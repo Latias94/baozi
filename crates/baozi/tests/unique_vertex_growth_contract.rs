@@ -74,7 +74,9 @@ fn obj_unique_vertices_preserve_typed_geometry_and_bound_metered_work_growth() {
             panic!("expected borrowed dense F32 positions");
         };
         assert_eq!(values.len(), 3 * vertex_count);
-        for (vertex, (&index, position)) in indices.iter().zip(values.chunks_exact(3)).enumerate() {
+        let (position_arrays, remainder) = values.as_chunks::<3>();
+        assert!(remainder.is_empty());
+        for (vertex, (&index, position)) in indices.iter().zip(position_arrays).enumerate() {
             // Every index is used exactly once. The strictly increasing x coordinate makes
             // all 3*N positions distinct; each triple also forms a nondegenerate triangle.
             assert_eq!(
@@ -82,7 +84,7 @@ fn obj_unique_vertices_preserve_typed_geometry_and_bound_metered_work_growth() {
                 "{triangle_count} triangles, index {vertex}"
             );
             assert_eq!(
-                position,
+                *position,
                 [
                     vertex as f32,
                     f32::from(u8::from(vertex % 3 == 1)),
