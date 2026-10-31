@@ -111,8 +111,9 @@ after Scene destruction; there is no second canonical Scene or automatic source 
 Real assets exposed a false coupling between tangent construction and handedness encoding. Those
 facts are now independent, and glTF declares its defined encoding without inventing a construction
 algorithm. Consumer normal generation establishes CCW numeric winding first, then applies any
-requested final winding. These changes are driven by concrete semantics rather than a broad new
-processing framework.
+requested final winding. glTF's positive-Z asset front is declared independently from Baozi's
+negative-Z-front target and camera-local viewing axes. These changes keep source facts and
+operation preconditions explicit.
 
 Keep stage time, allocator requests, operation ledgers, and process RSS distinct and advisory. Extend
 the corpus when a real caller supplies a missing profile, record its exact preservation/rejection

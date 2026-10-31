@@ -66,6 +66,13 @@ facts. A known encoding does not imply a known algorithm. Declaring MikkTSpace s
 `SignInW` for authored tangents, so glTF imports declare it while leaving the construction algorithm
 unknown. glTF also declares an upper-left UV origin. Import does not generate tangents or flip UVs.
 
+glTF's asset front is positive Z, as defined in its
+[coordinate-system contract](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#coordinate-system-and-units).
+Import preserves that source fact. A camera's local negative-Z viewing direction is carried by its
+intrinsic axes and does not redefine the asset front. Converting glTF to the standard negative-Z-front
+target explicitly rotates its X/Z basis; the offline consumer's left-handed centimeter target
+instead reflects Z and scales positions by 100.
+
 Normal maps are data textures:
 
 - no sRGB conversion

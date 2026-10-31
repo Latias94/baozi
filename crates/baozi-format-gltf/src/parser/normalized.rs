@@ -351,12 +351,17 @@ pub(super) fn submit_parts(
         primitive_deformations.as_slice(),
         mesh_instance_deformations.as_slice(),
     );
-    // glTF defines the UV origin and bitangent reconstruction, independently
-    // of the algorithm used to construct authored tangents.
+    // The asset front is +Z; camera-local viewing axes are a separate declaration.
+    // UV origin and bitangent reconstruction do not imply a tangent construction algorithm.
     let scene_space = SceneSpace {
+        handedness: Handedness::Right,
+        up_axis: Axis::PositiveY,
+        front_axis: Axis::PositiveZ,
+        unit_scale_to_meters: Some(1.0),
+        front_face_winding: FrontFaceWinding::CounterClockwise,
         uv_origin: UvOrigin::UpperLeft,
+        tangent_basis: TangentBasisConvention::Unknown,
         tangent_handedness_encoding: TangentHandednessEncoding::SignInW,
-        ..SceneSpace::STANDARD_TARGET
     };
     let spatial = SpatialAuthoringBatch::new(&scene_space, cameras.authored.as_slice(), &[]);
     let mut authored_nodes = ctx.metered_vec(

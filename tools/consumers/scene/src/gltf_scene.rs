@@ -207,7 +207,8 @@ fn verify_space_conversion(scene: ValidatedScene) {
         postprocess::{PostProcessControl, SpaceConversionOptions, convert_scene_space},
     };
 
-    // Q(x,y,z)=(-x,-z,y), s=2. Expectations below are independent of library arithmetic.
+    assert_eq!(scene.space().front_axis, Axis::PositiveZ);
+    // glTF is +Z-front: Q(x,y,z)=(x,z,y), s=2. Expectations are independent of library arithmetic.
     let target = TargetSpace::try_new(
         Handedness::Left,
         Axis::PositiveZ,
@@ -234,11 +235,11 @@ fn verify_space_conversion(scene: ValidatedScene) {
     assert_eq!(scene.space().unit_scale_to_meters, Some(0.5));
     let skin = scene.mesh_instances().next().unwrap().skin().unwrap();
     let binds = skin.inverse_bind_matrices().collect::<Vec<_>>();
-    assert_eq!(binds[0].cols[3], [2.0, 6.0, -4.0, 1.0]);
+    assert_eq!(binds[0].cols[3], [-2.0, -6.0, -4.0, 1.0]);
     assert_eq!(binds[1].cols[0], [0.5, 0.0, 0.0, 0.0]);
     assert_eq!(binds[1].cols[1], [0.0, 2.0, 0.0, 0.0]);
     assert_eq!(binds[1].cols[2], [0.0, 0.0, 0.25, 0.0]);
-    assert_eq!(binds[1].cols[3], [-8.0, -12.0, 10.0, 1.0]);
+    assert_eq!(binds[1].cols[3], [8.0, 12.0, 10.0, 1.0]);
     let mesh = scene.meshes().next().unwrap();
     let primitive = mesh.primitives().next().unwrap();
     assert_eq!(primitive.indices(), Some(&[2, 1, 0][..]));
@@ -251,7 +252,7 @@ fn verify_space_conversion(scene: ValidatedScene) {
     assert_eq!(
         delta.data(),
         MorphDeltaData::Dense {
-            values: &[0.0, -0.5, 0.0, 0.0, 0.0, 1.0, -2.0, 0.0, 0.0]
+            values: &[0.0, 0.5, 0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0]
         }
     );
     let clips = scene.animation_clips().collect::<Vec<_>>();
@@ -260,11 +261,11 @@ fn verify_space_conversion(scene: ValidatedScene) {
     assert_eq!(clips[0].channel(0).unwrap().key_times(), &[0.25, 1.5]);
     assert_eq!(
         clips[0].channel(0).unwrap().values(),
-        &[-2.0, -6.0, 4.0, -8.0, -12.0, 10.0]
+        &[2.0, 6.0, 4.0, 8.0, 12.0, 10.0]
     );
     assert_eq!(
         clips[0].channel(1).unwrap().values(),
-        &[0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0]
+        &[0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.0, 0.0]
     );
     let scale = clips[0].channel(2).unwrap();
     assert_eq!(scale.values(), &[1.0, 1.0, 1.0, 2.0, 4.0, 3.0]);

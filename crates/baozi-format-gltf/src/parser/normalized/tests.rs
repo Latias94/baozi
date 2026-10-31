@@ -290,6 +290,11 @@ fn canonical_authoring_accepts_a_hand_built_model_without_a_decoder()
     let report = import_fixture(FIXTURE_PRIMARY, FixtureFault::None)??;
     let scene = report.scene();
     let space = scene.space();
+    assert_eq!(space.handedness, Handedness::Right);
+    assert_eq!(space.up_axis, Axis::PositiveY);
+    assert_eq!(space.front_axis, Axis::PositiveZ);
+    assert_eq!(space.unit_scale_to_meters, Some(1.0));
+    assert_eq!(space.front_face_winding, FrontFaceWinding::CounterClockwise);
     assert_eq!(space.uv_origin, UvOrigin::UpperLeft);
     let mesh = scene.meshes().next().unwrap();
     assert_eq!(mesh.name(), Some("hand-built mesh"));

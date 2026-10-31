@@ -70,6 +70,10 @@ construction algorithm. Declaring MikkTSpace requires its `SignInW` encoding; a 
 still requires both facts. In particular, glTF declares `SignInW` and an upper-left UV origin but
 does not guarantee that authored tangents were constructed with MikkTSpace.
 
+glTF declares a positive-Z asset front. This source convention is distinct from Baozi's
+negative-Z-front standard target and from camera-local negative-Z viewing axes. Import records the
+source front without conversion; the explicit Scene conversion transports every affected domain.
+
 Column vectors and local-to-parent authored node transforms are fixed canonical API semantics,
 not source facts or target options. `SceneSpace` does not carry a duplicate transform-convention
 tag. Inverse bind, correction, and other matrices retain their domain-specific source/destination

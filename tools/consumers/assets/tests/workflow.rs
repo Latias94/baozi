@@ -84,7 +84,7 @@ fn upstream_models_match_source_counts_and_converted_mesh_bounds() -> Result<()>
                 }
             }
             for lane in 0..3 {
-                let (low, high) = if lane == 0 {
+                let (low, high) = if lane == 2 {
                     (
                         -expected["position_max"][lane].as_f64().unwrap() * 100.0,
                         -expected["position_min"][lane].as_f64().unwrap() * 100.0,
@@ -158,7 +158,7 @@ fn shared_mesh_instances_keep_distinct_authored_transforms() -> Result<()> {
         .transform
         .authored_trs()
         .ok_or("source TRS changed form")?;
-    assert_eq!(trs.translation().x, -100.0);
+    assert_eq!(trs.translation().x, 100.0);
     assert_eq!(trs.translation().y, 0.0);
     Ok(())
 }
@@ -254,9 +254,9 @@ fn skeletal_animation_keeps_all_influences_joint_bindings_and_keys() -> Result<(
             for (lane, value) in sample["value"].as_array().unwrap().iter().enumerate() {
                 let value = value.as_f64().unwrap() as f32;
                 let expected = match (path, lane) {
-                    ("translation", 0) => (f64::from(value) * -100.0) as f32,
+                    ("translation", 2) => (f64::from(value) * -100.0) as f32,
                     ("translation", _) => (f64::from(value) * 100.0) as f32,
-                    ("rotation", 1 | 2) => -value,
+                    ("rotation", 0 | 1) => -value,
                     _ => value,
                 };
                 assert_eq!(
@@ -277,7 +277,7 @@ fn skeletal_animation_keeps_all_influences_joint_bindings_and_keys() -> Result<(
                     .as_f64()
                     .unwrap() as f32;
                 let scale = if column == 3 && row < 3 { 100.0 } else { 1.0 };
-                let sign = if (column == 0) != (row == 0) {
+                let sign = if (column == 2) != (row == 2) {
                     -1.0
                 } else {
                     1.0
@@ -334,6 +334,7 @@ fn authored_gltf_tangents_reflect_without_claiming_a_construction_algorithm() ->
         FileSystemAssetIo::from_capability(NativeDirectoryCapability::open_ambient(fixtures())?);
     let report = Importer::new()?.read_asset(&io, AssetPath::new(model("AnimatedMorphCube"))?)?;
     let (scene, _) = report.into_parts();
+    assert_eq!(scene.space().front_axis, baozi::Axis::PositiveZ);
     assert_eq!(scene.space().uv_origin, UvOrigin::UpperLeft);
     assert_eq!(scene.space().tangent_basis, TangentBasisRef::Unknown);
     assert_eq!(
@@ -370,7 +371,7 @@ fn authored_gltf_tangents_reflect_without_claiming_a_construction_algorithm() ->
     )?
     .into_parts();
     for (before, after) in before.iter().zip(tangents(&scene)) {
-        assert_eq!(after, [-before[0], before[1], before[2], -before[3]]);
+        assert_eq!(after, [before[0], before[1], -before[2], -before[3]]);
     }
     assert_eq!(scene.space().tangent_basis, TangentBasisRef::Unknown);
     Ok(())

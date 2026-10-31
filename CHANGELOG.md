@@ -11,6 +11,9 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 - Decoupled tangent construction algorithms from handedness encodings in partial scene-space
   declarations. glTF now records its upper-left UV origin and sign-in-W tangent encoding without
   claiming an authored MikkTSpace basis, allowing correct reflection of authored tangents.
+- Corrected glTF's source asset front to positive Z, independently of camera-local negative-Z
+  viewing axes and Baozi's negative-Z-front target. Conversion regressions cover resulting instance,
+  tangent, skin, morph, and animation directions through both independent consumers.
 - Exposed the public loss, diagnostic, source-scope, text-profile, and resource-evidence vocabulary
   through `baozi`, including `ImportDimensionSnapshot`. Independent consumers can explicitly
   authorize partial-channel loss, inspect its exact disposition, and retain readable reports

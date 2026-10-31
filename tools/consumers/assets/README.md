@@ -12,6 +12,8 @@ OBJ, need an explicit caller assumption. The native dependency remains an unregi
 this tool does not add a filesystem backend to the portable library or its release target list.
 Library callers choosing a clockwise target receive a final winding conversion after normal
 generation. The tests cover both source windings against both target windings.
+glTF explicitly declares a +Z asset front, distinct from camera-local -Z viewing axes; conversion
+to this application's default target maps `(x, y, z)` to `(100x, 100y, -100z)`.
 
 Run from the repository root, reusing its target directory:
 

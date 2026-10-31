@@ -61,7 +61,7 @@ baseline malformed-input safety for that source state; it is not sustained fuzz 
   occlusion, and emissive texture bindings, including the extension `texCoord` override. Its
   finite transform and canonical UV-set bounds are checked before dependency I/O, and the values
   participate in the canonical material-binding snapshot.
-- Y-up, right-handed, meters scene space metadata, counter-clockwise fronts, upper-left UV origin,
+- Y-up, right-handed, +Z asset front, meters scene space metadata, counter-clockwise fronts, upper-left UV origin,
   and `SignInW` tangent handedness. The tangent construction algorithm remains unknown; importing
   authored tangents does not claim MikkTSpace generation.
 - Node translation, rotation, and scale animation with source clip/channel identity, duration, time
