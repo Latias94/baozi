@@ -3,6 +3,13 @@
 Baozi is currently foundation-first. Breaking changes are allowed when they protect the long-term
 IR, parser security model, or public API boundary.
 
+H in the [active delivery plan](../plans/2026-10-29-001-refactor-library-delivery-plan.md#h--update-dependencies-and-prove-first-publication)
+qualifies packaged consumers and executed target/profile behavior. It does not require implementing
+a registry publication workflow, registry-state validator, or signing/SBOM/attestation framework.
+Local artifact qualification does not authorize a registry upload. Any actual upload must satisfy
+[ADR 0006](../adr/0006-public-api-versioning-and-crate-stability-policy.md)'s publication and recovery
+requirements and the protections below.
+
 ## Registry State
 
 The crates.io registry already contains `baozi 0.0.1`, published on 2026-07-09 with placeholder
@@ -17,9 +24,11 @@ mutable fields, so release automation must never compare its live byte length or
 capture. It compares the live immutable tuple separately and checks yank status, current owners, and
 authentication configuration as mutable release-time state.
 
-U9 creates `docs/release/registry-state.toml`, and publication remains disabled until that file and
-its fail-closed validator exist. It is the sole expected-state authority and binds the release tag,
-full checkout SHA, registry, version, complete release-unit package set, expected package presence,
+Before a future registry publication, release owners must provide `docs/release/registry-state.toml`
+and its fail-closed validator as required by ADR 0006. Registry uploads remain disabled until both
+exist; they are not prerequisites for H's local artifact qualification. The manifest is the sole
+expected-state authority and binds the release tag, full checkout SHA, registry, version,
+complete release-unit package set, expected package presence,
 registry-stable owner kind/IDs, credential route, maximum token TTL, and complete approved Trusted
 Publisher configuration set. The workflow must exhaust pagination and reject a missing, extra,
 duplicate, unknown, stale, or display-name-only identity; live registry state never supplies its own
@@ -55,9 +64,9 @@ compared; changing to an API token does not remove unknown OIDC authority. An ex
 availability failure occurs before token issuance, and the protected release environment records an
 approval. A claim, binding, configuration, or authentication rejection always stops the train. No
 token is stored in the repository or printed in logs. OIDC, provenance attestation, SBOM, signatures,
-and reproducible-build claims are separate U9 evidence axes, not implied by a successful upload.
+and reproducible-build claims are separate release evidence axes, not implied by a successful upload.
 
-## Published Crates
+## Intended Release Unit and Current Manifest Eligibility
 
 Crates intended for eventual publication:
 
@@ -72,7 +81,7 @@ Crates intended for eventual publication:
 - `baozi-format-ply`
 - `baozi-format-gltf` and its maintained `baozi-gltf` / `baozi-gltf-json` dependencies
 
-Crates intentionally not published from the current repository state:
+The following packages currently set `publish = false`:
 
 - `baozi-test-support`: test-only helpers
 - `baozi-xtask`: repository-only governance tooling
@@ -82,6 +91,9 @@ Crates intentionally not published from the current repository state:
   independent consumer gates; publication remains disabled pending package/release evidence
 - `baozi-fuzz`: cargo-fuzz workspace
 
+Manifest eligibility, local artifact qualification, and actual registry publication are distinct.
+Local archives and their consumer checks do not change these flags or authorize publication.
+
 Shell format crates must stay `publish = false` until they import representative fixtures into
 `Scene` with validation, snapshots, malformed tests, resource limits, and fuzz coverage.
 
@@ -89,8 +101,9 @@ Shell format crates must stay `publish = false` until they import representative
 
 The facade crate `baozi` depends on workspace crates that are not yet present on crates.io for the
 canonical train. The existing placeholder `baozi 0.0.1` does not satisfy any dependency or
-compatibility requirement for that train. A direct `cargo package -p baozi` cannot pass until all
-admitted supporting dependencies have been published at the matching version.
+compatibility requirement for that train. Registry-based package verification and publication of
+`baozi` require every admitted supporting dependency to be available at the matching version.
+Local archive creation and extracted-artifact consumer qualification can complete before that train.
 
 Canonical release order:
 
@@ -106,21 +119,23 @@ Canonical release order:
 10. `baozi`
 
 Package each crate from a clean checkout of the exact tagged release commit with
-`cargo package --locked -p <crate>`. Release gates must not use `--allow-dirty` or `--no-verify`.
+`cargo package --locked -p <crate>`. Registry release packaging must not use `--allow-dirty` or
+`--no-verify`.
 The corresponding real upload command is
 `cargo publish --locked --registry crates-io -p <crate>`; a dry run adds `--dry-run` to that exact
 locked command. Record the local packaged `.crate` SHA-256 before upload and require the post-publish
 registry checksum to equal it. Then bounded-retry the exact-version archive download and require the
 downloaded `.crate` SHA-256, registry checksum, and local archive SHA-256 all to match before the next
 crate may start.
-Package the facade only after the dependency versions are available from the registry. Optional
-format crates with `publish = false` prevent packaging the facade manifest even when their feature
-is disabled; therefore every admitted facade dependency must be published first or removed from the
-release manifest by an explicit architecture decision. The preferred first-release path is to
-complete PLY's publication evidence and publish it before `baozi`.
+For actual registry publication, verify the facade package only after its dependency versions are
+available from the registry. Every required or optional production dependency must be
+registry-publishable and registry-resolvable, including format dependencies whose features are
+disabled in a particular build. Every admitted facade dependency must therefore be published first
+or removed from the release manifest by an explicit architecture decision. The preferred
+first-release path is to complete PLY's publication evidence and publish it before `baozi`.
 
 CI packages both release-unit leaves, `baozi-operation` and `baozi-io`, before the canonical registry
-train. The dependent crates must be package-checked in publish order after their internal
+train. Registry-based verification of dependent crates follows publish order after their internal
 dependencies exist on crates.io at the matching version. The existing
 [`check_packages.py`](../../scripts/check_packages.py) additionally validates the complete local
 production closure before registry publication: it creates `.crate` archives, unpacks them into a
@@ -129,13 +144,18 @@ and builds and executes the maintained public consumer. It uses the unchanged co
 fixed feature cases without generating Rust or substituting checkout sources.
 
 Run `python scripts/check_packages.py --toolchain 1.95.0` for all maintained cases, and use
-`--toolchain stable --release` for the current-stable release matrix. Local iteration deliberately
-uses `--allow-dirty --no-verify` while producing archives; the subsequent fresh consumer build is
-the artifact execution check. That simulation does not replace exact-tag packaging, registry
-ownership/authentication checks, or the real release commands above. Record the executed cases and
+`--toolchain stable --release` for the current-stable release matrix. Local archive creation uses
+`--locked --allow-dirty --no-verify --exclude-lockfile`, omitting generated package lockfiles.
+Extracted consumers resolve, build, and run with their unchanged maintained `Cargo.lock` and
+`--locked`; the checker does not retry unlocked or refresh a lockfile. The fresh consumer build
+and execution qualify the local artifacts. That simulation does not replace exact-tag packaging,
+registry ownership/authentication checks, or the real release commands above. Record the executed cases and
 targets rather than treating two selected cases as the entire publication matrix.
 
 ## Release Checklist
+
+This checklist applies before an actual registry publication. H's local artifact qualification
+follows the active delivery plan and does not require completing publication automation.
 
 Before any crate publish:
 
@@ -176,8 +196,8 @@ Before any crate publish:
 - after every real publish, bounded retries verify the expected owner and exact version, download the
   exact `.crate`, and require `download SHA-256 == registry checksum == local package SHA-256` before
   any later package is allowed to publish
-- provenance, SBOM, signature, and reproducibility claims are backed by explicit U9 evidence or are
-  documented as deferred
+- provenance, SBOM, signature, and reproducibility claims are backed by explicit release evidence
+  or are documented as deferred
 
 ## MSRV
 
