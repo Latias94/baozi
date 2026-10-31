@@ -1563,7 +1563,7 @@ fn validate_rotation_values<C: CanonicalAuthoringControl>(
     values: &[f32],
     context: &mut AnimationValidationContext<'_, C>,
 ) -> AnimationValidationResult<(), C> {
-    for (sample, components) in values.chunks_exact(4).enumerate() {
+    for (sample, components) in values.as_chunks::<4>().0.iter().enumerate() {
         context.run_semantic_unit(SceneValidationWork::Traversal, || {
             let rotation =
                 Quat::from_xyzw(components[0], components[1], components[2], components[3]);

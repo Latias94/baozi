@@ -35,7 +35,7 @@ impl ProfileSegmentNonceSource {
     fn issue(&self) -> Result<ProfileSegmentNonce, ProfileSegmentNonceExhausted> {
         let candidate = self
             .next
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |candidate| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |candidate| {
                 NonZeroU64::new(candidate).and_then(|_| candidate.checked_add(1))
             })
             .map_err(|_| ProfileSegmentNonceExhausted)?;

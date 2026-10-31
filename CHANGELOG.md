@@ -6,6 +6,10 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Replaced deprecated atomic `fetch_update` calls with `try_update`, available since the Rust 1.95
+  MSRV, preserving checked-counter closures and memory orderings. The maintained glTF reader uses
+  equivalent integer `MAX` constants. Constant-width traversal now borrows array chunks; dynamic
+  attribute widths keep their existing slice traversal.
 - Metered every dependency-cache probe and candidate index initialization, record scan, reinsertion,
   and replacement move through the existing resource-graph work budget. Cache work/control errors
   propagate distinctly from absent records; optional-input fallback cannot hide them. Replacement

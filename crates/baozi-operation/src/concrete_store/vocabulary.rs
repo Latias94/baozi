@@ -182,7 +182,7 @@ impl StoreKeyDomain {
     /// Issues one unique process-local key authority.
     pub fn try_new(catalog: StoreSemanticCatalogId) -> Result<Self, StoreKeyDomainCreateError> {
         let id = NEXT_STORE_KEY_DOMAIN_ID
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
                 (next != 0).then(|| next.wrapping_add(1))
             })
             .map_err(|_| StoreKeyDomainCreateError::Exhausted)?;

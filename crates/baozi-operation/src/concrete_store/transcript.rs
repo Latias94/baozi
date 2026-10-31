@@ -27,7 +27,7 @@ struct TranscriptId(NonZeroU64);
 
 fn try_issue_transcript_id() -> Option<TranscriptId> {
     NEXT_TRANSCRIPT_ID
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, checked_add_one)
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, checked_add_one)
         .ok()
         .and_then(NonZeroU64::new)
         .map(TranscriptId)

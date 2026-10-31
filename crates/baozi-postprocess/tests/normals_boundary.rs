@@ -66,7 +66,7 @@ fn smooth_normals_cross_uv_seams_and_keep_authored_data() {
         std::f32::consts::FRAC_1_SQRT_2,
         std::f32::consts::FRAC_1_SQRT_2,
     ];
-    for (corner, normal) in values.chunks_exact(3).enumerate() {
+    for (corner, normal) in values.as_chunks::<3>().0.iter().enumerate() {
         assert_vector(
             normal,
             if matches!(corner, 0 | 1 | 3 | 5) {
@@ -143,7 +143,7 @@ fn flat_normals_and_zero_smoothing_groups_keep_hard_edges() {
         else {
             panic!("flat normal values");
         };
-        for (corner, normal) in values.chunks_exact(3).enumerate() {
+        for (corner, normal) in values.as_chunks::<3>().0.iter().enumerate() {
             assert_vector(
                 normal,
                 if corner < 3 {
@@ -201,7 +201,7 @@ fn authored_normals_require_explicit_replacement() {
     else {
         panic!("replacement normals");
     };
-    for normal in values.chunks_exact(3) {
+    for normal in values.as_chunks::<3>().0 {
         assert_vector(normal, [0.0, 0.0, 1.0]);
     }
 }

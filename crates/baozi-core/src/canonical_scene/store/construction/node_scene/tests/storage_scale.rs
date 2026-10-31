@@ -667,7 +667,12 @@ fn shared_eight_mib_points_payload_node_edit_scale() {
             ),
             "editing a node must share the full index payload"
         );
-        for (index, point) in positions(&destination).chunks_exact(3).enumerate() {
+        for (index, point) in positions(&destination)
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .enumerate()
+        {
             assert_eq!(
                 point,
                 if index + 1 == VERTICES {

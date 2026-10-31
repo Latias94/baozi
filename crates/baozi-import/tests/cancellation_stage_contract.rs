@@ -189,7 +189,11 @@ impl FormatImporter for DetectorScanCancellationImporter {
         _hint: &ReadHint,
         scope: &DetectionScope<'_>,
     ) -> DetectionResult<DetectionOutcome> {
-        let mut chunks = probe.bytes().chunks_exact(DETECTOR_WORK_CHUNK_BYTES);
+        let mut chunks = probe
+            .bytes()
+            .as_chunks::<DETECTOR_WORK_CHUNK_BYTES>()
+            .0
+            .iter();
         let first = chunks.next().expect("detector fixture has a first chunk");
         scope.with_work(first.len() as u64, || {
             self.scanned_bytes.fetch_add(first.len(), Ordering::AcqRel);

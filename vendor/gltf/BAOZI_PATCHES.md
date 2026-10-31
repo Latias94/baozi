@@ -4,7 +4,9 @@ This package contains `gltf` 1.4.1 from gltf-rs, release source revision
 `0f1e94f5e2307de7336be6d3a65c38c4d34aea08`, under its original MIT OR Apache-2.0
 licenses. Both license files and upstream authorship are retained.
 
-The Rust reader source is unchanged. The package is named `baozi-gltf` and its
+The Rust reader retains the upstream API and behavior. Its color helpers use
+`u8::MAX` and `u16::MAX` instead of deprecated `max_value()` calls; this preserves
+the numeric constants and the upstream MSRV. The package is named `baozi-gltf` and its
 `gltf-json` dependency selects the maintained sibling `baozi-gltf-json`. The library
 name stays `gltf` for the existing private adapter. Package source inclusion also
 retains upstream tests, fixtures, examples, and these maintenance notes.

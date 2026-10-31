@@ -676,7 +676,7 @@ pub(super) fn try_next_retained_set_id() -> Option<RetainedSetId> {
         requests.set(requests.get().saturating_add(1));
     });
     NEXT_RETAINED_SET_ID
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
             current.checked_add(1)
         })
         .ok()

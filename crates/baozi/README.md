@@ -18,6 +18,9 @@ pixel decoding. Optional `postprocess` provides single-primitive triangulation,
 flat/smooth normals, and whole-Scene coordinate/unit conversion including skin
 matrices, morph deltas, TRS animation curves, camera projections, and light definitions.
 Camera/light reference frames include reflection without adding placement nodes.
+Material thickness and signed displacement strength scale with units while image/text payloads
+remain shared. The allocation-free `triangle_vertices` reader exposes complete draw-Corner tuples
+for application-owned vertex/index buffers, preserving attribute domains without deduplication.
 
 Use memory or custom asset IO for portable imports. `native-fs-candidate` is opt-in
 and limited to `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`, and

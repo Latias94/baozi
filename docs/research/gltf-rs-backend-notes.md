@@ -52,8 +52,9 @@ fixing the demonstrated validator defects at their source.
 
 **Integration status:** the maintained packages are installed under `vendor/gltf` and
 `vendor/gltf-json`, named `baozi-gltf` and `baozi-gltf-json`. Cargo dependency aliases preserve the
-private reader API. The reader source is unchanged; its path-plus-version dependency selects the
-corrected JSON package. Distinct package identities carry this selection into the separate fuzz
+private reader API. The reader uses the equivalent `u8::MAX`/`u16::MAX` constants instead of
+deprecated `max_value()` calls; its path-plus-version dependency selects the corrected JSON package.
+Distinct package identities carry this selection into the separate fuzz
 workspace and packaged manifests, where workspace-only registry patches would be lost. Both
 original license files and a short change inventory are retained beside each package.
 

@@ -21,7 +21,7 @@ f 1 2 3
             if let Some(positions) = primitive.positions()
                 && let AttributeData::DenseF32 { lanes: 3, values } = positions.data()
             {
-                for position in values.chunks_exact(3) {
+                for position in values.as_chunks::<3>().0 {
                     println!("position={position:?}");
                 }
             }

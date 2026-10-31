@@ -132,7 +132,7 @@ impl<'a> DeformationSpacePlan<'a> {
                     Ok(values)
                 })
                 .map_err(DeformationSpacePlanError::Control)??;
-            for (tuple_index, tuple) in values.chunks_exact(3).enumerate() {
+            for (tuple_index, tuple) in values.as_chunks::<3>().0.iter().enumerate() {
                 let changed = control
                     .run_unit(|| {
                         convert_morph_tuple(conversion, delta.semantic, tuple)
@@ -236,7 +236,7 @@ impl<'a> DeformationSpacePlan<'a> {
             let values = morph_values(delta.payload)
                 .get(&self.source.morph_values)
                 .ok_or(TypedStorageBuildError::Invariant)?;
-            for tuple in values.chunks_exact(3) {
+            for tuple in values.as_chunks::<3>().0 {
                 for component in 0..3 {
                     push_converted(&mut output.morph_values, p[15], control, || {
                         convert_morph_component(self.conversion, delta.semantic, tuple, component)
@@ -343,8 +343,10 @@ impl<'a> DeformationSpacePlan<'a> {
                 return Ok(false);
             };
             for (source_tuple, actual_tuple) in source_values
-                .chunks_exact(3)
-                .zip(actual_values.chunks_exact(3))
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .zip(actual_values.as_chunks::<3>().0)
             {
                 for (component, &actual) in actual_tuple.iter().enumerate() {
                     if control.run_unit(|| {
@@ -457,7 +459,7 @@ pub(in crate::canonical_scene::store) fn morph_delta_changes<C: TypedStorageBuil
     };
     let mut valid = true;
     let mut changed = false;
-    for tuple in values.chunks_exact(3) {
+    for tuple in values.as_chunks::<3>().0 {
         let tuple_changed = control.run_unit(|| {
             convert_morph_tuple(conversion, semantic, tuple)
                 .ok()

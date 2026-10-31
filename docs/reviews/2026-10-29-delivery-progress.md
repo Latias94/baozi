@@ -1262,6 +1262,30 @@ Logs are `target/review/h-windows-native-runtime.log`, `h-windows-native-reposit
 `h-linux-native-repository.log`, `h-linux-native-facade.log`, `h-native-clippy.log`, and
 `h-native-fmt.log`.
 
+## MSRV and Current-Stable Integration (2026-10-31)
+
+Current stable is `rustc 1.99.1 (58cf8f9c3 2026-10-13)`, LLVM 23.1.1, on Windows x86_64.
+Its first full run passed 2,444 tests, but strict Clippy then exposed deprecated atomic APIs and
+new constant-chunk lints. Six checked atomic issuers now use `try_update`, stable since the
+existing Rust 1.95 MSRV, with unchanged closures, return mapping, and memory ordering. The
+maintained glTF reader uses equivalent integer `MAX` constants. Constant-sized animation/morph,
+hex, example, and test traversals borrow array chunks; dynamic attribute widths keep their
+existing slice traversal and validation. No compatibility wrapper or lint suppression is added.
+
+After these changes, both Rust **1.95.0 and 1.99.1 passed 2,444/2,444 all-feature workspace
+tests**, with four manual pilots skipped. Strict all-target/all-feature Clippy passed on both
+toolchains. Current-stable workspace doctests and rustdoc with `-D warnings` passed. Read-only
+review found no changed closure/order, tuple/cardinality, control-unit, remainder, or borrowing
+semantics in this migration. The package README also describes the already delivered material
+length and borrowed application-tuple workflow.
+
+Logs are `target/review/h-stable-toolchain.log`, `h-msrv-workspace.log`,
+`h-stable-workspace.log`, `h-msrv-clippy.log`, `h-stable-clippy.log`,
+`h-stable-doctests.log`, and `h-stable-rustdoc.log`. The earlier warning-producing source run is
+retained as `h-stable-workspace-before-api-rename.log` and
+`h-stable-clippy-before-api-rename.log`; it is not the final lint result. Final packaged-consumer
+and target execution evidence remains separate below.
+
 ## Remaining acceptance
 
 - Complete final acceptance after the remaining architectural units. The current combined suite

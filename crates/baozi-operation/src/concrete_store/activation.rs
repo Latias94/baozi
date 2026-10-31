@@ -1968,7 +1968,7 @@ pub struct CanonicalActivationRequest {
 /// consumers receive only the opaque identity already embedded in requirements.
 fn mint_canonical_activation_request_identity() -> Option<CanonicalActivationRequestIdentity> {
     NEXT_CANONICAL_ACTIVATION_REQUEST_IDENTITY
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |observed| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |observed| {
             observed.checked_add(1)
         })
         .ok()

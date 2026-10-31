@@ -55,7 +55,7 @@ fn reserve_scene_generation(
     last_generation: &AtomicU64,
 ) -> Result<ReservedSceneGeneration, SceneGenerationError> {
     last_generation
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |observed| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |observed| {
             observed.checked_add(1)
         })
         .map(|previous| ReservedSceneGeneration(previous + 1))

@@ -321,7 +321,9 @@ fn winding_only_conversion_preserves_custom_precision_and_does_not_flip_tangent_
     };
     assert_eq!(
         values
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|tuple| tuple[3])
             .collect::<Vec<_>>(),
         [1.0, 1.0, -1.0]

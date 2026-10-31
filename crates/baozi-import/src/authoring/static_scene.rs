@@ -305,7 +305,7 @@ fn document_resource<'scope>(
     for (byte, pair) in digest
         .as_bytes()
         .into_iter()
-        .zip(fallback[PREFIX.len()..].chunks_exact_mut(2))
+        .zip(fallback[PREFIX.len()..].as_chunks_mut::<2>().0.iter_mut())
     {
         pair[0] = HEX[usize::from(byte >> 4)];
         pair[1] = HEX[usize::from(byte & 0x0f)];

@@ -496,7 +496,7 @@ fn assert_output_geometry(scene: &ValidatedScene, output_target: PrimitiveId) {
         panic!("generated F32 normals");
     };
     assert_eq!(values.len(), 18);
-    for normal in values.chunks_exact(3) {
+    for normal in values.as_chunks::<3>().0 {
         assert_eq!(normal, &[0.0, 0.0, 1.0]);
     }
     let AttributeData::DenseF32 { lanes: 2, values } = primitive

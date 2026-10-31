@@ -145,8 +145,11 @@ fn triangulate_generate_and_convert_preserves_vertex_identity_and_corner_pairing
             );
         }
     }
-    for normal in dense_f32(output.normals(AttributeDomain::Corner).unwrap(), 3).chunks_exact(3) {
-        assert_eq!(normal, [0.0, 0.0, 1.0]);
+    for normal in dense_f32(output.normals(AttributeDomain::Corner).unwrap(), 3)
+        .as_chunks::<3>()
+        .0
+    {
+        assert_eq!(normal, &[0.0, 0.0, 1.0]);
     }
     let output_generation = scene.generation();
     drop(scene);
