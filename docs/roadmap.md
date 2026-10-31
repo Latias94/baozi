@@ -115,6 +115,9 @@ requested final winding. glTF's positive-Z asset front is declared independently
 negative-Z-front target and camera-local viewing axes. These changes keep source facts and
 operation preconditions explicit.
 
+The [integration record](reviews/2026-10-31-real-asset-consumer.md) binds these changes to actual
+Windows and Linux/WSL execution and separates advisory memory/timing measurements by scope.
+
 Keep stage time, allocator requests, operation ledgers, and process RSS distinct and advisory. Extend
 the corpus when a real caller supplies a missing profile, record its exact preservation/rejection
 behavior, and minimize each discovered regression. Higher-value follow-up work is explicit policy

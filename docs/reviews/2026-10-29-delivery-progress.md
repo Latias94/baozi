@@ -2117,3 +2117,14 @@ This completion qualifies the unpublished library delivery. Native candidates re
 continues to fail closed with `UnsupportedIdentityBackend`. Format maturity, additional profiles,
 sustained fuzz campaigns and actual registry publication remain separate decisions. PR #3 remains
 a draft; no merge, registry upload or platform promotion is part of this completion.
+
+## Post-Merge Real-Asset Integration (2026-10-31)
+
+PR #3 subsequently merged at `04b4371b18d484d23641fdb8bda222741ddf2521`. The next implementation
+uses unchanged real assets through an excluded offline application, with actual native IO and
+application-owned output. It corrects independent tangent declarations, glTF's positive-Z asset
+front, and the consumer's normal-generation ordering. The
+[real-asset integration record](2026-10-31-real-asset-consumer.md) contains exact source revisions,
+semantic verification, ordinary/instrumented release observations, and remaining profile decisions.
+This is a new consumer increment after completed A–H delivery; it does not promote native release
+registration or claim new hosted qualification.

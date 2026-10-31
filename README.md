@@ -166,6 +166,7 @@ Start here:
 
 - [Completed library delivery plan](docs/plans/2026-10-29-001-refactor-library-delivery-plan.md)
 - [Offline real-asset consumer and profiling](tools/consumers/assets/README.md)
+- [Real-asset integration findings and measurements](docs/reviews/2026-10-31-real-asset-consumer.md)
 - [2026-10-29 library state review](docs/reviews/2026-10-29-library-state-review.md)
 - [`docs/research/assimp-replication-study.md`](docs/research/assimp-replication-study.md)
 - [`docs/adr/README.md`](docs/adr/README.md)
