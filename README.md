@@ -9,8 +9,9 @@ is available through `format-gltf`; its [exact restrictions](docs/formats/gltf.m
 Scene nodes, geometry, materials, images, skins, morphs, and animation have borrowed typed readers.
 The optional `postprocess` feature provides explicit single-primitive triangulation, flat/smooth
 normal generation, and whole-Scene coordinate/unit conversion including skins, morph deltas,
-TRS animation curves, camera projections, and light definitions. Application vertex unification
-remains in development.
+TRS animation curves, camera projections, light definitions, and material lengths.
+Its allocation-free `triangle_vertices` reader exposes borrowed application tuples; applications
+select their fields and allocate their own vertex/index buffers.
 Bounded snapshots are available separately for test and debug evidence.
 
 ## Goals
@@ -120,7 +121,7 @@ Failures return the original immutable Scene through `PostProcessRunFailure::int
 Triangulation preserves authored attributes through explicit origins and rejects malformed or
 numerically unresolved polygons. Its report owns the actual Corner/Face relation independently of
 either Scene. Triangles still retain separate attribute domains; this operation does not produce a
-unified application vertex buffer.
+vertex buffer. The `triangle_vertices` reader described below supplies their draw-order tuples.
 
 Normal generation preserves authored normals by default. `ExistingNormals::Replace` explicitly
 replaces them, and `TangentHandling::Remove` authorizes deleting invalidated tangents and their
@@ -139,9 +140,19 @@ conjugation, morph positions follow unit-scaled basis conversion, and animation 
 derivatives follow their target semantics without normalization. The report retains source/target
 facts and actual assumptions after either Scene is dropped. Camera/light intrinsic axes transform
 with the basis while node hierarchy stays fixed; projection distances and light ranges scale with
-units, and photometric intensity stays unchanged. Present semantics the current operation cannot convert
-return typed capability errors and the original Scene. See the
+units, and photometric intensity stays unchanged. Supplemental material thickness and signed
+displacement strength scale by the positive unit ratio; unchanged image and text payloads remain
+shared. Present semantics the current operation cannot convert return typed capability errors and
+the original Scene. See the
 [coordinate contract](docs/model/coordinate-and-render-conventions.md) for the current boundary.
+
+After the required operations, `baozi::postprocess::triangle_vertices(primitive)` borrows one
+application tuple per draw Corner of a `TriangleList`. Vertex, Corner, and Face fields keep their
+semantic/domain keys and scalar types; influence rows and requested morph deltas follow the same
+source Vertex. Equal tuples may repeat. Applications choose their concrete buffers and packing,
+and may collect the implicit `0..corner_count` output index stream. See
+[application triangle buffers](docs/model/reading-scenes.md#application-triangle-buffers) for the
+borrowed lifetimes and extraction contract.
 
 Run the import benchmark harness without collecting measurements:
 

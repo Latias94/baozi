@@ -55,24 +55,26 @@ delivery plan and progress record carry execution evidence and the remaining pro
 
 ### 3. Complete glTF/GLB and Useful Geometry Processing
 
-Timebox the glTF backend fix/fork/replacement decision around its known malformed-input reproducer.
-Keep glTF outside facade registration until baseline sanitizer admission passes. Deliver selected
-static PBR assets in GLB and external-resource forms, then the declared skin/morph/animation profile,
-with readable output and precise support claims.
+The selected glTF/GLB profile is source-admitted through `format-gltf` and `all-formats`, using a
+private maintained decoder. It includes selected-scene PBR assets in GLB and external-resource forms,
+skins, morphs, and TRS animation. The [exact profile](formats/gltf.md) defines its supported slices
+and explicit restrictions; source admission does not assign format maturity or publication readiness.
 
-Implement triangulation, normals, and explicit coordinate/unit conversion through transactional edits.
-Preserve winding and attribute-domain remaps, authorize loss, and retain the input on failure.
-Deliver the first concrete operation without requiring an extensible scheduling/replay framework.
-Add corner-to-application-vertex lowering so consumers can build actual vertex/index buffers.
+Concrete triangulation, Flat/Smooth normal generation, and explicit coordinate/unit conversion use
+transactional edits. They preserve winding and attribute-domain remaps, require authority for
+declared loss, and return the original immutable Scene on ordinary failure.
 
 Whole-Scene space conversion now covers geometry, authored nodes, skin matrices, morph deltas,
 TRS curves and derivatives, and camera/light definitions. Complete intrinsic camera/light axes
-compose without changing node hierarchy. Material spatial behavior and application vertex
-lowering remain open; verified increments and target/profile evidence are recorded in the
-[delivery progress](reviews/2026-10-29-delivery-progress.md).
+compose without changing node hierarchy. Supplemental material thickness and signed displacement
+strength scale with units while unchanged encoded-image and text payloads remain shared.
 
-The node/geometry storage cutover enables the first processing operation. Other domain migrations
-must not force every product increment to wait for a whole-library rewrite.
+The allocation-free `triangle_vertices` reader exposes one complete application tuple per draw
+Corner, preserving Vertex/Corner/Face fields, influence rows, and primitive-qualified morph reads.
+Applications select fields, allocate their concrete buffers, and may collect the implicit
+`0..corner_count` indices; equal tuples may repeat. The independent consumer constructs and checks
+owned vertex/index buffers through this workflow. Verified increments and target/profile evidence
+are recorded in the [delivery progress](reviews/2026-10-29-delivery-progress.md).
 
 ### 4. Reduce Governance and Prove Distribution
 

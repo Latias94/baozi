@@ -22,5 +22,7 @@ Include:
 - Parser code must not use `unsafe`.
 - Parser failures must return `Result::Err` or diagnostics, not panic.
 - Resource limits must bound primary bytes, sidecar bytes, strings, lines, vertices, faces, meshes, diagnostics, and future archive/data URI expansion.
-- Sidecar and texture references must go through `AssetIo` and `ImportContext`.
+- Sidecar and texture references must use origin-qualified `ParseScope::dependency` and the session
+  dependency resolver, acquiring resources through authorized `AssetIo`. See the
+  [IO and extension trust boundary](docs/security/parser-threat-model.md#in-process-extension-boundary).
 - Fuzz targets and malformed fixtures are required before a format moves beyond shell status.

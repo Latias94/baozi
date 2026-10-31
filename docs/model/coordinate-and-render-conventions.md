@@ -106,10 +106,21 @@ and leaving the node hierarchy and attachments unchanged. Camera clipping distan
 half-extents scale by `s`; point/spot ranges do likewise. FOV, aspect, cone angles, tint, and
 photometric intensity keep their bits. Projection ordering must remain valid after F32 rounding.
 
-Conversion still rejects numeric conversion of custom attributes, spatial texture-coordinate
-sources, or nonzero Scene-unit material values
-it cannot convert. Winding-only conversion can retain otherwise unaffected spatial domains.
+Supplemental material thickness is a nonnegative Scene-unit length; a Displacement binding's
+strength is a signed Scene-unit length. Both scale by the positive unit ratio `s`, using a binary64
+intermediate and one checked binary32 rounding. Reflection does not add a displacement sign.
+Signed zeros and representable subnormals are preserved; overflow and nonzero underflow to zero
+return a typed material/binding error. Other factors, binding values, names, and source keys retain
+their bits and presence. Converted appearance rows share the original encoded-image and text
+payload owners; if no row values change bits, the row owner is shared as well.
+
+Texture bindings select a direct UV set index. Coordinate conversion preserves that index and the
+UV transform; reads resolve the chosen Vertex or Corner stream explicitly. Generated spatial
+coordinate-source variants are absent from the current model.
+
+Numeric conversion of custom attributes without defined spatial semantics still returns a typed
+capability error. Winding-only conversion can retain otherwise unaffected spatial domains.
 These typed rejections preserve the original Scene. Unrepresentable numeric output identifies the
-skin correction, inverse-bind matrix, morph delta/tuple, animation channel/stream/key, or
-camera/light definition before
-retained output admission. Winding-only and declaration-only edits share deformation and animation storage.
+skin correction, inverse-bind matrix, morph delta/tuple, animation channel/stream/key, camera/light
+definition, material, or binding before retained output admission. Winding-only and declaration-only
+edits share deformation and animation storage.
