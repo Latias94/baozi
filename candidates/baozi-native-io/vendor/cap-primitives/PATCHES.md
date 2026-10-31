@@ -52,6 +52,11 @@ directory. Local changes use the crate's existing license options.
   reparse records. No new resolver or ambient reopen fallback is introduced.
 - `src/fs/manually/open.rs` drops upstream's unused `std::borrow::Cow` import.
   This is a trivial lint cleanup with no behavior change.
+- `src/fs/read_link.rs` keeps all five upstream Unix link-content test cases but
+  creates their owned temporary directory with `std`. The published upstream
+  manifest removes its path-only `cap-tempfile` dev dependency, so the original
+  test otherwise cannot compile from the complete registry package. No normal
+  dependency, production implementation or tested behavior changes.
 
 ## Abstract work envelope
 

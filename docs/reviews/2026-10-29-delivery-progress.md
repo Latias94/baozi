@@ -1821,6 +1821,31 @@ Current logs use the `h-open-work-` prefix with their respective command names. 
 was deliberately deferred until this additional Windows fixture could be verified and committed;
 no Linux execution is claimed by that deferral.
 
+## Committed Linux Qualification (2026-10-31)
+
+Linux qualification now consumes only `git archive` of `5de735e561a9a775c059ee2f7df848ac5c071d68`
+under `target/review/h-open-work-linux-5de735e561a9-k1gcmnfp/source`. It uses the actual unprivileged
+UID/GID 1000 host on Ubuntu 26.04/WSL2, Rust 1.95.0, offline locked dependencies, one build job,
+two test threads, and the existing `fuzz/target`. The all-feature workspace passed
+**2,438/2,438**, with the same four manual core pilots skipped. This is current committed-source
+evidence for the extraction, hidden bridge and bounded-open changes; it does not reuse an earlier
+source archive. Subsequent candidate/fallback/sanitizer results are recorded only after completion.
+The archive retains `source-and-toolchain.log`, `source.tar`, and `workspace.log` in that directory.
+Strict all-target/all-feature Linux Clippy and workspace doctests then passed. The standalone
+native candidate passed **21/21 runtime** and **39/39 repository-enabled** tests without skips,
+including actual Unix permissions, FIFO/device/link behavior and public facade sidecars. Those
+results are `clippy.log`, `doctests.log`, `candidate-runtime.log` and `candidate-repository.log`.
+
+The subsequent vendored backend unit-test compile exposed an upstream packaging omission:
+the registry archive includes a Unix test calling `cap_tempfile`, but its published manifest
+omits that path-only dev dependency. The repair retains all five original link-content cases and
+uses a uniquely created standard-library temporary directory; it changes only `#[test]` code and
+adds no dependency. Its Linux selection passed **18/18** without skips
+(`target/review/h-linux-backend-test-fixture-repair.log`). Prior complete workspace/native results
+still describe unchanged production source; the remaining backend/fallback/ASan stages use a new
+immutable commit archive after the test-only repair. The rejected original compile remains in the
+first archive's `candidate-backend.log` rather than being erased or reported as a passing stage.
+
 ## A–H Acceptance Audit (2026-10-31)
 
 Earlier entries describe their own increments and source revisions. This audit replaces the stale

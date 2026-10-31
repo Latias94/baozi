@@ -90,9 +90,26 @@ fn check_read_link(
 #[cfg(not(windows))]
 #[test]
 fn test_read_link_contents() {
-    use io_lifetimes::AsFilelike;
-    let td = cap_tempfile::tempdir(cap_tempfile::ambient_authority()).unwrap();
-    let td_view = &td.as_filelike_view::<std::fs::File>();
+    struct TestDirectory(PathBuf);
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    // The published upstream manifest omits its path-only cap-tempfile dev dependency.
+    // Keep the original behavioral cases runnable without changing the dependency closure.
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "baozi-cap-read-link-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir(&path).unwrap();
+    let td = TestDirectory(path);
+    let directory = fs::File::open(&td.0).unwrap();
+    let td_view = &directory;
     let valid = [
         "relative/path",
         "/some/absolute/path",

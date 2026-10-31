@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-13
+updated: 2026-10-31
 authors:
   - Codex
 decision_type: architecture
