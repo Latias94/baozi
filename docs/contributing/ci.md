@@ -32,6 +32,7 @@ Review these pins when changing CI, investigating tooling failures, or promoting
 
 - `ACTIONLINT_VERSION` in `.github/workflows/ci.yml`
 - `GO_VERSION` in `.github/workflows/ci.yml`
+- `cargo-deny@0.20.2` in the `taiki-e/install-action` tool list in `.github/workflows/ci.yml`
 - `CARGO_FUZZ_VERSION` in `.github/workflows/ci.yml` and `.github/workflows/fuzz.yml`
 - `RUST_FUZZ_NIGHTLY` in `.github/workflows/ci.yml` and `.github/workflows/fuzz.yml`
 
@@ -56,7 +57,7 @@ $env:RUSTDOCFLAGS = '-D warnings'
 cargo doc --locked --workspace --all-features --no-deps
 cargo deny --locked check
 cargo deny --locked --manifest-path fuzz/Cargo.toml check
-cargo deny --locked --all-features --manifest-path candidates/baozi-native-io/Cargo.toml check --config deny.toml
+cargo deny --locked --all-features --manifest-path candidates/baozi-native-io/Cargo.toml --config deny.toml check
 cargo check --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target x86_64-pc-windows-msvc
 cargo nextest run --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target x86_64-pc-windows-msvc
 cargo nextest run --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target x86_64-pc-windows-msvc --features repository-capture
@@ -70,6 +71,9 @@ python scripts/check_features.py --toolchain 1.95.0
 python scripts/check_packages.py --toolchain 1.95.0
 python scripts/check_packages.py --toolchain stable --release
 ```
+
+Use cargo-deny 0.20.2 for the dependency checks above. Its `--config` option belongs before the
+`check` subcommand; the standalone candidate uses the root policy explicitly.
 
 The package matrix creates fresh archives for the complete production dependency closure, checks
 each package's normalized metadata, README and licenses, and resolves local dependencies only from

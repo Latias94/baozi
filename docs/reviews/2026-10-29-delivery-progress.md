@@ -2038,3 +2038,41 @@ unwind ownership controls. The standalone standard-library panic probe reports z
 and bytes on Windows. These local checks and configuration/format validation do not establish the
 Apple hypothesis; the next Apple log must show the bare probe and preserve the full owner test's
 zero result.
+
+## Executed Apple ARM64 Acceptance (2026-10-31)
+
+At `55324fa`, [run 41199375814](https://github.com/Latias94/baozi/actions/runs/41199375814)
+passes the actual Apple ARM64 native runtime/backend/repository suites **20/18/38**, with zero
+fixture skips. Both runtime and repository configurations execute real search-permission denial.
+The actual ARM64 all-feature portable workspace executes **2,372/2,372**, excluding xtask, with
+the same four explicitly manual storage pilots skipped; all **58 doctests** pass. The first full
+import/conversion's host-unwind test now observes zero remaining allocations and bytes after only
+the bare standard-library panic path runs outside the measured closure. No Baozi warmup or retained
+allocation allowance is involved. The successful probe output is retained for this one test by
+nextest in the following audit commit, so its platform count/bytes remain visible on success.
+
+The Apple packaged-consumer matrices execute all twelve cases on Rust 1.95.0/debug and
+1.99.1/release, including the new loss, resource and source-selection assertions. The stable Linux
+workspace passes **2,438/2,438**, with four manual pilots skipped; its large glTF/STL cancellation
+cases take 14.876/10.774 seconds and retain their exact-prefix/control assertions. The remaining
+hosted checks must finish before the full A–H completion decision below. These executed Apple
+results close the prior missing-host item; release registration remains empty.
+
+The same run finishes fourteen jobs successfully, including all four extracted-consumer matrices,
+Linux **21/18/39** and Windows **20/21/30** native runtime/backend/repository suites with no fixture
+skips, and five Linux ASan targets with **256 actual runs each**. The MSRV job passes **2,365**
+default and **2,372** all-feature workspace tests, **66** xtask tests, strict Clippy, doctests/docs,
+the independent source consumers, browser-WASM checks, actual empty/all WASI execution, five
+negative-target compiler checks, architecture/runtime/native admission, and root/fuzz policy checks.
+It then stops at the standalone candidate policy command: cargo-deny **0.20.2** moved `--config`
+from the `check` subcommand to the top level. This is a tooling failure, not a dependency-policy
+exception or a completed hosted gate.
+
+The workflow now pins cargo-deny **0.20.2** and puts `--config deny.toml` before `check`. On Windows,
+the isolated official release binary, verified against its published SHA-256 checksum, executes
+the corrected locked all-feature candidate command: **advisories/bans/licenses/sources all pass**
+without changing `deny.toml`. Both following leaf commands, `cargo +1.95.0 package --locked -p
+baozi-operation` and `cargo +1.95.0 package --locked -p baozi-io`, build verified archives successfully.
+Logs are `target/review/h-cargo-deny-0.20.2-candidate.log`, `h-leaf-operation-package.log`, and
+`h-leaf-io-package.log`. The next current-head hosted run must confirm the repaired policy command
+and leaf step before the final whole-plan completion record.

@@ -67,7 +67,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest,cargo-deny
+          tool: cargo-nextest,cargo-deny@0.20.2
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -183,7 +183,7 @@ jobs:
         run: cargo deny --locked --manifest-path fuzz/Cargo.toml check
 
       - name: Check standalone native candidate dependency policy
-        run: cargo deny --locked --all-features --manifest-path candidates/baozi-native-io/Cargo.toml check --config deny.toml
+        run: cargo deny --locked --all-features --manifest-path candidates/baozi-native-io/Cargo.toml --config deny.toml check
 
       - name: Package release leaf crates
         run: |

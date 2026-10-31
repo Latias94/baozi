@@ -5,6 +5,11 @@ status-level = "pass"
 # to locate exact checkpoints. Keep frequent warnings with bounded CI headroom.
 slow-timeout = { period = "5s", terminate-after = 6 }
 
+# Retain the bare std panic probe beside the full owner's zero-allocation result.
+[[profile.default.overrides]]
+filter = "package(baozi-postprocess) & test(=space::tests::ordinary_host_unwind_drops_converted_scene_and_detached_report)"
+success-output = "final"
+
 [[profile.default.overrides]]
 filter = "package(baozi-xtask)"
 slow-timeout = { period = "10s", terminate-after = 2 }
