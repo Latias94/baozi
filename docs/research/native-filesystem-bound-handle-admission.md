@@ -329,8 +329,12 @@ The fixture requires an unprivileged runner; a privileged bypass fails setup ins
 It executed on Linux under UID 1000. A Windows fixture verifies real lower/upper-case host aliases
 before requiring capability reads to return the authorized in-root contents or a typed open error;
 the original spelling must open successfully. Windows runtime and repository candidate suites
-executed this fixture. Actual Apple ARM64 execution, including the permission case,
-Windows 8.3 aliases and unknown/volume-mount reparse points, and the remaining backend
+executed this fixture. The local F: fixture additionally produced the real 8.3 alias
+`LONGAU~1.BIN`. A small native consumer read identical authorized bytes through both host spellings,
+opened the original name through `FileSystemAssetIo`, and required the alias to return
+`PathErrorCode::ShortNameAlias` before backend IO. This is one executed volume case; it does not
+qualify every Windows volume or hosted runner. Actual Apple ARM64 execution, including the
+permission case, Windows unknown/volume-mount reparse points, and the remaining backend
 retry/fallback evidence still precede complete promotion. Candidate membership and release
 registration remain distinct.
 
