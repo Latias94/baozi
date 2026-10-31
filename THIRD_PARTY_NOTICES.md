@@ -29,3 +29,22 @@ identities, narrow JSON validation corrections, and explicit unsupported morph-p
 The complete changes are recorded
 in [reader maintenance](vendor/gltf/BAOZI_PATCHES.md) and
 [JSON maintenance](vendor/gltf-json/BAOZI_PATCHES.md).
+
+## cap-primitives
+
+`candidates/baozi-native-io/vendor/cap-primitives` retains the complete upstream
+4.0.3 package from the cap-std project, revision
+`b7acf8e8807fe3fab991884d2208b7e03d35a409`, authored by Dan Gohman,
+Jakub Konka and the cap-std contributors.
+Upstream: <https://github.com/bytecodealliance/cap-std>.
+
+The source is licensed `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT`.
+The original [copyright](candidates/baozi-native-io/vendor/cap-primitives/COPYRIGHT),
+[MIT](candidates/baozi-native-io/vendor/cap-primitives/LICENSE-MIT),
+[Apache-2.0](candidates/baozi-native-io/vendor/cap-primitives/LICENSE-APACHE), and
+[Apache-2.0 with LLVM exception](candidates/baozi-native-io/vendor/cap-primitives/LICENSE-Apache-2.0_WITH_LLVM-exception)
+texts are retained. The unpublished native candidate applies a bounded-link
+patch and test-only packaging repairs, documented in
+[PATCHES.md](candidates/baozi-native-io/vendor/cap-primitives/PATCHES.md).
+Its original archive checksum records upstream provenance, not the modified
+directory's identity. Portable Baozi production packages do not depend on it.

@@ -463,8 +463,14 @@ and [set operation](https://learn.microsoft.com/en-us/windows/win32/api/winioctl
 Windows candidate runtime **20/20** and repository-enabled **30/30** pass without skips, followed
 by strict candidate Clippy (`target/review/h-volume-candidate-*.log`). The older access-denied
 `SetVolumeMountPointW` attempt remains historical. No machine-wide drive mapping or volume
-configuration was changed. Apple execution and committed Linux retry/fallback evidence remain
-separate qualification work.
+configuration was changed. Committed Linux qualification now passes runtime **21/21**, repository
+**39/39**, backend **18/18**, and strict candidate Clippy. The repository-enabled candidate binary
+passes **35/35** in the ordinary environment and each forced `ENOSYS`/`EPERM`/persistent `EAGAIN`
+state. Actual syscall traces show exactly one/one/four `openat2` attempts respectively and one
+successful manual fixture `openat`, followed by the same-handle byte assertion. Evidence belongs
+to `target/review/h-open-work-linux-bdd7c800c463-ddigqztn/` (`exact-retries-*` and
+`candidate-fallback-*`). That trace supplies exact branch evidence; the separate bound API and
+fixed helper limits supply conservative pre-open billing. Apple ARM64 execution remains outstanding.
 
 | Risk | Impact | Treatment |
 | --- | --- | --- |

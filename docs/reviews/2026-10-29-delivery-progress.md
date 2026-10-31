@@ -1846,6 +1846,41 @@ still describe unchanged production source; the remaining backend/fallback/ASan 
 immutable commit archive after the test-only repair. The rejected original compile remains in the
 first archive's `candidate-backend.log` rather than being erased or reported as a passing stage.
 
+The follow-up immutable archive is `bdd7c800c463` under
+`target/review/h-open-work-linux-bdd7c800c463-ddigqztn`. Its backend unit tests passed **18/18**
+and strict candidate Clippy passed. One repository-enabled candidate libtest executable passed
+**35/35** in the ordinary environment and again under each child-local `openat2` rejection state:
+`ENOSYS`, `EPERM` and persistent `EAGAIN`. No fixture skips or parent/machine syscall-policy changes
+were used. Logs are `candidate-backend.log`, `candidate-clippy.log`, `candidate-baseline.log` and
+`candidate-fallback-{enosys,eperm,eagain}.log` in that archive.
+
+Actual `strace` observation now closes the formerly unmeasured retry count for this binary.
+`ENOSYS` and `EPERM` each produce exactly **one** `mesh.stl` `openat2` attempt; persistent `EAGAIN`
+produces exactly **four**. Each reaches **one** successful manual `openat` of the fixture, and the
+same-handle byte assertion passes. The fixture independently verifies the forced errno before
+executing the test. `exact-retries-*.log` and `exact-retries-*.strace` retain the full evidence.
+The locally extracted strace 6.19 archive was checked against the registered Ubuntu package SHA-256;
+it was not installed system-wide. These observations qualify the tested fallback/retry branches,
+not kernel duration or every abstract action in the conservative work envelope. The pre-open
+budget regression and bounded backend implementation supply the independent work-admission checks.
+
+All five Linux ASan smoke targets then completed **256 actual runs each**: `stl_import`,
+`obj_import`, `ply_import`, `gltf_import` and `registry_detection`. They use the same immutable
+`bdd7c800c463` source, installed nightly 1.101.0 (`92ffebece`, 2026-10-28), cargo-fuzz 0.13.2,
+single-job builds and committed corpus seeds. Input deadlines are 10 seconds, campaign ceilings
+120 seconds, RSS ceilings 4096 MiB, and maximum lengths 65536 bytes (4106 for registry detection).
+The logs' `Done 256 runs` lines were checked rather than inferred from successful builds. All five
+binaries expose both `__asan_init` and `__asan_report_load1`; `instrumentation.log` records those
+checks and binary sizes. `fuzz/Cargo.lock` remains byte-identical. Logs, corpora and artifact
+directories remain in the follow-up archive; completion is 2026-10-31T09:12:11Z.
+
+These are bounded sanitizer smoke runs, not sustained fuzz coverage or a Windows-native FFI
+sanitizer claim. Nightly's redundant-homepage manifest warnings remain visible. Current Windows
+dual-toolchain workspace, packaged consumer and WASI results, committed Linux workspace/native
+results, exact fallback traces, and current immutable ASan evidence now cover the delivered
+cutovers. Apple ARM64 runtime/permission execution remains the concrete outstanding native
+platform item; candidate registration is unchanged and the A–H goal is not marked complete.
+
 ## A–H Acceptance Audit (2026-10-31)
 
 Earlier entries describe their own increments and source revisions. This audit replaces the stale
@@ -1864,16 +1899,16 @@ candidate qualification, rather than another Scene representation or a speculati
 | G | Compiler/behavior boundaries replace source-hash/AST governance; metadata checks stay locked; the scale driver is thin Python; Rust owns fixtures/assertions; fuzz logs/corpus are retained. Native development is an excluded workspace; the core integration uses actual privacy/linearity rather than a feature gate. | The deliberate quadratic growth regression was rejected and precisely removed. Distinct buffers, depth/width, resource sharing, and unique vertices have executed work checks. The newer core/candidate cutover has separate focused and integrated evidence; earlier package/ASan archives do not cover later source by implication. Driver timing/RSS stay advisory. |
 | H | Updated dependencies/MSRV checks, package-local documentation/licenses, extracted-only twelve-case consumer matrix, executable WASI and current-stable CI wiring. | Both fresh ownership-boundary artifact matrices and verified leaf packages pass; the newer native repair also passes all-feature package verification. Browser-WASM is compile-only. Linux forced fallback passes all three backend-error states. No hosted CI dispatch, upload, or registry publication is claimed. Native candidates retain the concrete remaining platform matrix below. |
 
-Native release registration remains empty. Actual Apple ARM64 runtime/permission execution and
-the outstanding committed-source backend retry/work evidence still govern promotion. The actual
-Windows volume-mount case above now passes. The accounting trace exposed a genuine implementation gap at `71a81e0`; the subsequent
-bounded-open increment above implements that missing seam and backend limit. Its focused tests
-pass, while complete source-scoped package/Linux/target qualification remains separate. The
+Native release registration remains empty. Actual Apple ARM64 runtime/permission execution remains
+outstanding before promotion; the committed-source backend retry/work evidence above now passes.
+The actual Windows volume-mount case above now passes. The accounting trace exposed a genuine
+implementation gap at `71a81e0`; the bounded-open increment implements that seam and backend limit.
+The completed package/Linux/Windows evidence above qualifies its changed source independently. The
 dependency acquisition unit retains its distinct snapshot-acquisition meaning after open and does
 not substitute for pre-open `WorkUnits` admission.
 The original volume-mount fixture attempt returned access denied before creating a mount; its
-later replacement supplies actual adapter acceptance for that exercised case. Unknown-tag payload handling is a demonstrated defect with a concrete
-candidate-only repair, fixture, and separate regression gate. Windows repository capture continues
+later replacement supplies actual adapter acceptance for that exercised case. Unknown-tag payload
+handling has a candidate-only repair, fixture, and separate regression gate. Windows repository capture continues
 to return `UnsupportedIdentityBackend` before traversal; passing that test does not claim working
 Windows capture.
 

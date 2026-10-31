@@ -6,6 +6,10 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Added an actual Windows volume-GUID mount containment regression with native readback,
+  known outside bytes, an in-root positive control, Unicode paths, and explicit fixture cleanup.
+- Made the vendored Unix link-content tests runnable from the complete upstream registry
+  package without its unpublished path-only temporary-directory dev dependency.
 - Added required bounded asset-open planning to memory, custom, and native IO. Import admits
   conservative work before primary/dependency opens and preserves returned-error, panic, control,
   and cache semantics. The standalone native candidate vendors the bounded-link patch explicitly.
