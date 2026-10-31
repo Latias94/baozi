@@ -145,6 +145,14 @@ lockfile resolution against that record in CI. An update that changes path resol
 native calls, panic behavior, target support, or the resolved security-sensitive closure reopens
 admission before merge.
 
+An explicitly patched native dependency records its actual unique local path/version and reviewed
+patch surface separately from the original registry archive's checksum provenance. The standalone
+native candidate's bounded-link `cap-primitives` patch follows ADR 0010: its synchronous Windows
+reparse query retains adjacent safety invariants, safe bounded byte decoding, malformed/native
+tests and independent review. It remains outside portable production graphs and release
+registration. The original upstream checksum must never be presented as the modified source's hash;
+passing portable parser fuzz does not qualify that Windows native boundary.
+
 Security-relevant flag constants are dependencies too; numeric constants, documentation-hidden
 transitive interfaces, and unreviewed extension crates do not satisfy admission. ADR 0010 owns the
 native-filesystem package, version, feature, open-flag, and resolved-closure selection to which this

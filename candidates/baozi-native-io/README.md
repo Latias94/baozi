@@ -70,6 +70,11 @@ parent and validates one fixed-buffer response. Native Linux fast-path link
 resolution remains an OS action; its four attempts and a complete manual
 fallback are included in the work envelope. These are adapter limits, not
 system-wide link policies.
+The complete worst-case envelope is billed for every normal open return, even
+when a short fast path succeeds. It therefore consumes substantially more of
+`max_work_units` than memory IO, and a dependency-heavy native import can reach
+that caller-owned limit before `max_open_assets`. Size the work budget for the
+declared bounds; unused hypothetical backend steps are not measured or refunded.
 
 The native directory owner keeps its handle private. Clones share the retained
 directory and authority identity; repository capture uses that same owner.
@@ -107,8 +112,12 @@ from FreeBSD dependency auditing.
 Tests retain the existing race, same-handle, held-child, symlink, nonblocking,
 reparse, and repository controls. Windows tests require Python, actual junction
 and unknown-tag reparse fixtures, and permission to create file symlinks. The
-Python fixture is embedded from `src/fs/tests/windows_reparse.py`; fixture
-failures are test failures, not skips.
+Python fixtures are embedded from `src/fs/tests/windows_reparse.py` and
+`windows_volume.py`; fixture failures are test failures, not skips. The volume
+fixture creates one verified volume-GUID reparse object inside a caller-owned
+temporary directory, reads known outside bytes as a positive control, and clears
+that exact reparse object explicitly. The adapter must reject the escaping path
+while ordinary in-root files remain readable.
 
 See the [native IO admission boundary](../../docs/research/native-filesystem-bound-handle-admission.md)
 and [feature design review](../../docs/reviews/2026-10-29-feature-design-review.md#native-io-placement-and-status).

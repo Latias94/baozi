@@ -1756,6 +1756,29 @@ The subsequent complete STL limits selection passed **11/11** with no skips, inc
 color-expansion chunk boundaries. Its evidence is `h-open-work-stl-calibration-final.log`;
 the glTF repair is `h-open-work-gltf-calibration-final.log`.
 
+The bounded-open implementation and calibration repairs are committed as `faff556`. A fresh
+Windows Rust 1.95.0 all-feature workspace run from that commit passed **2,438/2,438**, with four
+manual core pilots skipped; those unchanged core fixtures have their six-case execution recorded
+in the extraction increment. `h-open-work-workspace-msrv-committed.log` is the complete green
+run, distinct from the earlier rejected calibration runs. Stable/package/Linux qualification
+continues against this committed production source.
+The matching stable **1.99.1** all-feature workspace run also passed **2,438/2,438** with the
+same four manual core pilots skipped (`h-open-work-workspace-stable.log`). Neither toolchain
+requires a compatibility implementation or an alternate IO-open path.
+Strict stable workspace all-target/all-feature Clippy, MSRV workspace doctests, and all five
+installed negative-target compiler checks pass. Root, fuzz and standalone-candidate advisory,
+license, ban and source policy scans pass, followed by strict MSRV `baozi-io` packaging. Evidence
+uses `h-open-work-workspace-clippy.log`, `h-open-work-doctests.log`,
+`h-open-work-negative-targets.log`, `h-open-work-negative-*.log`, `h-open-work-deny-*.log`,
+and `h-open-work-leaf-io.log`. Candidate dependency warnings remain visible; no target is promoted.
+Fresh `.crate` consumers for the new interface passed all twelve fixed cases in both MSRV/debug
+(`target/package-check-_5hv0wbd`) and stable/release (`target/package-check-us1wrjzf`). Every
+production dependency was built from its verified unpacked package, and both maintained consumer
+closures used their unchanged lockfiles. The complete custom-IO/plugin, typed-format and
+application-buffer workflows execute successfully. Logs are `h-open-work-packages-msrv-debug.log`
+and `h-open-work-packages-stable-release.log`. The later Windows-volume fixture is test-only and
+is not part of these portable package claims.
+
 Evidence uses `target/review/h-open-work-focused.log`, `h-open-work-import-io-final.log`,
 `h-open-work-import-io-clippy.log`, `h-open-work-candidate-runtime.log`,
 `h-open-work-candidate-repository.log`, `h-open-work-vendored-backend.log`,
@@ -1771,6 +1794,32 @@ the source archived before the new bound API and do not qualify that later inter
 All four examples, empty/all-feature executable WASI, and empty/all-feature browser-WASM checks
 subsequently passed with the new IO/import seam in the working tree. The initial formatting check
 then observed the still-unformatted new increment; formatting was applied before focused tests.
+
+## Actual Windows Volume-Mount Containment (2026-10-31)
+
+The earlier `SetVolumeMountPointW` attempt failed before creating any mount. A later direct
+`FSCTL_SET_REPARSE_POINT` probe succeeded inside a new owned fixture directory. Raw native data
+readback, `GetVolumeNameForVolumeMountPointW`, and known bytes reached through that mount verified
+a real volume-GUID target. The probe cleared its exact reparse object and removed only its known
+owned paths. This creates no machine-wide drive mapping or volume-policy change.
+
+The maintained candidate fixture now exercises the same verified object under the actual adapter.
+Ordinary Win32 access reaches a known root-external sentinel, including a non-ASCII filename;
+capability-relative `AssetIo` rejects that logical escaping path and still reads an in-root positive
+control. Explicit UTF-8 prevents host code-page dependence. Normal cleanup checks the exact reparse
+clear result; unwind cleanup cannot issue a second panic. Read-only review identified those two
+fixture concerns before execution and both were repaired. The default/runtime candidate passed
+**20/20**, repository-enabled passed **30/30**, and strict candidate Clippy passed with no fixture
+skip. Evidence is `target/review/h-windows-volume-reparse-probe.json`,
+`h-windows-maintained-volume-fixture.json`, and `h-volume-candidate-{runtime,repository,clippy}.log`.
+The new fixture is candidate-only; it does not change the portable production source qualified at
+`faff556`, or qualify arbitrary filter drivers and other mount targets.
+
+The final portable chain at `faff556` also completed all four examples, executable empty/all WASI,
+empty/all browser-WASM checks, root/candidate/vendor formatting, actionlint and strict rustdoc.
+Current logs use the `h-open-work-` prefix with their respective command names. Linux qualification
+was deliberately deferred until this additional Windows fixture could be verified and committed;
+no Linux execution is claimed by that deferral.
 
 ## A–H Acceptance Audit (2026-10-31)
 
@@ -1790,15 +1839,15 @@ candidate qualification, rather than another Scene representation or a speculati
 | G | Compiler/behavior boundaries replace source-hash/AST governance; metadata checks stay locked; the scale driver is thin Python; Rust owns fixtures/assertions; fuzz logs/corpus are retained. Native development is an excluded workspace; the core integration uses actual privacy/linearity rather than a feature gate. | The deliberate quadratic growth regression was rejected and precisely removed. Distinct buffers, depth/width, resource sharing, and unique vertices have executed work checks. The newer core/candidate cutover has separate focused and integrated evidence; earlier package/ASan archives do not cover later source by implication. Driver timing/RSS stay advisory. |
 | H | Updated dependencies/MSRV checks, package-local documentation/licenses, extracted-only twelve-case consumer matrix, executable WASI and current-stable CI wiring. | Both fresh ownership-boundary artifact matrices and verified leaf packages pass; the newer native repair also passes all-feature package verification. Browser-WASM is compile-only. Linux forced fallback passes all three backend-error states. No hosted CI dispatch, upload, or registry publication is claimed. Native candidates retain the concrete remaining platform matrix below. |
 
-Native release registration remains empty. Actual Apple ARM64 runtime/permission execution,
-Windows volume-mount behavior, and the outstanding exact backend retry/work evidence still govern
-promotion. The accounting trace exposed a genuine implementation gap at `71a81e0`; the subsequent
+Native release registration remains empty. Actual Apple ARM64 runtime/permission execution and
+the outstanding committed-source backend retry/work evidence still govern promotion. The actual
+Windows volume-mount case above now passes. The accounting trace exposed a genuine implementation gap at `71a81e0`; the subsequent
 bounded-open increment above implements that missing seam and backend limit. Its focused tests
 pass, while complete source-scoped package/Linux/target qualification remains separate. The
 dependency acquisition unit retains its distinct snapshot-acquisition meaning after open and does
 not substitute for pre-open `WorkUnits` admission.
-The local volume-mount fixture attempt returned access denied before creating a mount;
-it is not adapter acceptance. Unknown-tag payload handling is a demonstrated defect with a concrete
+The original volume-mount fixture attempt returned access denied before creating a mount; its
+later replacement supplies actual adapter acceptance for that exercised case. Unknown-tag payload handling is a demonstrated defect with a concrete
 candidate-only repair, fixture, and separate regression gate. Windows repository capture continues
 to return `UnsupportedIdentityBackend` before traversal; passing that test does not claim working
 Windows capture.

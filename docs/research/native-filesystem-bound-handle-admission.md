@@ -451,6 +451,21 @@ independently before promotion.
 
 ## Residual Risks
 
+The later maintained Windows volume fixture closes the earlier setup-only gap. Direct
+`FSCTL_SET_REPARSE_POINT` creates a volume-GUID mount inside one new caller-owned temporary
+directory. Exact raw readback, `GetVolumeNameForVolumeMountPointW`, and known outside bytes through
+the mount establish an actual volume mount rather than an ordinary junction. The native adapter
+rejects the escaping path while the in-root ordinary-file control succeeds, and the exact reparse
+object is cleared before owned-directory cleanup. The non-ASCII sentinel uses explicit UTF-8
+Python output. The fixture follows Microsoft's
+[reparse data layout](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_reparse_data_buffer)
+and [set operation](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_set_reparse_point).
+Windows candidate runtime **20/20** and repository-enabled **30/30** pass without skips, followed
+by strict candidate Clippy (`target/review/h-volume-candidate-*.log`). The older access-denied
+`SetVolumeMountPointW` attempt remains historical. No machine-wide drive mapping or volume
+configuration was changed. Apple execution and committed Linux retry/fallback evidence remain
+separate qualification work.
+
 | Risk | Impact | Treatment |
 | --- | --- | --- |
 | `cap-std` implementation defect | scope escape | security-sensitive upgrade review, platform race suite, advisory monitoring |

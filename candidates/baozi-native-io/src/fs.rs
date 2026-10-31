@@ -897,6 +897,105 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn windows_volume_guid_mount_cannot_escape_the_retained_root() {
+        struct VolumeFixture {
+            path: PathBuf,
+            active: bool,
+        }
+        impl VolumeFixture {
+            fn clear(&mut self) -> std::io::Result<()> {
+                if !self.active {
+                    return Ok(());
+                }
+                let cleared = std::process::Command::new("python")
+                    .args(["-X", "utf8"])
+                    .arg("-c")
+                    .arg(include_str!("fs/tests/windows_volume.py"))
+                    .arg("clear")
+                    .arg(&self.path)
+                    .arg("")
+                    .output()?;
+                if !cleared.status.success() {
+                    return Err(std::io::Error::other(format!(
+                        "volume fixture cleanup failed: {}",
+                        String::from_utf8_lossy(&cleared.stderr)
+                    )));
+                }
+                self.active = false;
+                Ok(())
+            }
+        }
+        impl Drop for VolumeFixture {
+            fn drop(&mut self) {
+                if let Err(error) = self.clear() {
+                    use std::io::Write;
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "volume fixture cleanup failed: {error}"
+                    );
+                }
+            }
+        }
+
+        let root = TempRoot::new("volume-root");
+        let outside = TempRoot::new("volume-outside");
+        let secret = outside.path().join("secret-\u{03c0}.bin");
+        fs::write(&secret, b"outside volume bytes").expect("write outside fixture");
+        fs::write(root.path().join("ordinary.bin"), b"inside bytes").expect("write inside fixture");
+        let mount = root.path().join("volume");
+        fs::create_dir(&mount).expect("create empty owned mount directory");
+        let created = std::process::Command::new("python")
+            .args(["-X", "utf8"])
+            .arg("-c")
+            .arg(include_str!("fs/tests/windows_volume.py"))
+            .arg("create")
+            .arg(&mount)
+            .arg(&secret)
+            .output()
+            .expect("Windows candidate runner must provide Python for volume fixtures");
+        assert!(
+            created.status.success(),
+            "actual volume fixture/readback failed: {}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+        let mut fixture = VolumeFixture {
+            path: mount,
+            active: true,
+        };
+        let relative = std::str::from_utf8(&created.stdout)
+            .expect("portable fixture path")
+            .trim();
+        let path = AssetPath::new(format!("volume/{relative}")).expect("logical volume path");
+        let io = FileSystemAssetIo::from_capability(
+            NativeDirectoryCapability::open_ambient(root.path()).expect("open retained root"),
+        );
+        assert_eq!(
+            read_all(io.open(&AssetPath::new("ordinary.bin").unwrap()).unwrap()),
+            b"inside bytes"
+        );
+        assert!(io.open_work_bound(&path).is_ok());
+        assert!(
+            io.open(&path).is_err(),
+            "volume GUID mount escaped the retained root"
+        );
+        drop(io);
+        fixture
+            .clear()
+            .expect("clear the owned volume reparse fixture");
+        assert_eq!(
+            fs::read(secret).expect("outside bytes remain"),
+            b"outside volume bytes"
+        );
+        assert!(
+            !fs::symlink_metadata(root.path().join("volume"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn windows_unknown_reparse_payloads_never_become_parser_input() {
         use std::os::windows::fs::MetadataExt;
 
