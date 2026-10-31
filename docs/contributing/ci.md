@@ -58,6 +58,9 @@ cargo doc --locked --workspace --all-features --no-deps
 cargo deny --locked check
 cargo deny --locked --manifest-path fuzz/Cargo.toml check
 cargo deny --locked --all-features --manifest-path candidates/baozi-native-io/Cargo.toml --config deny.toml check
+cargo deny --locked --all-features --manifest-path tools/consumers/assets/Cargo.toml --config deny.toml check
+cargo clippy --locked --manifest-path tools/consumers/assets/Cargo.toml --target-dir target --all-targets --all-features -- -D warnings
+cargo nextest run --locked --manifest-path tools/consumers/assets/Cargo.toml --target-dir target --all-features --build-jobs 1
 cargo check --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target x86_64-pc-windows-msvc
 cargo nextest run --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target x86_64-pc-windows-msvc
 cargo nextest run --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target x86_64-pc-windows-msvc --features repository-capture
@@ -73,7 +76,7 @@ python scripts/check_packages.py --toolchain stable --release
 ```
 
 Use cargo-deny 0.20.2 for the dependency checks above. Its `--config` option belongs before the
-`check` subcommand; the standalone candidate uses the root policy explicitly.
+`check` subcommand; the standalone candidate and real-asset consumer use the root policy explicitly.
 
 The package matrix creates fresh archives for the complete production dependency closure, checks
 each package's normalized metadata, README and licenses, and resolves local dependencies only from
@@ -93,8 +96,8 @@ or path helpers. Native tests compose the adapter through public `read_asset` an
 GitHub Actions binds each runtime candidate to one fixed runner and exact target:
 `ubuntu-24.04` / `x86_64-unknown-linux-gnu`, `windows-2025` /
 `x86_64-pc-windows-msvc`, and `macos-15` / `aarch64-apple-darwin`. Each job first compares the
-`rustc -vV` host with its matrix target, then passes that target explicitly to every Cargo and
-nextest command. Candidate fixture setup is fail-closed; the suite contains no `SKIP` path.
+`rustc -vV` host with its matrix target, then passes that target explicitly to adapter and consumer
+compile/lint/test commands. Candidate fixture setup is fail-closed; the suite contains no `SKIP` path.
 Unix candidate tests require an unprivileged runner so the search-permission fixture can verify
 an actual host denial. Root or another DAC bypass fails that fixture rather than passing it silently.
 The Apple candidate job also executes the portable all-feature workspace tests and doctests on
@@ -102,6 +105,15 @@ that actual ARM64 host. It uses one Cargo build job and two workspace test threa
 ceiling includes those checks; the separate packaged-consumer jobs retain their own 45-minute
 ceilings. Workflow wiring is not execution evidence: Apple qualification requires completed
 current-source jobs and their recorded host/toolchain identities.
+
+The same three candidate jobs check formatting, strict all-feature Clippy, and nextest for the
+excluded `tools/consumers/assets` application. The Linux job additionally runs the thin
+`scripts/run_asset_profile.py` driver twice in release mode, with and without allocator
+instrumentation, and uploads separate reports/logs even after failure. Those advisory builds use
+the already verified native host; they do not pass a cross-target option. The application records
+per-stage ledgers/times and the driver records per-process GNU time RSS. No timing or RSS threshold
+is a gate, but actual build/import failures fail the step. Neither the corpus nor passing these
+consumer checks expands the selected format profile or registers a native release target.
 
 Browser WASM remains compile-only. WASI executes the independent no-feature and all-feature release
 consumers under Wasmtime 50.0.0, including byte/custom-IO imports, typed semantic value assertions,

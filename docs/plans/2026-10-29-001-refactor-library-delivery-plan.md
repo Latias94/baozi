@@ -412,3 +412,8 @@ matrices, the repaired standalone candidate dependency policy, and both verified
 The [final acceptance record](../reviews/2026-10-29-delivery-progress.md#completed-ah-delivery-2026-10-31)
 binds those results to their source scope. Native release registration, format maturity, and actual
 registry publication remain separate decisions.
+
+After PR #3 merged at `04b4371b18d484d23641fdb8bda222741ddf2521`, the next increment is
+[real-asset integration](../roadmap.md#real-asset-integration-after-ah): a standalone offline consumer,
+unchanged upstream models, semantic regressions, and advisory measurements. This does not reopen
+the completed A–H acceptance sequence or promote native candidates.

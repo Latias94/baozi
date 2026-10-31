@@ -30,10 +30,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Check scale runner syntax and CLI
+      - name: Check profile runner syntax and CLIs
         run: |
-          python3 -m py_compile scripts/run_scale_profile.py
+          python3 -m py_compile scripts/run_scale_profile.py scripts/run_asset_profile.py
           python3 scripts/run_scale_profile.py --help
+          python3 scripts/run_asset_profile.py --help
 
       - name: Install Go
         uses: actions/setup-go@v6
@@ -185,6 +186,9 @@ jobs:
       - name: Check standalone native candidate dependency policy
         run: cargo deny --locked --all-features --manifest-path candidates/baozi-native-io/Cargo.toml --config deny.toml check
 
+      - name: Check standalone real-asset consumer dependency policy
+        run: cargo deny --locked --all-features --manifest-path tools/consumers/assets/Cargo.toml --config deny.toml check
+
       - name: Package release leaf crates
         run: |
           cargo package --locked -p baozi-operation
@@ -312,8 +316,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Python for Windows native fixtures
-        if: runner.os == 'Windows'
+      - name: Install Python for native fixtures and asset profiles
+        if: runner.os == 'Windows' || runner.os == 'Linux'
         uses: actions/setup-python@v6
         with:
           python-version: "3.13"
@@ -366,6 +370,20 @@ jobs:
       - name: Test repository filesystem candidate operational and fail-closed contracts
         run: cargo nextest run --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target "${{ matrix.target }}" --features repository-capture
 
+      - name: Check real-asset consumer formatting
+        run: cargo fmt --manifest-path tools/consumers/assets/Cargo.toml -- --check
+
+      - name: Lint real-asset consumer
+        run: >-
+          cargo clippy --locked --manifest-path tools/consumers/assets/Cargo.toml
+          --target-dir target --target "${{ matrix.target }}"
+          --all-targets --all-features -- -D warnings
+
+      - name: Test real-asset consumer
+        run: >-
+          cargo nextest run --locked --manifest-path tools/consumers/assets/Cargo.toml
+          --target-dir target --target "${{ matrix.target }}" --all-features
+
       - name: Test Apple portable workspace on the actual ARM64 host
         if: runner.os == 'macOS'
         run: cargo nextest run --locked --workspace --all-features --exclude baozi-xtask --target "${{ matrix.target }}" --build-jobs 1 --test-threads 2
@@ -373,6 +391,28 @@ jobs:
       - name: Test Apple workspace documentation examples
         if: runner.os == 'macOS'
         run: cargo test --locked --workspace --all-features --doc --target "${{ matrix.target }}" --jobs 1
+
+      # Measurements are advisory with no thresholds; consumer failures fail the step.
+      - name: Collect advisory real-asset release profile
+        if: runner.os == 'Linux'
+        run: >-
+          python scripts/run_asset_profile.py --toolchain 1.95.0
+          --artifact-root "target/asset-profiles/${{ github.run_id }}-${{ github.run_attempt }}/normal"
+
+      - name: Collect advisory real-asset allocation-metrics release profile
+        if: runner.os == 'Linux'
+        run: >-
+          python scripts/run_asset_profile.py --toolchain 1.95.0 --allocation-metrics
+          --artifact-root "target/asset-profiles/${{ github.run_id }}-${{ github.run_attempt }}/allocation-metrics"
+
+      - name: Retain real-asset profile reports and logs
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: asset-profiles-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/asset-profiles/${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: ignore
+          retention-days: 30
 
   fuzz:
     name: ${{ matrix.target }} sanitizer fuzz smoke

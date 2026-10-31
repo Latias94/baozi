@@ -100,6 +100,26 @@ Historical internal execution rails that serve fault tests are compiled only for
 projection/collector helpers are removed. The delivery progress records the corresponding source
 and behavior qualification; this structural separation does not promote native support.
 
+## Real-Asset Integration After A–H
+
+The next increment validates the delivered API against unchanged upstream assets through the
+[standalone offline consumer](../tools/consumers/assets/README.md). Its pinned corpus covers static
+texturing, interleaved storage, shared instances, skeletal TRS animation, and morph animation, plus
+explicit selected-profile and numeric-policy rejections. The application owns extracted buffers
+after Scene destruction; there is no second canonical Scene or automatic source repair.
+
+Real assets exposed a false coupling between tangent construction and handedness encoding. Those
+facts are now independent, and glTF declares its defined encoding without inventing a construction
+algorithm. Consumer normal generation establishes CCW numeric winding first, then applies any
+requested final winding. These changes are driven by concrete semantics rather than a broad new
+processing framework.
+
+Keep stage time, allocator requests, operation ledgers, and process RSS distinct and advisory. Extend
+the corpus when a real caller supplies a missing profile, record its exact preservation/rejection
+behavior, and minimize each discovered regression. Higher-value follow-up work is explicit policy
+for common numeric/metadata admission gaps and larger real-workload costs; exporters, a renderer,
+automatic recovery, native release registration, and a generic asset compiler remain separate work.
+
 ## Format Priorities
 
 Format work begins only when it strengthens a current architecture or product goal.

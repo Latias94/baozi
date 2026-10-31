@@ -1,0 +1,2 @@
+# Keep upstream files byte-for-byte identical, including their original line endings.
+upstream/** -text -whitespace

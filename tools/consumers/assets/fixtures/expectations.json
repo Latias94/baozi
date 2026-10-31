@@ -1,0 +1,245 @@
+{
+  "schema_version": 1,
+  "upstream": {
+    "repository_url": "https://github.com/KhronosGroup/glTF-Sample-Assets",
+    "commit": "8f492390ddc7a2ae221a1369ef560589cf8c70fb",
+    "tree": "936af0f6e5b471fefd6fc1d84a42328b9ce70978",
+    "verified_on": "2026-10-31",
+    "verification_method": "Official GitHub REST API via gh api; commit, complete tree, blob sizes and Git blob SHA-1 checked.",
+    "commit_signature_status": "unsigned"
+  },
+  "semantics": {
+    "evidence": "Facts transcribed from unchanged upstream glTF JSON, directly decoded little-endian binary accessors, and model READMEs, not from Baozi output. source_pointers are JSON Pointers within each primary file.",
+    "selection": "All fixtures declare scene 0 as default; all source nodes and meshes belong to that scene.",
+    "nodes": "Selected source node objects, including source root nodes, excluding any importer-generated root.",
+    "meshes": "Distinct source mesh definitions referenced by selected nodes.",
+    "primitives": "Primitive definitions summed over distinct selected meshes, without multiplying by instance count.",
+    "mesh_instances": "Selected source nodes with a mesh property, without multiplying by primitive count.",
+    "skins": "Distinct source skin definitions referenced by selected nodes.",
+    "morph_targets": "Target slots summed over distinct selected meshes; matching slots across multiple primitives of one mesh count once.",
+    "animations": "Source animation objects targeting selected nodes.",
+    "materials": "Explicit source material definitions only; excludes any importer-created default material.",
+    "images": "Source image definitions used by selected materials; encoded resources, not decoded pixels.",
+    "bounds": "POSITION accessor min/max in base mesh local coordinates, before transforms, skinning and morph application. Floating-point comparisons require tolerance.",
+    "mode": "glTF primitive mode; absent mode means TRIANGLES (4).",
+    "expected_outcome": "Inferred from the repository's documented selected profile and source inspection; no importer execution. Rejection fixture counts describe source content only.",
+    "animation_samples": "Key ordinals are zero-based. Binary F32 components are decoded directly without normalization; quaternion components use glTF XYZW order. Squared norms are calculated in binary64 from those decoded components.",
+    "joint_indices": "JOINTS_0 components index the skin's ordered joints array; they are not source node indices.",
+    "matrices": "Source MAT4 values and node matrices are stored in glTF column-major order.",
+    "quaternion_policy": "Baozi requires abs(norm2 - 1) <= 1e-4 for canonical quaternion values. A rejection under this stricter Baozi policy is not a general claim that an official upstream sample is invalid. Source bytes and the tolerance remain unchanged.",
+    "external_resources": "Unchanged relative URIs resolved from the primary glTF file's directory."
+  },
+  "fixtures": [
+    {
+      "id": "BoxTextured",
+      "path": "upstream/Models/BoxTextured/glTF/BoxTextured.gltf",
+      "expected_outcome": "success",
+      "coverage": ["static", "external_buffer", "external_png", "texture_coordinates", "textured_material"],
+      "selected_scene": 0,
+      "counts": {"nodes": 2, "meshes": 1, "primitives": 1, "mesh_instances": 1, "skins": 0, "morph_targets": 0, "animations": 0, "materials": 1, "images": 1},
+      "mesh_names": ["Mesh"],
+      "mesh_instances": [{"node": 1, "mesh": 0}],
+      "primitives": [
+        {"mesh": 0, "primitive": 0, "mode": 4, "mode_explicit": true, "position_accessor": 2, "index_accessor": 0, "vertex_count": 24, "index_count": 36, "position_min": [-0.5, -0.5, -0.5], "position_max": [0.5, 0.5, 0.5], "attributes": ["NORMAL", "POSITION", "TEXCOORD_0"], "morph_target_count": 0}
+      ],
+      "external_resources": ["BoxTextured0.bin", "CesiumLogoFlat.png"],
+      "source_pointers": ["/scenes/0", "/nodes", "/meshes/0", "/accessors/0", "/accessors/2", "/materials/0", "/textures/0", "/images/0"]
+    },
+    {
+      "id": "BoxInterleaved",
+      "path": "upstream/Models/BoxInterleaved/glTF/BoxInterleaved.gltf",
+      "expected_outcome": "success",
+      "coverage": ["static", "interleaved_position_normal", "external_buffer"],
+      "selected_scene": 0,
+      "counts": {"nodes": 2, "meshes": 1, "primitives": 1, "mesh_instances": 1, "skins": 0, "morph_targets": 0, "animations": 0, "materials": 1, "images": 0},
+      "mesh_names": ["Mesh"],
+      "mesh_instances": [{"node": 1, "mesh": 0}],
+      "primitives": [
+        {"mesh": 0, "primitive": 0, "mode": 4, "mode_explicit": true, "position_accessor": 2, "index_accessor": 0, "vertex_count": 24, "index_count": 36, "position_min": [-0.5, -0.5, -0.5], "position_max": [0.5, 0.5, 0.5], "attributes": ["NORMAL", "POSITION"], "morph_target_count": 0}
+      ],
+      "interleaving": {"buffer_view": 1, "byte_stride": 24, "normal_accessor": 1, "normal_byte_offset": 0, "position_accessor": 2, "position_byte_offset": 12},
+      "external_resources": ["BoxInterleaved.bin"],
+      "source_pointers": ["/scenes/0", "/nodes", "/meshes/0", "/bufferViews/1", "/accessors/0", "/accessors/1", "/accessors/2"]
+    },
+    {
+      "id": "SimpleMeshes",
+      "path": "upstream/Models/SimpleMeshes/glTF/SimpleMeshes.gltf",
+      "expected_outcome": "success",
+      "coverage": ["multiple_mesh_instances", "shared_mesh", "node_translation", "no_material"],
+      "selected_scene": 0,
+      "counts": {"nodes": 2, "meshes": 1, "primitives": 1, "mesh_instances": 2, "skins": 0, "morph_targets": 0, "animations": 0, "materials": 0, "images": 0},
+      "mesh_instances": [{"node": 0, "mesh": 0}, {"node": 1, "mesh": 0, "translation": [1.0, 0.0, 0.0]}],
+      "primitives": [
+        {"mesh": 0, "primitive": 0, "mode": 4, "mode_explicit": false, "position_accessor": 1, "index_accessor": 0, "vertex_count": 3, "index_count": 3, "position_min": [0.0, 0.0, 0.0], "position_max": [1.0, 1.0, 0.0], "attributes": ["NORMAL", "POSITION"], "morph_target_count": 0}
+      ],
+      "external_resources": ["SimpleMeshes.bin"],
+      "notes": ["The selected glTF primitive has POSITION and NORMAL only; the upstream README summary also mentions texture coordinates."],
+      "source_pointers": ["/scenes/0", "/nodes/0", "/nodes/1", "/meshes/0", "/accessors/0", "/accessors/1"]
+    },
+    {
+      "id": "SimpleSkin",
+      "path": "upstream/Models/SimpleSkin/glTF/SimpleSkin.gltf",
+      "expected_outcome": "rejection",
+      "rejection": {"feature": "animation_rotation_quaternion_norm", "source_pointer": "/animations/0/samplers/0/output", "error_code": "gltf.invalid_document", "reason_contains": "non-unit animation rotation", "reason": "Unchanged upstream rotation keys have abs(norm2 - 1) > 1e-4, exceeding Baozi's stricter canonical quaternion policy; this is not a general claim that the official model is invalid.", "norm2_absolute_tolerance": 0.0001},
+      "coverage": ["explicit_policy_rejection", "skinning", "joint_rotation_animation", "linear_interpolation", "inverse_bind_matrices", "multiple_external_buffers"],
+      "selected_scene": 0,
+      "counts": {"nodes": 3, "meshes": 1, "primitives": 1, "mesh_instances": 1, "skins": 1, "morph_targets": 0, "animations": 1, "materials": 0, "images": 0},
+      "mesh_instances": [{"node": 0, "mesh": 0, "skin": 0}],
+      "primitives": [
+        {"mesh": 0, "primitive": 0, "mode": 4, "mode_explicit": false, "position_accessor": 1, "index_accessor": 0, "vertex_count": 10, "index_count": 24, "position_min": [-0.5, 0.0, 0.0], "position_max": [0.5, 2.0, 0.0], "attributes": ["JOINTS_0", "POSITION", "WEIGHTS_0"], "morph_target_count": 0}
+      ],
+      "skins": [{"skin": 0, "joint_count": 2, "joints": [1, 2], "inverse_bind_matrices_accessor": 4, "skeleton_property_present": false}],
+      "animations": [
+        {"animation": 0, "channel_count": 1, "sampler_count": 1, "target_node": 2, "target_path": "rotation", "interpolation": "LINEAR", "input_accessor": 5, "output_accessor": 6, "keyframe_count": 12, "time_min": 0.0, "time_max": 5.5, "output_element_count": 12, "output_type": "VEC4"}
+      ],
+      "rotation_evidence": {
+        "animation": 0, "channel": 0, "output_accessor": 6,
+        "norm2_min": 0.999698048545838, "norm2_max": 1.0004650354123124,
+        "keys_outside_baozi_tolerance": [1, 2, 3, 4, 7, 8, 9, 10],
+        "samples": [
+          {"key": 1, "time": 0.5, "value": [0.0, 0.0, 0.382999986410141, 0.9240000247955322], "norm2": 1.0004650354123124, "abs_norm2_minus_one": 0.00046503541231235346},
+          {"key": 2, "time": 1.0, "value": [0.0, 0.0, 0.7070000171661377, 0.7070000171661377], "norm2": 0.999698048545838, "abs_norm2_minus_one": 0.0003019514541620083}
+        ]
+      },
+      "external_resources": ["SimpleSkin_geometry.bin", "SimpleSkin_skinningData.bin", "SimpleSkin_inverseBindMatrices.bin", "SimpleSkin_animation.bin"],
+      "notes": ["Retained unchanged as a Baozi policy rejection fixture. Do not normalize upstream quaternion bytes or broaden the canonical tolerance to admit this model."],
+      "source_pointers": ["/scenes/0", "/nodes", "/meshes/0", "/skins/0", "/animations/0", "/accessors/0", "/accessors/1", "/accessors/4", "/accessors/5", "/accessors/6"]
+    },
+    {
+      "id": "RiggedSimple",
+      "path": "upstream/Models/RiggedSimple/glTF/RiggedSimple.gltf",
+      "expected_outcome": "success",
+      "coverage": ["skinning", "joint_trs_animation", "linear_interpolation", "inverse_bind_matrices", "explicit_skeleton_root", "mixed_joint_influences", "matrix_node_transform", "external_buffer"],
+      "selected_scene": 0,
+      "counts": {"nodes": 5, "meshes": 1, "primitives": 1, "mesh_instances": 1, "skins": 1, "morph_targets": 0, "animations": 1, "materials": 1, "images": 0},
+      "mesh_names": ["Cylinder"],
+      "node_names": [{"node": 0, "name": "Z_UP"}, {"node": 1, "name": "Armature"}, {"node": 2, "name": "Cylinder"}, {"node": 3, "name": "Bone"}, {"node": 4, "name": "Bone.001"}],
+      "scene_roots": [0],
+      "node_hierarchy": [{"node": 0, "children": [1]}, {"node": 1, "children": [3, 2]}, {"node": 2, "children": []}, {"node": 3, "children": [4]}, {"node": 4, "children": []}],
+      "node_transforms": [
+        {"node": 0, "matrix": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]},
+        {"node": 1, "matrix": [-4.371139894487897e-08, -1.0, 0.0, 0.0, 1.0, -4.371139894487897e-08, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]},
+        {"node": 3, "matrix": [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, -1.3597299641787688e-07, -4.1803297996521, 1.0]},
+        {"node": 4, "translation": [1.2150299863455947e-11, 0.02797747030854225, 4.187077045440674], "rotation": [-0.0, 0.0002899225219152868, -0.0, -0.9999999403953552], "rotation_norm2": 0.9999999648457827}
+      ],
+      "mesh_instances": [{"node": 2, "mesh": 0, "skin": 0}],
+      "primitives": [
+        {"mesh": 0, "primitive": 0, "mode": 4, "mode_explicit": true, "position_accessor": 3, "index_accessor": 0, "vertex_count": 160, "index_count": 564, "position_min": [-1.0, -0.9999995827674866, -4.575077056884766], "position_max": [1.0, 1.0, 4.575077056884766], "attributes": ["JOINTS_0", "NORMAL", "POSITION", "WEIGHTS_0"], "morph_target_count": 0}
+      ],
+      "skins": [
+        {
+          "skin": 0, "name": "Armature", "joint_count": 2, "joints": [3, 4], "inverse_bind_matrices_accessor": 9, "skeleton_property_present": true, "skeleton": 3,
+          "inverse_bind_matrices": [
+            {"joint_index": 0, "joint_node": 3, "values_column_major": [0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.3597299641787686e-07, 4.1803297996521, 1.0]},
+            {"joint_index": 1, "joint_node": 4, "values_column_major": [0.0, 1.0, 0.0, 0.0, -0.9999998211860657, 0.0, 0.0005798449856229126, 0.0, 0.0005798449856229126, 0.0, 0.9999998211860657, 0.0, -3.912100055458723e-06, -0.02797728031873703, -0.006746708881109953, 1.0]}
+          ]
+        }
+      ],
+      "skin_influences": [
+        {
+          "mesh": 0, "primitive": 0, "skin": 0, "joints_accessor": 1, "weights_accessor": 4, "joint_component_type": 5123, "weight_component_type": 5126, "vertex_count": 160,
+          "mixed_influence_vertex_count": 32, "max_active_influences_per_vertex": 2, "weight_sum_min": 1.0, "weight_sum_max": 1.0000000298023224,
+          "samples": [
+            {"vertex": 0, "joints": [0, 0, 0, 0], "weights": [1.0, 0.0, 0.0, 0.0], "active_joint_nodes": [3]},
+            {"vertex": 2, "joints": [0, 1, 0, 0], "weights": [0.738601803779602, 0.26139819622039795, 0.0, 0.0], "active_joint_nodes": [3, 4]},
+            {"vertex": 73, "joints": [0, 1, 0, 0], "weights": [0.7386019229888916, 0.2613981068134308, 0.0, 0.0], "active_joint_nodes": [3, 4]},
+            {"vertex": 159, "joints": [1, 0, 0, 0], "weights": [1.0, 0.0, 0.0, 0.0], "active_joint_nodes": [4]}
+          ]
+        }
+      ],
+      "animations": [
+        {
+          "animation": 0, "channel_count": 3, "sampler_count": 3, "input_accessor": 5, "keyframe_count": 50, "time_min": 0.04166661947965622, "time_max": 2.0833330154418945,
+          "input_times": [0.04166661947965622, 0.08333330601453781, 0.125, 0.16666659712791443, 0.20833329856395721, 0.25, 0.29166659712791443, 0.3333333134651184, 0.3750000298023224, 0.41666659712791443, 0.4583333134651184, 0.5, 0.5416666865348816, 0.5833333134651184, 0.625, 0.6666666865348816, 0.7083333134651184, 0.75, 0.7916666865348816, 0.8333333134651184, 0.8750000596046448, 0.9166666865348816, 0.9583333134651184, 1.0, 1.0416669845581055, 1.0833330154418945, 1.125, 1.1666669845581055, 1.2083330154418945, 1.25, 1.2916669845581055, 1.3333330154418945, 1.3750001192092896, 1.4166669845581055, 1.4583330154418945, 1.5, 1.5416669845581055, 1.5833330154418945, 1.6250001192092896, 1.6666669845581055, 1.7083330154418945, 1.75, 1.7916669845581055, 1.8333330154418945, 1.8750001192092896, 1.9166669845581055, 1.9583330154418945, 2.0, 2.0416669845581055, 2.0833330154418945],
+          "channels": [
+            {
+              "channel": 0, "sampler": 0, "target_node": 4, "target_path": "translation", "interpolation": "LINEAR", "input_accessor": 5, "output_accessor": 6, "keyframe_count": 50, "output_element_count": 50, "output_type": "VEC3",
+              "samples": [
+                {"key": 0, "time": 0.04166661947965622, "value": [-3.4530497493474865e-14, 0.027977488934993744, 4.187077045440674]},
+                {"key": 25, "time": 1.0833330154418945, "value": [-2.9398998426660716e-13, 0.027977529913187027, 4.187077045440674]},
+                {"key": 49, "time": 2.0833330154418945, "value": [-3.4530497493474865e-14, 0.027977488934993744, 4.187077045440674]}
+              ]
+            },
+            {
+              "channel": 1, "sampler": 1, "target_node": 4, "target_path": "rotation", "interpolation": "LINEAR", "input_accessor": 5, "output_accessor": 7, "keyframe_count": 50, "output_element_count": 50, "output_type": "VEC4",
+              "norm2_min": 0.9999999153112562, "norm2_max": 1.000000100018059, "max_abs_norm2_minus_one": 1.0001805894610527e-07, "keys_outside_baozi_tolerance": [],
+              "samples": [
+                {"key": 0, "time": 0.04166661947965622, "value": [-4.6566102085421335e-09, 0.0002899225219152868, 4.162090377207717e-12, -0.9999999403953552]},
+                {"key": 25, "time": 1.0833330154418945, "value": [0.2840130627155304, 0.0002779837523121387, -8.234185952460393e-05, -0.9588203430175781]},
+                {"key": 49, "time": 2.0833330154418945, "value": [-4.6566102085421335e-09, 0.0002899225219152868, 4.162090377207717e-12, -0.9999999403953552]}
+              ]
+            },
+            {
+              "channel": 2, "sampler": 2, "target_node": 4, "target_path": "scale", "interpolation": "LINEAR", "input_accessor": 5, "output_accessor": 8, "keyframe_count": 50, "output_element_count": 50, "output_type": "VEC3",
+              "samples": [
+                {"key": 0, "time": 0.04166661947965622, "value": [1.0000001192092896, 0.9999999403953552, 1.0]},
+                {"key": 25, "time": 1.0833330154418945, "value": [1.0, 1.0, 0.9999998807907104]},
+                {"key": 49, "time": 2.0833330154418945, "value": [1.0000001192092896, 0.9999999403953552, 1.0]}
+              ]
+            }
+          ]
+        }
+      ],
+      "external_resources": ["RiggedSimple0.bin"],
+      "profile_inspection": {"extras_pointers": [], "extension_payload_pointers": [], "sparse_accessor_pointers": [], "all_animation_times_strictly_increasing": true, "all_animation_values_finite": true, "all_rotation_values_within_baozi_tolerance": true},
+      "upstream_blobs": [
+        {"path": "Models/RiggedSimple/LICENSE.md", "size": 781, "git_blob_sha1": "2a98e37252702a3dd4ddfa0d4e8d4c2e33e4641c"},
+        {"path": "Models/RiggedSimple/README.body.md", "size": 56, "git_blob_sha1": "1efdf8c19b4bac9c6ff7cb7d382505418a11fd04"},
+        {"path": "Models/RiggedSimple/README.md", "size": 917, "git_blob_sha1": "93f7c74a929e7474b05c02cc243c97d48843ec41"},
+        {"path": "Models/RiggedSimple/glTF/RiggedSimple.gltf", "size": 10567, "git_blob_sha1": "a8f3cabe330dc4fbd512d826969d5d065c1b9f58"},
+        {"path": "Models/RiggedSimple/glTF/RiggedSimple0.bin", "size": 11136, "git_blob_sha1": "dd3200d6ed19b94fab18fadaa622f099afad587b"},
+        {"path": "Models/RiggedSimple/metadata.json", "size": 652, "git_blob_sha1": "09910327d943d6239e8875a86f164382f6d5d8f0"}
+      ],
+      "notes": ["Source JSON and binary accessors inspected independently of Baozi. POSITION bounds also match decoded binary extrema.", "The animation starts after zero; retain its authored time domain rather than shifting the keys.", "Z_UP is the source root node's name; its authored matrix remains present. glTF scene-space conventions still apply.", "No source quaternion, influence, inverse bind matrix, or transform was normalized or rewritten."],
+      "source_pointers": ["/asset", "/scenes/0", "/nodes", "/meshes/0", "/skins/0", "/animations/0", "/accessors/0", "/accessors/1", "/accessors/2", "/accessors/3", "/accessors/4", "/accessors/5", "/accessors/6", "/accessors/7", "/accessors/8", "/accessors/9", "/materials/0", "/bufferViews", "/buffers/0"]
+    },
+    {
+      "id": "AnimatedMorphCube",
+      "path": "upstream/Models/AnimatedMorphCube/glTF/AnimatedMorphCube.gltf",
+      "expected_outcome": "success",
+      "coverage": ["two_morph_targets", "position_normal_tangent_morphs", "morph_weight_animation", "linear_interpolation", "node_rotation_scale"],
+      "selected_scene": 0,
+      "counts": {"nodes": 1, "meshes": 1, "primitives": 1, "mesh_instances": 1, "skins": 0, "morph_targets": 2, "animations": 1, "materials": 1, "images": 0},
+      "mesh_names": ["Cube"],
+      "node_names": [{"node": 0, "name": "AnimatedMorphCube"}],
+      "mesh_instances": [{"node": 0, "mesh": 0, "scale": [100.0, 100.0, 100.0]}],
+      "mesh_default_morph_weights": [{"mesh": 0, "weights": [0.0, 0.0]}],
+      "primitives": [
+        {"mesh": 0, "primitive": 0, "mode": 4, "mode_explicit": false, "position_accessor": 2, "index_accessor": 9, "vertex_count": 24, "index_count": 36, "position_min": [-0.0100000044, -0.0100000054, -0.01], "position_max": [0.0100000035, 0.0100000035, 0.01], "attributes": ["NORMAL", "POSITION", "TANGENT"], "morph_target_count": 2}
+      ],
+      "morph_targets": [
+        {"mesh": 0, "primitive": 0, "target": 0, "position_accessor": 4, "position_accessor_name": "thin", "normal_accessor": 3, "tangent_accessor": 5, "delta_min": [0.0, 0.0, 0.0], "delta_max": [0.0, 0.01893253, 0.0]},
+        {"mesh": 0, "primitive": 0, "target": 1, "position_accessor": 7, "position_accessor_name": "angle", "normal_accessor": 6, "tangent_accessor": 8, "delta_min": [0.0, 0.0, 0.0], "delta_max": [0.0, 0.0198908355, 0.0]}
+      ],
+      "animations": [
+        {"animation": 0, "name": "Square", "channel_count": 1, "sampler_count": 1, "target_node": 0, "target_path": "weights", "interpolation": "LINEAR", "input_accessor": 10, "output_accessor": 11, "keyframe_count": 127, "time_min": 0.0, "time_max": 4.19999743, "output_element_count": 254, "output_type": "SCALAR"}
+      ],
+      "external_resources": ["AnimatedMorphCube.bin"],
+      "notes": ["thin and angle are source accessor names, not mesh extras.targetNames or asserted importer-generated morph names.", "Accessor bounds are before the node's 100x scale and rotation."],
+      "source_pointers": ["/scenes/0", "/nodes/0", "/meshes/0", "/animations/0", "/accessors/2", "/accessors/4", "/accessors/7", "/accessors/9", "/accessors/10", "/accessors/11"]
+    },
+    {
+      "id": "MorphPrimitivesTest",
+      "path": "upstream/Models/MorphPrimitivesTest/glTF/MorphPrimitivesTest.gltf",
+      "expected_outcome": "rejection",
+      "rejection": {"feature": "selected_extras", "source_pointer": "/asset/extras", "error_code": "gltf.unsupported_feature", "subject": "extras", "reason": "The unchanged upstream asset contains extras on the selected document's asset object; the current selected profile rejects this payload."},
+      "coverage": ["explicit_profile_rejection", "multiple_primitives", "shared_morph_slot", "nonzero_default_morph_weight", "external_jpeg", "unicode_node_name"],
+      "selected_scene": 0,
+      "counts": {"nodes": 2, "meshes": 1, "primitives": 2, "mesh_instances": 1, "skins": 0, "morph_targets": 1, "animations": 0, "materials": 2, "images": 1},
+      "mesh_names": ["mesh"],
+      "node_names": [{"node": 0, "name": "\u30eb\u30fc\u30c8\u30d1\u30fc\u30c8"}, {"node": 1, "name": "mesh"}],
+      "mesh_instances": [{"node": 1, "mesh": 0}],
+      "mesh_default_morph_weights": [{"mesh": 0, "weights": [0.5]}],
+      "primitives": [
+        {"mesh": 0, "primitive": 0, "mode": 4, "mode_explicit": true, "position_accessor": 2, "index_accessor": 0, "vertex_count": 21, "index_count": 72, "position_min": [-0.5, 0.0, -0.5], "position_max": [0.5, 0.0, 0.5], "attributes": ["NORMAL", "POSITION", "TEXCOORD_0"], "morph_target_count": 1},
+        {"mesh": 0, "primitive": 1, "mode": 4, "mode_explicit": true, "position_accessor": 7, "index_accessor": 5, "vertex_count": 9, "index_count": 24, "position_min": [0.0, 0.0, -0.5], "position_max": [0.5, 0.0, 0.0], "attributes": ["NORMAL", "POSITION", "TEXCOORD_0"], "morph_target_count": 1}
+      ],
+      "morph_targets": [
+        {"mesh": 0, "primitive": 0, "target": 0, "position_accessor": 4, "delta_min": [0.0, 0.0, 0.0], "delta_max": [0.0, 0.20000000298023224, 0.0]},
+        {"mesh": 0, "primitive": 1, "target": 0, "position_accessor": 9, "delta_min": [0.0, 0.0, 0.0], "delta_max": [0.0, 0.20000000298023224, 0.0]}
+      ],
+      "external_resources": ["MorphPrimitivesTest.bin", "uv_texture.jpg"],
+      "source_pointers": ["/asset/extras", "/scenes/0", "/nodes", "/meshes/0", "/accessors/0", "/accessors/2", "/accessors/4", "/accessors/5", "/accessors/7", "/accessors/9", "/materials", "/images/0"]
+    }
+  ]
+}

@@ -48,3 +48,13 @@ patch and test-only packaging repairs, documented in
 [PATCHES.md](candidates/baozi-native-io/vendor/cap-primitives/PATCHES.md).
 Its original archive checksum records upstream provenance, not the modified
 directory's identity. Portable Baozi production packages do not depend on it.
+
+## Khronos glTF Sample Assets
+
+`tools/consumers/assets/fixtures/upstream` contains unchanged selected models and notices from
+[glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets), commit
+`8f492390ddc7a2ae221a1369ef560589cf8c70fb`. Model content uses CC-BY-4.0 or CC0-1.0 as specified in
+each original per-model `LICENSE.md`; metadocumentation and the Cesium logo have their separately
+retained notices. The [fixture inventory](tools/consumers/assets/fixtures/README.md) identifies the
+authors, exact models, scope, and checksums. Complete applicable license texts and upstream notices
+are retained under that fixture directory. These assets are independent of Baozi's source license.

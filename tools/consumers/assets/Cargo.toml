@@ -1,0 +1,24 @@
+[package]
+name = "baozi-asset-consumer"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Offline real-asset consumer and advisory profiling for Baozi"
+readme = "README.md"
+
+[workspace]
+resolver = "3"
+
+[dependencies]
+baozi = { path = "../../../crates/baozi", default-features = false, features = ["all-formats", "postprocess"] }
+baozi-native-io-candidate = { path = "../../../candidates/baozi-native-io" }
+serde_json = "1"
+allocation-counter = { version = "=0.8.1", optional = true }
+
+[features]
+allocation-metrics = ["dep:allocation-counter"]
+
+[patch.crates-io]
+cap-primitives = { path = "../../../candidates/baozi-native-io/vendor/cap-primitives" }

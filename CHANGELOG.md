@@ -6,6 +6,11 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Added an unpublished offline real-asset consumer with pinned upstream models, application-owned
+  buffers, typed rejection regressions, and separate advisory stage/allocation/RSS measurements.
+- Decoupled tangent construction algorithms from handedness encodings in partial scene-space
+  declarations. glTF now records its upper-left UV origin and sign-in-W tangent encoding without
+  claiming an authored MikkTSpace basis, allowing correct reflection of authored tangents.
 - Exposed the public loss, diagnostic, source-scope, text-profile, and resource-evidence vocabulary
   through `baozi`, including `ImportDimensionSnapshot`. Independent consumers can explicitly
   authorize partial-channel loss, inspect its exact disposition, and retain readable reports
