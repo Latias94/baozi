@@ -14,10 +14,11 @@ use baozi_import::{
     import_asset as run_import_asset, import_bytes as run_import_bytes,
 };
 use baozi_io::{
-    AssetIo, AssetLength, AssetOpenError, AssetPath, AssetReadError, AssetReader, AuthorityDomain,
-    OpenedAsset,
+    AssetIo, AssetLength, AssetOpenError, AssetOpenWorkError, AssetPath, AssetReadError,
+    AssetReader, AuthorityDomain, OpenedAsset,
 };
 use baozi_operation::CounterClass;
+use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -494,6 +495,11 @@ struct BackendCappedIo {
 impl AssetIo for BackendCappedIo {
     fn authority_domain(&self) -> AuthorityDomain {
         self.domain.clone()
+    }
+
+    fn open_work_bound(&self, path: &AssetPath) -> Result<NonZeroU64, AssetOpenWorkError> {
+        // One identity comparison, one path clone, and fixed shared-reader/cap setup.
+        Ok(NonZeroU64::new(2 * path.as_str().len() as u64 + 16).expect("bounded fixture work"))
     }
 
     fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {

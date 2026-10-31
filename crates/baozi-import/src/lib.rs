@@ -17,6 +17,7 @@
 
 pub use baozi_operation::{CapacityPlan, CapacityPlanError, LedgerCause};
 
+mod asset_open;
 pub mod authoring;
 mod config;
 mod dependency;

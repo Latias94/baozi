@@ -9,9 +9,10 @@ for public `Importer::read_asset` integration tests.
 Native filesystem support remains `CandidateUnregistered`, with no
 release-registered targets. Moving the implementation does not qualify a target
 or change its dependency admission status.
-Import sessions currently account for opaque open counts; native path/link/retry work is not yet
-precharged through `WorkUnits`. The required pre-open bound remains a candidate qualification
-gap alongside the platform matrix, rather than a guarantee supplied by this adapter.
+Import sessions admit the adapter's positive `open_work_bound` through `WorkUnits` before
+primary and fresh dependency opens. This is a conservative billing envelope for path processing,
+bounded manual link expansion and backend retry actions; it does not measure exact syscalls,
+kernel iterations, RSS or wall time. Platform qualification remains separate.
 
 ## Runtime targets
 
@@ -26,12 +27,17 @@ audits also resolve `x86_64-unknown-freebsd`; that profile does not enable a
 runtime adapter. Browser WASM and WASI consumers use memory or custom IO through
 `baozi-io`.
 
-The native dependency baseline retains `cap-std`, its transitive
-`cap-primitives`, and optional `cap-fs-ext` at `4.0.3`, and `rustix` at `1.1.4`.
+The native dependency baseline retains `cap-std` and optional `cap-fs-ext` at
+`4.0.3`, and `rustix` at `1.1.4`. A local `cap-primitives` 4.0.3 patch supplies
+fixed-buffer manual link reads and the checked work envelope. Its
+[patch record](vendor/cap-primitives/PATCHES.md) preserves the original archive
+provenance and identifies the actual modified sources; the upstream checksum
+does not identify the patched directory.
 Direct dependency default features remain disabled. `cap-fs-ext` explicitly
 selects `std`; the Unix `rustix` edge selects `std` and `fs`. Native admission
-checks still compare the reviewed target-specific dependency closures and
-checksums. Preserve those versions when generating this workspace's lockfile.
+checks compare the reviewed target-specific closures, registry checksums, and
+the unique local backend path/version. Preserve those versions when generating
+this workspace's lockfile.
 
 ## Opening assets
 
@@ -44,6 +50,7 @@ use baozi_native_io_candidate::{FileSystemAssetIo, NativeDirectoryCapability};
 let capability = NativeDirectoryCapability::open_ambient("assets")?;
 let io = FileSystemAssetIo::from_capability(capability);
 let path = AssetPath::new("models/mesh.obj")?;
+let work_bound = io.open_work_bound(&path)?;
 let mut opened = io.open(&path)?;
 let mut buffer = [0_u8; 1024];
 let bytes_read = opened.read_chunk(&mut buffer)?;
@@ -52,7 +59,17 @@ let bytes_read = opened.read_chunk(&mut buffer)?;
 
 Applications can pass this adapter and a logical `AssetPath` to
 `baozi::Importer::read_asset`. Request options and import policy remain owned by
-the caller and import layer.
+the caller and import layer. Import performs work admission automatically; a
+direct trait caller owns admission of its declared `work_bound`.
+
+The manual resolver permits at most 40 successful link expansions on Linux and
+macOS or 63 on Windows. Each returned target is limited to 4096 Unix bytes or
+Windows UTF-16 units before component expansion. Unix uses a single 4097-byte
+sentinel buffer read; Windows opens the reparse object relative to its retained
+parent and validates one fixed-buffer response. Native Linux fast-path link
+resolution remains an OS action; its four attempts and a complete manual
+fallback are included in the work envelope. These are adapter limits, not
+system-wide link policies.
 
 The native directory owner keeps its handle private. Clones share the retained
 directory and authority identity; repository capture uses that same owner.

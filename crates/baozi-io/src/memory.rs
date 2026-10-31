@@ -1,8 +1,9 @@
 use crate::{
-    AssetIo, AssetLength, AssetOpenError, AssetOpenErrorKind, AssetOpenStage, AssetPath,
-    AuthorityDomain, MemoryAssetInsertError, OpenedAsset,
+    AssetIo, AssetLength, AssetOpenError, AssetOpenErrorKind, AssetOpenStage, AssetOpenWorkError,
+    AssetPath, AuthorityDomain, MemoryAssetInsertError, OpenedAsset,
 };
 use std::io::Cursor;
+use std::num::NonZeroU64;
 use std::sync::{Arc, RwLock};
 
 type MemoryAssetEntry = (AssetPath, Arc<[u8]>);
@@ -66,6 +67,11 @@ impl AssetIo for MemoryAssetIo {
         self.domain.clone()
     }
 
+    fn open_work_bound(&self, path: &AssetPath) -> Result<NonZeroU64, AssetOpenWorkError> {
+        // Cover every possible future table size without locking or observing the namespace.
+        memory_open_work_bound(path, usize::BITS + 1)
+    }
+
     fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {
         let retained_path = path.try_clone().map_err(|_| {
             AssetOpenError::new(AssetOpenStage::Open, AssetOpenErrorKind::CapacityExceeded)
@@ -92,6 +98,24 @@ impl AssetIo for MemoryAssetIo {
     }
 }
 
+pub(crate) fn memory_open_work_bound(
+    path: &AssetPath,
+    comparisons: u32,
+) -> Result<NonZeroU64, AssetOpenWorkError> {
+    // One path clone and at most `comparisons` lexicographic comparisons. Each comparison
+    // bills at most path.len() byte pairs plus one length/control action, regardless of
+    // the candidate's length. Eight fixed units cover lock/Arc/reader setup actions.
+    let path_actions = u64::try_from(path.as_str().len())
+        .ok()
+        .and_then(|bytes| bytes.checked_add(1))
+        .ok_or(AssetOpenWorkError::Overflow)?;
+    path_actions
+        .checked_mul(u64::from(comparisons) + 1)
+        .and_then(|weight| weight.checked_add(8))
+        .and_then(NonZeroU64::new)
+        .ok_or(AssetOpenWorkError::Overflow)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,6 +130,81 @@ mod tests {
             }
             output.extend_from_slice(&chunk[..read]);
         }
+    }
+
+    #[test]
+    fn open_work_bound_is_positive_for_present_missing_and_maximum_length_paths() {
+        let io = MemoryAssetIo::new();
+        let present = AssetPath::new("present.bin").expect("valid path");
+        let missing = AssetPath::new("missing.bin").expect("valid path");
+        let longest = AssetPath::new("x".repeat(AssetPath::MAX_BYTES)).expect("valid long path");
+        io.try_insert(present.clone(), Arc::from(&b"payload"[..]))
+            .expect("asset inserted");
+
+        for path in [&present, &missing, &longest] {
+            let weight = io.open_work_bound(path).expect("memory open is bounded");
+            assert!(weight.get() >= path.as_str().len() as u64);
+            assert_eq!(io.clone().open_work_bound(path), Ok(weight));
+        }
+        assert!(io.open_work_bound(&longest).unwrap() > io.open_work_bound(&present).unwrap());
+        assert_eq!(
+            read_all(io.open(&present).expect("present asset")),
+            b"payload"
+        );
+        assert_eq!(
+            io.open(&missing)
+                .expect_err("query does not add assets")
+                .kind(),
+            AssetOpenErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn open_work_bound_survives_insertion_from_another_shared_handle() {
+        let io = MemoryAssetIo::new();
+        let path = AssetPath::new("shared/prefix/target.bin").expect("valid path");
+        let missing = AssetPath::new("shared/prefix/missing.bin").expect("valid path");
+        let weight = io
+            .open_work_bound(&path)
+            .expect("empty namespace is bounded");
+        let missing_weight = io
+            .open_work_bound(&missing)
+            .expect("missing path is bounded");
+        assert_eq!(
+            io.open(&path).expect_err("not inserted yet").kind(),
+            AssetOpenErrorKind::NotFound
+        );
+
+        let writer = io.clone();
+        let inserted_path = path.clone();
+        std::thread::spawn(move || {
+            for index in 0..256 {
+                writer
+                    .try_insert(
+                        AssetPath::new(format!("shared/prefix/entry-{index:03}.bin")).unwrap(),
+                        Arc::from(&b"other"[..]),
+                    )
+                    .expect("concurrent namespace growth");
+            }
+            writer
+                .try_insert(inserted_path, Arc::from(&b"inserted later"[..]))
+                .expect("target inserted");
+        })
+        .join()
+        .expect("insertion thread completes");
+
+        assert_eq!(io.open_work_bound(&path), Ok(weight));
+        assert_eq!(io.open_work_bound(&missing), Ok(missing_weight));
+        let opened = io.open(&path).expect("previously quoted open succeeds");
+        io.try_insert(path.clone(), Arc::from(&b"replacement"[..]))
+            .expect("target replaced");
+        assert_eq!(io.open_work_bound(&path), Ok(weight));
+        assert_eq!(read_all(opened), b"inserted later");
+        assert_eq!(read_all(io.open(&path).unwrap()), b"replacement");
+        assert_eq!(
+            io.open(&missing).unwrap_err().kind(),
+            AssetOpenErrorKind::NotFound
+        );
     }
 
     #[test]

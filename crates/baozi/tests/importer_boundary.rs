@@ -1,10 +1,10 @@
 mod support;
 
 use baozi::{
-    AssetIo, AssetLength, AssetOpenError, AssetPath, AuthorityDomain, CapabilityStatus, Error,
-    FormatCapability, FormatDescriptor, FormatEncoding, FormatId, ImportCause, ImportDimension,
-    ImportOperationControl, ImportTerminalCause, ImportTerminalFailureClass, Importer,
-    ReadConfidence, RequestError, SceneSnapshotLimits,
+    AssetIo, AssetLength, AssetOpenError, AssetOpenWorkError, AssetPath, AuthorityDomain,
+    CapabilityStatus, Error, FormatCapability, FormatDescriptor, FormatEncoding, FormatId,
+    ImportCause, ImportDimension, ImportOperationControl, ImportTerminalCause,
+    ImportTerminalFailureClass, Importer, ReadConfidence, RequestError, SceneSnapshotLimits,
 };
 use baozi_import::{
     DenyDependencies, DetectionOutcome, DetectionResult, DetectionScope, FormatImporter,
@@ -12,6 +12,7 @@ use baozi_import::{
 };
 use baozi_io::OpenedAsset;
 use std::io::Cursor;
+use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const ONCE_ID: &str = "org.example.open-once";
@@ -108,6 +109,7 @@ impl FormatImporter for GeometryImporter {
 struct ChangingAssetIo {
     domain: AuthorityDomain,
     domain_lookups: AtomicUsize,
+    bound_lookups: AtomicUsize,
     opens: AtomicUsize,
 }
 
@@ -116,12 +118,17 @@ impl ChangingAssetIo {
         Self {
             domain: AuthorityDomain::new(),
             domain_lookups: AtomicUsize::new(0),
+            bound_lookups: AtomicUsize::new(0),
             opens: AtomicUsize::new(0),
         }
     }
 
     fn domain_lookup_count(&self) -> usize {
         self.domain_lookups.load(Ordering::Acquire)
+    }
+
+    fn bound_lookup_count(&self) -> usize {
+        self.bound_lookups.load(Ordering::Acquire)
     }
 
     fn open_count(&self) -> usize {
@@ -133,6 +140,12 @@ impl AssetIo for ChangingAssetIo {
     fn authority_domain(&self) -> AuthorityDomain {
         self.domain_lookups.fetch_add(1, Ordering::AcqRel);
         self.domain.clone()
+    }
+
+    fn open_work_bound(&self, path: &AssetPath) -> Result<NonZeroU64, AssetOpenWorkError> {
+        // Query instrumentation must not affect opens; both payload versions fit this weight.
+        self.bound_lookups.fetch_add(1, Ordering::AcqRel);
+        Ok(NonZeroU64::new(path.as_str().len() as u64 + 32).expect("bounded fixture work"))
     }
 
     fn open(&self, path: &AssetPath) -> std::result::Result<OpenedAsset, AssetOpenError> {
@@ -204,6 +217,7 @@ fn foreign_prepared_request_is_rejected_before_io_or_session() {
         .expect_err("foreign request must fail before asset IO");
     assert_registry_snapshot_mismatch(asset_error);
     assert_eq!(asset_io.domain_lookup_count(), 0);
+    assert_eq!(asset_io.bound_lookup_count(), 0);
     assert_eq!(asset_io.open_count(), 0);
 
     let resolver_io = ChangingAssetIo::new();
@@ -218,6 +232,7 @@ fn foreign_prepared_request_is_rejected_before_io_or_session() {
         .expect_err("foreign request must fail before resolver or asset IO");
     assert_registry_snapshot_mismatch(resolver_error);
     assert_eq!(resolver_io.domain_lookup_count(), 0);
+    assert_eq!(resolver_io.bound_lookup_count(), 0);
     assert_eq!(resolver_io.open_count(), 0);
 }
 
@@ -233,6 +248,7 @@ fn facade_opens_primary_exactly_once_and_reuses_the_bound_snapshot() {
         .expect("one-open import must succeed");
 
     assert_eq!(io.open_count(), 1);
+    assert_eq!(io.bound_lookup_count(), 1);
     assert_eq!(report.format().id().as_str(), ONCE_ID);
     assert_eq!(
         report

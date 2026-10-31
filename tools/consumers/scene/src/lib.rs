@@ -166,6 +166,16 @@ impl baozi::AssetIo for CountingIo {
         baozi::AssetIo::authority_domain(&self.memory)
     }
 
+    fn open_work_bound(
+        &self,
+        path: &baozi::AssetPath,
+    ) -> Result<std::num::NonZeroU64, baozi::AssetOpenWorkError> {
+        // Include the wrapper's atomic open counter in the delegated billing weight.
+        baozi::AssetIo::open_work_bound(&self.memory, path)?
+            .checked_add(1)
+            .ok_or(baozi::AssetOpenWorkError::Overflow)
+    }
+
     fn open(&self, path: &baozi::AssetPath) -> Result<baozi::OpenedAsset, baozi::AssetOpenError> {
         self.opens
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

@@ -17,7 +17,9 @@ pub use error::{
 pub use immutable_memory::ImmutableMemoryAssetIo;
 pub use memory::MemoryAssetIo;
 pub use path::AssetPath;
-pub use resource::{AssetIo, AssetLength, AssetReader, AuthorityDomain, OpenedAsset};
+pub use resource::{
+    AssetIo, AssetLength, AssetOpenWorkError, AssetReader, AuthorityDomain, OpenedAsset,
+};
 /// Stable asset-IO semantic registry used by import's deep resource graph module.
 ///
 /// This is intentionally hidden from the ordinary root API. Importers may provide a custom

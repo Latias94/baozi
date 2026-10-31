@@ -12,11 +12,12 @@ use baozi_import::{
     import_asset_with_resolver as run_import_asset_with_resolver,
 };
 use baozi_io::{
-    AssetIo, AssetLength, AssetOpenError, AssetPath, AssetReadError, AssetReader, AuthorityDomain,
-    OpenedAsset,
+    AssetIo, AssetLength, AssetOpenError, AssetOpenWorkError, AssetPath, AssetReadError,
+    AssetReader, AuthorityDomain, OpenedAsset,
 };
 use baozi_operation::{CancellationOrigin, CancellationToken, ControlCause};
 use std::io::Cursor;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -273,6 +274,11 @@ impl AssetIo for CancelOnOpenIo {
         self.domain.clone()
     }
 
+    fn open_work_bound(&self, path: &AssetPath) -> Result<NonZeroU64, AssetOpenWorkError> {
+        // One path comparison/clone plus fixed cancellation and reader setup; no cancellation here.
+        Ok(NonZeroU64::new(2 * path.as_str().len() as u64 + 16).expect("bounded fixture work"))
+    }
+
     fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {
         assert_eq!(path, &self.source);
         self.cancellation.cancel();
@@ -292,6 +298,11 @@ impl AssetIo for CancelOnOpenIo {
 impl AssetIo for CancelOnDependencyOpenIo {
     fn authority_domain(&self) -> AuthorityDomain {
         self.domain.clone()
+    }
+
+    fn open_work_bound(&self, path: &AssetPath) -> Result<NonZeroU64, AssetOpenWorkError> {
+        // Cover both path comparisons, a path clone, and the tiny primary copies or reader setup.
+        Ok(NonZeroU64::new(3 * path.as_str().len() as u64 + 32).expect("bounded fixture work"))
     }
 
     fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {
@@ -324,6 +335,11 @@ impl AssetIo for CancelOnDependencyOpenIo {
 impl AssetIo for StableDependencyIo {
     fn authority_domain(&self) -> AuthorityDomain {
         self.domain.clone()
+    }
+
+    fn open_work_bound(&self, path: &AssetPath) -> Result<NonZeroU64, AssetOpenWorkError> {
+        // Two identity comparisons, one path clone, and fixed counter/borrowed-reader setup.
+        Ok(NonZeroU64::new(3 * path.as_str().len() as u64 + 16).expect("bounded fixture work"))
     }
 
     fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {

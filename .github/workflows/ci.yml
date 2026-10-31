@@ -318,11 +318,17 @@ jobs:
       - name: Check native filesystem candidate formatting
         run: cargo fmt --manifest-path candidates/baozi-native-io/Cargo.toml -- --check
 
+      - name: Check bounded native backend formatting
+        run: cargo fmt --manifest-path candidates/baozi-native-io/vendor/cap-primitives/Cargo.toml -- --check
+
       - name: Lint native filesystem candidate
         run: cargo clippy --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target "${{ matrix.target }}" --all-features --all-targets -- -D warnings
 
       - name: Test capability-bound native filesystem candidate without skipped fixtures
         run: cargo nextest run --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target "${{ matrix.target }}"
+
+      - name: Test bounded native backend and reparse decoding
+        run: cargo nextest run --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target "${{ matrix.target }}" -p cap-primitives --lib
 
       - name: Test repository filesystem candidate operational and fail-closed contracts
         run: cargo nextest run --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target "${{ matrix.target }}" --features repository-capture

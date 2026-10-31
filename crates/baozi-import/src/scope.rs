@@ -2876,8 +2876,10 @@ impl<'session> ParseScope<'session> {
                 .loss_policy
                 .allows(ImportLossKind::OptionalDependencyUnavailable)
             && optional_eligible(&cause);
-        if matches!(&cause, ScopeAbortCause::Control(_))
-            || (matches!(&cause, ScopeAbortCause::Ledger(_)) && !optional_fallback)
+        if matches!(
+            &cause,
+            ScopeAbortCause::Control(_) | ScopeAbortCause::TrustedExtension { .. }
+        ) || (matches!(&cause, ScopeAbortCause::Ledger(_)) && !optional_fallback)
         {
             let _ = self
                 .resource_graph
@@ -3026,15 +3028,12 @@ impl<'session> ParseScope<'session> {
     ) -> AssetSnapshotResult {
         self.poll_cause()?;
         self.charge_open_attempt()?;
-        let opened = catch_unwind(AssertUnwindSafe(|| io.open(identity.path())))
-            .map_err(|payload| {
-                discard_untrusted_panic_payload(payload);
-                ScopeAbortCause::TrustedExtension {
-                    boundary: TrustedExtensionBoundary::AssetIo,
-                    code: "asset-open-panicked",
-                }
-            })?
-            .map_err(ScopeAbortCause::AssetOpen)?;
+        let opened = crate::asset_open::open_asset(
+            self.host,
+            io,
+            identity.path(),
+            crate::asset_open::AssetOpenContext::Dependency,
+        )?;
         if opened.authority_domain() != identity.authority() || opened.path() != identity.path() {
             return Err(ScopeAbortCause::TrustedExtension {
                 boundary: TrustedExtensionBoundary::AssetIo,
@@ -3340,11 +3339,13 @@ impl<'session> ParseScope<'session> {
                 disposition,
             )
         {
-            // A terminal control/ledger cause already identifies the failed admission.
+            // A terminal control/ledger/extension cause already identifies the failed action.
             // Further best-effort graph accounting must not replace it with a later excess.
             if !matches!(
                 &cause,
-                ScopeAbortCause::Control(_) | ScopeAbortCause::Ledger(_)
+                ScopeAbortCause::Control(_)
+                    | ScopeAbortCause::Ledger(_)
+                    | ScopeAbortCause::TrustedExtension { .. }
             ) {
                 cause = graph_cause.into_scope_cause();
             }

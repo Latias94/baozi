@@ -259,6 +259,7 @@ fn extension_declaration_lists_reject_duplicates_and_empty_names() -> TestResult
 
 #[test]
 fn extension_declaration_sort_obeys_the_work_budget() -> TestResult<()> {
+    const SOURCE: &str = "extension-work.gltf";
     let document = br#"{
   "asset": { "version": "2.0" },
   "extensionsUsed": [
@@ -268,8 +269,8 @@ fn extension_declaration_sort_obeys_the_work_budget() -> TestResult<()> {
 }"#
     .to_vec();
     let (calibration_result, calibration_diagnostics) = import_assets_result(
-        "extension-work-calibration.gltf",
-        [("extension-work-calibration.gltf", document.clone())],
+        SOURCE,
+        [(SOURCE, document.clone())],
         GltfTestOptions::memory(),
     )?;
     let calibration_failure = expected_error(calibration_result)?;
@@ -285,11 +286,7 @@ fn extension_declaration_sort_obeys_the_work_budget() -> TestResult<()> {
 
     let mut options = GltfTestOptions::memory();
     options.limits.max_work_units = limit;
-    let (result, diagnostics) = import_assets_result(
-        "extension-work-limit.gltf",
-        [("extension-work-limit.gltf", document)],
-        options,
-    )?;
+    let (result, diagnostics) = import_assets_result(SOURCE, [(SOURCE, document)], options)?;
     let failure = expected_error(result)?;
 
     assert!(diagnostics.is_empty());

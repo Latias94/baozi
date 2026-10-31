@@ -5,6 +5,7 @@ use baozi_import::{
     ManifestResourceIdentityStability, SceneSnapshotLimits, ScopeAbortCause,
     SourceScopeDisposition, SourceScopeEntityKind,
 };
+use baozi_io::{AssetIo, AssetPath, MemoryAssetIo};
 use baozi_operation::{CancellationOrigin, ControlCause};
 use base64::Engine as _;
 use common::{
@@ -399,20 +400,42 @@ fn multiple_buffer_provenance_is_canonicalized_by_source_id() -> TestResult<()> 
 
 #[test]
 fn resource_closure_work_budget_fails_before_scope_or_dependency_io() -> TestResult<()> {
+    const SOURCE: &str = "models/scene.gltf";
     let document = selected_resource_closure_fixture();
+    let primary_bytes = document.len() as u64;
+    assert!(!document.is_empty() && document.len() < 16 * 1024);
+    let open_work = MemoryAssetIo::new()
+        .open_work_bound(&AssetPath::new(SOURCE)?)?
+        .get();
+    let execute = |options| {
+        import_assets_result(
+            SOURCE,
+            [
+                (SOURCE, document.clone()),
+                ("models/triangle.bin", triangle_bin()),
+                ("models/textures/base.png", triangle_png()),
+            ],
+            options,
+        )
+    };
+    // Calibrate the rejected hash admission after actual snapshot-storage setup. Check the
+    // complete primary-byte action, so a failure in an earlier open/read is not a valid baseline.
+    let mut calibration_options = sidecar_options();
+    calibration_options.limits.max_work_units = open_work + 2 + primary_bytes;
+    let (calibration, diagnostics) = execute(calibration_options)?;
+    assert!(diagnostics.is_empty());
+    let calibration = expected_error(calibration)?;
+    let work = calibration
+        .ledger()
+        .dimension(ImportDimension::WorkUnits)
+        .unwrap();
+    assert!(work.consumed() >= open_work + 2);
+    assert_eq!(work.attempted() - work.consumed(), primary_bytes);
+    let prefix = work.attempted();
     let mut options = sidecar_options();
-    // The immutable primary hash completes first. No subsequent semantic preflight work can
-    // start after this exact budget, regardless of later URI or source-scope work additions.
-    options.limits.max_work_units = document.len() as u64;
-    let (result, diagnostics) = import_assets_result(
-        "models/scene.gltf",
-        [
-            ("models/scene.gltf", document),
-            ("models/triangle.bin", triangle_bin()),
-            ("models/textures/base.png", triangle_png()),
-        ],
-        options,
-    )?;
+    // Admit the complete primary prefix, including the hash, without semantic preflight work.
+    options.limits.max_work_units = prefix;
+    let (result, diagnostics) = execute(options)?;
     let failure = expected_error(result)?;
 
     assert!(diagnostics.is_empty());
@@ -421,6 +444,30 @@ fn resource_closure_work_budget_fails_before_scope_or_dependency_io() -> TestRes
         ImportCause::Scope(abort)
             if matches!(abort.cause(), ScopeAbortCause::Ledger(_))
     ));
+    assert_eq!(
+        failure
+            .ledger()
+            .dimension(ImportDimension::WorkUnits)
+            .unwrap()
+            .consumed(),
+        prefix
+    );
+    assert_eq!(
+        failure
+            .ledger()
+            .dimension(ImportDimension::PrimaryBytes)
+            .unwrap()
+            .consumed(),
+        primary_bytes
+    );
+    assert_eq!(
+        failure
+            .ledger()
+            .dimension(ImportDimension::AssetOpen)
+            .unwrap()
+            .consumed(),
+        1
+    );
     assert!(failure.source_scope_record().is_none());
     assert_eq!(
         failure

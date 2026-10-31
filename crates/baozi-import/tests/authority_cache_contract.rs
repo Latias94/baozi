@@ -14,7 +14,11 @@ use baozi_import::{
     RegistryBuilder, SceneDraft, ScopeAbortCause,
     import_asset_with_resolver as run_import_asset_with_resolver,
 };
-use baozi_io::{AssetIo, AssetOpenError, AssetPath, AuthorityDomain, MemoryAssetIo, OpenedAsset};
+use baozi_io::{
+    AssetIo, AssetOpenError, AssetOpenWorkError, AssetPath, AuthorityDomain, MemoryAssetIo,
+    OpenedAsset,
+};
+use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -49,6 +53,14 @@ impl CountingMemoryIo {
 impl AssetIo for CountingMemoryIo {
     fn authority_domain(&self) -> AuthorityDomain {
         self.inner.authority_domain()
+    }
+
+    fn open_work_bound(&self, path: &AssetPath) -> Result<NonZeroU64, AssetOpenWorkError> {
+        // Add the wrapper's atomic open counter to the backend's declared weight.
+        self.inner
+            .open_work_bound(path)?
+            .checked_add(1)
+            .ok_or(AssetOpenWorkError::Overflow)
     }
 
     fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {
@@ -163,6 +175,14 @@ impl AddressAliasedPrimaryIo {
 impl AssetIo for AddressAliasedPrimaryIo {
     fn authority_domain(&self) -> AuthorityDomain {
         self.authority.clone()
+    }
+
+    fn open_work_bound(&self, path: &AssetPath) -> Result<NonZeroU64, AssetOpenWorkError> {
+        // Cover the routing comparison and tiny primary payload setup in either branch.
+        self.backend
+            .open_work_bound(path)?
+            .checked_add(path.as_str().len() as u64 + 16)
+            .ok_or(AssetOpenWorkError::Overflow)
     }
 
     fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {

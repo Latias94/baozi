@@ -5,6 +5,7 @@ AST spellings, and repository-conformance receipts do not.
 
 | Contract | Executable evidence |
 | --- | --- |
+| Work admission before opaque open | [`open_work_contract.rs`](../../crates/baozi-import/tests/open_work_contract.rs) exercises primary and dependency paths: positive declared weights, no backend call after work rejection or bound-query cancellation, full completion for returned open errors, attempted-only panic, terminal bound errors, identity checks, and no repeated planning/open on cache hits. Memory tests cover positive bounds across mutable namespace growth; the candidate's `open_work_bound_does_not_observe_namespace_mutations` preserves its bound through missing/file/directory states. The vendored backend tests check checked envelopes and malformed/aligned/limit-boundary native reparse records. |
 | Runtime dependency policy | [`runtime_admission.rs`](../../crates/baozi-xtask/tests/runtime_admission.rs) checks normal/build reachability, target conditions, renamed/transitive dependencies, dev-only exclusions, cycles, and malformed metadata. [`cli.rs`](../../crates/baozi-xtask/tests/cli.rs) checks the real repository command and rejects retired commands and receipt options. |
 | Host-owned admission | [`host_admission.rs`](../../crates/baozi/tests/host_admission.rs): `external_host_gate_is_the_only_concurrent_session_admission_authority` measures parser overlap at host capacities one and two and checks that all permits return. |
 | Concurrent parser isolation | [`reentrancy_contract.rs`](../../crates/baozi-import/tests/reentrancy_contract.rs): `one_prepared_request_is_semantically_reentrant_for_distinct_primary_inputs` and `one_snapshot_is_semantically_reentrant_for_distinct_immutable_parser_options` require overlap and compare observations, reports, and ledgers with serial imports. |
@@ -58,7 +59,8 @@ the behavior tests above.
 `native-fs-check` makes eleven serial `cargo metadata --locked` queries: four candidate targets
 in default/runtime and repository-capture configurations, plus root-workspace Linux/WASM/WASI
 all-feature graphs. The root Linux query also supplies the featureless xtask closure. It compares
-resolved normal/build closures, package sources/checksums, feature sets, and the reviewed dependency
+resolved normal/build closures, registry sources/checksums, the unique local bounded backend
+path/version with separate upstream provenance, feature sets, and the reviewed dependency
 basis against the existing snapshots. FreeBSD remains a dependency-audit profile, not a runtime
 candidate. Runtime candidates remain exactly `x86_64-unknown-linux-gnu`,
 `x86_64-pc-windows-msvc`, and `aarch64-apple-darwin`. Repository capture is operational only on the

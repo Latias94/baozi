@@ -1,9 +1,10 @@
 use crate::{
-    AssetIo, AssetLength, AssetOpenError, AssetOpenErrorKind, AssetOpenStage, AssetPath,
-    AuthorityDomain, ImmutableMemoryAssetBuildError, OpenedAsset,
+    AssetIo, AssetLength, AssetOpenError, AssetOpenErrorKind, AssetOpenStage, AssetOpenWorkError,
+    AssetPath, AuthorityDomain, ImmutableMemoryAssetBuildError, OpenedAsset,
 };
 use sha2::{Digest, Sha256};
 use std::io::Cursor;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 type ImmutableMemoryAssetEntry = (AssetPath, Arc<[u8]>);
@@ -62,6 +63,16 @@ impl AssetIo for ImmutableMemoryAssetIo {
         self.domain.clone()
     }
 
+    fn open_work_bound(&self, path: &AssetPath) -> Result<NonZeroU64, AssetOpenWorkError> {
+        // The frozen length bounds the search, including its final equality comparison.
+        let comparisons = self
+            .assets
+            .len()
+            .checked_ilog2()
+            .map_or(0, |depth| depth + 2);
+        crate::memory::memory_open_work_bound(path, comparisons)
+    }
+
     fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {
         let retained_path = path.try_clone().map_err(|_| {
             AssetOpenError::new(AssetOpenStage::Open, AssetOpenErrorKind::CapacityExceeded)
@@ -110,6 +121,47 @@ mod tests {
             AssetPath::new(path).expect("valid asset path"),
             Arc::from(bytes),
         )
+    }
+
+    #[test]
+    fn open_work_bound_covers_empty_and_frozen_namespaces_without_changing_reads() {
+        let path = AssetPath::new("shared/prefix/target.bin").unwrap();
+        let missing = AssetPath::new("shared/prefix/missing.bin").unwrap();
+        let empty = ImmutableMemoryAssetIo::try_from_entries(Vec::new()).unwrap();
+        let io = ImmutableMemoryAssetIo::try_from_entries(vec![
+            asset("shared/prefix/first.bin", b"first"),
+            asset("shared/prefix/target.bin", b"target"),
+            asset("shared/prefix/z.bin", b"last"),
+        ])
+        .unwrap();
+        let mutable = crate::MemoryAssetIo::new();
+
+        for requested in [&path, &missing] {
+            let empty_weight = empty
+                .open_work_bound(requested)
+                .expect("empty lookup is bounded");
+            let weight = io
+                .open_work_bound(requested)
+                .expect("frozen lookup is bounded");
+            assert!(empty_weight.get() >= requested.as_str().len() as u64);
+            assert!(weight > empty_weight);
+            assert!(weight < mutable.open_work_bound(requested).unwrap());
+            assert_eq!(io.clone().open_work_bound(requested), Ok(weight));
+            assert_eq!(
+                empty.open(requested).unwrap_err().kind(),
+                AssetOpenErrorKind::NotFound
+            );
+        }
+
+        let mut opened = io.open(&path).expect("query preserves the payload");
+        let mut bytes = [0_u8; 8];
+        assert_eq!(opened.read_chunk(&mut bytes).unwrap(), 6);
+        assert_eq!(&bytes[..6], b"target");
+        assert_eq!(opened.read_chunk(&mut bytes).unwrap(), 0);
+        assert_eq!(
+            io.open(&missing).unwrap_err().kind(),
+            AssetOpenErrorKind::NotFound
+        );
     }
 
     #[test]

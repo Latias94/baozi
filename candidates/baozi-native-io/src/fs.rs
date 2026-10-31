@@ -1,12 +1,13 @@
 use baozi_io::{
     AssetIo, AssetLength, AssetObjectKind, AssetOpenError, AssetOpenErrorKind, AssetOpenStage,
-    AssetPath, AuthorityDomain, OpenedAsset,
+    AssetOpenWorkError, AssetPath, AuthorityDomain, OpenedAsset,
 };
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 #[cfg(unix)]
 use cap_std::fs::{FileTypeExt, OpenOptionsExt};
 use std::fmt;
+use std::num::NonZeroU64;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -70,6 +71,19 @@ impl FileSystemAssetIo {
 impl AssetIo for FileSystemAssetIo {
     fn authority_domain(&self) -> AuthorityDomain {
         self.capability.domain.clone()
+    }
+
+    fn open_work_bound(&self, path: &AssetPath) -> Result<NonZeroU64, AssetOpenWorkError> {
+        let bytes = u64::try_from(path.as_str().len()).map_err(|_| AssetOpenWorkError::Overflow)?;
+        // AssetPath already excludes empty, rooted, dot and parent components. This pure
+        // calculation never asks the filesystem which components or links currently exist.
+        let components = u64::try_from(path.as_str().bytes().filter(|byte| *byte == b'/').count())
+            .ok()
+            .and_then(|separators| separators.checked_add(1))
+            .ok_or(AssetOpenWorkError::Overflow)?;
+        cap_primitives::fs::open_work_bound(bytes, components)
+            .and_then(NonZeroU64::new)
+            .ok_or(AssetOpenWorkError::Unbounded)
     }
 
     fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {
@@ -348,6 +362,33 @@ mod tests {
             #[cfg(not(windows))]
             Err(error) => panic!("candidate runner must replace the opened file fixture: {error}"),
         }
+    }
+
+    #[test]
+    fn open_work_bound_does_not_observe_namespace_mutations() {
+        let root = TempRoot::new("work-bound");
+        let io = FileSystemAssetIo::from_capability(
+            NativeDirectoryCapability::open_ambient(root.path()).expect("open capability"),
+        );
+        let path = AssetPath::new("nested/asset.bin").expect("valid path");
+        let bound = io
+            .open_work_bound(&path)
+            .expect("native open has an envelope");
+        assert!(bound.get() > path.as_str().len() as u64);
+        assert_eq!(io.clone().open_work_bound(&path), Ok(bound));
+        assert!(io.open(&path).is_err());
+
+        fs::create_dir(root.path().join("nested")).expect("create parent after query");
+        fs::write(root.path().join("nested/asset.bin"), b"payload").expect("create asset");
+        assert_eq!(io.open_work_bound(&path), Ok(bound));
+        assert_eq!(
+            read_all(io.open(&path).expect("quoted path opens")),
+            b"payload"
+        );
+        fs::remove_file(root.path().join("nested/asset.bin")).expect("remove asset");
+        fs::create_dir(root.path().join("nested/asset.bin")).expect("replace with directory");
+        assert_eq!(io.open_work_bound(&path), Ok(bound));
+        assert!(io.open(&path).is_err());
     }
 
     #[test]

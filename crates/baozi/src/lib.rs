@@ -91,8 +91,8 @@ pub use baozi_import::{
 };
 pub use baozi_io::{
     AssetIo, AssetLength, AssetObjectKind, AssetOpenError, AssetOpenErrorKind, AssetOpenStage,
-    AssetPath, AssetReadContractViolation, AssetReadError, AssetReadErrorKind, AssetReader,
-    AuthorityDomain, ImmutableMemoryAssetBuildError, ImmutableMemoryAssetIo,
+    AssetOpenWorkError, AssetPath, AssetReadContractViolation, AssetReadError, AssetReadErrorKind,
+    AssetReader, AuthorityDomain, ImmutableMemoryAssetBuildError, ImmutableMemoryAssetIo,
     MemoryAssetInsertError, MemoryAssetIo, OpenedAsset, PathError, PathErrorCode,
 };
 pub use baozi_operation::{

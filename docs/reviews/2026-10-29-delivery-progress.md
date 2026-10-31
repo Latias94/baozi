@@ -1697,6 +1697,81 @@ Evidence includes `target/review/h-bridge-before.log`, `h-bridge-public-api.log`
 Earlier rejected lint/license/source states are retained
 separately.
 
+## Bounded Asset-Open Admission (2026-10-31)
+
+The native-work gap identified after extraction is now implemented across the public IO contract
+and both import entry points. `AssetIo` requires a positive pure `open_work_bound`, with no
+compatibility default. Memory backends cover path retention and bounded binary-search comparisons;
+the mutable implementation remains valid after concurrent namespace growth. Custom wrappers
+explicitly account for their own work. Import owns the observed-work permit and completes a
+normally returned opaque call's declared weight, including returned errors; panic leaves attempted
+work only. `AssetOpen` retains its separate successful-object meaning. Bound errors, cancellation,
+and global-work denial cannot be softened into optional-input omission or replaced by later graph
+accounting. Cache hits and direct bytes do not enter open planning.
+
+The pinned registry implementation did not itself provide a practical finite manual-link envelope:
+Unix link reads used allocation-growth retries, and Windows called opaque ambient-path helpers.
+The standalone candidate therefore records an explicit local `cap-primitives` 4.0.3 patch, retaining
+the complete upstream package and licenses. Fixed-buffer link reads and target limits precede the
+existing resolver's component expansion. Windows validates native reparse bytes and uses its held
+parent directly; Unix uses a single raw sentinel-buffer read. Existing platform expansion limits,
+four Linux fast attempts, final handle inspection, nonblocking options, and root/parent share modes
+remain. The checked envelope bills wrapper text/component/helper actions and includes complete
+manual fallback; it does not claim exact syscall counts, kernel iteration limits, RSS or wall time.
+
+Runtime schema 5 and repository-delta schema 4 admit only the actual local backend path/version
+with distinct upstream provenance. All other registry identities stay unchanged. Actual offline
+resolution initially selected a different Windows binding version; the patch now explicitly pins
+the reviewed `windows-sys` 0.61.2, leaving only the two necessary binding features as closure changes.
+The candidate lock adds the direct local edge and removes its former registry source/checksum;
+the original archive checksum remains labeled as provenance, never as the patched directory's hash.
+
+The new six-case primary/dependency contract selection passes, followed by the complete
+**445/445 import/IO** suite with no skips and strict all-target/all-feature Clippy. Windows candidate
+runtime **19/19**, repository-enabled **29/29**, and the actual vendored backend's **21/21** unit tests
+all pass without skips. Native decode cases include malformed headers, native-unit limits, unpaired
+surrogates, odd/out-of-range name spans, unsupported tags/flags, and absolute target containment.
+Strict candidate Clippy and **35/35** native metadata tests pass, including actual repository
+baseline comparison and adversarial local-path/provider substitution. These focused results do not
+replace the remaining complete-workspace, fresh-package, or committed Linux qualification.
+Independent read-only security review found no actionable defect in the changed low-level sources
+or wrapper envelope. It inspected relative-parent access/share modes, native reparse bounds and
+conversion, reachable userspace retry helpers, and the complete fast/manual allowance. The review
+does not dynamically count every abstract action or supply an unexecuted platform result.
+Independent read-only correctness review likewise found no actionable defect in the shared import
+admission, primary/dependency cause handling, memory bounds or new contract tests.
+
+The first complete workspace run exposed an old glTF calibration defect: the two runs used
+different path lengths, which no longer have equal billed open work. They now use the same exact
+path and bytes without relaxing the one-unit-short assertion. The related resource-closure test
+was strengthened to include actual snapshot-storage setup in its calibrated pre-hash prefix and
+to require complete primary bytes, one successful open, and the intended completed work prefix.
+It can no longer pass merely because the new open cost causes an earlier failure. All **22/22**
+JSON-admission/resource-closure tests pass after those repairs; rejected runs remain in separate logs.
+The no-fail-fast full run then completed **2,437/2,438** and isolated the same path-prefix issue in
+STL color-expansion cancellation. Its four observations now use one exact source path while
+retaining the original facet-count, scan-chunk and completed-prefix assertions. No production
+budget or parser behavior was weakened to satisfy either calibration.
+The subsequent complete STL limits selection passed **11/11** with no skips, including both
+color-expansion chunk boundaries. Its evidence is `h-open-work-stl-calibration-final.log`;
+the glTF repair is `h-open-work-gltf-calibration-final.log`.
+
+Evidence uses `target/review/h-open-work-focused.log`, `h-open-work-import-io-final.log`,
+`h-open-work-import-io-clippy.log`, `h-open-work-candidate-runtime.log`,
+`h-open-work-candidate-repository.log`, `h-open-work-vendored-backend.log`,
+`h-open-work-candidate-clippy.log`, `h-open-work-xtask.log`, and
+`h-open-work-governance-final.log`. The exact syscall-trace fixture was first qualified against
+the older binary: `ENOSYS`/`EPERM` each showed one `openat2`, persistent `EAGAIN` showed four, and
+all reached successful manual fallback. That fixture qualification is historical until repeated
+against the new committed backend.
+
+The extraction's fresh artifact matrices both passed all twelve cases: Rust 1.95.0 debug in
+`target/package-check-lyhpmks8` and stable release in `target/package-check-yvahp7g_`. They exercise
+the source archived before the new bound API and do not qualify that later interface by implication.
+All four examples, empty/all-feature executable WASI, and empty/all-feature browser-WASM checks
+subsequently passed with the new IO/import seam in the working tree. The initial formatting check
+then observed the still-unformatted new increment; formatting was applied before focused tests.
+
 ## A–H Acceptance Audit (2026-10-31)
 
 Earlier entries describe their own increments and source revisions. This audit replaces the stale
@@ -1717,11 +1792,11 @@ candidate qualification, rather than another Scene representation or a speculati
 
 Native release registration remains empty. Actual Apple ARM64 runtime/permission execution,
 Windows volume-mount behavior, and the outstanding exact backend retry/work evidence still govern
-promotion. The later accounting trace also confirms an implementation gap: both import open paths
-charge one `AssetOpen`, but neither precharges native resolution/retry `WorkUnits`; dependency
-acquisition's one unit is admitted only after open. `AssetIo` currently exposes no pre-open work
-bound/admission seam. This requirement remains open and must be implemented with a justified
-bound, not inferred from passing fallback tests or weakened to an open counter.
+promotion. The accounting trace exposed a genuine implementation gap at `71a81e0`; the subsequent
+bounded-open increment above implements that missing seam and backend limit. Its focused tests
+pass, while complete source-scoped package/Linux/target qualification remains separate. The
+dependency acquisition unit retains its distinct snapshot-acquisition meaning after open and does
+not substitute for pre-open `WorkUnits` admission.
 The local volume-mount fixture attempt returned access denied before creating a mount;
 it is not adapter acceptance. Unknown-tag payload handling is a demonstrated defect with a concrete
 candidate-only repair, fixture, and separate regression gate. Windows repository capture continues

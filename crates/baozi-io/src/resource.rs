@@ -3,6 +3,7 @@ use std::any::Any;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::io::Read;
+use std::num::NonZeroU64;
 use std::panic::RefUnwindSafe;
 use std::sync::Arc;
 
@@ -254,6 +255,17 @@ impl fmt::Debug for OpenedAsset {
     }
 }
 
+/// Failure to declare a finite conservative billing weight for an asset open.
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AssetOpenWorkError {
+    /// Stable backend configuration cannot bound the next open.
+    #[error("asset open work cannot be bounded")]
+    Unbounded,
+    /// The conservative weight cannot be represented by a nonzero `u64`.
+    #[error("asset open work bound overflows u64")]
+    Overflow,
+}
+
 /// Reusable authority for opening logical asset identities.
 ///
 /// `authority_domain` must return the same process-local identity for the
@@ -267,6 +279,24 @@ impl fmt::Debug for OpenedAsset {
 /// isolation; this trait is not a sandbox boundary.
 pub trait AssetIo: Any + Send + Sync + RefUnwindSafe + 'static {
     fn authority_domain(&self) -> AuthorityDomain;
+
+    /// Declares a positive conservative billed work weight for the next [`Self::open`].
+    ///
+    /// The calculation must be pure and bounded, using only `path` and stable backend
+    /// configuration. It must not perform IO, metadata queries, readlink operations,
+    /// authority lookups, or reader preparation. The weight must remain valid for the
+    /// next open of this path even if a mutable namespace changes after this query.
+    ///
+    /// Work units conservatively bill path bytes copied, byte pairs compared,
+    /// comparison/control actions, and native-resolution actions, including bounded
+    /// reader construction. These are declared billing weights, not measured actual
+    /// steps. A normally returned `Ok` or `Err` from `open` completes the full weight;
+    /// an open that unwinds completes zero. The weight promises neither OS wall time
+    /// nor RSS bounds, and is not an exact syscall count.
+    ///
+    /// Backends unable to make this promise must return [`AssetOpenWorkError::Unbounded`];
+    /// arithmetic overflow must return [`AssetOpenWorkError::Overflow`].
+    fn open_work_bound(&self, path: &AssetPath) -> Result<NonZeroU64, AssetOpenWorkError>;
 
     fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError>;
 }

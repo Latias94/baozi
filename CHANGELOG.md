@@ -6,6 +6,9 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Added required bounded asset-open planning to memory, custom, and native IO. Import admits
+  conservative work before primary/dependency opens and preserves returned-error, panic, control,
+  and cache semantics. The standalone native candidate vendors the bounded-link patch explicitly.
 - Moved native filesystem and repository capture development into the excluded, unpublished
   `baozi-native-io-candidate` workspace. Removed facade/portable-IO candidate features, native
   path helpers, status exports, and native-only facade errors. Native callers compose the adapter

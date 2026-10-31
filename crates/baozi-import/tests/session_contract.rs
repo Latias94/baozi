@@ -22,9 +22,9 @@ use baozi_import::{
     import_asset_with_resolver as run_import_asset_with_resolver, import_bytes as run_import_bytes,
 };
 use baozi_io::{
-    AssetIo, AssetLength, AssetOpenError, AssetOpenErrorKind, AssetOpenStage, AssetPath,
-    AssetReadContractViolation, AssetReadError, AssetReadErrorKind, AssetReader, AuthorityDomain,
-    ImmutableMemoryAssetIo, OpenedAsset,
+    AssetIo, AssetLength, AssetOpenError, AssetOpenErrorKind, AssetOpenStage, AssetOpenWorkError,
+    AssetPath, AssetReadContractViolation, AssetReadError, AssetReadErrorKind, AssetReader,
+    AuthorityDomain, ImmutableMemoryAssetIo, OpenedAsset,
 };
 use baozi_operation::{CancellationToken, LedgerCause, ProgressDecision};
 use std::cell::RefCell;
@@ -32,6 +32,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::io::Cursor;
+use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
@@ -283,6 +284,7 @@ struct OpaquePanickingImporter {
 #[derive(Debug, Clone, Copy)]
 enum OpaqueAssetIoPanicBoundary {
     Authority,
+    WorkBound,
     Open,
     Read,
 }
@@ -331,6 +333,16 @@ impl AssetIo for OpaquePanickingAssetIo {
             });
         }
         self.domain.clone()
+    }
+
+    fn open_work_bound(&self, path: &AssetPath) -> Result<NonZeroU64, AssetOpenWorkError> {
+        if matches!(self.boundary, OpaqueAssetIoPanicBoundary::WorkBound) {
+            std::panic::panic_any(PanickingDropPayload {
+                drops: Arc::clone(&self.payload_drops),
+            });
+        }
+        // One identity comparison/clone and fixed reader construction on a returning open.
+        Ok(NonZeroU64::new(2 * path.as_str().len() as u64 + 16).expect("bounded fixture work"))
     }
 
     fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {
@@ -1174,7 +1186,7 @@ impl FormatImporter for LifecycleFailureImporter {
 
 struct SequencedIo {
     domain: AuthorityDomain,
-    assets: Mutex<BTreeMap<AssetPath, Vec<Arc<[u8]>>>>,
+    assets: BTreeMap<AssetPath, Vec<Arc<[u8]>>>,
     opens: AtomicUsize,
 }
 
@@ -1182,7 +1194,7 @@ impl SequencedIo {
     fn new(path: AssetPath, versions: impl IntoIterator<Item = Arc<[u8]>>) -> Self {
         Self {
             domain: AuthorityDomain::new(),
-            assets: Mutex::new(BTreeMap::from([(path, versions.into_iter().collect())])),
+            assets: BTreeMap::from([(path, versions.into_iter().collect())]),
             opens: AtomicUsize::new(0),
         }
     }
@@ -1191,11 +1203,12 @@ impl SequencedIo {
         self.opens.load(Ordering::Acquire)
     }
 
-    fn with_asset(self, path: AssetPath, versions: impl IntoIterator<Item = Arc<[u8]>>) -> Self {
-        self.assets
-            .lock()
-            .expect("asset mutex")
-            .insert(path, versions.into_iter().collect());
+    fn with_asset(
+        mut self,
+        path: AssetPath,
+        versions: impl IntoIterator<Item = Arc<[u8]>>,
+    ) -> Self {
+        self.assets.insert(path, versions.into_iter().collect());
         self
     }
 }
@@ -1205,10 +1218,14 @@ impl AssetIo for SequencedIo {
         self.domain.clone()
     }
 
+    fn open_work_bound(&self, path: &AssetPath) -> Result<NonZeroU64, AssetOpenWorkError> {
+        // Keys and version tables are frozen before shared use; selecting a version is constant work.
+        fixture_table_open_work_bound(path, self.assets.len())
+    }
+
     fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {
         let index = self.opens.fetch_add(1, Ordering::AcqRel);
-        let assets = self.assets.lock().expect("asset mutex");
-        let versions = assets.get(path).ok_or_else(|| {
+        let versions = self.assets.get(path).ok_or_else(|| {
             AssetOpenError::new(AssetOpenStage::Open, AssetOpenErrorKind::NotFound)
         })?;
         let bytes = versions
@@ -1260,6 +1277,11 @@ impl PartialDependencyReadIo {
 impl AssetIo for PartialDependencyReadIo {
     fn authority_domain(&self) -> AuthorityDomain {
         self.domain.clone()
+    }
+
+    fn open_work_bound(&self, path: &AssetPath) -> Result<NonZeroU64, AssetOpenWorkError> {
+        // Two path comparisons, one clone, and fixed counters/reader setup for either version.
+        Ok(NonZeroU64::new(3 * path.as_str().len() as u64 + 16).expect("bounded fixture work"))
     }
 
     fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {
@@ -1321,6 +1343,11 @@ impl AssetIo for ContractViolatingDependencyIo {
         self.domain.clone()
     }
 
+    fn open_work_bound(&self, path: &AssetPath) -> Result<NonZeroU64, AssetOpenWorkError> {
+        // Two path comparisons, one clone, and fixed counter/reader setup, even for the bad reader.
+        Ok(NonZeroU64::new(3 * path.as_str().len() as u64 + 16).expect("bounded fixture work"))
+    }
+
     fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {
         self.opens.fetch_add(1, Ordering::AcqRel);
         if path == &self.primary {
@@ -1370,6 +1397,11 @@ impl AssetIo for SingleAuthorityQueryIo {
         self.domain.clone()
     }
 
+    fn open_work_bound(&self, path: &AssetPath) -> Result<NonZeroU64, AssetOpenWorkError> {
+        // The frozen key count bounds lookup without querying authority or preparing a reader.
+        fixture_table_open_work_bound(path, self.assets.len())
+    }
+
     fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {
         self.opens.fetch_add(1, Ordering::AcqRel);
         let bytes = self.assets.get(path).cloned().ok_or_else(|| {
@@ -1382,6 +1414,23 @@ impl AssetIo for SingleAuthorityQueryIo {
             Some(AssetLength::Exact(bytes.len() as u64)),
         ))
     }
+}
+
+fn fixture_table_open_work_bound(
+    path: &AssetPath,
+    entries: usize,
+) -> Result<NonZeroU64, AssetOpenWorkError> {
+    // Conservatively visit every frozen key once, then clone the requested path. Eight
+    // fixed units cover the counter, version selection, Arc clones, and reader construction.
+    let comparisons_and_clone = u64::try_from(entries)
+        .ok()
+        .and_then(|count| count.checked_add(1))
+        .ok_or(AssetOpenWorkError::Overflow)?;
+    (path.as_str().len() as u64 + 1)
+        .checked_mul(comparisons_and_clone)
+        .and_then(|weight| weight.checked_add(8))
+        .and_then(NonZeroU64::new)
+        .ok_or(AssetOpenWorkError::Overflow)
 }
 
 struct RecordingReader {
@@ -1436,6 +1485,11 @@ impl VariableLengthIo {
 impl AssetIo for VariableLengthIo {
     fn authority_domain(&self) -> AuthorityDomain {
         self.domain.clone()
+    }
+
+    fn open_work_bound(&self, path: &AssetPath) -> Result<NonZeroU64, AssetOpenWorkError> {
+        // One path comparison/clone and fixed shared-reader setup, independent of payload length.
+        Ok(NonZeroU64::new(2 * path.as_str().len() as u64 + 16).expect("bounded fixture work"))
     }
 
     fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {
@@ -3966,6 +4020,10 @@ fn asset_io_panics_do_not_run_untrusted_payload_destructors() {
         (
             OpaqueAssetIoPanicBoundary::Authority,
             "primary-authority-panicked",
+        ),
+        (
+            OpaqueAssetIoPanicBoundary::WorkBound,
+            "primary-open-work-panicked",
         ),
         (OpaqueAssetIoPanicBoundary::Open, "primary-open-panicked"),
         (OpaqueAssetIoPanicBoundary::Read, "asset-read-panicked"),

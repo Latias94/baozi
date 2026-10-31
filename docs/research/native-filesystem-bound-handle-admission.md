@@ -1,5 +1,10 @@
 # Native Filesystem Bound-Handle Admission
 
+**Current source boundary:** the standalone candidate uses the explicit local bounded-link patch
+described in [Bounded Open Work Cutover](#bounded-open-work-cutover-2026-10-31). Runtime schema 5
+and repository-delta schema 4 distinguish that modified source from its upstream archive provenance.
+Release registration remains empty. Earlier dated sections retain their original dependency states.
+
 **Historical decision date:** 2026-07-10
 
 **Historical decision:** Admit `cap-std` 4.0.2 as the capability backend for the
@@ -15,7 +20,7 @@ Do not retain or fall back to `canonicalize + starts_with + File::open`.
 
 ## Standalone Candidate Cutover (2026-10-31)
 
-The implementation and all native/repository fixtures now live in the unpublished standalone
+At `71a81e0`, the implementation and all native/repository fixtures moved to the unpublished standalone
 [`baozi-native-io-candidate`](../../candidates/baozi-native-io/Cargo.toml) workspace. It depends on
 portable `baozi-io` through the public `AssetIo` seam; no production root-workspace package
 depends on the candidate. The facade's native feature/path helpers and the old IO candidate
@@ -43,7 +48,7 @@ Historical sections below retain their original source layout and feature names 
 
 ## Pin Status Before Extraction (2026-10-30)
 
-The root `Cargo.lock` now resolves `cap-std`, `cap-primitives`, and `cap-fs-ext` to 4.0.3.
+Before extraction, the root `Cargo.lock` resolved `cap-std`, `cap-primitives`, and `cap-fs-ext` to 4.0.3.
 `crates/baozi-xtask/src/native_fs/contract.rs` and its behavioral fixtures pin these exact versions
 and checksums from that lockfile:
 
@@ -402,16 +407,49 @@ deadline, or every platform's work bound. Build selection and all four logs are 
 `target/review/a2-native-fallback-*.log` and `a2-native-fallback-build.jsonl`. It is local
 qualification evidence, not a newly maintained resolver or hosted CI result.
 
-## Residual Risks
+## Bounded Open Work Cutover (2026-10-31)
 
-The current importer charges `AssetOpen` attempted/consumed counts around primary and fresh
-dependency opens; it does not precharge native path components, link traversal, or retry work in
-`WorkUnits`. Dependency acquisition's one work unit is admitted after open. The portable
-`AssetIo::open` interface has no cost/admission seam, and the standalone native adapter delegates
-directly to the capability backend. Thus the pre-open native bound remains an implementation
-requirement, not an established guarantee. The forced errno/fallback runs above prove behavior
-only. Preserve the normative requirement and implement a justified pre-open bound at both import
-entry paths before qualification; merely relabeling one open count as all backend work is not a fix.
+The extraction at `71a81e0` exposed a real implementation gap: primary and fresh dependency
+opens charged `AssetOpen`, but no path/link/retry `WorkUnits`. The dependency acquisition unit
+was admitted after open and did not supply that guarantee. Inspection of the pinned backend
+also found a link-read allocation-growth loop without an explicit target/retry limit; the initial
+4096-byte logical request did not bound expanded link targets.
+
+`AssetIo` now requires a pure `open_work_bound` with a positive conservative billing weight.
+The query performs no IO or authority lookup, and its bound must survive mutable-namespace
+changes before the next open. Import admits the weight using the existing observed-work owner
+before either backend entry. Returned success and returned errors complete the weight; panic
+leaves attempted work only. Bound failure is a terminal extension failure. Global work rejection
+cannot become an optional-input omission, and subsequent graph accounting preserves the original
+control, ledger or extension cause. Cache hits reuse their snapshot/failure without another
+bound query or physical open. Direct bytes do not enter open planning.
+
+The candidate uses the explicit local
+[`cap-primitives` patch](../../candidates/baozi-native-io/vendor/cap-primitives/PATCHES.md).
+The complete upstream 4.0.3 source and license files are retained. Its original registry checksum
+is provenance for the upstream archive; metadata records the actual unique local path/version
+and patch record instead of claiming that checksum describes the modified directory. Other
+registry versions and checksums remain pinned. The Windows bindings add only the two features
+needed for the bounded reparse query and tag constants.
+
+The existing manual resolver remains responsible for containment and parent handling. Targets
+are limited to 4096 native units before component expansion: bytes on Unix and UTF-16 units on
+Windows. Unix performs one raw read into a 4097-byte sentinel buffer. Windows performs a
+same-parent relative reparse open and one fixed-buffer query, validating lengths, tags, flags,
+alignment and ranges with byte slices before decoding. No ambient pathname reopen or new
+resolver is introduced. Existing 40/63 expansion caps and the four Linux fast-path attempts are
+shared constants used by the checked work envelope. The envelope includes all fast attempts and
+complete manual fallback, target scanning/copying, component actions, fixed buffers, helper
+actions, and final same-handle inspection.
+
+These are conservative billed units. A native API call is one action; kernel iterations,
+allocator internals, syscall duration, RSS and wall time are outside this guarantee. The target
+length policy governs manual targets returned to userspace, not OS-internal fast-path link
+resolution. The earlier fallback evidence remains scoped to its original binary. Current-source
+tests, actual syscall traces and remaining platform limits must qualify the new cutover
+independently before promotion.
+
+## Residual Risks
 
 | Risk | Impact | Treatment |
 | --- | --- | --- |

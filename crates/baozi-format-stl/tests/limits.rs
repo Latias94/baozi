@@ -556,6 +556,7 @@ fn binary_facet_cancellation_is_bounded_to_one_record() {
 #[test]
 fn binary_color_expansion_cancellation_is_bounded_by_scan_chunks() {
     const FACET_COUNT: usize = 2 * SCAN_CHUNK_BYTES + 1;
+    const SOURCE: &str = "color-expansion.stl";
 
     let mut colored = BinaryFacet::unit_triangle();
     colored.attribute = 0x8000;
@@ -564,7 +565,7 @@ fn binary_color_expansion_cancellation_is_bounded_by_scan_chunks() {
 
     let (calibration_control, calibration_polls) = controlled_import(None);
     let _report = import_bytes_forced_with_limits_and_control(
-        "color-calibration.stl",
+        SOURCE,
         &bytes,
         ResourceLimits::default(),
         calibration_control,
@@ -576,7 +577,7 @@ fn binary_color_expansion_cancellation_is_bounded_by_scan_chunks() {
     // Completing every facet record precedes color expansion. Measure the acquisition/hash
     // prefix here instead of treating the operation's WorkUnits counter as color-only work.
     let (decoded_poll, decoded) = first_cancelled_prefix_at_least(
-        "color-before-expansion.stl",
+        SOURCE,
         &bytes,
         total_polls,
         ImportDimension::Records,
@@ -598,7 +599,7 @@ fn binary_color_expansion_cancellation_is_bounded_by_scan_chunks() {
     );
 
     let (expansion_poll, failure) = first_cancelled_prefix_at_least(
-        "color-cancel.stl",
+        SOURCE,
         &bytes,
         total_polls,
         ImportDimension::AttributeCells,
@@ -624,7 +625,7 @@ fn binary_color_expansion_cancellation_is_bounded_by_scan_chunks() {
     assert_eq!(attempted(&failure, ImportDimension::Meshes), 0);
     assert_eq!(failure.ledger().current_live_bytes(), 0);
 
-    let next = cancelled_failure("color-next-chunk-cancel.stl", &bytes, expansion_poll + 1);
+    let next = cancelled_failure(SOURCE, &bytes, expansion_poll + 1);
     assert_eq!(
         attempted(&next, ImportDimension::WorkUnits) - work_before_expansion,
         FACET_COUNT as u64

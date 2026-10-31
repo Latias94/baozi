@@ -114,6 +114,17 @@ are evidence of failure, never reusable credit. Each read call separately admits
 normal return, including EOF or a returned read error, completes that action, while panic leaves
 only the earlier completed call prefix. Cooperative cancellation is checked before the next call.
 
+Opaque asset open is a separately weighted action. `AssetIo::open_work_bound` declares a positive
+conservative billing weight for the exact backend/path without IO or authority lookup. The owner
+admits that weight before calling open and completes it on a normal `Ok` or `Err` return; unwind
+completes none of it. Consumed `WorkUnits` here records the completed declared weight, not measured
+backend iterations or syscalls. Native weights must cover the bounded path/link/retry implementation;
+they do not certify RSS or wall time. The distinct `AssetOpen` counter completes only after a
+returned object passes authority/path checks, so a returned open error consumes billed work but no
+successful open. Cache hits and direct primary bytes perform no new open action. Bound errors and
+global work rejection are terminal and cannot become optional-input omission. Snapshot byte counts
+continue to consume only actually observed/copied bytes.
+
 Once payload credit reaches a resource/backend or aggregate byte limit, one nonempty one-byte probe
 may validate EOF. A zero result succeeds; a positive result causes a typed limit failure and is never
 stored as payload. The probe is validation/read work rather than payload storage, and cannot enlarge

@@ -333,10 +333,15 @@ standalone `baozi-native-io-candidate` workspace, with an exact direct `rustix` 
 `cap_std::fs::OpenOptionsExt`; it does not use a numeric flag, a documentation-hidden dependency
 API, or an additional filesystem extension crate. The detailed blocking review is recorded in
 [`native-filesystem-bound-handle-admission.md`](../research/native-filesystem-bound-handle-admission.md).
-It satisfies Baozi's license and MSRV gates and keeps platform `unsafe` outside Baozi-owned crates.
-The adapter's conformance gate must machine-lock the reviewed `cap-std`, `cap-primitives`, and
-`rustix` releases, checksums, features, and complete target-specific resolved dependency closure
-before the adapter can claim conformance. A path-resolution, open-flag, special-file, unsafe-scope,
+The native candidate also directly calls the public work-envelope helper in its explicit local
+`cap-primitives` 4.0.3 patch. That dependency retains the upstream source and licenses, adds bounded
+link reads, and isolates the Windows synchronous reparse-query FFI and checked byte parsing in
+the existing low-level crate. Baozi's own adapter and portable crates continue to forbid unsafe
+code. The patch is part of the security review surface; its original archive checksum is upstream
+provenance, not the modified source identity.
+The adapter's conformance gate must machine-lock the reviewed registry releases/checksums,
+unique local backend path/version/provenance, features, and complete target-specific resolved
+dependency closure before the adapter can claim conformance. A path-resolution, open-flag, special-file, unsafe-scope,
 or target-relevant closure change reopens dependency admission.
 
 Dependency admission is necessary but does not register a platform. ADR 0034 may register a release
@@ -370,8 +375,8 @@ handle returned by the capability-relative native open; it never reopens a valid
 
 The candidate native adapter's root-taking constructor accepts only Baozi's opaque
 `NativeDirectoryCapability`. The only path-taking root convenience constructs that capability,
-validates the root, and returns it before hostile references are processed; facade path helpers may
-delegate to that operation. In particular, Baozi does not wrap an arbitrary `std::fs::File`, raw file
+validates the root, and returns it before hostile references are processed. Native applications
+compose this adapter through the ordinary public `read_asset` seam. Baozi does not wrap an arbitrary `std::fs::File`, raw file
 descriptor, raw Windows handle, or public `cap-std` type.
 This restriction is required because `cap-std` documents that a Windows directory supplied through
 `Dir::from_std_file` must have been opened without `FILE_SHARE_DELETE`, a property Baozi cannot infer
@@ -405,8 +410,10 @@ candidate.
 
 The repository candidate uses exact `cap-std` 4.0.3 plus exact `cap-fs-ext` 4.0.3 with its explicit
 `std` feature. It uses only the extension crate's public no-follow, directory, metadata, and
-nonblocking interfaces. Direct `cap-primitives`, documentation-hidden hooks, and Baozi-owned
-platform `unsafe` are forbidden. `cap-fs-ext` controls only the final path component, so Baozi walks
+nonblocking interfaces. Repository capture does not call low-level `cap-primitives` APIs or
+documentation-hidden hooks; the runtime's public bound helper is its only direct use. The adapter
+retains `forbid(unsafe_code)`, with the reviewed link-read FFI isolated in the recorded vendored
+dependency patch. `cap-fs-ext` controls only the final path component, so Baozi walks
 one validated normal component at a time, retains each opened directory capability, and applies
 no-follow to every step. The default runtime candidate dependency closure remains independently frozen
 and must not acquire `cap-fs-ext` transitively.
@@ -616,7 +623,7 @@ contract. Reconsider only after a measured blocker and a separate unsafe/depende
 | Platform path safety | escape, symlink, junction, reparse, namespace, and device cases fail | per-target adversarial suites |
 | Special-file availability | directory, FIFO, socket, and device inputs fail by deadline without a blocking pathname preflight | same-handle type and deadline tests |
 | Root capability integrity | only Baozi-constructed, directory-validated roots enter the adapter; Windows roots exclude `FILE_SHARE_DELETE` | API-shape, root-type, and replacement tests |
-| Dependency identity | the resolved `cap-std`, `cap-primitives`, and direct `rustix` security-sensitive closure matches the admitted versions, checksums, features, and sources | target-filtered lockfile admission checker |
+| Dependency identity | the native closure matches admitted registry versions/checksums/features and the unique local patched backend identity with separate upstream provenance | target-filtered lockfile admission checker |
 | Repository mechanism ownership | only the standalone candidate directly depends on native filesystem backends; xtask reaches neither IO nor native backends; root packages cannot depend on the candidate or request/forward retired native features | manifest and resolved metadata negative fixtures |
 | Repository closure completeness | additions, deletions, same-content replacements, raw-byte changes, hard-link aliases, overlapping roots, and every symlink/reparse component fail the before/after closure gate | Linux/macOS platform-local no-skip capture and recapture matrix; Windows typed pre-traversal fail-closed test |
 | Repository resource bounds | exact limit succeeds and one-over root/file/directory/depth/path/single-file/total-byte/work cases fail before excess retention or read | boundary, allocation-failure, and hostile-size fixtures |
@@ -712,6 +719,15 @@ contract. Reconsider only after a measured blocker and a separate unsafe/depende
 - On Windows, validate regular-file type on the handle returned by the relative native open and
   reject directories, devices, pipes, and unresolved reparse objects without reopening by name.
 - Charge path-component work and the admitted backend's conservative retry allowance before opening.
+- Require a pure positive `AssetIo::open_work_bound` for the exact backend/path, and admit that
+  conservative billing weight through the existing `WorkUnits` permit before primary and fresh
+  dependency opens. Normal `Ok`/`Err` returns complete the weight; unwind does not. Bound errors
+  are terminal extension failures. Cache hits and direct-byte primaries do not query or open again.
+- Bound manual link target reads before expansion. The standalone candidate's explicit local
+  `cap-primitives` 4.0.3 patch uses fixed buffers, at most 40/63 expansions, and 4096 Unix-byte or
+  Windows-UTF-16-unit targets. Include all four Linux fast attempts plus manual fallback. Record
+  patched source identity separately from upstream archive provenance; no RSS, syscall-latency,
+  kernel-iteration or exact-syscall-count claim follows from the billing envelope.
 - Add deterministic path, non-regular-file deadline, and concurrent replacement tests from the
   admission record.
 - Keep `cap-std` and direct `rustix` inside the unpublished standalone candidate workspace;

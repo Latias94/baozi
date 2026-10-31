@@ -9,6 +9,17 @@ pub(super) const CANDIDATE_LOCK_PATH: &str = "candidates/baozi-native-io/Cargo.l
 pub(super) const CANDIDATE_PACKAGE: &str = "baozi-native-io-candidate";
 pub(super) const XTASK_PACKAGE: &str = "baozi-xtask";
 pub(super) const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
+pub(super) const RUNTIME_BASELINE_SCHEMA: u64 = 5;
+pub(super) const REPOSITORY_BASELINE_SCHEMA: u64 = 4;
+pub(super) const CAP_PRIMITIVES_PATH: &str = "candidates/baozi-native-io/vendor/cap-primitives";
+pub(super) const CAP_PRIMITIVES_SOURCE: &str =
+    "path+candidates/baozi-native-io/vendor/cap-primitives";
+pub(super) const CAP_PRIMITIVES_VERSION: &str = "4.0.3";
+// Upstream archive provenance only; this is not a checksum of the patched local source.
+pub(super) const CAP_PRIMITIVES_UPSTREAM_CHECKSUM: &str =
+    "8b5f74729fd2f44701d1a8eb47e906cdb3ccd9ec0f02baad85a744b791940b18";
+pub(super) const CAP_PRIMITIVES_PATCHES_PATH: &str =
+    "candidates/baozi-native-io/vendor/cap-primitives/PATCHES.md";
 pub(super) const CAP_STD_TARGET: &str = concat!(
     "cfg(any(",
     "all(target_arch = \"x86_64\", target_vendor = \"unknown\", target_os = \"linux\", target_env = \"gnu\", target_abi = \"\"), ",
@@ -95,11 +106,6 @@ pub(super) const CRITICAL_PACKAGES: &[CriticalPackage] = &[
         name: "cap-std",
         version: "4.0.3",
         checksum: "c1ec78e242cfa2cfe276807ac2ecc00315a6c97786977414bcd1c3963b6c91b8",
-    },
-    CriticalPackage {
-        name: "cap-primitives",
-        version: "4.0.3",
-        checksum: "8b5f74729fd2f44701d1a8eb47e906cdb3ccd9ec0f02baad85a744b791940b18",
     },
     CriticalPackage {
         name: "rustix",

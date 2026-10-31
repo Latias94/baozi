@@ -1,15 +1,15 @@
 mod support;
 
 use baozi::{
-    AssetIo, AssetLength, AssetOpenError, AssetOpenErrorKind, AssetOpenStage, AssetPath,
-    AssetReadError, AssetReader, AuthorityDomain, AuthorizedDependency, DependencyIdentity,
-    DependencyPolicyError, DependencyReference, DependencyResolver, DependencyRoleId,
-    DependencyRoleIdError, FormatId, FormatOptionEnvelope, FormatOptionEnvelopeError,
-    FormatOptionSchemaId, FormatOptionSchemaIdError, FormatOptionSchemaKey, ImportRequest,
-    ImportRequestLayer, Importer, OpenedAsset, OptionCompileLimits, OptionScopeLimits,
-    RegistryBuildLimits,
+    AssetIo, AssetLength, AssetOpenError, AssetOpenErrorKind, AssetOpenStage, AssetOpenWorkError,
+    AssetPath, AssetReadError, AssetReader, AuthorityDomain, AuthorizedDependency,
+    DependencyIdentity, DependencyPolicyError, DependencyReference, DependencyResolver,
+    DependencyRoleId, DependencyRoleIdError, FormatId, FormatOptionEnvelope,
+    FormatOptionEnvelopeError, FormatOptionSchemaId, FormatOptionSchemaIdError,
+    FormatOptionSchemaKey, ImportRequest, ImportRequestLayer, Importer, OpenedAsset,
+    OptionCompileLimits, OptionScopeLimits, RegistryBuildLimits,
 };
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -55,6 +55,11 @@ impl CustomAssetIo {
 impl AssetIo for CustomAssetIo {
     fn authority_domain(&self) -> AuthorityDomain {
         self.domain.clone()
+    }
+
+    fn open_work_bound(&self, path: &AssetPath) -> Result<NonZeroU64, AssetOpenWorkError> {
+        // Three literal comparisons, one path clone, and fixed counter/reader setup.
+        Ok(NonZeroU64::new(4 * path.as_str().len() as u64 + 16).expect("bounded fixture work"))
     }
 
     fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {
@@ -186,6 +191,12 @@ fn registry_and_request_limits_can_be_constructed_from_facade_types() {
 fn custom_reader_and_asset_io_use_only_facade_types() {
     let io = CustomAssetIo::new();
     let path = AssetPath::new("triangle.obj").expect("valid source path");
+    let weight: NonZeroU64 = io
+        .open_work_bound(&path)
+        .expect("facade exposes work bounds");
+    assert!(weight.get() >= path.as_str().len() as u64);
+    assert_eq!(io.opens.load(Ordering::Relaxed), 0);
+    assert_eq!(io.bytes_read.load(Ordering::Relaxed), 0);
     let mut opened = io.open(&path).expect("custom IO opens the triangle");
     assert!(opened.matches_identity(&io.authority_domain(), &path));
     assert_eq!(

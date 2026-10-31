@@ -10,10 +10,12 @@ use baozi_import::{
     SceneDraft, ScopeAbortCause, import_asset, import_asset_with_resolver,
 };
 use baozi_io::{
-    AssetIo, AssetOpenError, AssetOpenErrorKind, AssetPath, AuthorityDomain,
+    AssetIo, AssetOpenError, AssetOpenErrorKind, AssetOpenWorkError, AssetPath, AuthorityDomain,
     ImmutableMemoryAssetIo, OpenedAsset, PathError,
 };
+use std::collections::LinkedList;
 use std::error::Error;
+use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
 
 const SOURCE: &str = "models/asset.context";
@@ -81,7 +83,7 @@ impl FormatImporter for NestedRequiredImporter {
 
 struct LoggedIo {
     inner: ImmutableMemoryAssetIo,
-    opens: Mutex<Vec<AssetPath>>,
+    opens: Mutex<LinkedList<AssetPath>>,
 }
 
 impl LoggedIo {
@@ -96,12 +98,12 @@ impl LoggedIo {
         };
         Self {
             inner: ImmutableMemoryAssetIo::try_from_entries(assets).unwrap(),
-            opens: Mutex::new(Vec::new()),
+            opens: Mutex::new(LinkedList::new()),
         }
     }
 
     fn opened_paths(&self) -> Vec<AssetPath> {
-        self.opens.lock().unwrap().clone()
+        self.opens.lock().unwrap().iter().cloned().collect()
     }
 }
 
@@ -110,8 +112,17 @@ impl AssetIo for LoggedIo {
         self.inner.authority_domain()
     }
 
+    fn open_work_bound(&self, path: &AssetPath) -> Result<NonZeroU64, AssetOpenWorkError> {
+        // A linked log keeps append work independent of earlier opens. Bill its path clone
+        // and fixed lock/node setup without inspecting or changing the log here.
+        self.inner
+            .open_work_bound(path)?
+            .checked_add(path.as_str().len() as u64 + 8)
+            .ok_or(AssetOpenWorkError::Overflow)
+    }
+
     fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {
-        self.opens.lock().unwrap().push(path.clone());
+        self.opens.lock().unwrap().push_back(path.clone());
         self.inner.open(path)
     }
 }

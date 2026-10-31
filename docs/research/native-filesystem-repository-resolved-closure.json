@@ -199,6 +199,6 @@
     "authority": "docs/research/u4c-repository-input-capability.md"
   },
   "runtime_baseline": "docs/research/native-filesystem-resolved-closure.json",
-  "runtime_baseline_schema": 4,
-  "schema": 3
+  "runtime_baseline_schema": 5,
+  "schema": 4
 }

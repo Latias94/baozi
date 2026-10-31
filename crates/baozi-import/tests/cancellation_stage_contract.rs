@@ -12,14 +12,15 @@ use baozi_import::{
     import_bytes as run_import_bytes,
 };
 use baozi_io::{
-    AssetIo, AssetLength, AssetOpenError, AssetPath, AssetReadError, AssetReader, AuthorityDomain,
-    OpenedAsset,
+    AssetIo, AssetLength, AssetOpenError, AssetOpenWorkError, AssetPath, AssetReadError,
+    AssetReader, AuthorityDomain, OpenedAsset,
 };
 use baozi_operation::{
     CancellationOrigin, CancellationSignal, CancellationToken, ControlCause, ProgressDecision,
 };
 use std::cell::RefCell;
 use std::io::Cursor;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -443,6 +444,11 @@ struct CancelDuringReadIo {
 impl AssetIo for CancelDuringReadIo {
     fn authority_domain(&self) -> AuthorityDomain {
         self.domain.clone()
+    }
+
+    fn open_work_bound(&self, path: &AssetPath) -> Result<NonZeroU64, AssetOpenWorkError> {
+        // At most two path comparisons, one path clone, and fixed counter/reader setup.
+        Ok(NonZeroU64::new(3 * path.as_str().len() as u64 + 16).expect("bounded fixture work"))
     }
 
     fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {

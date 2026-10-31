@@ -16,7 +16,8 @@ pub use contract::{NativeFsMetadataProfiles, NativeFsReport};
 ///
 /// Compiler target checks and native behavior tests cover adapter availability and behavior;
 /// this check does not inspect Rust sources or promote candidate targets to release support.
-/// Every Cargo query is locked. Native checksums come only from the candidate's own lockfile.
+/// Every Cargo query is locked. Registry checksums come from the candidate's own lockfile;
+/// the reviewed local backend records its upstream archive checksum only as provenance.
 pub fn check_repository(repository_root: &Path) -> NativeFsReport {
     let result = (|| {
         let baseline = read_json(&repository_root.join(BASELINE_PATH), "native-fs baseline")?;
@@ -457,7 +458,14 @@ fn check_candidate_manifest(root: &Value, metadata: &Value, violations: &mut Vec
         .filter_map(|dependency| string_field(dependency, "name"))
         .collect::<Vec<_>>();
     let actual_set = actual.iter().copied().collect::<BTreeSet<_>>();
-    let expected = BTreeSet::from(["baozi-io", "thiserror", "cap-std", "rustix", "cap-fs-ext"]);
+    let expected = BTreeSet::from([
+        "baozi-io",
+        "thiserror",
+        "cap-std",
+        "cap-primitives",
+        "rustix",
+        "cap-fs-ext",
+    ]);
     if actual_set != expected || actual.len() != expected.len() {
         violations.push(format!("native-fs manifest: {CANDIDATE_PACKAGE} production dependencies must be exactly {expected:?} without duplicates, found {actual:?}"));
     }
@@ -465,6 +473,7 @@ fn check_candidate_manifest(root: &Value, metadata: &Value, violations: &mut Vec
         ManifestDependency {
             name: "cap-std",
             requirement: "=4.0.3",
+            path: None,
             target: CAP_STD_TARGET,
             optional: false,
             features: &[],
@@ -472,6 +481,7 @@ fn check_candidate_manifest(root: &Value, metadata: &Value, violations: &mut Vec
         ManifestDependency {
             name: "rustix",
             requirement: "=1.1.4",
+            path: None,
             target: RUSTIX_TARGET,
             optional: false,
             features: &["fs", "std"],
@@ -479,6 +489,7 @@ fn check_candidate_manifest(root: &Value, metadata: &Value, violations: &mut Vec
         ManifestDependency {
             name: "cap-fs-ext",
             requirement: "=4.0.3",
+            path: None,
             target: CAP_STD_TARGET,
             optional: true,
             features: &["std"],
@@ -644,6 +655,7 @@ fn check_workspace_package(
 struct ManifestDependency<'a> {
     name: &'a str,
     requirement: &'a str,
+    path: Option<&'a Path>,
     target: &'a str,
     features: &'a [&'a str],
     optional: bool,
@@ -680,7 +692,19 @@ fn check_manifest_dependency(
         .collect();
     expected_features.sort_unstable();
 
-    let exact = string_field(dependency, "source") == Some(CRATES_IO_SOURCE)
+    let (source_matches, location) = match expected.path {
+        Some(path) => (
+            dependency.get("source") == Some(&Value::Null)
+                && string_field(dependency, "path").is_some_and(|actual| Path::new(actual) == path),
+            format!("path={}", path.display()),
+        ),
+        None => (
+            string_field(dependency, "source") == Some(CRATES_IO_SOURCE)
+                && dependency.get("path").is_none_or(Value::is_null),
+            format!("source={CRATES_IO_SOURCE}"),
+        ),
+    };
+    let exact = source_matches
         && string_field(dependency, "req") == Some(expected.requirement)
         && dependency.get("kind") == Some(&Value::Null)
         && dependency.get("rename") == Some(&Value::Null)
@@ -693,7 +717,7 @@ fn check_manifest_dependency(
         && actual_features.as_ref() == Some(&expected_features);
     if !exact {
         violations.push(format!(
-            "native-fs manifest: direct {} edge drifted from source={CRATES_IO_SOURCE}, req={}, optional={}, default-features=false, features={expected_features:?}, target={}",
+            "native-fs manifest: direct {} edge drifted from {location}, req={}, optional={}, default-features=false, features={expected_features:?}, target={}",
             expected.name, expected.requirement, expected.optional, expected.target
         ));
     }
@@ -755,7 +779,7 @@ fn build_snapshot(
 
     let identities = identities.into_iter().collect::<Map<_, _>>();
     Some(Value::Object(Map::from_iter([
-        ("schema".to_owned(), Value::from(4)),
+        ("schema".to_owned(), Value::from(RUNTIME_BASELINE_SCHEMA)),
         ("review_basis".to_owned(), review_basis()),
         (
             "metadata_semantics".to_owned(),
@@ -802,6 +826,12 @@ fn build_repository_delta_snapshot(
     checksums: &BTreeMap<ChecksumKey, String>,
     violations: &mut Vec<String>,
 ) -> Option<Value> {
+    if runtime_baseline.get("schema").and_then(Value::as_u64) != Some(RUNTIME_BASELINE_SCHEMA) {
+        violations.push(format!(
+            "native-fs repository baseline: runtime baseline schema must be {RUNTIME_BASELINE_SCHEMA}"
+        ));
+        return None;
+    }
     let Some(runtime_identities) = runtime_baseline
         .get("package_identities")
         .and_then(Value::as_object)
@@ -945,19 +975,14 @@ fn build_repository_delta_snapshot(
     }
 
     Some(Value::Object(Map::from_iter([
-        ("schema".to_owned(), Value::from(3)),
+        ("schema".to_owned(), Value::from(REPOSITORY_BASELINE_SCHEMA)),
         (
             "runtime_baseline".to_owned(),
             Value::String(BASELINE_PATH.to_owned()),
         ),
         (
             "runtime_baseline_schema".to_owned(),
-            Value::from(
-                runtime_baseline
-                    .get("schema")
-                    .and_then(Value::as_u64)
-                    .unwrap_or_default(),
-            ),
+            Value::from(RUNTIME_BASELINE_SCHEMA),
         ),
         (
             "review_basis".to_owned(),
@@ -1074,8 +1099,16 @@ fn review_basis() -> Value {
                     ),
                 ),
                 (
+                    "source".to_owned(),
+                    Value::String(CAP_PRIMITIVES_SOURCE.to_owned()),
+                ),
+                (
+                    "patches".to_owned(),
+                    Value::String(CAP_PRIMITIVES_PATCHES_PATH.to_owned()),
+                ),
+                (
                     "reviewed_path".to_owned(),
-                    Value::String("src/windows/fs/dir_utils.rs".to_owned()),
+                    Value::String(format!("{CAP_PRIMITIVES_PATH}/src/windows/fs/dir_utils.rs")),
                 ),
                 (
                     "semantic_contract".to_owned(),
@@ -1110,6 +1143,24 @@ fn build_dependency_audit_profile(
         .parent()
         .and_then(Path::parent)
         .ok_or_else(|| format!("{profile_label}: candidate workspace omitted repository parent"))?;
+    let cap_primitives_path = repository_root.join(CAP_PRIMITIVES_PATH);
+    let declarations = document
+        .package(root)?
+        .get("dependencies")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{profile_label}: {CANDIDATE_PACKAGE} omitted dependencies"))?;
+    check_manifest_dependency(
+        declarations,
+        ManifestDependency {
+            name: "cap-primitives",
+            requirement: "=4.0.3",
+            path: Some(&cap_primitives_path),
+            target: CAP_STD_TARGET,
+            optional: false,
+            features: &[],
+        },
+        violations,
+    );
     let expected_io_manifest = repository_root.join("crates/baozi-io/Cargo.toml");
     let io_id = document.unique_package_id("baozi-io")?;
     let io_package = document.package(io_id)?;
@@ -1134,12 +1185,24 @@ fn build_dependency_audit_profile(
     }
     let root_node = document.node(root)?;
     let full_reachable = document.production_closure(&[root.to_owned()])?;
-    if !production_dependencies(root_node, profile.target)?
+    let root_dependencies = production_dependencies(root_node, profile.target)?;
+    if !root_dependencies
         .iter()
         .any(|dependency| dependency.package == io_id && dependency.kinds.contains(&"normal"))
     {
         violations.push(format!(
             "{profile_label}: candidate must depend directly on portable baozi-io"
+        ));
+    }
+    if !root_dependencies.iter().any(|dependency| {
+        dependency.name == "cap_primitives"
+            && dependency.kinds == ["normal"]
+            && document
+                .package(&dependency.package)
+                .is_ok_and(|package| string_field(package, "name") == Some("cap-primitives"))
+    }) {
+        violations.push(format!(
+            "{profile_label}: candidate must depend directly on local cap-primitives through a normal cap_primitives edge"
         ));
     }
     let mut full_package_keys = BTreeSet::new();
@@ -1154,7 +1217,10 @@ fn build_dependency_audit_profile(
                 "{profile_label}: duplicate full-closure package key {key}"
             ));
         }
-        if id != io_id && string_field(package, "source") != Some(CRATES_IO_SOURCE) {
+        if id != io_id
+            && string_field(package, "name") != Some("cap-primitives")
+            && string_field(package, "source") != Some(CRATES_IO_SOURCE)
+        {
             violations.push(format!(
                 "{profile_label}: full-closure package {key} must come from {CRATES_IO_SOURCE}"
             ));
@@ -1176,7 +1242,7 @@ fn build_dependency_audit_profile(
     }
 
     let mut roots = Vec::new();
-    for dependency in production_dependencies(root_node, profile.target)? {
+    for dependency in root_dependencies {
         let package = document.package(&dependency.package)?;
         let name = required_string(package, "name", "package")?;
         if NATIVE_FILESYSTEM_PACKAGES.contains(&name) {
@@ -1187,12 +1253,20 @@ fn build_dependency_audit_profile(
     roots.dedup();
 
     let expected_names: BTreeSet<_> = match (kind, profile.direct_rustix) {
-        (DependencyAuditKind::Runtime, true) => ["cap-std", "rustix"].into_iter().collect(),
-        (DependencyAuditKind::Runtime, false) => ["cap-std"].into_iter().collect(),
-        (DependencyAuditKind::Repository, true) => {
-            ["cap-fs-ext", "cap-std", "rustix"].into_iter().collect()
+        (DependencyAuditKind::Runtime, true) => ["cap-primitives", "cap-std", "rustix"]
+            .into_iter()
+            .collect(),
+        (DependencyAuditKind::Runtime, false) => {
+            ["cap-primitives", "cap-std"].into_iter().collect()
         }
-        (DependencyAuditKind::Repository, false) => ["cap-fs-ext", "cap-std"].into_iter().collect(),
+        (DependencyAuditKind::Repository, true) => {
+            ["cap-fs-ext", "cap-primitives", "cap-std", "rustix"]
+                .into_iter()
+                .collect()
+        }
+        (DependencyAuditKind::Repository, false) => ["cap-fs-ext", "cap-primitives", "cap-std"]
+            .into_iter()
+            .collect(),
     };
     let actual_names = roots
         .iter()
@@ -1226,16 +1300,18 @@ fn build_dependency_audit_profile(
         if !profile_keys.insert(key.clone()) {
             return Err(format!("{profile_label}: duplicate package key {key}"));
         }
-        let identity = package_identity(package, checksums)?;
-        if string_field(&identity, "source") != Some(CRATES_IO_SOURCE) {
-            violations.push(format!(
-                "{profile_label}: {key} must come from {CRATES_IO_SOURCE}"
-            ));
-        }
-        if identity.get("checksum").and_then(Value::as_str).is_none() {
-            violations.push(format!(
-                "{profile_label}: {key} must have a crates.io checksum"
-            ));
+        let identity = package_identity(package, checksums, &cap_primitives_path)?;
+        if string_field(package, "name") != Some("cap-primitives") {
+            if string_field(&identity, "source") != Some(CRATES_IO_SOURCE) {
+                violations.push(format!(
+                    "{profile_label}: {key} must come from {CRATES_IO_SOURCE}"
+                ));
+            }
+            if identity.get("checksum").and_then(Value::as_str).is_none() {
+                violations.push(format!(
+                    "{profile_label}: {key} must have a crates.io checksum"
+                ));
+            }
         }
         match identities.get(&key) {
             Some(existing) if existing != &identity => {
@@ -1333,6 +1409,17 @@ fn check_critical_packages(
         .iter()
         .map(|id| document.package(id))
         .collect::<Result<Vec<_>, _>>()?;
+
+    // The sole local backend's version and manifest path are checked by package_identity.
+    let local_count = packages
+        .iter()
+        .filter(|package| string_field(package, "name") == Some("cap-primitives"))
+        .count();
+    if local_count != 1 {
+        violations.push(format!(
+            "{profile_label}: expected exactly one cap-primitives package, found {local_count}"
+        ));
+    }
 
     if kind == DependencyAuditKind::Runtime
         && packages
@@ -1609,7 +1696,28 @@ fn package_key(package: &Value) -> Result<String, String> {
 fn package_identity(
     package: &Value,
     checksums: &BTreeMap<ChecksumKey, String>,
+    cap_primitives_path: &Path,
 ) -> Result<Value, String> {
+    if string_field(package, "name") == Some("cap-primitives") {
+        let expected_manifest = cap_primitives_path.join("Cargo.toml");
+        if package.get("source") != Some(&Value::Null)
+            || string_field(package, "version") != Some(CAP_PRIMITIVES_VERSION)
+            || string_field(package, "manifest_path")
+                .is_none_or(|path| Path::new(path) != expected_manifest)
+        {
+            return Err(format!(
+                "native-fs package: cap-primitives must resolve to local cap-primitives@{CAP_PRIMITIVES_VERSION} with source=null and manifest_path={}",
+                expected_manifest.display()
+            ));
+        }
+        return Ok(serde_json::json!({
+            "source": CAP_PRIMITIVES_SOURCE,
+            "upstream_source": CRATES_IO_SOURCE,
+            "upstream_version": CAP_PRIMITIVES_VERSION,
+            "upstream_checksum": CAP_PRIMITIVES_UPSTREAM_CHECKSUM,
+            "patches": CAP_PRIMITIVES_PATCHES_PATH,
+        }));
+    }
     let source = required_string(package, "source", "package")?;
     let checksum = package_checksum(package, checksums)?;
     Ok(Value::Object(Map::from_iter([
@@ -1634,8 +1742,10 @@ fn package_checksum<'a>(
 }
 
 fn check_baseline_shape(baseline: &Value, violations: &mut Vec<String>) {
-    if baseline.get("schema").and_then(Value::as_u64) != Some(4) {
-        violations.push("native-fs baseline: schema must be 4".to_owned());
+    if baseline.get("schema").and_then(Value::as_u64) != Some(RUNTIME_BASELINE_SCHEMA) {
+        violations.push(format!(
+            "native-fs baseline: schema must be {RUNTIME_BASELINE_SCHEMA}"
+        ));
     }
     let expected_profiles: BTreeSet<_> = DEPENDENCY_AUDIT_PROFILES
         .iter()
@@ -1703,8 +1813,10 @@ fn check_repository_target_partition(violations: &mut Vec<String>) {
 
 fn check_repository_baseline_shape(baseline: &Value, violations: &mut Vec<String>) {
     check_repository_target_partition(violations);
-    if baseline.get("schema").and_then(Value::as_u64) != Some(3) {
-        violations.push("native-fs repository baseline: schema must be 3".to_owned());
+    if baseline.get("schema").and_then(Value::as_u64) != Some(REPOSITORY_BASELINE_SCHEMA) {
+        violations.push(format!(
+            "native-fs repository baseline: schema must be {REPOSITORY_BASELINE_SCHEMA}"
+        ));
     }
     if string_field(baseline, "runtime_baseline") != Some(BASELINE_PATH) {
         violations.push(format!(
@@ -1714,10 +1826,11 @@ fn check_repository_baseline_shape(baseline: &Value, violations: &mut Vec<String
     if baseline
         .get("runtime_baseline_schema")
         .and_then(Value::as_u64)
-        != Some(4)
+        != Some(RUNTIME_BASELINE_SCHEMA)
     {
-        violations
-            .push("native-fs repository baseline: runtime_baseline_schema must be 4".to_owned());
+        violations.push(format!(
+            "native-fs repository baseline: runtime_baseline_schema must be {RUNTIME_BASELINE_SCHEMA}"
+        ));
     }
 
     let expected_profiles: BTreeSet<_> = DEPENDENCY_AUDIT_PROFILES

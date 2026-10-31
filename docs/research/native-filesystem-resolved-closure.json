@@ -132,6 +132,7 @@
         }
       },
       "roots": [
+        "cap-primitives@4.0.3",
         "cap-std@4.0.3",
         "rustix@1.1.4"
       ],
@@ -305,6 +306,7 @@
         }
       },
       "roots": [
+        "cap-primitives@4.0.3",
         "cap-std@4.0.3",
         "rustix@1.1.4"
       ],
@@ -442,6 +444,7 @@
         }
       },
       "roots": [
+        "cap-primitives@4.0.3",
         "cap-std@4.0.3",
         "rustix@1.1.4"
       ],
@@ -610,7 +613,9 @@
             "Win32_System_Diagnostics",
             "Win32_System_Diagnostics_Debug",
             "Win32_System_IO",
+            "Win32_System_Ioctl",
             "Win32_System_Kernel",
+            "Win32_System_SystemServices",
             "Win32_System_WindowsProgramming",
             "default"
           ]
@@ -644,6 +649,7 @@
         }
       },
       "roots": [
+        "cap-primitives@4.0.3",
         "cap-std@4.0.3"
       ],
       "target": "x86_64-pc-windows-msvc"
@@ -662,8 +668,11 @@
       "source": "registry+https://github.com/rust-lang/crates.io-index"
     },
     "cap-primitives@4.0.3": {
-      "checksum": "8b5f74729fd2f44701d1a8eb47e906cdb3ccd9ec0f02baad85a744b791940b18",
-      "source": "registry+https://github.com/rust-lang/crates.io-index"
+      "patches": "candidates/baozi-native-io/vendor/cap-primitives/PATCHES.md",
+      "source": "path+candidates/baozi-native-io/vendor/cap-primitives",
+      "upstream_checksum": "8b5f74729fd2f44701d1a8eb47e906cdb3ccd9ec0f02baad85a744b791940b18",
+      "upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
+      "upstream_version": "4.0.3"
     },
     "cap-std@4.0.3": {
       "checksum": "c1ec78e242cfa2cfe276807ac2ecc00315a6c97786977414bcd1c3963b6c91b8",
@@ -764,8 +773,10 @@
     "windows_directory_share_mode": {
       "identity_binding": "package_identities.cap-primitives@4.0.3",
       "package": "cap-primitives@4.0.3",
-      "reviewed_path": "src/windows/fs/dir_utils.rs",
-      "semantic_contract": "root and descendant directory opens use FILE_FLAG_BACKUP_SEMANTICS and share only FILE_SHARE_READ | FILE_SHARE_WRITE, excluding FILE_SHARE_DELETE"
+      "patches": "candidates/baozi-native-io/vendor/cap-primitives/PATCHES.md",
+      "reviewed_path": "candidates/baozi-native-io/vendor/cap-primitives/src/windows/fs/dir_utils.rs",
+      "semantic_contract": "root and descendant directory opens use FILE_FLAG_BACKUP_SEMANTICS and share only FILE_SHARE_READ | FILE_SHARE_WRITE, excluding FILE_SHARE_DELETE",
+      "source": "path+candidates/baozi-native-io/vendor/cap-primitives"
     }
   },
   "runtime_candidate_targets": [
@@ -773,5 +784,5 @@
     "x86_64-pc-windows-msvc",
     "aarch64-apple-darwin"
   ],
-  "schema": 4
+  "schema": 5
 }

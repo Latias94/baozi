@@ -1,4 +1,5 @@
 use crate::SceneDraft;
+use crate::asset_open::{AssetOpenContext, open_asset};
 use crate::config::FormatSelection;
 use crate::dependency::{
     DenyDependencies, DependencyOriginIssuer, DependencyResolver, ResolverBinding,
@@ -208,6 +209,14 @@ impl AssetIo for DirectBytesAuthority {
         self.domain.clone()
     }
 
+    fn open_work_bound(
+        &self,
+        _path: &AssetPath,
+    ) -> Result<std::num::NonZeroU64, baozi_io::AssetOpenWorkError> {
+        // Direct bytes have no backend-open entry point, even for failed requests.
+        Err(baozi_io::AssetOpenWorkError::Unbounded)
+    }
+
     fn open(&self, _path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {
         Err(AssetOpenError::new(
             AssetOpenStage::Open,
@@ -308,15 +317,18 @@ impl<'a> ImportSession<'a> {
                     code: "primary-authority-panicked",
                 }
             })?;
-        let opened = catch_unwind(AssertUnwindSafe(|| self.primary_io.open(&self.source)))
-            .map_err(|payload| {
-                discard_untrusted_panic_payload(payload);
-                ImportCause::TrustedExtension {
-                    boundary: TrustedExtensionBoundary::AssetIo,
-                    code: "primary-open-panicked",
-                }
-            })?
-            .map_err(|cause| self.scope_cause(ScopeAbortCause::AssetOpen(cause)))?;
+        let opened = open_asset(
+            self.host(),
+            self.primary_io,
+            &self.source,
+            AssetOpenContext::Primary,
+        )
+        .map_err(|cause| match cause {
+            ScopeAbortCause::TrustedExtension { boundary, code } => {
+                ImportCause::TrustedExtension { boundary, code }
+            }
+            cause => self.scope_cause(cause),
+        })?;
         if opened.authority_domain() != &expected_domain || opened.path() != &self.source {
             return Err(ImportCause::TrustedExtension {
                 boundary: TrustedExtensionBoundary::AssetIo,
@@ -1435,6 +1447,13 @@ mod tests {
         fn authority_domain(&self) -> AuthorityDomain {
             self.authority_calls.fetch_add(1, Ordering::SeqCst);
             self.domain.clone()
+        }
+
+        fn open_work_bound(
+            &self,
+            _path: &AssetPath,
+        ) -> Result<std::num::NonZeroU64, baozi_io::AssetOpenWorkError> {
+            panic!("initialization failure must precede backend work planning")
         }
 
         fn open(&self, _path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {
