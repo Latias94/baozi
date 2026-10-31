@@ -406,8 +406,11 @@ Negative:
 
 ## Implementation Evidence
 
-Implementation sequence and current verification live in the
-[canonical architecture refactor plan](../plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md),
-the `baozi-test-support` tracer, format/facade test suites, fuzz workspace, and engineering
-verification records. Those artifacts demonstrate progress without changing this accepted
-strategy.
+Current executed verification lives in the
+[completed delivery record](../reviews/2026-10-29-delivery-progress.md#completed-ah-delivery-2026-10-31),
+the [later real-asset metadata record](../reviews/2026-10-31-source-object-metadata.md),
+the [behavior gate index](../testing/behavior-gates.md), format/facade test suites and fuzz workspace.
+The [proposed next plan](../plans/2026-11-01-001-feat-asset-workflow-expansion-plan.md) adds bounded
+workload and edit-lifecycle exploration; it is not executed evidence. The
+[July canonical architecture plan](../plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md)
+is superseded history. These artifacts demonstrate progress without changing this accepted strategy.

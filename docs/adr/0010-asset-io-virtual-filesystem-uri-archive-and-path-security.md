@@ -172,6 +172,13 @@ namespace, device, or remote URI strings are rejected at the format-facing bound
 resolver may support additional schemes only by returning a bounded identity and an authorized
 opener or immutable bytes. It must not return a path for Baozi to reopen with ambient authority.
 
+Implementation scope at `e9c6b87` (2026-11-01): dependency references are normalized to portable
+`AssetPath` values before a custom resolver's authorization callback; path components reject colons.
+A host may map admitted logical names to remote bytes, but raw scheme-bearing references do not reach
+that callback. Additional scheme routing above is an extension contract, not an implemented URI
+dispatcher. The [current gap analysis](../research/2026-11-01-baozi-assimp-gap-analysis.md) records
+this boundary; adding it requires a concrete host use case and explicit normalization/authority rules.
+
 An admitted resolver may additionally return one inert negative observation together with a terminal
 authorized failure. ADR 0010 owns resolver semantic identity, proof-scheme admission, verification
 against the exact authorized namespace/reference, and atomic binding of `proof | none` to the first

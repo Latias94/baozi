@@ -7,6 +7,11 @@ records exact executed target/profile evidence. The [2026-10-29 review](reviews/
 remains the starting observation. Format maturity, native release registration, and publication
 remain separate decisions. The former U4 execution sequence is superseded history.
 
+The [2026-11-01 Assimp comparison](research/2026-11-01-baozi-assimp-gap-analysis.md) reviews the
+current implementation and its gaps. The [proposed next plan](plans/2026-11-01-001-feat-asset-workflow-expansion-plan.md)
+prioritizes current-profile fidelity and application consumption; it does not reopen A–H or claim
+that its new units are implemented.
+
 ## Product Direction
 
 Baozi is trusted, fidelity-preserving, engine-neutral 3D asset ingestion and offline compilation
@@ -102,7 +107,7 @@ and behavior qualification; this structural separation does not promote native s
 
 ## Real-Asset Integration After A–H
 
-The next increment validates the delivered API against unchanged upstream assets through the
+The delivered follow-up increment validates the API against unchanged upstream assets through the
 [standalone offline consumer](../tools/consumers/assets/README.md). Its pinned corpus covers static
 texturing, interleaved storage, shared instances, skeletal TRS animation, and morph animation, plus
 explicit selected-profile and numeric-policy rejections. The application owns extracted buffers
@@ -124,9 +129,29 @@ behavior, and minimize each discovered regression. Selected glTF extras now use 
 exact JSON metadata and borrowed public readers, including objects without one canonical entity.
 The unchanged multi-primitive morph fixture covers their survival through edits and application
 extraction, as recorded in the [metadata integration review](reviews/2026-10-31-source-object-metadata.md).
-Higher-value follow-up work is explicit numeric admission policy and larger real-workload
-costs; exporters, a renderer, automatic recovery, native release registration, and a generic asset
-compiler remain separate work.
+The current corpus has six successful assets and one named `SimpleSkin` numeric-policy rejection.
+Latest verification and its platform/revision limits belong to the metadata integration review;
+the older A–H hosted result does not qualify later code automatically.
+
+## Proposed Next Stage
+
+The [asset fidelity and consumer plan](plans/2026-11-01-001-feat-asset-workflow-expansion-plan.md)
+starts with accepted PLY color semantics and MTL texture options, then deterministic indexed
+application buffers and public owner-to-source provenance reads. Larger workloads and one bounded
+edit-lifecycle fuzz target validate those workflows. Recognized semantic omissions must follow
+the existing explicit loss contract rather than disappear behind a successful import.
+
+Before local tangent generation, move construction/encoding declarations from the whole Scene to
+the Tangent attribute that owns them. Preserve the rest of the completed typed Scene architecture.
+Later selected-profile work should favor glTF primitive modes, sparse accessors, additional influence
+sets and a concrete typed extension slice before starting another broad format. Static world bounds
+and device draw limits remain concrete consumer candidates.
+
+Publication needs a separately chosen package set and resolvable decoder dependencies; native
+distribution additionally needs a normal solution for its patched backend. Neither a local package
+archive nor the native candidate's CI wiring makes these release decisions complete. Exporters,
+a renderer, automatic recovery, native release registration and a generic asset compiler remain
+separate work.
 
 ## Format Priorities
 

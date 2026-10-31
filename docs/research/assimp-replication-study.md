@@ -6,6 +6,11 @@
 **Local navigation**: An optional gitignored `repo-ref/assimp` checkout may mirror that revision for local browsing, but it is non-authoritative and is not evidence, an implementation source, or a repository tracer.
 **Authority**: Accepted Baozi ADRs and the canonical architecture plan. Recommendations below are preserved as audit history and may have been superseded.
 
+For the current implementation comparison and proposed follow-up, use the
+[2026-11-01 gap analysis](2026-11-01-baozi-assimp-gap-analysis.md). In particular, the historical
+one-material-per-mesh recommendation below is superseded by logical mesh / primitive / instance
+separation; it is not a pending migration instruction.
+
 ## Executive Summary
 
 Assimp's strength comes from four architectural commitments:
