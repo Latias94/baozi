@@ -123,3 +123,71 @@ U1 does not qualify a new target, complete F64 support, replace the glTF decoder
 or establish release readiness. Fresh cross-target/sanitizer and final package
 qualification remain U8 work. No registry, push, PR or native registration
 operation was performed.
+
+## U2: precision-preserving geometry
+
+The component implementation is committed at
+`c9182a6d3a2c3608f45707f12b759edc2a4ea569`. PLY chooses each built-in Position,
+Normal and Texcoord stream's width from its declarations: Float32 and up-to-16-bit
+integers use F32; Float64 and I32/U32 use F64. Mixed components join before
+allocation. Dense and sparse F64 attributes use the existing canonical pools,
+finite/shape validation, borrowed reads and bit-preserving snapshot path.
+Color and unrelated authored transform/material/deformation types keep their
+existing contracts.
+
+Spatial queries now compose and retain F64 column-major matrices and return F64
+Aabb min/max arrays. They read either Position width, including sparse defaults,
+without an intermediate F32 result. Geometry-space conversion, triangulation
+copy/remap and generated Normal/Tangent payloads retain their selected widths.
+The common edit boundary rejects a candidate narrower than its selected
+dependencies or replaced field, independently of generator behavior. Ordinary
+F64 generation succeeds; unsupported numerical conditioning produces a typed
+stage/location issue and returns the immutable original Scene.
+
+The F32 determinant specialization remains selected by its source operands.
+F64 computation uses common exact binary scaling, fixed FMA/TwoSum error bounds,
+compensated area sums and certified direction/frame gates. An independent review
+found three real defects in the initial tangent integration: promoted F64 output
+bypassed projection uncertainty, an aggregate width switch displaced the F32
+specialization, and face-local scales bypassed primitive admission. Those paths
+were corrected, with concrete public/kernel regressions. All F64 outputs now use
+the same certified frame path; each determinant selects its own operand width.
+Sparse explicit values plus a used default cover the primitive magnitude scan
+without expanding a large logical domain.
+
+New sparse-F64 triangulation success cases also exposed an existing validation
+count error: correspondence supplied a worst-case binary-search allowance to an
+exact-completion session. Planning now reuses the measured comparison counts,
+and the work regression requires equality. The numerical polygon kernel itself
+already accepted the retained wide/tiny inputs.
+
+### Component verification and practical limits
+
+All commands ran on `x86_64-pc-windows-msvc`, Rust `+1.95.0`, with locked/offline
+dependency resolution, one Cargo process and one build job. Nextest used two
+test threads. The final component run covered `baozi-core`, `baozi-format-ply`
+and `baozi-postprocess`, all features: **957 passed**, four existing manual skips,
+run `ba5891bb-ff0a-4b0a-9b48-dde3f1b6ad5c`. Seven passing tests belong to the
+concurrently implemented U5 relations query; the remaining 950 tests cover the
+committed component scope. The tested U2 file bytes match the named commit.
+The run was a working-tree component check with that additional U5 query, not
+an isolated checkout or complete-workspace qualification.
+
+Strict all-target/all-feature Clippy for the three component crates, six core
+compile-fail doctests, and their formatting checks passed. Earlier focused runs
+passed 776/776 and then 805/805. The initial red precision, derived-width and
+triangulation logs remain available locally. Independent storage/remap,
+query/PLY, space, generated-width/normal and numerical reviews have no remaining
+actionable findings. Reviewers inspected source and main-owned evidence; they
+did not independently run Cargo. The numerical reviewer also used directed
+independent arithmetic probes, which are neither exhaustive proof nor repository
+test execution.
+
+Logs, reviewed-file hashes and exact staged U2 bytes are retained in
+`.git/baozi-review/maturation-plan/`, including `u2-staged-source.json`,
+`u2-complete-package-tests.log`, `u2-clippy-fixed.log`, `u2-doctests.log` and
+the `review-u2-*.json` receipts. The independent consumer's new F64 copy-out and
+world-bounds regression awaits U3's decoder integration, alongside its concurrent
+animation/appearance changes. Full workspace, target, sanitizer and unchanged
+archive-consumer qualification remain U8 work. This component result does not
+qualify a new target or establish release readiness.

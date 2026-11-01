@@ -205,6 +205,8 @@ These are separate disjoint implementation lanes with main-thread integration.
 
 ### U2. Establish precision-preserving geometry
 
+**Status:** Implemented at `c9182a6d3a2c3608f45707f12b759edc2a4ea569` with Windows/MSRV component checks and independent review complete. The independent application consumer will be rerun after U3 integration; final target/artifact qualification remains U8 work. See the [execution record](../reviews/2026-11-02-first-release-maturation.md#u2-precision-preserving-geometry).
+
 **Goal:** Preserve F64 geometry without forcing unrelated material, animation or transform domains into a universal scalar abstraction.
 **Requirements:** R2, R6–R9, R14; KTD2.
 **Dependencies:** U1's shared dependency-invalidation policy.
