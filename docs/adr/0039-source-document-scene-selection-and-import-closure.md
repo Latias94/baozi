@@ -210,6 +210,21 @@ excluded or lossy semantic observable. Chosen.
 
 ## Amendment History
 
+### 2026-11-01: Retain unlit fallback closure without unknown-payload loss authority
+
+- Selected material-level `KHR_materials_unlit` uses the existing Unlit shading selector and
+  creates no new reference edge. The MR base-color inputs and all authored lighting fallback
+  factors/bindings remain retained, so their complete texture/image/sampler closure and provenance
+  remain required. Unlit extras belong to the original material source identity.
+- Unsupported optional payloads outside the selected closure remain scope omissions. Unsupported
+  retained payloads fail even with `SourceSemanticLoss` permission until a typed schema owns a
+  fallback mapping. Unsupported required extensions fail globally as before.
+- Optional unsupported declarations without retained payloads produce only
+  `gltf.extension_uninterpreted_declaration`, after selected-payload validation. This supersedes the
+  earlier `gltf.extension_ignored` claim; it does not report nonexistent retained-domain loss.
+- The [unlit execution plan](../plans/2026-11-01-008-feat-gltf-unlit-materials-plan.md) and
+  [profile](../formats/gltf.md#unlit-materials-and-optional-extensions) define the admitted slice.
+
 ### 2026-11-01: Deliver explicit frozen glTF selection and request evidence
 
 - Affected: format-owned glTF options, public facade re-exports, root projection provenance and

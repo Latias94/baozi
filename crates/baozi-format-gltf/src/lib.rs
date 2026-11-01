@@ -65,7 +65,7 @@ pub fn format_descriptor() -> FormatDescriptor {
         (external_buffer_role(), DependencyRequirement::Required),
         (external_image_role(), DependencyRequirement::Required),
     ])
-    .notes("selected-scene glTF 2.0/GLB PBR, skin, morph, and TRS animation profile; see exact restrictions")
+    .notes("selected-scene glTF 2.0/GLB PBR/unlit, skin, morph, and TRS animation profile; see exact restrictions")
     .docs_path("docs/formats/gltf.md")
     .build()
     .expect("static glTF descriptor must be valid")

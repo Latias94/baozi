@@ -135,9 +135,7 @@ fn unknown_optional_extension_payload_is_explicitly_rejected() -> TestResult<()>
         GltfTestOptions::memory(),
     )?;
 
-    assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].code().as_str(), "gltf.extension_ignored");
-    assert!(diagnostics[0].message().contains("VENDOR_physics"));
+    assert!(diagnostics.is_empty());
     let error = expected_error(result)?;
     common::assert_gltf_failure(
         &error,

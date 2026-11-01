@@ -70,12 +70,14 @@ pub(crate) struct SourceEntity {
     pub(crate) range: SourceRange,
 }
 
-/// Core glTF objects nested inside an indexed entity retain that entity's source identity.
+/// Recognized property objects nested inside an indexed entity retain its source identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum SourcePayloadSite {
     Entity,
     Asset,
     MaterialPbrMetallicRoughness,
+    /// Direct payload members inside a material's KHR_materials_unlit.
+    MaterialUnlit,
     BaseColorTexture,
     MetallicRoughnessTexture,
     NormalTexture,
@@ -98,6 +100,7 @@ pub(crate) enum SourcePayloadSite {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SourceExtensionKind {
     KhrTextureTransform,
+    KhrMaterialsUnlit,
     Other,
 }
 
@@ -108,6 +111,8 @@ pub(crate) enum SourcePayloadKind {
     Extensions,
     /// One direct member of an `extensions` object. Its raw key remains available below.
     Extension(SourceExtensionKind),
+    /// One direct non-extras/extensions property of a recognized material unlit object.
+    ExtensionProperty,
 }
 
 /// Raw payload syntax only; the caller decides extension support and semantic-loss policy.

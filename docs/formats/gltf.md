@@ -18,7 +18,7 @@
 
 ## Current Status
 
-`baozi-format-gltf` imports the selected-scene PBR, skin, morph, and TRS animation profile below.
+`baozi-format-gltf` imports the selected-scene PBR/unlit, skin, morph, and TRS animation profile below.
 Enable `baozi/format-gltf` to register it through `Importer::new()`, or register `GltfImporter`
 in a custom registry. The curated default format set remains OBJ/MTL and STL.
 
@@ -70,6 +70,9 @@ baseline malformed-input safety for that source state; it is not sustained fuzz 
   and nested schema sites, retained as exact `application/json` bytes under source-object metadata
   owners. Source objects without a canonical entity keep their own identity and metadata.
 - PBR metallic-roughness material factors.
+- Typed `KHR_materials_unlit` materials through the existing `ShadingModel::Unlit`, with base color,
+  vertex colors, alpha coverage and double-sided state. Original PBR fallback factors, bindings and
+  their resources remain retained independently of the active shading model.
 - Base color, metallic-roughness, normal, occlusion, and emissive texture URI references.
 - The typed `KHR_texture_transform` slice for selected base color, metallic-roughness, normal,
   occlusion, and emissive texture bindings, including the extension `texCoord` override. Its
@@ -119,7 +122,9 @@ baseline malformed-input safety for that source state; it is not sustained fuzz 
 - Global `extensionsUsed` and `extensionsRequired` declarations are checked after JSON-root decode
   and before backend document validation. Empty or duplicate names and a required name missing from
   `extensionsUsed` are invalid; unsupported required extensions return typed format failure, while
-  unsupported optional extensions retain the core fallback and emit `gltf.extension_ignored`.
+  unsupported optional declarations without retained payloads emit
+  `gltf.extension_uninterpreted_declaration` after selected-payload validation. Unsupported retained
+  payloads fail explicitly; a loss opt-in alone does not define a fallback mapping.
   Duplicate detection uses metered name storage and bounded `WorkUnits` sorting.
 - Gates cover GLB import, snapshots, malformed external buffers/data URIs, skin validation,
   text preflight, bounded format failures, and the Linux sanitizer-run glTF fuzz target.
@@ -187,6 +192,33 @@ the requested modes. No canonical snapshot wire-layout revision is needed.
 This follows [ADR 0039](../adr/0039-source-document-scene-selection-and-import-closure.md) and
 the [pinned Khronos scenes contract](https://github.com/KhronosGroup/glTF/blob/59ecbdba704206bb656965ab4e202881806066f1/specification/2.0/Specification.adoc#scenes).
 The deterministic default-selection rules and parentless-node projection are Baozi policies.
+
+### Unlit materials and optional extensions
+
+A selected material's `extensions.KHR_materials_unlit` object selects `ShadingModel::Unlit` through
+the existing material contract, normalized row and public `MaterialRef::shading_model()`. The name
+must appear in `extensionsUsed`; an optional or required declaration has the same material meaning.
+Malformed values and unsupported owner/sites fail before dependency IO. An empty object and admitted
+descriptive `extras` are supported; empty nested `extensions` is allowed. Unknown direct properties
+and nested extension payloads return `gltf.unsupported_feature` with their original byte ranges.
+Khronos permits additional object properties with undefined interpretation; rejecting them is this
+selected profile's restriction.
+
+For glTF Unlit, evaluate the retained MR group's base color and `BaseColor` texture together with
+vertex color. Alpha mode/cutoff and double-sided state still apply. Read `shading_model()` before
+interpreting the complete `factors()` and `bindings()` values. Metallic, roughness, normal, occlusion
+and emissive data remain source fallback truth and do not contribute to active unlit evaluation.
+Their texture/image/sampler dependencies remain in the retained resource closure and are required
+when authored. The importer does not render pixels, rewrite factors or silently discard fallback data.
+
+Unsupported required extensions fail globally. Unsupported payloads on retained owners/sites fail
+even with `SourceSemanticLoss` authority; accepting a fallback requires a schema-owned mapping and
+appropriate loss evidence. Optional payloads on omitted owners remain scope omissions. An unknown
+optional declaration without retained payload produces only the declaration diagnostic above, with
+no semantic-loss record. This replaces the earlier misleading `gltf.extension_ignored` diagnostic.
+
+See the [pinned Khronos unlit contract](https://github.com/KhronosGroup/glTF/blob/59ecbdba704206bb656965ab4e202881806066f1/extensions/2.0/Khronos/KHR_materials_unlit/README.md)
+and [extension schema](https://github.com/KhronosGroup/glTF/blob/59ecbdba704206bb656965ab4e202881806066f1/extensions/2.0/Khronos/KHR_materials_unlit/schema/material.KHR_materials_unlit.schema.json).
 
 ### Primitive counts and index validation
 
@@ -308,11 +340,12 @@ and import-contract tests.
 
 - Embedded image buffer views and image data URIs are materialized as encoded image payloads without
   pixel decoding. Typed extension payloads beyond
-  `KHR_texture_transform` are rejected explicitly.
+  `KHR_texture_transform` and material-level `KHR_materials_unlit` are rejected explicitly.
 - Unsupported selected extension payloads are explicitly rejected with original raw byte
   ranges. A supported extension at an unsupported owner/site is rejected as well. Unselected entity
   payloads remain scope omissions. Declaring an unsupported optional extension without a selected
-  payload retains the core fallback with `gltf.extension_ignored`.
+  payload emits `gltf.extension_uninterpreted_declaration` without claiming a retained-payload loss
+  or an arbitrary safe fallback.
 - The current `SourceScopeRecord` includes ADR 0039's typed selection outcome, camera rows, and
   animation-sampler rows. Entity-level extension rows, typed extension-reference closure for
   reference-bearing schemas, and a sealed bridge for stable canonical dependency evidence remain
@@ -339,13 +372,14 @@ under `org.baozi.gltf:`:
 
 | Source owner | Nested-site key suffix |
 | --- | --- |
-| Material | `pbr-metallic-roughness-extras` |
+| Material | `pbr-metallic-roughness-extras`, `unlit-extras` |
 | Material, for each of base-color, metallic-roughness, normal, occlusion, emissive | `<binding>-texture-extras`, `<binding>-texture-transform-extras` |
 | Accessor | `sparse-extras`, `sparse-indices-extras`, `sparse-values-extras` |
 | Animation channel | `target-extras` |
 | Camera | `orthographic-extras`, `perspective-extras` |
 
-Nested extras in a supported texture transform require that transform's supported parent binding.
+Nested extras in a supported texture transform require that transform's supported parent binding;
+unlit extras require the admitted material-level unlit object.
 Unknown extension objects remain subject to the explicit extension rejection policy; data nested
 inside extras, including a property named `extensions`, is inert JSON. Extras do not create
 canonical material, animation, or reference behavior.

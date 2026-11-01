@@ -57,11 +57,12 @@ This is a concrete extraction example, not a new canonical representation or a g
   topology, indices, and shared mesh/instance relationships remain unchanged.
 - Reuse requires the same `PrimitiveVertex` identity and identical `to_bits()` values in every
   selected Position, Normal, Tangent (including
-  W), and UV0 lane. These application fields use F64, with exact F32 widening. Indices follow first
+  W), UV0 and COLOR0 lane. These application fields use F64, with exact F32 widening. RGB colors
+  acquire an explicit alpha of one; RGBA and absent colors remain distinct. Indices follow first
   expanded tuple encounter order, independently of hash map iteration, and retain list element
   order and triangle winding. Distinct source vertices, signed-zero seams, and separate draw/material
   boundaries stay distinct; there is no epsilon comparison or position welding. Simultaneous normal/tangent/
-  UV0 domains require an explicit application policy and are rejected here.
+  UV0/COLOR0 domains require an explicit application policy and are rejected here.
 - Skin influences use variable-length CSR rows without truncation. Each representative copies its
   complete joint/weight row once, preserving empty rows, all lanes, their sequence, and F32 bits.
   The core's separate source-order ordinals remain outside this selected application layout.
@@ -74,19 +75,27 @@ This is a concrete extraction example, not a new canonical representation or a g
   that key or keep their tuples separate.
 - Owned node hierarchy and authored transforms, mesh instances and their effective morph weights,
   joint references and inverse bind matrices, animation times/values/cubic derivatives, material
-  factors and texture image/UV/transform references, and encoded images survive Scene destruction.
+  shading model, alpha mode/cutoff, double-sided state, factors and texture image/UV/transform
+  references, and encoded images survive Scene destruction.
   Opaque Scene IDs are mapped to application indices only after the final edit.
 - Source-object glTF JSON metadata is copied explicitly with sanitized resource identity, format,
   versioned namespaced locator, site key, media type, and exact payload bytes. This subset omits
   entity metadata, non-JSON values, and other formats' metadata. It does not parse or rewrite extras.
   The unchanged `MorphPrimitivesTest` checks all 147 original `/asset/extras` bytes after edits and
   Scene destruction, together with both primitives, shared default morph weights, and its JPEG.
-- This application selects UV0 and a material/animation subset. It does not retain every material
+- This application selects UV0/COLOR0 and a material/animation subset. It does not retain every material
   channel, binding strength, sampler, skin-space declaration, animation time-domain/extrapolation
   declaration, camera, light, custom attribute, or provenance attachment. It is not a round-trip
   serializer or renderer. Image decoding, animation evaluation, skinning, tangent generation, GPU
   packing are outside this example. `mesh_local_bounds` aggregates base
   mesh-local positions; it does not apply instances, node transforms, skinning, or morph weights.
+
+For glTF `KHR_materials_unlit`, the owned material records `ShadingModel::Unlit`; its retained PBR
+base color, BaseColor binding and COLOR0 supply color, while alpha coverage and sidedness remain
+explicit. Lighting factors and bindings remain authored fallback data. The example copies these
+facts without rendering or silently applying PBR lighting to Unlit. The self-authored
+`unlit_materials` integration tests cover optional/required declarations, texture transforms,
+fallback resources, space edits and detached owned values.
 
 `BasePoseSpatialSnapshot::from_scene` is a separate, opt-in query before Scene destruction. It
 returns an owned `BasePoseWorldTransforms` table and scene-wide `Option<Aabb>` in the Scene's current

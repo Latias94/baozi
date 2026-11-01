@@ -287,6 +287,10 @@ with [executed evidence](../reviews/2026-11-01-gltf-influence-sets.md). Explicit
 completes candidate 6 through the
 [scene-selection slice](2026-11-01-007-feat-gltf-scene-selection-plan.md) in `82c976d`, with
 integrated verification in its [execution review](../reviews/2026-11-01-gltf-scene-selection.md).
+Candidate 7 is implemented through the
+[typed unlit slice](2026-11-01-008-feat-gltf-unlit-materials-plan.md), including explicit unsupported
+optional-extension policy and complete retained fallback semantics. Integrated qualification is
+tracked in its [execution review](../reviews/2026-11-01-gltf-unlit-materials.md).
 The remaining rows are ordered candidates, not implicitly authorized implementation work.
 
 | Order | Candidate and prerequisite | Required boundary and acceptance when selected |

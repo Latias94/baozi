@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-10-29
+updated: 2026-11-01
 authors:
   - Codex
 decision_type: architecture
@@ -299,6 +299,24 @@ Negative:
 | Maturity truthfulness | Linux sanitizer and subprocess RSS/timeout gates execute before promotion; compile-only evidence cannot satisfy them. |
 
 ## Amendment History
+
+### 2026-11-01: Admit typed unlit and make optional declaration evidence precise
+
+- Selected material-level `KHR_materials_unlit` objects map to the existing closed Unlit shading
+  enum. Their declaration, raw shape, site and supported properties are checked before dependency
+  IO. The existing selected material contract carries shading with texture contracts into owned
+  normalized rows; canonical authoring uses no backend handle or new core material representation.
+- Original PBR fallback factors, all five core texture slots and their forward resource/provenance
+  closure remain retained. Source-object unlit extras use existing exact JSON metadata storage.
+- Unsupported required extensions fail globally; unsupported selected payloads fail even with
+  `SourceSemanticLoss` opt-in. A future fallback must define its schema-owned mapping before caller
+  loss authority can apply. Unknown optional declarations without retained payloads produce only
+  `gltf.extension_uninterpreted_declaration` after selected-payload checks, replacing the inaccurate
+  payload-omission claim. No generic lossy fallback registry is introduced.
+- The maintained backend's existing unlit feature admits its required name to backend validation.
+  The admission source map still owns original payload ranges and unsupported direct properties;
+  an empty backend struct cannot silently discard those properties.
+- The [execution plan](../plans/2026-11-01-008-feat-gltf-unlit-materials-plan.md) owns qualification.
 
 ### 2026-10-29: Own selected meaning and retain admitted source ranges
 

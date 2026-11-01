@@ -9,9 +9,10 @@ use baozi_import::authoring::{
     GeometryMeshInstanceAuthoring, GeometryTopologyAuthoring, ImageLocalId, InfluenceAuthoring,
     LogicalMeshLocalId, Mat4, MaterialFactors, MaterialLocalId, MipmapFilter, NodeAuthoringNode,
     NodeLocalId, NodeParent, PbrMetallicRoughnessFactors, Presence, Quat, ResourceIdentityLocalId,
-    SamplerAuthoring, SamplerLocalId, SamplerState, SkinLocalId, TexelFilter, TextureAddressMode,
-    TextureAuthoring, TextureBlendOperation, TextureChannel, TextureChannelSwizzle, TextureLocalId,
-    TextureRole, TextureSourceKey, TextureStrength, TextureTransform, Vec2, Vec3,
+    SamplerAuthoring, SamplerLocalId, SamplerState, ShadingModel, SkinLocalId, TexelFilter,
+    TextureAddressMode, TextureAuthoring, TextureBlendOperation, TextureChannel,
+    TextureChannelSwizzle, TextureLocalId, TextureRole, TextureSourceKey, TextureStrength,
+    TextureTransform, Vec2, Vec3,
 };
 use baozi_import::{
     DiagnosticCode, DiagnosticSeverity, ImportStorageClass, ImportWorkClass, ImportWorkScope,
@@ -51,9 +52,10 @@ const GLTF_JSON_EXPANSION_ALLOWANCE: u64 = 64;
 const PARSER_POLL_INTERVAL: usize = 4_096;
 
 const KHR_TEXTURE_TRANSFORM: &str = "KHR_texture_transform";
+const KHR_MATERIALS_UNLIT: &str = "KHR_materials_unlit";
 
 // Only schemas with a bounded typed Baozi mapping belong in this list.
-const BAOZI_SUPPORTED_EXTENSION_NAMES: &[&str] = &[KHR_TEXTURE_TRANSFORM];
+const BAOZI_SUPPORTED_EXTENSION_NAMES: &[&str] = &[KHR_TEXTURE_TRANSFORM, KHR_MATERIALS_UNLIT];
 
 #[derive(Debug)]
 enum ContentError {
@@ -172,7 +174,7 @@ fn checked_add_with_limit(
 struct PreparedDocument<'scope, 'document> {
     node_graph: NodeGraph<'document, 'scope>,
     resource_closure: ResourceClosure<'scope>,
-    texture_binding_contracts: TextureBindingContracts<'scope>,
+    material_contracts: MaterialContracts<'scope>,
     geometry_contracts: GeometryContracts<'scope>,
     resolved_texture_uris: ResolvedTextureUris<'scope>,
     animation_contracts: animation::AnimationContracts<'scope, 'document>,
@@ -219,8 +221,8 @@ fn read_normalized_gltf<'scope>(ctx: &'scope ParseScope<'_>) -> Result<Normalize
         &resource_closure,
         &animation_contracts,
     )?;
-    let texture_binding_contracts =
-        preflight_texture_binding_contracts(ctx, &gltf, &resource_closure)?;
+    report_uninterpreted_extension_declarations(ctx, gltf.as_json())?;
+    let material_contracts = preflight_material_contracts(ctx, &gltf, &resource_closure)?;
     let repeated_mesh_string_bytes =
         preflight_canonical_base_strings(ctx, &gltf, &node_graph, &resource_closure)?;
     let resolved_texture_uris =
@@ -239,7 +241,7 @@ fn read_normalized_gltf<'scope>(ctx: &'scope ParseScope<'_>) -> Result<Normalize
     let prepared = PreparedDocument {
         node_graph,
         resource_closure,
-        texture_binding_contracts,
+        material_contracts,
         geometry_contracts,
         resolved_texture_uris,
         animation_contracts,
@@ -492,11 +494,7 @@ fn preflight_extension_declarations(ctx: &ParseScope<'_>, root: &json::Root) -> 
         "gltf-extension-required-names",
     )?;
 
-    let validation_work = to_u64(
-        root.extensions_required
-            .len()
-            .saturating_add(root.extensions_used.len()),
-    );
+    let validation_work = to_u64(root.extensions_required.len());
     if validation_work == 0 {
         return Ok(());
     }
@@ -522,23 +520,30 @@ fn preflight_extension_declarations(ctx: &ParseScope<'_>, root: &json::Root) -> 
                     )));
                 }
             }
-
-            for name in &root.extensions_used {
-                work.poll()?;
-                if !is_supported_extension(name) {
-                    push_warning(
-                        ctx,
-                        "gltf.extension_ignored",
-                        format_args!(
-                            "glTF optional extension {name:?} is not interpreted; its payload is omitted"
-                        ),
-                    )?;
-                }
-                work.complete([1])?;
-            }
             Ok(())
         },
     )
+}
+
+/// Called only after retained payloads have passed profile admission. Unknown selected
+/// behavior is a hard error, so these diagnostics never claim to omit a retained payload.
+fn report_uninterpreted_extension_declarations(
+    ctx: &ParseScope<'_>,
+    root: &json::Root,
+) -> Result<()> {
+    for name in &root.extensions_used {
+        ctx.charge_work(1)?;
+        if !is_supported_extension(name) {
+            push_warning(
+                ctx,
+                "gltf.extension_uninterpreted_declaration",
+                format_args!(
+                    "glTF optional extension {name:?} has no retained payload; its declaration is not interpreted"
+                ),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn sorted_extension_names<'scope, 'document>(
@@ -622,7 +627,8 @@ struct TextureBindingContract {
 }
 
 #[derive(Debug)]
-struct MaterialTextureContracts {
+struct MaterialContract {
+    shading_model: ShadingModel,
     base_color: Option<TextureBindingContract>,
     metallic_roughness: Option<TextureBindingContract>,
     normal: Option<TextureBindingContract>,
@@ -630,30 +636,26 @@ struct MaterialTextureContracts {
     emissive: Option<TextureBindingContract>,
 }
 
-struct TextureBindingContracts<'scope> {
-    materials: MeteredOrderedMap<'scope, usize, MaterialTextureContracts>,
+struct MaterialContracts<'scope> {
+    materials: MeteredOrderedMap<'scope, usize, MaterialContract>,
 }
 
-impl TextureBindingContracts<'_> {
-    fn material(
-        &self,
-        ctx: &ParseScope<'_>,
-        material_index: usize,
-    ) -> Result<&MaterialTextureContracts> {
+impl MaterialContracts<'_> {
+    fn material(&self, ctx: &ParseScope<'_>, material_index: usize) -> Result<&MaterialContract> {
         self.materials.get(&material_index).ok_or_else(|| {
             gltf_parse_error(
                 ctx,
-                format!("glTF texture binding contract is missing material {material_index}"),
+                format!("glTF material contract is missing material {material_index}"),
             )
         })
     }
 }
 
-fn preflight_texture_binding_contracts<'scope>(
+fn preflight_material_contracts<'scope>(
     ctx: &'scope ParseScope<'_>,
     gltf: &gltf::Document,
     closure: &ResourceClosure<'_>,
-) -> Result<TextureBindingContracts<'scope>> {
+) -> Result<MaterialContracts<'scope>> {
     let root = gltf.as_json();
     let extension_declared = root
         .extensions_used
@@ -661,7 +663,7 @@ fn preflight_texture_binding_contracts<'scope>(
         .any(|name| name == KHR_TEXTURE_TRANSFORM);
     let mut materials = ctx.metered_ordered_map(
         ImportStorageClass::FormatNormalization,
-        "gltf-texture-binding-contracts",
+        "gltf-material-contracts",
     );
 
     for (material_index, material) in root.materials.iter().enumerate() {
@@ -681,7 +683,16 @@ fn preflight_texture_binding_contracts<'scope>(
             continue;
         }
         let pbr = &material.pbr_metallic_roughness;
-        let contracts = MaterialTextureContracts {
+        let contracts = MaterialContract {
+            shading_model: if material
+                .extensions
+                .as_ref()
+                .is_some_and(|extensions| extensions.unlit.is_some())
+            {
+                ShadingModel::Unlit
+            } else {
+                ShadingModel::PbrMetallicRoughness
+            },
             base_color: pbr
                 .base_color_texture
                 .as_ref()
@@ -761,7 +772,7 @@ fn preflight_texture_binding_contracts<'scope>(
         }
     }
 
-    Ok(TextureBindingContracts { materials })
+    Ok(MaterialContracts { materials })
 }
 
 fn compile_texture_info_contract(
@@ -1747,7 +1758,7 @@ fn normalize_document<'scope>(
         buffers.as_slice(),
         &prepared.resolved_texture_uris,
         &external_images,
-        &prepared.texture_binding_contracts,
+        &prepared.material_contracts,
         &prepared.resource_closure,
     )?;
     let geometry_storage = build_geometry_storage(
@@ -1886,7 +1897,7 @@ fn build_appearance_storage<'scope>(
     buffers: &[Option<BufferData<'_>>],
     resolved_texture_uris: &ResolvedTextureUris<'_>,
     external_images: &ExternalImageResources<'scope>,
-    texture_binding_contracts: &TextureBindingContracts<'_>,
+    material_contracts: &MaterialContracts<'_>,
     closure: &ResourceClosure<'_>,
 ) -> Result<AppearanceStorage<'scope>> {
     let material_count = safe_gltf(ctx, "glTF material count", || gltf.materials().count())?;
@@ -1984,14 +1995,14 @@ fn build_appearance_storage<'scope>(
             storage.materials.len(),
             "gltf-authoring-material-id",
         )?);
-        let texture_contracts = texture_binding_contracts.material(ctx, material_index)?;
+        let contract = material_contracts.material(ctx, material_index)?;
         add_material_authoring(
             ctx,
             &mut storage,
             material,
             resolved_texture_uris,
             external_images,
-            texture_contracts,
+            contract,
         )?;
         let Some(slot) = storage.material_ids.as_mut_slice().get_mut(material_index) else {
             return Err(gltf_parse_error(ctx, "glTF material id map is incomplete"));
@@ -2289,7 +2300,7 @@ fn add_material_authoring<'scope, 'document>(
     material: gltf::Material<'document>,
     resolved_texture_uris: &ResolvedTextureUris<'_>,
     external_images: &ExternalImageResources<'scope>,
-    contracts: &MaterialTextureContracts,
+    contracts: &MaterialContract,
 ) -> Result<()> {
     let material_index = material.index().ok_or_else(|| {
         ContentError::from(GltfFailure::internal(
@@ -2421,6 +2432,7 @@ fn add_material_authoring<'scope, 'document>(
     )
     .map_err(|_| gltf_parse_error(ctx, "glTF material factors are outside canonical bounds"))?;
     storage.materials.try_push_reserved(MaterialStorage {
+        shading_model: contracts.shading_model,
         name: owned_name(ctx, material.name(), "gltf-normalized-material-name")?,
         bindings: AuthoringRange::new(
             binding_offset,

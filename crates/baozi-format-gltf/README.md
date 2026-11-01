@@ -31,11 +31,11 @@ The [exact selected profile](https://github.com/Latias94/baozi/blob/main/docs/fo
   require base64. URI schemes for remote fetching are unsupported.
 - Preserve selected `extras` as exact `application/json` byte values owned by source identities,
   including JSON null, scalars, and nested sites. No source JSON is interpreted as scene behavior.
-- Support only the typed `KHR_texture_transform` slice at documented texture
-  bindings. Reject unsupported selected extension payloads,
-  and unsupported required extensions. Unsupported optional extension
-  declarations without selected payloads may retain the core fallback with a
-  diagnostic.
+- Support typed `KHR_materials_unlit` at material objects and `KHR_texture_transform` at documented
+  texture bindings. Unlit selects base color/vertex color and preserves alpha/sidedness; the original
+  PBR fallback factors, bindings and complete resources remain retained. Reject unsupported selected
+  extension payloads and unsupported required extensions. Unknown optional declarations without
+  retained payloads produce a declaration-only diagnostic, with no semantic-loss claim.
 - Import retains source topology; the explicit `baozi-postprocess::list_vertices` view expands
   strips/fans/loops for list consumers without mutating the Scene. Resource-limit
   coverage is partial, canonical dependency identities remain session-opaque, and

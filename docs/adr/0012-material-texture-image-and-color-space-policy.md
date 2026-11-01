@@ -154,6 +154,14 @@ factor family. `Opacity` is an explicit multiplier under the formula above, not 
 of mapped color alpha. Any other cross-role combination that writes the same evaluated factor is
 rejected until a complete typed descriptor defines and validates the composition.
 
+For the glTF `KHR_materials_unlit` producer, `ShadingModel::Unlit` selects MR base color, the
+`BaseColor` binding and vertex color, with the retained alpha coverage and double-sided behavior.
+Other MR/emissive factors and lighting bindings remain original fallback source truth; they are not
+active unlit inputs. Their resources remain retained and required when authored. Public factor and
+binding readers expose all retained values, so a consumer first selects the shading model before
+evaluating roles. This format-owned base-color guarantee does not impose an MR factor group on every
+cross-format Unlit material or introduce a second factor authority.
+
 `Height` and `Lightmap` are not canonical v1 roles. `Height` lacks a format-independent zero, unit,
 and direction; `Lightmap` conflates irradiance color, ambient occlusion, shadow masks, and
 engine-specific baking products. A format maps the actual semantic to a precise role or reports

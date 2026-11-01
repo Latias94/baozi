@@ -167,7 +167,7 @@ enum SourceContext {
         owner: SourceEntityId,
         site: SourcePayloadSite,
     },
-    TextureTransform {
+    ExtensionProperty {
         payload_index: usize,
         owner: SourceEntityId,
         site: SourcePayloadSite,
@@ -208,6 +208,7 @@ enum SourceMember {
     Orthographic,
     Perspective,
     KhrTextureTransform,
+    KhrMaterialsUnlit,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -547,13 +548,13 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
             ) => self.begin_source_payload(owner, site, frame),
             Some(
                 frame @ JsonFrame {
-                    source: SourceContext::TextureTransform { owner, site, .. },
+                    source: SourceContext::ExtensionProperty { owner, site, .. },
                     ..
                 },
             ) if matches!(
                 frame.member,
                 SourceMember::Extras | SourceMember::Extensions
-            ) =>
+            ) || site == SourcePayloadSite::MaterialUnlit =>
             {
                 self.begin_source_payload(owner, site, frame)
             }
@@ -588,16 +589,18 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
         frame: JsonFrame,
     ) -> ScanResult<SourceContext> {
         let kind = if matches!(frame.source, SourceContext::Extensions { .. }) {
-            let extension = if frame.member == SourceMember::KhrTextureTransform {
-                SourceExtensionKind::KhrTextureTransform
-            } else {
-                SourceExtensionKind::Other
+            let extension = match frame.member {
+                SourceMember::KhrTextureTransform => SourceExtensionKind::KhrTextureTransform,
+                SourceMember::KhrMaterialsUnlit => SourceExtensionKind::KhrMaterialsUnlit,
+                _ => SourceExtensionKind::Other,
             };
             SourcePayloadKind::Extension(extension)
         } else if frame.member == SourceMember::Extensions {
             SourcePayloadKind::Extensions
-        } else {
+        } else if frame.member == SourceMember::Extras {
             SourcePayloadKind::Extras
+        } else {
+            SourcePayloadKind::ExtensionProperty
         };
         let key_range = SourceRange::from_json_offsets(
             self.raw_base,
@@ -613,53 +616,54 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
             member_range: self.source_range(frame.member_key_start)?,
             value_range: self.source_range(self.cursor)?,
         })?;
-        if kind == SourcePayloadKind::Extensions && self.peek() == Some(b'{') {
-            Ok(SourceContext::Extensions {
-                payload_index,
-                owner,
-                site,
-            })
-        } else if kind == SourcePayloadKind::Extension(SourceExtensionKind::KhrTextureTransform)
-            && matches!(
-                site,
-                SourcePayloadSite::BaseColorTexture
-                    | SourcePayloadSite::MetallicRoughnessTexture
-                    | SourcePayloadSite::NormalTexture
-                    | SourcePayloadSite::OcclusionTexture
-                    | SourcePayloadSite::EmissiveTexture
-            )
-            && self.peek() == Some(b'{')
-        {
-            Ok(SourceContext::TextureTransform {
-                payload_index,
-                owner,
-                site: match site {
-                    SourcePayloadSite::BaseColorTexture => {
-                        SourcePayloadSite::BaseColorTextureTransform
-                    }
-                    SourcePayloadSite::MetallicRoughnessTexture => {
-                        SourcePayloadSite::MetallicRoughnessTextureTransform
-                    }
-                    SourcePayloadSite::NormalTexture => SourcePayloadSite::NormalTextureTransform,
-                    SourcePayloadSite::OcclusionTexture => {
-                        SourcePayloadSite::OcclusionTextureTransform
-                    }
-                    SourcePayloadSite::EmissiveTexture => {
-                        SourcePayloadSite::EmissiveTextureTransform
-                    }
-                    _ => {
-                        return Err(self
-                            .ctx
-                            .format_failure(GltfFailure::internal(
-                                "glTF texture transform has no source binding site",
-                            ))
-                            .into());
-                    }
-                },
-            })
-        } else {
-            Ok(SourceContext::Payload { payload_index })
+        if self.peek() != Some(b'{') {
+            return Ok(SourceContext::Payload { payload_index });
         }
+        if kind == SourcePayloadKind::Extensions {
+            return Ok(SourceContext::Extensions {
+                payload_index,
+                owner,
+                site,
+            });
+        }
+        let site = match (kind, owner.kind, site) {
+            (
+                SourcePayloadKind::Extension(SourceExtensionKind::KhrMaterialsUnlit),
+                SourceEntityKind::Material,
+                SourcePayloadSite::Entity,
+            ) => SourcePayloadSite::MaterialUnlit,
+            (
+                SourcePayloadKind::Extension(SourceExtensionKind::KhrTextureTransform),
+                _,
+                SourcePayloadSite::BaseColorTexture,
+            ) => SourcePayloadSite::BaseColorTextureTransform,
+            (
+                SourcePayloadKind::Extension(SourceExtensionKind::KhrTextureTransform),
+                _,
+                SourcePayloadSite::MetallicRoughnessTexture,
+            ) => SourcePayloadSite::MetallicRoughnessTextureTransform,
+            (
+                SourcePayloadKind::Extension(SourceExtensionKind::KhrTextureTransform),
+                _,
+                SourcePayloadSite::NormalTexture,
+            ) => SourcePayloadSite::NormalTextureTransform,
+            (
+                SourcePayloadKind::Extension(SourceExtensionKind::KhrTextureTransform),
+                _,
+                SourcePayloadSite::OcclusionTexture,
+            ) => SourcePayloadSite::OcclusionTextureTransform,
+            (
+                SourcePayloadKind::Extension(SourceExtensionKind::KhrTextureTransform),
+                _,
+                SourcePayloadSite::EmissiveTexture,
+            ) => SourcePayloadSite::EmissiveTextureTransform,
+            _ => return Ok(SourceContext::Payload { payload_index }),
+        };
+        Ok(SourceContext::ExtensionProperty {
+            payload_index,
+            owner,
+            site,
+        })
     }
 
     fn finish_source_range(&mut self, source: SourceContext, raw_start: usize) -> ScanResult<()> {
@@ -675,7 +679,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
             }
             SourceContext::Payload { payload_index }
             | SourceContext::Extensions { payload_index, .. }
-            | SourceContext::TextureTransform { payload_index, .. } => {
+            | SourceContext::ExtensionProperty { payload_index, .. } => {
                 let range = self.source_range(raw_start)?;
                 let raw_end = self.absolute_offset(self.cursor)?;
                 let payload = self.source_map.payload_mut(payload_index).ok_or_else(|| {
@@ -1463,6 +1467,7 @@ fn source_member(bytes: &[u8], content_start: usize, content_end: usize) -> Sour
         b"orthographic" => SourceMember::Orthographic,
         b"perspective" => SourceMember::Perspective,
         b"KHR_texture_transform" => SourceMember::KhrTextureTransform,
+        b"KHR_materials_unlit" => SourceMember::KhrMaterialsUnlit,
         _ => SourceMember::Other,
     }
 }
@@ -2153,6 +2158,423 @@ mod tests {
             assert!(
                 map.payloads_for(id(SourceEntityKind::Node, None, 99))
                     .is_empty()
+            );
+        })
+    }
+
+    #[test]
+    fn material_unlit_shapes_keep_raw_ranges_and_glb_offsets() -> TestResult {
+        let json = r#"{
+            "materials":[
+                {"extensions":{"KHR_materials_unlit" : {}}},
+                {"extensions":{"KHR_materials_unlit" : {"extras":null}}},
+                {"extensions":{"KHR_materials_unlit" : {"extras":7,"extensions":{}}}},
+                {"extensions":{"KHR_materials_unlit" : {"extras":"包子🦀","extensions":null}}},
+                {"extensions":{"KHR_materials_unlit" : {"extensions":false}}},
+                {"extensions":{"KHR_materials_unlit" : null}},
+                {"extensions":{"KHR_materials_unlit" : 7}},
+                {"extensions":{"KHR_materials_unlit" : true}},
+                {"extensions":{"KHR_materials_unlit" : "raw"}},
+                {"extensions":{"KHR_materials_unlit" : [{"extras":false,"extensions":{"KHR_materials_unlit":{}}}]}}
+            ]
+        }"#;
+        fn inspect(scope: &ParseScope<'_>, map: &GltfSourceMap<'_>) {
+            let expected = [
+                ("{}", None, None),
+                (r#"{"extras":null}"#, Some("null"), None),
+                (r#"{"extras":7,"extensions":{}}"#, Some("7"), Some("{}")),
+                (
+                    r#"{"extras":"包子🦀","extensions":null}"#,
+                    Some(r#""包子🦀""#),
+                    Some("null"),
+                ),
+                (r#"{"extensions":false}"#, None, Some("false")),
+                ("null", None, None),
+                ("7", None, None),
+                ("true", None, None),
+                (r#""raw""#, None, None),
+                (
+                    r#"[{"extras":false,"extensions":{"KHR_materials_unlit":{}}}]"#,
+                    None,
+                    None,
+                ),
+            ];
+            assert_eq!(map.entities().len(), expected.len() + 1);
+            for (index, (value, extras, extensions)) in expected.into_iter().enumerate() {
+                let owner = id(SourceEntityKind::Material, None, index);
+                let payloads = map.payloads_for(owner);
+                assert_eq!(
+                    payloads.len(),
+                    2 + usize::from(extras.is_some()) + usize::from(extensions.is_some())
+                );
+                let unlit = payloads
+                    .iter()
+                    .find(|payload| {
+                        payload.kind
+                            == SourcePayloadKind::Extension(SourceExtensionKind::KhrMaterialsUnlit)
+                    })
+                    .unwrap();
+                assert_eq!(unlit.site, SourcePayloadSite::Entity);
+                assert_raw(scope, unlit.key_range, r#""KHR_materials_unlit""#);
+                assert_raw(
+                    scope,
+                    unlit.member_range,
+                    &format!(r#""KHR_materials_unlit" : {value}"#),
+                );
+                assert_raw(scope, unlit.value_range, value);
+                for (kind, value) in [
+                    (SourcePayloadKind::Extras, extras),
+                    (SourcePayloadKind::Extensions, extensions),
+                ] {
+                    if let Some(value) = value {
+                        let payload = payloads
+                            .iter()
+                            .find(|payload| {
+                                payload.site == SourcePayloadSite::MaterialUnlit
+                                    && payload.kind == kind
+                            })
+                            .unwrap();
+                        assert_raw(scope, payload.value_range, value);
+                    }
+                }
+            }
+        }
+        inspect_admission(json.as_bytes(), inspect)?;
+        inspect_admission(&glb(json.as_bytes()), inspect)
+    }
+
+    #[test]
+    fn material_unlit_nested_extensions_keep_sites_and_texture_transform_ranges() -> TestResult {
+        let json = br#"{
+            "materials":[{
+                "extensions":{"KHR_materials_unlit":{
+                    "extras":{"nodes":[{}]},
+                    "extensions":{
+                        "VENDOR_nested":{"extras":0},
+                        "KHR_texture_transform":{"extras":1},
+                        "KHR_materials_unlit":{"extras":2}
+                    }
+                }},
+                "pbrMetallicRoughness":{"baseColorTexture":{"extensions":{
+                    "KHR_texture_transform":{"texCoord":1,"offset":[1,2],"rotation":0.5,"scale":[2,2],"extras":null,"extensions":{"VENDOR_transform":0}}
+                }}}
+            }]
+        }"#;
+        inspect_admission(json, |scope, map| {
+            assert_eq!(map.entities().len(), 2);
+            let payloads = map.payloads_for(id(SourceEntityKind::Material, None, 0));
+            assert_eq!(payloads.len(), 12);
+            assert_eq!(
+                payloads
+                    .iter()
+                    .filter(|payload| payload.site == SourcePayloadSite::MaterialUnlit)
+                    .count(),
+                5
+            );
+            for (extension, key, value) in [
+                (
+                    SourceExtensionKind::Other,
+                    "VENDOR_nested",
+                    r#"{"extras":0}"#,
+                ),
+                (
+                    SourceExtensionKind::KhrTextureTransform,
+                    "KHR_texture_transform",
+                    r#"{"extras":1}"#,
+                ),
+                (
+                    SourceExtensionKind::KhrMaterialsUnlit,
+                    "KHR_materials_unlit",
+                    r#"{"extras":2}"#,
+                ),
+            ] {
+                let payload = payloads
+                    .iter()
+                    .find(|payload| {
+                        payload.site == SourcePayloadSite::MaterialUnlit
+                            && payload.kind == SourcePayloadKind::Extension(extension)
+                    })
+                    .unwrap();
+                assert_raw(scope, payload.key_range, &format!(r#""{key}""#));
+                assert_raw(scope, payload.value_range, value);
+            }
+            let transform = payloads
+                .iter()
+                .find(|payload| {
+                    payload.site == SourcePayloadSite::BaseColorTexture
+                        && payload.kind
+                            == SourcePayloadKind::Extension(
+                                SourceExtensionKind::KhrTextureTransform,
+                            )
+                })
+                .unwrap();
+            let value = r#"{"texCoord":1,"offset":[1,2],"rotation":0.5,"scale":[2,2],"extras":null,"extensions":{"VENDOR_transform":0}}"#;
+            assert_raw(scope, transform.key_range, r#""KHR_texture_transform""#);
+            assert_raw(scope, transform.value_range, value);
+            assert_raw(
+                scope,
+                transform.member_range,
+                &format!(r#""KHR_texture_transform":{value}"#),
+            );
+            for (site, kind, value) in [
+                (
+                    SourcePayloadSite::MaterialUnlit,
+                    SourcePayloadKind::Extras,
+                    r#"{"nodes":[{}]}"#,
+                ),
+                (
+                    SourcePayloadSite::BaseColorTextureTransform,
+                    SourcePayloadKind::Extras,
+                    "null",
+                ),
+                (
+                    SourcePayloadSite::BaseColorTextureTransform,
+                    SourcePayloadKind::Extensions,
+                    r#"{"VENDOR_transform":0}"#,
+                ),
+                (
+                    SourcePayloadSite::BaseColorTextureTransform,
+                    SourcePayloadKind::Extension(SourceExtensionKind::Other),
+                    "0",
+                ),
+            ] {
+                let payload = payloads
+                    .iter()
+                    .find(|payload| payload.site == site && payload.kind == kind)
+                    .unwrap();
+                assert_raw(scope, payload.value_range, value);
+            }
+            assert!(
+                payloads
+                    .iter()
+                    .all(|payload| payload.kind != SourcePayloadKind::ExtensionProperty)
+            );
+        })
+    }
+
+    #[test]
+    fn escaped_material_unlit_keys_preserve_raw_member_ranges() -> TestResult {
+        let json = r#"{
+            "ma\u0074erials":[{
+                "e\u0078tensions":{
+                    "KHR_materials_un\u006cit" : {
+                        "e\u0078tras":"包子🦀",
+                        "e\u0078tensions":{},
+                        "un\u006bnown" : [null, {"extras":0}]
+                    }
+                }
+            }]
+        }"#;
+        fn inspect(scope: &ParseScope<'_>, map: &GltfSourceMap<'_>) {
+            assert_eq!(map.entities().len(), 2);
+            let payloads = map.payloads_for(id(SourceEntityKind::Material, None, 0));
+            assert_eq!(payloads.len(), 5);
+            for (site, kind, key, member, value) in [
+                (
+                    SourcePayloadSite::MaterialUnlit,
+                    SourcePayloadKind::Extras,
+                    r#""e\u0078tras""#,
+                    r#""e\u0078tras":"包子🦀""#,
+                    r#""包子🦀""#,
+                ),
+                (
+                    SourcePayloadSite::MaterialUnlit,
+                    SourcePayloadKind::Extensions,
+                    r#""e\u0078tensions""#,
+                    r#""e\u0078tensions":{}"#,
+                    "{}",
+                ),
+                (
+                    SourcePayloadSite::MaterialUnlit,
+                    SourcePayloadKind::ExtensionProperty,
+                    r#""un\u006bnown""#,
+                    r#""un\u006bnown" : [null, {"extras":0}]"#,
+                    r#"[null, {"extras":0}]"#,
+                ),
+            ] {
+                let payload = payloads
+                    .iter()
+                    .find(|payload| payload.site == site && payload.kind == kind)
+                    .unwrap();
+                assert_raw(scope, payload.key_range, key);
+                assert_raw(scope, payload.member_range, member);
+                assert_raw(scope, payload.value_range, value);
+            }
+            let unlit = payloads
+                .iter()
+                .find(|payload| {
+                    payload.kind
+                        == SourcePayloadKind::Extension(SourceExtensionKind::KhrMaterialsUnlit)
+                })
+                .unwrap();
+            assert_eq!(unlit.site, SourcePayloadSite::Entity);
+            assert_raw(scope, unlit.key_range, r#""KHR_materials_un\u006cit""#);
+            let value = r#"{
+                        "e\u0078tras":"包子🦀",
+                        "e\u0078tensions":{},
+                        "un\u006bnown" : [null, {"extras":0}]
+                    }"#;
+            assert_raw(scope, unlit.value_range, value);
+            assert_raw(
+                scope,
+                unlit.member_range,
+                &format!(r#""KHR_materials_un\u006cit" : {value}"#),
+            );
+        }
+        inspect_admission(json.as_bytes(), inspect)?;
+        inspect_admission(&glb(json.as_bytes()), inspect)
+    }
+
+    #[test]
+    fn material_unlit_unknown_direct_properties_remain_observable_and_opaque() -> TestResult {
+        let json = br#"{
+            "materials":[{"extensions":{"KHR_materials_unlit":{
+                "nodes":[{}],
+                "normalTexture":{"extras":1,"extensions":{"KHR_materials_unlit":{}}},
+                "KHR_materials_unlit":{},
+                "nullable":null,
+                "enabled":true,
+                "number":7,
+                "label":"raw"
+            }}}]
+        }"#;
+        inspect_admission(json, |scope, map| {
+            assert_eq!(map.entities().len(), 2);
+            assert!(map.get(id(SourceEntityKind::Node, None, 0)).is_none());
+            let payloads = map.payloads_for(id(SourceEntityKind::Material, None, 0));
+            let expected = [
+                ("nodes", "[{}]"),
+                (
+                    "normalTexture",
+                    r#"{"extras":1,"extensions":{"KHR_materials_unlit":{}}}"#,
+                ),
+                ("KHR_materials_unlit", "{}"),
+                ("nullable", "null"),
+                ("enabled", "true"),
+                ("number", "7"),
+                ("label", r#""raw""#),
+            ];
+            assert_eq!(payloads.len(), expected.len() + 2);
+            let properties = payloads
+                .iter()
+                .filter(|payload| payload.site == SourcePayloadSite::MaterialUnlit);
+            assert_eq!(properties.clone().count(), expected.len());
+            for (payload, (key, value)) in properties.zip(expected) {
+                assert_eq!(payload.kind, SourcePayloadKind::ExtensionProperty);
+                assert_raw(scope, payload.key_range, &format!(r#""{key}""#));
+                assert_raw(scope, payload.member_range, &format!(r#""{key}":{value}"#));
+                assert_raw(scope, payload.value_range, value);
+            }
+        })
+    }
+
+    #[test]
+    fn material_unlit_wrong_owners_and_sites_keep_raw_payloads() -> TestResult {
+        let json = br#"{
+            "extensions":{"KHR_materials_unlit":{"extras":0}},
+            "asset":{"extensions":{"KHR_materials_unlit":{"extras":1}}},
+            "nodes":[{"extensions":{"KHR_materials_unlit":{"extras":2}}}],
+            "textures":[{"extensions":{"KHR_materials_unlit":{"extras":3}}}],
+            "materials":[{
+                "pbrMetallicRoughness":{
+                    "extensions":{"KHR_materials_unlit":{"extras":4}},
+                    "baseColorTexture":{"extensions":{
+                        "KHR_materials_unlit":{"extras":5},
+                        "KHR_texture_transform":{"extensions":{"KHR_materials_unlit":{"extras":6}}}
+                    }}
+                },
+                "normalTexture":{"extensions":{"KHR_materials_unlit":{"extras":7}}},
+                "extensions":{"KHR_materials_unlit":{"extensions":{"KHR_materials_unlit":{"extras":8}}}}
+            }]
+        }"#;
+        inspect_admission(json, |scope, map| {
+            let document = id(SourceEntityKind::Document, None, 0);
+            let material = id(SourceEntityKind::Material, None, 0);
+            for (owner, site, marker) in [
+                (document, SourcePayloadSite::Entity, 0),
+                (document, SourcePayloadSite::Asset, 1),
+                (
+                    id(SourceEntityKind::Node, None, 0),
+                    SourcePayloadSite::Entity,
+                    2,
+                ),
+                (
+                    id(SourceEntityKind::Texture, None, 0),
+                    SourcePayloadSite::Entity,
+                    3,
+                ),
+                (material, SourcePayloadSite::MaterialPbrMetallicRoughness, 4),
+                (material, SourcePayloadSite::BaseColorTexture, 5),
+                (material, SourcePayloadSite::BaseColorTextureTransform, 6),
+                (material, SourcePayloadSite::NormalTexture, 7),
+                (material, SourcePayloadSite::MaterialUnlit, 8),
+            ] {
+                let payload = map
+                    .payloads_for(owner)
+                    .iter()
+                    .find(|payload| {
+                        payload.site == site
+                            && payload.kind
+                                == SourcePayloadKind::Extension(
+                                    SourceExtensionKind::KhrMaterialsUnlit,
+                                )
+                    })
+                    .unwrap();
+                assert_raw(scope, payload.key_range, r#""KHR_materials_unlit""#);
+                let value = format!(r#"{{"extras":{marker}}}"#);
+                assert_raw(scope, payload.value_range, &value);
+                assert_raw(
+                    scope,
+                    payload.member_range,
+                    &format!(r#""KHR_materials_unlit":{value}"#),
+                );
+            }
+            assert_eq!(
+                map.payloads()
+                    .iter()
+                    .filter(|payload| {
+                        payload.kind
+                            == SourcePayloadKind::Extension(SourceExtensionKind::KhrMaterialsUnlit)
+                    })
+                    .count(),
+                10
+            );
+            assert!(map.payloads().iter().all(|payload| {
+                !matches!(
+                    payload.kind,
+                    SourcePayloadKind::Extras | SourcePayloadKind::ExtensionProperty
+                )
+            }));
+        })
+    }
+
+    #[test]
+    fn unlit_keys_inside_extras_do_not_create_semantic_objects() -> TestResult {
+        let json = br#"{
+            "extras":{"materials":[{"extensions":{"KHR_materials_unlit":{}}}]},
+            "materials":[{
+                "extras":{"extensions":{"KHR_materials_unlit":{"extras":null}}},
+                "extensions":{"KHR_materials_unlit":{
+                    "extras":{"nodes":[{}],"materials":[{}],"extensions":{"KHR_materials_unlit":{}},"KHR_materials_unlit":{"extras":null}}
+                }}
+            }]
+        }"#;
+        inspect_admission(json, |scope, map| {
+            assert_eq!(map.entities().len(), 2);
+            assert!(map.get(id(SourceEntityKind::Node, None, 0)).is_none());
+            assert!(map.get(id(SourceEntityKind::Material, None, 1)).is_none());
+            assert_eq!(map.payloads().len(), 5);
+            let payloads = map.payloads_for(id(SourceEntityKind::Material, None, 0));
+            assert_eq!(payloads.len(), 4);
+            let extras = payloads
+                .iter()
+                .find(|payload| payload.site == SourcePayloadSite::MaterialUnlit)
+                .unwrap();
+            assert_eq!(extras.kind, SourcePayloadKind::Extras);
+            assert_raw(
+                scope,
+                extras.value_range,
+                r#"{"nodes":[{}],"materials":[{}],"extensions":{"KHR_materials_unlit":{}},"KHR_materials_unlit":{"extras":null}}"#,
             );
         })
     }

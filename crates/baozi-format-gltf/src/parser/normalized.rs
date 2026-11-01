@@ -112,12 +112,11 @@ pub(super) fn submit_parts(
         ImportStorageClass::SceneConstruction,
         "gltf-complete-batch-materials",
     );
-    let shading_model = ShadingModel::PbrMetallicRoughness;
     materials.try_reserve(appearance_storage.materials.len())?;
     for material in appearance_storage.materials.as_slice() {
         let mut authored = MaterialAuthoring::try_from_parts(
             material.bindings,
-            shading_model,
+            material.shading_model,
             material.alpha_mode,
             material.double_sided,
             material.factors,

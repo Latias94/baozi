@@ -1,7 +1,8 @@
 //! Selection-aware checks over the existing admission scanner's raw source map.
 
 use super::{
-    GltfFailure, NodeGraph, ParseScope, ResourceClosure, Result, animation, gltf_parse_error,
+    GltfFailure, KHR_MATERIALS_UNLIT, NodeGraph, ParseScope, ResourceClosure, Result, animation,
+    gltf_parse_error, to_u64,
 };
 use crate::source_map::{
     GltfSourceMap, SourceEntityId, SourceEntityKind, SourceExtensionKind, SourcePayloadKind,
@@ -84,6 +85,12 @@ pub(super) fn preflight(
     }
 
     // Payload ownership comes from scanner contexts, so unknown data cannot disappear in serde.
+    ctx.charge_work(to_u64(document.as_json().extensions_used.len()))?;
+    let unlit_declared = document
+        .as_json()
+        .extensions_used
+        .iter()
+        .any(|name| name == KHR_MATERIALS_UNLIT);
     let mut extras = super::extras::ExtrasPreflight::default();
     for entity in map.entities() {
         ctx.charge_work(1)?;
@@ -125,6 +132,37 @@ pub(super) fn preflight(
                             | SourcePayloadSite::OcclusionTexture
                             | SourcePayloadSite::EmissiveTexture
                     ) => {}
+                SourcePayloadKind::Extension(SourceExtensionKind::KhrMaterialsUnlit)
+                    if entity.id.kind == SourceEntityKind::Material
+                        && payload.site == SourcePayloadSite::Entity =>
+                {
+                    let offset = usize::try_from(range.byte_offset).ok();
+                    if offset.and_then(|offset| ctx.primary_bytes().get(offset)) != Some(&b'{') {
+                        return Err(GltfFailure::invalid_json(
+                            "KHR_materials_unlit",
+                            range.byte_offset,
+                            range.byte_length,
+                            "glTF KHR_materials_unlit must be an object",
+                        )
+                        .into());
+                    }
+                    if !unlit_declared {
+                        return Err(GltfFailure::invalid_json(
+                            "KHR_materials_unlit",
+                            range.byte_offset,
+                            range.byte_length,
+                            "glTF KHR_materials_unlit must be declared in extensionsUsed",
+                        )
+                        .into());
+                    }
+                }
+                SourcePayloadKind::ExtensionProperty => {
+                    return Err(fail(
+                        "extension-property",
+                        "glTF extension property is outside the admitted profile",
+                    )
+                    .into());
+                }
                 SourcePayloadKind::Extension(_) => {
                     return Err(fail(
                         "extension-payload",

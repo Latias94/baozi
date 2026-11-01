@@ -214,6 +214,7 @@ pub(super) struct BindingStorage {
 }
 
 pub(super) struct MaterialStorage<'scope> {
+    pub(super) shading_model: ShadingModel,
     pub(super) name: Option<MeteredString<'scope>>,
     pub(super) bindings: AuthoringRange,
     pub(super) alpha_mode: AlphaMode,

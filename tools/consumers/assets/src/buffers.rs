@@ -11,7 +11,8 @@ use baozi::{
 
 use crate::Result;
 
-/// This application deliberately chooses F64 positions/normals/tangents and UV set zero.
+/// This application chooses F64 positions/normals/tangents, UV0, and linear COLOR_0.
+/// RGB colors gain alpha one; absent colors remain absent and RGBA alpha stays authored.
 /// F32 inputs widen exactly. Reuse requires the same source vertex and selected field bits.
 /// It does not weld distinct source vertices, truncate influences, or decode images.
 #[derive(Debug, Clone, PartialEq)]
@@ -20,6 +21,7 @@ pub struct Vertex {
     pub normal: Option<[f64; 3]>,
     pub tangent: Option<[f64; 4]>,
     pub uv: Option<[f64; 2]>,
+    pub color: Option<[f64; 4]>,
 }
 
 #[derive(Debug, Default)]
@@ -39,6 +41,7 @@ struct VertexKey {
     normal: Option<[u64; 3]>,
     tangent: Option<[u64; 4]>,
     uv: Option<[u64; 2]>,
+    color: Option<[u64; 4]>,
 }
 
 impl VertexKey {
@@ -50,6 +53,7 @@ impl VertexKey {
             normal: vertex.normal.map(|v| v.map(f64::to_bits)),
             tangent: vertex.tangent.map(|v| v.map(f64::to_bits)),
             uv: vertex.uv.map(|v| v.map(f64::to_bits)),
+            color: vertex.color.map(|v| v.map(f64::to_bits)),
         }
     }
 }
@@ -204,6 +208,9 @@ pub struct Binding {
 #[derive(Debug)]
 pub struct Material {
     pub name: Option<String>,
+    pub shading_model: baozi::ShadingModel,
+    pub alpha_mode: baozi::AlphaMode,
+    pub double_sided: bool,
     pub factors: MaterialFactors,
     pub bindings: Vec<Binding>,
 }
@@ -313,8 +320,8 @@ impl ApplicationAsset {
                 let tuples = list_vertices(primitive)?;
                 let mut indexed =
                     IndexedVertices::new(tuples.len(), primitive.influences().is_some())?;
-                // The app layout selects one normal, tangent and UV0 field. Ambiguous simultaneous
-                // domains must be resolved by an explicit application policy, never priority.
+                // The app selects one normal, tangent, UV0 and COLOR_0 field. Ambiguous
+                // simultaneous domains require an explicit application policy, never priority.
                 let normal = select_domain(
                     primitive
                         .attributes()
@@ -331,6 +338,12 @@ impl ApplicationAsset {
                     primitive
                         .attributes()
                         .filter(|a| a.semantic() == AttributeSemanticRef::Tangent)
+                        .map(|a| a.domain()),
+                )?;
+                let color = select_domain(
+                    primitive
+                        .attributes()
+                        .filter(|a| a.semantic() == AttributeSemanticRef::Color(0))
                         .map(|a| a.domain()),
                 )?;
                 for tuple in tuples.vertices() {
@@ -364,6 +377,16 @@ impl ApplicationAsset {
                                 numeric(
                                     tuple
                                         .attribute(AttributeSemanticRef::Texcoord(0), domain)
+                                        .expect("selected field exists")
+                                        .element(),
+                                )
+                            })
+                            .transpose()?,
+                        color: color
+                            .map(|domain| {
+                                numeric_color(
+                                    tuple
+                                        .attribute(AttributeSemanticRef::Color(0), domain)
                                         .expect("selected field exists")
                                         .element(),
                                 )
@@ -486,6 +509,9 @@ impl ApplicationAsset {
                 .materials()
                 .map(|m| Material {
                     name: m.name().map(str::to_owned),
+                    shading_model: m.shading_model(),
+                    alpha_mode: m.alpha_mode(),
+                    double_sided: m.double_sided(),
                     factors: m.factors(),
                     bindings: m
                         .bindings()
@@ -591,6 +617,22 @@ fn numeric<const N: usize>(element: AttributeElement<'_>) -> Result<[f64; N]> {
     Ok(result)
 }
 
+fn numeric_color(element: AttributeElement<'_>) -> Result<[f64; 4]> {
+    let mut result = [0.0, 0.0, 0.0, 1.0];
+    match element {
+        AttributeElement::F32(values) if matches!(values.len(), 3 | 4) => {
+            for (out, value) in result.iter_mut().zip(values) {
+                *out = f64::from(*value);
+            }
+        }
+        AttributeElement::F64(values) if matches!(values.len(), 3 | 4) => {
+            result[..values.len()].copy_from_slice(values);
+        }
+        _ => return Err("application color requires three or four floating scalars".into()),
+    }
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -615,6 +657,7 @@ mod tests {
             normal: Some([0.0, 0.0, 1.0]),
             tangent: Some([1.0, 0.0, 0.0, 1.0]),
             uv: Some([0.0, 0.0]),
+            color: Some([0.0, 0.5, 0.75, 1.0]),
         }
     }
 
@@ -634,6 +677,10 @@ mod tests {
         assert_eq!(
             actual.uv.map(|v| v.map(f64::to_bits)),
             expected.uv.map(|v| v.map(f64::to_bits))
+        );
+        assert_eq!(
+            actual.color.map(|v| v.map(f64::to_bits)),
+            expected.color.map(|v| v.map(f64::to_bits))
         );
     }
 
@@ -655,9 +702,17 @@ mod tests {
         uv.uv = Some([0.5, 0.0]);
         let mut signed_zero_uv = base.clone();
         signed_zero_uv.uv = Some([-0.0, 0.0]);
+        let mut color = base.clone();
+        color.color = Some([0.25, 0.5, 0.75, 1.0]);
+        let mut color_alpha = base.clone();
+        color_alpha.color = Some([0.0, 0.5, 0.75, 0.5]);
+        let mut signed_zero_color = base.clone();
+        signed_zero_color.color = Some([-0.0, 0.5, 0.75, 1.0]);
+        let mut absent_color = base.clone();
+        absent_color.color = None;
 
         // These selected tuples cover Corner/Face variation that the built-in glTF profile
-        // cannot author for Tangent. The source identity is deliberately unchanged at corner 3.
+        // cannot author for Tangent or Color. Source identity stays unchanged at corner 3.
         for seam in [
             position,
             normal,
@@ -666,6 +721,10 @@ mod tests {
             tangent_w,
             uv,
             signed_zero_uv,
+            color,
+            color_alpha,
+            signed_zero_color,
+            absent_color,
         ] {
             let corners = [
                 base.clone(),
@@ -749,6 +808,35 @@ mod tests {
             numeric::<3>(AttributeElement::F32(&narrow))?.map(f64::to_bits),
             narrow.map(|v| f64::from(v).to_bits())
         );
+        Ok(())
+    }
+
+    #[test]
+    fn application_color_preserves_rgb_rgba_bits_without_clamping() -> Result<()> {
+        let wide_rgb = [16_777_217.0, -0.0, f64::from_bits(1)];
+        let wide_rgba = [wide_rgb[0], wide_rgb[1], wide_rgb[2], -0.0];
+        assert_eq!(
+            numeric_color(AttributeElement::F64(&wide_rgb))?.map(f64::to_bits),
+            [wide_rgb[0], wide_rgb[1], wide_rgb[2], 1.0].map(f64::to_bits)
+        );
+        assert_eq!(
+            numeric_color(AttributeElement::F64(&wide_rgba))?.map(f64::to_bits),
+            wide_rgba.map(f64::to_bits)
+        );
+        let narrow_rgb = [-0.0, f32::from_bits(1), 1.25];
+        let narrow_rgba = [narrow_rgb[0], narrow_rgb[1], narrow_rgb[2], -0.5];
+        assert_eq!(
+            numeric_color(AttributeElement::F32(&narrow_rgb))?.map(f64::to_bits),
+            [narrow_rgb[0], narrow_rgb[1], narrow_rgb[2], 1.0]
+                .map(|value| f64::from(value).to_bits())
+        );
+        assert_eq!(
+            numeric_color(AttributeElement::F32(&narrow_rgba))?.map(f64::to_bits),
+            narrow_rgba.map(|value| f64::from(value).to_bits())
+        );
+        assert!(numeric_color(AttributeElement::F32(&[0.0; 2])).is_err());
+        assert!(numeric_color(AttributeElement::F64(&[0.0; 5])).is_err());
+        assert!(numeric_color(AttributeElement::U32(&[0; 4])).is_err());
         Ok(())
     }
 
