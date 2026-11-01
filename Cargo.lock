@@ -178,6 +178,7 @@ dependencies = [
  "baozi-import",
  "baozi-io",
  "baozi-operation",
+ "sha2",
  "thiserror",
  "tracing",
 ]

@@ -10,6 +10,7 @@ mod remap;
 mod report;
 mod scene_edit;
 mod space;
+mod tangents;
 mod triangulate;
 mod triangulation;
 mod vertices;
@@ -44,6 +45,10 @@ pub use normals::{
 pub use space::{
     SpaceConversionCause, SpaceConversionFailure, SpaceConversionIssue, SpaceConversionOptions,
     SpaceConversionReport, convert_scene_space,
+};
+pub use tangents::{
+    ExistingTangents, TangentCause, TangentFailure, TangentGenerationReport, TangentIssue,
+    TangentOptions, generate_tangents,
 };
 pub use vertices::{
     TriangleVertex, TriangleVertices, VertexAttribute, VertexLayoutError, triangle_vertices,

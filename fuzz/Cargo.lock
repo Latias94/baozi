@@ -129,6 +129,7 @@ version = "0.1.0"
 dependencies = [
  "baozi-core",
  "baozi-operation",
+ "sha2",
  "thiserror",
 ]
 

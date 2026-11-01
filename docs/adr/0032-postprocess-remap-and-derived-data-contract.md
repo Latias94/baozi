@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-10
-updated: 2026-10-31
+updated: 2026-11-01
 authors:
   - Codex
 decision_type: architecture
@@ -249,6 +249,39 @@ with operation-specific evidence. Each variant owns its actual
 rooted store and exposes only the applicable facts; a Normal result cannot be used as a remap.
 Public `NormalGenerationReport` owns the latter directly, without duplicating decoded effects.
 
+### Direct Tangent Generation
+
+`generate_tangents` consumes one TriangleList target and explicit Normal domain and Texcoord
+set/domain selections. The admitted domains are independently Vertex or Corner. The private
+**Baozi Triangle UV Derivative v1** kernel derives each face's increasing-U direction, projects
+against each normalized selected Normal and emits dense Corner F32x4. It neither averages nor
+welds across faces and does not claim MikkTSpace equivalence. The generated attribute owns
+`TriangleUvDerivative` construction and `SignInW` reconstruction declarations; no Scene-space
+declaration changes. See the [verified algorithm decision and numeric
+contract](../research/2026-11-01-tangent-generation-algorithm.md).
+
+`ExistingTangents::Preserve` returns the original Scene if any Tangent already exists.
+`Replace` permits exactly one authored stream. Canonical insertion and replacement preserve
+topology, all Vertex/Corner/Face identities and unrelated scalar bits, sparse encodings, names,
+metadata and provenance. Replaced owner-local Tangent metadata follows its replacement.
+The generated owner's lineage includes the target Primitive, Position, selected Normal,
+selected Texcoord and replaced Tangent attachments, deduplicated through the existing profile.
+The options digest binds the algorithm version, selected domain keys, UV set and replacement
+policy. Other owners retain their own ancestry.
+
+Any authored Position/Normal/Tangent morph delta on the target rejects this base-only profile,
+including sparse and explicitly zero payloads. Empty logical morph targets remain admissible.
+Zero area, zero UV determinant, zero or ill-conditioned frames and differing W signs within a
+triangle reject without publishing. All generated W values are exactly +1 or -1. Source
+coordinates, normals and UVs remain unchanged, with no implicit UV-origin adjustment.
+
+Output scratch and retained overlap use existing fallible capacity admission. Domain reads,
+sparse lookup comparisons and bounded face kernels use the existing work/control lane. The
+core validates the candidate against the exact borrowed replacement before publication.
+Ordinary failure or cancellation returns the original readable Scene and generation. Changed
+evidence exposes the input/output target, replacement fact and generated attribute index, and
+remains owned after the Scene is dropped. No empty remap or general pass scheduler is created.
+
 ### Direct Whole-Scene Spatial Conversion
 
 `convert_scene_space` consumes one immutable Scene and a validated complete `TargetSpace`, with
@@ -269,7 +302,8 @@ TriangleFan require a separately implemented lowering before a conversion needin
 
 Node conversion preserves authored Matrix/TRS form, hierarchy, names, and attachments. The new
 spatial owner changes the target's five facts and converts complete camera/light definitions;
-UV origin and tangent basis/encoding remain preserved. Declaration-only and winding-only edits share
+UV origin and each Tangent attribute's basis/encoding remain preserved. A reflection rejects
+atomically if any present stream lacks supported `SignInW` encoding. Declaration-only and winding-only edits share
 unaffected typed tables. Scene provenance records the resolved conversion. Changed Node,
 Primitive, Attribute, Skin, MorphDelta, AnimationChannel, Camera, Light, Material, and TextureBinding
 owners retain their own attachments together with the input Scene's attachments as operation

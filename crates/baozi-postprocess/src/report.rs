@@ -4,7 +4,7 @@ use baozi_core::{PrimitiveId, SceneGenerationId, ValidatedScene};
 
 use crate::{
     NormalGenerationReport, NormalOptions, PostProcessResourceEvidence, SpaceConversionOptions,
-    SpaceConversionReport, TriangulationRemap,
+    SpaceConversionReport, TangentGenerationReport, TangentOptions, TriangulationRemap,
 };
 
 /// The concrete operation evaluated against an input Scene.
@@ -16,6 +16,11 @@ pub enum PostProcessOperation {
     GenerateNormals {
         target: PrimitiveId,
         options: NormalOptions,
+    },
+    /// Generate one corner tangent field from explicitly selected normal and UV fields.
+    GenerateTangents {
+        target: PrimitiveId,
+        options: TangentOptions,
     },
     /// Convert the complete input Scene using explicit spatial declarations.
     ConvertSpace {
@@ -48,6 +53,7 @@ enum OperationResult {
     Unchanged,
     Triangulation(TriangulationRemap),
     Normals(NormalGenerationReport),
+    Tangents(TangentGenerationReport),
     SpaceConversion(SpaceConversionReport),
 }
 
@@ -121,6 +127,29 @@ impl PostProcessReport {
         }
     }
 
+    pub(crate) fn tangents(
+        target: PrimitiveId,
+        options: TangentOptions,
+        output_generation: SceneGenerationId,
+        resources: PostProcessResourceEvidence,
+        tangent: Option<TangentGenerationReport>,
+    ) -> Self {
+        Self {
+            operation: PostProcessOperation::GenerateTangents { target, options },
+            output_generation,
+            resources,
+            result: tangent.map_or(OperationResult::Unchanged, OperationResult::Tangents),
+        }
+    }
+
+    /// Returns the generated tangent attribute and explicit authored-field replacement evidence.
+    pub const fn tangent_generation(&self) -> Option<&TangentGenerationReport> {
+        match &self.result {
+            OperationResult::Tangents(report) => Some(report),
+            _ => None,
+        }
+    }
+
     /// Returns whether the operation preserved the input or published a replacement.
     pub const fn disposition(&self) -> PostProcessRunDisposition {
         match self.result {
@@ -138,7 +167,8 @@ impl PostProcessReport {
     pub const fn input_generation(&self) -> SceneGenerationId {
         match self.operation {
             PostProcessOperation::Triangulate { target }
-            | PostProcessOperation::GenerateNormals { target, .. } => target.generation(),
+            | PostProcessOperation::GenerateNormals { target, .. }
+            | PostProcessOperation::GenerateTangents { target, .. } => target.generation(),
             PostProcessOperation::ConvertSpace {
                 input_generation, ..
             } => input_generation,

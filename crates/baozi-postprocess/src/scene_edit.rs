@@ -13,7 +13,8 @@ use baozi_core::__scene_integration::integration::{
     ResolvedSceneSpaceConversion, SceneCanonicalRootTag, SceneEditAdmission, SceneEditEvidence,
     SceneEditEvidenceTag, SceneEditOutput, SceneEditPostflight, SceneEditRejection,
     SceneEditTransaction, SceneEditValidationProof, SceneNormalReplacement,
-    SceneSpaceConversionIssue, SceneTriangulationReplacement, consume_scene_edit_freeze_permit,
+    SceneSpaceConversionIssue, SceneTangentReplacement, SceneTriangulationReplacement,
+    consume_scene_edit_freeze_permit,
 };
 use baozi_core::{PrimitiveId, SceneValidationLimits, ValidatedScene};
 use baozi_operation::__retained_store_integration::activation::{
@@ -40,6 +41,11 @@ pub(crate) enum PreparedEdit<'a> {
         target: PrimitiveId,
         options: crate::NormalOptions,
         values: crate::normals::input::GeneratedNormals,
+    },
+    Tangents {
+        target: PrimitiveId,
+        options: crate::TangentOptions,
+        values: crate::tangents::input::GeneratedTangents,
     },
     Space {
         resolved: ResolvedSceneSpaceConversion<'a>,
@@ -82,6 +88,24 @@ impl PreparedEdit<'_> {
             Self::Space { resolved } => {
                 admission.into_space_transaction(*resolved, SceneValidationLimits::default())
             }
+            Self::Tangents {
+                target,
+                options,
+                values,
+            } => admission.into_tangent_transaction(
+                input,
+                SceneTangentReplacement::new(
+                    *target,
+                    values.values(),
+                    values.had_tangent(),
+                    options.normal_domain,
+                    options.uv_set,
+                    options.uv_domain,
+                    &crate::tangents::CONVENTIONS,
+                    options.digest(),
+                ),
+                SceneValidationLimits::default(),
+            ),
         }
     }
 }

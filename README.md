@@ -130,6 +130,14 @@ smoothing groups; group zero is hard per face, and UV seams do not split a share
 Attribute lookup requires both semantic and domain, so `normals(AttributeDomain::Corner)` and
 `texcoords(set, AttributeDomain::Vertex)` select the intended stream explicitly.
 
+`generate_tangents(scene, target, TangentOptions::new(normal_domain, uv_set, uv_domain), control)`
+selects the Normal and UV fields explicitly and emits dense Corner F32x4. The Triangle UV Derivative
+v1 algorithm preserves mirrored seams, uses `SignInW`, and performs no cross-face welding or
+averaging. It does not claim MikkTSpace compatibility. Existing Tangents are preserved by default;
+`ExistingTangents::Replace` replaces a single authored stream. Each Tangent owns its construction
+and encoding declarations. Degenerate frames and authored morph deltas on the target reject
+without replacing the Scene.
+
 `convert_scene_space(scene, options, control)` converts an entire Scene to a validated
 `TargetSpace`. The target contains handedness, signed up/front axes, meters per unit, and front-face
 winding. Unknown source facts need explicit `source_assumptions`; an assumption conflicting with

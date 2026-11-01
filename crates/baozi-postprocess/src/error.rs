@@ -70,6 +70,12 @@ pub enum PostProcessRunError {
         #[source]
         failure: crate::NormalFailure,
     },
+    /// Tangent generation failed without replacing the input Scene.
+    #[error("tangent generation failed: {failure}")]
+    Tangents {
+        #[source]
+        failure: crate::TangentFailure,
+    },
     /// Spatial conversion failed without replacing the input Scene.
     #[error("scene space conversion failed: {failure}")]
     SpaceConversion {

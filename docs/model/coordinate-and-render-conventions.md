@@ -14,8 +14,9 @@ Importers should record source metadata when known:
 - unit scale to meters
 - UV origin
 - winding convention
-- tangent basis convention
-- tangent handedness encoding
+
+Each authored Tangent attribute records its own construction convention and handedness encoding.
+Those facts are independent of Scene space and of other Tangent streams on the same primitive.
 
 Importers must not silently convert coordinate systems, flip UVs, flip winding, or change units for renderer convenience.
 
@@ -61,9 +62,9 @@ Generated tangents store handedness in tangent `w`.
 
 The tangent construction algorithm and bitangent reconstruction encoding are independent source
 facts. A known encoding does not imply a known algorithm. Declaring MikkTSpace still requires
-`SignInW`, and complete scene-space validation still requires both facts. The
+`SignInW`. Each Tangent descriptor owns both facts, with explicit unknown values when needed. The
 [glTF specification](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#meshes) defines
-`SignInW` for authored tangents, so glTF imports declare it while leaving the construction algorithm
+`SignInW` for authored tangents, so glTF imports declare it on each Tangent while leaving construction
 unknown. glTF also declares an upper-left UV origin. Import does not generate tangents or flip UVs.
 
 glTF's asset front is positive Z, as defined in its
@@ -83,6 +84,15 @@ Coordinate conversion transports normals and tangent directions by the signed ba
 It multiplies tangent `w` by the basis determinant when the encoding is `SignInW`; it does not
 normalize authored vectors or alter the tangent-generation declaration. A reflection with an
 unhandled present tangent encoding returns a typed capability error.
+
+`generate_tangents` selects one Vertex or Corner Normal field and a Vertex or Corner Texcoord
+set explicitly, then generates dense Corner F32x4 values on one TriangleList primitive. Its
+`TriangleUvDerivative` convention uses per-triangle UV derivatives and Gram-Schmidt projection,
+without cross-face welding or averaging. It does not claim MikkTSpace compatibility. Existing
+Tangents are preserved by default; explicit replacement requires a single authored stream.
+Degenerate geometry/UV/frame, mixed triangle handedness and any authored morph delta on the target
+reject without replacing the Scene. See the
+[algorithm and numeric profile](../research/2026-11-01-tangent-generation-algorithm.md).
 
 ## Units
 

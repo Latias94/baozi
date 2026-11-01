@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-10
-updated: 2026-10-31
+updated: 2026-11-01
 authors:
   - Codex
 decision_type: architecture
@@ -125,6 +125,13 @@ The current built-in schema is normative:
 | `TEXCOORD_n` | Vertex or Corner | `F32`, `UNorm U8`, or `UNorm U16`, with 1, 2, or 3 lanes |
 | `COLOR_n` | Vertex, Corner, Face, or Instance | `F32`, `UNorm U8`, or `UNorm U16`, with 3 or 4 lanes |
 | `SMOOTHING_GROUP` | Face | `U32 x 1`, no normalization; zero means off |
+
+Each `TANGENT` descriptor also owns typed construction and bitangent reconstruction declarations.
+`TangentConventions` permits independent unknown facts, and MikkTSpace requires `SignInW`.
+Non-Tangent descriptors cannot carry these declarations. Namespaced convention identities and
+text belong to the same geometry owner, admission, profile closure, borrowed read and snapshot
+as the attribute. Vertex and Corner Tangents on one primitive may declare different conventions.
+No Scene-wide or primitive-wide fallback applies. Deleting the attribute deletes its declarations.
 
 No built-in semantic accepts a namespaced normalization or packed encoding. A validated namespaced
 custom semantic may use any domain and current component type within the lane limit, but its

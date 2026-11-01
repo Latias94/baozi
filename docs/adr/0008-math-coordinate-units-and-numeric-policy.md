@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-10-31
+updated: 2026-11-01
 authors:
   - Codex
 decision_type: architecture
@@ -62,13 +62,14 @@ The raw scene preserves source numbers and records a complete `SceneSpace`:
 - unit scale to meters
 - clockwise or counter-clockwise front-face winding
 - upper-left or lower-left UV origin, or unknown
-- tangent basis convention and handedness encoding, or unknown
 
-Tangent construction and handedness encoding are independent facts: either may remain unknown in a
-partial descriptor. An importer may know that tangent W encodes a sign without knowing the author's
-construction algorithm. Declaring MikkTSpace requires its `SignInW` encoding; a complete descriptor
-still requires both facts. In particular, glTF declares `SignInW` and an upper-left UV origin but
-does not guarantee that authored tangents were constructed with MikkTSpace.
+Each Tangent attribute separately owns its construction convention and handedness encoding.
+These independent facts are absent from `SceneSpace`: either may remain unknown on an authored
+Tangent descriptor, and a primitive's Vertex and Corner streams may differ. Non-Tangent attributes
+cannot carry tangent declarations. Declaring MikkTSpace requires `SignInW`. An importer may know
+that tangent W encodes a sign without knowing the construction algorithm. In particular, glTF
+declares `SignInW` for each authored Tangent and an upper-left Scene UV origin, without guaranteeing
+MikkTSpace construction. A scene without Tangents has no tangent declarations.
 
 glTF declares a positive-Z asset front. This source convention is distinct from Baozi's
 negative-Z-front standard target and from camera-local negative-Z viewing axes. Import records the
@@ -89,8 +90,9 @@ postprocess operation.
 
 Validation rejects signed up/front axes on the same underlying axis. When both are known, they and
 the declared handedness must derive one finite orthonormal side axis; a complete-space claim cannot
-retain `Unknown`. Front-face winding remains an explicit independent convention, while tangent-basis
-orientation must agree with its declared normal/UV axes and handedness encoding. Every Baozi
+retain `Unknown`. Front-face winding remains an explicit independent convention. Reflection checks
+each Tangent attribute's encoding; any unsupported stream rejects the operation atomically.
+Every Baozi
 quaternion field, including future static TRS fields, obeys the same finite-unit rule; normalization
 outside tolerance is an explicit diagnosed recovery, not a constructor side effect.
 

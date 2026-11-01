@@ -2,5 +2,7 @@
 /repo-ref
 /fuzz/target
 /fuzz/artifacts
+/tools/consumers/assets/target
+/tools/consumers/scene/target
 /candidates/baozi-native-io/target
 __pycache__/

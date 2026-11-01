@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-10-31
+updated: 2026-11-01
 authors:
   - Codex
 decision_type: architecture
@@ -279,6 +279,13 @@ ADR 0032 defines its attribute-owner mapping, metadata deletion, provenance pare
 operation-specific report evidence. Normal generation remains an explicit caller operation after
 triangulation; importers do not perform it silently.
 
+`generate_tangents` selects explicit Vertex/Corner Normal and Texcoord set/domain keys and
+generates dense Corner F32x4 with attribute-owned `TriangleUvDerivative` and `SignInW`.
+The private Triangle UV Derivative v1 kernel does not weld or smooth across faces and makes no
+MikkTSpace compatibility claim. Authored Tangents are preserved by default; replacement requires
+one stream. Degenerate frames and authored morph deltas on the target reject atomically. It
+reuses the same concrete geometry transaction and operation-specific evidence under ADR 0032.
+
 ### Triangulation Contract
 
 Triangulation operates per polygon face and keeps the public and core boundary independent of any
@@ -507,6 +514,19 @@ Cancellation, deadlines, original-input failure ownership, generation binding, r
 lifetime, thread transfer, and tracing equivalence are tested through actual direct operations.
 
 ## Amendment History
+
+### 2026-11-01: Add attribute-owned tangent generation
+
+- Previous rule: tangent construction and encoding were global Scene-space facts, and no concrete
+  tangent-generation operation existed.
+- New rule: each Tangent descriptor owns those independent declarations. The explicit
+  single-primitive generator uses the bounded Triangle UV Derivative v1 kernel and retained
+  operation-specific evidence. Reflection checks every present stream's encoding.
+- Compatibility impact: remove the unpublished global fields and their schema authority without
+  an override or fallback path. The deterministic snapshot schema becomes revision 6.
+- Required review: per-stream ownership, namespaced text/closure accounting, numeric frames,
+  selected-domain provenance, morph rejection, cancellation and atomic publication.
+- Rationale: the values' descriptor must determine the conventions needed to interpret them.
 
 ### 2026-10-30: Add direct normal generation and typed geometry evidence
 

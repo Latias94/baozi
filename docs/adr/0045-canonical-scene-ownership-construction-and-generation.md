@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-08-19
-updated: 2026-10-31
+updated: 2026-11-01
 authors:
   - Codex
 decision_type: architecture
@@ -280,7 +280,8 @@ All semantic domains use these typed owners under the same Scene root. The priva
 record directory contains seven scalar revision/count fields and no domain-store references. It is
 the sole canonical record block; there are no record-store payload or shareable-leaf blocks. Each
 completed cutover deletes its replaced record schema and conversion/validation projection in the
-same change. Semantic snapshot revision 5 retains its independent, source-faithful encoding. The
+same change. Semantic snapshot revision 6 retains its independent, source-faithful encoding,
+including attribute-owned tangent conventions. The
 direct UV index keeps the existing kind-zero/set-value encoding without another revision.
 
 Profile state owns the current typed owner/attachment table, immutable lineage segment handles,

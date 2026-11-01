@@ -6,10 +6,16 @@ Controlled operations on immutable validated Scenes, exposed to applications as
 evidence on success, or the original Scene on ordinary failure.
 
 Current operations triangulate one polygon primitive, generate flat or smooth
-Corner normals on one triangle-list primitive, and convert a whole Scene's
+Corner normals or UV-derivative tangents on one triangle-list primitive, and convert a whole Scene's
 coordinate basis and units. Triangulation requires simple planar rings without
 holes and retains Corner/Face origins. Normal generation preserves authored
 normals by default.
+
+Tangent generation explicitly selects the Normal domain and Texcoord set/domain, preserving
+authored Tangents by default. The allocation-free Triangle UV Derivative v1 kernel generates
+Corner F32x4 with `SignInW`, without cross-face welding or averaging and without a MikkTSpace
+compatibility claim. Tangent conventions belong to each attribute; reflection checks every
+stream's encoding. Generation rejects degenerate frames and authored morph deltas on the target.
 
 The allocation-free `triangle_vertices` reader exposes one complete application tuple
 per draw Corner after those operations. Vertex, Corner, and Face fields, influences,
