@@ -26,7 +26,8 @@ operation or native promotion was used.
 
 ## Execution status
 
-U1–U8 are pending implementation and unit-specific verification. The current
+U1 implementation and Windows/MSRV verification are complete; U2–U8 are pending.
+The current
 portable graph still has twelve packages. Its reduction to ten depends on the
 complete U3 decoder cutover and deletion of both maintained glTF forks.
 
@@ -34,3 +35,91 @@ Actual publication, retirement of the existing `0.0.1`, target promotion and
 unexecuted hosted checks remain separate work. A completed implementation unit
 will record its source identity, commands, observed regressions and practical
 evidence limits here before the master plan can be considered complete.
+
+## U1: ownership and dependent-data integrity
+
+MTL opacity now has one authority: the final validated opacity selects the alpha
+mode. The sticky parse cache and projection parameter are deleted. Public typed
+material reads cover repeated/interleaved `d` and `Tr`, plus complete replacement
+within and across material libraries.
+
+A private opened-asset owner contains reader destruction from immediately after
+`AssetIo::open` returns, before work completion, identity checks and later
+admission. Successful EOF followed by a destructor panic fails at the AssetIo
+boundary; an earlier read, cancellation, limit or identity failure retains
+precedence. Explicit finish and protected fallback destruction release each
+reader exactly once. Optional dependency omissions retain their existing cache
+semantics, and an IO fault leaves a healthy format registration usable.
+
+The shared geometry transaction rejects Normal replacement or Tangent removal
+when their authored morph deltas would lose meaning, including empty sparse
+descriptors. Public errors identify the affected semantic. Preserve-existing
+no-ops and Position-only morphs remain supported. Central deformation validation
+also requires the corresponding base attributes, independently of the edit
+entry point. Existing core public-deformation and application-tuple fixtures
+declared Normal/Tangent deltas with only Position geometry; their bases and
+profile owners were corrected rather than weakening validation.
+
+glTF TRS and morph channels now declare `Constant` before/after extrapolation,
+preserving the source's endpoint-clamping rule. Public tag regressions cover
+Step, Linear and CubicSpline, with endpoints distinct from base/default values.
+Actual curve evaluation remains U7 work.
+
+PLY metadata uses one reserved append followed by existing interruptible sorting.
+Structurally disjoint generated key prefixes establish uniqueness without a
+repeated scan. Key order, values and owner remain observable through public
+metadata reads. Windows/MSRV ledger measurements are:
+
+| Short metadata input | 1,000 rows | 5,000 rows | 20,000 rows |
+| --- | ---: | ---: | ---: |
+| Comments | 100,850 | 537,045 | 2,292,166 |
+| `obj_info` | 105,850 | 562,173 | 2,392,295 |
+| One comment and one `obj_info` per row | 208,699 | 1,120,800 | 4,758,331 |
+
+These are charged WorkUnits for complete imports, not CPU comparisons, elapsed
+time, process memory or an allocator claim. The 20,000-comment input retains the
+audit's 200,106-byte size and now imports within the default work limit. Exact
+budget and comparison-chunk cancellation regressions also pass.
+
+All five defect lanes have observed red-before-fix logs in the local review
+directory. The initial focused public-interface run passed 53/53; the corrected
+complete core library passed 601/601 with four existing manual skips; all seven
+PLY limits tests passed. The final workspace run passed 2,708/2,708 with four
+existing manual skips; strict all-target/all-feature Clippy and 58 doctests
+passed. The independent asset consumer also passed 43/43, with one existing
+manual skip. Three independent code-review lanes found no actionable defects in
+the morph, IO/material/animation and PLY metadata changes; they inspected source
+and the main-owned logs rather than independently rerunning Cargo.
+
+### Revision and verification
+
+The tested production/test source is `55b31c1ed1ee3e8b80d4d631e583e7974338c866`.
+The four implementation commits are `eadcc09` (opacity), `bf691eb` (reader
+ownership), `2b50d3b` (deformation/animation) and `55b31c1` (metadata work).
+They commit the already-tested source without subsequent source edits. The
+following documentation-only update does not change that source qualification.
+
+All commands ran locally on `x86_64-pc-windows-msvc`, Rust `+1.95.0`.
+Dependency-resolving commands used `--locked --offline`, one build job, the root
+target directory, and no parallel Cargo processes. Ordinary nextest runs used
+two test threads; the independent consumer used one.
+
+| Gate | Command scope | Result |
+| --- | --- | --- |
+| Workspace | `nextest run --workspace --all-features` | 2,708 passed, 4 existing manual skips; run `ab3082b5-559e-4166-8ef4-767542e248a3` |
+| Independent consumer | `nextest run --manifest-path tools/consumers/assets/Cargo.toml --target-dir target --all-features` | 43 passed, 1 existing manual skip; run `41a1b14d-a8cf-4339-8ab8-426a4f338e23` |
+| Lints | `clippy --workspace --all-targets --all-features -- -D warnings` | Passed |
+| Documentation examples | `test --workspace --all-features --doc` | 58 passed |
+| Formatting | `fmt --all -- --check` | Passed |
+
+The raw logs, review JSON and revision-qualified evidence bundle are retained
+locally in `.git/baozi-review/maturation-plan/`. The previous failed full run is
+retained as well: all five failures came from the old tuple fixture's missing
+Normal base; its corrected 14-test binary and the final full matrix both pass.
+The 55,295-byte `u1-evidence.zip` has SHA-256
+`7c2e6ca31014306f5e1d0a89c4f2191b498110efdac7862472cd8d6a1361fb7f`.
+
+U1 does not qualify a new target, complete F64 support, replace the glTF decoder,
+or establish release readiness. Fresh cross-target/sanitizer and final package
+qualification remain U8 work. No registry, push, PR or native registration
+operation was performed.

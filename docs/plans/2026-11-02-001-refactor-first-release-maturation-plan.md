@@ -179,6 +179,9 @@ Kernel numerical conditioning and actual measured work ratios must be establishe
 
 ### U1. Restore ownership and dependent-data integrity
 
+**Status:** Implemented and Windows/MSRV verified at `55b31c1ed1ee3e8b80d4d631e583e7974338c866`; see the [execution record](../reviews/2026-11-02-first-release-maturation.md#u1-ownership-and-dependent-data-integrity).
+Fresh cross-target/sanitizer and final artifact qualification remain U8 responsibilities.
+
 **Goal:** Close the independent opacity, IO cleanup, morph dependency, metadata-work and animation extrapolation defects.
 **Requirements:** R3–R5, R14; KTD3 and KTD5.
 **Dependencies:** None.
