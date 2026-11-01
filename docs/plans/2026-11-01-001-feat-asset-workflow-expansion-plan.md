@@ -2,7 +2,7 @@
 title: Baozi Asset Fidelity and Consumer Workflow Expansion
 type: feat
 date: 2026-11-01
-status: in_progress
+status: completed
 ---
 
 # Baozi Asset Fidelity and Consumer Workflow Expansion
@@ -22,6 +22,12 @@ Existing user authorization permits necessary breaking refactors and deletion of
 unpublished compatibility is not a constraint. Change the relevant ADR and behavior documents with
 the implementation that changes their boundary, rather than retaining a rejected design because
 an old ADR describes it.
+
+The initial tranche completed on 2026-11-01: A1, A2, B1, B2, V1 and V2 are implemented and locally
+verified. The progress review records implementation commits, 2,482 passing workspace tests,
+complete release scale workflows, separate repeated measurements, and the executed Linux ASan
+smoke / 1,803-second campaign / saved-corpus resume. Completion applies to this initial tranche;
+the ordered follow-on candidates below remain unselected future work.
 
 The initial tranche is A1, A2, B1, B2, V1 and V2 below. Complete and review these bounded units
 before promoting follow-on candidates into required execution. Each unit should be independently
@@ -224,6 +230,13 @@ are useful complements and must be labeled separately from real assets.
 - Reuse relevant hosted results at the same implementation revision. Query existing runs first;
   supplement missing execution rather than rerunning every historical matrix. Browser compile,
   WASI runtime, local WSL and Apple native execution remain distinct claims.
+
+The executed [V1 observations](../reviews/2026-11-01-asset-workflow-expansion.md#v1--larger-complete-workflows)
+show 4.095x postprocess work for 4x grid quads. Increasing shared primitive definitions from eight
+to 32 keeps resource opens at three, while the separate normal edits use 9.201x work. Use this
+evidence to select a real many-primitive consumer and isolate repeated validation/publication costs
+before choosing a batch-edit API. That study remains a future candidate outside the initial
+tranche; the small absolute timings establish no optimization threshold.
 
 A pinned Assimp subprocess comparison for a few trusted fixtures is optional. Classify any
 difference as source semantics, selected profile, explicit loss, representation or probable bug;

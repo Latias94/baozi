@@ -30,7 +30,7 @@ the harness never infers those facts from file values. All primitive IDs are rea
 
 Limits admit at most four meshes, eight primitives, 128 vertices, 64 faces, 512 topology cells,
 64 attribute streams and 8,192 attribute cells. Import work is capped at 1,000,000 units, live
-operation capacity at 16 MiB and canonical payload at 2 MiB. Public reads allow the bounded
+import capacity at 16 MiB and canonical payload at 2 MiB. Public reads allow the bounded
 triangulation expansion, with a 131,072-element traversal backstop. Snapshot capture retains the
 existing 64 KiB preview, 256 preview items and 4,000,000 work-unit bounds; its digest covers all
 admitted semantics, including values outside the preview. Postprocessing uses the existing
@@ -39,10 +39,13 @@ operation resource policy; input bounds and at most three calls bound this harne
 Every rejected edit must return its input generation and complete digest unchanged and permit
 the same borrowed reads, including lookup with its original ID. `Unchanged` success has the same
 checks. `Changed` success requires a new generation, rejects the old primitive ID, checks report
-generation binding and reads the published output. A requested cancellation must report
-`Cancelled { origin: Signal }` through `PostProcessCancellationToken` and `PostProcessControl`.
-These are deterministic **pre-execution** cancellations, observed at the existing operation
-checkpoint; the harness makes no claim about cancelling in the middle of a geometry kernel.
+generation binding and reads the published output. A pre-cancelled call that reaches its control
+checkpoint must report `Cancelled { origin: Signal }` through `PostProcessCancellationToken` and
+`PostProcessControl`. Resource-policy initialization or the operation's `Start` can fail before
+that checkpoint; the arbitrary-input harness allows those startup failures while still requiring
+unchanged generation, digest and reads. The fixed cancellation seeds require actual signal
+cancellation under healthy startup admission. These are deterministic **pre-execution**
+cancellations; the harness makes no claim about cancelling in the middle of a geometry kernel.
 
 ## Independently authored corpus
 
@@ -81,6 +84,9 @@ The last command resumes the corpus saved by the preceding command in
 stdout/stderr and exit status for each run, source SHA and dirty diff, `rustc -Vv`, cargo-fuzz
 version, exact arguments, the resulting corpus and any crashes. A short run is exploration
 evidence, not proof of edit safety. No campaign result is implied by these instructions.
+
+Revision-qualified executed observations and local retained artifact paths belong to the
+[asset workflow expansion review](../docs/reviews/2026-11-01-asset-workflow-expansion.md#v2--edit-lifecycle-fuzz-execution).
 
 The scheduled workflow keeps its corpus/log artifact upload on success or failure. A manual run
 can set `resume_run_id` to a previous **Scheduled Fuzz** run in the same repository. Each matrix

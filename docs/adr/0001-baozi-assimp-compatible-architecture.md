@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-08
-updated: 2026-07-10
+updated: 2026-11-01
 authors:
   - Codex
 decision_type: architecture
@@ -31,7 +31,7 @@ evidence:
 This accepted decision defines Baozi's top-level architecture and ownership boundaries. It does not
 claim implementation completion. The
 [A–H delivery plan](../plans/2026-10-29-001-refactor-library-delivery-plan.md) is completed.
-The [proposed next plan](../plans/2026-11-01-001-feat-asset-workflow-expansion-plan.md) defines a
+The [adopted asset workflow plan](../plans/2026-11-01-001-feat-asset-workflow-expansion-plan.md) defines a
 separate follow-up sequence; verification results and known gaps live in the review and
 engineering evidence records linked below.
 
@@ -286,7 +286,8 @@ editing the accepted decision to report transient status:
 
 - [Completed delivery and core simplification plan](../plans/2026-10-29-001-refactor-library-delivery-plan.md)
 - [Current Assimp comparison and gaps](../research/2026-11-01-baozi-assimp-gap-analysis.md)
-- [Proposed asset fidelity and consumer plan](../plans/2026-11-01-001-feat-asset-workflow-expansion-plan.md)
+- [Adopted asset fidelity and consumer plan](../plans/2026-11-01-001-feat-asset-workflow-expansion-plan.md)
+- [Asset workflow implementation and verification](../reviews/2026-11-01-asset-workflow-expansion.md)
 - [2026-10-29 library state review](../reviews/2026-10-29-library-state-review.md)
 - [Superseded canonical architecture execution plan](../plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md)
 - [Facade source](../../crates/baozi/src/lib.rs)

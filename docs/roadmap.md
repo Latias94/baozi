@@ -8,9 +8,11 @@ remains the starting observation. Format maturity, native release registration, 
 remain separate decisions. The former U4 execution sequence is superseded history.
 
 The [2026-11-01 Assimp comparison](research/2026-11-01-baozi-assimp-gap-analysis.md) reviews the
-current implementation and its gaps. The [proposed next plan](plans/2026-11-01-001-feat-asset-workflow-expansion-plan.md)
-prioritizes current-profile fidelity and application consumption; it does not reopen A–H or claim
-that its new units are implemented.
+implementation baseline and its gaps. The adopted
+[asset workflow plan](plans/2026-11-01-001-feat-asset-workflow-expansion-plan.md) prioritizes
+current-profile fidelity and application consumption. Its
+[implementation review](reviews/2026-11-01-asset-workflow-expansion.md) records the completed six-unit
+initial tranche and exact local verification; it does not reopen A–H.
 
 ## Product Direction
 
@@ -129,17 +131,29 @@ behavior, and minimize each discovered regression. Selected glTF extras now use 
 exact JSON metadata and borrowed public readers, including objects without one canonical entity.
 The unchanged multi-primitive morph fixture covers their survival through edits and application
 extraction, as recorded in the [metadata integration review](reviews/2026-10-31-source-object-metadata.md).
-The current corpus has six successful assets and one named `SimpleSkin` numeric-policy rejection.
-Latest verification and its platform/revision limits belong to the metadata integration review;
-the older A–H hosted result does not qualify later code automatically.
+That increment has six successful assets and one named `SimpleSkin` numeric-policy rejection.
+The subsequent expansion adds unchanged CesiumMan as a seventh successful asset, with source-derived
+geometry, all 19 bind matrices, influence rows and every key of its 57 animation channels checked
+after edits and Scene destruction. Latest verification and its platform/revision limits belong to
+the corresponding review; the older A–H hosted result does not qualify later code automatically.
 
-## Proposed Next Stage
+## Asset Workflow Expansion
 
 The [asset fidelity and consumer plan](plans/2026-11-01-001-feat-asset-workflow-expansion-plan.md)
-starts with accepted PLY color semantics and MTL texture options, then deterministic indexed
-application buffers and public owner-to-source provenance reads. Larger workloads and one bounded
-edit-lifecycle fuzz target validate those workflows. Recognized semantic omissions must follow
-the existing explicit loss contract rather than disappear behind a successful import.
+implements accepted PLY color semantics and MTL texture options, deterministic indexed application
+buffers and public owner-to-source provenance reads. Recognized omissions in its bounded OBJ/MTL/PLY
+branch list require explicit source-semantic loss authority. Clamp-on retains canonical Decal
+coverage rather than an unspecified border color. Larger workloads and one bounded edit-lifecycle
+fuzz target validate those workflows; exact completed observations and their limits are in the
+[expansion review](reviews/2026-11-01-asset-workflow-expansion.md).
+
+The initial tranche is complete: Windows workspace tests pass 2,482/2,482, Linux release scale
+regressions include 98,304/393,216 Corner grids, five workloads have three fresh normal observations
+plus separate allocation measurements, and the Linux ASan lifecycle target completes smoke,
+1,803 seconds of campaigning and a 126-second saved-corpus resume. The current implementation has
+no newly executed hosted/platform matrix or maturity/release promotion. Shared-primitive
+measurements identify repeated single-primitive edit work to study when a concrete larger
+consumer needs it, before choosing a batch API.
 
 Before local tangent generation, move construction/encoding declarations from the whole Scene to
 the Tangent attribute that owns them. Preserve the rest of the completed typed Scene architecture.

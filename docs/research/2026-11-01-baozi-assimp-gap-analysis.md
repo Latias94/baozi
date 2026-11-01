@@ -18,7 +18,11 @@ Five independent read-only audits covered core/readers, format profiles, postpro
 import/IO/distribution, and validation/scale. This report consolidates their source findings. No
 Assimp binary was built or executed, no differential corpus was run, and no new Baozi test or
 performance result is claimed. Recommendations are input to the
-[proposed execution plan](../plans/2026-11-01-001-feat-asset-workflow-expansion-plan.md).
+[execution plan](../plans/2026-11-01-001-feat-asset-workflow-expansion-plan.md).
+
+This is the source audit at the baseline below. Subsequent fixes and newly executed results belong
+to the [asset workflow expansion review](../reviews/2026-11-01-asset-workflow-expansion.md); the
+historical observations here are not current unresolved-defect or verification claims.
 
 | Baseline | Exact identity and use |
 | --- | --- |
