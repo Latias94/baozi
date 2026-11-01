@@ -1,5 +1,5 @@
 ---
-status: in_progress
+status: completed
 date: 2026-11-01
 type: feat
 ---
@@ -10,6 +10,12 @@ This execution slice adopts follow-on candidates 1 and 2 from the completed
 [asset workflow expansion plan](2026-11-01-001-feat-asset-workflow-expansion-plan.md).
 Its initial A1/A2/B1/B2/V1/V2 tranche remains completed. The input implementation is
 `4ecc5d4`; new qualification applies to this slice's actual implementation and executed checks.
+
+Completed on 2026-11-01 in `905df7c` and `60f12bd`. The
+[execution review](../reviews/2026-11-01-attribute-owned-tangents.md) records the final
+Windows 2,545-test workspace suite, independent asset and Scene consumers, Linux Tangent checks,
+numeric review corrections, schema-6 vectors, strict Clippy, doctests and portable compilation.
+Completion does not select the other follow-on candidates.
 
 ## Ownership cutover
 

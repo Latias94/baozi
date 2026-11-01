@@ -27,7 +27,7 @@ The initial tranche completed on 2026-11-01: A1, A2, B1, B2, V1 and V2 are imple
 verified. The progress review records implementation commits, 2,482 passing workspace tests,
 complete release scale workflows, separate repeated measurements, and the executed Linux ASan
 smoke / 1,803-second campaign / saved-corpus resume. Completion applies to this initial tranche;
-follow-on candidates 1 and 2 are now adopted by the separate
+follow-on candidates 1 and 2 are now completed by the separate
 [attribute-owned tangent execution plan](2026-11-01-002-feat-attribute-owned-tangents-plan.md).
 The remaining candidates stay future work.
 
