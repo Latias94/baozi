@@ -66,6 +66,10 @@ pub use baozi_core::{
     MorphDeltaSemantic, MorphTargetDefinitionRef, MorphTargetId, MorphTargetRef, SkinId,
     SkinMatrixCorrection, SkinMatrixCorrectionError, SkinMatrixSpace, SkinMatrixSpaces, SkinRef,
 };
+pub use baozi_core::{
+    ProvenanceEvidenceRef, ProvenanceId, ProvenanceKindRef, ProvenanceLookupError,
+    ProvenanceOperationKindRef, ProvenanceOperationRef, ProvenanceRef,
+};
 pub use baozi_import::{
     AuthorizedDependency, CapabilityStatus, CauseOwner, ConformancePolicy,
     DeclarationEvidenceAuthority, DependencyCacheDisposition, DependencyFailureContext,

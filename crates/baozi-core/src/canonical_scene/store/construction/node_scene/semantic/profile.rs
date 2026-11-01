@@ -42,7 +42,7 @@ impl<'scene> NodeSceneProfileProvenanceIndices<'scene> {
 
     pub(in crate::canonical_scene::store) fn iter(
         self,
-    ) -> impl ExactSizeIterator<Item = Option<u32>> + 'scene {
+    ) -> impl ExactSizeIterator<Item = Option<u32>> + DoubleEndedIterator + Clone + 'scene {
         self.references
             .iter()
             .map(move |reference| self.profile.resolve(*reference).map(|(index, _)| index))
@@ -146,6 +146,83 @@ impl<'scene> NodeSceneProfileTables<'scene> {
             .get(row)
             .ok_or_else(|| invariant("validated resource row is absent"))?;
         read_resource(segment, row, resource)
+    }
+
+    pub(in crate::canonical_scene::store) fn owner_attachments(
+        self,
+        owner: CanonicalProfileOwner,
+    ) -> NodeSceneSemanticResult<NodeSceneProfileProvenanceIndices<'scene>> {
+        let row = self
+            .state
+            .owners
+            .binary_search_by_key(&owner, |row| row.owner)
+            .map_err(|_| invariant("validated profile owner is absent"))?;
+        let attachments = self.state.owners[row]
+            .attachments
+            .get(&self.state.attachments)
+            .ok_or_else(|| invariant("validated profile attachment range is unreadable"))?;
+        Ok(NodeSceneProfileProvenanceIndices::new(
+            self.profile,
+            attachments,
+        ))
+    }
+
+    pub(in crate::canonical_scene::store) fn provenance_at(
+        self,
+        index: usize,
+    ) -> NodeSceneSemanticResult<NodeSceneProfileProvenance<'scene>> {
+        if index >= self.state.lineage_counts.provenance {
+            return Err(invariant(
+                "profile provenance index is outside the validated Scene",
+            ));
+        }
+        let ordinal = self.state.segments.partition_point(|segment| {
+            segment.prefixes.provenance + segment.lineage.as_ref().provenance.len() <= index
+        });
+        let segment = self
+            .state
+            .segments
+            .get(ordinal)
+            .ok_or_else(|| invariant("validated provenance segment is absent"))?;
+        let row = index
+            .checked_sub(segment.prefixes.provenance)
+            .ok_or_else(|| invariant("validated provenance segment prefix is inconsistent"))?;
+        let provenance = segment
+            .lineage
+            .as_ref()
+            .provenance
+            .get(row)
+            .ok_or_else(|| invariant("validated provenance row is absent"))?;
+        read_provenance(self.profile, segment, row, provenance)
+    }
+
+    pub(in crate::canonical_scene::store) fn evidence_at(
+        self,
+        index: usize,
+    ) -> NodeSceneSemanticResult<NodeSceneProfileEvidence<'scene>> {
+        if index >= self.state.lineage_counts.evidence {
+            return Err(invariant(
+                "profile evidence index is outside the validated Scene",
+            ));
+        }
+        let ordinal = self.state.segments.partition_point(|segment| {
+            segment.prefixes.evidence + segment.lineage.as_ref().evidence.len() <= index
+        });
+        let segment = self
+            .state
+            .segments
+            .get(ordinal)
+            .ok_or_else(|| invariant("validated evidence segment is absent"))?;
+        let row = index
+            .checked_sub(segment.prefixes.evidence)
+            .ok_or_else(|| invariant("validated evidence segment prefix is inconsistent"))?;
+        let evidence = segment
+            .lineage
+            .as_ref()
+            .evidence
+            .get(row)
+            .ok_or_else(|| invariant("validated evidence row is absent"))?;
+        read_evidence(segment, row, evidence)
     }
 
     pub(super) fn into_cursor(self) -> NodeSceneProfileCursor<'scene> {
@@ -395,7 +472,18 @@ impl<'scene> NodeSceneProfileCursor<'scene> {
         self.provenance.step(
             profile,
             |segment| &segment.provenance,
-            |segment, row, value| read_provenance(profile, segment, row, value, next_operation),
+            |segment, row, value| {
+                let node = read_provenance(profile, segment, row, value)?;
+                if let NodeSceneProfileProvenanceKind::Operation(operation) = node.kind() {
+                    if operation.index() != *next_operation {
+                        return Err(invariant(
+                            "validated profile operations are not fully and uniquely covered",
+                        ));
+                    }
+                    *next_operation = checked_add(*next_operation, 1)?;
+                }
+                Ok(node)
+            },
         )
     }
 
@@ -815,7 +903,6 @@ fn read_provenance<'scene>(
     segment: &'scene StoredProfileSegment,
     row: usize,
     provenance: &'scene StoredProvenance,
-    next_operation: &mut usize,
 ) -> NodeSceneSemanticResult<NodeSceneProfileProvenance<'scene>> {
     let lineage = segment.lineage.as_ref();
     let parents = provenance
@@ -840,14 +927,7 @@ fn read_provenance<'scene>(
             if depth == 0 {
                 return Err(invariant("validated operation provenance depth is zero"));
             }
-            let operation = read_operation(segment, index(operation)?)?;
-            if operation.index != *next_operation {
-                return Err(invariant(
-                    "validated profile operations are not fully and uniquely covered",
-                ));
-            }
-            *next_operation = checked_add(*next_operation, 1)?;
-            NodeSceneProfileProvenanceKind::Operation(operation)
+            NodeSceneProfileProvenanceKind::Operation(read_operation(segment, index(operation)?)?)
         }
     };
     Ok(NodeSceneProfileProvenance {

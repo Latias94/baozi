@@ -197,6 +197,12 @@ Equality of `SourceIdentityRef` compares its generation and inventory row. Corre
 imports through the retained resource, format, and locator fields, keeping digest and replay
 stability separate.
 
+`source.metadata_entries()` selects just that source object's entries in key byte order. Two binary
+searches over the sorted metadata directory cost O(log metadata count); iterating the resulting
+range costs O(1) per entry. An object without extras returns an explicit empty iterator. This reader
+borrows the same descriptors and payloads as the whole-Scene inventory, without scanning unrelated
+entries or copying the source JSON.
+
 For selected glTF extras, match `SourceObject`, then `MetadataValueRef::Bytes` with media type
 `application/json`. The payload includes the exact JSON value, even for an authored `null`, scalar,
 or empty container. The site key distinguishes direct object extras from nested asset, material,
@@ -207,6 +213,118 @@ All strings and slices borrow the Scene, so they may outlive a temporary entry o
 cannot outlive the Scene. Copy only the application-owned fields needed after Scene destruction.
 The [real-asset consumer](../../tools/consumers/assets/README.md) demonstrates that choice for
 source JSON, including its resource and versioned locator.
+
+## Retained provenance relationships
+
+Start from `metadata_owner()` on the current Scene or entity view, including an attribute, binding,
+morph delta, or animation channel. The existing `EntityMetadataOwner` token qualifies both
+descriptive metadata and retained provenance; the entity need not have descriptive entries.
+`scene.owner_provenance(owner)` checks the token's exact generation and borrows its direct
+attachments. Each validated canonical owner has at least one attachment. Source objects remain
+separate from those canonical owners: one source can feed several entities, and a display name or
+numeric source index does not establish a relationship.
+
+Each `ProvenanceRef` has an opaque `id()`, retained longest-path `depth()`, immediate `parents()`, and
+`kind()`. Match `ProvenanceKindRef::Source(source)` to follow the actual `SourceIdentityRef`, its
+resource and its exact metadata. Match `Operation(operation)` to inspect the borrowed
+`ProvenanceOperationKindRef`, exact options digest and ordered `evidence()` summaries. An evidence
+summary gives its namespaced code, occurrence count and optional digest. Namespaced operation
+kinds, text, digests and metadata payloads borrow their original retained pools.
+
+`scene.provenance_nodes()` exposes the finite retained inventory in topological order;
+`provenance_node_count()` gives its size. `scene.provenance(id)` checks generation and range before
+resolving one node. Attachments and parents have strictly increasing retained-node order. A parent
+always precedes its child; Source leaves have depth one and no parents. A generated Operation can
+also have no parents, and any Operation can have no evidence. Empty iterators preserve those facts
+without inventing a source or an evidence row. Inventory nodes can remain retained after their last
+direct owner attachment changes; a historical node does not prove that a canonical owner still
+exists.
+
+All these iterators are independent, exact-size, double-ended and cloneable. No reader allocates,
+copies payloads, builds another graph, or automatically follows transitive ancestors. With `S`
+retained lineage segments, `O` canonical owners and `M` metadata entries, their costs are:
+
+| Read | Cost |
+| --- | --- |
+| Counts, resolved node depth/ID, Operation summary fields | O(1) |
+| Select an owner's direct attachments | O(log O) |
+| Construct a parent or evidence iterator | O(1) |
+| Yield an attachment, parent, inventory node or evidence summary | O(log S) per item |
+| Resolve a provenance ID, a Source kind or its resource | O(log S) |
+| Select a source's metadata, then yield entries | O(log M), then O(1) per entry |
+
+Traversal visits only the relations requested by the caller. Shared ancestors can be visited more
+than once along different paths. Choose a visit budget, pending-work capacity and deduplication
+policy for the application; depth bounds alone do not bound the number of paths in a DAG.
+
+For example, this external consumer follows the selected entity's ancestry using public facade
+types. Its `Vec` is application-owned traversal storage; its allocations are separate from the
+allocation-free Scene reads. Returning `false` reports that the caller's visit or pending-work
+budget stopped the walk. It deliberately retains repeated shared-ancestor visits.
+
+```rust
+use baozi::{
+    EntityMetadataOwner, MetadataValueRef, ProvenanceKindRef, ProvenanceLookupError, ValidatedScene,
+};
+
+fn print_source_extras(
+    scene: &ValidatedScene,
+    owner: EntityMetadataOwner,
+    max_visits: usize,
+    max_pending: usize,
+) -> Result<bool, ProvenanceLookupError> {
+    let attachments = scene.owner_provenance(owner)?;
+    if attachments.len() > max_pending {
+        return Ok(false);
+    }
+    let mut pending: Vec<_> = attachments.rev().collect();
+    let mut remaining = max_visits;
+    while let Some(node) = pending.pop() {
+        if remaining == 0 {
+            return Ok(false);
+        }
+        remaining -= 1;
+        match node.kind() {
+            ProvenanceKindRef::Source(source) => {
+                for entry in source.metadata_entries() {
+                    if let MetadataValueRef::Bytes { media_type: "application/json", payload } =
+                        entry.value()
+                    {
+                        println!("{:?} {} {:?}", source.locator(), entry.key(), payload);
+                    }
+                }
+            }
+            ProvenanceKindRef::Operation(_) => {
+                let parents = node.parents();
+                if parents.len() > max_pending - pending.len() {
+                    return Ok(false);
+                }
+                pending.extend(parents.rev());
+            }
+        }
+    }
+    Ok(true)
+}
+
+// let entity = scene.meshes().next().expect("selected mesh");
+// let complete = print_source_extras(scene, entity.metadata_owner(), 256, 256)?;
+```
+
+After a successful triangulation, space conversion or normal-generation edit, reacquire the owner
+and provenance IDs from the replacement Scene. Tokens from another Scene or any older generation
+return `ProvenanceLookupError::GenerationMismatch`, even if the same underlying lineage segments
+were shared. Source-object metadata survives deletion of a derived Tangent while the removed
+attribute and its entity metadata disappear. Newly retained operation parents describe the
+dependencies actually recorded by that edit, which can include the Scene's source declarations.
+The source identity fields still permit correlation across generations, with replay stability and
+content digests considered separately.
+
+These are the retained owner-level relationships. They do not promise per-Face or per-Corner
+ancestry that the format path never recorded, detailed source-scope omission evidence, or
+cross-generation remaps. Those reports retain their existing independent contracts. The
+[public facade tests](../../crates/baozi/tests/provenance_readers.rs) exercise reordered and shared
+source joins, exact extras, generation rejection and actual edit publication without the hidden
+integration namespace or diagnostic snapshots.
 
 ## Deformation and animation
 

@@ -122,6 +122,10 @@ pub use canonical_scene::store::api::read::{
     InfluenceRef, InfluenceRowRef, InfluenceRows, MorphDeltaData, MorphDeltaRef,
     MorphTargetDefinitionRef, MorphTargetRef, SkinRef,
 };
+pub use canonical_scene::store::api::read::{
+    ProvenanceEvidenceRef, ProvenanceId, ProvenanceKindRef, ProvenanceLookupError,
+    ProvenanceOperationKindRef, ProvenanceOperationRef, ProvenanceRef,
+};
 pub use canonical_scene::store::api::scene::{
     SceneSnapshot, SceneSnapshotError, SceneSnapshotLimits, ValidatedScene,
 };

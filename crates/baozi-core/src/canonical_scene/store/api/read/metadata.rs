@@ -15,7 +15,7 @@ use crate::canonical_scene::store::typed_storage::profile::{
 use crate::identity::SceneGenerationId;
 use crate::provenance::{DigestAlgorithm, SourceObjectKind};
 
-fn tables(scene: &ValidatedScene) -> NodeSceneProfileTables<'_> {
+pub(super) fn tables(scene: &ValidatedScene) -> NodeSceneProfileTables<'_> {
     expect_validated(NodeSceneProfileTables::try_new(
         scene.as_node_scene().read_profile(),
     ))
@@ -25,6 +25,8 @@ fn tables(scene: &ValidatedScene) -> NodeSceneProfileTables<'_> {
 ///
 /// Its descriptor uses canonical coordinates, including the hidden synthetic-root offset for
 /// nodes. Compare tokens obtained from entity views rather than constructing numeric indices.
+/// This same token selects the entity's retained provenance via
+/// [`ValidatedScene::owner_provenance`], even when it has no descriptive metadata entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EntityMetadataOwner {
     generation: SceneGenerationId,
@@ -45,6 +47,10 @@ impl EntityMetadataOwner {
 
     pub const fn generation(self) -> SceneGenerationId {
         self.generation
+    }
+
+    pub(super) const fn owner(self) -> CanonicalProfileOwner {
+        self.owner
     }
 
     pub const fn descriptor(self) -> SceneProfileOwner {
@@ -133,7 +139,7 @@ pub struct SourceIdentityRef<'s> {
 }
 
 impl<'s> SourceIdentityRef<'s> {
-    fn at(scene: &'s ValidatedScene, index: usize) -> Self {
+    pub(super) fn at(scene: &'s ValidatedScene, index: usize) -> Self {
         Self {
             scene,
             source: expect_validated(tables(scene).source_at(index)),
@@ -177,6 +183,30 @@ impl<'s> SourceIdentityRef<'s> {
         self.source
             .content_digest()
             .map(|digest| (digest.algorithm(), digest.bytes()))
+    }
+
+    /// Borrows only this source object's metadata in key byte order.
+    ///
+    /// Two binary searches cost O(log metadata count); each yielded entry costs O(1).
+    /// An object without descriptive metadata returns an empty iterator. No payload is copied.
+    pub fn metadata_entries(
+        self,
+    ) -> impl ExactSizeIterator<Item = MetadataEntryRef<'s>> + DoubleEndedIterator + Clone + 's
+    {
+        let entries = &self
+            .scene
+            .as_node_scene()
+            .read_profile()
+            .state
+            .as_ref()
+            .metadata_entries;
+        let owner = CanonicalMetadataOwner::SourceObject(self.source.index() as u32);
+        let start = entries.partition_point(|entry| entry.owner < owner);
+        let end = entries.partition_point(|entry| entry.owner <= owner);
+        (start..end).map(move |row| MetadataEntryRef {
+            scene: self.scene,
+            row,
+        })
     }
 }
 

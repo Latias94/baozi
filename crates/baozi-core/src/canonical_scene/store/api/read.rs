@@ -12,6 +12,7 @@ mod deformation;
 mod geometry;
 mod metadata;
 mod node;
+mod provenance;
 mod spatial;
 
 pub use animation::{AnimationChannelRef, AnimationClipRef, AnimationTarget};
@@ -30,6 +31,10 @@ pub use metadata::{
     SourceObjectLocatorRef,
 };
 pub use node::{NodeChildren, NodeRef};
+pub use provenance::{
+    ProvenanceEvidenceRef, ProvenanceId, ProvenanceKindRef, ProvenanceLookupError,
+    ProvenanceOperationKindRef, ProvenanceOperationRef, ProvenanceRef,
+};
 pub use spatial::{CameraRef, LightRef, SceneSpaceRef, TangentBasisRef, TangentEncodingRef};
 
 fn expect_validated<T>(result: NodeSceneSemanticResult<T>) -> T {
