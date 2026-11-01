@@ -45,6 +45,59 @@ impl AssetOpenContext {
     }
 }
 
+/// Keeps host reader destruction inside the IO boundary from the moment open returns.
+pub(crate) struct OpenedAssetOwner {
+    opened: Option<OpenedAsset>,
+}
+
+impl OpenedAssetOwner {
+    pub(crate) fn new(opened: OpenedAsset) -> Self {
+        Self {
+            opened: Some(opened),
+        }
+    }
+
+    pub(crate) fn asset(&self) -> &OpenedAsset {
+        self.opened
+            .as_ref()
+            .expect("an unfinished asset owner retains its reader")
+    }
+
+    pub(crate) fn asset_mut(&mut self) -> &mut OpenedAsset {
+        self.opened
+            .as_mut()
+            .expect("an unfinished asset owner retains its reader")
+    }
+
+    pub(crate) fn finish<T>(
+        mut self,
+        result: Result<T, ScopeAbortCause>,
+    ) -> Result<T, ScopeAbortCause> {
+        let cleanup = self.drop_reader();
+        match result {
+            Err(cause) => Err(cause),
+            Ok(value) => cleanup.map(|()| value),
+        }
+    }
+
+    fn drop_reader(&mut self) -> Result<(), ScopeAbortCause> {
+        let Some(opened) = self.opened.take() else {
+            return Ok(());
+        };
+        catch_unwind(AssertUnwindSafe(|| drop(opened))).map_err(|payload| {
+            discard_untrusted_panic_payload(payload);
+            extension_failure("asset-reader-drop-panicked")
+        })
+    }
+}
+
+impl Drop for OpenedAssetOwner {
+    fn drop(&mut self) {
+        // Earlier admission/identity failures already own the terminal cause.
+        let _ = self.drop_reader();
+    }
+}
+
 /// The caller owns identity checking and the separate attempted/successful-open counters.
 /// Only a cache miss enters this function. The bound and open use the same borrowed backend/path;
 /// no admission authority, lifetime token, or completion callback escapes into the backend.
@@ -53,7 +106,7 @@ pub(crate) fn open_asset(
     io: &dyn AssetIo,
     path: &AssetPath,
     context: AssetOpenContext,
-) -> Result<OpenedAsset, ScopeAbortCause> {
+) -> Result<OpenedAssetOwner, ScopeAbortCause> {
     let bound = catch_unwind(AssertUnwindSafe(|| io.open_work_bound(path)))
         .map_err(|payload| {
             discard_untrusted_panic_payload(payload);
@@ -65,7 +118,11 @@ pub(crate) fn open_asset(
     // Admission polls control again after the pure bound query, before any opaque backend IO.
     let opened = host
         .with_observed_work([(ImportDimension::WorkUnits, bound)], |work| {
-            let opened = catch_unwind(AssertUnwindSafe(|| io.open(path))).map_err(|payload| {
+            // Install cleanup ownership before work completion or any later fallible check.
+            let opened = catch_unwind(AssertUnwindSafe(|| {
+                io.open(path).map(OpenedAssetOwner::new)
+            }))
+            .map_err(|payload| {
                 discard_untrusted_panic_payload(payload);
                 extension_failure(context.open_panic_code())
             })?;

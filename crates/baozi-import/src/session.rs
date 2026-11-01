@@ -329,13 +329,16 @@ impl<'a> ImportSession<'a> {
             }
             cause => self.scope_cause(cause),
         })?;
-        if opened.authority_domain() != &expected_domain || opened.path() != &self.source {
+        if !opened
+            .asset()
+            .matches_identity(&expected_domain, &self.source)
+        {
             return Err(ImportCause::TrustedExtension {
                 boundary: TrustedExtensionBoundary::AssetIo,
                 code: "primary-open-identity-mismatch",
             });
         }
-        let backend_hard_limit = opened.backend_hard_limit();
+        let backend_hard_limit = opened.asset().backend_hard_limit();
         self.charge_open_consumed()?;
         let snapshot = read_opened_asset(
             self.host(),

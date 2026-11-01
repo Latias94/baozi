@@ -1,3 +1,4 @@
+use crate::asset_open::OpenedAssetOwner;
 use crate::config::{ConformancePolicy, ImportLossKind, LossPolicy};
 use crate::dependency::{
     AuthorizedDependency, CachedDependencyFailure, DependencyCacheDisposition,
@@ -3045,7 +3046,10 @@ impl<'session> ParseScope<'session> {
             identity.path(),
             crate::asset_open::AssetOpenContext::Dependency,
         )?;
-        if opened.authority_domain() != identity.authority() || opened.path() != identity.path() {
+        if !opened
+            .asset()
+            .matches_identity(identity.authority(), identity.path())
+        {
             return Err(ScopeAbortCause::TrustedExtension {
                 boundary: TrustedExtensionBoundary::AssetIo,
                 code: "opened-object-identity-mismatch",
@@ -4361,7 +4365,28 @@ fn share_dependency_snapshot_with(
 
 pub(crate) fn read_opened_asset(
     host: ImportStoreHost<'_>,
-    mut opened: OpenedAsset,
+    mut opened: OpenedAssetOwner,
+    ledger_phase: ImportLedgerPhase,
+    progress_phase: ImportProgressPhase,
+    dimension: ImportDimension,
+    per_resource_limit: u64,
+    aggregate_limit: u64,
+) -> AssetSnapshotResult {
+    let result = read_asset_snapshot(
+        host,
+        opened.asset_mut(),
+        ledger_phase,
+        progress_phase,
+        dimension,
+        per_resource_limit,
+        aggregate_limit,
+    );
+    opened.finish(result)
+}
+
+fn read_asset_snapshot(
+    host: ImportStoreHost<'_>,
+    opened: &mut OpenedAsset,
     ledger_phase: ImportLedgerPhase,
     progress_phase: ImportProgressPhase,
     dimension: ImportDimension,
@@ -4450,7 +4475,7 @@ pub(crate) fn read_opened_asset(
             allowance.min(chunk.len() as u64) as usize
         };
         let before = opened.bytes_read();
-        let read = read_asset_chunk(host, &mut opened, &mut chunk[..requested]);
+        let read = read_asset_chunk(host, opened, &mut chunk[..requested]);
         let after = opened.bytes_read();
         let observed = after.checked_sub(before).ok_or({
             ScopeAbortCause::TrustedExtension {
@@ -5263,7 +5288,7 @@ mod tests {
 
         let snapshot = read_opened_asset(
             host,
-            opened,
+            OpenedAssetOwner::new(opened),
             ImportLedgerPhase::PrimarySnapshot,
             ImportProgressPhase::AcquirePrimary,
             ImportDimension::PrimaryBytes,
@@ -5313,9 +5338,16 @@ mod tests {
                     length,
                 );
                 let work_before = host.dimension_state(ImportDimension::WorkUnits).unwrap();
-                let snapshot =
-                    read_opened_asset(host, opened, ledger_phase, progress_phase, dimension, 4, 2)
-                        .expect("unspent total-byte credit must carry into the next resource");
+                let snapshot = read_opened_asset(
+                    host,
+                    OpenedAssetOwner::new(opened),
+                    ledger_phase,
+                    progress_phase,
+                    dimension,
+                    4,
+                    2,
+                )
+                .expect("unspent total-byte credit must carry into the next resource");
                 assert_eq!(&*snapshot, b"a");
                 let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
                 assert_eq!(work.attempted() - work_before.attempted(), 2);
@@ -5370,7 +5402,7 @@ mod tests {
             let work_before = host.dimension_state(ImportDimension::WorkUnits).unwrap();
             let snapshot = read_opened_asset(
                 host,
-                opened,
+                OpenedAssetOwner::new(opened),
                 ImportLedgerPhase::PrimarySnapshot,
                 ImportProgressPhase::AcquirePrimary,
                 ImportDimension::PrimaryBytes,
@@ -5413,7 +5445,7 @@ mod tests {
             let work_before = host.dimension_state(ImportDimension::WorkUnits).unwrap();
             let cause = read_opened_asset(
                 host,
-                opened,
+                OpenedAssetOwner::new(opened),
                 ImportLedgerPhase::PrimarySnapshot,
                 ImportProgressPhase::AcquirePrimary,
                 ImportDimension::PrimaryBytes,
@@ -5489,7 +5521,7 @@ mod tests {
             let work_before = host.dimension_state(ImportDimension::WorkUnits).unwrap();
             let cause = read_opened_asset(
                 host,
-                opened,
+                OpenedAssetOwner::new(opened),
                 ImportLedgerPhase::PrimarySnapshot,
                 ImportProgressPhase::AcquirePrimary,
                 ImportDimension::PrimaryBytes,
@@ -5566,7 +5598,7 @@ mod tests {
             .expect("one backend read must fit after the startup work");
             let cause = read_opened_asset(
                 host,
-                opened,
+                OpenedAssetOwner::new(opened),
                 ImportLedgerPhase::PrimarySnapshot,
                 ImportProgressPhase::AcquirePrimary,
                 ImportDimension::PrimaryBytes,
