@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: completed
 date: 2026-11-01
 type: feat
 ---
@@ -9,6 +9,13 @@ type: feat
 This slice adopts follow-on candidate 4 from the
 [asset workflow plan](2026-11-01-001-feat-asset-workflow-expansion-plan.md), after the completed
 base-pose queries in `3267064`. Sparse accessors and later format extensions remain separate.
+
+Completed on 2026-11-01 in `d388d3e`. The
+[execution review](../reviews/2026-11-01-gltf-primitive-modes.md) records independent review,
+103 passing postprocess and 50 passing importer focused tests, 2,584 passing Windows workspace
+tests, 31 passing standalone consumer tests, strict Clippy, 58 doctests, rustdoc, formatting,
+native consumer execution and two wasm compile-only checks. The API type rename is explicit;
+source topology is preserved while list assembly remains a borrowed consumption view.
 
 ## Source preservation
 

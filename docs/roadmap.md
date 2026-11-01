@@ -159,9 +159,11 @@ Tangent construction/encoding declarations now belong to each Tangent attribute,
 single-primitive Triangle UV Derivative generation is implemented. Read-only base-pose world
 transforms and static instance/Scene bounds are also
 [completed](reviews/2026-11-01-base-pose-world-queries.md), preserving the existing typed Scene
-architecture. Later selected-profile work should favor glTF primitive modes, sparse
-accessors, additional influence sets and a concrete typed extension slice before starting another
-broad format. Device draw limits remain a concrete consumer candidate.
+architecture. All seven glTF primitive modes are now preserved, with strict draw/index validation
+and [explicit borrowed list consumption](reviews/2026-11-01-gltf-primitive-modes.md).
+Later selected-profile work should favor sparse accessors, additional influence sets and a concrete
+typed extension slice before starting another broad format. Device draw limits remain a concrete
+consumer candidate.
 
 Publication needs a separately chosen package set and resolvable decoder dependencies; native
 distribution additionally needs a normal solution for its patched backend. Neither a local package

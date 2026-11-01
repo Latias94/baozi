@@ -275,6 +275,9 @@ Follow-on candidates 1 and 2 are completed by the
 [attribute-owned tangent slice](2026-11-01-002-feat-attribute-owned-tangents-plan.md). Candidate 3
 is completed by the [base-pose world-query slice](2026-11-01-003-feat-base-pose-world-queries-plan.md)
 in `947a92b`, with [executed evidence](../reviews/2026-11-01-base-pose-world-queries.md).
+Candidate 4 is completed by the [glTF primitive-mode slice](2026-11-01-004-feat-gltf-primitive-modes-plan.md)
+in `d388d3e`, including explicit borrowed list consumption and
+[executed evidence](../reviews/2026-11-01-gltf-primitive-modes.md).
 The remaining rows are ordered candidates, not implicitly authorized implementation work.
 
 | Order | Candidate and prerequisite | Required boundary and acceptance when selected |
