@@ -78,6 +78,7 @@ dependencies = [
 name = "baozi-format-gltf"
 version = "0.1.0"
 dependencies = [
+ "baozi-core",
  "baozi-gltf",
  "baozi-import",
  "baozi-io",

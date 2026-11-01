@@ -71,6 +71,52 @@ impl BufferSet<'_> {
     }
 }
 
+/// Sorted unique sources from the base, sparse indices, and sparse values buffers.
+/// Inline storage is admitted with the containing metered row, including root source zero.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct AccessorSources {
+    sources: [u32; Self::MAX_SOURCES],
+    len: u8,
+}
+
+impl AccessorSources {
+    pub(super) const MAX_SOURCES: usize = 3;
+
+    /// Prepay buffer lookups and bounded collection/sort/dedup before entering decode work.
+    pub(super) const COLLECTION_WORK_BOUND: u64 = 32;
+
+    pub(super) const ROOT: Self = Self {
+        sources: [0; Self::MAX_SOURCES],
+        len: 1,
+    };
+
+    /// Callers prepay COLLECTION_WORK_BOUND; this never opens a nested work scope.
+    pub(super) fn new(mut sources: [Option<u32>; Self::MAX_SOURCES]) -> Self {
+        sources.sort_unstable();
+        let mut provenance = Self {
+            sources: [0; Self::MAX_SOURCES],
+            len: 0,
+        };
+        let mut previous = None;
+        for source in sources.into_iter().flatten() {
+            if previous != Some(source) {
+                provenance.sources[usize::from(provenance.len)] = source;
+                provenance.len += 1;
+                previous = Some(source);
+            }
+        }
+        provenance
+    }
+
+    pub(super) fn as_slice(&self) -> &[u32] {
+        &self.sources[..self.reference_count()]
+    }
+
+    pub(super) fn reference_count(&self) -> usize {
+        usize::from(self.len)
+    }
+}
+
 pub(super) struct NormalizedGltf<'scope> {
     pub(super) sources: source_profile::SelectedSourceProfile<'scope>,
     pub(super) appearance: AppearanceStorage<'scope>,
@@ -195,7 +241,7 @@ pub(super) struct AttributeStorage<'scope> {
     pub(super) semantic: AttributeSemantic,
     pub(super) lanes: u8,
     pub(super) values: MeteredVec<'scope, f32>,
-    pub(super) provenance: u32,
+    pub(super) provenance: AccessorSources,
 }
 
 pub(super) struct PrimitiveStorage<'scope> {
@@ -240,7 +286,7 @@ pub(super) struct SkinStorageRow<'scope> {
     pub(super) joints: MeteredVec<'scope, NodeLocalId>,
     pub(super) inverse_bind_matrices: MeteredVec<'scope, Mat4>,
     pub(super) skeleton_root: Option<NodeLocalId>,
-    pub(super) provenance: u32,
+    pub(super) provenance: AccessorSources,
 }
 
 pub(super) struct SkinStorage<'scope> {

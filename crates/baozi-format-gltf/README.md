@@ -12,10 +12,13 @@ The [exact selected profile](https://github.com/Latias94/baozi/blob/main/docs/fo
   closure are omitted; mixed-target animation filtering requires explicit semantic
   loss authorization.
 - Preserve all seven point, line and triangle primitive modes, supported vertex streams including
-  `JOINTS_0`/`WEIGHTS_0`, hierarchy and node transforms, skins, dense F32 VEC3
+  `JOINTS_0`/`WEIGHTS_0`, hierarchy and node transforms, skins, F32 VEC3
   POSITION/NORMAL/TANGENT morph deltas, node TRS and morph-weight animation,
   perspective/orthographic cameras, and PBR metallic-roughness materials.
   Animation interpolation covers Step, Linear, and CubicSpline.
+- Decode dense and sparse accessors throughout the admitted profile, with an optional base
+  or implicit zero values, normalized conversion, bounded layout/index validation and complete
+  base/indices/values buffer provenance.
 - Preserve encoded external, data-URI, and buffer-view image payloads without
   pixel decoding. Selected dependencies use the origin-qualified session resolver;
   external URIs use the restricted relative-path profile and embedded data URLs
@@ -24,7 +27,7 @@ The [exact selected profile](https://github.com/Latias94/baozi/blob/main/docs/fo
   including JSON null, scalars, and nested sites. No source JSON is interpreted as scene behavior.
 - Support only the typed `KHR_texture_transform` slice at documented texture
   bindings. Reject unsupported selected extension payloads,
-  unsupported required extensions, and sparse morph accessors. Unsupported optional extension
+  and unsupported required extensions. Unsupported optional extension
   declarations without selected payloads may retain the core fallback with a
   diagnostic.
 - Import retains source topology; the explicit `baozi-postprocess::list_vertices` view expands

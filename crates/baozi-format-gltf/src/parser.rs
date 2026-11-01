@@ -28,6 +28,8 @@ use serde::Deserialize as _;
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+mod accessor;
+use accessor::{AccessorContract, validate_accessor};
 mod animation;
 mod extras;
 mod model;
@@ -229,6 +231,7 @@ fn read_normalized_gltf<'scope>(ctx: &'scope ParseScope<'_>) -> Result<Normalize
         &geometry_contracts,
         node_graph.selected.as_slice(),
     )?;
+    preflight_skin_accessors(ctx, &gltf, &resource_closure)?;
     let prepared = PreparedDocument {
         node_graph,
         resource_closure,
@@ -246,6 +249,7 @@ fn read_normalized_gltf<'scope>(ctx: &'scope ParseScope<'_>) -> Result<Normalize
         &prepared.resource_closure,
     )?;
     let buffers = load_buffers(ctx, &gltf, surface.bin_bytes(), &prepared.resource_closure)?;
+    accessor::validate_sparse_indices(ctx, &gltf, buffers.as_slice(), &prepared.resource_closure)?;
     let normalized = normalize_document(ctx, &gltf, buffers, &prepared, surface.into_source_map())?;
     drop(prepared);
     drop(gltf);
@@ -1265,30 +1269,35 @@ fn accessor_provenance(
     ctx: &ParseScope<'_>,
     buffers: &[Option<BufferData<'_>>],
     accessor: gltf::Accessor<'_>,
-) -> Result<u32> {
-    let view = accessor.view().ok_or_else(|| {
-        gltf_parse_error(
-            ctx,
-            format!(
-                "glTF accessor {} has no bufferView after provenance preflight",
-                accessor.index()
-            ),
-        )
-    })?;
-    let buffer_index = view.buffer().index();
-    buffers
-        .get(buffer_index)
-        .and_then(Option::as_ref)
-        .map(BufferData::provenance)
-        .ok_or_else(|| {
-            gltf_parse_error(
-                ctx,
-                format!(
-                    "glTF accessor {} references unavailable buffer {buffer_index}",
-                    accessor.index()
-                ),
-            )
-        })
+) -> Result<AccessorSources> {
+    // Collection work is prepaid before the caller enters its decode work scope.
+    let sparse = accessor.sparse();
+    let views = [
+        accessor.view(),
+        sparse.as_ref().map(|sparse| sparse.indices().view()),
+        sparse.as_ref().map(|sparse| sparse.values().view()),
+    ];
+    let mut sources = [None; AccessorSources::MAX_SOURCES];
+    for (source, view) in sources.iter_mut().zip(views) {
+        let Some(view) = view else { continue };
+        let buffer_index = view.buffer().index();
+        *source = Some(
+            buffers
+                .get(buffer_index)
+                .and_then(Option::as_ref)
+                .map(BufferData::provenance)
+                .ok_or_else(|| {
+                    gltf_parse_error(
+                        ctx,
+                        format!(
+                            "glTF accessor {} references unavailable buffer {buffer_index}",
+                            accessor.index()
+                        ),
+                    )
+                })?,
+        );
+    }
+    Ok(AccessorSources::new(sources))
 }
 
 /// Conservative work for collecting R references, heap sorting, deduplicating, and copying them.
@@ -2925,322 +2934,6 @@ fn checked_primitive_mode(
     }
 }
 
-#[derive(Clone, Copy)]
-struct AccessorContract {
-    components: &'static [json::accessor::ComponentType],
-    dimensions: &'static [json::accessor::Type],
-    allow_stride: bool,
-    require_normalized_integer: bool,
-}
-
-impl AccessorContract {
-    fn vertex(
-        components: &'static [json::accessor::ComponentType],
-        dimensions: &'static [json::accessor::Type],
-    ) -> Self {
-        Self {
-            components,
-            dimensions,
-            allow_stride: true,
-            require_normalized_integer: false,
-        }
-    }
-
-    fn tightly_packed(
-        components: &'static [json::accessor::ComponentType],
-        dimensions: &'static [json::accessor::Type],
-    ) -> Self {
-        Self {
-            components,
-            dimensions,
-            allow_stride: false,
-            require_normalized_integer: false,
-        }
-    }
-
-    fn require_normalized_integer(mut self) -> Self {
-        self.require_normalized_integer = true;
-        self
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct AccessorInfo {
-    count: usize,
-}
-
-fn validate_accessor(
-    ctx: &ParseScope<'_>,
-    gltf: &gltf::Document,
-    accessor_index: usize,
-    owner: AccessorOwner,
-    label: &'static str,
-    contract: AccessorContract,
-) -> Result<AccessorInfo> {
-    let accessor = gltf
-        .as_json()
-        .accessors
-        .get(accessor_index)
-        .ok_or_else(|| {
-            GltfFailure::invalid_accessor(
-                Some(accessor_index),
-                format_args!("{owner} {label} accessor reference is out of range"),
-            )
-        })?;
-    let component = match accessor.component_type {
-        Checked::Valid(component) => component.0,
-        Checked::Invalid => {
-            return Err(ContentError::parse(
-                ctx.source().to_string(),
-                None,
-                format!("{owner} {label} accessor has an invalid component type"),
-            ));
-        }
-    };
-    let dimension = match accessor.type_ {
-        Checked::Valid(dimension) => dimension,
-        Checked::Invalid => {
-            return Err(ContentError::parse(
-                ctx.source().to_string(),
-                None,
-                format!("{owner} {label} accessor has an invalid type"),
-            ));
-        }
-    };
-    if !contract.components.contains(&component) || !contract.dimensions.contains(&dimension) {
-        return Err(ContentError::parse(
-            ctx.source().to_string(),
-            None,
-            format!("{owner} {label} accessor type is unsupported"),
-        ));
-    }
-    if accessor.sparse.is_some() {
-        return Err(ContentError::FeatureUnsupported {
-            format: "gltf",
-            feature: format!("{label} sparse accessor"),
-        });
-    }
-    if accessor.normalized && component == json::accessor::ComponentType::F32 {
-        return Err(ContentError::parse(
-            ctx.source().to_string(),
-            None,
-            format!("{owner} float {label} accessor must not be normalized"),
-        ));
-    }
-    if contract.require_normalized_integer
-        && component != json::accessor::ComponentType::F32
-        && !accessor.normalized
-    {
-        return Err(ContentError::parse(
-            ctx.source().to_string(),
-            None,
-            format!("{owner} integer {label} accessor must be normalized"),
-        ));
-    }
-    validate_accessor_layout(
-        ctx,
-        gltf,
-        AccessorLayoutCheck {
-            accessor,
-            owner,
-            label,
-            component,
-            dimension,
-            contract,
-        },
-    )?;
-
-    let count = usize::try_from(accessor.count.0)
-        .map_err(|_| ctx.allocation_failure("gltf-accessor-count"))?;
-    Ok(AccessorInfo { count })
-}
-
-#[derive(Clone, Copy)]
-struct AccessorLayoutCheck<'a> {
-    accessor: &'a json::accessor::Accessor,
-    owner: AccessorOwner,
-    label: &'static str,
-    component: json::accessor::ComponentType,
-    dimension: json::accessor::Type,
-    contract: AccessorContract,
-}
-
-fn validate_accessor_layout(
-    ctx: &ParseScope<'_>,
-    gltf: &gltf::Document,
-    check: AccessorLayoutCheck<'_>,
-) -> Result<()> {
-    let buffer_view_index = check
-        .accessor
-        .buffer_view
-        .ok_or_else(|| {
-            ContentError::parse(
-                ctx.source().to_string(),
-                None,
-                format!("{} {} accessor has no bufferView", check.owner, check.label),
-            )
-        })?
-        .value();
-    let buffer_view = gltf
-        .as_json()
-        .buffer_views
-        .get(buffer_view_index)
-        .ok_or_else(|| {
-            ContentError::parse(
-                ctx.source().to_string(),
-                None,
-                format!(
-                    "{} {} bufferView reference is out of range",
-                    check.owner, check.label
-                ),
-            )
-        })?;
-    let buffer_index = buffer_view.buffer.value();
-    let buffer = gltf.as_json().buffers.get(buffer_index).ok_or_else(|| {
-        ContentError::parse(
-            ctx.source().to_string(),
-            None,
-            format!(
-                "{} {} buffer reference is out of range",
-                check.owner, check.label
-            ),
-        )
-    })?;
-
-    let component_size = component_size(check.component);
-    let element_size = element_size(check.component, check.dimension);
-    let stride = match buffer_view.byte_stride {
-        Some(_) if !check.contract.allow_stride => {
-            return Err(ContentError::parse(
-                ctx.source().to_string(),
-                None,
-                format!(
-                    "{} {} accessor uses byteStride where it is unsupported",
-                    check.owner, check.label
-                ),
-            ));
-        }
-        Some(stride) => stride.0 as u64,
-        None => element_size,
-    };
-    if stride < element_size {
-        return Err(ContentError::parse(
-            ctx.source().to_string(),
-            None,
-            format!(
-                "{} {} byteStride is smaller than the accessor element size",
-                check.owner, check.label
-            ),
-        ));
-    }
-    if !stride.is_multiple_of(component_size) {
-        return Err(ContentError::parse(
-            ctx.source().to_string(),
-            None,
-            format!(
-                "{} {} byteStride is not aligned to component size",
-                check.owner, check.label
-            ),
-        ));
-    }
-
-    let view_offset = buffer_view.byte_offset.map_or(0, |offset| offset.0);
-    let view_length = buffer_view.byte_length.0;
-    let accessor_offset = check.accessor.byte_offset.map_or(0, |offset| offset.0);
-    let absolute_offset = view_offset.checked_add(accessor_offset).ok_or_else(|| {
-        gltf_parse_error(
-            ctx,
-            format!("{} {} byte offset overflow", check.owner, check.label),
-        )
-    })?;
-    if !absolute_offset.is_multiple_of(component_size) {
-        return Err(ContentError::parse(
-            ctx.source().to_string(),
-            None,
-            format!(
-                "{} {} byte offset is not aligned to component size",
-                check.owner, check.label
-            ),
-        ));
-    }
-
-    let view_end = view_offset.checked_add(view_length).ok_or_else(|| {
-        gltf_parse_error(
-            ctx,
-            format!("{} {} bufferView range overflow", check.owner, check.label),
-        )
-    })?;
-    if view_end > buffer.byte_length.0 {
-        return Err(ContentError::parse(
-            ctx.source().to_string(),
-            None,
-            format!(
-                "{} {} bufferView exceeds declared buffer byteLength",
-                check.owner, check.label
-            ),
-        ));
-    }
-
-    let required = required_accessor_bytes(check.accessor.count.0, element_size, stride)
-        .ok_or_else(|| {
-            gltf_parse_error(
-                ctx,
-                format!("{} {} byte range overflow", check.owner, check.label),
-            )
-        })?;
-    let accessor_end = accessor_offset.checked_add(required).ok_or_else(|| {
-        gltf_parse_error(
-            ctx,
-            format!("{} {} accessor range overflow", check.owner, check.label),
-        )
-    })?;
-    if accessor_end > view_length {
-        return Err(ContentError::parse(
-            ctx.source().to_string(),
-            None,
-            format!(
-                "{} {} bufferView byteLength does not cover accessor data",
-                check.owner, check.label
-            ),
-        ));
-    }
-
-    Ok(())
-}
-
-fn component_size(component: json::accessor::ComponentType) -> u64 {
-    match component {
-        json::accessor::ComponentType::I8 | json::accessor::ComponentType::U8 => 1,
-        json::accessor::ComponentType::I16 | json::accessor::ComponentType::U16 => 2,
-        json::accessor::ComponentType::U32 | json::accessor::ComponentType::F32 => 4,
-    }
-}
-
-fn component_count(dimension: json::accessor::Type) -> u64 {
-    match dimension {
-        json::accessor::Type::Scalar => 1,
-        json::accessor::Type::Vec2 => 2,
-        json::accessor::Type::Vec3 => 3,
-        json::accessor::Type::Vec4 | json::accessor::Type::Mat2 => 4,
-        json::accessor::Type::Mat3 => 9,
-        json::accessor::Type::Mat4 => 16,
-    }
-}
-
-fn element_size(component: json::accessor::ComponentType, dimension: json::accessor::Type) -> u64 {
-    component_size(component) * component_count(dimension)
-}
-
-fn required_accessor_bytes(count: u64, element_size: u64, stride: u64) -> Option<u64> {
-    if count == 0 {
-        return Some(0);
-    }
-    count
-        .checked_sub(1)?
-        .checked_mul(stride)?
-        .checked_add(element_size)
-}
-
 fn safe_gltf<T>(ctx: &ParseScope<'_>, operation: &'static str, f: impl FnOnce() -> T) -> Result<T> {
     ctx.poll()?;
     let outcome = catch_unwind(AssertUnwindSafe(f));
@@ -3396,6 +3089,7 @@ fn build_geometry_storage<'scope>(
         None,
         "gltf-logical-mesh-id-map",
     )?;
+    ctx.charge_work(to_u64(buffers.len()))?;
     let available_provenance_count = buffers
         .iter()
         .filter(|buffer| buffer.is_some())
@@ -3408,7 +3102,10 @@ fn build_geometry_storage<'scope>(
         .filter_map(Option::as_ref)
         .flat_map(|mesh| mesh.primitives.as_slice())
         .try_fold(0usize, |count, primitive| {
-            let reference_count = primitive.attribute_stream_count.checked_add(1)?;
+            let reference_count = primitive
+                .attribute_stream_count
+                .checked_add(1)?
+                .checked_mul(AccessorSources::MAX_SOURCES)?;
             count.checked_add(reference_count.min(available_provenance_count))
         })
         .ok_or_else(|| ctx.allocation_failure("gltf-primitive-buffer-provenance-count"))?;
@@ -3519,11 +3216,20 @@ fn build_primitive_authoring<'scope>(
         .position_count
         .checked_mul(contract.attribute_stream_count)
         .ok_or_else(|| ctx.allocation_failure("gltf-attribute-cell-counter"))?;
-    let provenance_references = contract
+    let accessor_count = contract
         .attribute_stream_count
         .checked_add(1)
         .ok_or_else(|| ctx.allocation_failure("gltf-primitive-provenance-references"))?;
-    ctx.charge_work(provenance_work_bound(ctx, provenance_references)?)?;
+    let provenance_references = accessor_count
+        .checked_mul(AccessorSources::MAX_SOURCES)
+        .ok_or_else(|| ctx.allocation_failure("gltf-primitive-provenance-references"))?;
+    let merge_work = provenance_work_bound(ctx, provenance_references)?;
+    // Each accessor contributes to the primitive and, for attributes, its own retained row.
+    let collection_work = to_u64(accessor_count)
+        .checked_mul(2 * AccessorSources::COLLECTION_WORK_BOUND)
+        .and_then(|work| work.checked_add(merge_work))
+        .ok_or_else(|| ctx.allocation_failure("gltf-primitive-provenance-work"))?;
+    ctx.charge_work(collection_work)?;
     pending_provenance.try_reserve(provenance_references)?;
     ctx.with_work_group(
         [
@@ -3544,12 +3250,14 @@ fn build_primitive_authoring<'scope>(
             let provenance_offset = provenance.len();
             for (ordinal, (_, accessor)) in primitive.attributes().enumerate() {
                 poll_parser_loop(ctx, ordinal)?;
-                pending_provenance
-                    .try_push_reserved(accessor_provenance(ctx, buffers, accessor)?)?;
+                pending_provenance.try_extend_from_slice_reserved(
+                    accessor_provenance(ctx, buffers, accessor)?.as_slice(),
+                )?;
             }
             if let Some(accessor) = primitive.indices() {
-                pending_provenance
-                    .try_push_reserved(accessor_provenance(ctx, buffers, accessor)?)?;
+                pending_provenance.try_extend_from_slice_reserved(
+                    accessor_provenance(ctx, buffers, accessor)?.as_slice(),
+                )?;
             }
             try_extend_provenance_unique(ctx, provenance, pending_provenance)?;
             let reader = safe_gltf(ctx, "glTF primitive reader construction", || {
@@ -5546,86 +5254,14 @@ fn build_skins<'scope>(
             None => None,
         };
 
-        let has_inverse_bind_matrices =
-            validate_skin_inverse_bind_accessor(ctx, gltf, skin.index(), mapped_joints.len())?;
+        ctx.charge_work(AccessorSources::COLLECTION_WORK_BOUND)?;
         let provenance = skin
             .inverse_bind_matrices()
             .map(|accessor| accessor_provenance(ctx, buffers, accessor))
             .transpose()?
-            .unwrap_or(0);
-        let inverse_bind_matrices = if has_inverse_bind_matrices {
-            let reader = safe_gltf(ctx, "glTF skin reader construction", || {
-                skin.reader(|buffer| {
-                    buffers
-                        .get(buffer.index())
-                        .and_then(Option::as_ref)
-                        .map(BufferData::as_slice)
-                })
-            })?;
-            safe_gltf(ctx, "glTF inverse bind matrix reader", || {
-                reader
-                    .read_inverse_bind_matrices()
-                    .map(|matrices| {
-                        let mut collected = ctx.metered_vec(
-                            ImportStorageClass::SceneConstruction,
-                            "gltf-inverse-bind-matrices",
-                        );
-                        collected.try_reserve(mapped_joints.len())?;
-                        for (joint, cols) in matrices.enumerate() {
-                            poll_parser_loop(ctx, joint)?;
-                            if joint >= mapped_joints.len() {
-                                return Err(gltf_parse_error(
-                                    ctx,
-                                    "glTF inverse bind matrix reader exceeded the joint count",
-                                ));
-                            }
-                            let matrix = Mat4 { cols };
-                            if !matrix.is_finite() || !matrix.is_affine() {
-                                return Err(gltf_parse_error(
-                                    ctx,
-                                    format!(
-                                        "glTF skin {} inverse bind matrix {joint} must be finite and affine",
-                                        skin.index(),
-                                    ),
-                                ));
-                            }
-                            collected.try_push_reserved(matrix)?;
-                        }
-                        Ok(collected)
-                    })
-                    .transpose()
-            })??
-            .ok_or_else(|| {
-                gltf_parse_error(
-                    ctx,
-                    format!(
-                        "glTF skin {} declares inverse bind matrices but exposes no reader",
-                        skin.index()
-                    ),
-                )
-            })?
-        } else {
-            let mut matrices = ctx.metered_vec(
-                ImportStorageClass::SceneConstruction,
-                "gltf-inverse-bind-matrices",
-            );
-            matrices.try_reserve(mapped_joints.len())?;
-            for joint in 0..mapped_joints.len() {
-                poll_parser_loop(ctx, joint)?;
-                matrices.try_push_reserved(Mat4::IDENTITY)?;
-            }
-            matrices
-        };
-        if has_inverse_bind_matrices && inverse_bind_matrices.len() != mapped_joints.len() {
-            return Err(ContentError::parse(
-                ctx.source().to_string(),
-                None,
-                format!(
-                    "glTF skin {} inverse bind matrix count does not match joint count",
-                    skin.index()
-                ),
-            ));
-        }
+            .unwrap_or(AccessorSources::ROOT);
+        let inverse_bind_matrices =
+            collect_inverse_bind_matrices(ctx, buffers, &skin, mapped_joints.len())?;
 
         let source_name = skin.name();
         complete_canonical_string_work(ctx, source_name.map_or(0, str::len))?;
@@ -5651,6 +5287,87 @@ fn build_skins<'scope>(
         *slot = Some(local_id);
     }
     Ok(storage)
+}
+
+fn collect_inverse_bind_matrices<'scope>(
+    ctx: &'scope ParseScope<'_>,
+    buffers: &[Option<BufferData<'_>>],
+    skin: &gltf::Skin<'_>,
+    joint_count: usize,
+) -> Result<MeteredVec<'scope, Mat4>> {
+    let scalar_count = to_u64(joint_count)
+        .checked_mul(16)
+        .ok_or_else(|| ctx.allocation_failure("gltf-inverse-bind-work"))?;
+    ctx.with_work(
+        ImportWorkClass::WorkUnits,
+        scalar_count,
+        |work| -> Result<_> {
+            let mut collected = try_vec_capacity(
+                ctx,
+                ImportStorageClass::SceneConstruction,
+                joint_count,
+                "gltf-inverse-bind-matrices",
+            )?;
+            if skin.inverse_bind_matrices().is_some() {
+                let reader = safe_gltf(ctx, "glTF skin reader construction", || {
+                    skin.reader(|buffer| {
+                        buffers
+                            .get(buffer.index())
+                            .and_then(Option::as_ref)
+                            .map(BufferData::as_slice)
+                    })
+                })?;
+                let matrices = safe_gltf(ctx, "glTF inverse bind matrix reader", || {
+                    reader.read_inverse_bind_matrices()
+                })?
+                .ok_or_else(|| {
+                    gltf_parse_error(ctx, "glTF inverse bind matrices could not be read")
+                })?;
+                safe_gltf(ctx, "glTF inverse bind matrix decode", || -> Result<()> {
+                    for cols in matrices {
+                        if collected.len().is_multiple_of(PARSER_POLL_INTERVAL) {
+                            work.poll()?;
+                        }
+                        if collected.len() == joint_count {
+                            return Err(gltf_parse_error(
+                                ctx,
+                                "glTF inverse bind matrix reader exceeded the joint count",
+                            ));
+                        }
+                        let matrix = Mat4 { cols };
+                        if !matrix.is_finite() || !matrix.is_affine() {
+                            return Err(gltf_parse_error(
+                                ctx,
+                                format!(
+                                    "glTF skin {} inverse bind matrix {} must be finite and affine",
+                                    skin.index(),
+                                    collected.len(),
+                                ),
+                            ));
+                        }
+                        collected.try_push_reserved(matrix)?;
+                        work.complete([16])?;
+                    }
+                    Ok(())
+                })??;
+            } else {
+                for joint in 0..joint_count {
+                    if joint.is_multiple_of(PARSER_POLL_INTERVAL) {
+                        work.poll()?;
+                    }
+                    collected.try_push_reserved(Mat4::IDENTITY)?;
+                    work.complete([16])?;
+                }
+            }
+            if collected.len() != joint_count {
+                return Err(gltf_parse_error(
+                    ctx,
+                    "glTF inverse bind matrix count does not match joint count",
+                ));
+            }
+            Ok(collected)
+        },
+    )
 }
 
 fn build_mesh_instance_deformations<'scope>(
@@ -5753,6 +5470,21 @@ fn validate_skin_inverse_bind_accessor(
         ));
     }
     Ok(true)
+}
+
+fn preflight_skin_accessors(
+    ctx: &ParseScope<'_>,
+    gltf: &gltf::Document,
+    closure: &ResourceClosure<'_>,
+) -> Result<()> {
+    for (skin_index, skin) in gltf.as_json().skins.iter().enumerate() {
+        ctx.charge_work(1)?;
+        poll_parser_loop(ctx, skin_index)?;
+        if closure.skins.as_slice()[skin_index] {
+            validate_skin_inverse_bind_accessor(ctx, gltf, skin_index, skin.joints.len())?;
+        }
+    }
+    Ok(())
 }
 
 fn build_cameras<'scope>(

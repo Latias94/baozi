@@ -122,7 +122,7 @@ fn build_fixture<'scope>(
         semantic: AttributeSemantic::Position,
         lanes: 3,
         values: values(scope, &[0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0, 0.0])?,
-        provenance: 0,
+        provenance: AccessorSources::ROOT,
     };
     let primitive = PrimitiveStorage {
         topology: GeometryTopologyAuthoring::TriangleList,
@@ -212,7 +212,7 @@ fn build_fixture<'scope>(
             morph::MorphDeltaStorage {
                 semantic: MorphDeltaSemantic::Position,
                 values: values(scope, &[0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0, 3.0])?,
-                provenance: 0,
+                provenance: AccessorSources::ROOT,
             },
         )?,
     };

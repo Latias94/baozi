@@ -278,6 +278,8 @@ in `947a92b`, with [executed evidence](../reviews/2026-11-01-base-pose-world-que
 Candidate 4 is completed by the [glTF primitive-mode slice](2026-11-01-004-feat-gltf-primitive-modes-plan.md)
 in `d388d3e`, including explicit borrowed list consumption and
 [executed evidence](../reviews/2026-11-01-gltf-primitive-modes.md).
+Candidate 5 is selected for execution by the
+[shared sparse accessor plan](2026-11-01-005-feat-gltf-sparse-accessors-plan.md).
 The remaining rows are ordered candidates, not implicitly authorized implementation work.
 
 | Order | Candidate and prerequisite | Required boundary and acceptance when selected |

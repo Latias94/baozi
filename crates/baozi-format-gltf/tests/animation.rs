@@ -222,6 +222,43 @@ fn animation_output_count_is_rejected_before_payload_admission() -> TestResult<(
 }
 
 #[test]
+fn animation_accessor_byte_stride_fails_before_dependency_io() -> TestResult<()> {
+    for (view, stride) in [(0, 4), (1, 12), (2, 16), (3, 12)] {
+        let mut document = gltf::json::Root::from_slice(base_animation_json())?;
+        document.buffers[0].uri = Some("animation.bin".to_owned());
+        document.buffer_views[view].byte_stride = Some(gltf::json::buffer::Stride(stride));
+        let (result, diagnostics) = import_assets_result(
+            "strided-animation.gltf",
+            [("strided-animation.gltf", serde_json::to_vec(&document)?)],
+            GltfTestOptions::memory(),
+        )?;
+        let failure = expected_error(result)?;
+
+        assert!(diagnostics.is_empty());
+        assert_gltf_failure(
+            &failure,
+            GltfFailureCode::InvalidDocument,
+            Some("byteStride"),
+        )?;
+        let animation_cells = failure
+            .ledger()
+            .dimension(ImportDimension::AnimationCells)
+            .expect("animation cells are configured");
+        assert_eq!(animation_cells.attempted(), 0);
+        assert_eq!(animation_cells.consumed(), 0);
+        assert_eq!(
+            failure
+                .ledger()
+                .dimension(ImportDimension::DependencyReference)
+                .expect("dependency references are configured")
+                .attempted(),
+            0
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn non_finite_animation_payload_is_rejected_without_committing_cells() -> TestResult<()> {
     let mut bin = base_animation_bin();
     bin[20..24].copy_from_slice(&f32::NAN.to_le_bytes());

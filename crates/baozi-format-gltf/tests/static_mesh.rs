@@ -1,5 +1,6 @@
 mod common;
 
+use baozi_core::{AttributeElement, AttributeSemanticRef};
 use baozi_format_gltf::GltfFailureCode;
 use baozi_import::{ImportCause, ImportDimension, ScopeAbortCause};
 use base64::Engine as _;
@@ -8,6 +9,11 @@ use common::{
     expected_error, import_assets, import_assets_result, interleaved_triangle_bin,
     interleaved_triangle_gltf, sidecar_options, triangle_bin, triangle_glb, triangle_gltf,
     triangle_gltf_with_buffer_uri, triangle_png,
+};
+use gltf::json::{
+    self,
+    accessor::{ComponentType, GenericComponentType},
+    validation::{Checked, USize64},
 };
 
 #[test]
@@ -649,6 +655,83 @@ fn integer_texcoord_must_be_normalized_before_reader() -> TestResult<()> {
 }
 
 #[test]
+fn vertex_relative_byte_offset_must_align_to_four_before_dependency_io() -> TestResult<()> {
+    for (component, offset) in [(ComponentType::U8, 1), (ComponentType::U16, 2)] {
+        let mut document = json::Root::from_slice(&triangle_gltf())?;
+        let accessor = &mut document.accessors[2];
+        accessor.component_type = Checked::Valid(GenericComponentType(component));
+        accessor.normalized = true;
+        accessor.byte_offset = Some(USize64(offset));
+        let (result, diagnostics) = import_assets_result(
+            "models/scene.gltf",
+            [("models/scene.gltf", serde_json::to_vec(&document)?)],
+            GltfTestOptions::memory(),
+        )?;
+        let error = expected_error(result)?;
+
+        assert!(diagnostics.is_empty());
+        assert_gltf_failure(&error, GltfFailureCode::InvalidAccessor, None)?;
+        assert_eq!(
+            error
+                .ledger()
+                .dimension(ImportDimension::DependencyReference)
+                .expect("dependency references are configured")
+                .attempted(),
+            0
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn imports_packed_u16_texcoords_with_two_byte_aligned_view() -> TestResult<()> {
+    let mut document = json::Root::from_slice(&triangle_gltf())?;
+    document.accessors[2].component_type = Checked::Valid(GenericComponentType(ComponentType::U16));
+    document.accessors[2].normalized = true;
+    document.buffer_views[2].byte_offset = Some(USize64(74));
+    document.buffer_views[2].byte_length = USize64(12);
+    let mut binary = triangle_bin();
+    for (bytes, value) in
+        binary[74..86]
+            .chunks_exact_mut(2)
+            .zip([0_u16, 0, u16::MAX, 0, 0, u16::MAX])
+    {
+        bytes.copy_from_slice(&value.to_le_bytes());
+    }
+    let (report, diagnostics) = import_assets(
+        "models/scene.gltf",
+        [
+            ("models/scene.gltf", serde_json::to_vec(&document)?),
+            ("models/triangle.bin", binary),
+            ("models/textures/base.png", triangle_png()),
+        ],
+        sidecar_options(),
+    )?;
+
+    assert!(diagnostics.is_empty());
+    let primitive = report
+        .scene()
+        .meshes()
+        .next()
+        .unwrap()
+        .primitives()
+        .next()
+        .unwrap();
+    let texcoords = primitive
+        .attributes()
+        .find(|attribute| attribute.semantic() == AttributeSemanticRef::Texcoord(0))
+        .expect("the packed TEXCOORD_0 stream is retained");
+    assert_eq!(texcoords.len(), 3);
+    for (vertex, expected) in [[0.0_f32, 0.0], [1.0, 0.0], [0.0, 1.0]].iter().enumerate() {
+        assert_eq!(
+            texcoords.element(vertex),
+            Some(AttributeElement::F32(expected))
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn short_buffer_view_is_parse_error_before_reader() -> TestResult<()> {
     let gltf = String::from_utf8(triangle_gltf())
         .expect("fixture is valid utf-8")
@@ -701,36 +784,42 @@ fn index_accessor_byte_stride_is_parse_error_before_reader() -> TestResult<()> {
 }
 
 #[test]
-fn sparse_accessor_is_explicitly_unsupported_before_reader() -> TestResult<()> {
-    let gltf = String::from_utf8(triangle_gltf())
-        .expect("fixture is valid utf-8")
-        .replace(r#""byteLength": 104"#, r#""byteLength": 116"#)
-        .replace(
-            r#"{ "buffer": 0, "byteOffset": 96, "byteLength": 6, "target": 34963 }"#,
-            r#"{ "buffer": 0, "byteOffset": 96, "byteLength": 6, "target": 34963 },
-    { "buffer": 0, "byteOffset": 102, "byteLength": 2 },
-    { "buffer": 0, "byteOffset": 104, "byteLength": 12 }"#,
-        )
-        .replace(
-            r#"{ "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0] }"#,
-            r#"{ "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0], "sparse": { "count": 1, "indices": { "bufferView": 4, "componentType": 5123 }, "values": { "bufferView": 5 } } }"#,
-        )
-        .into_bytes();
-    let mut bin = triangle_bin();
-    bin.resize(116, 0);
+fn sparse_vertex_offsets_require_four_byte_alignment() -> TestResult<()> {
+    let mut document: serde_json::Value = serde_json::from_slice(&triangle_gltf())?;
+    document["accessors"][2]["componentType"] = serde_json::json!(5123);
+    document["accessors"][2]["normalized"] = serde_json::json!(true);
+    // Component alignment permits this U16 offset; a sparse overlay cannot relax vertex alignment.
+    document["accessors"][2]["byteOffset"] = serde_json::json!(2);
+    document["bufferViews"][2]["byteStride"] = serde_json::json!(4);
+    document["bufferViews"].as_array_mut().unwrap().extend([
+        serde_json::json!({"buffer": 0, "byteOffset": 96, "byteLength": 1}),
+        serde_json::json!({"buffer": 0, "byteOffset": 96, "byteLength": 4}),
+    ]);
+    document["accessors"][2]["sparse"] = serde_json::json!({
+        "count": 1,
+        "indices": {"bufferView": 4, "componentType": 5121},
+        "values": {"bufferView": 5}
+    });
     let (result, diagnostics) = import_assets_result(
         "models/scene.gltf",
-        [("models/scene.gltf", gltf), ("models/triangle.bin", bin)],
+        [("models/scene.gltf", serde_json::to_vec(&document)?)],
         sidecar_options(),
     )?;
-    let error = expected_error(result)?;
-
     assert!(diagnostics.is_empty());
+    let failure = expected_error(result)?;
     assert_gltf_failure(
-        &error,
-        GltfFailureCode::UnsupportedFeature,
-        Some("sparse accessor"),
+        &failure,
+        GltfFailureCode::InvalidAccessor,
+        Some("multiple of four"),
     )?;
+    assert_eq!(
+        failure
+            .ledger()
+            .dimension(ImportDimension::DependencyReference)
+            .unwrap()
+            .attempted(),
+        0
+    );
     Ok(())
 }
 

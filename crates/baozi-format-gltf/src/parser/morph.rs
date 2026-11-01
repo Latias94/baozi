@@ -27,7 +27,7 @@ pub(super) struct MorphTargetStorage {
 pub(super) struct MorphDeltaStorage<'scope> {
     pub(super) semantic: MorphDeltaSemantic,
     pub(super) values: MeteredVec<'scope, f32>,
-    pub(super) provenance: u32,
+    pub(super) provenance: AccessorSources,
 }
 
 pub(super) struct MorphStorage<'scope> {
@@ -319,6 +319,10 @@ pub(super) fn build_storage<'scope>(
         .and_then(|count| count.checked_add(contracts.deltas))
         .and_then(|count| count.checked_add(contracts.cells))
         .ok_or_else(|| ctx.allocation_failure("gltf-morph-work"))?;
+    let provenance_work = to_u64(contracts.deltas)
+        .checked_mul(AccessorSources::COLLECTION_WORK_BOUND)
+        .ok_or_else(|| ctx.allocation_failure("gltf-morph-provenance-work"))?;
+    ctx.charge_work(provenance_work)?;
     ctx.with_work_group([
         (ImportWorkClass::WorkUnits, to_u64(work_units)),
         (ImportWorkClass::MorphCells, to_u64(contracts.cells)),

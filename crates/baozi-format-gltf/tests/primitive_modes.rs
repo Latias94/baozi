@@ -263,7 +263,12 @@ fn empty_short_and_incomplete_draws_fail_before_dependency_io() -> TestResult<()
                     indexed.then_some((indices.as_slice(), 5123)),
                 );
                 let failure = reject_before_dependency_io(&document, sidecar_options())?;
-                assert_gltf_failure(&failure, GltfFailureCode::InvalidDocument, None)?;
+                let code = if corners == 0 {
+                    GltfFailureCode::InvalidAccessor
+                } else {
+                    GltfFailureCode::InvalidDocument
+                };
+                assert_gltf_failure(&failure, code, None)?;
             }
         }
     }

@@ -48,12 +48,17 @@ baseline malformed-input safety for that source state; it is not sustained fuzz 
   Points/LineList/TriangleList draw tuples.
 - Positions, normals, tangents, texture coordinates, colors, indices, `JOINTS_0`, and `WEIGHTS_0`
   streams when present.
+- Dense and sparse accessors for every admitted accessor use, including geometry, indices,
+  influences, morph deltas, animation inputs/outputs and inverse bind matrices. Sparse accessors
+  accept an optional base bufferView or implicit zero source components and apply replacements
+  before normalized integer conversion. Canonical materialization uses the existing bounded
+  dense collectors; source sparsity does not reduce logical cardinality or allocation admission.
 - Node hierarchy, node transforms, mesh binding, node-level skin binding, and camera binding.
 - Deterministic document-default scene selection: a sole scene is selected when no default is
   declared, while multiple declared scenes without a default are rejected instead of silently
   selecting scene zero.
 - Skins with joint node references, optional skeleton root, and optional inverse bind matrices.
-- Dense F32 VEC3 POSITION/NORMAL/TANGENT morph deltas, with equal target width across morph-bearing
+- F32 VEC3 POSITION/NORMAL/TANGENT morph deltas, with equal target width across morph-bearing
   primitives, zero deltas for empty targets or primitives without targets, zero mesh defaults when
   weights are absent, and complete node weight overrides. Delta streams require the corresponding
   base semantic. Cardinality, finite values, ordered POSITION bounds, and morph-cell admission are
@@ -126,6 +131,33 @@ original U8/U16/U32 component type. The check runs before source-width informati
 These rules follow the [Khronos mesh contract](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#meshes).
 Repeated indices and degenerate elements remain present; import does not perform geometric repair.
 
+### Sparse accessor validation and provenance
+
+The shared accessor preflight checks the base and both sparse layouts before dependency I/O.
+Sparse count must be positive and no greater than the logical accessor count. Sparse index encoding
+is U8, U16 or U32; both sparse views must omit `byteStride` and `target`, fit their declared buffers,
+and cover all replacements. Relative offsets and view offsets must each align to the corresponding
+component size. An accessor without a base view must omit `byteOffset`. Logical decoded size is
+checked independently of stored sparse size, and existing semantic count limits still apply.
+Base vertex relative offsets and explicit strides also require four-byte alignment. Animation
+accessors use tightly packed base views without `byteStride`; integer indices and JOINTS must not
+set `normalized`, while supported normalized UV/color/weight/animation values retain their conversion.
+
+After selected buffers are loaded, a single admitted scan of each selected sparse index stream
+rejects duplicates, decreasing order and indices outside the accessor count before decoding.
+This scan borrows source bytes, charges DecodeWork by sparse index count, and polls between
+at-most-4096-index chunks. It creates no auxiliary index table. Source-width primitive restart
+checks and semantic value checks then operate on the final accessor values as for dense input.
+
+The accessor's provenance includes all distinct contributing base, index and value buffer sources,
+including the primary resource for embedded bytes. The selected closure and source-object links
+retain the same full chain. Attribute, primitive, morph delta, skin and animation owners propagate
+these sources through the existing public provenance readers. Buffer sources are sorted and
+deduplicated with admitted capacity/work; even a completely replaced base remains a declared source.
+
+These rules follow the [Khronos sparse accessor contract](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#sparse-accessors).
+They do not add new component types, joint sets, extension-provided element sources or matrix forms.
+
 ## Text Preflight, Resource Accounting, and Cancellation
 
 This preflight uses document admission because JSON is a document grammar rather than a
@@ -174,7 +206,7 @@ and import-contract tests.
 ## Explicit Restrictions
 
 - Embedded image buffer views and image data URIs are materialized as encoded image payloads without
-  pixel decoding. Sparse morph accessors, typed extension payloads beyond
+  pixel decoding. Typed extension payloads beyond
   `KHR_texture_transform` are rejected explicitly.
 - Unsupported selected extension payloads are explicitly rejected with original raw byte
   ranges. A supported extension at an unsupported owner/site is rejected as well. Unselected entity

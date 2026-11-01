@@ -1,11 +1,12 @@
 //! Canonical authoring from the owned, backend-independent glTF model.
 
 use super::{
-    ContentError, GltfFailure, Result, animation, authoring_u32, gltf_parse_error,
+    ContentError, GltfFailure, PARSER_POLL_INTERVAL, Result, animation, authoring_u32,
+    gltf_parse_error,
     model::*,
     morph,
     source_profile::{self, SelectedSourceProfile},
-    uri,
+    to_u64, uri,
 };
 use crate::FORMAT_ID;
 use baozi_import::authoring::*;
@@ -545,33 +546,37 @@ pub(super) fn submit_parts(
             .iter()
             .filter(|binding| binding.provenance != 0)
             .count(),
-        geometry_storage
-            .primitive_provenance
-            .as_slice()
-            .iter()
-            .filter(|&&source| source != 0)
-            .count(),
-        geometry_storage
-            .logical_meshes
-            .as_slice()
-            .iter()
-            .flat_map(|mesh| mesh.primitives.as_slice())
-            .flat_map(|primitive| primitive.attributes.as_slice())
-            .filter(|attribute| attribute.provenance != 0)
-            .count(),
-        skins
-            .skins
-            .as_slice()
-            .iter()
-            .filter(|skin| skin.provenance != 0)
-            .count(),
-        morph_storage
-            .deltas
-            .as_slice()
-            .iter()
-            .filter(|delta| delta.provenance != 0)
-            .count(),
-        animation_storage.non_primary_provenance_count(),
+        non_primary_provenance_count(
+            ctx,
+            std::iter::once(geometry_storage.primitive_provenance.as_slice()),
+        )?,
+        non_primary_provenance_count(
+            ctx,
+            geometry_storage
+                .logical_meshes
+                .as_slice()
+                .iter()
+                .flat_map(|mesh| mesh.primitives.as_slice())
+                .flat_map(|primitive| primitive.attributes.as_slice())
+                .map(|attribute| attribute.provenance.as_slice()),
+        )?,
+        non_primary_provenance_count(
+            ctx,
+            skins
+                .skins
+                .as_slice()
+                .iter()
+                .map(|skin| skin.provenance.as_slice()),
+        )?,
+        non_primary_provenance_count(
+            ctx,
+            morph_storage
+                .deltas
+                .as_slice()
+                .iter()
+                .map(|delta| delta.provenance.as_slice()),
+        )?,
+        animation_storage.non_primary_provenance_count(ctx)?,
     ]
     .into_iter()
     .try_fold(0usize, |count, value| count.checked_add(value))
@@ -741,7 +746,7 @@ pub(super) fn submit_parts(
                 .checked_add(1)
                 .ok_or_else(|| ctx.allocation_failure("gltf-profile-primitive-owner"))?;
             for attribute in primitive.attributes.as_slice() {
-                push_owner_source(
+                push_owner_sources(
                     ctx,
                     &mut owner_sources,
                     &mut owner_source_values,
@@ -752,7 +757,7 @@ pub(super) fn submit_parts(
                         attribute_owner_index,
                         "gltf-profile-attribute-owner",
                     )?),
-                    attribute.provenance,
+                    attribute.provenance.as_slice().iter().copied(),
                 )?;
                 attribute_owner_index = attribute_owner_index
                     .checked_add(1)
@@ -770,14 +775,14 @@ pub(super) fn submit_parts(
         ProfileOwner::MeshInstance,
     )?;
     for (index, skin) in skins.skins.as_slice().iter().enumerate() {
-        push_owner_source(
+        push_owner_sources(
             ctx,
             &mut owner_sources,
             &mut owner_source_values,
             selected_sources,
             resource_count,
             ProfileOwner::Skin(authoring_u32(ctx, index, "gltf-profile-skin-owner")?),
-            skin.provenance,
+            skin.provenance.as_slice().iter().copied(),
         )?;
     }
     push_indexed_owner_sources(
@@ -791,14 +796,14 @@ pub(super) fn submit_parts(
     )?;
     for (index, delta) in morph_storage.deltas.as_slice().iter().enumerate() {
         ctx.charge_work(1)?;
-        push_owner_source(
+        push_owner_sources(
             ctx,
             &mut owner_sources,
             &mut owner_source_values,
             selected_sources,
             resource_count,
             ProfileOwner::MorphDelta(authoring_u32(ctx, index, "gltf-profile-morph-delta-owner")?),
-            delta.provenance,
+            delta.provenance.as_slice().iter().copied(),
         )?;
     }
     for index in 0..animation_storage.clip_count() {
@@ -1046,6 +1051,24 @@ fn generated_evidence(
     let evidence = OperationEvidenceSummary::new(code, 1, Some(EvidenceDigest::sha256(bytes)))
         .map_err(|_| gltf_parse_error(ctx, "static glTF generated evidence count is invalid"))?;
     Ok((OptionsDigest::sha256(bytes), [evidence]))
+}
+
+fn non_primary_provenance_count<'a>(
+    ctx: &ParseScope<'_>,
+    provenance: impl IntoIterator<Item = &'a [u32]>,
+) -> Result<usize> {
+    provenance
+        .into_iter()
+        .try_fold(0usize, |mut count, sources| {
+            ctx.charge_work(1)?;
+            for chunk in sources.chunks(PARSER_POLL_INTERVAL) {
+                ctx.charge_work(to_u64(chunk.len()))?;
+                count = count
+                    .checked_add(chunk.iter().filter(|&&source| source != 0).count())
+                    .ok_or_else(|| ctx.allocation_failure("gltf-profile-owner-source-count"))?;
+            }
+            Ok(count)
+        })
 }
 
 fn push_owner_source(
