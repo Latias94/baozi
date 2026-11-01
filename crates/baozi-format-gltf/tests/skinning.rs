@@ -178,7 +178,7 @@ fn selected_skin_without_mesh_is_rejected_before_dependency_io() -> TestResult<(
 }
 
 #[test]
-fn multiple_influence_sets_are_rejected_before_dependency_io() -> TestResult<()> {
+fn higher_influence_set_requires_its_weight_partner_before_dependency_io() -> TestResult<()> {
     let gltf = String::from_utf8(skinned_triangle_gltf())
         .expect("fixture is valid utf-8")
         .replace(
@@ -196,8 +196,8 @@ fn multiple_influence_sets_are_rejected_before_dependency_io() -> TestResult<()>
     assert!(diagnostics.is_empty());
     assert_gltf_failure(
         &error,
-        GltfFailureCode::UnsupportedFeature,
-        Some("multiple JOINTS/WEIGHTS sets"),
+        GltfFailureCode::InvalidDocument,
+        Some("JOINTS and WEIGHTS"),
     )?;
     assert!(error.source_scope_record().is_none());
     assert_eq!(

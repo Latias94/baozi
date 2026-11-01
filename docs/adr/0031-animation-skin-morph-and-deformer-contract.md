@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-10
-updated: 2026-10-30
+updated: 2026-11-01
 authors:
   - Codex
 decision_type: architecture
@@ -74,8 +74,12 @@ remain checked at the admitted import boundary in addition to canonical validati
 
 Vertex influences are variable-length compressed rows: `vertex_offsets` has `vertex_count + 1`
 entries and a flat influence array stores palette-local joint index, finite non-negative `f32`
-weight, and source order for deterministic ties. Weight sums need not equal one in raw import, but
-the discrepancy is diagnosed. Zero weights may be preserved; compaction may remove them.
+weight, and source order for deterministic ties. Core raw rows do not require unit sums or unique
+palette joints. A format adapter enforces stricter source requirements and diagnoses preserved
+sum discrepancies under its profile. Zero weights may be preserved; compaction may remove them.
+The [glTF profile](../formats/gltf.md#complete-influence-sets) requires contiguous paired sets,
+unique positive-weight joints, exact all-integer sums, and a summary diagnostic for F32 sum
+discrepancies. It retains every set/lane without normalizing or truncating the canonical rows.
 
 The row contract is exact: offsets are `u32`, the first offset is zero, offsets are non-decreasing,
 the final offset equals the flat influence count, and every offset is in range. There is one row per

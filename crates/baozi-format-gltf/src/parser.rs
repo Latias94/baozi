@@ -32,6 +32,7 @@ mod accessor;
 use accessor::{AccessorContract, validate_accessor};
 mod animation;
 mod extras;
+mod influences;
 mod model;
 mod morph;
 use model::*;
@@ -2518,6 +2519,7 @@ struct PrimitiveContract {
     index_count: usize,
     face_count: usize,
     attribute_stream_count: usize,
+    influences: influences::InfluenceContract,
     material_index: Option<usize>,
 }
 
@@ -2555,6 +2557,8 @@ fn preflight_geometry_contracts<'scope>(
     let mut total_topology_cells = 0usize;
     let mut total_attribute_streams = 0usize;
     let mut total_attribute_cells = 0usize;
+    let mut total_influence_cells = 0usize;
+    let mut total_influence_offsets = 0usize;
     for (mesh_ordinal, mesh) in gltf.meshes().enumerate() {
         poll_parser_loop(ctx, mesh_ordinal)?;
         if !closure
@@ -2628,6 +2632,18 @@ fn preflight_geometry_contracts<'scope>(
                 attribute_cells,
                 ctx.limits().max_total_vertex_attribute_cells,
             )?;
+            total_influence_cells = checked_add_with_limit(
+                ctx,
+                "max_influence_cells",
+                total_influence_cells,
+                contract.influences.cell_count,
+                ctx.limits().max_influence_cells,
+            )?;
+            authoring_u32(ctx, total_influence_cells, "gltf-total-influence-cells")?;
+            total_influence_offsets = total_influence_offsets
+                .checked_add(contract.influences.offset_count)
+                .ok_or_else(|| ctx.allocation_failure("gltf-total-influence-offsets"))?;
+            authoring_u32(ctx, total_influence_offsets, "gltf-total-influence-offsets")?;
             primitives.try_push_reserved(contract)?;
         }
         meshes.try_push_reserved(Some(MeshContracts { primitives }))?;
@@ -2718,8 +2734,6 @@ fn validate_primitive_contract(
     )?
     .count;
 
-    let mut has_joints = false;
-    let mut has_weights = false;
     for (semantic, accessor) in &primitive.attributes {
         let label = match semantic {
             Checked::Valid(json::mesh::Semantic::Positions) => continue,
@@ -2802,20 +2816,8 @@ fn validate_primitive_contract(
                 ),
             ));
         }
-        if matches!(semantic, Checked::Valid(json::mesh::Semantic::Joints(_))) {
-            has_joints = true;
-        }
-        if matches!(semantic, Checked::Valid(json::mesh::Semantic::Weights(_))) {
-            has_weights = true;
-        }
     }
-    if has_joints != has_weights {
-        return Err(ContentError::parse(
-            ctx.source().to_string(),
-            None,
-            format!("{owner} JOINTS and WEIGHTS attributes must be provided together"),
-        ));
-    }
+    let influences = influences::preflight(ctx, primitive, position_count, owner)?;
 
     let index_count = if let Some(index_accessor) = primitive.indices {
         Some(
@@ -2862,6 +2864,7 @@ fn validate_primitive_contract(
         index_count,
         face_count,
         attribute_stream_count,
+        influences,
         material_index,
     })
 }
@@ -3231,7 +3234,7 @@ fn build_primitive_authoring<'scope>(
         .ok_or_else(|| ctx.allocation_failure("gltf-primitive-provenance-work"))?;
     ctx.charge_work(collection_work)?;
     pending_provenance.try_reserve(provenance_references)?;
-    ctx.with_work_group(
+    let (output, non_unit_rows) = ctx.with_work_group(
         [
             (ImportWorkClass::Primitives, 1),
             (ImportWorkClass::Vertices, to_u64(contract.position_count)),
@@ -3245,8 +3248,10 @@ fn build_primitive_authoring<'scope>(
                 ImportWorkClass::AttributeCells,
                 to_u64(attribute_cell_count),
             ),
+            (ImportWorkClass::InfluenceCells, to_u64(contract.influences.cell_count)),
+            (ImportWorkClass::WorkUnits, contract.influences.work),
         ],
-        |work| -> Result<PrimitiveStorage<'scope>> {
+        |work| -> Result<_> {
             let provenance_offset = provenance.len();
             for (ordinal, (_, accessor)) in primitive.attributes().enumerate() {
                 poll_parser_loop(ctx, ordinal)?;
@@ -3443,51 +3448,13 @@ fn build_primitive_authoring<'scope>(
                     )?,
                 })?;
             }
-            let joint_indices = safe_gltf(ctx, "glTF JOINTS reader", || {
-                reader.read_joints(0).map(|values| {
-                    collect_exact(
-                        ctx,
-                        ImportStorageClass::SceneConstruction,
-                        contract.position_count,
-                        "gltf-joint-index-values",
-                        values.into_u16(),
-                    )
-                })
-            })?
-            .transpose()?
-            .unwrap_or_else(|| {
-                ctx.metered_vec(
-                    ImportStorageClass::SceneConstruction,
-                    "gltf-joint-index-values",
-                )
-            });
-            let joint_weights = safe_gltf(ctx, "glTF WEIGHTS reader", || {
-                reader.read_weights(0).map(|values| {
-                    collect_exact(
-                        ctx,
-                        ImportStorageClass::SceneConstruction,
-                        contract.position_count,
-                        "gltf-joint-weight-values",
-                        values.into_f32(),
-                    )
-                })
-            })?
-            .transpose()?
-            .unwrap_or_else(|| {
-                ctx.metered_vec(
-                    ImportStorageClass::SceneConstruction,
-                    "gltf-joint-weight-values",
-                )
-            });
-
-            let (influence_offsets, influences) = build_influence_rows(
+            let influences = safe_gltf(
                 ctx,
-                contract.position_count,
-                joint_indices.as_slice(),
-                joint_weights.as_slice(),
-            )?;
+                "glTF influence set reader",
+                || influences::build_rows(ctx, buffers, &primitive, contract.influences),
+            )??;
             work.complete_all()?;
-            Ok(PrimitiveStorage {
+            Ok((PrimitiveStorage {
                 topology: contract.topology,
                 has_indices: primitive.indices().is_some(),
                 indices,
@@ -3510,13 +3477,25 @@ fn build_primitive_authoring<'scope>(
                     })
                     .transpose()?,
                 attributes,
-                influence_offsets,
-                influences,
+                influence_offsets: influences.offsets,
+                influences: influences.values,
                 provenance_offset,
                 provenance_count: provenance.len() - provenance_offset,
-            })
+            }, influences.non_unit_rows))
         },
-    )
+    )?;
+    if non_unit_rows != 0 {
+        push_warning(
+            ctx,
+            "gltf.influence_weight_sum",
+            format_args!(
+                "glTF mesh {} primitive {} has {non_unit_rows} vertices with non-unit influence weights; values are preserved",
+                mesh.index(),
+                primitive.index(),
+            ),
+        )?;
+    }
+    Ok(output)
 }
 
 fn collect_indices<'scope>(
@@ -3592,53 +3571,6 @@ fn collect_f32_arrays<'scope, const N: usize>(
         ));
     }
     Ok(collected)
-}
-
-fn build_influence_rows<'scope>(
-    ctx: &'scope ParseScope<'_>,
-    vertex_count: usize,
-    joint_indices: &[[u16; 4]],
-    joint_weights: &[[f32; 4]],
-) -> Result<(
-    MeteredVec<'scope, u32>,
-    MeteredVec<'scope, InfluenceAuthoring>,
-)> {
-    let mut offsets = ctx.metered_vec(
-        ImportStorageClass::SceneConstruction,
-        "gltf-authoring-influence-offsets",
-    );
-    let mut influences = ctx.metered_vec(
-        ImportStorageClass::SceneConstruction,
-        "gltf-authoring-influences",
-    );
-    if joint_indices.is_empty() && joint_weights.is_empty() {
-        return Ok((offsets, influences));
-    }
-    if joint_indices.len() != vertex_count || joint_weights.len() != vertex_count {
-        return Err(gltf_parse_error(
-            ctx,
-            "glTF joint and weight row counts do not match the vertex count",
-        ));
-    }
-    offsets.try_reserve(vertex_count.saturating_add(1))?;
-    influences.try_reserve(vertex_count.saturating_mul(4))?;
-    offsets.try_push_reserved(0)?;
-    for (vertex_index, (joints, weights)) in joint_indices.iter().zip(joint_weights).enumerate() {
-        poll_parser_loop(ctx, vertex_index)?;
-        for source_order in 0..4 {
-            influences.try_push_reserved(InfluenceAuthoring::new(
-                u32::from(joints[source_order]),
-                weights[source_order],
-                source_order as u32,
-            ))?;
-        }
-        offsets.try_push_reserved(authoring_u32(
-            ctx,
-            influences.len(),
-            "gltf-influence-offset",
-        )?)?;
-    }
-    Ok((offsets, influences))
 }
 
 fn build_scene_nodes<'scope, 'document>(
@@ -4112,17 +4044,6 @@ fn validate_selected_primitive_semantics(
                     });
                 };
                 *selected = true;
-            }
-            Checked::Valid(json::mesh::Semantic::Joints(set))
-            | Checked::Valid(json::mesh::Semantic::Weights(set))
-                if *set != 0 =>
-            {
-                return Err(ContentError::FeatureUnsupported {
-                    format: "gltf",
-                    feature: format!(
-                        "mesh {mesh_index} primitive {primitive_index} has multiple JOINTS/WEIGHTS sets"
-                    ),
-                });
             }
             Checked::Invalid => {
                 return Err(gltf_parse_error(

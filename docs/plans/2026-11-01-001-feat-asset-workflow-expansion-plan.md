@@ -281,6 +281,9 @@ Candidate 5 is completed by the
 [shared sparse accessor slice](2026-11-01-005-feat-gltf-sparse-accessors-plan.md) in `562e6da`,
 including complete multi-buffer provenance and
 [executed evidence](../reviews/2026-11-01-gltf-sparse-accessors.md).
+The influence-set part of candidate 6 is selected by the
+[complete influence sets plan](2026-11-01-006-feat-gltf-influence-sets-plan.md); explicit scene
+selection stays a separate follow-on slice.
 The remaining rows are ordered candidates, not implicitly authorized implementation work.
 
 | Order | Candidate and prerequisite | Required boundary and acceptance when selected |

@@ -12,10 +12,14 @@ The [exact selected profile](https://github.com/Latias94/baozi/blob/main/docs/fo
   closure are omitted; mixed-target animation filtering requires explicit semantic
   loss authorization.
 - Preserve all seven point, line and triangle primitive modes, supported vertex streams including
-  `JOINTS_0`/`WEIGHTS_0`, hierarchy and node transforms, skins, F32 VEC3
+  complete paired `JOINTS_n`/`WEIGHTS_n`, hierarchy and node transforms, skins, F32 VEC3
   POSITION/NORMAL/TANGENT morph deltas, node TRS and morph-weight animation,
   perspective/orthographic cameras, and PBR metallic-roughness materials.
   Animation interpolation covers Step, Linear, and CubicSpline.
+- Preserve every admitted influence lane in set/lane source order, including zero weights,
+  with bounded variable rows and complete source provenance. Validate paired contiguous sets,
+  nonzero-joint uniqueness and exact all-integer weight sums; preserve F32 sum discrepancies
+  with a summary diagnostic instead of silently normalizing.
 - Decode dense and sparse accessors throughout the admitted profile, with an optional base
   or implicit zero values, normalized conversion, bounded layout/index validation and complete
   base/indices/values buffer provenance.

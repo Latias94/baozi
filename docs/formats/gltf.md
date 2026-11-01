@@ -46,8 +46,9 @@ baseline malformed-input safety for that source state; it is not sustained fuzz 
   indices are preserved. Import performs no mode expansion or primitive discard. Consumers may
   explicitly use [`list_vertices`](../model/reading-scenes.md#application-list-buffers) for borrowed
   Points/LineList/TriangleList draw tuples.
-- Positions, normals, tangents, texture coordinates, colors, indices, `JOINTS_0`, and `WEIGHTS_0`
-  streams when present.
+- Positions, normals, tangents, texture coordinates, colors, indices, and complete paired
+  `JOINTS_n` / `WEIGHTS_n` streams when present. Influence set indices start at zero without gaps;
+  the existing attribute, cell, work and storage limits bound their count.
 - Dense and sparse accessors for every admitted accessor use, including geometry, indices,
   influences, morph deltas, animation inputs/outputs and inverse bind matrices. Sparse accessors
   accept an optional base bufferView or implicit zero source components and apply replacements
@@ -156,7 +157,38 @@ these sources through the existing public provenance readers. Buffer sources are
 deduplicated with admitted capacity/work; even a completely replaced base remains a declared source.
 
 These rules follow the [Khronos sparse accessor contract](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#sparse-accessors).
-They do not add new component types, joint sets, extension-provided element sources or matrix forms.
+They do not add new component types, extension-provided element sources or matrix forms.
+
+### Complete influence sets
+
+Each selected primitive must provide both JOINTS_n and WEIGHTS_n for each set, with contiguous
+set indices starting at zero. JOINTS uses U8/U16 VEC4 without normalized conversion; WEIGHTS uses
+F32 or normalized U8/U16 VEC4. Every accessor has the primitive's complete Position count and
+passes shared dense/sparse layout checks. All contributing accessor/buffer sources remain in
+primitive provenance, including higher-set sparse dependencies.
+
+The importer writes all `4 * set_count` lanes per Vertex to existing variable influence rows.
+Order is ascending set index, then source lane; `source_order` is `4 * set + lane`. Zero and
+signed-zero weights remain present. Import performs no compaction, truncation, joint merging,
+sorting of the output rows or weight normalization. Every lane must address every selected skin's
+palette for instances sharing that logical mesh, including lanes with zero weight.
+
+Weights must be finite and non-negative, and positive-weight joint indices must be unique across
+all sets of each Vertex. If all weight sets use normalized integer storage, the complete raw sum
+must be exactly one: U8 components contribute `value * 257` and U16 components contribute `value`,
+for a total of `65535`. If any set uses F32, preserve the exact converted values; rows whose F64
+sum differs from one by more than `2e-7 * positive_lane_count` produce one summary warning per
+primitive (`gltf.influence_weight_sum`). A warning does not normalize or authorize semantic loss.
+
+Preflight checks the aggregate logical influence count `4 * vertex_count * set_count` across
+selected primitive definitions against `max_influence_cells` before dependency IO; shared instances
+do not multiply stored rows. Row widths, individual and aggregate CSR endpoints/offset counts must
+fit canonical U32 domains. Materialization admits that complete InfluenceCells count and bounded
+WorkUnits before storage reservation. Temporary storage consists of borrowed iterators per set and
+one reusable row scratch for joint uniqueness; no full per-set joint/weight copies are retained.
+The scratch sort is metered and cancellable, while canonical row order stays unchanged.
+
+These rules follow the [Khronos skinned mesh attribute contract](https://github.com/KhronosGroup/glTF/blob/59ecbdba704206bb656965ab4e202881806066f1/specification/2.0/Specification.adoc#skinned-mesh-primitive-attributes).
 
 ## Text Preflight, Resource Accounting, and Cancellation
 
