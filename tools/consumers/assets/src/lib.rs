@@ -6,13 +6,13 @@ mod buffers;
 
 pub use buffers::*;
 
-use std::{path::Path, time::Instant};
+use std::{collections::HashSet, path::Path, time::Instant};
 
 use baozi::{
     AssetIo, AssetPath, Axis, FrontFaceWinding, Handedness, ImportConfigOverlay, ImportDimension,
     ImportEvidence, ImportOperationControl, ImportRequest, ImportRequestLayer, Importer,
-    OptionCompileLimits, PrimitiveRef, ResourceLimitsOverlay, TargetSpace, TopologyKind,
-    ValidatedScene,
+    OptionCompileLimits, PrimitiveRef, ProvenanceKindRef, ResourceLimitsOverlay, TargetSpace,
+    TopologyKind, ValidatedScene,
     postprocess::{
         NormalOptions, PostProcessControl, PostProcessReport, SpaceConversionOptions,
         convert_scene_space, generate_normals, triangulate_primitive,
@@ -50,6 +50,8 @@ impl Default for Options {
 pub struct Metrics {
     pub import_micros: u128,
     pub postprocess_micros: u128,
+    /// Application traversal of retained owner/source relations, separate from library ledgers.
+    pub source_trace_micros: u128,
     pub buffers_micros: u128,
     pub import_peak_live_bytes: u64,
     pub import_work: u64,
@@ -58,6 +60,9 @@ pub struct Metrics {
     pub max_postprocess_peak_live_bytes: u64,
     pub opened_assets: u64,
     pub changed_operations: usize,
+    pub traced_primitive_owners: usize,
+    pub traced_provenance_nodes: usize,
+    pub traced_source_objects: usize,
 }
 
 #[derive(Debug)]
@@ -185,6 +190,10 @@ pub fn process(io: &dyn AssetIo, source: AssetPath, options: Options) -> Result<
     metrics.postprocess_micros = started.elapsed().as_micros();
 
     let started = Instant::now();
+    trace_primitive_sources(&scene, &mut metrics)?;
+    metrics.source_trace_micros = started.elapsed().as_micros();
+
+    let started = Instant::now();
     let asset = ApplicationAsset::from_scene(&scene)?;
     metrics.buffers_micros = started.elapsed().as_micros();
     drop(scene);
@@ -194,6 +203,43 @@ pub fn process(io: &dyn AssetIo, source: AssetPath, options: Options) -> Result<
         metrics,
         import_evidence,
     })
+}
+
+fn trace_primitive_sources(scene: &ValidatedScene, metrics: &mut Metrics) -> Result<()> {
+    let mut pending = Vec::new();
+    let mut visited = HashSet::new();
+    let mut sources = HashSet::new();
+    for primitive in scene.meshes().flat_map(|mesh| mesh.primitives()) {
+        let attachments = scene.owner_provenance(primitive.metadata_owner())?;
+        pending.try_reserve(attachments.len())?;
+        pending.extend(attachments);
+        metrics.traced_primitive_owners += 1;
+    }
+    // One shared-ancestor visit across all draws; no recursive walk or second Scene graph.
+    while let Some(node) = pending.pop() {
+        if visited.contains(&node.id()) {
+            continue;
+        }
+        visited.try_reserve(1)?;
+        visited.insert(node.id());
+        match node.kind() {
+            ProvenanceKindRef::Source(source) => {
+                sources.try_reserve(1)?;
+                sources.insert(source.index());
+                // Source indices are local to this borrowed Scene; no persistent key is minted.
+                assert_eq!(source.generation(), scene.generation());
+                let _ = source.resource().identity();
+            }
+            ProvenanceKindRef::Operation(_) => {
+                let parents = node.parents();
+                pending.try_reserve(parents.len())?;
+                pending.extend(parents);
+            }
+        }
+    }
+    metrics.traced_provenance_nodes = visited.len();
+    metrics.traced_source_objects = sources.len();
+    Ok(())
 }
 
 fn primitive_at(scene: &ValidatedScene, mesh: usize, primitive: usize) -> Result<PrimitiveRef<'_>> {

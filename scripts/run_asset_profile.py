@@ -113,8 +113,13 @@ def collect(arguments: argparse.Namespace, artifact_root: Path, report: dict) ->
     forwarded = ["--assume-standard-space"] if arguments.assume_standard_space else []
     if arguments.max_work_units is not None:
         forwarded += ["--max-work-units", str(arguments.max_work_units)]
-    for index, asset in enumerate(assets, 1):
-        run(f"asset-{index:03d}", [executable, report["root"], asset, *forwarded], asset)
+    for repetition in range(1, arguments.repetitions + 1):
+        for index, asset in enumerate(assets, 1):
+            record = run(
+                f"asset-{repetition:02d}-{index:03d}",
+                [executable, report["root"], asset, *forwarded], asset,
+            )
+            record["repetition"] = repetition
 
 
 def main() -> int:
@@ -129,7 +134,11 @@ def main() -> int:
     parser.add_argument("--allocation-metrics", action="store_true", help="enable allocator instrumentation")
     parser.add_argument("--assume-standard-space", action="store_true", help="forward explicit OBJ space assumption")
     parser.add_argument("--max-work-units", type=int, help="forward an explicit consumer work limit")
+    parser.add_argument("--repetitions", type=int, default=1,
+                        help="fresh consumer processes per selected asset (default: %(default)s)")
     arguments = parser.parse_args()
+    if arguments.repetitions < 1:
+        parser.error("--repetitions must be positive")
     artifact_root = (ROOT / arguments.artifact_root).resolve()
     try:
         artifact_root.mkdir(parents=True, exist_ok=False)
@@ -139,6 +148,7 @@ def main() -> int:
         "status": "failed", "started_at": datetime.now(timezone.utc).isoformat(),
         "root": str((ROOT / arguments.root).resolve()), "cwd": str(ROOT),
         "allocation_metrics": arguments.allocation_metrics, "toolchain": arguments.toolchain,
+        "repetitions": arguments.repetitions,
         "host": {"system": platform.system(), "release": platform.release(),
                  "version": platform.version(), "machine": platform.machine()},
         "python_version": platform.python_version(),

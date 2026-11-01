@@ -1,0 +1,889 @@
+{
+  "schema_version": 1,
+  "workload_version": "V1",
+  "expectation_basis": "Construction formulas for generated data; unchanged glTF JSON and directly decoded little-endian accessors for CesiumMan. No Baozi import or consumer output was used.",
+  "count_semantics": "Vertices are indexed draw representatives; indices are post-triangulation corners. Primitive definitions and draw buffers are not multiplied by node instances. Bounds are mesh-local before node transforms or skinning.",
+  "families": [
+    {
+      "id": "static-quads",
+      "kind": "generated-obj",
+      "default_grid_sizes": [
+        128,
+        256
+      ],
+      "ci_grid_sizes": [
+        2,
+        4
+      ],
+      "formulas": {
+        "source_vertices": "(N + 1)^2",
+        "source_quad_faces": "N^2",
+        "source_corners": "4*N^2",
+        "triangle_faces": "2*N^2",
+        "draw_vertices": "(N + 1)^2",
+        "draw_indices": "6*N^2"
+      },
+      "source_assumptions": "Caller explicitly declares right-handed, +Y up, -Z front, meters and CCW fronts (TargetSpace::STANDARD); OBJ does not encode these conventions.",
+      "construction": "One connected XY grid at Z=0, row-major integer positions, CCW quads, smoothing group 1, no authored normals, UVs, materials or external resources.",
+      "expected_normal": [
+        0,
+        0,
+        1
+      ],
+      "expected_opened_assets": 1,
+      "expected_changed_operations": 3,
+      "default_cases": [
+        {
+          "grid_size": 128,
+          "source_vertices": 16641,
+          "source_quad_faces": 16384,
+          "source_corners": 65536,
+          "draw_vertices": 16641,
+          "draw_indices": 98304
+        },
+        {
+          "grid_size": 256,
+          "source_vertices": 66049,
+          "source_quad_faces": 65536,
+          "source_corners": 262144,
+          "draw_vertices": 66049,
+          "draw_indices": 393216
+        }
+      ]
+    },
+    {
+      "id": "shared-primitives",
+      "kind": "generated-gltf",
+      "default_primitive_counts": [
+        8,
+        32
+      ],
+      "ci_primitive_counts": [
+        8,
+        32
+      ],
+      "optional_profile_primitive_counts": [
+        64,
+        256
+      ],
+      "construction": "One mesh with P identical indexed quad primitives, two nodes instancing that mesh, and alternating materials sharing a single texture/image. All primitives share the same POSITION, TEXCOORD_0 and index accessors. No authored normals.",
+      "source_conventions": "glTF 2.0 right-handed, +Y up, +Z front, meters and CCW fronts; no caller source assumptions.",
+      "fixed_geometry": {
+        "unique_position_rows": 4,
+        "vertices_per_primitive": 4,
+        "indices_per_primitive": 6,
+        "geometry_bytes": 92,
+        "positions": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            1,
+            0,
+            0
+          ],
+          [
+            1,
+            1,
+            0
+          ],
+          [
+            0,
+            1,
+            0
+          ]
+        ],
+        "uvs": [
+          [
+            0,
+            0
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            1,
+            1
+          ],
+          [
+            0,
+            1
+          ]
+        ],
+        "indices": [
+          0,
+          1,
+          2,
+          0,
+          2,
+          3
+        ]
+      },
+      "fixed_counts": {
+        "nodes": 2,
+        "meshes": 1,
+        "mesh_instances": 2,
+        "materials": 2,
+        "textures": 1,
+        "images": 1,
+        "buffers": 1,
+        "external_resources": 2
+      },
+      "formulas": {
+        "draw_vertices": "4*P",
+        "draw_indices": "6*P",
+        "changed_operations": "P+1"
+      },
+      "expected_normal": [
+        0,
+        0,
+        -1
+      ],
+      "expected_opened_assets": 3,
+      "expected_second_node_translation": [
+        200,
+        0,
+        0
+      ],
+      "default_cases": [
+        {
+          "primitive_count": 8,
+          "draw_vertices": 32,
+          "draw_indices": 48
+        },
+        {
+          "primitive_count": 32,
+          "draw_vertices": 128,
+          "draw_indices": 192
+        }
+      ]
+    },
+    {
+      "id": "cesium-man",
+      "kind": "unchanged-upstream",
+      "path": "upstream/Models/CesiumMan/glTF/CesiumMan.gltf",
+      "upstream": {
+        "repository": "https://github.com/KhronosGroup/glTF-Sample-Assets",
+        "commit": "8f492390ddc7a2ae221a1369ef560589cf8c70fb",
+        "tree": "936af0f6e5b471fefd6fc1d84a42328b9ce70978",
+        "local_verification": "All seven local files match the supplied pinned tree by size and Git blob SHA-1; SHA-256 is recorded independently here.",
+        "files": [
+          {
+            "path": "Models/CesiumMan/glTF/CesiumMan.gltf",
+            "bytes": 51950,
+            "git_blob_sha1": "f474e54a73329809726566a139861ac65884b830",
+            "sha256": "bbb66a129c906e015620197b683edbc6e7a27510169ffa5adec2114046f14919"
+          },
+          {
+            "path": "Models/CesiumMan/glTF/CesiumMan_data.bin",
+            "bytes": 252664,
+            "git_blob_sha1": "d78b75cfb0d9a1204316c4301aae66ca1c0839b6",
+            "sha256": "2115d3c8df0519cea62f7def76d66d2346c5ac2216319859d3c79e3784dafd3f"
+          },
+          {
+            "path": "Models/CesiumMan/glTF/CesiumMan_img0.jpg",
+            "bytes": 157013,
+            "git_blob_sha1": "58ec3b23c4efed342ab204064cb75f95f9e191c1",
+            "sha256": "35d278c7b7b0b9e22881b2c435e41ce8659f230c776ef8780b4a5087abbefaa1"
+          },
+          {
+            "path": "Models/CesiumMan/LICENSE.md",
+            "bytes": 858,
+            "git_blob_sha1": "b49826e438176de67bfc7b29c41ce962aab40a92",
+            "sha256": "709e02749c7c904c480d98f883cae63046f589031b5f22249544b13c159eedf6"
+          },
+          {
+            "path": "Models/CesiumMan/metadata.json",
+            "bytes": 971,
+            "git_blob_sha1": "ee8fbeabbe5bd24573b1f584553bdc548b0a42e9",
+            "sha256": "635ca496eafa7b82639b3b90f65e35beb9d0ac0d8721e6425a9471f08a9cc603"
+          },
+          {
+            "path": "Models/CesiumMan/README.body.md",
+            "bytes": 126,
+            "git_blob_sha1": "f0c11c4291448785f0631dab1b4844041efb827e",
+            "sha256": "396ca8cca96745ee0400b15c6c2bc9c6d58d325828eec24dc39095d9e8489033"
+          },
+          {
+            "path": "Models/CesiumMan/README.md",
+            "bytes": 1146,
+            "git_blob_sha1": "49cd989bb91fcc4aa77577c968f0b964010eb309",
+            "sha256": "1bf7fa794013d2e0de8c244518936b04d95cba780f4510c8cceee4c23dbc04a8"
+          }
+        ]
+      },
+      "attribution": {
+        "artist": "Cesium",
+        "owner": "Cesium",
+        "year": "2017",
+        "model_license": "CC-BY-4.0",
+        "logo_notice": "LicenseRef-LegalMark-Cesium",
+        "notice_paths": [
+          "upstream/Models/CesiumMan/LICENSE.md",
+          "upstream/Models/CesiumMan/metadata.json",
+          "upstream/Models/CesiumMan/README.md",
+          "upstream/LICENSES/CC-BY-4.0.txt",
+          "upstream/LICENSES/LicenseRef-LegalMark-Cesium.txt"
+        ],
+        "logo_credit": "2015 Cesium; metadata describes a non-copyrightable Cesium logo; the mark notice remains applicable."
+      },
+      "selected_scene": 0,
+      "scene_roots": [
+        0
+      ],
+      "counts": {
+        "nodes": 22,
+        "meshes": 1,
+        "primitives": 1,
+        "mesh_instances": 1,
+        "skins": 1,
+        "joints": 19,
+        "animations": 1,
+        "channels": 57,
+        "materials": 1,
+        "images": 1
+      },
+      "node_names": [
+        "Z_UP",
+        "Armature",
+        "Cesium_Man",
+        "Skeleton_torso_joint_1",
+        "leg_joint_R_1",
+        "leg_joint_R_2",
+        "leg_joint_R_3",
+        "leg_joint_R_5",
+        "leg_joint_L_1",
+        "leg_joint_L_2",
+        "leg_joint_L_3",
+        "leg_joint_L_5",
+        "Skeleton_torso_joint_2",
+        "torso_joint_3",
+        "Skeleton_arm_joint_R",
+        "Skeleton_arm_joint_R__2_",
+        "Skeleton_arm_joint_R__3_",
+        "Skeleton_arm_joint_L__4_",
+        "Skeleton_arm_joint_L__3_",
+        "Skeleton_arm_joint_L__2_",
+        "Skeleton_neck_joint_1",
+        "Skeleton_neck_joint_2"
+      ],
+      "mesh_instances": [
+        {
+          "node": 2,
+          "mesh": 0,
+          "skin": 0
+        }
+      ],
+      "primitive": {
+        "mesh": 0,
+        "primitive": 0,
+        "mode": 4,
+        "material": 0,
+        "accessors": {
+          "indices": 0,
+          "JOINTS_0": 1,
+          "NORMAL": 2,
+          "POSITION": 3,
+          "TEXCOORD_0": 4,
+          "WEIGHTS_0": 5
+        },
+        "vertex_count": 3273,
+        "referenced_vertex_count": 3273,
+        "index_count": 14016,
+        "triangle_count": 4672,
+        "position_min": [
+          -0.13100001215934753,
+          -0.5691370964050293,
+          0.0
+        ],
+        "position_max": [
+          0.1809539943933487,
+          0.569136917591095,
+          1.5065499544143677
+        ],
+        "first_source_indices": [
+          0,
+          1,
+          2,
+          3,
+          2,
+          1,
+          4,
+          5,
+          6,
+          7,
+          6,
+          5,
+          8,
+          9,
+          10,
+          11,
+          10,
+          9
+        ]
+      },
+      "skin": {
+        "skin": 0,
+        "name": "Armature",
+        "skeleton": 3,
+        "joints": [
+          3,
+          12,
+          13,
+          20,
+          21,
+          17,
+          14,
+          18,
+          15,
+          19,
+          16,
+          8,
+          4,
+          9,
+          5,
+          10,
+          6,
+          11,
+          7
+        ],
+        "inverse_bind_accessor": 82,
+        "inverse_bind_samples": [
+          {
+            "joint_index": 0,
+            "values_column_major": [
+              0.9971418380737305,
+              -4.3711398944878965e-08,
+              0.07555299252271652,
+              0.0,
+              4.358646421565027e-08,
+              1.0,
+              3.3025269186026662e-09,
+              0.0,
+              -0.07555299252271652,
+              0.0,
+              0.9971418380737305,
+              0.0,
+              0.05130045861005783,
+              -0.0049998159520328045,
+              -0.6770592331886292,
+              1.0
+            ]
+          },
+          {
+            "joint_index": 9,
+            "values_column_major": [
+              -0.9848927855491638,
+              -4.3711398944878965e-08,
+              -0.17316530644893646,
+              0.0,
+              -4.30510418425456e-08,
+              1.0,
+              -7.569298077214626e-09,
+              0.0,
+              0.17316530644893646,
+              0.0,
+              -0.9848927855491638,
+              0.0,
+              -0.08602433651685715,
+              -0.45450031757354736,
+              0.8732962012290955,
+              1.0
+            ]
+          },
+          {
+            "joint_index": 18,
+            "values_column_major": [
+              -0.9971264004707336,
+              -4.3711398944878965e-08,
+              -0.07575774192810059,
+              0.0,
+              -4.3585789200051295e-08,
+              1.0,
+              -3.3114768704933795e-09,
+              0.0,
+              0.07575774192810059,
+              0.0,
+              -0.9971264004707336,
+              0.0,
+              0.025233980268239975,
+              0.07456933706998825,
+              0.023213259875774384,
+              1.0
+            ]
+          }
+        ]
+      },
+      "influences": {
+        "vertex_count": 3273,
+        "slots_per_vertex": 4,
+        "total_slots": 13092,
+        "active_slots": 7645,
+        "active_count_histogram": {
+          "1": 458,
+          "2": 1678,
+          "3": 717,
+          "4": 420
+        },
+        "weight_sum_min": 0.9999999105930328,
+        "weight_sum_max": 1.0000000884756446,
+        "samples": [
+          {
+            "vertex": 0,
+            "joints": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "weights": [
+              0.17160889506340027,
+              0.6451614499092102,
+              0.13225100934505463,
+              0.05097858980298042
+            ]
+          },
+          {
+            "vertex": 100,
+            "joints": [
+              2,
+              3,
+              4,
+              0
+            ],
+            "weights": [
+              0.020529381930828094,
+              0.30205583572387695,
+              0.6774147748947144,
+              0.0
+            ]
+          },
+          {
+            "vertex": 1000,
+            "joints": [
+              4,
+              0,
+              0,
+              0
+            ],
+            "weights": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          {
+            "vertex": 3272,
+            "joints": [
+              4,
+              0,
+              0,
+              0
+            ],
+            "weights": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        ]
+      },
+      "animation": {
+        "animation": 0,
+        "name": null,
+        "channel_count": 57,
+        "sampler_count": 57,
+        "interpolation": "LINEAR",
+        "keys_per_channel": 48,
+        "total_channel_keys": 2736,
+        "output_scalar_count": 9120,
+        "input_accessors": [
+          6,
+          10,
+          14,
+          18,
+          22,
+          26,
+          30,
+          34,
+          38,
+          42,
+          46,
+          50,
+          54,
+          58,
+          62,
+          66,
+          70,
+          74,
+          78
+        ],
+        "input_times": [
+          0.04166661947965622,
+          0.08333330601453781,
+          0.125,
+          0.16666659712791443,
+          0.20833329856395721,
+          0.25,
+          0.29166659712791443,
+          0.3333333134651184,
+          0.3750000298023224,
+          0.41666659712791443,
+          0.4583333134651184,
+          0.5,
+          0.5416666865348816,
+          0.5833333134651184,
+          0.625,
+          0.6666666865348816,
+          0.7083333134651184,
+          0.75,
+          0.7916666865348816,
+          0.8333333134651184,
+          0.8750000596046448,
+          0.9166666865348816,
+          0.9583333134651184,
+          1.0,
+          1.0416669845581055,
+          1.0833330154418945,
+          1.125,
+          1.1666669845581055,
+          1.2083330154418945,
+          1.25,
+          1.2916669845581055,
+          1.3333330154418945,
+          1.3750001192092896,
+          1.4166669845581055,
+          1.4583330154418945,
+          1.5,
+          1.5416669845581055,
+          1.5833330154418945,
+          1.6250001192092896,
+          1.6666669845581055,
+          1.7083330154418945,
+          1.75,
+          1.7916669845581055,
+          1.8333330154418945,
+          1.8750001192092896,
+          1.9166669845581055,
+          1.9583330154418945,
+          2.0
+        ],
+        "time_min": 0.04166661947965622,
+        "time_max": 2.0,
+        "target_nodes_channel_group_order": [
+          3,
+          12,
+          13,
+          20,
+          21,
+          17,
+          18,
+          19,
+          14,
+          15,
+          16,
+          8,
+          9,
+          10,
+          11,
+          4,
+          5,
+          6,
+          7
+        ],
+        "paths_per_group": [
+          "translation",
+          "rotation",
+          "scale"
+        ],
+        "rotation_norm2_min": 0.9999994375449175,
+        "rotation_norm2_max": 1.000000559725978,
+        "rotation_keys_outside_1e_minus_4": 0,
+        "channel_samples": [
+          {
+            "channel": 0,
+            "target_node": 3,
+            "target_path": "translation",
+            "input_accessor": 6,
+            "output_accessor": 7,
+            "interpolation": "LINEAR",
+            "samples": [
+              {
+                "key": 0,
+                "time": 0.04166661947965622,
+                "value": [
+                  1.971350016560791e-08,
+                  -0.02000010944902897,
+                  0.6439971327781677
+                ]
+              },
+              {
+                "key": 24,
+                "time": 1.0416669845581055,
+                "value": [
+                  3.158789851909205e-08,
+                  -0.025370510295033455,
+                  0.6498960852622986
+                ]
+              },
+              {
+                "key": 47,
+                "time": 2.0,
+                "value": [
+                  1.0633099734036477e-08,
+                  -0.02000010944902897,
+                  0.6399999856948853
+                ]
+              }
+            ]
+          },
+          {
+            "channel": 1,
+            "target_node": 3,
+            "target_path": "rotation",
+            "input_accessor": 6,
+            "output_accessor": 8,
+            "interpolation": "LINEAR",
+            "samples": [
+              {
+                "key": 0,
+                "time": 0.04166661947965622,
+                "value": [
+                  -5.19421482749749e-05,
+                  -0.03665076196193695,
+                  -2.4140945242834277e-05,
+                  -0.9993281364440918
+                ]
+              },
+              {
+                "key": 24,
+                "time": 1.0416669845581055,
+                "value": [
+                  -0.010620900429785252,
+                  -0.03737369179725647,
+                  -0.0041049933061003685,
+                  -0.999236524105072
+                ]
+              },
+              {
+                "key": 47,
+                "time": 2.0,
+                "value": [
+                  0.00014350026322063059,
+                  -0.03695422783493996,
+                  -9.948204024112783e-06,
+                  -0.9993169903755188
+                ]
+              }
+            ]
+          },
+          {
+            "channel": 2,
+            "target_node": 3,
+            "target_path": "scale",
+            "input_accessor": 6,
+            "output_accessor": 9,
+            "interpolation": "LINEAR",
+            "samples": [
+              {
+                "key": 0,
+                "time": 0.04166661947965622,
+                "value": [
+                  1.0000001192092896,
+                  0.9999999403953552,
+                  0.9999998807907104
+                ]
+              },
+              {
+                "key": 24,
+                "time": 1.0416669845581055,
+                "value": [
+                  1.0000003576278687,
+                  0.9999998211860657,
+                  0.9999999403953552
+                ]
+              },
+              {
+                "key": 47,
+                "time": 2.0,
+                "value": [
+                  1.0000001192092896,
+                  0.9999999403953552,
+                  1.0
+                ]
+              }
+            ]
+          },
+          {
+            "channel": 28,
+            "target_node": 15,
+            "target_path": "rotation",
+            "input_accessor": 42,
+            "output_accessor": 44,
+            "interpolation": "LINEAR",
+            "samples": [
+              {
+                "key": 0,
+                "time": 0.04166661947965622,
+                "value": [
+                  -0.0652962327003479,
+                  0.9186970591545105,
+                  -0.051731694489717484,
+                  0.3860779106616974
+                ]
+              },
+              {
+                "key": 24,
+                "time": 1.0416669845581055,
+                "value": [
+                  -0.10874459892511368,
+                  0.9195365309715271,
+                  -0.0028288192115724087,
+                  0.3776496946811676
+                ]
+              },
+              {
+                "key": 47,
+                "time": 2.0,
+                "value": [
+                  -0.05983791500329971,
+                  0.9177058339118958,
+                  -0.05256454274058342,
+                  0.38919487595558167
+                ]
+              }
+            ]
+          },
+          {
+            "channel": 55,
+            "target_node": 7,
+            "target_path": "rotation",
+            "input_accessor": 78,
+            "output_accessor": 80,
+            "interpolation": "LINEAR",
+            "samples": [
+              {
+                "key": 0,
+                "time": 0.04166661947965622,
+                "value": [
+                  -0.0006624427041970193,
+                  0.3388012945652008,
+                  -0.0018139963503926992,
+                  -0.9408557415008545
+                ]
+              },
+              {
+                "key": 24,
+                "time": 1.0416669845581055,
+                "value": [
+                  -0.027301998808979988,
+                  0.34588706493377686,
+                  0.06668323278427124,
+                  -0.9355050325393677
+                ]
+              },
+              {
+                "key": 47,
+                "time": 2.0,
+                "value": [
+                  -0.0007517260382883251,
+                  0.3399997353553772,
+                  -0.001996157458052039,
+                  -0.9404230117797852
+                ]
+              }
+            ]
+          },
+          {
+            "channel": 56,
+            "target_node": 7,
+            "target_path": "scale",
+            "input_accessor": 78,
+            "output_accessor": 81,
+            "interpolation": "LINEAR",
+            "samples": [
+              {
+                "key": 0,
+                "time": 0.04166661947965622,
+                "value": [
+                  1.0,
+                  0.999999463558197,
+                  0.9999989867210388
+                ]
+              },
+              {
+                "key": 24,
+                "time": 1.0416669845581055,
+                "value": [
+                  1.0,
+                  0.9999994039535522,
+                  0.9999986886978149
+                ]
+              },
+              {
+                "key": 47,
+                "time": 2.0,
+                "value": [
+                  1.000000238418579,
+                  0.9999995827674866,
+                  0.9999991655349731
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "external_resources": [
+        "CesiumMan_data.bin",
+        "CesiumMan_img0.jpg"
+      ],
+      "expected": {
+        "draw_vertices": 3273,
+        "draw_indices": 14016,
+        "opened_assets": 3,
+        "changed_operations": 1,
+        "mesh_local_bounds": [
+          [
+            -13.100001215934753,
+            -56.91370964050293,
+            -150.65499544143677
+          ],
+          [
+            18.09539943933487,
+            56.9136917591095,
+            -0.0
+          ]
+        ]
+      },
+      "source_pointers": [
+        "/scenes/0",
+        "/nodes",
+        "/meshes/0/primitives/0",
+        "/skins/0",
+        "/animations/0",
+        "/accessors",
+        "/bufferViews",
+        "/buffers/0",
+        "/materials/0",
+        "/textures/0",
+        "/images/0"
+      ]
+    }
+  ],
+  "limitations": [
+    "Workload definitions and semantic regressions; revision-qualified elapsed-time, allocation and RSS observations are recorded separately in docs/reviews/2026-11-01-asset-workflow-expansion.md. No performance threshold is asserted.",
+    "Planar grids do not represent arbitrary concave/nonplanar polygons, hard-edge distributions or production cache behavior.",
+    "Repeated shared quad primitives exercise per-primitive edits and shared-resource handling with fixed geometry; they do not grow per-primitive geometry or unique image/material content.",
+    "The consumer preserves encoded image bytes without decoding or rendering them.",
+    "CesiumMan is one medium, single-skin model with one LINEAR clip; no morph, sparse accessor, compressed geometry, cubic spline or sampled animation playback claim is made.",
+    "Tests directly decode all CesiumMan bind matrices, influence rows and channel keys; this snapshot stores representative numeric samples plus complete input times and source identifiers.",
+    "The direct test decoder supports only the dense, non-normalized U16 and F32 accessors used here; it is not a general glTF validator.",
+    "The consumer traces retained primitive ancestry through public readers, without retaining a second graph or claiming per-face lineage.",
+    "SHA256SUMS covers this definition and all vendored inputs; the seven CesiumMan entries above also preserve pinned Git blob identities."
+  ]
+}

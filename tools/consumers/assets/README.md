@@ -5,6 +5,9 @@ assets and actual capability-bound filesystem access. It imports a model, triang
 converts the complete Scene to a known CCW processing space, preserves authored normals or generates
 missing normals, copies application buffers, and destroys the Scene before returning those
 buffers and detached import evidence.
+Before extraction it walks the retained provenance of each primitive through the public borrowed
+readers, sharing one visited set across draws. This reports reached source objects without
+inventing a persistent application provenance graph.
 
 The target is left-handed, positive Y up, negative Z front, centimeters, with counter-clockwise front
 faces. UVs remain in their declared source convention. Formats with unknown spatial facts, including
@@ -34,13 +37,21 @@ Postprocess operations use their documented default per-operation limits.
 
 This is a concrete extraction example, not a new canonical representation or a general exporter:
 
-- Each primitive becomes a separate draw. Complete triangle tuples are expanded to draw order with
-  indices `0..corner_count`; vertices are not welded. Positions, normals, authored tangents, and UV0
-  use F64, with exact F32 widening. Simultaneous normal/tangent/UV0 domains require an explicit
-  application policy and are rejected here rather than resolved by precedence.
-- Skin influences use variable-length CSR rows without truncation. All authored Position, Normal,
-  and Tangent morph delta streams expand to the same draw order. Missing sparse entries use the
-  public logical value read, and no new morph stream is synthesized.
+- Each primitive becomes a separate indexed draw. Reuse requires the same `PrimitiveVertex`
+  identity and identical `to_bits()` values in every selected Position, Normal, Tangent (including
+  W), and UV0 lane. These application fields use F64, with exact F32 widening. Indices follow first
+  Corner encounter order, independently of hash map iteration, and retain triangle order and
+  winding. Distinct source vertices, signed-zero seams, and separate draw/material boundaries
+  stay distinct; there is no epsilon comparison or position welding. Simultaneous normal/tangent/
+  UV0 domains require an explicit application policy and are rejected here.
+- Skin influences use variable-length CSR rows without truncation. Each representative copies its
+  complete joint/weight row once, preserving empty rows, all lanes, their sequence, and F32 bits.
+  The core's separate source-order ordinals remain outside this selected application layout.
+  Every authored Position, Normal, and Tangent morph delta stream uses the same indexed vertex
+  order. Missing sparse entries use the public logical value read, and no new stream is synthesized.
+  Influences and morph deltas are Vertex-domain values, so source identity guarantees their
+  equivalence within a key. Any future selected Corner/Face deformation fields must also extend
+  that key or keep their tuples separate.
 - Owned node hierarchy and authored transforms, mesh instances and their effective morph weights,
   joint references and inverse bind matrices, animation times/values/cubic derivatives, material
   factors and texture image/UV/transform references, and encoded images survive Scene destruction.
@@ -62,6 +73,20 @@ generation, so the application reacquires each primitive after every publication
 integration fixture exercises consecutive edits across multiple primitives. The unchanged real
 models and their independent expected facts are documented in [fixtures/README.md](fixtures/README.md).
 
+The borrowed `triangle_vertices` reader remains a zero-allocation Corner tuple view. Indexing is
+private application policy; its buffer/map allocations use fallible reservation, and index/count
+conversions are checked. Allocation or count failures propagate through the application `Result`,
+including structured `TryReserveError` and `TryFromIntError` causes. Application allocations are
+outside the library's operation ledger.
+
+Indexing tests reconstruct every original draw Corner through the indices and compare all selected
+F64 fields and exported F32 deformation values by `to_bits()`. They cover UV/Normal seams, same-source
+signed-zero UV and Tangent/W-only seams, five-influence and empty rows, coincident source vertices,
+repeat ordering, and owned data after Scene destruction. The quad produces 4 vertices / 6 indices;
+both `BoxTextured` and `BoxInterleaved` produce 24 / 36. The existing workflow assertions retain
+independent source counts: `RiggedSimple` is 160 / 564, `AnimatedMorphCube` is 24 / 36, and the two
+`MorphPrimitivesTest` draws are 21 / 72 and 9 / 24.
+
 ## Advisory profiling
 
 The thin Python driver builds one release executable and launches a fresh process for each
@@ -72,6 +97,7 @@ performance thresholds:
 python scripts/run_asset_profile.py --toolchain 1.95.0
 python scripts/run_asset_profile.py --toolchain 1.95.0 --allocation-metrics
 python scripts/run_asset_profile.py --toolchain 1.95.0 --root /path/to/assets --asset model.obj --assume-standard-space
+python scripts/run_asset_profile.py --toolchain 1.95.0 --root target/asset-workloads-v1 --asset static-quads-128.obj --asset static-quads-256.obj --assume-standard-space --max-work-units 200000000 --repetitions 3
 ```
 
 `--asset` can be repeated. `--artifact-root NEW_DIR` selects a new output directory; the default is
@@ -80,6 +106,18 @@ Reports include Git revision/dirty state, `rustc -vV`, actual argv, return codes
 per-stage consumer summaries, and separate stdout/stderr logs. On a failure, the partial report is
 retained and the nonzero result is propagated. CI exercises the consumer on the three exact native
 candidate hosts and retains both Linux release profile variants.
+`--repetitions N` starts a new consumer process for every selected asset in each repetition;
+it does not reuse an imported Scene or average away individual observations. Normal timing and
+the separately built `--allocation-metrics` variant belong in different artifact directories.
+
+Consumer summaries separate import, postprocess, provenance traversal and buffer extraction time.
+`traced_primitive_owners`, `traced_provenance_nodes` and `traced_source_objects` count the owners
+and distinct retained ancestors actually reached. Library ledgers cover their existing operation
+scopes; the application's visited sets and indexed buffers use application allocation accounting.
+The V1 families and semantic expectations are described in
+[fixtures/README.md](fixtures/README.md#v1-workload-definitions-and-regressions); actual executed
+measurements belong to the revision-qualified
+[expansion review](../../../docs/reviews/2026-11-01-asset-workflow-expansion.md).
 
 The memory measurements answer different questions:
 
