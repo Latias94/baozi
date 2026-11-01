@@ -24,6 +24,7 @@ use std::cell::RefCell;
 use std::fmt;
 
 const SCAN_QUANTUM: usize = 4 * 1024;
+const METADATA_SORT_COMPARISON_CHUNK: u64 = 64;
 const MAX_NUMERIC_LITERAL_BYTES: usize = SCAN_QUANTUM;
 const BODY_WORK_ENTRIES: usize = 8;
 const BODY_RECORDS: usize = 0;
@@ -1630,8 +1631,8 @@ fn scene_from_parsed<'scope>(
     let _bounds = compute_bounds(ctx, parsed.positions.as_slice())?;
 
     let canonical_string_bytes = canonical_string_bytes(ctx, &header)?;
-    let metadata_work = metadata_insertion_work(ctx, &header)?;
-    let (pending_metadata, mesh_name, node_name) = ctx.with_work_group(
+    let metadata_count = metadata_entry_count(ctx, &header)?;
+    let (mut pending_metadata, mesh_name, node_name) = ctx.with_work_group(
         [
             (
                 ImportWorkClass::CanonicalStringBytes,
@@ -1639,7 +1640,7 @@ fn scene_from_parsed<'scope>(
             ),
             (
                 ImportWorkClass::WorkUnits,
-                usize_amount(ctx, metadata_work, "ply-metadata-insertion-work")?,
+                usize_amount(ctx, metadata_count, "ply-metadata-append-work")?,
             ),
         ],
         |work| -> ParseResult<_> {
@@ -1647,7 +1648,9 @@ fn scene_from_parsed<'scope>(
                 ImportStorageClass::FormatNormalization,
                 "ply-complete-batch-pending-metadata",
             );
-            insert_string_metadata(
+            metadata.try_reserve(metadata_count)?;
+            // Fixed keys and disjoint indexed prefixes make every generated key unique.
+            append_string_metadata(
                 ctx,
                 &mut metadata,
                 "ply:format",
@@ -1658,7 +1661,7 @@ fn scene_from_parsed<'scope>(
                 },
                 work,
             )?;
-            insert_string_metadata(
+            append_string_metadata(
                 ctx,
                 &mut metadata,
                 "ply:source",
@@ -1667,7 +1670,7 @@ fn scene_from_parsed<'scope>(
             )?;
             for (index, comment) in header.comments.as_slice().iter().enumerate() {
                 poll_collection(ctx, index)?;
-                insert_indexed_string_metadata(
+                append_indexed_string_metadata(
                     ctx,
                     &mut metadata,
                     "ply:comment_",
@@ -1678,7 +1681,7 @@ fn scene_from_parsed<'scope>(
             }
             for (index, info) in header.obj_infos.as_slice().iter().enumerate() {
                 poll_collection(ctx, index)?;
-                insert_indexed_string_metadata(
+                append_indexed_string_metadata(
                     ctx,
                     &mut metadata,
                     "ply:obj_info_",
@@ -1693,7 +1696,6 @@ fn scene_from_parsed<'scope>(
             let mut node_name =
                 ctx.metered_string(ImportStorageClass::FormatNormalization, "ply-node-name");
             node_name.try_push_str(NODE_NAME)?;
-            metadata.sort_unstable_by(|left, right| left.key.as_str().cmp(right.key.as_str()));
             work.complete([
                 usize_amount(ctx, canonical_string_bytes, "ply-canonical-string-bytes")?,
                 0,
@@ -1702,6 +1704,7 @@ fn scene_from_parsed<'scope>(
         },
     )?;
     drop(header);
+    order_metadata(ctx, &mut pending_metadata)?;
 
     let ParsedPly {
         positions,
@@ -3141,21 +3144,14 @@ fn preflight_limit(
     Ok(())
 }
 
-fn metadata_insertion_work(ctx: &ParseScope<'_>, header: &Header<'_>) -> ParseResult<usize> {
-    let entry_count = 2usize
+fn metadata_entry_count(ctx: &ParseScope<'_>, header: &Header<'_>) -> ParseResult<usize> {
+    2usize
         .checked_add(header.comments.len())
         .and_then(|count| count.checked_add(header.obj_infos.len()))
-        .ok_or_else(|| {
-            ctx.resource_limit_exceeded("max_work_units", ctx.limits().max_work_units)
-        })?;
-    (1..=entry_count).try_fold(0usize, |total, insertion| {
-        total.checked_add(insertion).ok_or_else(|| {
-            ctx.resource_limit_exceeded("max_work_units", ctx.limits().max_work_units)
-        })
-    })
+        .ok_or_else(|| ctx.resource_limit_exceeded("max_work_units", ctx.limits().max_work_units))
 }
 
-fn insert_string_metadata<'scope>(
+fn append_string_metadata<'scope>(
     ctx: &'scope ParseScope<'_>,
     metadata: &mut MeteredVec<'scope, PendingMetadata<'scope>>,
     key: &str,
@@ -3170,10 +3166,10 @@ fn insert_string_metadata<'scope>(
         "ply-metadata-value",
     );
     value_storage.try_push_str(value)?;
-    insert_metadata_parts(ctx, metadata, key_storage, value_storage, work)
+    append_metadata_parts(metadata, key_storage, value_storage, work)
 }
 
-fn insert_indexed_string_metadata<'scope>(
+fn append_indexed_string_metadata<'scope>(
     ctx: &'scope ParseScope<'_>,
     metadata: &mut MeteredVec<'scope, PendingMetadata<'scope>>,
     prefix: &str,
@@ -3191,38 +3187,37 @@ fn insert_indexed_string_metadata<'scope>(
         "ply-metadata-value",
     );
     value_storage.try_push_str(value)?;
-    insert_metadata_parts(ctx, metadata, key, value_storage, work)
+    append_metadata_parts(metadata, key, value_storage, work)
 }
 
-fn insert_metadata_parts<'scope>(
-    ctx: &ParseScope<'_>,
+fn append_metadata_parts<'scope>(
     metadata: &mut MeteredVec<'scope, PendingMetadata<'scope>>,
     key: MeteredString<'scope>,
     value: MeteredString<'scope>,
     work: &mut ImportWorkScope<'_, '_, 2>,
 ) -> ParseResult<()> {
-    if metadata
-        .as_slice()
-        .iter()
-        .any(|candidate| candidate.key.as_str() == key.as_str())
-    {
-        return Err(format_failure(
-            ctx,
-            PlyFailureCode::InternalInvariant,
-            "PLY metadata key was inserted more than once",
-            None,
-            Some("metadata-key"),
-        ));
-    }
-    let insertion_work = metadata.len().checked_add(1).ok_or_else(|| {
-        ctx.resource_limit_exceeded("max_work_units", ctx.limits().max_work_units)
-    })?;
-    metadata.try_push(PendingMetadata { key, value })?;
-    work.complete([
-        0,
-        usize_amount(ctx, insertion_work, "ply-metadata-insertion-work")?,
-    ])?;
-    Ok(())
+    metadata.try_push_reserved(PendingMetadata { key, value })?;
+    work.complete([0, 1])
+}
+
+fn order_metadata(
+    ctx: &ParseScope<'_>,
+    metadata: &mut MeteredVec<'_, PendingMetadata<'_>>,
+) -> ParseResult<()> {
+    ctx.with_work(ImportWorkClass::WorkUnits, 0, |work| {
+        let mut comparisons_left = 0;
+        metadata.try_sort_unstable_by(|left, right| -> ParseResult<_> {
+            if comparisons_left == 0 {
+                work.complete_all()?;
+                work.replenish(METADATA_SORT_COMPARISON_CHUNK)?;
+                comparisons_left = METADATA_SORT_COMPARISON_CHUNK;
+            }
+            comparisons_left -= 1;
+            // Generated keys have fixed prefixes and at most usize::MAX's decimal digits.
+            Ok(left.key.as_str().cmp(right.key.as_str()))
+        })?;
+        work.complete_all()
+    })
 }
 
 fn canonical_string_bytes(ctx: &ParseScope<'_>, header: &Header<'_>) -> ParseResult<usize> {
