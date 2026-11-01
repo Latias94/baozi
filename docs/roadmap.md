@@ -14,6 +14,14 @@ current-profile fidelity and application consumption. Its
 [implementation review](reviews/2026-11-01-asset-workflow-expansion.md) records the completed six-unit
 initial tranche and exact local verification; it does not reopen A–H.
 
+The [first-release usability audit](reviews/2026-11-01-first-release-usability-audit.md) identifies
+the remaining correctness and application-interface gaps. The reviewed
+[first-release maturation refactor](plans/2026-11-02-001-refactor-first-release-maturation-plan.md)
+owns the next eight units: independent integrity repairs, precision-preserving geometry, owned glTF
+decoding, selected-geometry transactions, public navigation/material semantics, complete static and
+animated consumption, and qualification of the resulting package graph. These are planned changes,
+not completed release or target claims.
+
 ## Product Direction
 
 Baozi is trusted, fidelity-preserving, engine-neutral 3D asset ingestion and offline compilation

@@ -2,10 +2,13 @@
 title: First-Release Correctness and Application Workflows
 type: feat
 date: 2026-11-01
-status: proposed
+status: superseded
 ---
 
 # First-Release Correctness and Application Workflows
+
+Superseded by the reviewed [first-release maturation refactor](2026-11-02-001-refactor-first-release-maturation-plan.md).
+The audit remains the problem evidence; the replacement plan owns implementation choices, sequencing and acceptance.
 
 ## Objective
 
