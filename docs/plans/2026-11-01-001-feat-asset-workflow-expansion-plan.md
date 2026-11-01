@@ -2,7 +2,7 @@
 title: Baozi Asset Fidelity and Consumer Workflow Expansion
 type: feat
 date: 2026-11-01
-status: proposed
+status: in_progress
 ---
 
 # Baozi Asset Fidelity and Consumer Workflow Expansion
@@ -15,8 +15,9 @@ and validate the resulting workflow at realistic sizes. The
 evidence and exact baselines. The completed [A–H plan](2026-10-29-001-refactor-library-delivery-plan.md)
 stays completed; July checkboxes and older intake findings do not become new requirements.
 
-This is a proposed next development plan. This documentation change does not implement its units,
-change public contracts, assign format maturity, register native targets or authorize publication.
+The user adopted the initial tranche and started its execution goal on 2026-11-01. Executed units
+and exact verification are recorded in the [progress review](../reviews/2026-11-01-asset-workflow-expansion.md).
+Plan adoption does not assign format maturity, register native targets or authorize publication.
 Existing user authorization permits necessary breaking refactors and deletion of replaced code;
 unpublished compatibility is not a constraint. Change the relevant ADR and behavior documents with
 the implementation that changes their boundary, rather than retaining a rejected design because

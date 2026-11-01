@@ -16,8 +16,9 @@ use baozi_import::authoring::{
 use baozi_import::{
     DiagnosticByteRange, DiagnosticCode, DiagnosticSeverity, ImportProgressPhase,
     ImportStorageClass, ImportWorkClass, ImportWorkScope, MeteredString, MeteredVec, ParseFailure,
-    ParseResult, ParseScope, SceneDraft, TextConformanceViolation, TextConformanceViolationKind,
-    TextDecodingMode, TextDiagnosticLocation, TextInputOptions, TextInputRecordCursor,
+    ParseResult, ParseScope, SceneDraft, SourceScopeEntityKind, TextConformanceViolation,
+    TextConformanceViolationKind, TextDecodingMode, TextDiagnosticLocation, TextInputOptions,
+    TextInputRecordCursor,
 };
 use std::cell::RefCell;
 use std::fmt;
@@ -1246,6 +1247,7 @@ fn parse_vertex_row<'scope>(
     parsed: &mut ParsedPly<'scope>,
     work: &mut ImportWorkScope<'_, '_, BODY_WORK_ENTRIES>,
 ) -> ParseResult<()> {
+    let vertex_index = parsed.positions.len();
     let mut x = None;
     let mut y = None;
     let mut z = None;
@@ -1278,15 +1280,21 @@ fn parse_vertex_row<'scope>(
                     "nz" => nz = Some(value.to_f32(ctx, "nz")?),
                     "s" | "u" | "texture_u" => s = Some(value.to_f32(ctx, name.as_str())?),
                     "t" | "v" | "texture_v" => t = Some(value.to_f32(ctx, name.as_str())?),
-                    "red" | "r" => red = Some(value.to_color_component(ctx, *ty, name.as_str())?),
+                    "red" | "r" => {
+                        red =
+                            Some(value.to_color_component(ctx, *ty, name.as_str(), vertex_index)?)
+                    }
                     "green" | "g" => {
-                        green = Some(value.to_color_component(ctx, *ty, name.as_str())?)
+                        green =
+                            Some(value.to_color_component(ctx, *ty, name.as_str(), vertex_index)?)
                     }
                     "blue" | "b" => {
-                        blue = Some(value.to_color_component(ctx, *ty, name.as_str())?)
+                        blue =
+                            Some(value.to_color_component(ctx, *ty, name.as_str(), vertex_index)?)
                     }
                     "alpha" | "a" => {
-                        alpha = Some(value.to_color_component(ctx, *ty, name.as_str())?)
+                        alpha =
+                            Some(value.to_color_component(ctx, *ty, name.as_str(), vertex_index)?)
                     }
                     _ => {
                         let Some(attribute_index) = *custom_attribute else {
@@ -2142,14 +2150,59 @@ impl ScalarValue {
         ctx: &ParseScope<'_>,
         ty: ScalarType,
         name: &str,
+        vertex_index: usize,
     ) -> ParseResult<f32> {
-        let value = self.to_f32(ctx, name)?;
+        let value = self.to_f64(ctx, name)?;
         let normalized = match ty {
             ScalarType::U8 => value / 255.0,
             ScalarType::U16 => value / 65535.0,
-            _ => value,
+            ScalarType::U32 => value / f64::from(u32::MAX),
+            ScalarType::F32 | ScalarType::F64 if (0.0..=1.0).contains(&value) => value,
+            ScalarType::F32 | ScalarType::F64 => {
+                return Err(format_failure(
+                    ctx,
+                    PlyFailureCode::InvalidScalar,
+                    "PLY floating color must be within [0, 1]",
+                    None,
+                    Some("color-component"),
+                ));
+            }
+            ScalarType::I8 | ScalarType::I16 | ScalarType::I32 => {
+                return Err(format_failure(
+                    ctx,
+                    PlyFailureCode::InvalidScalar,
+                    "PLY signed color scalars have no admitted interpretation",
+                    None,
+                    Some("color-component"),
+                ));
+            }
         };
-        Ok(normalized.clamp(0.0, 1.0))
+        let output = normalized as f32;
+        if ty == ScalarType::F64 && f64::from(output).to_bits() != value.to_bits() {
+            let mut object_path = ctx.metered_string(
+                ImportStorageClass::FormatNormalization,
+                "ply-color-precision-object-path",
+            );
+            object_path.try_write_fmt(format_args!(
+                "/elements/vertex/records/{vertex_index}/properties/{name}"
+            ))?;
+            ctx.record_source_semantic_loss(
+                DiagnosticCode::new("ply.color_precision_loss")
+                    .expect("static PLY diagnostic code must be valid"),
+                SourceScopeEntityKind::Mesh,
+                object_path.as_str(),
+                |details| {
+                    details.unsigned("vertex", vertex_index as u64);
+                    details.string("property", name);
+                    details.unsigned("source_f64_bits", value.to_bits());
+                    details.unsigned("output_f32_bits", u64::from(output.to_bits()));
+                },
+                format_args!(
+                    "PLY double color requires explicit source semantic loss authority to round to F32"
+                ),
+            )?;
+        }
+        Ok(output)
     }
 }
 

@@ -38,6 +38,27 @@
   literals, vertex count, custom vertex attribute stream/cell counts, face count, list lengths, mesh
   count, diagnostics, and cooperative cancellation checkpoints.
 
+## Accepted Color Profile
+
+Baozi's PLY color profile interprets unsigned `uchar`, `ushort`, and `uint` channels as full-range
+normalized values. It divides by 255, 65535, or 4294967295 in F64, then rounds once to canonical
+F32 RGBA. This explicitly defined numeric mapping applies to alpha as well as RGB; it does not
+infer a transfer function or promise a universal convention for every PLY producer.
+
+`float` and `double` color channels must be finite and within `[0,1]` before narrowing. Values
+outside that interval are rejected, never saturated. Signed integer colors are rejected because
+this profile defines no signed-color dialect. Missing alpha defaults to one. In-range F32 values
+and exactly representable F64 values, including signed zero, retain their bits. An inexact F64 to
+F32 conversion (including a nonzero value rounding to zero) requires explicit `SourceSemanticLoss`
+authority and records `ply.color_precision_loss`, the vertex/property path, and original/output
+scalar bits. `FormatRecovery` permission alone is insufficient; conformance policy remains separate.
+Unsigned normalization's documented final F32 rounding is part of that profile's evaluated mapping.
+Custom scalar attributes keep their existing independent width/precision contract.
+
+Public facade regressions in `crates/baozi/tests/ply_colors.rs` check RGBA midpoint values and
+aliases across all three encodings, rejection before floating range narrowing, signed types,
+signed zero, and denied/authorized F64 precision loss.
+
 ## Text Surface, Tokenization, and Failure Offsets
 
 - ASCII PLY counts the complete input against `max_decoded_utf8_bytes`. Binary little-endian and
