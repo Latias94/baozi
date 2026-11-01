@@ -6,6 +6,9 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Made the repository-only `baozi-test-support` development dependency path-only so Cargo
+  omits it from published manifests. The facade and four format archives no longer require
+  an unpublished registry test helper when resolved as root packages.
 - Replaced the native candidate and asset consumer's root patches with maintained
   `baozi-cap-primitives`, `baozi-cap-std`, and `baozi-cap-fs-ext` 0.1.0 packages based on
   upstream 4.0.3. Exact dependency edges retain the library aliases, original source, build

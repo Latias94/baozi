@@ -6,6 +6,14 @@ in `tools/consumers/scene` and copies its checked-in `Cargo.lock` as staging inp
 The staged lock transitions to registry identities before locked artifact builds;
 the checkout's source manifests and lockfiles remain unchanged.
 
+The unpublished `baozi-test-support` package is a path-only workspace development
+dependency without a version. Cargo omits it from normalized published manifests,
+so the facade and format archives do not require an unpublished registry helper
+when resolved as root packages. Repository fixture tests still use the checkout;
+this does not claim those tests run from the stripped published development graph.
+Keep ordinary versioned development dependencies in dependency-order publication
+planning as well as the required and optional production closure.
+
 ```text
 python scripts/check_packages.py --toolchain 1.95.0 --case default
 python scripts/check_packages.py --toolchain 1.95.0 --case empty --case obj --case ply --case all

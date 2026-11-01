@@ -24,7 +24,8 @@ baozi-format-stl = { path = "crates/baozi-format-stl", version = "0.1.0" }
 baozi-format-obj = { path = "crates/baozi-format-obj", version = "0.1.0" }
 baozi-format-ply = { path = "crates/baozi-format-ply", version = "0.1.0" }
 baozi-format-gltf = { path = "crates/baozi-format-gltf", version = "0.1.0" }
-baozi-test-support = { path = "crates/baozi-test-support", version = "0.1.0" }
+# Repository-only dev dependency; Cargo omits it from published manifests.
+baozi-test-support = { path = "crates/baozi-test-support" }
 base64 = "0.22"
 thiserror = "2"
 tracing = "0.1"
