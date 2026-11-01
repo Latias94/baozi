@@ -1,5 +1,5 @@
 ---
-status: in_progress
+status: completed
 date: 2026-11-01
 ---
 
@@ -8,7 +8,11 @@ date: 2026-11-01
 This record covers the [scene-selection execution plan](../plans/2026-11-01-007-feat-gltf-scene-selection-plan.md)
 after `01fe7e1`. Together with complete influence sets in `660a4f2`, this completes candidate 6
 of the [asset workflow plan](../plans/2026-11-01-001-feat-asset-workflow-expansion-plan.md).
-Implementation identity and integrated verification are recorded after source freeze below.
+Implementation is `82c976d41137d86db1be06f424227a381fb70985`. The tracked tree was clean
+when the integrated run began. Completion documentation is recorded separately; the local
+source identity and execution logs are retained under `target/review/gltf-scene-selection-*`,
+with a local `target/review/gltf-scene-selection-evidence.zip` bundle. Integrated checks below
+use this implementation state; subsequent changes only complete documentation.
 
 ## Behavior and decisions
 
@@ -108,11 +112,24 @@ reused. All three targeted repair cases then passed (`3114c562-1ab5-4d56-b508-f4
 | Shared source-scope tests | 19/19 pass | `d94e0629-cb32-4223-a05f-cb42b1554315` |
 | New independent consumer cases | 3/3 pass | `af41cd51-59b7-457b-8d02-3192049ea238` |
 | Focused option/selection/direct-backend tests | 30/30 pass | `29f3b8a9-1ca4-4527-b1ad-03b28eb7118f` |
-| glTF format package | Pending | Pending |
-| Windows workspace, all features | Pending | Pending |
-| Independent asset consumer, all features | Pending | Pending |
+| Windows workspace, all features | 2,652/2,652 pass; 4 existing manual skips | `ee1a88bc-5cd6-42ee-a058-c9e7a38e05d2` |
+| Independent asset consumer, all features | 37/37 pass; 1 existing manual skip | `a9883dbd-cd90-4ab1-8f57-09e034362978` |
 | Workspace strict Clippy | Pass, all targets/features, `-D warnings` | Local log |
-| Consumer strict Clippy and formatting | Pending | Pending |
+| Independent asset consumer strict Clippy | Pass, all targets/features, `-D warnings` | Local log |
+| Workspace and independent consumer formatting | Both pass | `cargo fmt ... -- --check` |
+| glTF library, wasm32-unknown-unknown | Compile pass | No browser execution claim |
+
+Executed integrated commands:
+
+```text
+cargo +1.95.0 clippy --locked --offline --workspace --all-targets --all-features --jobs 1 -- -D warnings
+cargo +1.95.0 nextest run --locked --offline --workspace --all-features --build-jobs 1 --test-threads 2 --no-fail-fast --status-level fail --final-status-level none
+cargo +1.95.0 nextest run --locked --offline --manifest-path tools/consumers/assets/Cargo.toml --target-dir target --all-features --build-jobs 1 --test-threads 1 --no-fail-fast --status-level fail --final-status-level none
+cargo +1.95.0 clippy --locked --offline --manifest-path tools/consumers/assets/Cargo.toml --target-dir target --all-targets --all-features --jobs 1 -- -D warnings
+cargo +1.95.0 fmt --all -- --check
+cargo +1.95.0 fmt --manifest-path tools/consumers/assets/Cargo.toml -- --check
+cargo +1.95.0 check --locked --offline -p baozi-format-gltf --lib --target wasm32-unknown-unknown --jobs 1
+```
 
 ## Qualification boundary
 

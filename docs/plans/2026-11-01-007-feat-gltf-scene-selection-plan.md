@@ -2,7 +2,7 @@
 title: Explicit glTF Scene Selection
 type: feat
 date: 2026-11-01
-status: in_progress
+status: completed
 ---
 
 # Explicit glTF Scene Selection
@@ -53,6 +53,13 @@ Only the main thread runs Cargo using Rust 1.95.0, locked/offline dependencies, 
 and the shared target directory. Native Codex agents own the format option codec and disjoint
 new importer/consumer test files. The main thread owns selection, shared evidence and integration.
 Existing untracked user notes remain untouched.
+
+Completed in `82c976d41137d86db1be06f424227a381fb70985`. The
+[execution review](../reviews/2026-11-01-gltf-scene-selection.md) records the source identity,
+option/selection/evidence contracts, empty-scene decoder and animation-channel owner corrections,
+and revision-qualified verification: 2,652 passing Windows workspace tests, 37 passing independent
+consumer tests, strict Clippy and formatting for both workspaces, and a compile-only wasm32 glTF
+library check. Candidate 6 is complete; extension admission and package release remain separate.
 
 ## References
 
