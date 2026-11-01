@@ -1,5 +1,5 @@
 ---
-status: in_progress
+status: completed
 date: 2026-11-01
 ---
 
@@ -8,6 +8,9 @@ date: 2026-11-01
 This record covers the [influence-set execution plan](../plans/2026-11-01-006-feat-gltf-influence-sets-plan.md)
 after `42ab367`. It implements the influence half of candidate 6; explicit scene selection remains
 future work. Earlier sparse qualification belongs to its own implementation state.
+Implementation is `660a4f2d986ac004179c77e1ed326ceb5cf41dad`. The tracked tree was clean when
+the integrated run began. Source identities and local execution logs are retained under
+`target/review/gltf-influence-sets-evidence.zip`; completion documentation is recorded separately.
 
 ## Behavior and decisions
 
@@ -58,8 +61,56 @@ Three native Codex agents provided read-only architecture review, importer regre
 an independent application consumer test file. The main thread owns production integration and
 serial Cargo execution. The first format-package run passed 271/271 tests
 (`137b67c8-b41e-4ba6-94f3-1583a67b0d25`); the independent consumer's two-set and sparse third-set
-cases passed 2/2 (`48111282-d5cc-4b8f-ab58-f9e15f65d782`). Final source identity, integrated results
-and any subsequent corrections will be recorded after implementation freeze.
+cases passed 2/2 (`48111282-d5cc-4b8f-ab58-f9e15f65d782`). Workspace strict Clippy passed with all
+targets/features and `-D warnings`. The integrated runs below use the frozen implementation commit;
+subsequent changes only complete this documentation.
+
+The new importer test file contains 18 bounded tests. Coverage includes two/three/seventeen sets
+(68 lanes without a special set cap), all weight storage forms including mixed integer widths,
+strided higher accessors, sparse higher sets and complete typed public provenance. It checks
+missing partners, gaps and enormous suffixes, accessor count/type/normalization/layout defects,
+later-set negative/nonfinite values, positive duplicates within/across sets, permitted duplicate
+zero lanes and signed-zero bits, single/multiple-set integer sum rejection, float warning/no-warning
+controls, CSR overflow and the exact aggregate InfluenceCells limit. Selected omission keeps an
+unselected invalid higher-set definition and its unavailable buffer outside the import closure.
+All-instance palette bounds include higher-set zero-weight lanes and retain core error ownership.
+
+The independent consumer fixtures use two legal palettes over a shared logical mesh, 8/12 lanes,
+more than four nonzero weights, UV seams, repeated indices and a sparse third-set dependency. They
+verify typed source-order ordinals, reflect/scale/reverse winding through the existing space edit,
+reacquire current handles and reconstruct complete application-owned rows after Scene/IO drop.
+The application still stores lane order in parallel arrays; it does not add a separate source-order
+field. Cancellation checkpoints and sorting bounds were reviewed statically; this slice does not
+claim a new stage-targeted cancellation injection test.
+
+| Executed check | Result | Run identity |
+| --- | --- | --- |
+| glTF format package | 271/271 pass | `137b67c8-b41e-4ba6-94f3-1583a67b0d25` |
+| New independent consumer cases | 2/2 pass | `48111282-d5cc-4b8f-ab58-f9e15f65d782` |
+| Windows workspace, all features | 2,626/2,626 pass; 4 existing manual skips | `b74ebd9d-7c27-4a07-a0d2-5b466da0e3fd` |
+| Independent asset consumer, all features | 34/34 pass; 1 existing manual skip | `afd29221-79c9-4ff1-9488-1e545dacbba7` |
+| Workspace strict Clippy | Pass, all targets/features, `-D warnings` | Local log |
+| Independent asset consumer strict Clippy | Pass, all targets/features, `-D warnings` | Local log |
+| Workspace and independent consumer formatting | Both pass | `cargo fmt ... -- --check` |
+| glTF library, wasm32-unknown-unknown | Compile pass | No browser execution claim |
+
+The initial library check exposed two integration constraints before tests: the backend's Normalize
+trait is private, and MeteredVec only exposes mutable slices for Copy elements. The implementation
+uses the backend's public weight Cast functions and inline RefCell iterator state instead of
+expanding either boundary. Focused and integrated tests then passed without a production rule
+relaxation or a source-fixture repair.
+
+Executed integrated commands:
+
+```text
+cargo +1.95.0 clippy --locked --offline --workspace --all-targets --all-features --jobs 1 -- -D warnings
+cargo +1.95.0 nextest run --locked --offline --workspace --all-features --build-jobs 1 --test-threads 2 --no-fail-fast --status-level fail --final-status-level none
+cargo +1.95.0 nextest run --locked --offline --manifest-path tools/consumers/assets/Cargo.toml --target-dir target --all-features --build-jobs 1 --test-threads 1 --no-fail-fast --status-level fail --final-status-level none
+cargo +1.95.0 clippy --locked --offline --manifest-path tools/consumers/assets/Cargo.toml --target-dir target --all-targets --all-features --jobs 1 -- -D warnings
+cargo +1.95.0 fmt --all -- --check
+cargo +1.95.0 fmt --manifest-path tools/consumers/assets/Cargo.toml -- --check
+cargo +1.95.0 check --locked --offline -p baozi-format-gltf --lib --target wasm32-unknown-unknown --jobs 1
+```
 
 ## Qualification boundary
 

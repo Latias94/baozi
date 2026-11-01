@@ -2,7 +2,7 @@
 title: Complete glTF Influence Sets
 type: feat
 date: 2026-11-01
-status: in_progress
+status: completed
 ---
 
 # Complete glTF Influence Sets
@@ -44,6 +44,13 @@ including zero and signed-zero weights. Source order is the bounded row ordinal 
 Only the main thread runs Cargo, with Rust 1.95.0, locked/offline dependencies, one build job and
 the existing target directory. Native Codex agents own read-only design review and disjoint new
 importer/consumer integration test files. Existing user notes and unrelated edits remain untouched.
+
+Completed in `660a4f2d986ac004179c77e1ed326ceb5cf41dad`. The
+[execution review](../reviews/2026-11-01-gltf-influence-sets.md) records source-level validation,
+capacity/work bounds, all-instance palette and consumer behavior, and revision-qualified results:
+2,626 passing workspace tests, 34 passing consumer tests, strict Clippy, formatting and a compile-only
+wasm32 glTF library check. Nonzero joint uniqueness and exact all-integer sum checks apply to
+single/multiple sets; F32 sum discrepancies are preserved with a bounded primitive summary warning.
 
 ## Normative reference
 
