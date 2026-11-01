@@ -9,6 +9,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
 
 [[package]]
+name = "baozi"
+version = "0.1.0"
+dependencies = [
+ "baozi-core",
+ "baozi-import",
+ "baozi-io",
+ "baozi-operation",
+ "baozi-postprocess",
+ "thiserror",
+]
+
+[[package]]
 name = "baozi-core"
 version = "0.1.0"
 dependencies = [
@@ -55,6 +67,7 @@ dependencies = [
 name = "baozi-fuzz"
 version = "0.0.0"
 dependencies = [
+ "baozi",
  "baozi-format-gltf",
  "baozi-format-obj",
  "baozi-format-ply",
@@ -108,6 +121,15 @@ version = "0.1.0"
 dependencies = [
  "scopeguard",
  "triomphe",
+]
+
+[[package]]
+name = "baozi-postprocess"
+version = "0.1.0"
+dependencies = [
+ "baozi-core",
+ "baozi-operation",
+ "thiserror",
 ]
 
 [[package]]

@@ -27,12 +27,7 @@ fuzz_target!(|data: &[u8]| {
     io.try_insert(mtl_path, Arc::<[u8]>::from(mtl_bytes))
         .expect("the dependency fuzz asset insertion must succeed");
 
-    if let Ok(report) = import_asset(
-        request,
-        &io,
-        obj_path,
-        ImportOperationControl::default(),
-    ) {
+    if let Ok(report) = import_asset(request, &io, obj_path, ImportOperationControl::default()) {
         support::assert_validated_snapshot(report.scene());
     }
 });

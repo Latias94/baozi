@@ -4,12 +4,18 @@ on:
   schedule:
     - cron: "17 3 * * 1"
   workflow_dispatch:
+    inputs:
+      resume_run_id:
+        description: "Optional earlier Scheduled Fuzz run ID whose retained corpora should be resumed"
+        required: false
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
+  actions: read
   contents: read
 
 env:
@@ -30,6 +36,7 @@ jobs:
           - ply_import
           - gltf_import
           - registry_detection
+          - edit_lifecycle
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -48,16 +55,79 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
 
+      - name: Restore requested campaign corpus
+        if: github.event_name == 'workflow_dispatch' && inputs.resume_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESUME_RUN_ID: ${{ inputs.resume_run_id }}
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: |
+          gh run download "$RESUME_RUN_ID" --repo "$GITHUB_REPOSITORY" --pattern "${FUZZ_TARGET}-fuzz-*" --dir "$RUNNER_TEMP/fuzz-resume"
+          python3 - <<'PY'
+          import os
+          import hashlib
+          from pathlib import Path
+
+          target = os.environ["FUZZ_TARGET"]
+          restored = Path(os.environ["RUNNER_TEMP"]) / "fuzz-resume"
+          seeds = [path for path in restored.glob(f"**/corpus/{target}/*") if path.is_file()]
+          if not seeds:
+              raise SystemExit(f"No retained corpus found for {target}")
+          corpus = Path("fuzz/corpus") / target
+          corpus.mkdir(parents=True, exist_ok=True)
+          for seed in seeds:
+              data = seed.read_bytes()
+              # Merge by content without overwriting the current handwritten regression seeds.
+              destination = corpus / hashlib.sha256(data).hexdigest()
+              try:
+                  with destination.open("xb") as output:
+                      output.write(data)
+              except FileExistsError:
+                  pass
+          print(f"Restored {len(seeds)} corpus entries for {target}")
+          PY
+
       - name: Check fuzz target
         run: |
           cargo metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml > /dev/null
           cargo fuzz check "${{ matrix.target }}"
 
-      - name: Run scheduled fuzz
+      - name: Check edit lifecycle seed regressions
+        if: matrix.target == 'edit_lifecycle'
+        run: cargo test --locked --manifest-path fuzz/Cargo.toml --lib --jobs 1
+
+      - name: Record campaign identity
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+          RESUME_RUN_ID: ${{ inputs.resume_run_id }}
         run: |
-          mkdir -p "fuzz/artifacts/${{ matrix.target }}" "fuzz/corpus/${{ matrix.target }}"
+          mkdir -p "fuzz/artifacts/$FUZZ_TARGET"
+          {
+            git rev-parse HEAD
+            git status --short
+            rustc -Vv
+            cargo fuzz --version
+            printf 'target=%s\nresume_run_id=%s\n' "$FUZZ_TARGET" "$RESUME_RUN_ID"
+          } > "fuzz/artifacts/$FUZZ_TARGET/environment.log"
+
+      - name: Run edit lifecycle sanitizer smoke
+        if: matrix.target == 'edit_lifecycle'
+        run: |
           set -o pipefail
-          cargo fuzz run --sanitizer address "${{ matrix.target }}" -- -max_total_time=120 2>&1 | tee "fuzz/artifacts/${{ matrix.target }}/fuzz.log"
+          cargo fuzz run --sanitizer address edit_lifecycle -- -runs=256 -max_len=8196 2>&1 | tee fuzz/artifacts/edit_lifecycle/smoke.log
+
+      - name: Run scheduled fuzz
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p "fuzz/artifacts/$FUZZ_TARGET" "fuzz/corpus/$FUZZ_TARGET"
+          fuzzer_args=(-max_total_time=120)
+          if [[ "$FUZZ_TARGET" == edit_lifecycle ]]; then
+            fuzzer_args+=(-max_len=8196)
+          fi
+          printf 'cargo fuzz run --sanitizer address %s -- %s\n' "$FUZZ_TARGET" "${fuzzer_args[*]}" >> "fuzz/artifacts/$FUZZ_TARGET/environment.log"
+          set -o pipefail
+          cargo fuzz run --sanitizer address "$FUZZ_TARGET" -- "${fuzzer_args[@]}" 2>&1 | tee "fuzz/artifacts/$FUZZ_TARGET/fuzz.log"
           git diff --exit-code -- fuzz/Cargo.lock
 
       - name: Retain fuzz corpus and logs

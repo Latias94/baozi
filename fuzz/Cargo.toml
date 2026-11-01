@@ -10,6 +10,7 @@ license = "MIT OR Apache-2.0"
 cargo-fuzz = true
 
 [dependencies]
+baozi = { path = "../crates/baozi", default-features = false, features = ["postprocess"] }
 baozi-format-gltf = { path = "../crates/baozi-format-gltf" }
 baozi-format-obj = { path = "../crates/baozi-format-obj" }
 baozi-format-ply = { path = "../crates/baozi-format-ply" }
@@ -49,6 +50,13 @@ bench = false
 [[bin]]
 name = "registry_detection"
 path = "fuzz_targets/registry_detection.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "edit_lifecycle"
+path = "fuzz_targets/edit_lifecycle.rs"
 test = false
 doc = false
 bench = false

@@ -8,12 +8,12 @@ use baozi_import::authoring::{
     SceneAuthoringBatch, SceneSpace, SpatialAuthoringBatch,
 };
 use baozi_import::{
-    import_bytes, CapabilityStatus, DetectionEvidence, DetectionInconclusive, DetectionOptions,
-    DetectionOutcome, DetectionResult, DetectionScope, FormatCapability, FormatDescriptor,
-    FormatEncoding, FormatImporter, FormatSelection, ImportConfigOverlay, ImportOperationControl,
-    ImportRequest, ImportRequestLayer, ImportResult, OptionCompileLimits, ParseResult, ParseScope,
+    CapabilityStatus, DetectionEvidence, DetectionInconclusive, DetectionOptions, DetectionOutcome,
+    DetectionResult, DetectionScope, FormatCapability, FormatDescriptor, FormatEncoding,
+    FormatImporter, FormatSelection, ImportConfigOverlay, ImportOperationControl, ImportRequest,
+    ImportRequestLayer, ImportResult, OptionCompileLimits, ParseResult, ParseScope,
     PreparedImportRequest, Probe, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
-    ResourceLimits, ResourceLimitsOverlay, SceneDraft,
+    ResourceLimits, ResourceLimitsOverlay, SceneDraft, import_bytes,
 };
 use baozi_io::AssetPath;
 use libfuzzer_sys::fuzz_target;

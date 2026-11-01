@@ -2,7 +2,7 @@ use baozi_import::authoring::FormatId;
 use baozi_import::{
     FormatImporter, FormatSelection, ImportConfigOverlay, ImportRequest, ImportRequestLayer,
     OptionCompileLimits, PreparedImportRequest, RegistryBuildLimits, RegistryBuilder,
-    SceneSnapshotLimits, ValidatedScene,
+    ResourceLimits, ResourceLimitsOverlay, SceneSnapshot, SceneSnapshotLimits, ValidatedScene,
 };
 
 const SNAPSHOT_PREVIEW_BYTES: usize = 64 * 1024;
@@ -10,6 +10,17 @@ const SNAPSHOT_COLLECTION_ITEMS: usize = 256;
 const SNAPSHOT_WORK: u64 = 4_000_000;
 
 pub fn prepared_request<I>(importer: I, format_id: &str) -> PreparedImportRequest
+where
+    I: FormatImporter,
+{
+    prepared_request_with_limits(importer, format_id, ResourceLimits::default())
+}
+
+pub fn prepared_request_with_limits<I>(
+    importer: I,
+    format_id: &str,
+    limits: ResourceLimits,
+) -> PreparedImportRequest
 where
     I: FormatImporter,
 {
@@ -27,6 +38,7 @@ where
                 ImportRequestLayer::default(),
                 ImportRequestLayer::new(
                     ImportConfigOverlay::default()
+                        .with_resource_limits(ResourceLimitsOverlay::from_limits(limits))
                         .with_format_selection(FormatSelection::Forced(format)),
                 ),
             ),
@@ -36,6 +48,10 @@ where
 }
 
 pub fn assert_validated_snapshot(scene: &ValidatedScene) {
+    capture_snapshot(scene);
+}
+
+pub fn capture_snapshot(scene: &ValidatedScene) -> SceneSnapshot {
     let limits = SceneSnapshotLimits::try_new(
         SNAPSHOT_PREVIEW_BYTES,
         SNAPSHOT_COLLECTION_ITEMS,
@@ -44,5 +60,5 @@ pub fn assert_validated_snapshot(scene: &ValidatedScene) {
     .expect("the static fuzz snapshot limits must be valid");
     scene
         .capture_snapshot(limits)
-        .expect("every successfully imported bounded fuzz Scene must admit a semantic snapshot");
+        .expect("every successfully imported bounded fuzz Scene must admit a semantic snapshot")
 }
