@@ -2504,7 +2504,7 @@ fn add_texture_binding<'scope, 'document>(
 
 #[derive(Debug, Clone, Copy)]
 struct PrimitiveContract {
-    mode: Mode,
+    topology: GeometryTopologyAuthoring<'static>,
     position_count: usize,
     index_count: usize,
     face_count: usize,
@@ -2580,12 +2580,6 @@ fn preflight_geometry_contracts<'scope>(
                 primitive.index(),
                 material_count,
             )?;
-            if map_topology(contract.mode).is_none() {
-                return Err(ContentError::FeatureUnsupported {
-                    format: "gltf",
-                    feature: format!("primitive mode {:?} is not implemented yet", contract.mode),
-                });
-            }
             total_vertices = checked_add_with_limit(
                 ctx,
                 "max_vertices",
@@ -2836,13 +2830,9 @@ fn validate_primitive_contract(
     } else {
         None
     };
-    let face_input_count = index_count.unwrap_or(position_count);
+    let corner_count = index_count.unwrap_or(position_count);
+    let face_count = primitive_face_count(ctx, owner, mode, corner_count)?;
     let index_count = index_count.unwrap_or_default();
-    let face_count = match mode {
-        Mode::Triangles => face_input_count / 3,
-        Mode::Points | Mode::Lines => 0,
-        Mode::LineLoop | Mode::LineStrip | Mode::TriangleStrip | Mode::TriangleFan => 0,
-    };
 
     let material_index = primitive.material.map(|material| material.value());
     if let Some(material_index) = material_index
@@ -2858,13 +2848,38 @@ fn validate_primitive_contract(
     }
 
     Ok(PrimitiveContract {
-        mode,
+        topology: map_topology(mode),
         position_count,
         index_count,
         face_count,
         attribute_stream_count,
         material_index,
     })
+}
+
+/// glTF requires a complete nonempty primitive; core topology also admits empty authoring input.
+/// Count canonical topology elements (including points/segments) before dependency I/O.
+fn primitive_face_count(
+    ctx: &ParseScope<'_>,
+    owner: AccessorOwner,
+    mode: Mode,
+    corners: usize,
+) -> Result<usize> {
+    let faces = match mode {
+        Mode::Points if corners != 0 => corners,
+        Mode::Lines if corners != 0 && corners.is_multiple_of(2) => corners / 2,
+        Mode::LineLoop if corners >= 2 => corners,
+        Mode::LineStrip if corners >= 2 => corners - 1,
+        Mode::Triangles if corners != 0 && corners.is_multiple_of(3) => corners / 3,
+        Mode::TriangleStrip | Mode::TriangleFan if corners >= 3 => corners - 2,
+        _ => {
+            return Err(gltf_parse_error(
+                ctx,
+                format!("{owner} mode {mode:?} has an invalid draw index count {corners}"),
+            ));
+        }
+    };
+    Ok(faces)
 }
 
 fn json_primitive<'a>(
@@ -3500,11 +3515,6 @@ fn build_primitive_authoring<'scope>(
     provenance: &mut MeteredVec<'scope, u32>,
     pending_provenance: &mut MeteredVec<'scope, u32>,
 ) -> Result<PrimitiveStorage<'scope>> {
-    let topology = map_topology(contract.mode).ok_or_else(|| ContentError::FeatureUnsupported {
-        format: "gltf",
-        feature: format!("primitive mode {:?} is not implemented yet", contract.mode),
-    })?;
-
     let attribute_cell_count = contract
         .position_count
         .checked_mul(contract.attribute_stream_count)
@@ -3604,20 +3614,18 @@ fn build_primitive_authoring<'scope>(
                 ctx.metered_vec(ImportStorageClass::SceneConstruction, "gltf-tangent-values")
             });
             let indices = safe_gltf(ctx, "glTF indices reader", || {
-                reader.read_indices().map(|indices| {
-                    collect_exact(
-                        ctx,
-                        ImportStorageClass::SceneConstruction,
-                        contract.index_count,
-                        "gltf-index-values",
-                        indices.into_u32(),
-                    )
-                })
+                reader
+                    .read_indices()
+                    .map(|indices| collect_indices(ctx, contract, indices))
             })?
-            .transpose()?
-            .unwrap_or_else(|| {
-                ctx.metered_vec(ImportStorageClass::SceneConstruction, "gltf-index-values")
-            });
+            .transpose()?;
+            let indices = match indices {
+                Some(indices) => indices,
+                None if contract.index_count == 0 => {
+                    ctx.metered_vec(ImportStorageClass::SceneConstruction, "gltf-index-values")
+                }
+                None => return Err(gltf_parse_error(ctx, "glTF indices accessor could not be read")),
+            };
 
             let mut attributes = ctx.metered_vec(
                 ImportStorageClass::SceneConstruction,
@@ -3772,7 +3780,7 @@ fn build_primitive_authoring<'scope>(
             )?;
             work.complete_all()?;
             Ok(PrimitiveStorage {
-                topology,
+                topology: contract.topology,
                 has_indices: primitive.indices().is_some(),
                 indices,
                 material: contract
@@ -3801,6 +3809,48 @@ fn build_primitive_authoring<'scope>(
             })
         },
     )
+}
+
+fn collect_indices<'scope>(
+    ctx: &'scope ParseScope<'_>,
+    contract: PrimitiveContract,
+    indices: gltf::mesh::util::ReadIndices<'_>,
+) -> Result<MeteredVec<'scope, u32>> {
+    use gltf::mesh::util::ReadIndices;
+    let restart = match &indices {
+        ReadIndices::U8(_) => u32::from(u8::MAX),
+        ReadIndices::U16(_) => u32::from(u16::MAX),
+        ReadIndices::U32(_) => u32::MAX,
+    };
+    let mut collected = ctx.metered_vec(ImportStorageClass::SceneConstruction, "gltf-index-values");
+    collected.try_reserve(contract.index_count)?;
+    for index in indices.into_u32() {
+        poll_parser_loop(ctx, collected.len())?;
+        if collected.len() == contract.index_count {
+            return Err(gltf_parse_error(
+                ctx,
+                "glTF index stream exceeds its admitted count",
+            ));
+        }
+        // Reject the source-width restart sentinel before its original component type is lost.
+        if index == restart || index as usize >= contract.position_count {
+            return Err(gltf_parse_error(
+                ctx,
+                format!(
+                    "glTF index {} contains invalid vertex index {index}",
+                    collected.len()
+                ),
+            ));
+        }
+        collected.try_push_reserved(index)?;
+    }
+    if collected.len() != contract.index_count {
+        return Err(gltf_parse_error(
+            ctx,
+            "glTF index stream differs from its admitted count",
+        ));
+    }
+    Ok(collected)
 }
 
 fn collect_f32_arrays<'scope, const N: usize>(
@@ -5798,12 +5848,15 @@ fn build_cameras<'scope>(
     Ok(storage)
 }
 
-fn map_topology(mode: Mode) -> Option<GeometryTopologyAuthoring<'static>> {
+fn map_topology(mode: Mode) -> GeometryTopologyAuthoring<'static> {
     match mode {
-        Mode::Points => Some(GeometryTopologyAuthoring::Points),
-        Mode::Lines => Some(GeometryTopologyAuthoring::LineList),
-        Mode::Triangles => Some(GeometryTopologyAuthoring::TriangleList),
-        Mode::LineLoop | Mode::LineStrip | Mode::TriangleStrip | Mode::TriangleFan => None,
+        Mode::Points => GeometryTopologyAuthoring::Points,
+        Mode::Lines => GeometryTopologyAuthoring::LineList,
+        Mode::LineLoop => GeometryTopologyAuthoring::LineLoop,
+        Mode::LineStrip => GeometryTopologyAuthoring::LineStrip,
+        Mode::Triangles => GeometryTopologyAuthoring::TriangleList,
+        Mode::TriangleStrip => GeometryTopologyAuthoring::TriangleStrip,
+        Mode::TriangleFan => GeometryTopologyAuthoring::TriangleFan,
     }
 }
 

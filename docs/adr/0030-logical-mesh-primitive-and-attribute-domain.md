@@ -220,38 +220,39 @@ snapshot schema revisions remain 3: scalar tag 3 extends the existing discrimina
 without changing existing tag meanings, table layouts, or the transcripts of scenes without F64
 attributes. A nonzero F64 scalar total is also included in the preview summary.
 
-### Borrowed Triangle Application Layout
+### Borrowed List Application Layout
 
-`baozi-postprocess::triangle_vertices(PrimitiveRef)` returns
-`Result<TriangleVertices, VertexLayoutError>`. It accepts only `TopologyKind::TriangleList`;
-other topologies return `VertexLayoutError::UnsupportedTopology { topology }`, including empty
-non-triangle primitives. Empty triangle lists return an empty layout. No triangulation, normal
-generation, coordinate conversion, or numerical degeneracy test occurs inside this reader.
+`baozi-postprocess::list_vertices(PrimitiveRef)` explicitly exposes the seven canonical point,
+line and triangle assembly modes as Points, LineList or TriangleList draw tuples. It returns
+`Result<ListVertices, VertexLayoutError>`. Polygons require the separate geometric
+`triangulate_primitive` operation. `triangle_vertices` remains a strict TriangleList entry using
+the same view and sampler. The replaced `TriangleVertices` and `TriangleVertex` type names are
+removed; public types are `ListVertices` and `ListVertex`.
 
-The layout emits exactly one application tuple per source draw Corner, in draw order. With `C`
-corners, the application vertex count is `C` and the implicit application index stream is the
-allocation-free `Range<u32>` `0..C`. Equal tuples may be repeated. There is no deduplication,
-cross-source welding, epsilon comparison, minimal vertex-count guarantee, or owned vertex map.
-UV seams and Face boundaries therefore retain their distinct tuples without a tuple-equivalence
-policy. Shared source vertices still supply the same Vertex values, influences, and morph deltas.
+The Scene retains source topology and all original data. Source Corner order is unchanged for
+native lists and points. Strips/fans/loops use the exact documented assembly order in the
+[reader contract](../model/reading-scenes.md#application-list-buffers), preserving degenerate
+primitives, strip parity and every loop closing edge. Short core-authored assemblies produce an
+empty view. Expansion is O(1) per tuple; construction checks the output u32 count and returns
+`VertexLayoutError::SizeOverflow` if necessary.
 
-For application index `c`, the source-domain selection is:
+`ListVertices` and `ListVertex` are `Copy` borrowed views. The layout exposes `primitive()`,
+`topology()` for the output list kind, `len()`, `is_empty()`, checked `vertex(index: usize)`,
+`vertices()` and an implicit `Range<u32>` `indices()`. Iterators are independent, exact-size,
+double-ended and cloneable. The application tuple index is separate from all source domains:
 
-| Field domain | Source element |
+| Field or endpoint | Source selection |
 | --- | --- |
-| Vertex | `primitive.indices()[c]` when indexed, otherwise `c` |
-| Corner | `c` |
-| Face | `c / 3` |
+| `index()` | Expanded output tuple ordinal |
+| `source_corner()` / Corner fields | Original assembled Corner ordinal |
+| `source_vertex()` / Vertex fields | Source indices at that Corner, or its implicit Vertex |
+| `source_face()` / Face fields | Original assembled element ordinal |
 
-`TriangleVertices` and `TriangleVertex` are `Copy` borrowed views of the current primitive.
-`TriangleVertices` exposes `primitive()`, `len()`, `is_empty()`, checked `vertex(index: usize)`,
-`vertices()`, and `indices()`. The vertex iterator is exact-size, double-ended, and cloneable.
-`TriangleVertex::index()` is the current Corner ordinal; `source_vertex()`, `source_corner()`, and
-`source_face()` return generation- and primitive-qualified endpoints. In particular, a
-`PrimitiveVertex` contains `{ primitive: PrimitiveId, index: u32 }`. These endpoints describe the
-current Scene, not a new generation or an implicit remap to an earlier import.
+A repeated fan hub therefore samples several Face values while retaining its original Corner and
+Vertex. Equal tuples remain repeated unless an application applies its own explicit deduplication
+policy. There is no welding, resampling, precision reduction or automatic geometry repair.
 
-`TriangleVertex::attributes()` traverses every retained primitive attribute in order. Each
+`ListVertex::attributes()` traverses every retained primitive attribute in order. Each
 `VertexAttribute` exposes its original `AttributeRef` through `attribute()` and its selected
 `AttributeElement` through `element()`. Keyed `attribute(semantic, domain)` lookup requires the
 complete key, preserving simultaneous Vertex and Corner normals or UVs and all Face/custom fields.
@@ -264,7 +265,7 @@ Scalar kind, lane count, signed-zero bits, and full F64 precision are preserved 
 normalization, or implicit conversion. `AttributeRef::data()` retains the source dense/sparse
 representation, indices, and defaults; sampling an element does not rewrite that representation.
 
-`TriangleVertex::influences()` returns the complete source-Vertex row, retaining absence, empty rows,
+`ListVertex::influences()` returns the complete source-Vertex row, retaining absence, empty rows,
 source order, weights, and palette-local joint indices. `morph_delta(target, semantic)` resolves the
 target through the same current primitive and returns `Result<Option<Vec3>, SceneLookupError>`.
 A foreign generation or logical-mesh owner fails lookup; a missing semantic stream is `None`, while
@@ -281,12 +282,14 @@ ownership and accounting boundary. The application chooses checked sizing, falli
 field selection, packing, and cancellation of its own extraction loop. Attribute iteration visits
 the actual descriptor sequence once per tuple; keyed lookup is O(attribute count). No full scan,
 sort, or tuple cache is performed at construction. Expanding a highly shared mesh can repeat data
-up to the draw-Corner count; the zero-allocation view does not promise compact application buffers.
+up to the expanded list-Corner count; the zero-allocation view does not promise compact application
+buffers.
 
-Primitive bounds are `Derived<Bounds>` in primitive-local space. Logical-mesh bounds are a separate
-`Derived<Bounds>` combining primitives under the declared morph-bounds policy; scene bounds are a
-scene-owned `Derived<Bounds>` combining instances and node transforms. ADR 0032 defines valid versus
-absent state. Authored normals and tangents remain provenance-bearing attributes, but after a write
+The implemented bounds path is the explicit
+[base-pose world query](../model/reading-scenes.md#base-pose-world-transforms-and-static-bounds),
+independent of retained canonical geometry fields. It transforms all base Position vertices per
+instance, rather than only the draw tuples, and rejects unsupported deformation. Authored normals
+and tangents remain provenance-bearing attributes, but after a write
 to one of their dependencies an operation must prove preservation, remap/recompute them, or remove
 them with invalidation/loss evidence before commit. A stale attribute is never publishable merely
 because it originated in the source.
@@ -313,7 +316,7 @@ count. Chosen.
 - STL, OBJ, PLY, and glTF cut over to one model without a legacy single-primitive path.
 - OBJ may preserve corner-domain streams without importer-time vertex explosion.
 - Canonical primitive split/merge and corner expansion must return explicit entity and domain
-  remaps. Borrowed triangle tuples expose current source endpoints without publishing a remap.
+  remaps. Borrowed list tuples expose current source endpoints without publishing a remap.
 - Convenience accessors can expose typed positions and triangle views, but they never redefine the
   canonical owner.
 
@@ -347,7 +350,8 @@ count. Chosen.
   packed encoding before publication.
 - Primitive split, merge, triangulation, and vertex join tests publish deterministic remaps for every
   affected domain.
-- Borrowed triangle-layout fixtures must cover UV seams, Face fields, complete semantic/domain keys,
+- Borrowed list-layout fixtures must cover assembly order, strip parity, loop closure, UV seams,
+  Face fields, complete semantic/domain keys,
   dense/sparse and F64 values, indexed/implicit/empty streams, and source-Vertex-consistent influence
   and morph reads without reader allocations or source mutation. These are acceptance requirements,
   not a record of executed checks.

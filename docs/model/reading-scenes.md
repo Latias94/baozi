@@ -50,36 +50,56 @@ to `TangentConventions::UNKNOWN`; conventions belong to that descriptor rather t
 default. The selected glTF profile declares an unknown construction algorithm and `SignInW` on each
 imported base Tangent attribute.
 
-## Application triangle buffers
+## Application list buffers
 
-Use `baozi::postprocess::triangle_vertices(primitive)` after any explicit triangulation, normal
-generation, and space conversion that the application needs. It returns
-`Result<TriangleVertices<'scene>, VertexLayoutError>` and accepts only `TriangleList` topology.
-Other topologies, even when empty, return `VertexLayoutError::UnsupportedTopology { topology }`.
-An empty TriangleList gives an empty layout. No transformation runs inside this helper.
+Use `baozi::postprocess::list_vertices(primitive)` to explicitly obtain list draw tuples from
+Points, LineList, LineStrip, LineLoop, TriangleList, TriangleStrip or TriangleFan. It returns
+`Result<ListVertices<'scene>, VertexLayoutError>`. The borrowed Scene retains its original topology.
+Polygons require the existing explicit `triangulate_primitive` geometry operation first.
+`triangle_vertices(primitive)` is the strict TriangleList entry and returns the same shared view
+and tuple types; it rejects every other topology, even when empty. The former triangle-only public
+type names are replaced by `ListVertices` and `ListVertex`.
 
 The layout and its tuple views are `Copy` and borrow the current primitive:
 
 | Layout method | Result |
 | --- | --- |
-| `primitive()` | The current borrowed `PrimitiveRef` |
-| `len()`, `is_empty()` | Application tuple count and emptiness; count equals source Corner count |
-| `vertex(index: usize)` | `Option<TriangleVertex>` with an out-of-range check |
+| `primitive()` | The original borrowed `PrimitiveRef`, with source topology |
+| `topology()` | Output Points, LineList or TriangleList |
+| `len()`, `is_empty()` | Expanded application tuple count and emptiness |
+| `vertex(index: usize)` | `Option<ListVertex>` with an out-of-range check |
 | `vertices()` | An independent exact-size, double-ended, cloneable iterator |
-| `indices()` | An allocation-free `Range<u32>` from zero to source Corner count |
+| `indices()` | Allocation-free `Range<u32>` from zero to output tuple count |
 
-There is exactly one application tuple per draw Corner, including repeated source vertices. For
-tuple index `c`, Vertex fields sample the source index at `c` or implicit Vertex `c`, Corner fields
-sample `c`, and Face fields sample `c / 3`. Triangle order, winding, UV seams, Flat/Smooth normal
-values, and Face boundaries therefore follow the already processed primitive. Equal tuples are
-allowed to repeat: the helper performs no deduplication, welding, minimum-count optimization, or
-precision conversion. Unreferenced source vertices remain in the Scene and are not appended to
-the draw layout.
+Points and native lists retain their Corner order. For source Face `f` and source Corner count `n`,
+assembly uses these exact Corner ordinals before resolving source indices:
 
-`vertex.index()` is that application/Corner ordinal. `source_vertex()` returns
-`PrimitiveVertex { primitive: PrimitiveId, index: u32 }`; `source_corner()` and `source_face()` return
-the corresponding qualified endpoints. `vertex.primitive()` follows the exact current primitive.
-These sources refer to the current Scene; earlier edit reports own any relation to a prior Scene.
+| Source topology | Output topology | Source Corners per output element |
+| --- | --- | --- |
+| Points | Points | `[f]` |
+| LineList | LineList | `[2f, 2f + 1]` |
+| LineStrip | LineList | `[f, f + 1]` |
+| LineLoop | LineList | `[f, (f + 1) % n]` |
+| TriangleList | TriangleList | `[3f, 3f + 1, 3f + 2]` |
+| TriangleStrip | TriangleList | even `f`: `[f, f + 1, f + 2]`; odd `f`: `[f, f + 2, f + 1]` |
+| TriangleFan | TriangleList | `[f + 1, f + 2, 0]` |
+
+Every output element follows source Face `f`. Degenerate elements remain present and occupy their
+original Face, including strip parity and the closing loop edge. A two-Corner loop yields both
+directions. Core-authored strips/fans/loops without a complete element yield zero tuples; their
+source Vertex/Corner data remains in the Scene. glTF's format-specific minimum counts are stricter.
+Checked expansion returns `VertexLayoutError::SizeOverflow` when the output count cannot fit u32.
+
+`vertex.index()` is the expanded application ordinal. `source_corner()` gives the original Corner;
+`source_vertex()` resolves that Corner through source indices or implicit indexing; `source_face()`
+is the assembled source element. These are independent ordinals: a fan hub has the same source
+Corner/Vertex in several Faces. Endpoints use the current generation-qualified `PrimitiveId`.
+Earlier edit reports own any relation to a prior Scene. Vertex fields follow the source Vertex,
+Corner fields follow the source Corner and Face fields follow the source Face.
+
+Equal tuples may repeat. No deduplication, welding, precision conversion, normal generation,
+coordinate conversion or numerical degeneracy test occurs in these readers. Unreferenced source
+vertices remain in the Scene and are not appended to the draw layout.
 
 `vertex.attributes()` iterates all primitive fields in retained order. For each `VertexAttribute`,
 `field.attribute()` returns the original `AttributeRef`, including semantic, source domain, and

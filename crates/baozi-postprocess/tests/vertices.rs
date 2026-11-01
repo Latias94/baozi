@@ -28,9 +28,12 @@ use baozi_import::{
 };
 use baozi_io::AssetPath;
 use baozi_postprocess::{
-    PrimitiveCorner, PrimitiveFace, PrimitiveVertex, TriangleVertices, VertexLayoutError,
-    triangle_vertices,
+    ListVertices, PrimitiveCorner, PrimitiveFace, PrimitiveVertex, VertexLayoutError,
+    list_vertices, triangle_vertices,
 };
+
+#[path = "vertices/lists.rs"]
+mod lists;
 
 const FORMAT: &str = "dev.baozi.test.triangle-vertices";
 const PATH: &str = "fixtures/tuple.vertices";
@@ -55,10 +58,19 @@ const SPARSE_U32: [u32; 4] = [u32::MAX, 0x8000_0001, 7, 11];
 enum Fixture {
     Rich,
     Implicit,
-    Empty { indexed: bool },
+    Empty {
+        indexed: bool,
+    },
     Degenerate,
     Unsupported(GeometryTopologyAuthoring<'static>),
     Deformed,
+    Assembly {
+        topology: GeometryTopologyAuthoring<'static>,
+        corners: u8,
+        indexed: bool,
+        repeated_end: bool,
+    },
+    DeformedAssembly(GeometryTopologyAuthoring<'static>),
 }
 
 struct TupleImporter(Fixture);
@@ -88,7 +100,14 @@ impl FormatImporter for TupleImporter {
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
         match self.0 {
             Fixture::Rich => submit_rich(scope),
-            Fixture::Deformed => submit_deformed(scope),
+            Fixture::Deformed => submit_deformed(scope, GeometryTopologyAuthoring::TriangleList),
+            Fixture::DeformedAssembly(topology) => submit_deformed(scope, topology),
+            Fixture::Assembly {
+                topology,
+                corners,
+                indexed,
+                repeated_end,
+            } => lists::submit(scope, topology, corners, indexed, repeated_end),
             fixture => submit_simple(scope, fixture),
         }
     }
@@ -236,7 +255,10 @@ fn submit_simple(scope: &ParseScope<'_>, fixture: Fixture) -> ParseResult<SceneD
             Presence::Present(&[0, 0, 1, 2, 2, 2]),
         ),
         Fixture::Unsupported(topology) => (topology, &positions, Presence::Absent),
-        Fixture::Rich | Fixture::Deformed => {
+        Fixture::Rich
+        | Fixture::Deformed
+        | Fixture::Assembly { .. }
+        | Fixture::DeformedAssembly(_) => {
             unreachable!("these fixtures have explicit submissions")
         }
     };
@@ -261,7 +283,10 @@ fn submit_simple(scope: &ParseScope<'_>, fixture: Fixture) -> ParseResult<SceneD
     )
 }
 
-fn submit_deformed(scope: &ParseScope<'_>) -> ParseResult<SceneDraft> {
+fn submit_deformed(
+    scope: &ParseScope<'_>,
+    topology: GeometryTopologyAuthoring<'static>,
+) -> ParseResult<SceneDraft> {
     let roots = [
         NodeLocalId::new(0),
         NodeLocalId::new(1),
@@ -289,7 +314,7 @@ fn submit_deformed(scope: &ParseScope<'_>) -> ParseResult<SceneDraft> {
     });
     let primitives = [
         GeometryPrimitiveAuthoring::new(
-            GeometryTopologyAuthoring::TriangleList,
+            topology,
             Presence::Present(&[0, 1, 2, 0, 2, 1]),
             Presence::Absent,
             AuthoringRange::new(0, 1),
@@ -957,7 +982,7 @@ fn iterators_are_independent_exact_double_ended_and_checked_at_both_index_limits
         AttributeDomain::Corner
     );
     assert_eq!(independent.len(), 9);
-    assert!(format!("{layout:?}").contains("TriangleVertices"));
+    assert!(format!("{layout:?}").contains("ListVertices"));
 }
 
 #[test]
@@ -1350,7 +1375,7 @@ fn elements_influences_and_iterators_keep_scene_lifetimes_after_temporary_views_
     assert_f32(row.weights(), &[-0.0, 0.125, 0.25, 0.375, 0.25]);
 }
 
-fn visit_all_fields(layout: TriangleVertices<'_>) {
+fn visit_all_fields(layout: ListVertices<'_>) {
     for vertex in layout.vertices() {
         for field in vertex.attributes() {
             std::hint::black_box((field.attribute(), field.element()));

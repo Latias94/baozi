@@ -4,7 +4,7 @@ use baozi::{
     AssetPath, AttributeElement, AttributeSemanticRef, Importer, MemoryAssetIo, MorphDeltaSemantic,
     TargetSpace, ValidatedScene,
     postprocess::{
-        PostProcessControl, SpaceConversionOptions, TriangleVertex, convert_scene_space,
+        ListVertex, PostProcessControl, SpaceConversionOptions, convert_scene_space,
         triangle_vertices,
     },
 };
@@ -37,7 +37,7 @@ fn field_bits<const N: usize>(element: AttributeElement<'_>) -> [u64; N] {
 }
 
 fn selected_bits<const N: usize>(
-    tuple: TriangleVertex<'_>,
+    tuple: ListVertex<'_>,
     semantic: AttributeSemanticRef<'_>,
 ) -> Option<[u64; N]> {
     let mut fields = tuple
@@ -51,7 +51,7 @@ fn selected_bits<const N: usize>(
     first.map(|field| field_bits(field.element()))
 }
 
-fn source_corner(tuple: TriangleVertex<'_>) -> Result<CornerBits> {
+fn source_corner(tuple: ListVertex<'_>) -> Result<CornerBits> {
     let mut morphs = Vec::new();
     for (target_index, target) in tuple.primitive().morph_targets().enumerate() {
         for delta in target.deltas() {

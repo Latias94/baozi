@@ -41,7 +41,11 @@ baseline malformed-input safety for that source state; it is not sustained fuzz 
 
 ## Supported Profile
 
-- Static primitives using points, lines, or triangles.
+- All seven authored primitive modes: POINTS, LINES, LINE_LOOP, LINE_STRIP, TRIANGLES,
+  TRIANGLE_STRIP and TRIANGLE_FAN. Canonical topology, primitive order and absent versus present
+  indices are preserved. Import performs no mode expansion or primitive discard. Consumers may
+  explicitly use [`list_vertices`](../model/reading-scenes.md#application-list-buffers) for borrowed
+  Points/LineList/TriangleList draw tuples.
 - Positions, normals, tangents, texture coordinates, colors, indices, `JOINTS_0`, and `WEIGHTS_0`
   streams when present.
 - Node hierarchy, node transforms, mesh binding, node-level skin binding, and camera binding.
@@ -109,6 +113,19 @@ baseline malformed-input safety for that source state; it is not sustained fuzz 
 - Gates cover GLB import, snapshots, malformed external buffers/data URIs, skin validation,
   text preflight, bounded format failures, and the Linux sanitizer-run glTF fuzz target.
 
+### Primitive counts and index validation
+
+Draw Corner count comes from the index accessor when present, otherwise from the vertex attributes.
+glTF requires nonempty points, complete nonempty line/triangle lists, at least two Corners for line
+strips/loops and at least three for triangle strips/fans. These format rules are checked before
+dependency I/O. Canonical `face_count` and the corresponding import limit/work count assembled
+points or segments as well as triangles; stored topology cells count only explicit indices.
+
+Decoded indices must address the Position domain and cannot equal the maximum value of their
+original U8/U16/U32 component type. The check runs before source-width information is discarded.
+These rules follow the [Khronos mesh contract](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#meshes).
+Repeated indices and degenerate elements remain present; import does not perform geometric repair.
+
 ## Text Preflight, Resource Accounting, and Cancellation
 
 This preflight uses document admission because JSON is a document grammar rather than a
@@ -159,7 +176,6 @@ and import-contract tests.
 - Embedded image buffer views and image data URIs are materialized as encoded image payloads without
   pixel decoding. Sparse morph accessors, typed extension payloads beyond
   `KHR_texture_transform` are rejected explicitly.
-- Triangle strips, triangle fans, line strips, and line loops are not expanded yet.
 - Unsupported selected extension payloads are explicitly rejected with original raw byte
   ranges. A supported extension at an unsupported owner/site is rejected as well. Unselected entity
   payloads remain scope omissions. Declaring an unsupported optional extension without a selected

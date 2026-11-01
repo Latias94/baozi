@@ -483,26 +483,32 @@ fn indexed_point_topology_cells_are_bounded_before_reader_allocation() -> TestRe
 }
 
 #[test]
-fn unsupported_primitive_mode_is_fatal() -> TestResult<()> {
+fn triangle_strip_preserves_its_authored_topology() -> TestResult<()> {
     let gltf = String::from_utf8(triangle_gltf())?
         .replace("\"mode\": 4", "\"mode\": 5")
         .into_bytes();
-    let (result, diagnostics) = import_assets_result(
+    let (report, diagnostics) = import_assets(
         "models/scene.gltf",
         [
             ("models/scene.gltf", gltf),
             ("models/triangle.bin", triangle_bin()),
+            ("models/textures/base.png", triangle_png()),
         ],
         sidecar_options(),
     )?;
-    let error = expected_error(result)?;
-
     assert!(diagnostics.is_empty());
-    assert_gltf_failure(
-        &error,
-        GltfFailureCode::UnsupportedFeature,
-        Some("TriangleStrip"),
-    )?;
+    assert!(report.loss_evidence().is_empty());
+    let primitive = report
+        .scene()
+        .meshes()
+        .next()
+        .unwrap()
+        .primitives()
+        .next()
+        .unwrap();
+    assert_eq!(format!("{:?}", primitive.topology()), "TriangleStrip");
+    assert_eq!(primitive.indices(), Some([0, 1, 2].as_slice()));
+    assert_eq!((primitive.corner_count(), primitive.face_count()), (3, 1));
     Ok(())
 }
 

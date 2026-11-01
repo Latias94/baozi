@@ -11,7 +11,7 @@ The [exact selected profile](https://github.com/Latias94/baozi/blob/main/docs/fo
   Multiple scenes without a default are rejected. Resources outside the selected
   closure are omitted; mixed-target animation filtering requires explicit semantic
   loss authorization.
-- Import points, lines, and triangles, supported vertex streams including
+- Preserve all seven point, line and triangle primitive modes, supported vertex streams including
   `JOINTS_0`/`WEIGHTS_0`, hierarchy and node transforms, skins, dense F32 VEC3
   POSITION/NORMAL/TANGENT morph deltas, node TRS and morph-weight animation,
   perspective/orthographic cameras, and PBR metallic-roughness materials.
@@ -27,7 +27,8 @@ The [exact selected profile](https://github.com/Latias94/baozi/blob/main/docs/fo
   unsupported required extensions, and sparse morph accessors. Unsupported optional extension
   declarations without selected payloads may retain the core fallback with a
   diagnostic.
-- Triangle strips/fans and line strips/loops are not expanded. Resource-limit
+- Import retains source topology; the explicit `baozi-postprocess::list_vertices` view expands
+  strips/fans/loops for list consumers without mutating the Scene. Resource-limit
   coverage is partial, canonical dependency identities remain session-opaque, and
   full glTF conformance is not claimed.
 

@@ -151,16 +151,18 @@ vertices, or force an interleaved renderer layout. Canonical edits are explicit 
 applicable loss evidence and remaps. Read-only application views instead expose the current source
 relation without changing or republishing the Scene.
 
-`postprocess::triangle_vertices(PrimitiveRef)` is a zero-heap-allocation view over one TriangleList.
-It exposes one application tuple per draw Corner with an implicit `0..corner_count` index stream.
-Vertex fields use that Corner's source Vertex, Corner fields use the Corner itself, and Face fields
-use `corner / 3`. Every retained field remains available by its full semantic/source-domain key.
+`postprocess::list_vertices(PrimitiveRef)` is a zero-heap-allocation view over the seven canonical
+point/line/triangle assembly modes. It exposes an explicit output list topology and one application
+tuple per expanded draw Corner, with an implicit `0..output_count` index stream. Output index,
+source Corner and source Face are separate; Vertex, Corner and Face fields follow their own source
+endpoints. The strict `triangle_vertices` entry accepts only TriangleList using the same sampler.
+Every retained field remains available by its full semantic/source-domain key.
 Influences and primitive-specific morph deltas follow the same source Vertex; skin and morph-weight
 choices remain instance-owned. There is no deduplication, minimum vertex-count guarantee, owned
 map, retained artifact runtime, or operation/account report. Source storage, including unreferenced
 vertices, remains unchanged. The application allocates its own final buffers. See
-[the triangle-buffer reading guide](reading-scenes.md#application-triangle-buffers) and
-[ADR 0030](../adr/0030-logical-mesh-primitive-and-attribute-domain.md#borrowed-triangle-application-layout)
+[the list-buffer reading guide](reading-scenes.md#application-list-buffers) and
+[ADR 0030](../adr/0030-logical-mesh-primitive-and-attribute-domain.md#borrowed-list-application-layout)
 for the complete API, lifetimes, and capability boundary.
 
 ## Attribute Domains

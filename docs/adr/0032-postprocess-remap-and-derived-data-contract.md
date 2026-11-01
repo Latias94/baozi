@@ -373,17 +373,24 @@ requirements cover the real schema. No independently cached decoded report facts
 Application tuple extraction has a separate read-only ownership boundary from the coordinate
 conversion transaction. It does not require another canonical edit or retained output artifact.
 
-### Borrowed Triangle Application Layout
+### Borrowed List Application Layout
 
-`triangle_vertices(PrimitiveRef)` is a read-only helper over the exact current primitive, as defined
-by ADR 0030. `TriangleVertices` contains borrowed primitive/index access and a count; each
-`TriangleVertex` resolves one draw Corner's complete tuple. Unsupported topology is the constructor's
-typed `VertexLayoutError::UnsupportedTopology { topology }`. `TriangleList` order, winding, repeated
-corners, and degenerate triangles are retained. No geometry operation runs implicitly.
+`list_vertices(PrimitiveRef)` is an explicit read-only list-assembly view over the exact current
+primitive, as defined by ADR 0030. It supports all seven point/line/triangle modes and keeps the
+Scene's source topology unchanged. `triangle_vertices` remains a strict TriangleList entry using
+the same implementation. `ListVertices` borrows source primitive/index access, assembly and a
+checked output count; each `ListVertex` resolves an output tuple with independent source Corner,
+Vertex and Face ordinals. Unsupported topology returns
+`VertexLayoutError::UnsupportedTopology { topology }`; an unrepresentable expanded u32 count
+returns `SizeOverflow`. Degenerates, strip parity and loop closure remain present. Polygon geometry
+still requires explicit triangulation.
 
-The application relation is defined directly, with no stored map: application index `c` is source
-Corner `c`; source Face is `c / 3`; source Vertex is the source index at `c`, or `c` for an implicit
-stream. `indices()` yields `0..corner_count` without allocating. The helper does not deduplicate,
+The application relation is computed directly from source assembly and output index, without a
+stored map. A tuple carries its source Corner, corresponding indexed or implicit source Vertex,
+and assembled source Face. Fan hubs may therefore sample different Face values at the same source
+Corner. The exact assembly formulas are in the
+[reader contract](../model/reading-scenes.md#application-list-buffers).
+`indices()` yields `0..output_count` without allocating. The helper does not deduplicate,
 minimize vertex count, merge source vertices, or compare tuple values. Canonical vertices that are
 not referenced by the draw stream remain untouched and do not appear in this application layout.
 

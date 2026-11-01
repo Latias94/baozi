@@ -5,8 +5,8 @@ use baozi::{
     AttributeSemanticRef, AuthoredTransform, BasePoseWorldTransforms, CancellationToken, Mat4,
     MaterialFactors, MetadataOwnerRef, MetadataValueRef, MorphDeltaSemantic, PrimitiveId,
     SourceObjectLocatorRef, SpatialQueryError, SpatialQueryLimits, TextureRole, TextureTransform,
-    ValidatedScene,
-    postprocess::{PrimitiveVertex, triangle_vertices},
+    TopologyKind, ValidatedScene,
+    postprocess::{PrimitiveVertex, list_vertices},
 };
 
 use crate::Result;
@@ -58,14 +58,15 @@ struct IndexedVertices {
     lookup: HashMap<VertexKey, u32>,
     vertices: Vec<Vertex>,
     indices: Vec<u32>,
+    // Expanded output tuple ordinals, which can differ from source Corner indices.
     representative_corners: Vec<usize>,
     influences: Option<Influences>,
 }
 
 impl IndexedVertices {
-    fn new(corner_count: usize, has_influences: bool) -> Result<Self> {
+    fn new(tuple_count: usize, has_influences: bool) -> Result<Self> {
         let mut indices = Vec::new();
-        indices.try_reserve_exact(corner_count)?;
+        indices.try_reserve_exact(tuple_count)?;
         let influences = if has_influences {
             let mut offsets = Vec::new();
             offsets.try_reserve_exact(1)?;
@@ -112,7 +113,7 @@ impl IndexedVertices {
             }
             self.vertices.push(vertex);
             self.representative_corners.push(self.indices.len());
-            // Output order comes only from first Corner encounter, never map iteration.
+            // Output order comes only from first output tuple encounter, never map iteration.
             self.lookup.insert(key, index);
             index
         };
@@ -137,6 +138,8 @@ pub struct DrawBuffer {
     pub mesh: usize,
     pub primitive: usize,
     pub material: Option<usize>,
+    /// Explicit list topology of these buffers, independent of the source primitive topology.
+    pub topology: TopologyKind,
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
     pub influences: Option<Influences>,
@@ -266,9 +269,11 @@ pub struct ApplicationAsset {
 }
 
 impl ApplicationAsset {
-    /// Copies this application's selected layout from an already processed triangle Scene.
-    /// All output owns its data. Unsupported topology or ambiguous field domains return an error;
-    /// this step does not generate fields or change coordinates.
+    /// Copies this application's selected layout as Points, LineList, or TriangleList draws.
+    /// Strips, fans, and loops expand without changing the Scene; polygons need triangulation.
+    /// All output owns its data. Unsupported topology or ambiguous field domains return an error.
+    /// This direct extraction does not generate fields or change coordinates and is independent
+    /// of the triangle editing, space conversion, and normal generation in [`crate::process_file`].
     pub fn from_scene(scene: &ValidatedScene) -> Result<Self> {
         // Public IDs stay opaque. The application creates its own dense indices exactly once,
         // after the final Scene edit, for references that must outlive that Scene.
@@ -305,11 +310,9 @@ impl ApplicationAsset {
         let mut draws = Vec::new();
         for (mesh_index, mesh) in scene.meshes().enumerate() {
             for (primitive_index, primitive) in mesh.primitives().enumerate() {
-                let tuples = triangle_vertices(primitive)?;
-                let mut indexed = IndexedVertices::new(
-                    usize::try_from(primitive.corner_count())?,
-                    primitive.influences().is_some(),
-                )?;
+                let tuples = list_vertices(primitive)?;
+                let mut indexed =
+                    IndexedVertices::new(tuples.len(), primitive.influences().is_some())?;
                 // The app layout selects one normal, tangent and UV0 field. Ambiguous simultaneous
                 // domains must be resolved by an explicit application policy, never priority.
                 let normal = select_domain(
@@ -382,10 +385,10 @@ impl ApplicationAsset {
                     for delta in target.deltas() {
                         let mut values = Vec::new();
                         values.try_reserve_exact(indexed.vertices.len())?;
-                        for &corner in &indexed.representative_corners {
+                        for &tuple_index in &indexed.representative_corners {
                             let tuple = tuples
-                                .vertex(corner)
-                                .ok_or("missing representative corner")?;
+                                .vertex(tuple_index)
+                                .ok_or("missing representative output tuple")?;
                             let v = tuple
                                 .morph_delta(target.id(), delta.semantic())?
                                 .ok_or("missing morph stream")?;
@@ -404,6 +407,7 @@ impl ApplicationAsset {
                     mesh: mesh_index,
                     primitive: primitive_index,
                     material: primitive.material().map(|m| materials[&m.id()]),
+                    topology: tuples.topology(),
                     vertices: indexed.vertices,
                     indices: indexed.indices,
                     influences: indexed.influences,
