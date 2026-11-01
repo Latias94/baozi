@@ -67,12 +67,19 @@ fn upstream_models_match_source_counts_and_converted_mesh_bounds() -> Result<()>
         {
             assert_eq!(
                 draw.vertices.len() as u64,
-                expected["index_count"].as_u64().unwrap(),
-                "{name}"
+                expected["vertex_count"].as_u64().unwrap(),
+                "{name}: referenced source vertices"
             );
             assert_eq!(
-                draw.indices,
-                (0..draw.vertices.len() as u32).collect::<Vec<_>>()
+                draw.indices.len() as u64,
+                expected["index_count"].as_u64().unwrap(),
+                "{name}: draw corners"
+            );
+            assert!(
+                draw.indices
+                    .iter()
+                    .all(|&i| usize::try_from(i).unwrap() < draw.vertices.len()),
+                "{name}: index bounds"
             );
             let mut bounds = [[f64::INFINITY; 3], [f64::NEG_INFINITY; 3]];
             for v in &draw.vertices {
@@ -129,18 +136,20 @@ fn texture_bytes_material_binding_uvs_and_reflected_winding_survive_scene_drop()
             ..Options::default()
         },
     )?;
-    for (before, after) in standard.asset.draws[0]
-        .vertices
+    let before = &standard.asset.draws[0];
+    let after = &asset.draws[0];
+    assert_eq!((after.vertices.len(), after.indices.len()), (24, 36));
+    for (before_triangle, after_triangle) in before
+        .indices
         .chunks_exact(3)
-        .zip(asset.draws[0].vertices.chunks_exact(3))
+        .zip(after.indices.chunks_exact(3))
     {
         for (lane, source) in [0, 2, 1].into_iter().enumerate() {
-            assert_eq!(after[lane].uv, before[source].uv);
-            let p = before[source].position;
-            assert_eq!(
-                after[lane].position,
-                [-p[0] * 100.0, p[1] * 100.0, p[2] * 100.0]
-            );
+            let before = &before.vertices[usize::try_from(before_triangle[source])?];
+            let after = &after.vertices[usize::try_from(after_triangle[lane])?];
+            assert_eq!(after.uv, before.uv);
+            let p = before.position;
+            assert_eq!(after.position, [-p[0] * 100.0, p[1] * 100.0, p[2] * 100.0]);
         }
     }
     Ok(())
@@ -192,8 +201,11 @@ fn skeletal_animation_keeps_all_influences_joint_bindings_and_keys() -> Result<(
         .influences
         .as_ref()
         .ok_or("missing influences")?;
-    assert_eq!(row.offsets.len(), 565);
-    assert_eq!(row.joints.len(), row.weights.len());
+    assert_eq!(asset.draws[0].vertices.len(), 160);
+    assert_eq!(asset.draws[0].indices.len(), 564);
+    assert_eq!(row.offsets.len(), 161);
+    assert_eq!(row.joints.len(), 640);
+    assert_eq!(row.weights.len(), 640);
     for range in row.offsets.windows(2) {
         assert!(row.joints[range[0]..range[1]].iter().all(|j| *j < 2));
         assert!((row.weights[range[0]..range[1]].iter().sum::<f32>() - 1.0).abs() < 0.00001);
@@ -295,9 +307,10 @@ fn morph_streams_and_weight_animation_remain_app_owned() -> Result<()> {
     let output = process_file(&fixtures(), &model("AnimatedMorphCube"), Options::default())?;
     let asset = output.asset;
     let draw = &asset.draws[0];
+    assert_eq!((draw.vertices.len(), draw.indices.len()), (24, 36));
     assert!(draw.vertices.iter().all(|v| v.tangent.is_some()));
     assert_eq!(draw.morphs.len(), 6);
-    assert!(draw.morphs.iter().all(|m| m.values.len() == 36));
+    assert!(draw.morphs.iter().all(|m| m.values.len() == 24));
     assert_eq!(asset.instances[0].morph_weights, [0.0, 0.0]);
     let first = draw
         .morphs
@@ -352,8 +365,12 @@ fn unchanged_morph_primitives_keep_source_json_after_edits_and_scene_drop() -> R
         )?;
         // process_file has destroyed every Scene before returning these owned values.
         let asset = output.asset;
-        assert_eq!(asset.vertex_count(), 96);
+        assert_eq!(asset.vertex_count(), 30);
         assert_eq!(asset.draws.len(), 2);
+        assert_eq!(asset.draws[0].vertices.len(), 21);
+        assert_eq!(asset.draws[0].indices.len(), 72);
+        assert_eq!(asset.draws[1].vertices.len(), 9);
+        assert_eq!(asset.draws[1].indices.len(), 24);
         assert_eq!(asset.materials.len(), 2);
         assert_ne!(asset.draws[0].material, asset.draws[1].material);
         assert_eq!(asset.instances[0].morph_weights, [0.5]);
@@ -505,7 +522,14 @@ fn consecutive_polygon_edits_reacquire_current_generation_handles() -> Result<()
         },
     )?;
     assert_eq!(output.asset.draws.len(), 2);
-    assert_eq!(output.asset.vertex_count(), 12);
+    assert_eq!(output.asset.vertex_count(), 8);
+    assert!(
+        output
+            .asset
+            .draws
+            .iter()
+            .all(|d| d.vertices.len() == 4 && d.indices.len() == 6)
+    );
     assert_eq!(output.metrics.changed_operations, 5);
     assert_eq!(
         output.asset.bounds(),
@@ -545,9 +569,15 @@ fn missing_normals_follow_the_declared_source_and_target_fronts() -> Result<()> 
                     ..Options::default()
                 },
             )?;
-            let vertices = &output.asset.draws[0].vertices;
-            assert!(vertices.iter().all(|v| v.normal == Some([0.0, 0.0, 1.0])));
-            let [a, b, c] = std::array::from_fn::<_, 3, _>(|i| vertices[i].position);
+            let draw = &output.asset.draws[0];
+            assert!(
+                draw.vertices
+                    .iter()
+                    .all(|v| v.normal == Some([0.0, 0.0, 1.0]))
+            );
+            let [a, b, c] = std::array::from_fn::<_, 3, _>(|i| {
+                draw.vertices[usize::try_from(draw.indices[i]).unwrap()].position
+            });
             let cross_z = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
             assert_eq!(cross_z > 0.0, target_winding == CounterClockwise);
         }
