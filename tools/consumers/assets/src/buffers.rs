@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, HashMap};
 
 use baozi::{
-    AnimationInterpolation, AnimationTarget, AttributeDomain, AttributeElement,
-    AttributeSemanticRef, AuthoredTransform, Mat4, MaterialFactors, MetadataOwnerRef,
-    MetadataValueRef, MorphDeltaSemantic, PrimitiveId, SourceObjectLocatorRef, TextureRole,
-    TextureTransform, ValidatedScene,
+    Aabb, AnimationInterpolation, AnimationTarget, AttributeDomain, AttributeElement,
+    AttributeSemanticRef, AuthoredTransform, BasePoseWorldTransforms, CancellationToken, Mat4,
+    MaterialFactors, MetadataOwnerRef, MetadataValueRef, MorphDeltaSemantic, PrimitiveId,
+    SourceObjectLocatorRef, SpatialQueryError, SpatialQueryLimits, TextureRole, TextureTransform,
+    ValidatedScene,
     postprocess::{PrimitiveVertex, triangle_vertices},
 };
 
@@ -216,6 +217,38 @@ pub struct SourceJsonMetadata {
     pub key: String,
     pub media_type: String,
     pub payload: Vec<u8>,
+}
+
+/// An opt-in owned snapshot in the Scene's current coordinates, using authored base poses.
+///
+/// Bounds include every Position vertex of each mesh instance, including unreferenced vertices;
+/// uninstanced meshes do not contribute. This does not sample animation, apply skinning, or
+/// evaluate morphs. Bound skins and effective nonzero morph weights return a typed error.
+/// The transform table and bounds remain usable after the source Scene is dropped.
+#[derive(Debug)]
+pub struct BasePoseSpatialSnapshot {
+    pub world_transforms: BasePoseWorldTransforms,
+    pub scene_bounds: Option<Aabb>,
+}
+
+impl BasePoseSpatialSnapshot {
+    /// Queries world transforms, then instance-aware bounds, without changing the Scene.
+    ///
+    /// `limits` applies independently to each of these two library operations. Cancellation is
+    /// forwarded to both operations. This optional query is separate from buffer extraction so
+    /// animated and deformed assets can still use [`ApplicationAsset::from_scene`].
+    pub fn from_scene(
+        scene: &ValidatedScene,
+        limits: SpatialQueryLimits,
+        cancellation: Option<&CancellationToken>,
+    ) -> std::result::Result<Self, SpatialQueryError> {
+        let world_transforms = scene.base_pose_world_transforms(limits, cancellation)?;
+        let scene_bounds = world_transforms.scene_bounds(scene, limits, cancellation)?;
+        Ok(Self {
+            world_transforms,
+            scene_bounds,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -506,6 +539,8 @@ impl ApplicationAsset {
         self.draws.iter().map(|d| d.vertices.len()).sum()
     }
 
+    /// Aggregates copied draw vertices in mesh-local coordinates, without applying instances.
+    /// Use [`BasePoseSpatialSnapshot`] for authored base-pose world bounds.
     pub fn bounds(&self) -> Option<[[f64; 3]; 2]> {
         let mut vertices = self.draws.iter().flat_map(|d| &d.vertices);
         let first = vertices.next()?.position;

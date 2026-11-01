@@ -149,44 +149,44 @@ impl Mat4 {
     }
 
     /// Composes a column-vector local transform as `T * R * S`.
+    ///
+    /// Uses F64 intermediates and rounds each final component to F32. This unchecked math helper
+    /// can produce nonfinite output for unrepresentable components; derived Scene queries check
+    /// their numeric results separately.
     pub fn from_trs(translation: Vec3, rotation: Quat, scale: Vec3) -> Self {
-        let x2 = rotation.x + rotation.x;
-        let y2 = rotation.y + rotation.y;
-        let z2 = rotation.z + rotation.z;
-        let xx = rotation.x * x2;
-        let xy = rotation.x * y2;
-        let xz = rotation.x * z2;
-        let yy = rotation.y * y2;
-        let yz = rotation.y * z2;
-        let zz = rotation.z * z2;
-        let wx = rotation.w * x2;
-        let wy = rotation.w * y2;
-        let wz = rotation.w * z2;
-
         Self {
-            cols: [
-                [
-                    (1.0 - (yy + zz)) * scale.x,
-                    (xy + wz) * scale.x,
-                    (xz - wy) * scale.x,
-                    0.0,
-                ],
-                [
-                    (xy - wz) * scale.y,
-                    (1.0 - (xx + zz)) * scale.y,
-                    (yz + wx) * scale.y,
-                    0.0,
-                ],
-                [
-                    (xz + wy) * scale.z,
-                    (yz - wx) * scale.z,
-                    (1.0 - (xx + yy)) * scale.z,
-                    0.0,
-                ],
-                [translation.x, translation.y, translation.z, 1.0],
-            ],
+            cols: trs_columns_f64(translation, rotation, scale)
+                .map(|column| column.map(|component| component as f32)),
         }
     }
+}
+
+/// Shared TRS arithmetic for unchecked math and fallible derived queries.
+pub(crate) fn trs_columns_f64(translation: Vec3, rotation: Quat, scale: Vec3) -> [[f64; 4]; 4] {
+    let [x, y, z, w] = [rotation.x, rotation.y, rotation.z, rotation.w].map(f64::from);
+    let [sx, sy, sz] = [scale.x, scale.y, scale.z].map(f64::from);
+    let [xx, xy, xz, yy, yz, zz, wx, wy, wz] = [
+        x * (x + x),
+        x * (y + y),
+        x * (z + z),
+        y * (y + y),
+        y * (z + z),
+        z * (z + z),
+        w * (x + x),
+        w * (y + y),
+        w * (z + z),
+    ];
+    [
+        [(1.0 - (yy + zz)) * sx, (xy + wz) * sx, (xz - wy) * sx, 0.0],
+        [(xy - wz) * sy, (1.0 - (xx + zz)) * sy, (yz + wx) * sy, 0.0],
+        [(xz + wy) * sz, (yz - wx) * sz, (1.0 - (xx + yy)) * sz, 0.0],
+        [
+            f64::from(translation.x),
+            f64::from(translation.y),
+            f64::from(translation.z),
+            1.0,
+        ],
+    ]
 }
 
 impl Default for Mat4 {

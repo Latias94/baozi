@@ -65,8 +65,20 @@ This is a concrete extraction example, not a new canonical representation or a g
   channel, binding strength, sampler, skin-space declaration, animation time-domain/extrapolation
   declaration, camera, light, custom attribute, or provenance attachment. It is not a round-trip
   serializer or renderer. Image decoding, animation evaluation, skinning, tangent generation, GPU
-  packing, and world-space bounds are outside this example. `mesh_local_bounds` aggregates base
+  packing are outside this example. `mesh_local_bounds` aggregates base
   mesh-local positions; it does not apply instances, node transforms, skinning, or morph weights.
+
+`BasePoseSpatialSnapshot::from_scene` is a separate, opt-in query before Scene destruction. It
+returns an owned `BasePoseWorldTransforms` table and scene-wide `Option<Aabb>` in the Scene's current
+coordinate convention and units. It composes authored base poses as `parent_world * local`, without
+sampling animation. Bounds transform every Position vertex per instance, including vertices omitted
+from the draw indices; uninstanced meshes do not contribute, and no vertices produce `None`.
+Bound skins and effective nonzero morph weights return a `SpatialQueryError`. The existing
+`ApplicationAsset::from_scene` extraction path remains available for those assets. The caller supplies
+`SpatialQueryLimits` and optional cancellation; the same limits apply independently to transform
+construction and bounds traversal. Both outputs survive Scene destruction. `world_bounds` tests use
+a self-authored shared-instance glTF with ancestor transforms, nonuniform/negative scale, shear and
+an unreferenced vertex, plus the unchanged rigged, morph and animated upstream models.
 
 Topology/normal operations preserve mesh and primitive order. Their handles belong to a Scene
 generation, so the application reacquires each primitive after every publication. A two-polygon

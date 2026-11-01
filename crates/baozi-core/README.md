@@ -4,6 +4,8 @@ Baozi's canonical scene model and domain vocabulary: validated immutable Scenes,
 borrowed typed readers, entity IDs, geometry and attributes, appearance,
 deformation and animation data, math, coordinate conventions, and validation.
 Bounded snapshots support test and debug evidence.
+Explicit base-pose world-transform tables and instance/Scene bounds queries provide read-only
+spatial results with generation checks, work/allocation limits, and cancellation.
 
 This is the canonical-model layer. Applications normally use its types through
 the [baozi facade](https://github.com/Latias94/baozi/blob/main/crates/baozi/README.md). Scene construction, validation proofs, and

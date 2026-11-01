@@ -48,6 +48,9 @@ pub use baozi_core::{
     TextureRef, TopologyKind, TrsTransform, UvOrigin,
 };
 pub use baozi_core::{
+    BasePoseWorldTransforms, SpatialQueryError, SpatialQueryLimit, SpatialQueryLimits,
+};
+pub use baozi_core::{
     CameraProjectionError, LightDefinition, LightEmissionError, LightError, LightKindCategory,
     LocalAxes, LocalAxesError, LocalAxis, OrthographicProjection, PerspectiveProjection,
 };

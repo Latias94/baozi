@@ -57,15 +57,20 @@ edge:
 
 | Owner | Canonical contents | References or local ownership |
 | --- | --- | --- |
-| Scene | scene space, nodes, mesh instances, logical meshes, materials, images, samplers, textures, skins, animation clips, cameras, lights, metadata, provenance arena, scene bounds | generation-qualified scene IDs |
+| Scene | scene space, nodes, mesh instances, logical meshes, materials, images, samplers, textures, skins, animation clips, cameras, lights, metadata, provenance arena | generation-qualified scene IDs |
 | Node | authored matrix-or-TRS base transform, ordered child IDs, optional camera/light attachments | node, camera, and light IDs |
-| Logical mesh | one or more primitives, morph target definitions, default morph weights, logical-mesh bounds | owner-qualified primitive and morph-target IDs |
-| Primitive | topology, optional index stream, vertex/corner/face attributes, optional material, morph deltas, influence rows, primitive bounds | primitive-local domains and material ID |
+| Logical mesh | one or more primitives, morph target definitions, default morph weights | owner-qualified primitive and morph-target IDs |
+| Primitive | topology, optional index stream, vertex/corner/face attributes, optional material, morph deltas, influence rows | primitive-local domains and material ID |
 | Mesh instance | one owner node, one logical mesh, optional skin, optional morph overrides, instance attributes | node, logical-mesh, and skin IDs |
 | Material | typed factors, texture bindings, bounded namespaced extensions | texture IDs |
 
 Reciprocal storage is not canonical. Derived indexes may accelerate reverse queries, but validation
 can rebuild them from the owner edge and they do not become a second source of truth.
+
+World transforms and static world bounds are explicit
+[base-pose queries](reading-scenes.md#base-pose-world-transforms-and-static-bounds), rather than
+retained canonical fields. Their derived results preserve exact Scene generation identity and
+leave Scene ownership, stored geometry, provenance and snapshots unchanged.
 
 All semantic domains use private typed tables in one `SceneStorage` root. Node transforms are
 explicit Matrix/TRS values, children are ordered logical indices, and optional names preserve absent

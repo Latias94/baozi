@@ -5,6 +5,7 @@
 mod animation;
 mod appearance;
 mod attribute;
+mod base_pose;
 mod canonical_scene;
 mod deform;
 pub mod diagnostic;
@@ -105,6 +106,9 @@ pub use attribute::{
     AttributeDomain, AttributeSemantic, AttributeSemanticKind, CustomAttributeSemantic,
     TangentBasisConvention, TangentConventionField, TangentConventions,
     TangentConventionsValidationError, TangentHandednessEncoding, TangentSchemaBindingError,
+};
+pub use base_pose::{
+    BasePoseWorldTransforms, SpatialQueryError, SpatialQueryLimit, SpatialQueryLimits,
 };
 pub use canonical_scene::store::api::read::{
     AnimationChannelRef, AnimationClipRef, AnimationTarget,

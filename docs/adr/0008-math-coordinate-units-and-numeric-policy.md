@@ -108,6 +108,18 @@ into the other: format rules decide whether a source matrix must be decomposable
 and a conversion from matrix to TRS requires an explicit format contract plus provenance and
 authorized representation loss. A derived matrix view never changes which form the source authored.
 
+`Mat4::from_trs` derives components with F64 intermediates and one final F32 rounding. As an
+unchecked math helper it may produce a nonfinite result for an unrepresentable component. The
+read-only `BasePoseWorldTransforms` query checks local derivation and world composition, including
+roots, rather than assuming a valid authored TRS guarantees a representable derived matrix.
+It rounds each local/world component to F32 at the corresponding node boundary and rejects
+nonfinite output or a nonzero F64 value rounding to zero. Matrix and point dot products accumulate
+in increasing column order; points add translation last. This is deterministic floating-point
+evaluation, not exact real arithmetic. Static bounds enclose the resulting rounded F32 world
+vertices, with no stronger interval guarantee. The
+[Scene reader contract](../model/reading-scenes.md#base-pose-world-transforms-and-static-bounds)
+specifies the all-Position-vertex scope, pose/deformation limits and query resource boundary.
+
 The canonical `Matrix` invariant is format-independent: every cell is finite and the affine bottom
 row compares exactly to `[0, 0, 0, 1]` under the convention above. Signed zero compares equal to zero
 and its authored bit remains preserved. Canonical construction never stores a near-affine bottom row.

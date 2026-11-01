@@ -155,11 +155,13 @@ no newly executed hosted/platform matrix or maturity/release promotion. Shared-p
 measurements identify repeated single-primitive edit work to study when a concrete larger
 consumer needs it, before choosing a batch API.
 
-Before local tangent generation, move construction/encoding declarations from the whole Scene to
-the Tangent attribute that owns them. Preserve the rest of the completed typed Scene architecture.
-Later selected-profile work should favor glTF primitive modes, sparse accessors, additional influence
-sets and a concrete typed extension slice before starting another broad format. Static world bounds
-and device draw limits remain concrete consumer candidates.
+Tangent construction/encoding declarations now belong to each Tangent attribute, and explicit
+single-primitive Triangle UV Derivative generation is implemented. Read-only base-pose world
+transforms and static instance/Scene bounds are the next selected
+[execution slice](plans/2026-11-01-003-feat-base-pose-world-queries-plan.md), preserving the existing
+typed Scene architecture. Later selected-profile work should favor glTF primitive modes, sparse
+accessors, additional influence sets and a concrete typed extension slice before starting another
+broad format. Device draw limits remain a concrete consumer candidate.
 
 Publication needs a separately chosen package set and resolvable decoder dependencies; native
 distribution additionally needs a normal solution for its patched backend. Neither a local package

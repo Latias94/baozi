@@ -123,6 +123,53 @@ Parent lookup is not currently exposed. Traverse from the roots and maintain app
 state when parent relationships are required. A future direct parent lookup must retain an admitted
 index rather than scan the graph on every getter.
 
+### Base-pose world transforms and static bounds
+
+`scene.base_pose_world_transforms(limits, cancellation)` derives an owned
+`BasePoseWorldTransforms` table in one linear forest traversal. Use
+`SpatialQueryLimits::new(max_work, max_bytes)` and optionally borrow a `CancellationToken`.
+The table preserves the originating generation and may outlive the Scene. Its
+`node_transform(NodeId)` checks generation/range and returns a local-to-world `Mat4` in O(1).
+Every ancestor contributes `parent_world * local`, including nodes without attached geometry.
+Coordinates, units and unknown declarations remain those of the Scene.
+
+The named pose is the authored node base pose. Clips may be present, but these queries do not
+sample a time or interpolate animation. Node transforms are available even for nodes participating
+in skinning or morph animation. Query a placement with
+`world.instance_bounds(instance, limits, cancellation)` or explicitly aggregate all placements with
+`world.scene_bounds(scene, limits, cancellation)`. The latter rejects a different Scene generation,
+including an empty Scene from another publication. Recompute the table after a successful edit.
+
+Bounds transform all logical Vertex Position elements for each placement, including unreferenced
+vertices and sparse defaults. They do not depend on topology or index-stream emptiness. This set
+can be larger than the draw tuples described above. An uninstanced mesh does not contribute to
+Scene bounds. Actual positions are transformed rather than corners of a local box, so rotation
+and shear do not introduce nonexistent vertices. No geometry is flattened or baked.
+
+An instance with a skin or any nonzero effective morph weight returns a typed error identifying
+that instance. A present instance override replaces mesh defaults; `-0.0` counts as zero. Morph
+definitions/deltas and inert influences without an instance skin remain readable and do not
+prevent a query. Other static instances can be queried individually. Whole-Scene aggregation
+fails on any unsupported placement, without publishing a partial bound. No contributing vertices
+returns `None`; an actual point returns `Some` with equal minimum and maximum.
+
+TRS and matrix products use F64 intermediates. Local components, world components at each node,
+and transformed vertex components round to F32 at their respective boundaries. The component dot
+products add terms in increasing column order, with translation last for a point. Nonfinite
+results and nonzero F64 values rounding to zero are errors, including for root transforms.
+Bounds enclose these rounded F32 world vertices; they are not certified intervals over exact real
+arithmetic. Negative, nonuniform and zero scales need no inverse and are supported.
+
+World-table construction allocates fallibly under the explicit capacity-byte limit; traversal
+needs no separate parent index or queue. Work counts initialized slots, evaluated nodes, visited
+instances, effective morph weights, primitives, inspected attributes and logical Position elements.
+Bounds queries allocate no heap storage and scan only the requested placement unless the caller
+explicitly asks for the complete Scene. Cancellation is polled throughout and before success.
+These derived allocations belong to the query, independently of import/postprocess retained-storage
+accounting. The canonical Scene, metadata, provenance and snapshot do not change.
+
+### Cameras, lights and spatial declarations
+
 Node camera/light attachments follow to scene-owned definitions. `scene.space()` returns the
 non-generic `SceneSpaceRef` with handedness, axes, units, winding, and UV origin, preserving unknown
 facts. Tangent conventions are read from the actual attribute. Reading never assigns missing units
