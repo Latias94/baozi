@@ -1,0 +1,248 @@
+{
+  "schema_version": 1,
+  "kind": "public-registry-observation-not-approved-publication-state",
+  "candidate_version": "0.1.0",
+  "source_revision": "f08d39d37ae44baae856cc05a918efaf31613324",
+  "observations": [
+    {
+      "name": "baozi-operation",
+      "candidate_version": "0.1.0",
+      "crate_response": {
+        "url": "https://crates.io/api/v1/crates/baozi-operation",
+        "observed_at": "2026-11-01T15:29:27.526797Z",
+        "status": 404,
+        "bytes": 64,
+        "sha256": "f887c950f75664a7a85a09d12c3a1bf49c15f797e9ac6338d384ff910ae38c12",
+        "raw_file": "baozi-operation.json"
+      },
+      "presence": "absent",
+      "error_messages": [
+        "crate `baozi-operation` does not exist"
+      ]
+    },
+    {
+      "name": "baozi-io",
+      "candidate_version": "0.1.0",
+      "crate_response": {
+        "url": "https://crates.io/api/v1/crates/baozi-io",
+        "observed_at": "2026-11-01T15:29:28.382761Z",
+        "status": 404,
+        "bytes": 57,
+        "sha256": "5bd643ccfd071af29f5a091c07f5483e7c61bebc19c041aabdac06fbb5a0b6f4",
+        "raw_file": "baozi-io.json"
+      },
+      "presence": "absent",
+      "error_messages": [
+        "crate `baozi-io` does not exist"
+      ]
+    },
+    {
+      "name": "baozi-core",
+      "candidate_version": "0.1.0",
+      "crate_response": {
+        "url": "https://crates.io/api/v1/crates/baozi-core",
+        "observed_at": "2026-11-01T15:29:28.780390Z",
+        "status": 404,
+        "bytes": 59,
+        "sha256": "1ef34cfa707d716a8794c94b3a7025fe01dc8a492c38723b1f7ce2d4646c969d",
+        "raw_file": "baozi-core.json"
+      },
+      "presence": "absent",
+      "error_messages": [
+        "crate `baozi-core` does not exist"
+      ]
+    },
+    {
+      "name": "baozi-import",
+      "candidate_version": "0.1.0",
+      "crate_response": {
+        "url": "https://crates.io/api/v1/crates/baozi-import",
+        "observed_at": "2026-11-01T15:29:29.195932Z",
+        "status": 404,
+        "bytes": 61,
+        "sha256": "f341e786aff42066a1e35f3e102bddbf9e8bb6c8bc8b9128ad8af553910e720e",
+        "raw_file": "baozi-import.json"
+      },
+      "presence": "absent",
+      "error_messages": [
+        "crate `baozi-import` does not exist"
+      ]
+    },
+    {
+      "name": "baozi-postprocess",
+      "candidate_version": "0.1.0",
+      "crate_response": {
+        "url": "https://crates.io/api/v1/crates/baozi-postprocess",
+        "observed_at": "2026-11-01T15:29:29.624538Z",
+        "status": 404,
+        "bytes": 66,
+        "sha256": "cec43d0db95c10106e81681b23d763de05b0a98d1d53c8bd4474baf03697ed43",
+        "raw_file": "baozi-postprocess.json"
+      },
+      "presence": "absent",
+      "error_messages": [
+        "crate `baozi-postprocess` does not exist"
+      ]
+    },
+    {
+      "name": "baozi-format-stl",
+      "candidate_version": "0.1.0",
+      "crate_response": {
+        "url": "https://crates.io/api/v1/crates/baozi-format-stl",
+        "observed_at": "2026-11-01T15:29:30.488018Z",
+        "status": 404,
+        "bytes": 65,
+        "sha256": "6c00fc843dfdb210d34f7d153d902c3b39cc7ddfb4715363b4720432e86183b9",
+        "raw_file": "baozi-format-stl.json"
+      },
+      "presence": "absent",
+      "error_messages": [
+        "crate `baozi-format-stl` does not exist"
+      ]
+    },
+    {
+      "name": "baozi-format-obj",
+      "candidate_version": "0.1.0",
+      "crate_response": {
+        "url": "https://crates.io/api/v1/crates/baozi-format-obj",
+        "observed_at": "2026-11-01T15:29:31.320952Z",
+        "status": 404,
+        "bytes": 65,
+        "sha256": "c5df193be33e650f943c72eaace5619c1f5099296654fcbfe03630465f857379",
+        "raw_file": "baozi-format-obj.json"
+      },
+      "presence": "absent",
+      "error_messages": [
+        "crate `baozi-format-obj` does not exist"
+      ]
+    },
+    {
+      "name": "baozi-format-ply",
+      "candidate_version": "0.1.0",
+      "crate_response": {
+        "url": "https://crates.io/api/v1/crates/baozi-format-ply",
+        "observed_at": "2026-11-01T15:29:31.723613Z",
+        "status": 404,
+        "bytes": 65,
+        "sha256": "1112ad2e9631d29e6937088e454a8e00e9e18a16748fb95b4ec61c232f31c13b",
+        "raw_file": "baozi-format-ply.json"
+      },
+      "presence": "absent",
+      "error_messages": [
+        "crate `baozi-format-ply` does not exist"
+      ]
+    },
+    {
+      "name": "baozi-gltf-json",
+      "candidate_version": "0.1.0",
+      "crate_response": {
+        "url": "https://crates.io/api/v1/crates/baozi-gltf-json",
+        "observed_at": "2026-11-01T15:29:32.595442Z",
+        "status": 404,
+        "bytes": 64,
+        "sha256": "190154bd00a6267b1ae6856da427390b0c7cef30a159fd818e3875c90f6ae5cc",
+        "raw_file": "baozi-gltf-json.json"
+      },
+      "presence": "absent",
+      "error_messages": [
+        "crate `baozi-gltf-json` does not exist"
+      ]
+    },
+    {
+      "name": "baozi-gltf",
+      "candidate_version": "0.1.0",
+      "crate_response": {
+        "url": "https://crates.io/api/v1/crates/baozi-gltf",
+        "observed_at": "2026-11-01T15:29:50.671226Z",
+        "status": 404,
+        "bytes": 59,
+        "sha256": "b2d725983598a45b1b6eff63baf9924ae53db065d27c59cb0bccd4817d6d8333",
+        "raw_file": "baozi-gltf.json"
+      },
+      "presence": "absent",
+      "error_messages": [
+        "crate `baozi-gltf` does not exist"
+      ]
+    },
+    {
+      "name": "baozi-format-gltf",
+      "candidate_version": "0.1.0",
+      "crate_response": {
+        "url": "https://crates.io/api/v1/crates/baozi-format-gltf",
+        "observed_at": "2026-11-01T15:29:51.890403Z",
+        "status": 404,
+        "bytes": 66,
+        "sha256": "a5b623f31bd7cfa23a52f056d2fb14bd9c287e4ad5287c4d968be37c223ab91a",
+        "raw_file": "baozi-format-gltf.json"
+      },
+      "presence": "absent",
+      "error_messages": [
+        "crate `baozi-format-gltf` does not exist"
+      ]
+    },
+    {
+      "name": "baozi",
+      "candidate_version": "0.1.0",
+      "crate_response": {
+        "url": "https://crates.io/api/v1/crates/baozi",
+        "observed_at": "2026-11-01T15:29:52.749573Z",
+        "status": 200,
+        "bytes": 2244,
+        "sha256": "a3404414b97f9f65bc506de015c2368fbf6c5a94e43cd4dea26f908bccfd2610",
+        "raw_file": "baozi.json"
+      },
+      "presence": "present",
+      "versions": [
+        {
+          "version": "0.0.1",
+          "created_at": "2026-07-09T05:03:00.933097Z",
+          "yanked": false,
+          "checksum": "e74b14d1e2410f8a062bb423f7bbc8bc9fdaa9cf4ac64b10efccc562d62bbd28"
+        }
+      ],
+      "version_pagination": null,
+      "owners_response": {
+        "url": "https://crates.io/api/v1/crates/baozi/owners",
+        "observed_at": "2026-11-01T15:29:53.599595Z",
+        "status": 200,
+        "bytes": 207,
+        "sha256": "e870308b337d2d1a9a348f501fdcf064a735fa84e28ea73bcfc8a8a9320d6fe2",
+        "raw_file": "baozi-owners.json"
+      },
+      "owners": [
+        {
+          "kind": "user",
+          "id": 179538,
+          "login": "Latias94"
+        }
+      ],
+      "owner_user_response": {
+        "url": "https://crates.io/api/v1/crates/baozi/owner_user",
+        "observed_at": "2026-11-01T15:29:54.111537Z",
+        "status": 200,
+        "bytes": 207,
+        "sha256": "e870308b337d2d1a9a348f501fdcf064a735fa84e28ea73bcfc8a8a9320d6fe2",
+        "raw_file": "baozi-owner_user.json"
+      },
+      "owner_user": [
+        {
+          "kind": "user",
+          "id": 179538,
+          "login": "Latias94"
+        }
+      ],
+      "owner_team_response": {
+        "url": "https://crates.io/api/v1/crates/baozi/owner_team",
+        "observed_at": "2026-11-01T15:29:54.497467Z",
+        "status": 200,
+        "bytes": 12,
+        "sha256": "33e8f41be6b8efc31191aa2b283c19c40811d9bef42f37139f3c658eff7eec86",
+        "raw_file": "baozi-owner_team.json"
+      },
+      "owner_team": []
+    }
+  ],
+  "scope_note": "Documentary observation only. Not an approved registry-state manifest, namespace reservation, credential check, or publication authorization. Recheck all state at actual publication.",
+  "raw_evidence_location": ".git/baozi-review/portable-first-release/",
+  "transport_note": "Initial pass stopped on a TLS EOF; the full recapture had one TLS EOF for baozi-gltf, retried once after two seconds. Only completed HTTP responses define presence."
+}

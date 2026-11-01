@@ -14,8 +14,12 @@ requirements and the protections below.
 
 The crates.io registry already contains `baozi 0.0.1`, published on 2026-07-09 with placeholder
 `hello world` metadata. It is not the canonical architecture release and its version must never be
-overwritten or reused. Before the canonical train, release owners record and yank that placeholder;
-yanking is not deletion or rollback. The current workspace train is `0.1.0`.
+overwritten or reused. Before the canonical train, release owners record that placeholder's
+noncanonical status and current yank state. Publish and verify the complete canonical train,
+including a fresh registry-only consumer that downloads, builds and runs the facade, before
+yanking `baozi 0.0.1`. Verify the live yank afterward. A partial train leaves retirement pending;
+a failed yank is retried as a separate retirement step and does not undo the verified release.
+Yanking is not deletion or rollback. The current workspace train is `0.1.0`.
 
 [The exact-version evidence record](../research/crates-io-baozi-0.0.1-registry-evidence.md) and its
 [normalized capture manifest](../research/crates-io-baozi-0.0.1-registry-evidence.toml) fix one
@@ -81,6 +85,14 @@ Crates intended for eventual publication:
 - `baozi-format-ply`
 - `baozi-format-gltf` and its maintained `baozi-gltf` / `baozi-gltf-json` dependencies
 
+The [2026-11-01 first-release audit](../reviews/2026-11-01-first-release-usability-audit.md)
+selects these twelve packages as the portable 0.1.0 candidate, with STL/OBJ defaults
+and PLY/selected-glTF opt-ins. It records confirmed correctness and workflow gaps
+and the [remaining implementation plan](../plans/2026-11-01-011-feat-first-release-usability-plan.md).
+Candidate selection and local archive success do not enable publication or change
+the eligibility flags below. Its public registry observation is documentary,
+not the approved expected-state manifest required for a real train.
+
 The following packages currently set `publish = false`:
 
 - `baozi-test-support`: test-only helpers
@@ -121,9 +133,9 @@ Canonical release order:
 2. `baozi-io`
 3. `baozi-core`
 4. `baozi-import`
-5. `baozi-postprocess`
-6. `baozi-format-stl`
-7. `baozi-format-obj`
+5. `baozi-format-stl`
+6. `baozi-format-obj`
+7. `baozi-postprocess` (after its versioned OBJ development dependency)
 8. `baozi-format-ply` after its publication gate is complete
 9. `baozi-gltf-json`, `baozi-gltf`, then `baozi-format-gltf` after their publication gates are complete
 10. `baozi`
@@ -131,6 +143,10 @@ Canonical release order:
 Package each crate from a clean checkout of the exact tagged release commit with
 `cargo package --locked -p <crate>`. Registry release packaging must not use `--allow-dirty` or
 `--no-verify`.
+The `-p` form selects root workspace members only. The excluded maintained glTF
+packages need their own `--manifest-path` selection and reviewed lock inputs;
+settle those before the real train. The local rehearsal's temporary workspace
+does not establish the real clean-tag publication procedure for those packages.
 The corresponding real upload command is
 `cargo publish --locked --registry crates-io -p <crate>`; a dry run adds `--dry-run` to that exact
 locked command. Record the local packaged `.crate` SHA-256 before upload and require the post-publish
@@ -206,8 +222,8 @@ Before any crate publish:
 - support matrix and format docs updated
 - workspace path dependencies include matching `version` fields
 - security-impacting parser changes called out in release notes
-- the crates.io registry-state check confirms the placeholder `baozi 0.0.1` is yanked and no manifest
-  or workflow targets it
+- the crates.io registry-state check records the placeholder `baozi 0.0.1` and its live yank state;
+  no manifest or publish workflow targets that version
 - before the first upload, one complete registry preflight confirms every release-unit name is
   absent or owned exactly as expected; any unexpected occupation or owner drift visible then stops
   the whole train with zero publications
@@ -231,6 +247,14 @@ Before any crate publish:
   any later package is allowed to publish
 - provenance, SBOM, signature, and reproducibility claims are backed by explicit release evidence
   or are documented as deferred
+
+After the complete canonical train is published:
+
+- verify every exact-version registry artifact, then download, build and run a fresh facade consumer
+  using crates.io alone, without path dependencies, patches or source replacement
+- yank `baozi 0.0.1` only after that consumer succeeds and verify the live yank result
+- record a failed retirement as pending work; preserve the verified canonical release and retry
+  the exact-version yank separately
 
 ## MSRV
 

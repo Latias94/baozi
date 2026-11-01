@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-08
-updated: 2026-07-17
+updated: 2026-11-01
 authors:
   - Codex
 decision_type: architecture
@@ -172,8 +172,13 @@ silently promise direct-consumer stability for every public item.
 The crates.io registry already contains `baozi 0.0.1`, published on 2026-07-09 with placeholder
 metadata and no supporting release train. That immutable artifact is not the canonical v1 contract,
 does not establish compatibility for the current workspace, and must never be overwritten, rebuilt,
-or reused. Before the first canonical train, release automation must record its noncanonical status
-and yank it; yanking is a discovery control, not deletion or rollback. The canonical train starts at
+or reused. Before the first canonical train, release automation records its noncanonical status
+and observes its current yank state. Publish and verify the complete canonical release unit first,
+including a fresh registry-only consumer that downloads, builds and runs the facade and its
+dependencies. Only then yank `baozi 0.0.1` and verify its live yank state. A failed or partial train
+must not retire the placeholder before a usable replacement exists. A failed post-release yank is
+an incomplete retirement step to retry with the exact-version credential; it does not roll back
+the verified replacement. Yanking is a discovery control, not deletion or rollback. The canonical train starts at
 the repository's current lockstep version (currently `0.1.0`) and publishes only the closed package
 set proven by the package simulation.
 
@@ -408,7 +413,7 @@ Negative:
 | Feature names promise unavailable behavior | Medium | Medium | Promotion requires executable feature and packaged-consumer evidence; delete empty features |
 | Registry publish fails after supporting crates are immutable | High | Medium | publish in dependency order with facade last; stop the train, never reuse bytes/version, and advance the complete lockstep train when same-version recovery is impossible |
 | Supporting package visibility is mistaken for product stability | High | Medium | identify `baozi-operation` and similar crates as packageable support with Internal/backend-tier APIs until explicit promotion |
-| The existing placeholder package is mistaken for the canonical contract | Critical | High | record and yank `baozi 0.0.1` before the canonical train, never reuse its version, and require the lockstep package simulation to start from the new train |
+| The existing placeholder package is mistaken for the canonical contract | Critical | High | record its noncanonical status before the train, verify the canonical registry-only consumer before yanking `baozi 0.0.1`, never reuse its version, and track a failed yank as incomplete retirement |
 | A release-unit name changes after the initial preflight | Critical | Low | preflight every name and exact owner set before the first upload, recheck the current package immediately before upload, stop on drift, and use partial-train recovery because crates.io offers no name reservation |
 | Expected owners or credential routes are inferred from mutable live state | Critical | Medium | require a reviewed tag/commit-bound registry-state manifest with exhaustive stable owner IDs and fail closed on missing or incomplete pagination |
 | First-publication authentication is unavailable or overprivileged | High | Medium | use exact-crate scoped credentials with a maximum 24-hour TTL, verify best-effort immediate revocation, block after unverified cleanup, and allow OIDC only when the complete publisher configuration set matches the manifest |
@@ -429,7 +434,7 @@ Negative:
 | Release readiness | packaged consumer imports, inspects, and optionally processes a scene using only canonical v1 names |
 | Closed release topology | package simulation proves every required and optional facade dependency is registry-publishable at one lockstep version, with licenses, metadata, docs, and extracted-package tests |
 | Failure recovery | release automation publishes the facade last and a dry-run fault injection proves a partial supporting train cannot publish the facade or cause version drift/reuse |
-| Registry state | a tag/commit-bound machine manifest is the sole expected-state authority for the complete release unit; normalized exact-version evidence records the immutable `baozi 0.0.1` version/archive tuple without treating mutable live JSON bytes as stable; a separate live check proves it is yanked immediately before the `0.1.0` train, and no workflow targets the old version |
+| Registry state | a tag/commit-bound machine manifest is the sole expected-state authority for the complete release unit; normalized exact-version evidence records the immutable `baozi 0.0.1` version/archive tuple without treating mutable live JSON bytes as stable; a fresh registry-only consumer proves the complete canonical train usable before placeholder retirement; a subsequent live check proves `0.0.1` is yanked, and no publish workflow targets the old version |
 | Name preflight and upload-time recheck | before the first upload, workflow tests query every release-unit name and exact owner set, so failures visible then produce zero publications; every upload repeats its exact-name/owner check, and an injected late race stops before that upload, with any earlier immutable packages handled by partial-train recovery |
 | Authentication boundary | workflow tests prove a never-published supporting crate can reach only an exact-crate `publish-new` job with at most a 24-hour TTL, update/yank jobs use distinct endpoint scopes, unverified cleanup blocks later publication, and an existing package may select OIDC only after exhaustive publisher-set equality plus a successful exact-bound exchange; wildcard/no-expiry/excess-scope credentials fail |
 | Locked artifact identity | package and real publish commands use `--locked`; dry-run is never authentication evidence; each upload records the local `.crate` SHA-256 and requires exact owner/version plus equality of local archive, registry checksum, and bounded-retry downloaded archive before continuing |
@@ -450,6 +455,22 @@ Transient pass/fail counts, current symbol gaps, and work-unit completion belong
 records. They must not change this ADR's accepted decision status.
 
 ## Amendment History
+
+### 2026-11-01: Retire the placeholder after a usable replacement
+
+- Affected: `Existing Registry State and Canonical Release Train`, `Risks and
+  Mitigations`, and `Acceptance Criteria`.
+- Previous: the placeholder had to be yanked before the first canonical train.
+- New: record its status before the train, verify all canonical artifacts and a
+  fresh registry-only facade consumer, then yank the placeholder and confirm the
+  live result. A partial train leaves retirement pending; a failed yank does not
+  invalidate already verified replacement artifacts.
+- Impact: the old version remains discoverable until a usable replacement exists.
+  No version is reused and owner/authentication/artifact checks are unchanged.
+- Review: explicit release-owner instruction in the 2026-11-01 first-release
+  usability audit.
+- Rationale: establish the real consumer installation path before retiring the
+  only currently published version.
 
 ### 2026-07-17: Account for the existing placeholder registry artifact
 

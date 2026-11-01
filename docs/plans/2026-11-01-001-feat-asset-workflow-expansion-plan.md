@@ -299,6 +299,14 @@ That slice removes root patch requirements and executes independent archived con
 and Linux in `e7e9b00`, with [revision-qualified results](../reviews/2026-11-01-native-dependency-closure.md).
 It does not select a first registry release, publish packages or promote native targets.
 
+The subsequent [portable preparation and usability audit](2026-11-01-010-chore-portable-first-release-plan.md)
+selects the twelve-package first candidate, observes registry state and adds Windows
+stable/release artifact evidence. Its [audit](../reviews/2026-11-01-first-release-usability-audit.md)
+finds concrete correctness and caller-workflow gaps; the
+[next implementation plan](2026-11-01-011-feat-first-release-usability-plan.md)
+addresses them before publication. Selection does not enable PLY/glTF publication
+or add a native target, and the earlier completed workflow slices remain complete.
+
 | Order | Candidate and prerequisite | Required boundary and acceptance when selected |
 | --- | --- | --- |
 | 1 | Tangent convention ownership, before tangent generation | Move construction and encoding from `SceneSpace` to each Tangent attribute descriptor. Thread authoring → retained table → borrowed reader → validation → snapshot → conversion; delete replaced global fields and schema authority. Same primitive may have Vertex and Corner Tangent, so primitive-wide ownership is insufficient. Mixed authored-unknown and generated-known conventions coexist; removing one/last Tangent leaves no orphan declaration. Reflection checks each stream and fails atomically on unsupported encoding. No default/override compatibility chain. |

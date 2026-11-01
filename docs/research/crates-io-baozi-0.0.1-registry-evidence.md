@@ -33,15 +33,17 @@ The exact version and package checksum identify immutable published bytes. The A
 immutable: it includes mutable registry fields such as yank state and may change representation.
 Its byte length and digest identify only this time-point response observation so later reviewers can
 distinguish it from a different response. The raw response is not used as a live equality oracle.
-U9 must parse the normalized manifest, query the live endpoint, compare only the immutable tuple,
-and independently require live `yanked = true` before the canonical train.
+U9 must parse the normalized manifest, query the live endpoint and compare only the immutable tuple.
+The [2026-11-01 policy amendment](../adr/0006-public-api-versioning-and-crate-stability-policy.md#2026-11-01-retire-the-placeholder-after-a-usable-replacement)
+requires live `yanked = true` only after the canonical train and a fresh registry-only consumer
+have been verified; this changes the retirement sequence, not this historical capture.
 
 ## Mutable Registry State
 
 The capture reported `yanked = false` on 2026-07-17. That value is an observation only: crates.io
-owners can change yank status after publication. Release automation must therefore query the live
-exact-version endpoint immediately before the canonical release train and fail closed unless
-`baozi 0.0.1` is yanked.
+owners can change yank status after publication. Release automation must therefore observe the live
+exact-version state before the train, verify the canonical replacement, then yank `baozi 0.0.1`
+and confirm the live result. A failed or partial publication leaves retirement pending.
 
 Current owners, Trusted Publishing configuration, workflow bindings, and token availability are also
 mutable operational state. They require live release-time checks and are not inferred from this

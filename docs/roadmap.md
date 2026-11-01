@@ -161,14 +161,21 @@ transforms and static instance/Scene bounds are also
 [completed](reviews/2026-11-01-base-pose-world-queries.md), preserving the existing typed Scene
 architecture. All seven glTF primitive modes are now preserved, with strict draw/index validation
 and [explicit borrowed list consumption](reviews/2026-11-01-gltf-primitive-modes.md).
-Later selected-profile work should favor sparse accessors, additional influence sets and a concrete
-typed extension slice before starting another broad format. Device draw limits remain a concrete
-consumer candidate.
+Sparse accessors, complete influence sets, explicit scene selection and typed unlit materials are
+also complete through the [follow-on slices](plans/2026-11-01-001-feat-asset-workflow-expansion-plan.md#ordered-follow-on-candidates).
+The [maintained dependency closure](reviews/2026-11-01-native-dependency-closure.md) removes native
+root patches and rehearses real archives on Windows and Linux. Device draw limits remain a
+concrete consumer candidate.
 
-Publication needs a separately chosen package set and resolvable decoder dependencies; native
-distribution additionally needs a normal solution for its patched backend. Neither a local package
-archive nor the native candidate's CI wiring makes these release decisions complete. Exporters,
-a renderer, automatic recovery, native release registration and a generic asset compiler remain
+The [first-release usability audit](reviews/2026-11-01-first-release-usability-audit.md) selects a
+twelve-package portable candidate and identifies correctness and caller-workflow gaps that must
+precede publication. The [next plan](plans/2026-11-01-011-feat-first-release-usability-plan.md)
+prioritizes glTF allocation admission, PLY precision, morph-aware derived edits, then bounded batch
+geometry preparation and complete application consumption. Its package/target evidence keeps exact
+revision boundaries. Local archives and configured CI do not establish public registry availability
+or target promotion. The first canonical train is verified through a registry-only consumer before
+retiring the placeholder 0.0.1, following [release policy](contributing/release-policy.md).
+Exporters, a renderer, automatic recovery, native registration and a generic asset compiler remain
 separate work.
 
 ## Format Priorities
