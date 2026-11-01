@@ -27,9 +27,8 @@ The initial tranche completed on 2026-11-01: A1, A2, B1, B2, V1 and V2 are imple
 verified. The progress review records implementation commits, 2,482 passing workspace tests,
 complete release scale workflows, separate repeated measurements, and the executed Linux ASan
 smoke / 1,803-second campaign / saved-corpus resume. Completion applies to this initial tranche;
-follow-on candidates 1 and 2 are now completed by the separate
-[attribute-owned tangent execution plan](2026-11-01-002-feat-attribute-owned-tangents-plan.md).
-The remaining candidates stay future work.
+follow-on progress is tracked in the ordered candidate section below through separate execution
+plans and revision-qualified reviews.
 
 The initial tranche is A1, A2, B1, B2, V1 and V2 below. Complete and review these bounded units
 before promoting follow-on candidates into required execution. Each unit should be independently
@@ -278,8 +277,10 @@ in `947a92b`, with [executed evidence](../reviews/2026-11-01-base-pose-world-que
 Candidate 4 is completed by the [glTF primitive-mode slice](2026-11-01-004-feat-gltf-primitive-modes-plan.md)
 in `d388d3e`, including explicit borrowed list consumption and
 [executed evidence](../reviews/2026-11-01-gltf-primitive-modes.md).
-Candidate 5 is selected for execution by the
-[shared sparse accessor plan](2026-11-01-005-feat-gltf-sparse-accessors-plan.md).
+Candidate 5 is completed by the
+[shared sparse accessor slice](2026-11-01-005-feat-gltf-sparse-accessors-plan.md) in `562e6da`,
+including complete multi-buffer provenance and
+[executed evidence](../reviews/2026-11-01-gltf-sparse-accessors.md).
 The remaining rows are ordered candidates, not implicitly authorized implementation work.
 
 | Order | Candidate and prerequisite | Required boundary and acceptance when selected |

@@ -22,7 +22,7 @@ performance result is claimed. Recommendations are input to the
 
 This is the source audit at the baseline below. Subsequent fixes and newly executed results belong
 to the [asset workflow expansion review](../reviews/2026-11-01-asset-workflow-expansion.md) and the
-[attribute-owned tangent review](../reviews/2026-11-01-attribute-owned-tangents.md); the
+[follow-on plans and reviews](../plans/2026-11-01-001-feat-asset-workflow-expansion-plan.md#ordered-follow-on-candidates); the
 historical observations here are not current unresolved-defect or verification claims.
 
 | Baseline | Exact identity and use |

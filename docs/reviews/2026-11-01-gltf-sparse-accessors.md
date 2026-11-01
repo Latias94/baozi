@@ -1,5 +1,5 @@
 ---
-status: in_progress
+status: completed
 date: 2026-11-01
 ---
 
@@ -8,6 +8,9 @@ date: 2026-11-01
 This record covers the [selected sparse accessor slice](../plans/2026-11-01-005-feat-gltf-sparse-accessors-plan.md)
 after `c7bf38b`. Additional influence sets, explicit scene selection and new extensions remain
 separate candidates. Earlier primitive-mode qualification belongs to its own implementation state.
+Implementation is `562e6da0f950683c33c063d603e52c4dbf354ba2`. The tracked tree was clean before
+integrated qualification; only completion/evidence documentation changes afterward. The local
+source identity manifest and logs are retained in `target/review/gltf-sparse-evidence.zip`.
 
 ## Behavior and design
 
@@ -71,13 +74,45 @@ normalized integer inputs now compare through the same existing conversion path 
 rational expectations are checked separately within one F32 ULP. Normalization arithmetic was not
 changed by this slice.
 
-Final executed checks and implementation identity will be recorded after integration.
 The next package run passed 252/253; its remaining new DecodeWork-boundary expectation counted only
 one of the existing JSON syntax and backend scans. Correcting that baseline to twice the JSON byte
 count made the complete 21-test sparse integration binary pass (`ab1d353c-9a87-4b72-a6cb-41c2f9397f61`).
 The independent owned-buffer sparse consumer passed (`e7a5ab3b-5b7e-4265-b0bf-72b00d1aee7e`), and
-workspace strict Clippy passed with all targets/features. Integrated qualification follows the
-implementation commit; these intermediate runs are not substituted for its final workspace run.
+workspace strict Clippy passed with all targets/features. The final workspace and consumer runs
+below qualify the implementation commit; these intermediate runs do not substitute for them.
+
+| Executed check | Result | Run identity |
+| --- | --- | --- |
+| Sparse accessor integration | 21/21 pass | `ab1d353c-9a87-4b72-a6cb-41c2f9397f61` |
+| Windows workspace, all features | 2,608/2,608 pass; 4 existing manual skips | `952c7c51-bc1a-40e0-9b96-34bfb0b0f3ec` |
+| Independent asset consumer, all features | 32/32 pass; 1 existing manual skip | `65bd9451-dba4-4e78-a55f-af9b50c64a50` |
+| Workspace strict Clippy | Pass, all targets/features, `-D warnings` | Local log |
+| Independent asset consumer strict Clippy | Pass, all targets/features, `-D warnings` | Local log |
+| Workspace and independent consumer formatting | Both pass | `cargo fmt ... -- --check` |
+| glTF library, wasm32-unknown-unknown | Compile pass | No browser execution claim |
+
+The 21 integration tests cover typed dense/sparse equivalence, all selector widths, zero and
+nonzero bases, normalized conversion and implicit RGB alpha, geometry and all three morph delta
+semantics, animation and skin, complete public typed provenance, ordering/range/layout rejection,
+logical budgets before dependency IO and a shared-accessor DecodeWork boundary. Selector 255 is
+valid for 256 logical elements and is distinct from a primitive index value's restart sentinel.
+An omitted scene's sparse accessor neither authorizes nor opens its two missing dependencies.
+Additional shared-layout tests cover dense/sparse vertex offsets, packed U16 UVs with a valid
+component-aligned view offset, and forbidden animation stride. The independent consumer copies
+geometry and morph values into application-owned indexed buffers, then verifies them after dropping
+the import report, Scene and IO.
+
+Executed integrated commands:
+
+```text
+cargo +1.95.0 clippy --locked --offline --workspace --all-targets --all-features --jobs 1 -- -D warnings
+cargo +1.95.0 nextest run --locked --offline --workspace --all-features --build-jobs 1 --test-threads 2 --no-fail-fast --status-level fail --final-status-level none
+cargo +1.95.0 nextest run --locked --offline --manifest-path tools/consumers/assets/Cargo.toml --target-dir target --all-features --build-jobs 1 --test-threads 1 --no-fail-fast --status-level fail --final-status-level none
+cargo +1.95.0 clippy --locked --offline --manifest-path tools/consumers/assets/Cargo.toml --target-dir target --all-targets --all-features --jobs 1 -- -D warnings
+cargo +1.95.0 fmt --all -- --check
+cargo +1.95.0 fmt --manifest-path tools/consumers/assets/Cargo.toml -- --check
+cargo +1.95.0 check --locked --offline -p baozi-format-gltf --lib --target wasm32-unknown-unknown --jobs 1
+```
 
 ## Qualification boundary
 

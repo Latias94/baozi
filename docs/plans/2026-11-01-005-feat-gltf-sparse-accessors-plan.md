@@ -2,7 +2,7 @@
 title: Shared glTF Sparse Accessor Decoding
 type: feat
 date: 2026-11-01
-status: in_progress
+status: completed
 ---
 
 # Shared glTF Sparse Accessor Decoding
@@ -51,6 +51,12 @@ accessor/JSON model, core sparse rewrite, external/runtime dependency or compati
 
 Native Codex agents review decoding assumptions, implement the disjoint provenance storage/caller
 changes, and add a new sparse integration test file. Only the main thread runs Cargo.
+
+Completed in `562e6da0f950683c33c063d603e52c4dbf354ba2`. The
+[execution review](../reviews/2026-11-01-gltf-sparse-accessors.md) records the design decisions,
+malformed-input and admission regressions, independent consumer, exact run identities and final
+qualification: 2,608 workspace tests, 32 consumer tests, strict Clippy, formatting and a compile-only
+wasm32 glTF library check.
 
 ## Sources and boundaries
 
