@@ -8,7 +8,7 @@ use baozi_io::AssetPath;
 use sha2::{Digest, Sha256};
 use std::fmt;
 
-const SOURCE_SCOPE_DIGEST_DOMAIN: &[u8] = b"baozi.source-scope.v2\0";
+const SOURCE_SCOPE_DIGEST_DOMAIN: &[u8] = b"baozi.source-scope.v3\0";
 const SOURCE_SCOPE_SELECTION_FRAME_TAG: u8 = 0xff;
 
 /// A source-document entity category counted by source-scope evidence.
@@ -88,6 +88,18 @@ impl SourceScopeSourceIdentity {
     pub const fn scene_index(&self) -> u64 {
         self.scene_index
     }
+}
+
+/// Requested mode retained as evidence after format-owned option resolution.
+///
+/// This is report evidence, not a format-independent import option. An explicit
+/// source scene index is interpreted only by the format that owns the document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SourceScopeSelectionRequest {
+    /// Resolve the document's default-selection policy.
+    DocumentDefault,
+    /// Select one declared scene by its original source index.
+    ExplicitScene { scene_index: u64 },
 }
 
 /// Typed result of the format-owned source selection step.
@@ -244,6 +256,7 @@ impl ExactSizeIterator for SourceScopeDetails<'_> {}
 
 /// Baozi-owned inert evidence describing one selected source closure.
 pub struct SourceScopeRecord {
+    selection_request: SourceScopeSelectionRequest,
     selection_outcome: SourceScopeSelectionOutcome,
     counts: [SourceScopeCounts; SourceScopeEntityKind::COUNT],
     digest: SourceScopeDigest,
@@ -256,6 +269,12 @@ pub struct SourceScopeRecord {
 }
 
 impl SourceScopeRecord {
+    /// Returns the request that produced this projection, including after detail collapse.
+    pub const fn selection_request(&self) -> &SourceScopeSelectionRequest {
+        &self.selection_request
+    }
+
+    /// Returns the resolved source identity under the requested selection mode.
     pub fn selection_outcome(&self) -> &SourceScopeSelectionOutcome {
         &self.selection_outcome
     }
@@ -291,6 +310,7 @@ impl fmt::Debug for SourceScopeRecord {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("SourceScopeRecord")
+            .field("selection_request", &self.selection_request)
             .field("selection_outcome", &self.selection_outcome)
             .field("counts", &self.counts)
             .field("digest", &self.digest)
@@ -307,6 +327,7 @@ impl fmt::Debug for SourceScopeRecord {
 #[must_use = "finish and submit source-scope evidence or drop the builder"]
 pub struct SourceScopeRecordBuilder<'scope, 'session> {
     scope: &'scope ParseScope<'session>,
+    selection_request: SourceScopeSelectionRequest,
     selection_outcome: SourceScopeSelectionOutcome,
     counts: [SourceScopeCounts; SourceScopeEntityKind::COUNT],
     digest: Sha256,
@@ -321,6 +342,7 @@ pub struct SourceScopeRecordBuilder<'scope, 'session> {
 impl<'scope, 'session> SourceScopeRecordBuilder<'scope, 'session> {
     pub(crate) fn new(
         scope: &'scope ParseScope<'session>,
+        selection_request: SourceScopeSelectionRequest,
         selection_outcome: SourceScopeSelectionOutcome,
     ) -> ParseResult<Self> {
         // This argument transfers already-owned caller storage. Admit its actual backing capacity
@@ -336,6 +358,13 @@ impl<'scope, 'session> SourceScopeRecordBuilder<'scope, 'session> {
         let mut digest = Sha256::new();
         digest.update(SOURCE_SCOPE_DIGEST_DOMAIN);
         digest.update(SOURCE_SCOPE_SELECTION_FRAME_TAG.to_le_bytes());
+        match selection_request {
+            SourceScopeSelectionRequest::DocumentDefault => digest.update([0]),
+            SourceScopeSelectionRequest::ExplicitScene { scene_index } => {
+                digest.update([1]);
+                digest.update(scene_index.to_le_bytes());
+            }
+        }
         match &selection_outcome {
             SourceScopeSelectionOutcome::DeclaredScene(identity) => {
                 digest.update([1]);
@@ -349,6 +378,7 @@ impl<'scope, 'session> SourceScopeRecordBuilder<'scope, 'session> {
         }
         Ok(Self {
             scope,
+            selection_request,
             selection_outcome,
             counts: [SourceScopeCounts::default(); SourceScopeEntityKind::COUNT],
             digest,
@@ -508,6 +538,7 @@ impl<'scope, 'session> SourceScopeRecordBuilder<'scope, 'session> {
         Ok(FinalizedSourceScopeRecord {
             scope: self.scope,
             record: LiveSourceScopeRecord {
+                selection_request: self.selection_request,
                 selection_outcome: self.selection_outcome,
                 counts: self.counts,
                 digest,
@@ -548,6 +579,7 @@ impl FinalizedSourceScopeRecord<'_, '_> {
 }
 
 pub(crate) struct LiveSourceScopeRecord {
+    selection_request: SourceScopeSelectionRequest,
     selection_outcome: SourceScopeSelectionOutcome,
     counts: [SourceScopeCounts; SourceScopeEntityKind::COUNT],
     digest: SourceScopeDigest,
@@ -576,6 +608,7 @@ impl LiveSourceScopeRecord {
         let detail_indexes = self.detail_indexes;
         let detail_bytes = self.detail_bytes;
         SourceScopeRecord {
+            selection_request: self.selection_request,
             selection_outcome: self.selection_outcome,
             counts: self.counts,
             digest: self.digest,
@@ -648,6 +681,7 @@ mod tests {
                 .try_clone()
                 .map_err(|_| scope.allocation_failure("source-scope-document"))?;
             let mut builder = scope.source_scope_builder(
+                SourceScopeSelectionRequest::DocumentDefault,
                 SourceScopeSelectionOutcome::parentless_node_projection(document),
             )?;
             builder.observe(

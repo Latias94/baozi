@@ -7,10 +7,12 @@ private and replaceable; custom registration uses the experimental importer API.
 
 The [exact selected profile](https://github.com/Latias94/baozi/blob/main/docs/formats/gltf.md) governs support:
 
-- Select the document-default scene, or its sole scene when no default is declared.
-  Multiple scenes without a default are rejected. Resources outside the selected
-  closure are omitted; mixed-target animation filtering requires explicit semantic
-  loss authorization.
+- Select one declared source scene through frozen `GltfImportOptions` and
+  `GltfSceneSelection::SceneIndex`, or use `DocumentDefault` for a declared default,
+  sole scene or zero-scene parentless-node projection. Multiple scenes without a default
+  require an explicit index. Report evidence records the request and outcome, and generated
+  root provenance binds both. Resources outside the selected closure are omitted;
+  mixed-target animation filtering requires explicit semantic loss authorization.
 - Preserve all seven point, line and triangle primitive modes, supported vertex streams including
   complete paired `JOINTS_n`/`WEIGHTS_n`, hierarchy and node transforms, skins, F32 VEC3
   POSITION/NORMAL/TANGENT morph deltas, node TRS and morph-weight animation,

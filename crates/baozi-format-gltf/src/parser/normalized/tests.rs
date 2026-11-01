@@ -217,6 +217,7 @@ fn build_fixture<'scope>(
         )?,
     };
     Ok(NormalizedGltf {
+        selection_request: SourceScopeSelectionRequest::DocumentDefault,
         sources,
         appearance,
         geometry,

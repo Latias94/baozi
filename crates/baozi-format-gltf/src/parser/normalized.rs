@@ -10,7 +10,9 @@ use super::{
 };
 use crate::FORMAT_ID;
 use baozi_import::authoring::*;
-use baozi_import::{ImportStorageClass, MeteredVec, ParseScope, SceneDraft};
+use baozi_import::{
+    ImportStorageClass, MeteredVec, ParseScope, SceneDraft, SourceScopeSelectionRequest,
+};
 use sha2::{Digest, Sha256};
 
 #[cfg(test)]
@@ -31,6 +33,7 @@ pub(super) fn submit(ctx: &ParseScope<'_>, model: &NormalizedGltf<'_>) -> Result
         &model.animations,
         &model.morphs,
         &model.sources,
+        model.selection_request,
     )
 }
 
@@ -54,6 +57,7 @@ pub(super) fn submit_parts(
     animation_storage: &animation::AnimationStorage<'_>,
     morph_storage: &morph::MorphStorage<'_>,
     selected_sources: &SelectedSourceProfile<'_>,
+    selection_request: SourceScopeSelectionRequest,
 ) -> Result<SceneDraft> {
     let mut images = ctx.metered_vec(
         ImportStorageClass::SceneConstruction,
@@ -862,12 +866,17 @@ pub(super) fn submit_parts(
     };
     let projection_index = u64::try_from(projection.source.source_index)
         .map_err(|_| ctx.allocation_failure("gltf-profile-projection-index"))?;
-    let (root_options, root_evidence) = generated_evidence(
-        ctx,
-        "org.baozi.gltf:projection-root-v1",
-        projection_tag,
-        projection_index,
-    )?;
+    // Fixed framing: request mode/index, then resolved projection kind/index.
+    // DocumentDefault has no requested locator and encodes its index lane as zero.
+    let mut instruction = [0_u8; 18];
+    if let SourceScopeSelectionRequest::ExplicitScene { scene_index } = selection_request {
+        instruction[0] = 1;
+        instruction[1..9].copy_from_slice(&scene_index.to_be_bytes());
+    }
+    instruction[9] = projection_tag;
+    instruction[10..].copy_from_slice(&projection_index.to_be_bytes());
+    let (root_options, root_evidence) =
+        generated_evidence(ctx, "org.baozi.gltf:projection-root-v2", &instruction)?;
     let root_kind = OperationKind::Generated;
     let root_attachment = [ProvenanceLocalId::new(authoring_u32(
         ctx,
@@ -892,7 +901,7 @@ pub(super) fn submit_parts(
         .default_sampler
         .map(|sampler| ProfileOwner::Sampler(sampler.index()));
     let (default_options, default_evidence) =
-        generated_evidence(ctx, "org.baozi.gltf:implicit-sampler-v1", 0, 0)?;
+        generated_evidence(ctx, "org.baozi.gltf:implicit-sampler-v1", &[0; 9])?;
     let default_kind = OperationKind::Default;
     let default_attachment = [ProvenanceLocalId::new(authoring_u32(
         ctx,
@@ -1032,19 +1041,17 @@ fn owner_sources_for<'a>(
     ))
 }
 
-// The v1 instruction digest identifies the fixed normalization rule and source projection.
+// Each versioned instruction identifies the normalization rule and its immutable inputs.
 // Its source parents bind the generated owner to actual declarations without inventing a locator.
 fn generated_evidence(
     ctx: &ParseScope<'_>,
     code: &'static str,
-    projection_kind: u8,
-    projection_index: u64,
+    instruction: &[u8],
 ) -> Result<(OptionsDigest, [OperationEvidenceSummary; 1])> {
-    ctx.charge_work(code.len() as u64 + 9)?;
+    ctx.charge_work(to_u64(code.len()) + to_u64(instruction.len()))?;
     let mut digest = Sha256::new();
     digest.update(code.as_bytes());
-    digest.update([projection_kind]);
-    digest.update(projection_index.to_be_bytes());
+    digest.update(instruction);
     let bytes: [u8; 32] = digest.finalize().into();
     let code = NamespacedName::new(code)
         .map_err(|_| gltf_parse_error(ctx, "static glTF generated evidence code is invalid"))?;

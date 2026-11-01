@@ -18,6 +18,11 @@ are:
 3. `src/mesh.rs`: retain other morph attribute references in a flattened map.
    The format adapter can explicitly reject unsupported semantics instead of
    silently discarding attributes that the upstream three-field type omits.
+4. `src/scene.rs`: default an omitted optional scene `nodes` field to an empty
+   root list. This admits legal empty scenes and makes the existing omission on
+   serialization roundtrip. The direct backend regression uses an absent field,
+   rather than an explicit empty array, following the
+   [Khronos scene schema](https://github.com/KhronosGroup/glTF/blob/59ecbdba704206bb656965ab4e202881806066f1/specification/2.0/schema/scene.schema.json).
 
 Baozi's `backend_malformed` integration target exercises these paths directly,
 without the adapter's panic containment, and through JSON and GLB import. Upstream

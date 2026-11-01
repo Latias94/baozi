@@ -528,8 +528,8 @@ fn multiple_scenes_without_default_are_rejected_instead_of_selecting_scene_zero(
     assert!(diagnostics.is_empty());
     assert_gltf_failure(
         &failure,
-        GltfFailureCode::InvalidDocument,
-        Some("multiple scenes require an explicit default"),
+        GltfFailureCode::SceneSelectionRequired,
+        Some("multiple scenes require an explicit scene selection"),
     )?;
     Ok(())
 }

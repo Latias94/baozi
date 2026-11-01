@@ -283,8 +283,10 @@ including complete multi-buffer provenance and
 [executed evidence](../reviews/2026-11-01-gltf-sparse-accessors.md).
 The influence-set part of candidate 6 is completed by the
 [complete influence sets slice](2026-11-01-006-feat-gltf-influence-sets-plan.md) in `660a4f2`,
-with [executed evidence](../reviews/2026-11-01-gltf-influence-sets.md). Explicit scene selection
-stays a separate follow-on slice.
+with [executed evidence](../reviews/2026-11-01-gltf-influence-sets.md). The remaining explicit
+scene-selection work is implemented by the
+[scene-selection slice](2026-11-01-007-feat-gltf-scene-selection-plan.md), with integrated
+verification tracked in its [execution review](../reviews/2026-11-01-gltf-scene-selection.md).
 The remaining rows are ordered candidates, not implicitly authorized implementation work.
 
 | Order | Candidate and prerequisite | Required boundary and acceptance when selected |

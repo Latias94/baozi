@@ -144,7 +144,7 @@ pub use source_scope::{
     FinalizedSourceScopeRecord, SourceScopeCounts, SourceScopeDetail, SourceScopeDetailState,
     SourceScopeDetails, SourceScopeDigest, SourceScopeDisposition, SourceScopeDocumentIdentity,
     SourceScopeEntityKind, SourceScopeRecord, SourceScopeRecordBuilder,
-    SourceScopeSelectionOutcome, SourceScopeSourceIdentity,
+    SourceScopeSelectionOutcome, SourceScopeSelectionRequest, SourceScopeSourceIdentity,
 };
 pub use text_input::{
     ConformedTextInput, TextConformanceResult, TextConformanceViolation,

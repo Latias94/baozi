@@ -105,6 +105,7 @@ impl fmt::Debug for AnimationClipRef<'_> {
 #[derive(Debug, Clone, Copy)]
 pub struct AnimationChannelRef<'s> {
     generation: SceneGenerationId,
+    index: u32,
     channel: NodeSceneAnimationChannel<'s>,
 }
 
@@ -113,13 +114,16 @@ impl<'s> AnimationChannelRef<'s> {
         super::EntityMetadataOwner::from_parts(
             self.generation,
             crate::canonical_scene::store::production::CanonicalProfileOwner::AnimationChannel(
-                self.channel.source_index() as u32,
+                self.index,
             ),
         )
     }
     fn at(scene: &'s ValidatedScene, row: usize) -> Self {
         Self {
             generation: scene.generation(),
+            // Source ordinals may be non-contiguous or repeated across clips.
+            // Profile owners use the global retained row, independent of that provenance.
+            index: row as u32,
             channel: expect_validated(tables(scene).channel_at(row)),
         }
     }

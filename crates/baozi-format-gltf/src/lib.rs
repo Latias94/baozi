@@ -4,20 +4,23 @@ mod admission;
 mod detect;
 mod error;
 mod json_syntax;
+mod options;
 mod parser;
 mod source_map;
 
 pub(crate) use error::GltfFailure;
 pub use error::GltfFailureCode;
+pub use options::{GltfImportOptions, GltfSceneSelection, gltf_import_option_key};
 
 use baozi_import::authoring::FormatId;
 use baozi_import::{
     CapabilityStatus, DependencyRequirement, DependencyRoleId, DetectionOutcome, DetectionResult,
     DetectionScope, FormatCapability, FormatDescriptor, FormatEncoding, FormatImporter,
-    ParseResult, ParseScope, Probe, ReadHint, RegistryBuilder, RegistryRegistrationError,
-    SceneDraft, TextBomPolicy, TextControlPolicy, TextDecodingMode, TextHardCaps, TextLexicalMode,
-    TextNewline, TextProfile, TextSourceEncoding,
+    OptionRuntimeTypeKey, ParseResult, ParseScope, Probe, ReadHint, RegistryBuilder,
+    RegistryRegistrationError, SceneDraft, TextBomPolicy, TextControlPolicy, TextDecodingMode,
+    TextHardCaps, TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding,
 };
+use std::sync::Arc;
 
 /// Stable identity of the selected glTF 2.0 and GLB profile.
 pub const FORMAT_ID: &str = "org.baozi.gltf";
@@ -100,6 +103,14 @@ pub(crate) fn external_image_role() -> DependencyRoleId {
 impl FormatImporter for GltfImporter {
     fn descriptor(&self) -> FormatDescriptor {
         format_descriptor()
+    }
+
+    fn option_codec(&self) -> Arc<dyn baozi_import::FormatOptionCodec> {
+        options::option_codec()
+    }
+
+    fn option_runtime_type_key(&self) -> OptionRuntimeTypeKey {
+        OptionRuntimeTypeKey::of::<GltfImportOptions>()
     }
 
     fn detect(

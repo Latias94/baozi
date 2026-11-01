@@ -8,7 +8,7 @@ use crate::{
     FormatImporter, ImportConfigOverlay, ImportLossDisposition, ImportLossKind, ImportLossSubject,
     ImportRequest, ImportRequestLayer, LossPolicy, OptionCompileLimits, ReadConfidence,
     RegistryBuildLimits, RegistryBuilder, SourceScopeDisposition, SourceScopeEntityKind,
-    SourceScopeSelectionOutcome,
+    SourceScopeSelectionOutcome, SourceScopeSelectionRequest,
 };
 use baozi_operation::{
     PhysicalStorageAccount, PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryLimits,
@@ -57,6 +57,7 @@ impl FormatImporter for RetainedOutputImporter {
             format_args!("this retained diagnostic keeps its source and message"),
         )?;
         let mut closure = scope.source_scope_builder(
+            SourceScopeSelectionRequest::DocumentDefault,
             SourceScopeSelectionOutcome::parentless_node_projection(scope.source().clone()),
         )?;
         closure.observe(

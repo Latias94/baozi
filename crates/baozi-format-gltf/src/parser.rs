@@ -1,5 +1,8 @@
 use crate::admission::AdmittedSurfaces;
-use crate::{GltfFailure, admission, external_buffer_role, external_image_role};
+use crate::{
+    GltfFailure, GltfSceneSelection, admission, external_buffer_role, external_image_role,
+    gltf_import_option_key,
+};
 use baozi_import::authoring::{
     AlphaMode, AttributeSemantic, AuthoredTransform, AuthoringRange, CameraLocalId,
     CameraProjection, Color, ColorInterpretation, ExtensionMediaType,
@@ -14,7 +17,7 @@ use baozi_import::{
     DiagnosticCode, DiagnosticSeverity, ImportStorageClass, ImportWorkClass, ImportWorkScope,
     MeteredOrderedMap, MeteredString, MeteredVec, ParseFailure, ParseResult, ParseScope,
     SceneDraft, SourceScopeDisposition, SourceScopeEntityKind, SourceScopeRecordBuilder,
-    SourceScopeSelectionOutcome,
+    SourceScopeSelectionOutcome, SourceScopeSelectionRequest,
 };
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::{DecodeError, DecodeSliceError, Engine as _};
@@ -1814,6 +1817,7 @@ fn normalize_document<'scope>(
         )
     })?;
     let mut normalized = NormalizedGltf {
+        selection_request: prepared.node_graph.selection_request,
         sources,
         appearance: appearance_storage,
         geometry: geometry_storage,
@@ -3758,6 +3762,7 @@ struct NodeGraph<'document, 'scope> {
     children: MeteredVec<'scope, MeteredVec<'scope, usize>>,
     roots: MeteredVec<'scope, usize>,
     selected: MeteredVec<'scope, bool>,
+    selection_request: SourceScopeSelectionRequest,
     selection_outcome: NodeSelectionOutcome,
 }
 
@@ -4408,7 +4413,7 @@ fn record_source_scope(
             SourceScopeSelectionOutcome::parentless_node_projection(source_document)
         }
     };
-    let mut builder = ctx.source_scope_builder(selection_outcome)?;
+    let mut builder = ctx.source_scope_builder(graph.selection_request, selection_outcome)?;
     let mut identity = ctx.metered_string(
         ImportStorageClass::FormatNormalization,
         "gltf-source-scope-identity",
@@ -4688,6 +4693,13 @@ fn preflight_node_graph<'document, 'scope>(
     ctx: &'scope ParseScope<'_>,
     gltf: &'document gltf::Document,
 ) -> Result<NodeGraph<'document, 'scope>> {
+    let selection = ctx.options(&gltf_import_option_key())?.scene_selection();
+    let selection_request = match selection {
+        GltfSceneSelection::DocumentDefault => SourceScopeSelectionRequest::DocumentDefault,
+        GltfSceneSelection::SceneIndex(scene_index) => SourceScopeSelectionRequest::ExplicitScene {
+            scene_index: u64::from(scene_index),
+        },
+    };
     let node_count = safe_gltf(ctx, "glTF node count", || gltf.nodes().len())?;
     let nodes = ctx.with_work_group(
         [
@@ -4806,7 +4818,7 @@ fn preflight_node_graph<'document, 'scope>(
 
     validate_graph_depth_and_cycles(ctx, children.as_slice(), parents.as_slice())?;
     let (roots, selection_outcome) =
-        select_and_validate_scene_roots(ctx, gltf, parents.as_slice())?;
+        select_and_validate_scene_roots(ctx, gltf, parents.as_slice(), selection)?;
     charge_canonical_graph_shape(ctx, roots.len())?;
     let selected = validate_canonical_graph_limits(ctx, children.as_slice(), roots.as_slice())?;
 
@@ -4815,6 +4827,7 @@ fn preflight_node_graph<'document, 'scope>(
         children,
         roots,
         selected,
+        selection_request,
         selection_outcome,
     })
 }
@@ -4950,6 +4963,7 @@ fn select_and_validate_scene_roots<'scope>(
     ctx: &'scope ParseScope<'_>,
     gltf: &gltf::Document,
     parents: &[Option<usize>],
+    selection: GltfSceneSelection,
 ) -> Result<(MeteredVec<'scope, usize>, NodeSelectionOutcome)> {
     let scene_count = safe_gltf(ctx, "glTF scene count", || gltf.scenes().len())?;
     let mut scene_roots = ctx.metered_vec(
@@ -5018,18 +5032,35 @@ fn select_and_validate_scene_roots<'scope>(
         }
     }
 
-    let default_scene_index = safe_gltf(ctx, "glTF default scene", || {
-        gltf.default_scene().map(|scene| scene.index())
-    })?;
-    let selection_outcome = match (default_scene_index, scene_count) {
-        (Some(scene_index), _) => NodeSelectionOutcome::DeclaredScene(scene_index),
-        (None, 0) => NodeSelectionOutcome::ParentlessNodeProjection,
-        (None, 1) => NodeSelectionOutcome::DeclaredScene(0),
-        (None, _) => {
-            return Err(gltf_parse_error(
-                ctx,
-                "multiple scenes require an explicit default scene",
-            ));
+    let selection_outcome = match selection {
+        GltfSceneSelection::SceneIndex(scene_index) => {
+            let scene_index = usize::try_from(scene_index).map_err(|_| {
+                GltfFailure::invalid_reference(
+                    "scene-selection",
+                    None,
+                    "glTF requested scene index exceeds the platform index range",
+                )
+            })?;
+            if scene_index >= scene_count {
+                return Err(GltfFailure::invalid_reference(
+                    "scene-selection",
+                    Some(scene_index),
+                    "glTF requested scene index is out of range",
+                )
+                .into());
+            }
+            NodeSelectionOutcome::DeclaredScene(scene_index)
+        }
+        GltfSceneSelection::DocumentDefault => {
+            let default_scene_index = safe_gltf(ctx, "glTF default scene", || {
+                gltf.default_scene().map(|scene| scene.index())
+            })?;
+            match (default_scene_index, scene_count) {
+                (Some(scene_index), _) => NodeSelectionOutcome::DeclaredScene(scene_index),
+                (None, 0) => NodeSelectionOutcome::ParentlessNodeProjection,
+                (None, 1) => NodeSelectionOutcome::DeclaredScene(0),
+                (None, _) => return Err(GltfFailure::scene_selection_required().into()),
+            }
         }
     };
     match selection_outcome {
@@ -5037,7 +5068,7 @@ fn select_and_validate_scene_roots<'scope>(
             let selected = scene_roots.as_slice().get(scene_index).ok_or_else(|| {
                 gltf_parse_error(
                     ctx,
-                    format!("glTF default scene index {scene_index} is out of range"),
+                    format!("glTF selected scene index {scene_index} is out of range"),
                 )
             })?;
             let mut roots = try_vec_capacity(

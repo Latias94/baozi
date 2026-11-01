@@ -16,6 +16,9 @@ pub use importer::{Importer, ImporterBuilder};
 #[cfg(feature = "postprocess")]
 pub use baozi_postprocess as postprocess;
 
+#[cfg(feature = "format-gltf")]
+pub use baozi_format_gltf::{GltfImportOptions, GltfSceneSelection, gltf_import_option_key};
+
 pub use baozi_core::{
     Aabb, Color, FormatId, FormatIdError, Mat4, Quat, SceneGenerationId, Vec2, Vec3, Vec4,
 };
@@ -106,10 +109,11 @@ pub use baozi_import::{
     SceneSnapshotError, SceneSnapshotLimits, ScopeAbort, ScopeAbortCause, SourceScopeCounts,
     SourceScopeDetail, SourceScopeDetailState, SourceScopeDetails, SourceScopeDigest,
     SourceScopeDisposition, SourceScopeDocumentIdentity, SourceScopeEntityKind, SourceScopeRecord,
-    SourceScopeSelectionOutcome, SourceScopeSourceIdentity, SuccessfulInputManifest, TextBomPolicy,
-    TextControlPolicy, TextDecodingMode, TextHardCapDimension, TextHardCaps, TextLexicalMode,
-    TextNewline, TextProfile, TextProfileBuilder, TextProfileError, TextProfileField,
-    TextSourceEncoding, TrustedExtensionBoundary, ValidatedScene,
+    SourceScopeSelectionOutcome, SourceScopeSelectionRequest, SourceScopeSourceIdentity,
+    SuccessfulInputManifest, TextBomPolicy, TextControlPolicy, TextDecodingMode,
+    TextHardCapDimension, TextHardCaps, TextLexicalMode, TextNewline, TextProfile,
+    TextProfileBuilder, TextProfileError, TextProfileField, TextSourceEncoding,
+    TrustedExtensionBoundary, ValidatedScene,
 };
 pub use baozi_io::{
     AssetIo, AssetLength, AssetObjectKind, AssetOpenError, AssetOpenErrorKind, AssetOpenStage,

@@ -55,9 +55,10 @@ baseline malformed-input safety for that source state; it is not sustained fuzz 
   before normalized integer conversion. Canonical materialization uses the existing bounded
   dense collectors; source sparsity does not reduce logical cardinality or allocation admission.
 - Node hierarchy, node transforms, mesh binding, node-level skin binding, and camera binding.
-- Deterministic document-default scene selection: a sole scene is selected when no default is
-  declared, while multiple declared scenes without a default are rejected instead of silently
-  selecting scene zero.
+- Frozen format-owned scene selection through `GltfImportOptions`: `DocumentDefault` uses a
+  declared default, otherwise a sole scene or a validated parentless-node projection when no
+  scenes are declared. Multiple declared scenes without a default require an explicit
+  `GltfSceneSelection::SceneIndex`; no declaration-order fallback is applied.
 - Skins with joint node references, optional skeleton root, and optional inverse bind matrices.
 - F32 VEC3 POSITION/NORMAL/TANGENT morph deltas, with equal target width across morph-bearing
   primitives, zero deltas for empty targets or primitives without targets, zero mesh defaults when
@@ -96,6 +97,10 @@ baseline malformed-input safety for that source state; it is not sustained fuzz 
   animations, and animation channels. The selected core resource closure is compiled before
   dependency IO; omitted external buffers/images are not authorized, and selected data-URI or
   buffer-view images are materialized as encoded payloads.
+- Typed source-scope selection evidence retains the requested mode and actual source scene or
+  parentless projection. Generated root provenance includes both the request and resolved
+  projection in its versioned options digest, even when default and explicit requests resolve
+  to the same scene.
 - Selected external buffers and images are recorded in the canonical source profile after the
   primary document, with formal Buffer/Image locators and owner provenance for geometry,
   attributes, skins, animation clips/channels, and buffer-view images. External buffer snapshots
@@ -118,6 +123,70 @@ baseline malformed-input safety for that source state; it is not sustained fuzz 
   Duplicate detection uses metered name storage and bounded `WorkUnits` sorting.
 - Gates cover GLB import, snapshots, malformed external buffers/data URIs, skin validation,
   text preflight, bounded format failures, and the Linux sanitizer-run glTF fuzz target.
+
+### Selecting one declared scene
+
+Enable the facade's `format-gltf` feature. The input type and locator belong to the glTF format;
+they use the same option envelopes, preset/caller precedence and immutable prepared requests as
+other format options:
+
+```rust
+use baozi::{
+    GltfImportOptions, GltfSceneSelection, ImportConfigOverlay, ImportOperationControl,
+    ImportReport, ImportRequest, ImportRequestLayer, Importer, OptionCompileLimits,
+};
+
+fn import_preview(document: &[u8]) -> Result<ImportReport, Box<dyn std::error::Error>> {
+    let importer = Importer::new()?;
+    let caller = ImportRequestLayer::new(ImportConfigOverlay::default())
+        .try_with_format_option(
+            GltfImportOptions::default()
+                .with_scene_selection(GltfSceneSelection::SceneIndex(1))
+                .to_envelope()?,
+        )?;
+    let request = importer.prepare_request(
+        &ImportRequest::new().with_caller_layer(caller),
+        OptionCompileLimits::default(),
+    )?;
+    Ok(importer.read_bytes_with_request(
+        "preview.gltf",
+        document,
+        &request,
+        ImportOperationControl::default(),
+    )?)
+}
+```
+
+Use `read_asset_with_request` with an `AssetIo` namespace when the selected scene needs external
+buffers or images. The prepared request can be reused for multiple imports in its originating
+importer. A caller's explicit `DocumentDefault` overrides an explicit preset selection.
+
+`SceneIndex` is a zero-based source index, independent of names and compact canonical IDs. It
+selects exactly one declared scene, including an empty scene. Explicit zero for a document with
+no scenes is out of range; the parentless-node rule belongs only to `DocumentDefault`. Malformed
+option transport fails during request compilation before primary IO. Out-of-range selection
+fails with `gltf.invalid_reference`, subject `scene-selection` and the requested index, before
+dependency IO or source-scope publication. An ambiguous default fails with
+`gltf.scene_selection_required` and the same subject.
+
+All scene roots, source indices and node-graph safety are still structurally validated before
+selection. The chosen roots and descendants determine the resource closure; an omitted resource
+cannot pull otherwise unselected nodes into the Scene. A selected skin's joints and skeleton
+must already belong to the structural closure. Mixed-target animation retains the existing
+`SourceSemanticLoss` requirement. Each projection gets one identity-TRS synthetic root with
+selected children in source order, including an empty child list for an empty scene. Import
+different projections separately when several source scenes are needed.
+
+`source_scope_record().selection_request()` exposes `DocumentDefault` or
+`ExplicitScene { scene_index }`; `selection_outcome()` exposes the resolved source identity.
+Both participate in the `baozi.source-scope.v3` digest and survive optional-detail collapse or a
+later import failure. The generated root operation uses `org.baozi.gltf:projection-root-v2`;
+its source parents identify the actual document and scene, while its options digest distinguishes
+the requested modes. No canonical snapshot wire-layout revision is needed.
+
+This follows [ADR 0039](../adr/0039-source-document-scene-selection-and-import-closure.md) and
+the [pinned Khronos scenes contract](https://github.com/KhronosGroup/glTF/blob/59ecbdba704206bb656965ab4e202881806066f1/specification/2.0/Specification.adoc#scenes).
+The deterministic default-selection rules and parentless-node projection are Baozi policies.
 
 ### Primitive counts and index validation
 

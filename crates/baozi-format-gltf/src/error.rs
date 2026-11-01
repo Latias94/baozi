@@ -25,6 +25,7 @@ pub enum GltfFailureCode {
     ParserPanicked,
     ResourceContract,
     InternalInvariant,
+    SceneSelectionRequired,
 }
 
 impl GltfFailureCode {
@@ -39,6 +40,7 @@ impl GltfFailureCode {
             Self::ParserPanicked => "gltf.parser_panicked",
             Self::ResourceContract => "gltf.resource_contract",
             Self::InternalInvariant => "gltf.internal_invariant",
+            Self::SceneSelectionRequired => "gltf.scene_selection_required",
         }
     }
 
@@ -53,6 +55,7 @@ impl GltfFailureCode {
             Self::ParserPanicked => 6,
             Self::ResourceContract => 7,
             Self::InternalInvariant => 8,
+            Self::SceneSelectionRequired => 9,
         }
     }
 
@@ -66,6 +69,7 @@ impl GltfFailureCode {
             5 => Self::UnsupportedFeature,
             6 => Self::ParserPanicked,
             7 => Self::ResourceContract,
+            9 => Self::SceneSelectionRequired,
             _ => Self::InternalInvariant,
         }
     }
@@ -163,6 +167,15 @@ impl GltfFailure {
             Some(subject),
             index.and_then(|value| u64::try_from(value).ok()),
             reason,
+        )
+    }
+
+    pub(crate) fn scene_selection_required() -> Self {
+        Self::new(
+            GltfFailureCode::SceneSelectionRequired,
+            Some("scene-selection"),
+            None,
+            "multiple scenes require an explicit scene selection",
         )
     }
 

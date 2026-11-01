@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-12
-updated: 2026-07-17
+updated: 2026-11-01
 authors:
   - Codex
 decision_type: architecture
@@ -209,6 +209,44 @@ excluded or lossy semantic observable. Chosen.
 - [ADR 0036 source identity and provenance](0036-source-identity-provenance-and-metadata.md)
 
 ## Amendment History
+
+### 2026-11-01: Deliver explicit frozen glTF selection and request evidence
+
+- Affected: format-owned glTF options, public facade re-exports, root projection provenance and
+  `SourceScopeRecord` request/outcome evidence.
+- New: `GltfImportOptions` owns `GltfSceneSelection::{DocumentDefault, SceneIndex(u32)}` and a
+  bounded version-one `org.baozi.gltf` / `import-options` codec. The canonical payload is a
+  presence byte followed, when present, by a default/index tag and a little-endian u32 for the
+  index variant. Preset and caller layers use ADR 0016's existing compiler; explicit default
+  selection overrides a preset just as an explicit index does. The runtime type key changes
+  from the no-options type to `GltfImportOptions`; no compatibility path is retained.
+- New: `SourceScopeSelectionRequest::{DocumentDefault, ExplicitScene { scene_index: u64 }}`
+  records the format-resolved request as shared report evidence. It is not a generic facade
+  input selector. The source-scope builder requires request and outcome together and rejects
+  an explicit index that differs from the declared-scene outcome or resolves to a parentless
+  projection. The existing document-identity check remains mandatory.
+- Digest: `baozi.source-scope.v3\0` replaces v2. After the selection frame tag `0xff`, request
+  framing is tag 0 for `DocumentDefault` or tag 1 plus a little-endian u64 explicit index;
+  existing outcome and document framing follow unchanged, then the ordered entity observations.
+  Fixed selection fields do not count as per-entity detail/digest bytes. Both request and outcome
+  survive collapse and terminal transport without extra heap storage.
+- Provenance: the generated root's instruction is `org.baozi.gltf:projection-root-v2`, followed
+  by an 18-byte fixed frame: request tag, requested u64 index, resolved projection tag and
+  resolved u64 index. Instruction indices use big-endian bytes; default mode has a zero requested
+  index lane. Source parents continue to identify the actual selected document/scene. The
+  implicit sampler's version-one instruction is unchanged. This changes provenance content,
+  without changing the canonical snapshot wire layout.
+- Failure ordering: malformed transport is a request-compile error before primary IO; an
+  out-of-range source scene index is `gltf.invalid_reference` with `scene-selection` and the
+  requested index, before dependency IO or source-scope publication. Ambiguous `DocumentDefault`
+  returns `gltf.scene_selection_required`. Whole-document structural validation, selected
+  closure, skin membership and animation-loss policy remain required for explicit requests.
+- Integration: the existing decoder scene model defaults an omitted optional `nodes` list so
+  legal empty scenes need no explicit empty array. Borrowed animation-channel metadata owners
+  use retained global rows, independently of non-contiguous/repeated source channel ordinals;
+  source identities and filtering provenance remain unchanged.
+- Verification: the [execution plan](../plans/2026-11-01-007-feat-gltf-scene-selection-plan.md)
+  owns this slice's implementation and revision-qualified evidence.
 
 ### 2026-09-02: Admit typed `KHR_texture_transform` bindings
 

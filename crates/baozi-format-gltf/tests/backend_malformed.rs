@@ -69,6 +69,24 @@ fn backend_camera_kind_requires_its_projection_payload() {
 }
 
 #[test]
+fn backend_empty_scene_allows_omitted_optional_nodes_and_roundtrips() -> TestResult<()> {
+    let bytes = br#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{}]}"#;
+    let root = gltf::json::Root::from_slice(bytes)?;
+    assert_eq!(root.scenes.len(), 1);
+    assert!(root.scenes[0].nodes.is_empty());
+    let encoded = serde_json::to_vec(&root)?;
+    let value: Value = serde_json::from_slice(&encoded)?;
+    assert!(value["scenes"][0].get("nodes").is_none());
+    for document in [encoded, glb_with_json(bytes)] {
+        let document = gltf::Gltf::from_slice(&document)?.document;
+        let scene = document.default_scene().expect("declared empty scene");
+        assert_eq!(scene.index(), 0);
+        assert_eq!(scene.nodes().len(), 0);
+    }
+    Ok(())
+}
+
+#[test]
 fn camera_kind_is_rejected_before_projection_reading_in_json_and_glb() -> TestResult<()> {
     for document in [PERSPECTIVE_WITHOUT_PAYLOAD, ORTHOGRAPHIC_WITHOUT_PAYLOAD] {
         assert_import_rejection("camera-kind.gltf", document.to_vec())?;

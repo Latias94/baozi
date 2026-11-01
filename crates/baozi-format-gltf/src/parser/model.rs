@@ -5,7 +5,7 @@
 
 use super::{animation, morph, source_profile, uri};
 use baozi_import::authoring::*;
-use baozi_import::{DependencySnapshot, MeteredString, MeteredVec};
+use baozi_import::{DependencySnapshot, MeteredString, MeteredVec, SourceScopeSelectionRequest};
 
 #[allow(
     clippy::large_enum_variant,
@@ -118,6 +118,7 @@ impl AccessorSources {
 }
 
 pub(super) struct NormalizedGltf<'scope> {
+    pub(super) selection_request: SourceScopeSelectionRequest,
     pub(super) sources: source_profile::SelectedSourceProfile<'scope>,
     pub(super) appearance: AppearanceStorage<'scope>,
     pub(super) geometry: GeometryStorage<'scope>,

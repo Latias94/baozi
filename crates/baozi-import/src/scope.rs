@@ -37,7 +37,7 @@ use crate::resource_graph::{
 };
 use crate::source_scope::{
     FinalizedSourceScopeRecord, LiveSourceScopeRecord, SourceScopeEntityKind,
-    SourceScopeRecordBuilder, SourceScopeSelectionOutcome,
+    SourceScopeRecordBuilder, SourceScopeSelectionOutcome, SourceScopeSelectionRequest,
 };
 use crate::store::{
     ImportObservedWorkFailure, ImportStoreHost, ImportStoreHostError, ImportStoreReservation,
@@ -711,8 +711,12 @@ impl<'session> ParseScope<'session> {
     }
 
     /// Starts one incremental source-selection and closure evidence record.
+    ///
+    /// The outcome must identify this document. An explicit request must resolve
+    /// to the same declared source scene before any evidence storage is adopted.
     pub fn source_scope_builder(
         &self,
+        selection_request: SourceScopeSelectionRequest,
         selection_outcome: SourceScopeSelectionOutcome,
     ) -> ParseResult<SourceScopeRecordBuilder<'_, 'session>> {
         self.preflight_active()?;
@@ -721,7 +725,14 @@ impl<'session> ParseScope<'session> {
                 code: "source-scope-selection-document-mismatch",
             }));
         }
-        SourceScopeRecordBuilder::new(self, selection_outcome)
+        if let SourceScopeSelectionRequest::ExplicitScene { scene_index } = selection_request
+            && selection_outcome.scene_index() != Some(scene_index)
+        {
+            return Err(self.abort(ScopeAbortCause::DescriptorContract {
+                code: "source-scope-selection-request-mismatch",
+            }));
+        }
+        SourceScopeRecordBuilder::new(self, selection_request, selection_outcome)
     }
 
     /// Creates vector storage whose backing allocation cannot outlive this parse capability.

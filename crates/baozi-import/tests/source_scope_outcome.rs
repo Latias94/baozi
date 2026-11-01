@@ -10,7 +10,8 @@ use baozi_import::{
     LossPolicy, OptionCompileLimits, ParseResult, ParseScope, PreparedImportRequest,
     ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder, ResourceLimits,
     ResourceLimitsOverlay, SceneDraft, ScopeAbortCause, SourceScopeDetailState,
-    SourceScopeDisposition, SourceScopeEntityKind, SourceScopeSelectionOutcome, import_bytes,
+    SourceScopeDisposition, SourceScopeEntityKind, SourceScopeSelectionOutcome,
+    SourceScopeSelectionRequest, import_bytes,
 };
 use baozi_io::AssetPath;
 use baozi_operation::{CancellationOrigin, CancellationToken, ControlCause};
@@ -38,6 +39,51 @@ struct ScopeImporter {
 }
 
 struct SourceSemanticLossImporter;
+
+struct SelectionImporter {
+    requested: SourceScopeSelectionRequest,
+    actual_scene: Option<u64>,
+    document: &'static str,
+    fail_after_record: bool,
+}
+
+impl FormatImporter for SelectionImporter {
+    fn descriptor(&self) -> FormatDescriptor {
+        ScopeImporter {
+            exit: Exit::Success,
+            identities: &[],
+        }
+        .descriptor()
+    }
+
+    fn detect(
+        &self,
+        _probe: &baozi_import::Probe<'_>,
+        _hint: &ReadHint,
+        _scope: &DetectionScope<'_>,
+    ) -> DetectionResult<DetectionOutcome> {
+        Ok(DetectionOutcome::Match(ReadConfidence::Certain))
+    }
+
+    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+        let document = AssetPath::new(self.document).unwrap();
+        let actual = match self.actual_scene {
+            Some(index) => SourceScopeSelectionOutcome::declared_scene(document, index),
+            None => SourceScopeSelectionOutcome::parentless_node_projection(document),
+        };
+        let mut builder = scope.source_scope_builder(self.requested, actual)?;
+        builder.observe(
+            SourceScopeEntityKind::Scene,
+            SourceScopeDisposition::Selected,
+            "scene:main",
+        )?;
+        scope.record_source_scope(builder.finish()?)?;
+        if self.fail_after_record {
+            return Err(scope.format_failure(TestFormatFailure));
+        }
+        support::submit_minimal_scene(scope)
+    }
+}
 
 impl FormatImporter for SourceSemanticLossImporter {
     fn descriptor(&self) -> FormatDescriptor {
@@ -148,7 +194,10 @@ impl FormatImporter for CancelBeforeEmptyIdentityImporter {
     }
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        let mut builder = scope.source_scope_builder(selection_outcome())?;
+        let mut builder = scope.source_scope_builder(
+            SourceScopeSelectionRequest::DocumentDefault,
+            selection_outcome(),
+        )?;
         self.cancellation.cancel();
         builder.observe(
             SourceScopeEntityKind::Scene,
@@ -160,7 +209,10 @@ impl FormatImporter for CancelBeforeEmptyIdentityImporter {
 }
 
 fn record(scope: &ParseScope<'_>, identities: &[&str]) -> ParseResult<()> {
-    let mut builder = scope.source_scope_builder(selection_outcome())?;
+    let mut builder = scope.source_scope_builder(
+        SourceScopeSelectionRequest::DocumentDefault,
+        selection_outcome(),
+    )?;
     for (index, identity) in identities.iter().enumerate() {
         let disposition = if index == 0 {
             SourceScopeDisposition::Selected
@@ -174,7 +226,10 @@ fn record(scope: &ParseScope<'_>, identities: &[&str]) -> ParseResult<()> {
 }
 
 fn record_typed(scope: &ParseScope<'_>) -> ParseResult<()> {
-    let mut builder = scope.source_scope_builder(selection_outcome())?;
+    let mut builder = scope.source_scope_builder(
+        SourceScopeSelectionRequest::DocumentDefault,
+        selection_outcome(),
+    )?;
     for (kind, disposition, identity) in [
         (
             SourceScopeEntityKind::Scene,
@@ -488,9 +543,9 @@ fn typed_counts_remain_partitioned_by_source_entity_kind() {
     assert_eq!(
         record.digest().as_bytes(),
         &[
-            0x23, 0x7b, 0x0b, 0xd3, 0x89, 0x1c, 0xa7, 0x32, 0xb1, 0xba, 0x26, 0xa9, 0xe2, 0x2b,
-            0xfd, 0x84, 0x38, 0xb3, 0x7a, 0x2f, 0xf5, 0x24, 0x6a, 0xa6, 0x0d, 0xe8, 0xc4, 0x86,
-            0xe4, 0x62, 0xd6, 0x75,
+            0x96, 0x46, 0xce, 0x2f, 0x95, 0x79, 0x06, 0x8c, 0x9b, 0xa8, 0x22, 0xd1, 0xd9, 0xcc,
+            0x5f, 0x51, 0x89, 0x23, 0xdd, 0xe6, 0xb0, 0xa0, 0xd8, 0x6f, 0xf2, 0xd6, 0xf0, 0x98,
+            0x28, 0x9e, 0xbc, 0xb8,
         ]
     );
 }
@@ -810,9 +865,150 @@ fn full_digest_is_sensitive_to_tail_changes() {
     assert_eq!(
         canonical.source_scope_record().unwrap().digest().as_bytes(),
         &[
-            0x89, 0xbf, 0xba, 0x0d, 0xf1, 0x3b, 0x75, 0xf7, 0x39, 0xfe, 0xeb, 0xa5, 0x9e, 0xd5,
-            0xb0, 0x8a, 0xa6, 0x38, 0xa7, 0x32, 0x4b, 0x61, 0x6e, 0xb9, 0x04, 0x14, 0x0d, 0x66,
-            0x38, 0xf7, 0xc9, 0x75,
+            0x12, 0x7d, 0x39, 0xde, 0xd1, 0x01, 0x62, 0x9c, 0xe9, 0x5f, 0xc7, 0x40, 0xd9, 0xe8,
+            0xdc, 0x36, 0x09, 0x71, 0xce, 0x2a, 0xab, 0x10, 0xcb, 0x91, 0x77, 0x4b, 0xd7, 0x92,
+            0x01, 0x14, 0x0a, 0x0d,
         ]
     );
+}
+
+#[test]
+fn selection_request_is_retained_and_changes_the_digest_for_the_same_outcome() {
+    let mut digests = Vec::new();
+    for requested in [
+        SourceScopeSelectionRequest::DocumentDefault,
+        SourceScopeSelectionRequest::ExplicitScene { scene_index: 3 },
+    ] {
+        let mut limits = ResourceLimits::default();
+        limits.max_source_scope_items = 1;
+        limits.max_source_scope_digest_bytes = 10;
+        limits.max_source_scope_detail_count = 1;
+        limits.max_source_scope_detail_bytes = 10;
+        let request = compile_request(
+            SelectionImporter {
+                requested,
+                actual_scene: Some(3),
+                document: SOURCE,
+                fail_after_record: false,
+            },
+            limits,
+            LossPolicy::preserve_or_fail(),
+        );
+        let report = operation_result(import_bytes(
+            &request,
+            AssetPath::new(SOURCE).unwrap(),
+            b"scope",
+            ImportOperationControl::default(),
+        ))
+        .unwrap();
+        let record = report.source_scope_record().unwrap();
+        assert_eq!(record.selection_request(), &requested);
+        assert_eq!(record.selection_outcome().scene_index(), Some(3));
+        assert_eq!(record.detail_state(), SourceScopeDetailState::Detailed);
+        assert_eq!(record.details().count(), 1);
+        digests.push(record.digest());
+        assert_eq!(
+            report
+                .ledger()
+                .dimension(ImportDimension::SourceScopeDigestBytes)
+                .unwrap()
+                .consumed(),
+            10
+        );
+    }
+    assert_ne!(digests[0], digests[1]);
+}
+
+#[test]
+fn invalid_selection_request_outcome_pairs_are_rejected_before_evidence_admission() {
+    for (requested, actual_scene, document, code) in [
+        (
+            SourceScopeSelectionRequest::ExplicitScene { scene_index: 3 },
+            Some(4),
+            SOURCE,
+            "source-scope-selection-request-mismatch",
+        ),
+        (
+            SourceScopeSelectionRequest::ExplicitScene { scene_index: 0 },
+            None,
+            SOURCE,
+            "source-scope-selection-request-mismatch",
+        ),
+        (
+            SourceScopeSelectionRequest::DocumentDefault,
+            Some(3),
+            "other.scope",
+            "source-scope-selection-document-mismatch",
+        ),
+    ] {
+        let request = compile_request(
+            SelectionImporter {
+                requested,
+                actual_scene,
+                document,
+                fail_after_record: false,
+            },
+            ResourceLimits::default(),
+            LossPolicy::preserve_or_fail(),
+        );
+        let failure = operation_result(import_bytes(
+            &request,
+            AssetPath::new(SOURCE).unwrap(),
+            b"scope",
+            ImportOperationControl::default(),
+        ))
+        .unwrap_err();
+        assert!(matches!(
+            failure.cause(),
+            ImportCause::Scope(abort)
+                if matches!(abort.cause(), ScopeAbortCause::DescriptorContract {code: actual} if *actual == code)
+        ));
+        assert_source_scope_bundle_unpublished(&failure);
+        assert_eq!(failure.ledger().current_live_bytes(), 0);
+    }
+}
+
+#[test]
+fn collapsed_selection_request_survives_later_failure_with_the_complete_digest() {
+    let requested = SourceScopeSelectionRequest::ExplicitScene { scene_index: 3 };
+    let mut digests = Vec::new();
+    for collapse in [false, true] {
+        let mut limits = ResourceLimits::default();
+        limits.max_source_scope_detail_count = if collapse { 0 } else { 1 };
+        let request = compile_request(
+            SelectionImporter {
+                requested,
+                actual_scene: Some(3),
+                document: SOURCE,
+                fail_after_record: true,
+            },
+            limits,
+            provenance_loss_policy(),
+        );
+        let failure = operation_result(import_bytes(
+            &request,
+            AssetPath::new(SOURCE).unwrap(),
+            b"scope",
+            ImportOperationControl::default(),
+        ))
+        .unwrap_err();
+        let record = failure.source_scope_record().unwrap();
+        assert_eq!(record.selection_request(), &requested);
+        assert_eq!(record.selection_outcome().scene_index(), Some(3));
+        assert_eq!(record.counts(SourceScopeEntityKind::Scene).selected(), 1);
+        assert_eq!(record.details().count(), usize::from(!collapse));
+        assert_eq!(record.collapsed_detail_count(), u64::from(collapse));
+        assert_eq!(
+            record.detail_state(),
+            if collapse {
+                SourceScopeDetailState::Collapsed
+            } else {
+                SourceScopeDetailState::Detailed
+            }
+        );
+        assert_eq!(failure.loss_evidence().len(), usize::from(collapse));
+        assert_eq!(failure.ledger().current_live_bytes(), 0);
+        digests.push(record.digest());
+    }
+    assert_eq!(digests[0], digests[1]);
 }

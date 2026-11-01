@@ -40,6 +40,10 @@ separate from source admission.
   resolver stability. Canonical dependency resources remain session-opaque until import and core
   expose a sealed stable-evidence bridge.
 - Baozi wraps many `gltf-rs` calls in `safe_gltf`, which uses `catch_unwind` in normal Rust builds to turn backend panics into `gltf.parser_panicked` format failures.
+- Explicit scene selection exposed the optional scene-root-list deserialization defect: a legal
+  empty scene omits `nodes`, but upstream required that field. The maintained model now defaults
+  it to the existing empty root vector. Direct JSON/GLB and serialization-roundtrip regressions
+  accompany the correction; see the [scene-selection review](../reviews/2026-11-01-gltf-scene-selection.md).
 
 ## E Backend Decision: Narrow Maintained Backport
 
