@@ -271,6 +271,12 @@ pass scheduler. A short campaign is exploration evidence, not proof that all edi
 These items are documented gaps, not additional completion requirements for the initial tranche.
 Select the next slice using its concrete asset/consumer need and the V1 observations.
 
+Follow-on candidates 1 and 2 are completed by the
+[attribute-owned tangent slice](2026-11-01-002-feat-attribute-owned-tangents-plan.md). Candidate 3
+is completed by the [base-pose world-query slice](2026-11-01-003-feat-base-pose-world-queries-plan.md)
+in `947a92b`, with [executed evidence](../reviews/2026-11-01-base-pose-world-queries.md).
+The remaining rows are ordered candidates, not implicitly authorized implementation work.
+
 | Order | Candidate and prerequisite | Required boundary and acceptance when selected |
 | --- | --- | --- |
 | 1 | Tangent convention ownership, before tangent generation | Move construction and encoding from `SceneSpace` to each Tangent attribute descriptor. Thread authoring → retained table → borrowed reader → validation → snapshot → conversion; delete replaced global fields and schema authority. Same primitive may have Vertex and Corner Tangent, so primitive-wide ownership is insufficient. Mixed authored-unknown and generated-known conventions coexist; removing one/last Tangent leaves no orphan declaration. Reflection checks each stream and fails atomically on unsupported encoding. No default/override compatibility chain. |

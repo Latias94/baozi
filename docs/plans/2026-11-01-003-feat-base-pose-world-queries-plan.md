@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: completed
 date: 2026-11-01
 type: feat
 ---
@@ -10,6 +10,12 @@ This slice adopts follow-on candidate 3 from the completed
 [asset workflow expansion plan](2026-11-01-001-feat-asset-workflow-expansion-plan.md).
 The implementation baseline is `6c0b1ea`. Tangent ownership and generation remain completed;
 this work does not select another format, deformation evaluator, or Scene ownership rewrite.
+
+Completed on 2026-11-01 in `947a92b`. The
+[execution review](../reviews/2026-11-01-base-pose-world-queries.md) records independent review,
+the corrected 20-test core query suite, 2,565 passing Windows workspace tests, 29 passing standalone
+asset-consumer tests, strict Clippy, 58 doctests, rustdoc, formatting, native consumer execution and
+two wasm compile-only checks. Later follow-on candidates remain unselected.
 
 ## Contract and implementation
 

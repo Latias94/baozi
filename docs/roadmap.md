@@ -157,9 +157,9 @@ consumer needs it, before choosing a batch API.
 
 Tangent construction/encoding declarations now belong to each Tangent attribute, and explicit
 single-primitive Triangle UV Derivative generation is implemented. Read-only base-pose world
-transforms and static instance/Scene bounds are the next selected
-[execution slice](plans/2026-11-01-003-feat-base-pose-world-queries-plan.md), preserving the existing
-typed Scene architecture. Later selected-profile work should favor glTF primitive modes, sparse
+transforms and static instance/Scene bounds are also
+[completed](reviews/2026-11-01-base-pose-world-queries.md), preserving the existing typed Scene
+architecture. Later selected-profile work should favor glTF primitive modes, sparse
 accessors, additional influence sets and a concrete typed extension slice before starting another
 broad format. Device draw limits remain a concrete consumer candidate.
 
