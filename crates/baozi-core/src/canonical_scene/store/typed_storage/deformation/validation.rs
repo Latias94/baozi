@@ -6,7 +6,9 @@
 //! reflections, and authored signed zeros remain valid and are never decomposed or rewritten.
 
 use crate::canonical_scene::store::typed_storage::validation::TypedStorageValidationControl;
-use crate::canonical_scene::store::typed_storage::{GeometryStorage, NodeStorage, TableRange};
+use crate::canonical_scene::store::typed_storage::{
+    GeometryStorage, NodeStorage, StoredAttributeSemantic, TableRange,
+};
 use crate::deform::{MorphDeltaSemantic, SkinMatrixSpace, SkinMatrixSpaces};
 use crate::entity::{MAX_ENTITY_NAME_BYTES, validate_entity_name_str};
 
@@ -329,8 +331,21 @@ impl DeformationStorage {
             let primitive_start = geometry.logical_meshes[mesh_index].primitives.start();
             for (ordinal, primitive) in primitives.iter().enumerate() {
                 let primitive_index = primitive_start + ordinal;
-                let Some((targets, influences)) = run(control, || {
+                let Some((targets, influences, base_fields)) = run(control, || {
                     let source = geometry.primitives.get(primitive_index)?;
+                    let attributes = source.attributes.get(&geometry.attributes)?;
+                    // Geometry is centrally validated first: sorted built-ins have at most one
+                    // Vertex Position and two domains each for Normal/Tangent. Their complete
+                    // prefix is therefore fixed-size, independent of UV/custom field counts.
+                    let mut base_fields = [false; 3];
+                    for attribute in attributes.iter().take(5) {
+                        match attribute.semantic {
+                            StoredAttributeSemantic::Position => base_fields[0] = true,
+                            StoredAttributeSemantic::Normal => base_fields[1] = true,
+                            StoredAttributeSemantic::Tangent => base_fields[2] = true,
+                            _ => {}
+                        }
+                    }
                     let targets = consume(
                         primitive.morph_targets,
                         &self.morph_targets,
@@ -350,9 +365,13 @@ impl DeformationStorage {
                         )?;
                         (u64::try_from(offsets.len()).ok()? == u64::from(source.vertex_count) + 1)
                             .then_some(())?;
-                        Some((targets, Some((offsets, joints, rows.influences.start()))))
+                        Some((
+                            targets,
+                            Some((offsets, joints, rows.influences.start())),
+                            base_fields,
+                        ))
                     } else {
-                        Some((targets, None))
+                        Some((targets, None, base_fields))
                     }
                 })?
                 else {
@@ -376,6 +395,7 @@ impl DeformationStorage {
                     primitive.morph_targets.start(),
                     targets,
                     geometry.primitives[primitive_index].vertex_count,
+                    base_fields,
                     cursors,
                 )? {
                     return Ok(false);
@@ -441,6 +461,7 @@ impl DeformationStorage {
         target_start: usize,
         targets: &[StoredMorphTarget],
         vertex_count: u32,
+        base_fields: [bool; 3],
         cursors: &mut Cursors,
     ) -> Result<bool, C::Error> {
         for (ordinal, target) in targets.iter().enumerate() {
@@ -458,6 +479,7 @@ impl DeformationStorage {
                 let Some(indices) = run(control, || {
                     let semantic = semantic_ordinal(delta.semantic);
                     (delta.target.0 as usize == target_start.checked_add(ordinal)?
+                        && base_fields[semantic as usize]
                         && previous_semantic.is_none_or(|previous| previous < semantic))
                     .then_some(())?;
                     previous_semantic = Some(semantic);

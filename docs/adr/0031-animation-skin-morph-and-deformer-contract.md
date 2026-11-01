@@ -120,6 +120,12 @@ A logical mesh owns an ordered `MorphTargetDefinition` list and an equally sized
 producer contract is relative deltas, matching glTF: each primitive carries position, normal, and
 three-component tangent deltas keyed by target; tangent handedness is not morphed. Each delta payload
 is finite `F32 x 3` over that primitive's Vertex domain and can be dense or sparse under ADR 0030.
+Every delta descriptor requires a corresponding base attribute on the same primitive, including
+an explicitly empty sparse delta. Central validation checks this independently of importer or edit
+entry points. Normal replacement rejects retained Normal deltas, and Tangent removal rejects
+retained Tangent deltas; Position-only morphs remain usable through those normal edits. Tangent
+generation conservatively rejects any authored geometric morph delta until an explicit rebasing
+contract exists. A preserve-existing no-op retains the original Scene and needs no rebasing.
 Absolute/replacement or normalized morph methods do not gain concrete variants until a supported
 producer defines their combination semantics and fixtures.
 
@@ -172,8 +178,10 @@ Every channel declares:
 that component of the materialized TRS base pose. For mesh-instance morph weights it evaluates to the
 instance override when present, otherwise to the logical-mesh default weights. It never means zero,
 the nearest key, or mutable state left by another clip. A format with a different source-defined
-behavior must preserve it through an admitted namespaced extrapolation instead of overloading
-`SourceDefault`.
+behavior must select the matching concrete extrapolation or an admitted namespaced extrapolation
+instead of overloading `SourceDefault`. glTF clamps before and after the key interval to its first
+and last key values; both extrapolation tags are therefore `Constant`, independently of the node
+base pose, mesh default weights or instance weight override.
 
 Within one clip, `(target owner, target semantic)` is unique. Two channels cannot both write the same
 node translation, rotation, or scale, or the same mesh-instance morph-weight vector. Baozi does not

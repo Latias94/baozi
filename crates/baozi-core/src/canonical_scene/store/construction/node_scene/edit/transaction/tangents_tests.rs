@@ -80,26 +80,24 @@ fn tangent_preflight_rejects_every_geometric_morph_delta_only_on_the_selected_ta
         MorphDeltaSemantic::Tangent,
     ] {
         source.morph_deltas[0].semantic = semantic;
-        assert!(check_tangent_morphs(&source, 0, &mut Control::default()).is_ok());
+        assert!(check_morph_dependencies(&source, 0, |_| true, &mut Control::default()).is_ok());
         assert!(matches!(
-            check_tangent_morphs(&source, 1, &mut Control::default()),
-            Err(SceneEditRejection::Compile(
-                SceneEditCompileError::InvalidSource
-            ))
+            check_morph_dependencies(&source, 1, |_| true, &mut Control::default()),
+            Err(SceneEditRejection::MorphDependency { semantic: actual }) if actual == semantic
         ));
         assert_eq!(source.morph_deltas.len(), 1);
         assert!(source.morph_values.is_empty());
     }
     source.morph_targets[0].deltas = TableRange::new(0, 0);
     let mut control = Control::default();
-    assert!(check_tangent_morphs(&source, 1, &mut control).is_ok());
+    assert!(check_morph_dependencies(&source, 1, |_| true, &mut control).is_ok());
     assert_eq!(control.completed, 2);
     let mut control = Control {
         reject: true,
         ..Control::default()
     };
     assert!(matches!(
-        check_tangent_morphs(&source, 1, &mut control),
+        check_morph_dependencies(&source, 1, |_| true, &mut control),
         Err(SceneEditRejection::Runtime(_))
     ));
     assert_eq!(control.completed, 0);

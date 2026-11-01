@@ -1,5 +1,6 @@
 mod common;
 
+use baozi_core::AnimationExtrapolation;
 use baozi_format_gltf::GltfFailureCode;
 use baozi_import::{
     AnimationInterpolation, AnimationTarget, ImportCause, ImportDiagnostic, ImportDimension,
@@ -198,6 +199,73 @@ fn cubic_weights_split_complete_width_two_triplets() -> TestResult<()> {
     assert_eq!(channel.values(), &[-0.25, 0.5, 1.25, -2.0]);
     assert_eq!(channel.in_tangents(), Some(&[11.0, 12.0, 31.0, 32.0][..]));
     assert_eq!(channel.out_tangents(), Some(&[21.0, 22.0, 41.0, 42.0][..]));
+    Ok(())
+}
+
+#[test]
+fn morph_endpoint_tags_clamp_instead_of_using_static_weights() -> TestResult<()> {
+    for (source_interpolation, interpolation, output) in [
+        ("STEP", AnimationInterpolation::Step, WEIGHTS.as_slice()),
+        ("LINEAR", AnimationInterpolation::Linear, WEIGHTS.as_slice()),
+        (
+            "CUBICSPLINE",
+            AnimationInterpolation::CubicSpline,
+            CUBIC.as_slice(),
+        ),
+    ] {
+        let (mut document, binary) = fixture(source_interpolation, output);
+        document["nodes"][0]["weights"] = json!([0.75, 0.625]);
+        document["animations"][0]["channels"] = json!([
+            {"sampler": 0, "target": {"node": 0, "path": "weights"}},
+            {"sampler": 0, "target": {"node": 2, "path": "weights"}}
+        ]);
+        let (report, diagnostics) = import_assets(
+            "weights.glb",
+            [("weights.glb", glb(&document, &binary))],
+            GltfTestOptions::memory(),
+        )?;
+        assert!(diagnostics.is_empty());
+        let scene = report.scene();
+        let instance_a = scene
+            .mesh_instances()
+            .find(|instance| instance.node().name() == Some("A"))
+            .unwrap();
+        let instance_b = scene
+            .mesh_instances()
+            .find(|instance| instance.node().name() == Some("B"))
+            .unwrap();
+        assert_eq!(instance_a.morph_weights(), Some(&[0.75, 0.625][..]));
+        assert_eq!(instance_b.morph_weights(), None);
+        assert_eq!(instance_a.mesh().id(), instance_b.mesh().id());
+        assert_eq!(instance_a.mesh().default_morph_weights(), &[0.25, -0.5]);
+        let clip = scene.animation_clips().next().unwrap();
+        assert_eq!(clip.channel_count(), 2);
+        for (index, instance) in [instance_a, instance_b].into_iter().enumerate() {
+            let channel = clip.channel(index).unwrap();
+            assert_eq!(
+                channel.target(),
+                AnimationTarget::MeshInstanceMorphWeights(instance.id())
+            );
+            assert_eq!(channel.interpolation(), interpolation);
+            assert_eq!(channel.key_times(), &[0.0, 1.0]);
+            assert_eq!(channel.value_width(), 2);
+            assert_eq!(channel.values(), &WEIGHTS);
+            let source_default = instance
+                .morph_weights()
+                .unwrap_or_else(|| instance.mesh().default_morph_weights());
+            assert_ne!(&channel.values()[..2], source_default);
+            assert_ne!(&channel.values()[2..], source_default);
+            assert_eq!(
+                (channel.pre_extrapolation(), channel.post_extrapolation()),
+                (
+                    AnimationExtrapolation::Constant,
+                    AnimationExtrapolation::Constant,
+                ),
+                "{source_interpolation} morph endpoints for {:?}",
+                instance.node().name()
+            );
+        }
+    }
     Ok(())
 }
 

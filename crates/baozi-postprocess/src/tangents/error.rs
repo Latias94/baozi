@@ -162,6 +162,7 @@ impl From<crate::scene_edit::EditFailure> for TangentFailure {
             EditCause::Control { cause } => TangentCause::Control { cause },
             EditCause::FinalControl => TangentCause::FinalControl,
             EditCause::CoreRejected => TangentCause::CoreRejected,
+            EditCause::MorphDependency { .. } => TangentCause::MorphDeltas,
             EditCause::SpaceIssue { .. } => TangentCause::CoreRejected,
             EditCause::CentralValidation => TangentCause::CentralValidation,
             EditCause::Publication => TangentCause::Publication,

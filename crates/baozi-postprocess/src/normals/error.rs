@@ -56,6 +56,10 @@ pub enum NormalCause {
     MultipleNormalFields,
     #[error("normal generation cannot remove multiple authored TANGENT domains")]
     MultipleTangentFields,
+    #[error("normal generation would invalidate authored {semantic:?} morph deltas")]
+    MorphDeltas {
+        semantic: baozi_core::MorphDeltaSemantic,
+    },
     #[error("normal generation failed: {issue:?}")]
     Issue { issue: NormalIssue },
     #[error("normal generation size or work bound overflowed")]
@@ -184,6 +188,7 @@ impl From<crate::scene_edit::EditFailure> for NormalFailure {
             EditCause::Control { cause } => NormalCause::Control { cause },
             EditCause::FinalControl => NormalCause::FinalControl,
             EditCause::CoreRejected => NormalCause::CoreRejected,
+            EditCause::MorphDependency { semantic } => NormalCause::MorphDeltas { semantic },
             EditCause::SpaceIssue { .. } => NormalCause::CoreRejected,
             EditCause::CentralValidation => NormalCause::CentralValidation,
             EditCause::Publication => NormalCause::Publication,

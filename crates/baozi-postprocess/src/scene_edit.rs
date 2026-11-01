@@ -120,6 +120,9 @@ pub(crate) enum EditCause {
     },
     FinalControl,
     CoreRejected,
+    MorphDependency {
+        semantic: baozi_core::MorphDeltaSemantic,
+    },
     SpaceIssue {
         issue: SceneSpaceConversionIssue,
     },
@@ -416,6 +419,9 @@ fn core_requested(cause: &SceneEditRejection) -> EditCause {
     match cause {
         SceneEditRejection::Runtime(cause) => cause.clone().into(),
         SceneEditRejection::Space(issue) => EditCause::SpaceIssue { issue: *issue },
+        SceneEditRejection::MorphDependency { semantic } => EditCause::MorphDependency {
+            semantic: *semantic,
+        },
         _ => EditCause::CoreRejected,
     }
 }

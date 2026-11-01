@@ -303,7 +303,7 @@ fn submit_deformed(
     });
     // Equal positions at vertices 0/1 must still address different influence and delta rows.
     let positions = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-    let attributes = std::array::from_fn::<_, 3, _>(|_| {
+    let mut attributes = Vec::from(std::array::from_fn::<_, 3, _>(|_| {
         GeometryAttributeAuthoring::f32(
             AttributeSemantic::Position,
             AttributeDomain::Vertex,
@@ -311,25 +311,35 @@ fn submit_deformed(
             &positions,
             Presence::Absent,
         )
-    });
+    }));
+    attributes.insert(
+        1,
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Normal,
+            AttributeDomain::Vertex,
+            3,
+            &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+            Presence::Absent,
+        ),
+    );
     let primitives = [
         GeometryPrimitiveAuthoring::new(
             topology,
             Presence::Present(&[0, 1, 2, 0, 2, 1]),
             Presence::Absent,
-            AuthoringRange::new(0, 1),
+            AuthoringRange::new(0, 2),
         ),
         GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::TriangleList,
             Presence::Present(&[2, 1, 0]),
             Presence::Absent,
-            AuthoringRange::new(1, 1),
+            AuthoringRange::new(2, 1),
         ),
         GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::TriangleList,
             Presence::Absent,
             Presence::Absent,
-            AuthoringRange::new(2, 1),
+            AuthoringRange::new(3, 1),
         ),
     ];
     let meshes = [
@@ -493,7 +503,7 @@ fn submit_deformed(
     owners.extend((0..4).map(|index| ProfileOwner::Node(NodeLocalId::new(index))));
     owners.extend((0..2).map(ProfileOwner::LogicalMesh));
     owners.extend((0..3).map(ProfileOwner::Primitive));
-    owners.extend((0..3).map(ProfileOwner::Attribute));
+    owners.extend((0..attributes.len() as u32).map(ProfileOwner::Attribute));
     owners.extend((0..2).map(ProfileOwner::MeshInstance));
     owners.extend((0..2).map(ProfileOwner::Skin));
     owners.extend((0..5).map(ProfileOwner::MorphDefinition));

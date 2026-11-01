@@ -3,7 +3,8 @@ use crate::attribute::AttributeDomain;
 use crate::canonical_scene::store::production::input::deformation::MorphTargetIdentity;
 use crate::canonical_scene::store::typed_storage::{
     StoredAttribute, StoredAttributePayload, StoredAttributeSemantic, StoredLogicalMesh,
-    StoredLogicalMeshIndex, StoredMeshInstance, StoredNode, StoredPrimitive, StoredTransform,
+    StoredLogicalMeshIndex, StoredMeshInstance, StoredNode, StoredPrimitive,
+    StoredTangentConventions, StoredTransform,
 };
 use crate::deform::SkinMatrixCorrection;
 use crate::geometry::TopologyKind;
@@ -101,7 +102,8 @@ fn fixture() -> Fixture {
         names: Vec::new(),
     };
     let mut geometry = empty_geometry();
-    for (index, (vertices, start)) in [(3, 0), (0, 9), (1, 9)].into_iter().enumerate() {
+    for (index, (vertices, start)) in [(3, 0), (0, 30), (1, 30)].into_iter().enumerate() {
+        let attribute_start = geometry.attributes.len();
         geometry.attributes.push(StoredAttribute {
             semantic: StoredAttributeSemantic::Position,
             tangent_conventions: None,
@@ -113,6 +115,26 @@ fn fixture() -> Fixture {
                 vertices as usize * 3,
             )),
         });
+        if index == 0 {
+            geometry.attributes.extend([
+                StoredAttribute {
+                    semantic: StoredAttributeSemantic::Normal,
+                    tangent_conventions: None,
+                    domain: AttributeDomain::Vertex,
+                    lanes: 3,
+                    element_count: vertices,
+                    payload: StoredAttributePayload::DenseF32(TableRange::new(9, 9)),
+                },
+                StoredAttribute {
+                    semantic: StoredAttributeSemantic::Tangent,
+                    tangent_conventions: Some(StoredTangentConventions::UNKNOWN),
+                    domain: AttributeDomain::Vertex,
+                    lanes: 4,
+                    element_count: vertices,
+                    payload: StoredAttributePayload::DenseF32(TableRange::new(18, 12)),
+                },
+            ]);
+        }
         geometry.primitives.push(StoredPrimitive {
             topology: if index == 2 {
                 TopologyKind::Points
@@ -125,10 +147,13 @@ fn fixture() -> Fixture {
             polygon_boundaries: None,
             indices: None,
             material: None,
-            attributes: TableRange::new(index, 1),
+            attributes: TableRange::new(
+                attribute_start,
+                geometry.attributes.len() - attribute_start,
+            ),
         });
     }
-    geometry.f32_values = vec![0.0; 12];
+    geometry.f32_values = vec![0.0; 33];
     geometry.logical_meshes = vec![
         StoredLogicalMesh {
             primitives: TableRange::new(0, 2),
@@ -698,6 +723,18 @@ fn morphs_check_semantic_order_sparse_shape_and_all_weight_value_contents() {
         }),
         ("defaults width", |f| {
             f.storage.logical_morphs[0].default_weights = TableRange::new(0, 1)
+        }),
+    ]);
+}
+
+#[test]
+fn morph_delta_descriptors_require_corresponding_base_attributes() {
+    reject_cases(&[
+        ("normal delta without base normal", |f| {
+            f.geometry.attributes[1].semantic = StoredAttributeSemantic::Texcoord(0);
+        }),
+        ("empty sparse tangent delta without base tangent", |f| {
+            f.geometry.attributes[2].semantic = StoredAttributeSemantic::Texcoord(0);
         }),
     ]);
 }

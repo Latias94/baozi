@@ -166,7 +166,7 @@ fn deformation_scene(account: &PhysicalStorageAccount) -> NodeSceneSuccessParts 
         Presence::Absent,
     ); 3];
     let positions = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-    let attributes = std::array::from_fn::<_, 3, _>(|_| {
+    let mut attributes = Vec::from(std::array::from_fn::<_, 3, _>(|_| {
         GeometryAttributeAuthoring::f32(
             AttributeSemantic::Position,
             AttributeDomain::Vertex,
@@ -174,13 +174,37 @@ fn deformation_scene(account: &PhysicalStorageAccount) -> NodeSceneSuccessParts 
             &positions,
             Presence::Absent,
         )
-    });
+    }));
+    attributes.insert(
+        1,
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Normal,
+            AttributeDomain::Vertex,
+            3,
+            &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+            Presence::Absent,
+        ),
+    );
+    attributes.insert(
+        2,
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Tangent,
+            AttributeDomain::Vertex,
+            4,
+            &[1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0],
+            Presence::Absent,
+        ),
+    );
     let primitives = std::array::from_fn::<_, 3, _>(|index| {
         GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::Points,
             Presence::Absent,
             Presence::Absent,
-            AuthoringRange::new(index as u32, 1),
+            if index == 0 {
+                AuthoringRange::new(0, 3)
+            } else {
+                AuthoringRange::new(index as u32 + 2, 1)
+            },
         )
     });
     let meshes = std::array::from_fn::<_, 3, _>(|index| {

@@ -635,6 +635,10 @@ fn map_animation_space(error: AnimationSpacePlanError<StoreRuntimeError>) -> Sce
 
 #[derive(Debug, Error)]
 pub enum SceneEditRejection {
+    #[error("the geometry edit invalidates authored {semantic:?} morph deltas")]
+    MorphDependency {
+        semantic: crate::deform::MorphDeltaSemantic,
+    },
     #[error("space conversion is unsupported: {0}")]
     Space(#[from] SceneSpaceConversionIssue),
     #[error("the Scene-edit target or origin relation is invalid")]
@@ -827,9 +831,20 @@ impl<'a> SceneEditTransaction<'a> {
                 (EditStoragePlan::Triangulation(plan), pending)
             }
             EditRequest::Normals(replacement) => {
+                let target = target_row.ok_or(SceneEditCompileError::InvalidTarget)?;
+                check_morph_dependencies(
+                    input.as_node_scene().read_deformation(),
+                    target,
+                    |semantic| match semantic {
+                        crate::deform::MorphDeltaSemantic::Position => false,
+                        crate::deform::MorphDeltaSemantic::Normal => replacement.replace_existing,
+                        crate::deform::MorphDeltaSemantic::Tangent => replacement.remove_tangents,
+                    },
+                    semantic,
+                )?;
                 let plan = GeometryNormalsPlan::try_new(
                     input.as_node_scene().read_geometry(),
-                    target_row.ok_or(SceneEditCompileError::InvalidTarget)?,
+                    target,
                     replacement.normals,
                     if replacement.replace_existing {
                         NormalWritePolicy::Replace
@@ -860,7 +875,12 @@ impl<'a> SceneEditTransaction<'a> {
             }
             EditRequest::Tangents(replacement) => {
                 let target = target_row.ok_or(SceneEditCompileError::InvalidTarget)?;
-                check_tangent_morphs(input.as_node_scene().read_deformation(), target, semantic)?;
+                check_morph_dependencies(
+                    input.as_node_scene().read_deformation(),
+                    target,
+                    |_| true,
+                    semantic,
+                )?;
                 let plan = GeometryTangentsPlan::try_new(
                     input.as_node_scene().read_geometry(),
                     target,
@@ -1124,11 +1144,12 @@ fn map_plan(cause: NodeSceneEditPlanError) -> SceneEditRejection {
     }
 }
 
-/// A generated base tangent would no longer describe any authored geometric morph. Even empty
-/// sparse delta streams are authored deltas, so reject their descriptors before publication.
-fn check_tangent_morphs<C: TypedStorageBuildControl<Error = StoreRuntimeError>>(
+/// Check the edit's dependency closure before any replacement is materialized. Empty sparse
+/// streams are authored descriptors too; an edit cannot silently discard their base meaning.
+fn check_morph_dependencies<C: TypedStorageBuildControl<Error = StoreRuntimeError>>(
     deformation: &crate::canonical_scene::store::typed_storage::deformation::DeformationStorage,
     target: usize,
+    invalidates: impl Fn(crate::deform::MorphDeltaSemantic) -> bool,
     control: &mut C,
 ) -> Result<(), SceneEditRejection> {
     let targets = control.run_unit(|| {
@@ -1139,15 +1160,18 @@ fn check_tangent_morphs<C: TypedStorageBuildControl<Error = StoreRuntimeError>>(
             .ok_or(SceneEditCompileError::InvalidSource)
     })??;
     for target in targets {
-        let valid = control.run_unit(|| {
+        let deltas = control.run_unit(|| {
             target
                 .deltas
-                .checked(deformation.morph_deltas.len())
-                .is_some()
-                && target.deltas.is_empty()
-        })?;
-        if !valid {
-            return Err(SceneEditCompileError::InvalidSource.into());
+                .get(&deformation.morph_deltas)
+                .ok_or(SceneEditCompileError::InvalidSource)
+        })??;
+        for delta in deltas {
+            if control.run_unit(|| invalidates(delta.semantic))? {
+                return Err(SceneEditRejection::MorphDependency {
+                    semantic: delta.semantic,
+                });
+            }
         }
     }
     Ok(())

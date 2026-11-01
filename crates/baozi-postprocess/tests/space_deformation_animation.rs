@@ -33,9 +33,9 @@ use baozi_import::{
 };
 use baozi_io::AssetPath;
 use baozi_postprocess::{
-    PostProcessControl, PostProcessResourceEvidence, PostProcessRunDisposition,
-    PostProcessRunError, SpaceConversionCause, SpaceConversionIssue, SpaceConversionOptions,
-    convert_scene_space,
+    ExistingNormals, NormalCause, NormalOptions, PostProcessControl, PostProcessResourceEvidence,
+    PostProcessRunDisposition, PostProcessRunError, SpaceConversionCause, SpaceConversionIssue,
+    SpaceConversionOptions, TangentHandling, convert_scene_space, generate_normals,
 };
 
 const FORMAT: &str = "dev.baozi.test.space-deformation-animation";
@@ -116,6 +116,11 @@ const LINEAR_ROTATION: [f32; 8] = [-0.0, 0.0, -0.0, 1.0, 0.0, -0.0, 0.0, -1.0];
 #[derive(Debug, Clone, Copy)]
 enum Fixture {
     Valid,
+    NormalEdit {
+        semantic: MorphDeltaSemantic,
+        sparse: bool,
+        empty: bool,
+    },
     CorrectionOverflow,
     InverseBindOverflow,
     DenseMorphOverflow,
@@ -165,7 +170,7 @@ impl FormatImporter for DeformationAnimationImporter {
         let mut translation_out = TRANSLATION_OUT;
         let mut late_translation = LATE_TRANSLATION;
         match self.fixture {
-            Fixture::Valid => {}
+            Fixture::Valid | Fixture::NormalEdit { .. } => {}
             Fixture::CorrectionOverflow => correction.cols[3][2] = f32::MAX,
             Fixture::InverseBindOverflow => inverse_binds[1].cols[3][0] = f32::MAX,
             Fixture::DenseMorphOverflow => dense_position[8] = f32::MAX,
@@ -321,12 +326,52 @@ impl FormatImporter for DeformationAnimationImporter {
                 values: &[],
             },
         )];
-        let targets = [
+        let full_targets = [
             PrimitiveMorphTargetAuthoring::new(&dense_deltas),
             PrimitiveMorphTargetAuthoring::new(&sparse_deltas),
             PrimitiveMorphTargetAuthoring::new(&[]),
             PrimitiveMorphTargetAuthoring::new(&zero_delta),
         ];
+        let empty_sparse = [MorphDeltaAuthoring::new(
+            match self.fixture {
+                Fixture::NormalEdit { semantic, .. } => semantic,
+                _ => MorphDeltaSemantic::Position,
+            },
+            MorphDeltaPayloadAuthoring::Sparse {
+                logical_count: 3,
+                indices: &[],
+                values: &[],
+            },
+        )];
+        let edit_targets;
+        let (targets, delta_count) = if let Fixture::NormalEdit {
+            semantic,
+            sparse,
+            empty,
+        } = self.fixture
+        {
+            let ordinal = match semantic {
+                MorphDeltaSemantic::Position => 0,
+                MorphDeltaSemantic::Normal => 1,
+                MorphDeltaSemantic::Tangent => 2,
+            };
+            let deltas = if empty {
+                &empty_sparse[..]
+            } else if sparse {
+                &sparse_deltas[ordinal..ordinal + 1]
+            } else {
+                &dense_deltas[ordinal..ordinal + 1]
+            };
+            edit_targets = [
+                PrimitiveMorphTargetAuthoring::new(deltas),
+                PrimitiveMorphTargetAuthoring::new(&[]),
+                PrimitiveMorphTargetAuthoring::new(&[]),
+                PrimitiveMorphTargetAuthoring::new(&[]),
+            ];
+            (&edit_targets, 1)
+        } else {
+            (&full_targets, 7)
+        };
         let influences = [
             InfluenceAuthoring::new(1, 0.25, 1),
             InfluenceAuthoring::new(0, 0.75, 0),
@@ -334,7 +379,7 @@ impl FormatImporter for DeformationAnimationImporter {
         ];
         let primitive_deformations = [PrimitiveDeformationAuthoring::new(
             Presence::Present(InfluenceRowsAuthoring::new(&[0, 2, 2, 3], &influences)),
-            &targets,
+            targets,
         )];
         let instance_deformations = [
             MeshInstanceDeformationAuthoring::new(
@@ -479,7 +524,7 @@ impl FormatImporter for DeformationAnimationImporter {
             ProfileOwner::Skin(0),
         ];
         owners.extend((0..4).map(ProfileOwner::MorphDefinition));
-        owners.extend((0..7).map(ProfileOwner::MorphDelta));
+        owners.extend((0..delta_count).map(ProfileOwner::MorphDelta));
         owners.extend((0..4).map(ProfileOwner::AnimationClip));
         owners.extend((0..6).map(ProfileOwner::AnimationChannel));
         let owners: Vec<_> = owners
@@ -566,6 +611,117 @@ fn snapshot(scene: &ValidatedScene) -> SceneSnapshot {
     assert!(!snapshot.preview_bytes_truncated());
     assert!(!snapshot.preview_items_truncated());
     snapshot
+}
+
+#[test]
+fn normal_edits_reject_dependent_morph_deltas_without_publishing() {
+    for semantic in [MorphDeltaSemantic::Normal, MorphDeltaSemantic::Tangent] {
+        for (sparse, empty) in [(false, false), (true, false), (true, true)] {
+            let (scene, import_evidence) = import_fixture(Fixture::NormalEdit {
+                semantic,
+                sparse,
+                empty,
+            })
+            .into_parts();
+            let target = scene
+                .meshes()
+                .next()
+                .unwrap()
+                .primitives()
+                .next()
+                .unwrap()
+                .id();
+            let generation = scene.generation();
+            let before = snapshot(&scene);
+            let result = generate_normals(
+                scene,
+                target,
+                NormalOptions {
+                    existing: ExistingNormals::Replace,
+                    tangents: TangentHandling::Remove,
+                    ..NormalOptions::default()
+                },
+                PostProcessControl::default(),
+            );
+            let failure = result.expect_err("dependent morph delta must reject normal replacement");
+            assert!(matches!(
+                failure.error(),
+                PostProcessRunError::Normals { failure }
+                    if matches!(failure.cause(), NormalCause::MorphDeltas { semantic: actual } if *actual == semantic)
+            ));
+            let (scene, _) = failure.into_parts();
+            assert_eq!(scene.generation(), generation);
+            assert_eq!(snapshot(&scene).digest(), before.digest());
+            assert!(import_evidence.matches_scene(&scene));
+        }
+    }
+}
+
+#[test]
+fn normal_preservation_and_position_only_morphs_keep_their_meaning() {
+    for semantic in [
+        MorphDeltaSemantic::Position,
+        MorphDeltaSemantic::Normal,
+        MorphDeltaSemantic::Tangent,
+    ] {
+        let (scene, import_evidence) = import_fixture(Fixture::NormalEdit {
+            semantic,
+            sparse: true,
+            empty: false,
+        })
+        .into_parts();
+        let target = scene
+            .meshes()
+            .next()
+            .unwrap()
+            .primitives()
+            .next()
+            .unwrap()
+            .id();
+        let before = snapshot(&scene);
+        let (scene, report) = generate_normals(
+            scene,
+            target,
+            NormalOptions::default(),
+            PostProcessControl::default(),
+        )
+        .unwrap()
+        .into_parts();
+        assert_eq!(report.disposition(), PostProcessRunDisposition::Unchanged);
+        assert!(import_evidence.matches_scene(&scene));
+        assert_eq!(snapshot(&scene).digest(), before.digest());
+        if semantic == MorphDeltaSemantic::Position {
+            let (scene, report) = generate_normals(
+                scene,
+                target,
+                NormalOptions {
+                    existing: ExistingNormals::Replace,
+                    tangents: TangentHandling::Remove,
+                    ..NormalOptions::default()
+                },
+                PostProcessControl::default(),
+            )
+            .unwrap()
+            .into_parts();
+            assert_eq!(report.disposition(), PostProcessRunDisposition::Changed);
+            let primitive = scene.meshes().next().unwrap().primitives().next().unwrap();
+            assert!(
+                primitive
+                    .attribute(AttributeSemanticRef::Tangent, AttributeDomain::Vertex)
+                    .is_none()
+            );
+            assert_sparse_delta(
+                primitive
+                    .morph_targets()
+                    .next()
+                    .unwrap()
+                    .delta(semantic)
+                    .unwrap(),
+                &[0, 2],
+                &SPARSE_POSITION,
+            );
+        }
+    }
 }
 
 fn assert_f32_bits(actual: &[f32], expected: &[f32]) {

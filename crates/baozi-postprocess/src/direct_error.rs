@@ -168,6 +168,7 @@ impl From<crate::scene_edit::EditFailure> for TriangulationFailure {
             EditCause::Control { cause } => TriangulationCause::Control { cause },
             EditCause::FinalControl => TriangulationCause::FinalControl,
             EditCause::CoreRejected => TriangulationCause::CoreRejected,
+            EditCause::MorphDependency { .. } => TriangulationCause::CoreRejected,
             EditCause::SpaceIssue { .. } => TriangulationCause::CoreRejected,
             EditCause::CentralValidation => TriangulationCause::CentralValidation,
             EditCause::Publication => TriangulationCause::Publication,
