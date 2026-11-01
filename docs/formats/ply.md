@@ -59,6 +59,15 @@ Public facade regressions in `crates/baozi/tests/ply_colors.rs` check RGBA midpo
 aliases across all three encodings, rejection before floating range narrowing, signed types,
 signed zero, and denied/authorized F64 precision loss.
 
+Partial Normal (`nx/ny/nz`), Texcoord (the admitted pairs), or RGB groups require explicit
+`SourceSemanticLoss` authority before the incomplete group may be omitted. Preserve-or-fail
+rejects each group, even when `FormatRecovery` is allowed. Authorized omission retains its existing
+`ply.partial_*_ignored` code, the channel path, and header element location in structured details,
+once per schema rather than per vertex. It can succeed under `ConformancePolicy::Strict` because
+loss authority and malformed-input recovery are independent controls. Arbitrary face properties,
+vertex list properties and nongeometry elements remain under the separately documented warning
+and non-support policy; this change does not classify unknown PLY semantics.
+
 ## Text Surface, Tokenization, and Failure Offsets
 
 - ASCII PLY counts the complete input against `max_decoded_utf8_bytes`. Binary little-endian and

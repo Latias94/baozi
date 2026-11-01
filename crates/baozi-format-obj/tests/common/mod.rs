@@ -154,7 +154,7 @@ pub fn import_assets_result_with_text_policy_and_control<'asset>(
     )
 }
 
-fn import_assets_result_with_policies<'asset>(
+pub fn import_assets_result_with_policies<'asset>(
     source: &str,
     assets: impl IntoIterator<Item = (&'asset str, &'asset [u8])>,
     limits: ResourceLimits,

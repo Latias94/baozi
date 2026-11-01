@@ -1,10 +1,13 @@
 use crate::material_library_role;
 use crate::parser;
-use baozi_import::authoring::Color;
+use baozi_import::authoring::{
+    Color, SamplerState, TextureAddressMode, TextureTransform, Vec2, Vec3,
+};
 use baozi_import::{
     ConformedTextInput, DependencyOrigin, DependencySnapshot, DiagnosticCode, DiagnosticSeverity,
     ImportProgressPhase, ImportStorageClass, ImportWorkClass, ImportWorkScope, MeteredOrderedMap,
-    MeteredString, MeteredVec, ParseFailure, ParseResult, ParseScope, TextInputLine,
+    MeteredString, MeteredVec, ParseFailure, ParseResult, ParseScope, SourceScopeEntityKind,
+    TextInputLine,
 };
 use std::cmp::Ordering;
 use std::fmt;
@@ -211,6 +214,8 @@ pub(crate) struct ParsedMaterial<'scope> {
     pub name: MeteredString<'scope>,
     order: usize,
     pub base_color: Color,
+    pub ambient: Vec3,
+    pub specular: Vec3,
     pub emissive: Color,
     pub alpha_mode: ParsedAlphaMode,
     pub metadata: ParsedMetadata<'scope>,
@@ -226,6 +231,8 @@ pub(crate) enum ParsedAlphaMode {
 pub(crate) struct ParsedTexture<'scope> {
     pub reference: MeteredString<'scope>,
     pub origin: usize,
+    pub transform: TextureTransform,
+    pub sampler: SamplerState,
 }
 
 pub(crate) struct ParsedMetadata<'scope> {
@@ -270,6 +277,8 @@ impl<'scope> ParsedMaterial<'scope> {
             name,
             order,
             base_color: Color::WHITE,
+            ambient: Vec3::ZERO,
+            specular: Vec3::ZERO,
             emissive: Color::linear_rgba(0.0, 0.0, 0.0, 1.0),
             alpha_mode: ParsedAlphaMode::Opaque,
             metadata: ParsedMetadata {
@@ -492,26 +501,73 @@ fn parse_mtl<'scope>(
                 }
             }
             "Ka" | "Ks" => {
-                if let Some(material) = current.as_mut()
-                    && let Some(value) =
-                        parse_vec_metadata(scope, snapshot, &tokens, line_number, keyword)?
-                {
+                if let Some(material) = current.as_mut() {
+                    let color = parse_legacy_color(scope, &tokens, line_number)?;
                     let metadata_key = if keyword == "Ka" { "obj:ka" } else { "obj:ks" };
+                    let value = owned_string(
+                        scope,
+                        trailing_text_after_keyword(raw_line, &tokens).unwrap_or_default(),
+                        "obj-mtl-color-source",
+                    )?;
                     insert_metadata(
                         scope,
                         material,
                         metadata_key,
                         ParsedMetadataValue::String(value),
                     )?;
+                    let mut factor = Vec3::new(color.r, color.g, color.b);
+                    if color.r < 0.0 || color.g < 0.0 || color.b < 0.0 {
+                        record_material_loss(
+                            scope,
+                            snapshot,
+                            line_number,
+                            tokens[0],
+                            if keyword == "Ka" {
+                                "obj.mtl_ambient_omitted"
+                            } else {
+                                "obj.mtl_specular_omitted"
+                            },
+                            "negative-legacy-factor",
+                        )?;
+                        factor = Vec3::ZERO;
+                    }
+                    if keyword == "Ka" {
+                        material.ambient = factor;
+                    } else {
+                        material.specular = factor;
+                    }
                 }
             }
             "map_Kd" => {
+                // Validate the complete option prefix before consulting omission authority.
+                let arguments = parse_map_arguments(scope, &tokens[1..], line_number)?;
                 if let Some(material) = current.as_mut() {
-                    match texture_path_from_map(scope, snapshot, &tokens[1..], line_number)? {
+                    let (transform, sampler) = map_texture_options(
+                        scope,
+                        snapshot,
+                        &tokens[1..],
+                        &arguments,
+                        line_number,
+                    )?;
+                    let path = &tokens[1 + arguments.path_index..];
+                    match texture_path_from_tokens(scope, raw_line, path)? {
                         TexturePathOutcome::Value(texture_path) => {
+                            let source = owned_string(
+                                scope,
+                                trailing_text_after_keyword(raw_line, &tokens).unwrap_or_default(),
+                                "obj-mtl-map-source",
+                            )?;
+                            insert_metadata(
+                                scope,
+                                material,
+                                "obj:map_kd",
+                                ParsedMetadataValue::String(source),
+                            )?;
                             material.diffuse_texture = Some(ParsedTexture {
                                 reference: texture_path,
                                 origin,
+                                transform,
+                                sampler,
                             });
                         }
                         TexturePathOutcome::TooLong => push_dependency_warning(
@@ -520,13 +576,6 @@ fn parse_mtl<'scope>(
                             Some((line_number, 1)),
                             "obj.mtl_texture_path_limit",
                             format_args!("MTL map_Kd texture path exceeded max_string_bytes"),
-                        )?,
-                        TexturePathOutcome::Missing => push_dependency_warning(
-                            scope,
-                            snapshot,
-                            Some((line_number, 1)),
-                            "obj.mtl_texture_missing",
-                            format_args!("MTL map_Kd has no texture path"),
                         )?,
                     }
                 }
@@ -602,6 +651,7 @@ struct MtlToken<'line> {
     text: &'line str,
     start: usize,
     end: usize,
+    column: u32,
 }
 
 struct MtlTokenBuffer<'scope, 'line> {
@@ -641,10 +691,15 @@ fn tokenize_mtl<'scope, 'line>(
                     ),
                 ],
                 |work| {
+                    let column = start
+                        .checked_add(1)
+                        .and_then(|column| u32::try_from(column).ok())
+                        .ok_or_else(|| scope.resource_limit_exceeded("line-columns", u64::MAX))?;
                     tokens.values.try_push(MtlToken {
                         text: &line[start..end],
                         start,
                         end,
+                        column,
                     })?;
                     work.complete_all()
                 },
@@ -748,17 +803,29 @@ fn parse_i64(
     }
 }
 
-fn parse_vec_metadata<'scope>(
-    scope: &'scope ParseScope<'_>,
-    snapshot: &DependencySnapshot<'_>,
+fn parse_legacy_color(
+    scope: &ParseScope<'_>,
     tokens: &[MtlToken<'_>],
     line_number: u32,
-    keyword: &str,
-) -> ParseResult<Option<MeteredString<'scope>>> {
-    let Some(color) = parse_color(scope, snapshot, tokens, line_number, keyword)? else {
-        return Ok(None);
+) -> ParseResult<Color> {
+    if !(2..=4).contains(&tokens.len()) {
+        return Err(map_syntax_failure(
+            scope,
+            tokens[0],
+            line_number,
+            "legacy-color-component-count",
+        ));
+    }
+    let red = parse_required_map_number(scope, tokens[1], line_number)?;
+    let green = match tokens.get(2) {
+        Some(token) => parse_required_map_number(scope, *token, line_number)?,
+        None => red,
     };
-    owned_format(scope, format_args!("{} {} {}", color.r, color.g, color.b)).map(Some)
+    let blue = match tokens.get(3) {
+        Some(token) => parse_required_map_number(scope, *token, line_number)?,
+        None => red,
+    };
+    Ok(Color::linear_rgba(red, green, blue, 1.0))
 }
 
 fn parse_f32_warning(
@@ -801,73 +868,338 @@ fn parse_f32_warning(
     Ok(Some(value))
 }
 
-fn texture_path_from_map<'scope>(
-    scope: &'scope ParseScope<'_>,
-    snapshot: &DependencySnapshot<'_>,
+struct MapArguments {
+    offset: [f32; 3],
+    scale: [f32; 3],
+    clamp: bool,
+    offset_index: Option<usize>,
+    scale_index: Option<usize>,
+    path_index: usize,
+}
+
+fn parse_map_arguments(
+    scope: &ParseScope<'_>,
     tokens: &[MtlToken<'_>],
     line_number: u32,
-) -> ParseResult<TexturePathOutcome<'scope>> {
-    let mut index = 0usize;
-    while index < tokens.len() {
+) -> ParseResult<MapArguments> {
+    let mut arguments = MapArguments {
+        offset: [0.0; 3],
+        scale: [1.0; 3],
+        clamp: false,
+        offset_index: None,
+        scale_index: None,
+        path_index: 0,
+    };
+    let mut index = 0;
+    while let Some(option) = tokens.get(index).copied() {
         scope.poll()?;
-        let token = tokens[index].text;
-        if token.starts_with('-') {
-            if !is_known_map_option(token) {
-                push_dependency_warning(
-                    scope,
-                    snapshot,
-                    Some((line_number, 1)),
-                    "obj.mtl_unsupported_texture_option",
-                    format_args!("MTL map_Kd option '{token}' is not supported"),
-                )?;
-            }
-            index = index.saturating_add(1 + map_option_arity(token, &tokens[index + 1..]));
-        } else {
-            let mut length = 0usize;
-            for chunk in tokens[index..].chunks(64) {
-                scope.poll()?;
-                for token in chunk {
-                    length = length
-                        .checked_add(token.text.len())
-                        .and_then(|length| length.checked_add(1))
-                        .ok_or_else(|| scope.allocation_failure("obj-mtl-texture-path-length"))?;
+        // A stray negative number is an extra operand, not an unknown map option.
+        // Numeric filenames can be disambiguated with a prefix such as ./.
+        if option.text.parse::<f32>().is_ok() {
+            return Err(map_syntax_failure(
+                scope,
+                option,
+                line_number,
+                "unexpected-numeric-operand",
+            ));
+        }
+        if !option.text.starts_with('-') {
+            arguments.path_index = index;
+            return Ok(arguments);
+        }
+        let following = &tokens[index + 1..];
+        let consumed = match option.text {
+            "-o" | "-s" | "-t" | "-mm" | "-bm" | "-boost" => {
+                let (minimum, maximum) = match option.text {
+                    "-o" | "-s" | "-t" => (1, 3),
+                    "-mm" => (2, 2),
+                    _ => (1, 1),
+                };
+                if following.len() < minimum {
+                    return Err(map_syntax_failure(
+                        scope,
+                        option,
+                        line_number,
+                        "missing-option-operand",
+                    ));
                 }
-            }
-            let length = length.saturating_sub(1);
-            if length > parser::max_text_value_bytes(scope) {
-                return Ok(TexturePathOutcome::TooLong);
-            }
-            return scope.with_work(
-                ImportWorkClass::StringBytes,
-                usize_amount(scope, length, "obj-mtl-texture-path-bytes")?,
-                |work| {
-                    let mut path = scope.metered_string(
-                        ImportStorageClass::FormatNormalization,
-                        "obj-mtl-texture-path",
-                    );
-                    path.try_reserve(length)?;
-                    let mut first = true;
-                    for chunk in tokens[index..].chunks(64) {
-                        work.poll()?;
-                        for token in chunk {
-                            if !first {
-                                path.try_push_char_reserved(' ')?;
-                            }
-                            if token.text.len() <= parser::SCAN_CHUNK_BYTES {
-                                path.try_push_str_reserved(token.text)?;
-                            } else {
-                                path.try_push_str(token.text)?;
-                            }
-                            first = false;
-                        }
+                let mut values = if option.text == "-s" {
+                    [1.0; 3]
+                } else {
+                    [0.0; 3]
+                };
+                let count = numeric_option_arity(following, maximum).max(minimum);
+                for (value, token) in values.iter_mut().zip(following).take(count) {
+                    *value = parse_required_map_number(scope, *token, line_number)?;
+                }
+                match option.text {
+                    "-o" => {
+                        arguments.offset = values;
+                        arguments.offset_index = Some(index);
                     }
-                    work.complete_all()?;
-                    Ok(TexturePathOutcome::Value(path))
-                },
-            );
+                    "-s" => {
+                        arguments.scale = values;
+                        arguments.scale_index = Some(index);
+                    }
+                    "-boost" if values[0] < 0.0 => {
+                        return Err(map_syntax_failure(
+                            scope,
+                            option,
+                            line_number,
+                            "negative-boost",
+                        ));
+                    }
+                    _ => {}
+                }
+                count
+            }
+            "-clamp" | "-type" | "-texres" => {
+                let operand = following.first().copied().ok_or_else(|| {
+                    map_syntax_failure(scope, option, line_number, "missing-option-operand")
+                })?;
+                let valid = match option.text {
+                    "-clamp" => {
+                        arguments.clamp = operand.text == "on";
+                        matches!(operand.text, "on" | "off")
+                    }
+                    "-type" => matches!(
+                        operand.text,
+                        "sphere"
+                            | "cube_top"
+                            | "cube_bottom"
+                            | "cube_front"
+                            | "cube_back"
+                            | "cube_left"
+                            | "cube_right"
+                    ),
+                    "-texres" => {
+                        enforce_map_numeric_limit(scope, operand.text)?;
+                        operand.text.parse::<u32>().is_ok_and(|value| value > 0)
+                    }
+                    _ => false,
+                };
+                if !valid {
+                    return Err(map_syntax_failure(
+                        scope,
+                        operand,
+                        line_number,
+                        "invalid-option-operand",
+                    ));
+                }
+                1
+            }
+            _ => {
+                // Unknown options retain the existing warning-only, one-operand profile.
+                // The finite recognized branch list below is governed by semantic loss.
+                if following
+                    .first()
+                    .is_none_or(|token| token.text.starts_with('-'))
+                {
+                    return Err(map_syntax_failure(
+                        scope,
+                        option,
+                        line_number,
+                        "missing-option-operand",
+                    ));
+                }
+                1
+            }
+        };
+        index += 1 + consumed;
+    }
+    Err(scope.format_failure(crate::ObjFailure::statement(
+        "map_Kd",
+        "missing-texture-path",
+        line_number,
+        1,
+    )))
+}
+
+fn enforce_map_numeric_limit(scope: &ParseScope<'_>, text: &str) -> ParseResult<()> {
+    scope.enforce_resource_limit(
+        "obj-mtl-number-bytes",
+        usize_amount(scope, text.len(), "obj-mtl-number-bytes")?,
+        MAX_NUMERIC_LITERAL_BYTES as u64,
+    )
+}
+
+fn parse_required_map_number(
+    scope: &ParseScope<'_>,
+    token: MtlToken<'_>,
+    line_number: u32,
+) -> ParseResult<f32> {
+    enforce_map_numeric_limit(scope, token.text)?;
+    let value = token
+        .text
+        .parse::<f32>()
+        .map_err(|_| map_syntax_failure(scope, token, line_number, "invalid-numeric-operand"))?;
+    if !value.is_finite() {
+        return Err(map_syntax_failure(
+            scope,
+            token,
+            line_number,
+            "non-finite-numeric-operand",
+        ));
+    }
+    Ok(value)
+}
+
+fn map_syntax_failure(
+    scope: &ParseScope<'_>,
+    token: MtlToken<'_>,
+    line_number: u32,
+    reason: &'static str,
+) -> ParseFailure {
+    scope.format_failure(crate::ObjFailure::statement(
+        "mtl-material",
+        reason,
+        line_number,
+        token.column,
+    ))
+}
+
+fn map_texture_options(
+    scope: &ParseScope<'_>,
+    snapshot: &DependencySnapshot<'_>,
+    tokens: &[MtlToken<'_>],
+    arguments: &MapArguments,
+    line_number: u32,
+) -> ParseResult<(TextureTransform, SamplerState)> {
+    let mut index = 0;
+    while index < arguments.path_index {
+        scope.poll()?;
+        let option = tokens[index];
+        let code = match option.text {
+            "-t" => Some("obj.mtl_texture_turbulence_omitted"),
+            "-mm" => Some("obj.mtl_texture_range_omitted"),
+            "-bm" => Some("obj.mtl_texture_bump_multiplier_omitted"),
+            "-boost" => Some("obj.mtl_texture_boost_omitted"),
+            "-type" => Some("obj.mtl_texture_type_omitted"),
+            "-texres" => Some("obj.mtl_texture_resolution_omitted"),
+            _ => None,
+        };
+        if let Some(code) = code {
+            record_material_loss(
+                scope,
+                snapshot,
+                line_number,
+                option,
+                code,
+                "unsupported-option",
+            )?;
+        } else if !is_known_map_option(option.text) {
+            push_dependency_warning(
+                scope,
+                snapshot,
+                Some((line_number, option.column)),
+                "obj.mtl_unsupported_texture_option",
+                format_args!("MTL map_Kd option '{}' is not supported", option.text),
+            )?;
+        }
+        index += 1 + map_option_arity(option.text, &tokens[index + 1..]);
+    }
+
+    for (nonneutral, option_index, code) in [
+        (
+            arguments.offset[2] != 0.0,
+            arguments.offset_index,
+            "obj.mtl_texture_offset_w_omitted",
+        ),
+        (
+            arguments.scale[2] != 1.0,
+            arguments.scale_index,
+            "obj.mtl_texture_scale_w_omitted",
+        ),
+    ] {
+        if nonneutral && let Some(index) = option_index {
+            record_material_loss(
+                scope,
+                snapshot,
+                line_number,
+                tokens[index],
+                code,
+                "nonrepresentable-third-component",
+            )?;
         }
     }
-    Ok(TexturePathOutcome::Missing)
+
+    // Baozi OBJ/MTL UV Sampling Profile: q = offset + scale * p. Retain authored UV
+    // components directly; the original manual does not uniquely specify this equation.
+    let scale = Vec2::new(arguments.scale[0], arguments.scale[1]);
+    let offset = Vec2::new(arguments.offset[0], arguments.offset[1]);
+    let transform = TextureTransform::try_new(offset, 0.0, scale).map_err(|_| {
+        scope.format_failure(crate::ObjFailure::internal("invalid-texture-transform"))
+    })?;
+    let default = SamplerState::CANONICAL_DEFAULT;
+    let address = if arguments.clamp {
+        // The manual leaves the underlying material unchanged outside the single map copy.
+        TextureAddressMode::Decal
+    } else {
+        TextureAddressMode::Repeat
+    };
+    let sampler = SamplerState::new(
+        default.minification(),
+        default.magnification(),
+        default.mipmap(),
+        address,
+        address,
+        default.address_w(),
+    );
+    Ok((transform, sampler))
+}
+
+fn record_material_loss(
+    scope: &ParseScope<'_>,
+    snapshot: &DependencySnapshot<'_>,
+    line_number: u32,
+    token: MtlToken<'_>,
+    code: &'static str,
+    reason: &'static str,
+) -> ParseResult<()> {
+    let source = snapshot.diagnostic_source();
+    let path = owned_format(
+        scope,
+        format_args!(
+            "/dependencies/{}/records/{line_number}/{}",
+            source.path().as_str(),
+            token.text,
+        ),
+    )?;
+    let code = DiagnosticCode::new(code).expect("static OBJ diagnostic code must be valid");
+    scope.record_source_semantic_loss(
+        code,
+        SourceScopeEntityKind::Material,
+        path.as_str(),
+        |details| {
+            details.string("dependency", source.path().as_str());
+            details.unsigned("line", u64::from(line_number));
+            details.unsigned("column", u64::from(token.column));
+            details.string("option", token.text);
+            details.string("reason", reason);
+        },
+        format_args!(
+            "MTL '{}' at line {line_number} has unrepresented '{}' semantics ({reason}); omission requires explicit source semantic loss authorization",
+            source.path().as_str(), token.text,
+        ),
+    )
+}
+
+fn texture_path_from_tokens<'scope>(
+    scope: &'scope ParseScope<'_>,
+    raw_line: &str,
+    tokens: &[MtlToken<'_>],
+) -> ParseResult<TexturePathOutcome<'scope>> {
+    let first = tokens.first().ok_or_else(|| {
+        scope.format_failure(crate::ObjFailure::internal("missing-map-path-token"))
+    })?;
+    let last = tokens.last().ok_or_else(|| {
+        scope.format_failure(crate::ObjFailure::internal("missing-map-path-token"))
+    })?;
+    let path = &raw_line[first.start..last.end];
+    if path.len() > parser::max_text_value_bytes(scope) {
+        return Ok(TexturePathOutcome::TooLong);
+    }
+    owned_string(scope, path, "obj-mtl-texture-path").map(TexturePathOutcome::Value)
 }
 
 #[allow(
@@ -875,7 +1207,6 @@ fn texture_path_from_map<'scope>(
     reason = "the metered string retains its reservation inline; boxing would add unmetered allocation"
 )]
 enum TexturePathOutcome<'scope> {
-    Missing,
     TooLong,
     Value(MeteredString<'scope>),
 }

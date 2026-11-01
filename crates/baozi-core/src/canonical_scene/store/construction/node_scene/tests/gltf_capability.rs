@@ -371,6 +371,7 @@ fn encode_gltf_source(
             TextureAddressMode::MirroredRepeat => 1,
             TextureAddressMode::ClampToEdge => 2,
             TextureAddressMode::ClampToBorder => 3,
+            TextureAddressMode::Decal => 4,
         }
     }
 

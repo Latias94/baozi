@@ -495,6 +495,7 @@ const fn encode_address_mode(value: TextureAddressMode) -> u8 {
         TextureAddressMode::MirroredRepeat => 1,
         TextureAddressMode::ClampToEdge => 2,
         TextureAddressMode::ClampToBorder => 3,
+        TextureAddressMode::Decal => 4,
     }
 }
 
@@ -536,6 +537,7 @@ fn address_mode_name(value: TextureAddressMode) -> &'static str {
         TextureAddressMode::MirroredRepeat => "mirrored_repeat",
         TextureAddressMode::ClampToEdge => "clamp_to_edge",
         TextureAddressMode::ClampToBorder => "clamp_to_border",
+        TextureAddressMode::Decal => "decal",
     }
 }
 

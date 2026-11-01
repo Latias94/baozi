@@ -88,7 +88,9 @@ fn dimension_consumed(failure: &ImportFailure, dimension: ImportDimension) -> u6
 fn binary_vertex_document(vertex_count: usize, profile: BinaryVertexProfile) -> Vec<u8> {
     let extra_properties = match profile {
         BinaryVertexProfile::PositionsOnly => {
-            ["nx", "s", "u", "texture_u", "red", "r", "green", "g"]
+            // Keep the same scalar-read width without incomplete channels requiring loss authority.
+            // Repeated Position components retain this profile's single output stream.
+            ["x", "y", "z", "x", "y", "z", "x", "y"]
         }
         BinaryVertexProfile::BuiltinStreams => ["nx", "ny", "nz", "s", "t", "red", "green", "blue"],
         BinaryVertexProfile::CustomStreams | BinaryVertexProfile::CustomF64Streams => [

@@ -6,9 +6,9 @@ use baozi_import::{
     CauseOwner, DetectionOptions, FormatFailureDetailValue, FormatFailureEnvelope, FormatSelection,
     ImportCause, ImportConfigOverlay, ImportDimension, ImportFailure, ImportOperationControl,
     ImportReport, ImportRequest, ImportRequestLayer, ImportResult, ImportRunError,
-    ImportTerminalCause, ImportTerminalFailureClass, OptionCompileLimits, RegistryBuildLimits,
-    RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, SceneSnapshot, SceneSnapshotLimits,
-    ScopeAbortCause, import_asset,
+    ImportTerminalCause, ImportTerminalFailureClass, LossPolicy, OptionCompileLimits,
+    RegistryBuildLimits, RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, SceneSnapshot,
+    SceneSnapshotLimits, ScopeAbortCause, import_asset,
 };
 use baozi_io::{AssetPath, MemoryAssetIo};
 use std::error::Error;
@@ -56,6 +56,23 @@ pub fn import_bytes_result(
     run_import(source, bytes, limits, DetectionOptions::default())
 }
 
+pub fn import_bytes_result_with_loss_policy(
+    source: &str,
+    bytes: &[u8],
+    limits: ResourceLimits,
+    loss_policy: LossPolicy,
+) -> TestResult<ImportResult<ImportReport>> {
+    run_import_with_selection_and_control(
+        source,
+        bytes,
+        limits,
+        DetectionOptions::default(),
+        None,
+        ImportOperationControl::default(),
+        loss_policy,
+    )
+}
+
 pub fn import_bytes_forced_result(
     source: &str,
     bytes: &[u8],
@@ -83,6 +100,7 @@ pub fn import_bytes_forced_result_with_control(
         DetectionOptions::default(),
         Some(FormatSelection::Forced(format)),
         control,
+        LossPolicy::preserve_or_fail(),
     )
 }
 
@@ -118,6 +136,7 @@ fn run_import_with_selection(
         detection,
         format_selection,
         ImportOperationControl::default(),
+        LossPolicy::preserve_or_fail(),
     )
 }
 
@@ -128,6 +147,7 @@ fn run_import_with_selection_and_control(
     detection: DetectionOptions,
     format_selection: Option<FormatSelection>,
     control: ImportOperationControl,
+    loss_policy: LossPolicy,
 ) -> TestResult<ImportResult<ImportReport>> {
     let path = AssetPath::new(source).map_err(|error| TestError::setup("source path", error))?;
     let io = MemoryAssetIo::new();
@@ -143,7 +163,8 @@ fn run_import_with_selection_and_control(
         .map_err(|error| TestError::setup("registry freeze", error))?;
     let mut config = ImportConfigOverlay::default()
         .with_resource_limits(ResourceLimitsOverlay::from_limits(limits))
-        .with_detection_options(detection);
+        .with_detection_options(detection)
+        .with_loss_policy(loss_policy);
     if let Some(selection) = format_selection {
         config = config.with_format_selection(selection);
     }

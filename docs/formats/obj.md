@@ -10,7 +10,7 @@
 - Parser backend: Baozi-owned hand-written parser
 - Supported extensions: `.obj`
 - Supported media types: `model/obj`, `text/plain`
-- Primary references: Wavefront OBJ/MTL text conventions; Assimp OBJ/MTL behavior as a clean-room behavior reference only
+- Primary references: original Wavefront [OBJ appendix](https://paulbourke.net/dataformats/obj/) and [MTL manual](https://paulbourke.net/dataformats/mtl/), reproduced by Paul Bourke; Assimp OBJ/MTL behavior as a clean-room behavior reference only
 
 ## Capability Matrix
 
@@ -18,8 +18,8 @@
 | --- | --- | --- | --- |
 | Geometry | Supported | Imports static face meshes from `v`, `vt`, `vn`, and `f`, preserving independent Corner-domain UV/normal indices and negative indices without duplicating shared positions. | `crates/baozi-format-obj/tests/geometry.rs` |
 | Hierarchy and transforms | Partial | Preserves object/group changes by splitting mesh segments and attaching child nodes. OBJ has no general transform stack. | `geometry.rs`, facade tests |
-| Materials | Partial | Loads `newmtl`, `Kd`, `d`, `Tr`, `Ke`, `Ns`, `Ni`, `illum`, `Ka`, and `Ks` where the current IR can express or preserve them. | `materials.rs` |
-| Textures and sidecars | Partial | Resolves `mtllib` and `map_Kd` through the origin-qualified dependency resolver; owns the snapshotted encoded image bytes without pixel decoding. | `materials.rs`, `crates/baozi/tests/obj_facade.rs` |
+| Materials | Partial | Loads `newmtl`, `Kd`, `d`, `Tr`, `Ke`, `Ns`, `Ni`, `illum`, and typed legacy RGB `Ka`/`Ks`; retains source metadata and replaces duplicate materials as complete definitions. | `materials.rs`, `mtl_semantics.rs` |
+| Textures and sidecars | Partial | Resolves `mtllib` and `map_Kd` through the origin-qualified dependency resolver; maps two-dimensional `-o`/`-s` and `-clamp` into typed binding/sampler state; owns encoded image bytes without pixel decoding. | `materials.rs`, `mtl_semantics.rs`, `crates/baozi/tests/obj_facade.rs` |
 | Cameras and lights | Unsupported | OBJ/MTL support does not expose camera or light data. | not applicable |
 | Animation | Unsupported | OBJ has no animation model in this importer slice. | not applicable |
 | Skinning | Unsupported | OBJ has no skinning model in this importer slice. | not applicable |
@@ -48,6 +48,7 @@ Status values: `Supported`, `Partial`, `ParsedLossy`, `IgnoredWithDiagnostic`, `
 - Attribute projection: positions are compacted per mesh segment by source position index, while UV and normal source tables are projected in face-corner order as Corner-domain attributes. UV or normal seams therefore remain distinguishable without duplicating shared positions. A segment that mixes present and missing values for one channel is rejected under `LossPolicy::preserve_or_fail()`. The existing sparse attribute representation supplies default values rather than preserving missing corner values, so partial channels require explicit loss authorization instead of synthesized defaults.
 - Partial attribute loss: `LossPolicy::preserve_or_fail().allow(ImportLossKind::SourceSemanticLoss)` permits omitting each incomplete UV or normal channel while retaining positions, topology, and any complete channel. Each omitted channel records `SourceSemanticLoss` evidence with disposition `Applied` and its own code, `obj.partial_texcoord_channel` or `obj.partial_normal_channel`. Without authorization, the first incomplete channel records `RejectedByLossPolicy` evidence and terminates import. Diagnostics identify the affected channel at `/segments/{index}/attributes/texcoord` or `/segments/{index}/attributes/normal`; the typed loss subject is the source mesh. These are source-semantic omissions, independent of text recovery and conformance policy.
 - Mesh splitting: material and object/group boundaries may split one OBJ file into multiple Baozi meshes. Polygon topology is preserved within each segment, and smoothing remains per-face data.
+- Point/line handling: `p` and `l` are recognized source geometry omissions. They fail by default; explicit `SourceSemanticLoss` authority can omit them while retaining imported faces. This permission works under `ConformancePolicy::Strict` and does not require text recovery. Point records require at least one valid position index. Line records require at least two valid position or position/texture-coordinate references. Positive and negative indices are validated against their source tables before omission is authorized. Missing vertices, zero/out-of-range indices, malformed integers, point texture suffixes, empty line texture suffixes, and normal-index suffixes remain format errors. Other line/free-form dialects are outside this bounded profile. A file with no retained faces still fails with `obj.empty_geometry`, including an authorized point/line-only file.
 
 ### Numeric Record Fidelity
 
@@ -110,8 +111,114 @@ OBJ/MTL keywords, numeric fields, smoothing values, face references, `map_Kd` op
 | `d` | `Material.base_color.a`; alpha below 1 sets blend mode |
 | `Tr` | inverse alpha; alpha below 1 sets blend mode |
 | `Ke` | `Material.emissive` |
-| `Ns`, `Ni`, `illum`, `Ka`, `Ks` | namespaced `Material.metadata` entries |
-| `map_Kd` | `TextureSource::External` URI plus diffuse/base-color material texture slot |
+| `Ka`, `Ks` | `LegacyMaterialFactors.ambient` / `.specular`, plus exact source value text in `obj:ka` / `obj:ks` metadata |
+| `Ns` | legacy shininess plus `obj:ns` metadata |
+| `Ni`, `illum` | namespaced `obj:ni` / `obj:illum` metadata |
+| `map_Kd` | encoded image/texture dependency plus a typed `TextureRole::Diffuse` binding, UV transform and sampler; exact option/path text in `obj:map_kd` metadata |
+
+`Ka` and `Ks` accept one to three finite RGB components. Omitted green/blue components use red,
+as specified by the original manual's scalar RGB shorthand. Nonnegative values above one remain
+unchanged: legacy factors are not unit-clamped. Negative source components are syntactically valid
+but cannot be represented by Baozi's nonnegative legacy factors; omitting that whole factor requires
+explicit `SourceSemanticLoss` permission. Authorized omission retains the source metadata and uses
+zero for the omitted ambient/specular factor. Nonnumeric, nonfinite, missing or extra RGB operands
+are terminal format failures. Spectral and CIEXYZ color forms are outside this RGB profile.
+
+Every `newmtl` begins a fresh definition with its own defaults. When names repeat within a sidecar
+or across `mtllib` sidecars, the last complete definition wins, with
+`obj.mtl_duplicate_material`. Fields, textures, sampler state and metadata from an earlier
+definition are not merged into the replacement. Missing ambient/specular factors default to zero.
+
+### Diffuse Texture Options
+
+The **Baozi OBJ/MTL UV Sampling Profile** selects the common ecosystem interpretation of authored
+offset and scale as a direct sampling transform. The [original MTL manual](https://paulbourke.net/dataformats/mtl/)
+supplies the option arities and defaults, but its shifted/scaled-logo examples do not uniquely
+specify a sampling equation or the composition order. The following equation is an explicit Baozi
+profile decision, not a claim of an unambiguous normative formula:
+
+```text
+q = offset + scale * p
+p = authored OBJ UV
+q = texture sampling UV
+```
+
+Baozi retains authored U/V offset and scale directly in `TextureTransform`, with rotation zero.
+The profile scales the UV coordinates about `(0, 0)`, then adds the offset, independently of the
+options' textual order. For example, `-o 0.25 -0.5 -s 2 0.5` maps authored UV `(0.25, 0.75)` to
+sampling UV `(0.75, -0.125)`. There is no V flip or center pivot. With repeating addressing,
+`-s 1.2` covers 1.2 horizontal texture periods per unit source-U interval in this selected profile.
+The complete authored option/path text remains available as `obj:map_kd` metadata. Tests assert
+typed transform values and this profile's equation without treating the manual's examples as
+independent proof of the equation.
+
+As comparative compatibility evidence, [three.js r180's MTL loader reads authored `-s`/`-o`
+directly into scale/offset](https://github.com/mrdoob/three.js/blob/r180/examples/jsm/loaders/MTLLoader.js#L547)
+and [copies those values to texture repeat/offset](https://github.com/mrdoob/three.js/blob/r180/examples/jsm/loaders/MTLLoader.js#L364).
+This supports the selected ecosystem profile without claiming that the original manual uniquely
+requires it. No implementation code is copied.
+
+| Option | Accepted operands and defaults | Typed behavior |
+| --- | --- | --- |
+| `-o u [v [w]]` | One to three finite values; omitted components are zero. | Retains authored U/V as canonical sampling offset. Neutral `w=0` needs no loss permission. |
+| `-s u [v [w]]` | One to three finite values; omitted components are one. | Retains authored U/V as canonical sampling scale, including signed and zero values. Neutral `w=1` needs no loss permission. |
+| `-clamp on\|off` | Exactly `on` or `off`; default `off`. | `on` sets U/V to `Decal`; `off` sets U/V to `Repeat`. W and filtering retain the canonical defaults. |
+
+The manual's clamped texture is a single copy with the underlying material unchanged outside its
+extent. The canonical `Decal` coverage rule expresses that behavior: if transformed sampling U or V
+is outside the closed unit interval `[0, 1]`, the binding contributes no sample and is skipped,
+retaining the underlying material before filtering, color interpretation, or alpha evaluation.
+Coordinates inside the interval sample with `ClampToEdge`; the endpoints zero and one remain
+covered. This is an explicit binding-coverage rule, separate from `ClampToBorder` and any border
+color. The built-in Diffuse role multiplies an active sample by the legacy diffuse factor under
+the canonical role contract; the binding retains `Replace` as required by that contract.
+
+Options may appear in either order before the path. Repeating an option replaces its entire tuple,
+including omitted-component defaults; the last value for each supported option is effective.
+Paths use the remaining source text, preserving internal spaces. A purely numeric path token is
+ambiguous with an extra operand and must use a prefix such as `./`. Option operands stay strict
+even when path text recovery is authorized. Missing operands/path, extra numeric operands, nonfinite
+numbers, invalid clamp/type values, negative boost, and nonpositive/noninteger/out-of-u32 texture
+resolution are terminal format failures before semantic omission is considered.
+
+The third offset/scale components describe three-dimensional behavior that the two-dimensional
+binding cannot retain. This profile conservatively requires explicit semantic-loss permission for
+effective nonneutral W values, including an explicitly authored scale W=0. Authorized omission
+keeps both representable UV components. Zero U/V scale, finite subnormal components, and all other
+finite F32 transform components are retained without semantic loss. No reciprocal transform is
+constructed. Numeric operands still follow the existing F32 OBJ/MTL parsing contract, including
+rejection of nonfinite results.
+
+### Recognized Semantic Omissions
+
+Each branch below rejects under `LossPolicy::preserve_or_fail()`. Adding
+`.allow(ImportLossKind::SourceSemanticLoss)` permits the specified omission and records
+`ImportLossDisposition::Applied`, including under strict conformance. Rejected omissions retain
+`RejectedByLossPolicy` evidence. `FormatRecovery` permission alone never substitutes for this
+authority, and neither loss permission nor declared-recovery conformance accepts malformed syntax.
+Even apparently neutral operands on the six unimplemented recognized map options require this
+authority; they are not silently interpreted as supported no-ops.
+
+| Branch | Loss code | Authorized result |
+| --- | --- | --- |
+| `map_Kd -t` | `obj.mtl_texture_turbulence_omitted` | Omits turbulence; validates one to three finite operands. |
+| `map_Kd -mm` | `obj.mtl_texture_range_omitted` | Omits range adjustment; validates two finite operands. |
+| `map_Kd -bm` | `obj.mtl_texture_bump_multiplier_omitted` | Omits the recognized compatibility option; validates one finite operand. |
+| `map_Kd -boost` | `obj.mtl_texture_boost_omitted` | Omits sharpness adjustment; validates one finite nonnegative operand. |
+| `map_Kd -type` | `obj.mtl_texture_type_omitted` | Omits projection; validates `sphere` or one of `cube_top`, `cube_bottom`, `cube_front`, `cube_back`, `cube_left`, `cube_right`. |
+| `map_Kd -texres` | `obj.mtl_texture_resolution_omitted` | Omits image resolution selection; validates a positive U32 integer. |
+| Effective nonzero offset W | `obj.mtl_texture_offset_w_omitted` | Keeps the UV transform, omits W. |
+| Effective scale W other than one | `obj.mtl_texture_scale_w_omitted` | Keeps the UV transform, omits W. |
+| Negative `Ka` / `Ks` RGB | `obj.mtl_ambient_omitted` / `obj.mtl_specular_omitted` | Retains source text, uses zero for that whole legacy factor. |
+| OBJ `p` / `l` | `obj.point_geometry_omitted` / `obj.line_geometry_omitted` | Omits the validated point/line record, retains faces. |
+
+MTL omissions use a typed source-material subject and diagnostic paths
+`/dependencies/{mtl-path}/records/{line}/{keyword-or-option}`, with dependency path, line, column,
+option and reason details. The current public semantic-loss recorder binds the evidence's
+`source` field to the primary OBJ; the diagnostic path/details identify the actual MTL snapshot.
+OBJ point/line omissions use a typed source-primitive subject and `/records/{line}/p` or
+`/records/{line}/l`. Each omitted record/option has its own bounded evidence entry. Source metadata
+is descriptive evidence alongside typed fields and authorized omissions, not a substitute for them.
 
 MTL is optional enrichment only at the dependency-acquisition boundary. A missing, policy-denied, unreadable, or acquisition-budget-exhausted MTL may be represented as unavailable, emit structured optional-dependency diagnostics, and preserve valid OBJ geometry only when the request loss policy explicitly allows `ImportLossKind::OptionalDependencyUnavailable`. Without that authorization, the dependency failure is terminal.
 
@@ -119,9 +226,9 @@ Once an MTL snapshot is available, it is parsed under the same text, resource, a
 
 ## Known Limitations
 
-- OBJ points, polylines, free-form curves, surfaces, parameter spaces, bevel/interp directives, and exporter behavior are not implemented in this slice.
+- OBJ points/polylines are covered by the explicit omission contract above; free-form curves, surfaces, parameter spaces, bevel/interp directives, and other exporter dialects remain unimplemented with their existing warning behavior.
 - The importer does not repair degenerate faces, generate normals, normalize coordinates, infer units, flip winding, decode image files, or fetch remote assets.
-- `map_Kd` option parsing is intentionally minimal: common option arities are skipped to find the texture path, but option semantics are not applied.
+- The completed recognized MTL option list is exactly `-o`, `-s`, `-clamp`, `-t`, `-mm`, `-bm`, `-boost`, `-type`, and `-texres`. Unknown options keep the earlier warning and one-operand skipping behavior; other MTL maps and syntax remain outside this bounded audit. This does not claim that all unknown source semantics are loss-gated.
 - MTL PBR extensions are preserved through namespaced material metadata/properties where possible, but are not promoted to first-class PBR fields yet.
 - OBJ/MTL syntax is UTF-8 and strict by default. The only encoding recovery is the explicitly gated `ReplaceInvalidUtf8` behavior for the textual value ranges listed above.
 
@@ -152,4 +259,5 @@ Once an MTL snapshot is available, it is parsed under the same text, resource, a
 | Fixture | Purpose | License | Snapshot |
 | --- | --- | --- | --- |
 | hand-authored in tests | triangles, quads, N-gons, separate indices, materials, sidecars, malformed input, limits | Baozi project license | direct assertions and `SceneSnapshot` support |
+| `mtl_semantics.rs`, `geometry_loss.rs` | typed UV transforms, sampler/factor defaults, named UV sampling profile, finite zero/extreme transform components, full-definition replacement, and each recognized omission/conformance branch | Baozi project license; independently authored fixture bytes | borrowed typed Scene assertions and bounded report evidence |
 | `fuzz/corpus/obj_import/*` | seed inputs for sanitizer fuzzing | Baozi project license | fuzz target corpus |

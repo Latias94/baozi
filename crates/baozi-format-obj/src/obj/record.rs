@@ -4,10 +4,93 @@ use baozi_import::{DiagnosticCode, SourceScopeEntityKind};
 
 use super::{
     ImportStorageClass, ImportWorkClass, ObjFailure, ObjParser, ParseResult, ParseScope,
-    ParsedTexcoord, Token, Vec3, parse_f32,
+    ParsedTexcoord, Token, Vec3, parse_f32, resolve_index,
 };
 
 impl ObjParser<'_, '_> {
+    pub(super) fn parse_omitted_geometry(
+        &mut self,
+        tokens: &[Token<'_>],
+        line_number: u32,
+    ) -> ParseResult<()> {
+        let is_line = tokens[0].text == "l";
+        let minimum = if is_line { 2 } else { 1 };
+        if tokens.len() - 1 < minimum {
+            return Err(self.scope.format_failure(ObjFailure::statement(
+                "point-or-line",
+                "too-few-vertices",
+                line_number,
+                tokens[0].column,
+            )));
+        }
+        // Validate supported point/line reference shapes before requesting omission authority.
+        // Normal indices and free-form line variants are outside this bounded OBJ profile.
+        for chunk in tokens[1..].chunks(64) {
+            self.scope.poll()?;
+            for token in chunk {
+                let mut parts = token.text.split('/');
+                let position = parts.next().unwrap_or_default();
+                let texcoord = parts.next();
+                if position.is_empty()
+                    || parts.next().is_some()
+                    || (!is_line && texcoord.is_some())
+                    || texcoord == Some("")
+                {
+                    return Err(self.scope.format_failure(ObjFailure::statement(
+                        "point-or-line",
+                        "invalid-vertex-reference",
+                        line_number,
+                        token.column,
+                    )));
+                }
+                resolve_index(
+                    self.scope,
+                    position,
+                    self.parsed.positions.len(),
+                    "position",
+                    line_number,
+                    token.column,
+                )?;
+                if let Some(texcoord) = texcoord {
+                    resolve_index(
+                        self.scope,
+                        texcoord,
+                        self.parsed.texcoords.len(),
+                        "texcoord",
+                        line_number,
+                        token.column,
+                    )?;
+                }
+            }
+        }
+        let mut path = self.scope.metered_string(
+            ImportStorageClass::FormatNormalization,
+            "obj-omitted-geometry-path",
+        );
+        path.try_write_fmt(format_args!("/records/{line_number}/{}", tokens[0].text))?;
+        let code = DiagnosticCode::new(if is_line {
+            "obj.line_geometry_omitted"
+        } else {
+            "obj.point_geometry_omitted"
+        })
+        .expect("static OBJ diagnostic code must be valid");
+        self.scope.record_source_semantic_loss(
+            code,
+            SourceScopeEntityKind::Primitive,
+            path.as_str(),
+            |details| {
+                details.unsigned("line", u64::from(line_number));
+                details.unsigned("column", u64::from(tokens[0].column));
+                details.string("statement", tokens[0].text);
+                details.unsigned("reference_count", (tokens.len() - 1) as u64);
+            },
+            format_args!(
+                "OBJ '{}' geometry at line {line_number} is not represented; omission requires explicit source semantic loss authorization",
+                tokens[0].text,
+            ),
+        )
+    }
+
     pub(super) fn parse_position(
         &mut self,
         tokens: &[Token<'_>],

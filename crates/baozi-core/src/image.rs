@@ -26,6 +26,12 @@ pub enum TextureAddressMode {
     MirroredRepeat,
     ClampToEdge,
     ClampToBorder,
+    /// Outside the closed unit interval, the entire texture binding is inactive and its
+    /// underlying material value remains unchanged. Inside the interval, sample as ClampToEdge,
+    /// including filtering at the boundary. Any Decal axis outside its interval disables the
+    /// binding before filtering, color transfer, strength, factor, or alpha combination.
+    /// This is a coverage rule, not sampling an unspecified border color.
+    Decal,
 }
 
 /// Provenance-free sampler behavior used inside a canonical sampler owner.

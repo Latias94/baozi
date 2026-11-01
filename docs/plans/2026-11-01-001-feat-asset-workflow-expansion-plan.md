@@ -104,7 +104,13 @@ small typed record for the supported texture options and path. Reuse existing `T
 sampler and material-factor types. Preserve the existing last-complete-definition policy for
 duplicate MTL materials. Do not reproduce Assimp's field-merging behavior.
 
-Map the supported two-dimensional offset/scale and clamp semantics from a primary MTL reference.
+Consult primary MTL references for option arities, defaults and clamp coverage. The original
+manual does not uniquely specify an offset/scale sampling equation or composition order; the
+adopted Baozi OBJ/MTL UV Sampling Profile therefore states `q = offset + scale*p` explicitly.
+Retain authored U/V directly, with no reciprocal, V flip or pivot. Primary ecosystem implementation
+evidence and the ambiguity are documented in `docs/formats/obj.md`. Clamp-on uses a typed `Decal`
+coverage rule: skip the binding outside the closed unit interval, preserving the underlying
+material; sample covered coordinates with edge clamping.
 Keep metadata as source evidence, not as a substitute for known behavioral fields. The finite
 initial-tranche branch list is:
 
@@ -124,8 +130,9 @@ documents to name the completed branch list and the deferred restrictions.
 
 - Nonidentity `map_Kd` offset/scale and clamp-on/off fixtures directly assert typed UV transform
   and sampler addressing, including argument defaults, malformed arguments and paths with spaces.
-- A primary-source-derived UV example checks operation order/origin interpretation. Tests must
-  inspect more than the retained texture URI.
+- A numeric UV example checks the named sampling profile's operation order/origin interpretation,
+  with primary references and their limits documented. Tests must inspect more than the retained
+  texture URI.
 - Accepted `Ka/Ks` produce expected typed factors; source metadata survives. Redefinition behavior
   remains explicit and tested.
 - Every unimplemented recognized branch in the list fails with

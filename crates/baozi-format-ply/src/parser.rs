@@ -123,6 +123,7 @@ struct Header<'scope> {
 }
 
 struct ParsedPly<'scope> {
+    channels: VertexChannels,
     positions: MeteredVec<'scope, [f32; 3]>,
     normals: MeteredVec<'scope, [f32; 3]>,
     texcoords: MeteredVec<'scope, [f32; 2]>,
@@ -723,6 +724,7 @@ fn parse_body<'scope, 'session, 'source>(
     let custom_attributes =
         custom_accumulators(ctx, vertex_element, vertex_profile.custom_scalar_count)?;
     let mut parsed = ParsedPly {
+        channels,
         positions,
         normals,
         texcoords,
@@ -1102,33 +1104,59 @@ fn warn_for_vertex_schema(ctx: &ParseScope<'_>, element: &Element) -> ParseResul
 
     let normal_components = usize::from(has_nx) + usize::from(has_ny) + usize::from(has_nz);
     if normal_components != 0 && normal_components != 3 {
-        warn(
+        record_partial_channel_loss(
             ctx,
+            element.source_location,
             "ply.partial_normals_ignored",
-            Some(element.source_location),
-            format_args!("PLY vertex has partial normal properties; normals were ignored"),
+            "normal",
         )?;
     }
     if has_s != has_t {
-        warn(
+        record_partial_channel_loss(
             ctx,
+            element.source_location,
             "ply.partial_texcoords_ignored",
-            Some(element.source_location),
-            format_args!(
-                "PLY vertex has partial texture coordinate properties; texcoords were ignored"
-            ),
+            "texcoord",
         )?;
     }
     let color_components = usize::from(has_red) + usize::from(has_green) + usize::from(has_blue);
     if color_components != 0 && color_components != 3 {
-        warn(
+        record_partial_channel_loss(
             ctx,
+            element.source_location,
             "ply.partial_colors_ignored",
-            Some(element.source_location),
-            format_args!("PLY vertex has partial color properties; colors were ignored"),
+            "color",
         )?;
     }
     Ok(())
+}
+
+fn record_partial_channel_loss(
+    ctx: &ParseScope<'_>,
+    location: TextDiagnosticLocation<'_>,
+    code: &'static str,
+    channel: &'static str,
+) -> ParseResult<()> {
+    let mut object_path = ctx.metered_string(
+        ImportStorageClass::FormatNormalization,
+        "ply-partial-channel-object-path",
+    );
+    object_path.try_write_fmt(format_args!("/elements/vertex/properties/{channel}"))?;
+    ctx.record_source_semantic_loss(
+        DiagnosticCode::new(code).expect("static PLY diagnostic code must be valid"),
+        SourceScopeEntityKind::Mesh,
+        object_path.as_str(),
+        |details| {
+            details.string("channel", channel);
+            details.unsigned("byte_offset", location.byte_range().start());
+            details.unsigned("byte_length", location.byte_range().end() - location.byte_range().start());
+            details.unsigned("line", location.line_column().line());
+            details.unsigned("column", location.line_column().column());
+        },
+        format_args!(
+            "PLY vertex has partial {channel} properties; omitting the channel requires explicit source semantic loss authority"
+        ),
+    )
 }
 
 fn vertex_property_profile(
@@ -1248,6 +1276,7 @@ fn parse_vertex_row<'scope>(
     work: &mut ImportWorkScope<'_, '_, BODY_WORK_ENTRIES>,
 ) -> ParseResult<()> {
     let vertex_index = parsed.positions.len();
+    let retain_colors = parsed.channels.colors;
     let mut x = None;
     let mut y = None;
     let mut z = None;
@@ -1281,20 +1310,40 @@ fn parse_vertex_row<'scope>(
                     "s" | "u" | "texture_u" => s = Some(value.to_f32(ctx, name.as_str())?),
                     "t" | "v" | "texture_v" => t = Some(value.to_f32(ctx, name.as_str())?),
                     "red" | "r" => {
-                        red =
-                            Some(value.to_color_component(ctx, *ty, name.as_str(), vertex_index)?)
+                        red = Some(value.to_color_component(
+                            ctx,
+                            *ty,
+                            name.as_str(),
+                            vertex_index,
+                            retain_colors,
+                        )?)
                     }
                     "green" | "g" => {
-                        green =
-                            Some(value.to_color_component(ctx, *ty, name.as_str(), vertex_index)?)
+                        green = Some(value.to_color_component(
+                            ctx,
+                            *ty,
+                            name.as_str(),
+                            vertex_index,
+                            retain_colors,
+                        )?)
                     }
                     "blue" | "b" => {
-                        blue =
-                            Some(value.to_color_component(ctx, *ty, name.as_str(), vertex_index)?)
+                        blue = Some(value.to_color_component(
+                            ctx,
+                            *ty,
+                            name.as_str(),
+                            vertex_index,
+                            retain_colors,
+                        )?)
                     }
                     "alpha" | "a" => {
-                        alpha =
-                            Some(value.to_color_component(ctx, *ty, name.as_str(), vertex_index)?)
+                        alpha = Some(value.to_color_component(
+                            ctx,
+                            *ty,
+                            name.as_str(),
+                            vertex_index,
+                            retain_colors,
+                        )?)
                     }
                     _ => {
                         let Some(attribute_index) = *custom_attribute else {
@@ -2151,6 +2200,7 @@ impl ScalarValue {
         ty: ScalarType,
         name: &str,
         vertex_index: usize,
+        retained: bool,
     ) -> ParseResult<f32> {
         let value = self.to_f64(ctx, name)?;
         let normalized = match ty {
@@ -2178,7 +2228,7 @@ impl ScalarValue {
             }
         };
         let output = normalized as f32;
-        if ty == ScalarType::F64 && f64::from(output).to_bits() != value.to_bits() {
+        if retained && ty == ScalarType::F64 && f64::from(output).to_bits() != value.to_bits() {
             let mut object_path = ctx.metered_string(
                 ImportStorageClass::FormatNormalization,
                 "ply-color-precision-object-path",

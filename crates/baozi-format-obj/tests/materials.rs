@@ -147,7 +147,8 @@ fn loads_multiple_mtllib_tokens_from_one_statement() -> TestResult<()> {
 #[test]
 fn duplicate_materials_across_libraries_keep_the_last_definition() -> TestResult<()> {
     let obj = b"mtllib first.mtl second.mtl\nusemtl shared\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
-    let first = b"newmtl shared\nKd 1 0 0\n";
+    let first =
+        b"newmtl shared\nKd 1 0 0\nKa 0.25\nKs 0.5\nmap_Kd -o 0.25 -s 2 -clamp on first.png\n";
     let second = b"newmtl shared\nKd 0 1 0\n";
 
     let report = import_assets(
@@ -169,6 +170,12 @@ fn duplicate_materials_across_libraries_keep_the_last_definition() -> TestResult
     assert_eq!(snapshot.material_count(), 1);
     assert_eq!(material_factor_bits(&snapshot, 0, 20), 0.0_f32.to_bits());
     assert_eq!(material_factor_bits(&snapshot, 0, 21), 1.0_f32.to_bits());
+    let material = report.scene().materials().next().unwrap();
+    let legacy = material.factors().legacy().unwrap();
+    assert_eq!(legacy.ambient(), baozi_core::Vec3::ZERO);
+    assert_eq!(legacy.specular(), baozi_core::Vec3::ZERO);
+    assert_eq!(material.binding_count(), 0);
+    assert_eq!(report.scene().texture_count(), 0);
     Ok(())
 }
 

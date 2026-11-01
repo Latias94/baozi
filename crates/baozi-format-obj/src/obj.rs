@@ -169,6 +169,7 @@ impl<'scope> ObjParser<'scope, '_> {
             "vt" => self.parse_texcoord(token_values, line_number),
             "vn" => self.parse_normal(token_values, line_number),
             "f" => self.parse_face(token_values, line_number),
+            "p" | "l" => self.parse_omitted_geometry(token_values, line_number),
             "o" => {
                 self.object = parse_state_name(
                     self.scope,
@@ -639,8 +640,7 @@ fn trailing_token_range(tokens: &[Token<'_>]) -> Option<std::ops::Range<usize>> 
 fn is_unsupported_statement(keyword: &str) -> bool {
     matches!(
         keyword,
-        "p" | "l"
-            | "curv"
+        "curv"
             | "curv2"
             | "surf"
             | "parm"

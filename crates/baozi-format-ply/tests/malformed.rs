@@ -1,11 +1,14 @@
 mod common;
 
 use baozi_format_ply::PlyFailureCode;
-use baozi_import::{DiagnosticDetailValue, ImportDiagnostic, ImportProgressPhase, ResourceLimits};
+use baozi_import::{
+    DiagnosticDetailValue, ImportDiagnostic, ImportLossKind, ImportProgressPhase, LossPolicy,
+    ResourceLimits,
+};
 use common::{
     TestResult, ascii_triangle, assert_resource_limit, expected_error, expected_ply_failure,
-    expected_report, import_bytes_result, ply_string_detail, ply_unsigned_detail, scene_snapshot,
-    snapshot_line, snapshot_line_containing,
+    expected_report, import_bytes_result, import_bytes_result_with_loss_policy, ply_string_detail,
+    ply_unsigned_detail, scene_snapshot, snapshot_line, snapshot_line_containing,
 };
 
 fn memory_limits() -> ResourceLimits {
@@ -853,7 +856,12 @@ end_header
 0 1 0 0
 3 0 1 2
 ";
-    let scene = import_bytes_result("partial-normal.ply", bytes, memory_limits())?;
+    let scene = import_bytes_result_with_loss_policy(
+        "partial-normal.ply",
+        bytes,
+        memory_limits(),
+        LossPolicy::preserve_or_fail().allow(ImportLossKind::SourceSemanticLoss),
+    )?;
     let report = expected_report(scene)?;
     let diagnostics = report.diagnostics();
     let snapshot = scene_snapshot(&report)?;
@@ -889,7 +897,12 @@ end_header
 0 1 0 1 0 255 128 0
 ";
 
-    let scene = import_bytes_result("vertex-schema-warnings.ply", bytes, memory_limits())?;
+    let scene = import_bytes_result_with_loss_policy(
+        "vertex-schema-warnings.ply",
+        bytes,
+        memory_limits(),
+        LossPolicy::preserve_or_fail().allow(ImportLossKind::SourceSemanticLoss),
+    )?;
     let report = expected_report(scene)?;
     let diagnostics = report.diagnostics();
     let snapshot = scene_snapshot(&report)?;

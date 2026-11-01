@@ -970,6 +970,8 @@ struct BuiltMaterial<'input, 'scope> {
 struct BuiltTexture<'scope> {
     identity: ResourceIdentity,
     snapshot: DependencySnapshot<'scope>,
+    transform: TextureTransform,
+    sampler: SamplerState,
 }
 
 struct MaterialProjection<'scope, 'input> {
@@ -1082,7 +1084,9 @@ fn build_material<'input, 'scope>(
             name,
             CanonicalShadingModel::Phong,
             CanonicalAlphaMode::Opaque,
+            Vec3::ZERO,
             Color::WHITE,
+            Vec3::ZERO,
             Color::linear_rgba(0.0, 0.0, 0.0, 1.0),
             0.0,
             None,
@@ -1117,7 +1121,9 @@ fn material_from_parsed<'input, 'scope>(
         parsed.name.as_str(),
         CanonicalShadingModel::Phong,
         alpha_mode,
+        parsed.ambient,
         parsed.base_color,
+        parsed.specular,
         parsed.emissive,
         parsed_shininess(&parsed.metadata),
         Some(&parsed.metadata),
@@ -1153,7 +1159,12 @@ fn load_diffuse_texture<'scope>(
     };
     let identity = ResourceIdentity::new(snapshot.identity().path().as_str())
         .map_err(|_| scope.format_failure(ObjFailure::internal("texture-identity-invalid")))?;
-    Ok(Some(BuiltTexture { identity, snapshot }))
+    Ok(Some(BuiltTexture {
+        identity,
+        snapshot,
+        transform: texture.transform,
+        sampler: texture.sampler,
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1162,16 +1173,18 @@ fn material_from_factors<'input, 'scope>(
     name: &'input str,
     shading_model: CanonicalShadingModel,
     alpha_mode: CanonicalAlphaMode,
+    ambient: Vec3,
     base_color: Color,
+    specular: Vec3,
     emissive: Color,
     shininess: f32,
     metadata: Option<&'input ParsedMetadata<'scope>>,
     diffuse_texture: Option<BuiltTexture<'scope>>,
 ) -> ParseResult<BuiltMaterial<'input, 'scope>> {
     let legacy = LegacyMaterialFactors::try_new(
-        Vec3::ZERO,
+        ambient,
         Vec3::new(base_color.r, base_color.g, base_color.b),
-        Vec3::ZERO,
+        specular,
         Vec3::new(emissive.r, emissive.g, emissive.b),
         shininess,
         base_color.a,
@@ -1435,7 +1448,7 @@ fn submit_complete_batch<'scope>(
             material_bindings.len(),
             "obj-material-binding-offset",
         )?;
-        let binding_count = if material.diffuse_texture.is_some() {
+        let binding_count = if let Some(texture) = &material.diffuse_texture {
             let image_index = canonical_u32(scope, images.len(), "obj-image-local-id")?;
             let sampler_index = canonical_u32(scope, samplers.len(), "obj-sampler-local-id")?;
             let texture_index = canonical_u32(scope, textures.len(), "obj-texture-local-id")?;
@@ -1446,7 +1459,7 @@ fn submit_complete_batch<'scope>(
                 ResourceIdentityLocalId::new(resource_index),
                 Presence::Absent,
             ))?;
-            samplers.try_push_reserved(SamplerAuthoring::new(SamplerState::CANONICAL_DEFAULT))?;
+            samplers.try_push_reserved(SamplerAuthoring::new(texture.sampler))?;
             textures.try_push_reserved(TextureAuthoring::new(
                 ImageLocalId::new(image_index),
                 SamplerLocalId::new(sampler_index),
@@ -1458,7 +1471,7 @@ fn submit_complete_batch<'scope>(
                     0,
                     channel_mapping,
                     color_interpretation,
-                    TextureTransform::IDENTITY,
+                    texture.transform,
                     TextureStrength::ONE,
                     blend,
                     Some(&source_key),

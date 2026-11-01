@@ -199,7 +199,7 @@ fn fixture() -> AppearanceRows {
                 MipmapFilter::None,
                 TextureAddressMode::ClampToEdge,
                 TextureAddressMode::MirroredRepeat,
-                TextureAddressMode::ClampToBorder,
+                TextureAddressMode::Decal,
             ),
         ],
         textures: vec![

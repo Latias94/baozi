@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-10-31
+updated: 2026-11-01
 authors:
   - Codex
 decision_type: architecture
@@ -36,6 +36,16 @@ The canonical scene has three separate dense identities:
   canonical default sampler exists when the source omits one.
 - `Texture` pairs exactly one `ImageId` with one `SamplerId`. It has no material role or color-space
   interpretation.
+
+`TextureAddressMode::Decal` is an explicit coverage rule: if any Decal axis of the transformed UV
+lies outside the closed `[0,1]` interval, the binding is inactive and the underlying material value
+is retained, including opacity and normal behavior. Skip sampling, color transfer, strength and
+factor combination for that inactive binding. Within the interval, that axis samples as
+`ClampToEdge`, including filter footprints at its boundary. Other axis modes retain their own
+behavior. This does not choose an implicit border color and is distinct from `ClampToBorder`.
+It admits the original MTL `-clamp on` single-copy/underlying-material behavior without asking an
+OBJ consumer to reinterpret an unrelated sampler category. The retained sampler, central typed
+model, public readers, deterministic snapshot and Scene edits carry the same mode.
 
 A material `TextureBinding` references `TextureId` and owns usage semantics: role, zero-based
 `uv_set: u16`, transform, channel mapping, color interpretation, scale/strength, blend operation
