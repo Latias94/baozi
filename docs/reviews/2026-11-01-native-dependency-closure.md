@@ -1,5 +1,5 @@
 ---
-status: in_progress
+status: completed
 date: 2026-11-01
 ---
 
@@ -8,7 +8,9 @@ date: 2026-11-01
 This record covers the [dependency closure plan](../plans/2026-11-01-009-refactor-native-dependency-closure-plan.md)
 after `625d339972f68bea81293469ec3d1aa6a63ff883`. It implements a bounded part of the
 separate release track in the [asset workflow plan](../plans/2026-11-01-001-feat-asset-workflow-expansion-plan.md).
-The implementation revision and final executed results are recorded after source qualification.
+Implementation is `e7e9b00247eb3000e9db54ef5315fabd7ec9479b`. The tracked source tree
+was clean after that commit; subsequent documentation changes bind the already
+executed source qualification to this revision and complete the plan.
 Final Windows source fingerprints, logs and archive inventories are retained locally
 under `.git/baozi-review/native-dependency-closure/`. Each package rehearsal creates
 its archive/source/build staging under `target/package-check-*`; that build cache

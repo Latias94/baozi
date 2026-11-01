@@ -2,7 +2,7 @@
 title: Normally Resolvable Maintained Native Dependency Closure
 type: refactor
 date: 2026-11-01
-status: in_progress
+status: completed
 ---
 
 # Normally Resolvable Maintained Native Dependency Closure
@@ -68,5 +68,10 @@ remain independent decisions. No registry write, push or PR is authorized here.
    record revision-qualified evidence and complete this plan. Preserve unrelated
    user notes and do not publish.
 
-Execution results will be recorded in
-`docs/reviews/2026-11-01-native-dependency-closure.md`.
+Completed in `e7e9b00247eb3000e9db54ef5315fabd7ec9479b`. The
+[execution review](../reviews/2026-11-01-native-dependency-closure.md) records source
+consumer and native regressions, the 11-profile dependency audit, the full Windows
+and Linux archived-consumer matrices, optional closure checks, independent reviews
+and the evidence retention boundary. No package was published and no native target
+was registered. The first registry release and its exact package/target set remain
+separate work.
