@@ -193,6 +193,7 @@ struct FailureTerminalWorkCapability<D> {
     max_evidence_members: usize,
     construction_work_limit: u64,
     validation_work_limit: u64,
+    validation_work_qualified: bool,
 }
 
 /// Records the first trusted terminal cause while keeping a requested cause provisional.
@@ -234,6 +235,7 @@ impl<D: Copy> FailureTerminalWorkCapability<D> {
             max_evidence_members: plan.max_evidence_members(),
             construction_work_limit: plan.construction_work_limit(),
             validation_work_limit: plan.validation_work_limit(),
+            validation_work_qualified: false,
         }
     }
 }
@@ -2041,6 +2043,92 @@ where
                 capability.validation_work_limit,
             )
         })
+    }
+
+    pub(crate) fn preflight_failure_validation_work(&self) -> Result<(), RetainedWriterError<D>> {
+        let preflight = self
+            .account()
+            .try_begin_account_preflight()
+            .map_err(RetainedWriterError::AccountPoisoned)?;
+        drop(preflight);
+        Ok(())
+    }
+
+    pub(crate) fn qualify_failure_validation_work(
+        &mut self,
+        ordinary_dimension: D,
+        max_evidence_members: usize,
+        validation_work_limit: u64,
+    ) -> Result<(), RetainedWriterError<D>> {
+        let result = (|| {
+            let preflight = self
+                .account()
+                .try_begin_account_preflight()
+                .map_err(RetainedWriterError::AccountPoisoned)?;
+            let capability = self
+                .failure_terminal_work
+                .as_ref()
+                .filter(|capability| !capability.validation_work_qualified)
+                .ok_or(RetainedWriterError::InvalidPublicationPlan)?;
+            if self.has_outstanding_work_permit() || self.sticky_terminal_cause().is_some() {
+                return Err(RetainedWriterError::InvalidPublicationPlan);
+            }
+            if !self.contains_dimension(ordinary_dimension) {
+                return Err(RetainedWriterError::Ledger(LedgerCause::UnknownDimension {
+                    dimension: ordinary_dimension,
+                }));
+            }
+            let max_evidence_members = max_evidence_members.max(capability.max_evidence_members);
+            let validation_work_limit = validation_work_limit.max(capability.validation_work_limit);
+            let terminal_dimension = capability.handle_share_work.charges()[0].0;
+            let original = RetainedFailureTerminalWorkPlan::with_evidence_work(
+                terminal_dimension,
+                capability.max_evidence_members,
+                capability.construction_work_limit,
+                capability.validation_work_limit,
+            )
+            .requirement()
+            .map_err(|()| RetainedWriterError::InvalidPublicationPlan)?;
+            let qualified = RetainedFailureTerminalWorkPlan::with_evidence_work(
+                terminal_dimension,
+                max_evidence_members,
+                capability.construction_work_limit,
+                validation_work_limit,
+            )
+            .requirement()
+            .map_err(|()| RetainedWriterError::InvalidPublicationPlan)?;
+            let additional_work = qualified
+                .observed_work_limit()
+                .checked_sub(original.observed_work_limit())
+                .ok_or(RetainedWriterError::InvalidPublicationPlan)?;
+            self.coordinator
+                .retained_ledger()
+                .transfer_failure_terminal_work(
+                    ordinary_dimension,
+                    terminal_dimension,
+                    additional_work,
+                )
+                .map_err(RetainedWriterError::Ledger)?;
+            drop(preflight);
+            let capability = self
+                .failure_terminal_work
+                .as_mut()
+                .expect("qualification retains the dormant failure capability");
+            capability.max_evidence_members = max_evidence_members;
+            capability.validation_work_limit = validation_work_limit;
+            capability.validation_work_qualified = true;
+            Ok(())
+        })();
+        if let Err(cause) = &result {
+            match cause {
+                RetainedWriterError::Ledger(_) => self.record_ledger_failure(),
+                RetainedWriterError::InvalidPublicationPlan => {
+                    self.record_product_graph_failure(0x4657_5155);
+                }
+                _ => {}
+            }
+        }
+        result
     }
 
     pub(crate) fn try_rebind_canonical_assembly(

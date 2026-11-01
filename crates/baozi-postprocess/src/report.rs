@@ -22,6 +22,10 @@ pub enum PostProcessOperation {
         target: PrimitiveId,
         options: TangentOptions,
     },
+    PrepareTriangles {
+        input_generation: SceneGenerationId,
+        options: crate::TrianglePreparationOptions,
+    },
     /// Convert the complete input Scene using explicit spatial declarations.
     ConvertSpace {
         input_generation: SceneGenerationId,
@@ -55,9 +59,51 @@ enum OperationResult {
     Normals(NormalGenerationReport),
     Tangents(TangentGenerationReport),
     SpaceConversion(SpaceConversionReport),
+    Preparation(crate::GeometryPreparationReport),
 }
 
 impl PostProcessReport {
+    pub(crate) fn preparation(
+        input_generation: SceneGenerationId,
+        options: crate::TrianglePreparationOptions,
+        output_generation: SceneGenerationId,
+        resources: PostProcessResourceEvidence,
+        effects: Option<crate::GeometryPreparationReport>,
+    ) -> Self {
+        Self {
+            operation: PostProcessOperation::PrepareTriangles {
+                input_generation,
+                options,
+            },
+            output_generation,
+            resources,
+            result: effects.map_or(OperationResult::Unchanged, OperationResult::Preparation),
+        }
+    }
+    pub const fn geometry_preparation(&self) -> Option<&crate::GeometryPreparationReport> {
+        match &self.result {
+            OperationResult::Preparation(r) => Some(r),
+            OperationResult::Triangulation(r) => Some(r.preparation()),
+            OperationResult::Normals(r) => Some(r.preparation()),
+            OperationResult::Tangents(r) => Some(r.preparation()),
+            _ => None,
+        }
+    }
+    pub(crate) fn normal_preparation(
+        target: PrimitiveId,
+        options: NormalOptions,
+        output_generation: SceneGenerationId,
+        resources: PostProcessResourceEvidence,
+        preparation: crate::GeometryPreparationReport,
+    ) -> Self {
+        Self {
+            operation: PostProcessOperation::GenerateNormals { target, options },
+            output_generation,
+            resources,
+            result: OperationResult::Preparation(preparation),
+        }
+    }
+
     pub(crate) fn space_conversion(
         input_generation: SceneGenerationId,
         options: SpaceConversionOptions,
@@ -170,6 +216,9 @@ impl PostProcessReport {
             | PostProcessOperation::GenerateNormals { target, .. }
             | PostProcessOperation::GenerateTangents { target, .. } => target.generation(),
             PostProcessOperation::ConvertSpace {
+                input_generation, ..
+            }
+            | PostProcessOperation::PrepareTriangles {
                 input_generation, ..
             } => input_generation,
         }

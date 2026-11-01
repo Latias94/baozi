@@ -146,7 +146,7 @@ fn fixture() -> Fixture {
             face_count: u32::from(vertices != 0),
             polygon_boundaries: None,
             indices: None,
-            material: None,
+            material: crate::MaterialAssignment::Unspecified,
             attributes: TableRange::new(
                 attribute_start,
                 geometry.attributes.len() - attribute_start,

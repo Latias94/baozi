@@ -90,12 +90,16 @@ impl Drop for Generated {
     }
 }
 
-fn assert_released(output: &Output, opened: u64, changed: usize) {
+fn assert_released(output: &Output, opened: u64, changed: usize, reconstructions: u32) {
     assert!(output.import_evidence.loss_evidence().is_empty());
     assert_eq!(output.import_evidence.ledger().current_live_bytes(), 0);
     assert_eq!(output.import_evidence.ledger().active_reservations(), 0);
     assert_eq!(output.metrics.opened_assets, opened);
     assert_eq!(output.metrics.changed_operations, changed);
+    assert_eq!(
+        output.metrics.selected_geometry_reconstructions,
+        reconstructions
+    );
     assert_eq!(
         output.metrics.traced_primitive_owners,
         output.asset.draws.len()
@@ -128,9 +132,9 @@ fn assert_grid(asset: &ApplicationAsset, size: usize) {
         assert!(row >= 0.0 && row <= size as f64 && row.fract() == 0.0);
         assert!(positions.insert((column as usize, row as usize)));
         assert_eq!(vertex.normal, Some([0.0, 0.0, 1.0]));
-        assert!(vertex.uv.is_none());
         assert!(vertex.tangent.is_none());
     }
+    assert!(draw.uv_streams.is_empty());
     for triangle in draw.indices.chunks_exact(3) {
         let [a, b, c] = std::array::from_fn::<_, 3, _>(|i| {
             draw.vertices[usize::try_from(triangle[i]).unwrap()].position
@@ -161,13 +165,13 @@ fn assert_shared_primitives(asset: &ApplicationAsset, primitives: usize, image: 
     assert_eq!(asset.draws.len(), primitives);
     assert_eq!(asset.vertex_count(), 4 * primitives);
     assert_eq!(asset.images.len(), 1);
-    assert_eq!(asset.images[0], image);
+    assert_eq!(asset.images[0].encoded_bytes, image);
     assert_eq!(asset.materials.len(), 2);
     for (material, name) in asset.materials.iter().zip(["white", "tinted"]) {
         assert_eq!(material.name.as_deref(), Some(name));
         assert_eq!(material.bindings.len(), 1);
         assert_eq!(material.bindings[0].role, TextureRole::BaseColor);
-        assert_eq!(material.bindings[0].image, 0);
+        assert_eq!(asset.textures[material.bindings[0].texture].image, 0);
         assert_eq!(material.bindings[0].uv_set, 0);
     }
     let translation = asset.nodes[1]
@@ -190,7 +194,11 @@ fn assert_shared_primitives(asset: &ApplicationAsset, primitives: usize, image: 
     for (primitive, draw) in asset.draws.iter().enumerate() {
         assert_eq!(
             (draw.mesh, draw.primitive, draw.material),
-            (0, primitive, Some(primitive % 2))
+            (
+                0,
+                primitive,
+                baozi::MaterialAssignment::Authored(primitive % 2)
+            )
         );
         assert_eq!((draw.vertices.len(), draw.indices.len()), (4, 6));
         assert!(draw.influences.is_none());
@@ -199,7 +207,10 @@ fn assert_shared_primitives(asset: &ApplicationAsset, primitives: usize, image: 
         for (&index, source) in draw.indices.iter().zip([0, 2, 1, 0, 3, 2]) {
             let vertex = &draw.vertices[usize::try_from(index).unwrap()];
             assert_eq!(vertex.position, positions[source]);
-            assert_eq!(vertex.uv, Some(uvs[source]));
+            assert_eq!(
+                draw.uv_stream(0).unwrap().values[index as usize],
+                uvs[source]
+            );
             assert_eq!(vertex.normal, Some([0.0, 0.0, -1.0]));
             assert!(vertex.tangent.is_none());
         }
@@ -249,7 +260,7 @@ fn generated_workflows(grids: &[usize], primitives: &[usize]) -> Result<()> {
                 assert_eq!(count(&case["source_counts"]["quad_faces"]), size * size);
                 assert_eq!(count(&case["expected"]["draw_vertices"]), (size + 1).pow(2));
                 assert_eq!(count(&case["expected"]["draw_indices"]), 6 * size * size);
-                assert_released(&output, 1, 3);
+                assert_released(&output, 1, 2, 1);
                 let asset = output.asset;
                 drop(output.import_evidence);
                 assert_grid(&asset, size);
@@ -259,7 +270,7 @@ fn generated_workflows(grids: &[usize], primitives: &[usize]) -> Result<()> {
                 assert_eq!(count(&case["source_counts"]["unique_position_rows"]), 4);
                 assert_eq!(count(&case["expected"]["draw_vertices"]), 4 * size);
                 assert_eq!(count(&case["expected"]["draw_indices"]), 6 * size);
-                assert_released(&output, 3, size + 1);
+                assert_released(&output, 3, 2, 1);
                 let asset = output.asset;
                 drop(output.import_evidence);
                 assert_shared_primitives(&asset, size, &image);
@@ -436,7 +447,7 @@ fn cesium_man_binds_keys_influences_and_image_survive_scene_drop() -> Result<()>
         assert_eq!(weights[vertex], floats(&sample["weights"]));
     }
     let output = process_file(&fixtures(), relative, Options::default())?;
-    assert_released(&output, 3, 1);
+    assert_released(&output, 3, 1, 0);
     let asset = output.asset;
     drop(output.import_evidence);
     // Every comparison below uses owned application data, after both Scene and evidence drop.
@@ -501,7 +512,10 @@ fn cesium_man_binds_keys_influences_and_image_survive_scene_drop() -> Result<()>
     assert_eq!(asset.instances[0].mesh, count(&instance["mesh"]));
     assert_eq!(asset.instances[0].skin, Some(count(&instance["skin"])));
     let draw = &asset.draws[0];
-    assert_eq!((draw.mesh, draw.primitive, draw.material), (0, 0, Some(0)));
+    assert_eq!(
+        (draw.mesh, draw.primitive, draw.material),
+        (0, 0, baozi::MaterialAssignment::Authored(0))
+    );
     assert_eq!(
         (draw.vertices.len(), draw.indices.len()),
         (positions.len(), indices.len())
@@ -541,11 +555,11 @@ fn cesium_man_binds_keys_influences_and_image_survive_scene_drop() -> Result<()>
                 ])
             );
             assert_eq!(
-                vertex.uv,
-                Some([
+                draw.uv_stream(0).unwrap().values[index],
+                [
                     f64::from(uvs[source_index][0]),
                     f64::from(uvs[source_index][1])
-                ])
+                ]
             );
             assert!(vertex.tangent.is_none());
             let range = influences.offsets[index]..influences.offsets[index + 1];
@@ -680,12 +694,15 @@ fn cesium_man_binds_keys_influences_and_image_survive_scene_drop() -> Result<()>
         count(&expected["animation"]["output_scalar_count"])
     );
     assert_eq!(
-        asset.images[0],
+        asset.images[0].encoded_bytes,
         std::fs::read(directory.join("CesiumMan_img0.jpg"))?
     );
     assert_eq!(asset.materials[0].bindings.len(), 1);
     let binding = &asset.materials[0].bindings[0];
     assert_eq!(binding.role, TextureRole::BaseColor);
-    assert_eq!((binding.image, binding.uv_set), (0, 0));
+    assert_eq!(
+        (asset.textures[binding.texture].image, binding.uv_set),
+        (0, 0)
+    );
     Ok(())
 }

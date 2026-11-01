@@ -636,7 +636,7 @@ fn mixed_modes_keep_order_shared_accessors_deformation_and_source_owned_extras()
             );
             assert_eq!(primitive.indices(), Some(INDICES.as_slice()));
             assert_eq!(
-                primitive.material().unwrap().name(),
+                primitive.authored_material().unwrap().name(),
                 Some(if slot % 2 == 0 { "first" } else { "second" })
             );
             let position = primitive.positions().unwrap();

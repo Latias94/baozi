@@ -235,7 +235,7 @@ fn nested_descriptors_and_uniqueness_growth_release_at_each_control_failure() {
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::Points,
         Presence::Absent,
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 0),
     )];
     let geometry = validate_geometry_batch_with_control(
@@ -422,7 +422,7 @@ fn borrowed_deformation_names_preserve_empty_unicode_and_bounded_errors() {
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::Points,
         Presence::Absent,
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 0),
     )];
     let geometry = validate_geometry_batch_with_control(

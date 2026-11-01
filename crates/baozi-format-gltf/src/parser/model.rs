@@ -224,8 +224,10 @@ pub(super) struct MaterialStorage<'scope> {
 
 pub(super) struct AppearanceStorage<'scope> {
     pub(super) images: MeteredVec<'scope, ImageStorage>,
+    pub(super) image_names: MeteredVec<'scope, Option<MeteredString<'scope>>>,
     pub(super) encoded_image_payloads: MeteredVec<'scope, MeteredVec<'scope, u8>>,
     pub(super) samplers: MeteredVec<'scope, SamplerAuthoring>,
+    pub(super) sampler_names: MeteredVec<'scope, Option<MeteredString<'scope>>>,
     pub(super) sampler_provenance: MeteredVec<'scope, u32>,
     pub(super) textures: MeteredVec<'scope, TextureAuthoring>,
     pub(super) texture_provenance: MeteredVec<'scope, u32>,
@@ -236,6 +238,7 @@ pub(super) struct AppearanceStorage<'scope> {
     pub(super) sampler_ids: MeteredVec<'scope, Option<SamplerLocalId>>,
     pub(super) texture_ids: MeteredVec<'scope, Option<TextureLocalId>>,
     pub(super) default_sampler: Option<SamplerLocalId>,
+    pub(super) default_material: Option<MaterialLocalId>,
     pub(super) material_ids: MeteredVec<'scope, Option<MaterialLocalId>>,
 }
 
@@ -250,7 +253,7 @@ pub(super) struct PrimitiveStorage<'scope> {
     pub(super) topology: GeometryTopologyAuthoring<'static>,
     pub(super) has_indices: bool,
     pub(super) indices: MeteredVec<'scope, u32>,
-    pub(super) material: Option<MaterialLocalId>,
+    pub(super) material_assignment: MaterialAssignment<MaterialLocalId>,
     pub(super) attributes: MeteredVec<'scope, AttributeStorage<'scope>>,
     pub(super) influence_offsets: MeteredVec<'scope, u32>,
     pub(super) influences: MeteredVec<'scope, InfluenceAuthoring>,

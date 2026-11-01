@@ -38,7 +38,7 @@ pub(crate) fn admit<'scope>(
     bytes: &[u8],
     raw_base: u64,
     is_glb: bool,
-) -> ParseResult<GltfSourceMap<'scope>> {
+) -> ParseResult<(GltfSourceMap<'scope>, JsonIndex<'scope>)> {
     ctx.enforce_resource_limit(
         "gltf-decoded-utf8-bytes",
         to_u64(bytes.len()),
@@ -64,6 +64,7 @@ pub(crate) fn admit<'scope>(
         mut keys,
         stats,
         mut source_map,
+        index,
         ..
     } = scanner;
     debug_assert!(frames.is_empty());
@@ -81,7 +82,37 @@ pub(crate) fn admit<'scope>(
     debug_assert_eq!(stats.containers, stats.objects + stats.arrays);
     drop(keys);
     source_map.finish(ctx)?;
-    Ok(source_map)
+    Ok((source_map, index))
+}
+
+pub(crate) type ValueId = usize;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ValueKind {
+    Object,
+    Array,
+    String,
+    Number,
+    Bool,
+    Null,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct IndexedValue {
+    pub(crate) kind: ValueKind,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) key_start: usize,
+    pub(crate) key_end: usize,
+    pub(crate) first_child: Option<ValueId>,
+    last_child: Option<ValueId>,
+    pub(crate) next_sibling: Option<ValueId>,
+    pub(crate) child_count: usize,
+}
+
+/// Structural storage only: unknown values and strings retain borrowed raw ranges.
+pub(crate) struct JsonIndex<'scope> {
+    pub(crate) values: MeteredVec<'scope, IndexedValue>,
 }
 
 fn publish_ledger_limit<T>(
@@ -134,6 +165,7 @@ struct JsonKey {
 
 #[derive(Clone, Copy)]
 struct JsonFrame {
+    value_id: ValueId,
     state: FrameState,
     object_id: u64,
     raw_start: usize,
@@ -235,6 +267,7 @@ struct JsonScanner<'scope, 'session, 'bytes> {
     frames: MeteredVec<'scope, JsonFrame>,
     keys: MeteredVec<'scope, JsonKey>,
     source_map: GltfSourceMap<'scope>,
+    index: JsonIndex<'scope>,
     stats: JsonStats,
 }
 
@@ -263,6 +296,12 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                 "gltf-json-object-keys",
             ),
             source_map: GltfSourceMap::new(ctx),
+            index: JsonIndex {
+                values: ctx.metered_vec(
+                    ImportStorageClass::FormatNormalization,
+                    "gltf-json-structural-index",
+                ),
+            },
             stats: JsonStats::new(),
         }
     }
@@ -457,9 +496,43 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
     ) -> ScanResult<()> {
         let raw_start = self.cursor;
         let source = self.value_source(parent)?;
+        let kind = match self.peek() {
+            Some(b'{') => ValueKind::Object,
+            Some(b'[') => ValueKind::Array,
+            Some(b'"') => ValueKind::String,
+            Some(b't' | b'f') => ValueKind::Bool,
+            Some(b'n') => ValueKind::Null,
+            _ => ValueKind::Number,
+        };
+        let value_id = self.index.values.len();
+        self.index.values.try_push(IndexedValue {
+            kind,
+            start: raw_start,
+            end: raw_start,
+            key_start: parent.map_or(0, |frame| frame.member_key_start),
+            key_end: parent.map_or(0, |frame| frame.member_key_end),
+            first_child: None,
+            last_child: None,
+            next_sibling: None,
+            child_count: 0,
+        })?;
+        if let Some(parent) = parent {
+            let previous = self.index.values.as_slice()[parent.value_id].last_child;
+            if let Some(previous) = previous {
+                self.index.values.as_mut_slice()[previous].next_sibling = Some(value_id);
+            }
+            let entry = &mut self.index.values.as_mut_slice()[parent.value_id];
+            entry.first_child.get_or_insert(value_id);
+            entry.last_child = Some(value_id);
+            entry.child_count += 1;
+        }
         match self.peek() {
-            Some(b'{') => return self.open_container(work, FrameState::ObjectKeyOrEnd, source),
-            Some(b'[') => return self.open_container(work, FrameState::ArrayValueOrEnd, source),
+            Some(b'{') => {
+                return self.open_container(work, FrameState::ObjectKeyOrEnd, source, value_id);
+            }
+            Some(b'[') => {
+                return self.open_container(work, FrameState::ArrayValueOrEnd, source, value_id);
+            }
             Some(b'"') => self.scan_string(work, false).map(|_| ()),
             Some(b't') => self.scan_literal(work, b"true"),
             Some(b'f') => self.scan_literal(work, b"false"),
@@ -490,6 +563,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                 "glTF JSON is missing a value",
             ),
         }?;
+        self.index.values.as_mut_slice()[value_id].end = self.cursor;
         self.finish_source_range(source, raw_start)
     }
 
@@ -704,6 +778,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
         work: &mut ImportWorkScope<'_, 'session, 1>,
         state: FrameState,
         source: SourceContext,
+        value_id: ValueId,
     ) -> ScanResult<()> {
         let depth = self
             .frames
@@ -739,6 +814,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
 
         work.poll()?;
         self.frames.try_push(JsonFrame {
+            value_id,
             state,
             object_id,
             raw_start: self.cursor,
@@ -781,6 +857,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                 .into());
         };
         self.finish_source_range(closed.source, closed.raw_start)?;
+        self.index.values.as_mut_slice()[closed.value_id].end = self.cursor;
         if self.frames.is_empty() {
             self.root_end = Some(self.cursor);
         }
@@ -1686,18 +1763,18 @@ fn decoded_keys_equal(
     )
 }
 
-struct DecodedScalars<'bytes> {
+pub(crate) struct DecodedScalars<'bytes> {
     bytes: &'bytes [u8],
     cursor: usize,
     end: usize,
 }
 
 impl<'bytes> DecodedScalars<'bytes> {
-    const fn new(bytes: &'bytes [u8], cursor: usize, end: usize) -> Self {
+    pub(crate) const fn new(bytes: &'bytes [u8], cursor: usize, end: usize) -> Self {
         Self { bytes, cursor, end }
     }
 
-    fn next_scalar(&mut self) -> Result<Option<u32>, ()> {
+    pub(crate) fn next_scalar(&mut self) -> Result<Option<u32>, ()> {
         if self.cursor == self.end {
             return Ok(None);
         }

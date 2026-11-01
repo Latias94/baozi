@@ -319,7 +319,7 @@ fn data_uri_base64_scan_cancellation_is_bounded_by_scan_chunks() -> TestResult<(
     let decoded_bytes = base64::decoded_len_estimate(valid_encoded.len());
     let valid_uri = data_uri(&valid_encoded);
     let valid_document = triangle_gltf_with_buffer_uri(&valid_uri, decoded_bytes);
-    let document_decode_work = (valid_document.len() * 2) as u64;
+    let document_decode_work = valid_document.len() as u64;
 
     let mut early_encoded = valid_encoded.as_bytes().to_vec();
     early_encoded[0] = b' ';
@@ -453,7 +453,7 @@ fn data_uri_base64_decode_cancellation_is_bounded_by_decode_chunks() -> TestResu
     let decoded_bytes = base64::decoded_len_estimate(encoded.len());
     let uri = data_uri(&encoded);
     let document = triangle_gltf_with_buffer_uri(&uri, decoded_bytes);
-    let document_decode_work = (document.len() * 2) as u64;
+    let document_decode_work = document.len() as u64;
     let (calibration_control, calibration_polls) = controlled_import(None);
     let (calibration_result, calibration_diagnostics) = import_assets_result_with_control(
         "base64-decode-calibration.gltf",
@@ -512,7 +512,7 @@ fn data_uri_work_admission_precedes_decode_buffer_allocation() -> TestResult<()>
     let encoded = encoded_payload();
     let uri = data_uri(&encoded);
     let document = triangle_gltf_with_buffer_uri(&uri, DECODED_BYTES);
-    let decode_limit = (document.len() * 2) as u64;
+    let decode_limit = document.len() as u64;
 
     let mut calibration_options = GltfTestOptions::memory();
     calibration_options.limits.max_decode_work = decode_limit;
@@ -555,11 +555,11 @@ fn data_uri_work_admission_precedes_decode_buffer_allocation() -> TestResult<()>
     );
     assert_eq!(
         dimension_attempted(&failure, ImportDimension::DecodeWork),
-        (document.len() * 2 + encoded.len()) as u64
+        (document.len() + encoded.len()) as u64
     );
     assert_eq!(
         dimension_consumed(&failure, ImportDimension::DecodeWork),
-        (document.len() * 2) as u64
+        document.len() as u64
     );
     assert_eq!(failure.ledger().peak_live_bytes(), pre_buffer_peak);
     assert_eq!(failure.ledger().current_live_bytes(), 0);

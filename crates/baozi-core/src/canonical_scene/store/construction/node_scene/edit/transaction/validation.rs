@@ -73,7 +73,8 @@ impl SceneEditPostflight<'_> {
                             scene.evidence_counts,
                         );
                         if Some(output.facts) == expected {
-                            if let Some(counts) = validate_changed_root(session, evidence, &recipe)?
+                            if let Some(counts) =
+                                validate_changed_root(session, evidence, &recipe, self.storage)?
                             {
                                 if storage.validate_correspondence(&scene.tables, session)? {
                                     let mut scratch = scratch.metered_view();
@@ -122,6 +123,7 @@ fn validate_changed_root<'session, O, PP, U>(
     session: &mut CanonicalValidationSession<'session, '_, '_, '_, O, PP, U>,
     root: OutcomeEvidenceValidationMember<'session, RecordBlock, SceneEditEvidenceTag>,
     recipe: &SceneEditEvidenceRecipe<'_>,
+    storage: Option<super::EditStoragePlan<'_>>,
 ) -> Result<
     Option<OutcomeEvidenceValidationMember<'session, RecordBlock, NodeSceneOutcomeEvidenceSchema>>,
     StoreWorkError,
@@ -160,7 +162,10 @@ where
                 schema::field::SCENE_COUNTS,
                 |member| member,
             )?;
-            if recipe.facts.words[0] != schema::OPERATION_TRIANGULATE {
+            if !matches!(
+                recipe.facts.words[0],
+                schema::OPERATION_TRIANGULATE | schema::OPERATION_SELECTION
+            ) {
                 valid &= row.scalar(schema::field::CORNER_ORIGINS, |value: u8| value)? == Some(0);
                 valid &= row.scalar(schema::field::FACE_OFFSETS, |value: u8| value)? == Some(0);
             } else {
@@ -175,7 +180,10 @@ where
             }
             Ok(valid)
         })?;
-    if recipe.facts.words[0] != schema::OPERATION_TRIANGULATE {
+    if !matches!(
+        recipe.facts.words[0],
+        schema::OPERATION_TRIANGULATE | schema::OPERATION_SELECTION
+    ) {
         return Ok(if complete { counts } else { None });
     }
     let (Some(counts), Some(corners), Some(faces)) = (counts, corners, faces) else {
@@ -184,24 +192,59 @@ where
     if !complete {
         return Ok(None);
     }
-    if !session.visit_outcome_evidence_sequence(
-        corners,
-        recipe.facts.words[7] as usize,
-        |index, actual| {
-            recipe
-                .source_corner_triangles()
-                .get(index / 3)
-                .is_some_and(|triangle| triangle[index % 3] == actual)
-        },
-    )? {
-        return Ok(None);
-    }
-    if !session.visit_outcome_evidence_sequence(
-        faces,
-        recipe.source_face_triangle_offsets().len(),
-        |index, actual| recipe.source_face_triangle_offsets().get(index).copied() == Some(actual),
-    )? {
-        return Ok(None);
+    if let Some(super::EditStoragePlan::Selection(plan)) = storage {
+        let triples = plan.edits().iter().flat_map(|e| {
+            e.origins
+                .into_iter()
+                .flat_map(|o| o.triangles.iter().flat_map(|t| t.iter().copied()))
+        });
+        let mut expected_corners = std::iter::once(recipe.facts.words[7]).chain(triples);
+        let Some(corner_fields) =
+            (recipe.facts.words[7] as usize).checked_add(schema::SELECTION_CORNER_PREFIX_FIELDS)
+        else {
+            return Ok(None);
+        };
+        if !session.visit_outcome_evidence_sequence(corners, corner_fields, |_, actual| {
+            expected_corners.next() == Some(actual)
+        })? {
+            return Ok(None);
+        }
+        let headers = (0..plan.edits().len()).flat_map(|i| super::selected::target_words(plan, i));
+        let offsets = plan.edits().iter().flat_map(|e| {
+            e.origins
+                .into_iter()
+                .flat_map(|o| o.face_offsets.iter().copied())
+        });
+        let mut expected = headers.chain(offsets);
+        if !session.visit_outcome_evidence_sequence(
+            faces,
+            recipe.facts.words[8] as usize,
+            |_, actual| expected.next() == Some(actual),
+        )? {
+            return Ok(None);
+        }
+    } else {
+        if !session.visit_outcome_evidence_sequence(
+            corners,
+            recipe.facts.words[7] as usize,
+            |index, actual| {
+                recipe
+                    .source_corner_triangles()
+                    .get(index / 3)
+                    .is_some_and(|triangle| triangle[index % 3] == actual)
+            },
+        )? {
+            return Ok(None);
+        }
+        if !session.visit_outcome_evidence_sequence(
+            faces,
+            recipe.source_face_triangle_offsets().len(),
+            |index, actual| {
+                recipe.source_face_triangle_offsets().get(index).copied() == Some(actual)
+            },
+        )? {
+            return Ok(None);
+        }
     }
     Ok(Some(counts))
 }

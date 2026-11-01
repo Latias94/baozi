@@ -195,13 +195,10 @@ pub(super) fn submit_parts(
             } else {
                 Presence::Absent
             };
-            let material = primitive
-                .material
-                .map_or(Presence::Absent, Presence::Present);
             primitives.try_push_reserved(GeometryPrimitiveAuthoring::new(
                 primitive.topology,
                 indices,
-                material,
+                primitive.material_assignment,
                 AuthoringRange::new(
                     attribute_offset,
                     authoring_u32(
@@ -463,7 +460,9 @@ pub(super) fn submit_parts(
         .checked_add(selected_sources.entries().len() - 1)
         .ok_or_else(|| ctx.allocation_failure("gltf-profile-source-count"))?;
     source_identities.try_reserve(source_count)?;
-    let operation_count = 1 + usize::from(appearance_storage.default_sampler.is_some());
+    let operation_count = 1
+        + usize::from(appearance_storage.default_sampler.is_some())
+        + usize::from(appearance_storage.default_material.is_some());
     provenance_nodes.try_reserve(
         source_count
             .checked_add(operation_count)
@@ -896,24 +895,49 @@ pub(super) fn submit_parts(
         ),
     ))?;
 
-    let default_owner = appearance_storage
+    let default_sampler_owner = appearance_storage
         .default_sampler
         .map(|sampler| ProfileOwner::Sampler(sampler.index()));
     let (default_options, default_evidence) =
         generated_evidence(ctx, "org.baozi.gltf:implicit-sampler-v1", &[0; 9])?;
     let default_kind = OperationKind::Default;
-    let default_attachment = [ProvenanceLocalId::new(authoring_u32(
+    let default_sampler_attachment = [ProvenanceLocalId::new(authoring_u32(
         ctx,
         provenance_nodes.len(),
         "gltf-profile-default-sampler",
     )?)];
-    if let Some(owner) = default_owner {
+    if let Some(owner) = default_sampler_owner {
         provenance_nodes.try_push_reserved(ProvenanceNodeAuthoring::operation(
             ProvenanceOperationAuthoring::new(
                 &default_kind,
                 default_options,
                 owner_sources_for(ctx, &owner_sources, &owner_source_values, owner)?,
                 &default_evidence,
+            ),
+        ))?;
+    }
+
+    let default_material_owner = appearance_storage
+        .default_material
+        .map(|material| ProfileOwner::Material(material.index()));
+    let material_generated = default_material_owner
+        .map(|_| generated_evidence(ctx, "org.baozi.gltf:implicit-material-v1", &[]))
+        .transpose()?;
+    let material_kind = OperationKind::Generated;
+    let default_material_attachment = [ProvenanceLocalId::new(authoring_u32(
+        ctx,
+        provenance_nodes.len(),
+        "gltf-profile-default-material",
+    )?)];
+    if let (Some(owner), Some((material_options, material_evidence))) =
+        (default_material_owner, material_generated.as_ref())
+    {
+        provenance_nodes.try_push_reserved(ProvenanceNodeAuthoring::operation(
+            ProvenanceOperationAuthoring::new(
+                &material_kind,
+                *material_options,
+                owner_sources_for(ctx, &owner_sources, &owner_source_values, owner)?,
+                material_evidence,
             ),
         ))?;
     }
@@ -934,8 +958,10 @@ pub(super) fn submit_parts(
             .ok_or_else(|| gltf_parse_error(ctx, "glTF owner provenance is incomplete"))?;
         let provenance = if owner.owner == ProfileOwner::SyntheticRoot {
             root_attachment.as_slice()
-        } else if Some(owner.owner) == default_owner {
-            default_attachment.as_slice()
+        } else if Some(owner.owner) == default_sampler_owner {
+            default_sampler_attachment.as_slice()
+        } else if Some(owner.owner) == default_material_owner {
+            default_material_attachment.as_slice()
         } else {
             source_parents
         };
@@ -974,19 +1000,29 @@ pub(super) fn submit_parts(
             ))?;
         }
     }
-    for (index, name) in appearance_storage
-        .texture_names
-        .as_slice()
-        .iter()
-        .enumerate()
-    {
-        let index = authoring_u32(ctx, index, "gltf-metadata-image")?;
-        if let Some(name) = name.as_ref() {
-            metadata.try_push(MetadataAuthoringEntry::new(
-                ProfileOwner::Texture(index),
-                &source_name_key,
-                ExtensionValueRef::String(name.as_str()),
-            ))?;
+    for (owner, names) in [
+        (
+            ProfileOwner::Image as fn(u32) -> ProfileOwner,
+            appearance_storage.image_names.as_slice(),
+        ),
+        (
+            ProfileOwner::Sampler as fn(u32) -> ProfileOwner,
+            appearance_storage.sampler_names.as_slice(),
+        ),
+        (
+            ProfileOwner::Texture as fn(u32) -> ProfileOwner,
+            appearance_storage.texture_names.as_slice(),
+        ),
+    ] {
+        for (index, name) in names.iter().enumerate() {
+            ctx.charge_work(1)?;
+            if let Some(name) = name.as_ref() {
+                metadata.try_push(MetadataAuthoringEntry::new(
+                    owner(authoring_u32(ctx, index, "gltf-metadata-source-name")?),
+                    &source_name_key,
+                    ExtensionValueRef::String(name.as_str()),
+                ))?;
+            }
         }
     }
 

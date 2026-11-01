@@ -2,7 +2,8 @@
 
 `edit_lifecycle` imports a real OBJ or PLY payload through the public import session. It edits one
 selected primitive in a fixed order: applicable triangulation, applicable normal generation, then
-whole-Scene coordinate conversion. There are at most three operation calls. All successful imports
+whole-Scene coordinate conversion. A separate header flag instead prepares all triangle-like
+primitives in one transaction before any conversion. There are at most three operation calls. All successful imports
 and edit results traverse public node, mesh, instance, attribute-element and triangle-tuple readers,
 and capture a complete bounded semantic digest through the existing fuzz snapshot support.
 
@@ -18,9 +19,9 @@ or secondary buffer; external dependencies are disabled.
 | Byte | Meaning |
 | --- | --- |
 | `0` | Bit 0 chooses OBJ (`0`) or PLY (`1`). Bits 1–7 choose a primitive ordinal modulo the imported primitive count, in mesh/primitive iteration order. |
-| `1` | Bit 0 requests triangulation; bit 1 normal generation; bit 2 coordinate conversion. Other bits are ignored. Order is fixed regardless of flags. |
+| `1` | Bit 0 requests triangulation; bit 1 normal generation; bit 2 coordinate conversion. Bit 3 replaces the first two operations with one selected triangle preparation over all triangle-like primitives. Other bits are ignored. Order is fixed regardless of flags. |
 | `2` | Bit 0 chooses flat normals instead of smooth; bit 1 explicitly replaces existing normals; bit 2 requests reflected centimeters instead of the standard target; bit 3 omits the explicit standard source assumptions, allowing the real missing-source rejection path. Other bits are ignored. |
-| `3` | Value modulo 4: `0` uses active control, `1` pre-cancels triangulation, `2` pre-cancels normal generation, `3` pre-cancels conversion. |
+| `3` | Value modulo 4: `0` uses active control, `1` pre-cancels triangulation, `2` pre-cancels normal generation, `3` pre-cancels conversion. Either `1` or `2` pre-cancels selected preparation. |
 | `4..` | Original source-file bytes; malformed payloads use the actual parser rejection path. |
 
 Triangulation accepts Polygon and TriangleList inputs; the latter can return `Unchanged`. Normal
@@ -35,6 +36,7 @@ triangulation expansion, with a 131,072-element traversal backstop. Snapshot cap
 existing 64 KiB preview, 256 preview items and 4,000,000 work-unit bounds; its digest covers all
 admitted semantics, including values outside the preview. Postprocessing uses the existing
 operation resource policy; input bounds and at most three calls bound this harness's edit work.
+Selected preparation uses explicit 4,000,000 work-unit and 16 MiB storage caps.
 
 Every rejected edit must return its input generation and complete digest unchanged and permit
 the same borrowed reads, including lookup with its original ID. `Unchanged` success has the same
@@ -60,6 +62,7 @@ separately for triangulation, normal generation and conversion, plus public nume
 | `normals_replace.bin` | Explicit replacement changes authored +X normals to the expected +Z field. |
 | `space_centimeters.bin` | Reflection and unit conversion change positions to independently expected values. |
 | `workflow_two_meshes.bin`, `workflow_quad_ply.bin` | All three operations return `Changed`, with fresh IDs between publications; the OBJ seed selects the second mesh. |
+| `prepare_two_meshes.bin` | Both polygon meshes lower and generate normals with one reconstruction/publication; a companion deterministic test cancels it with the exact original Scene. |
 | `rejected_polygon.bin`, `rejected_space.bin` | Deterministic polygon-kernel and missing-source-convention rejections preserve generation, digest and reads. |
 | `cancel_triangulate.bin`, `cancel_normals.bin`, `cancel_space.bin` | Each operation is cancelled through its pre-cancelled public token and returns the exact original Scene. |
 | `workflow_cancel_normals.bin` | Triangulation publishes, normal generation is cancelled without changing that generation/digest, then conversion publishes successfully. |

@@ -46,7 +46,7 @@ fn geometry() -> GeometryStorage {
             face_count: 1,
             polygon_boundaries: None,
             indices: Some(TableRange::new(3, 3)),
-            material: None,
+            material: crate::MaterialAssignment::Unspecified,
             attributes: TableRange::new(0, 4),
         }],
         attributes: vec![
@@ -115,7 +115,7 @@ fn tangent_geometry() -> GeometryStorage {
             face_count: 1,
             polygon_boundaries: None,
             indices: None,
-            material: None,
+            material: crate::MaterialAssignment::Unspecified,
             attributes: TableRange::new(0, 3),
         }],
         attributes: vec![
@@ -175,7 +175,7 @@ fn f64_geometry() -> GeometryStorage {
             face_count: 2,
             polygon_boundaries: None,
             indices: Some(TableRange::new(3, 6)),
-            material: None,
+            material: crate::MaterialAssignment::Unspecified,
             attributes: TableRange::new(0, 4),
         }],
         attributes: vec![
@@ -316,7 +316,7 @@ fn precision_contract_central_sparse_f64_default_only_validation_does_not_expand
             face_count: count,
             polygon_boundaries: None,
             indices: None,
-            material: None,
+            material: crate::MaterialAssignment::Unspecified,
             attributes: TableRange::new(0, 1),
         };
         storage.attributes.truncate(1);
@@ -336,6 +336,31 @@ fn precision_contract_central_sparse_f64_default_only_validation_does_not_expand
         assert_eq!(allocations.bytes_total, 0);
         assert_eq!(control.completed, 7);
     }
+}
+
+#[test]
+fn material_assignment_tags_share_effective_range_validation() {
+    for assignment in [
+        crate::MaterialAssignment::Authored(0),
+        crate::MaterialAssignment::ImplicitDefault(0),
+    ] {
+        let mut storage = f64_geometry();
+        storage.primitives[0].material = assignment;
+        assert_eq!(
+            storage.validate(&mut Control::default(), [1, 1, 4, 0], 1, 0),
+            Ok(false)
+        );
+        assert_eq!(
+            storage.validate(&mut Control::default(), [1, 1, 4, 0], 1, 1),
+            Ok(true)
+        );
+    }
+    let mut storage = f64_geometry();
+    storage.primitives[0].material = crate::MaterialAssignment::Unspecified;
+    assert_eq!(
+        storage.validate(&mut Control::default(), [1, 1, 4, 0], 1, 0),
+        Ok(true)
+    );
 }
 
 #[test]

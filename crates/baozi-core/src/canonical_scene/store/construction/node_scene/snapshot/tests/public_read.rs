@@ -34,7 +34,7 @@ fn f64_builtin_scene(
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::TriangleList,
         Presence::Present(&indices),
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, attributes.len() as u32),
     )];
     let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -420,7 +420,11 @@ fn borrowed_readers_preserve_dense_sparse_and_presence_without_allocation() {
             assert_eq!(second.indices(), Some(&[0, 1, 2][..]));
             assert_eq!(second.polygon_face_sizes(), Some(&[3][..]));
             assert_eq!(
-                first.material().unwrap().shading_model(),
+                first
+                    .material_assignment()
+                    .effective()
+                    .unwrap()
+                    .shading_model(),
                 ShadingModel::Unlit
             );
             assert_eq!(first.attributes().len(), 2);
@@ -514,6 +518,86 @@ fn borrowed_readers_preserve_dense_sparse_and_presence_without_allocation() {
 }
 
 #[test]
+fn material_assignment_public_reads_and_snapshot_preserve_source_presence() {
+    let factory = factory();
+    let account = account(&factory);
+    let build = |assignment| {
+        let attributes = [GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Position,
+            AttributeDomain::Vertex,
+            3,
+            &[0.0, 0.0, 0.0],
+            Presence::Absent,
+        )];
+        let primitives = [GeometryPrimitiveAuthoring::new(
+            GeometryTopologyAuthoring::Points,
+            Presence::Absent,
+            assignment,
+            AuthoringRange::new(0, 1),
+        )];
+        let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
+        let materials = [MaterialAuthoring::new(
+            AuthoringRange::new(0, 0),
+            MaterialSemantics::new(
+                ShadingModel::Unlit,
+                AlphaMode::Opaque,
+                false,
+                MaterialFactors::empty(),
+            ),
+        )];
+        build_scene_with_appearance_and_geometry(
+            &account,
+            &[],
+            &[],
+            AppearanceAuthoringBatch::new(&[], &[], &[], &[], &materials),
+            GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &[]),
+        )
+    };
+    let mut digests = Vec::new();
+    for assignment in [
+        crate::MaterialAssignment::Unspecified,
+        crate::MaterialAssignment::Authored(MaterialLocalId::new(0)),
+        crate::MaterialAssignment::ImplicitDefault(MaterialLocalId::new(0)),
+    ] {
+        let parts = build(assignment);
+        let snapshot = capture_node_scene(&parts.scene, snapshot_limits(16_384, 64), None).unwrap();
+        assert_eq!(snapshot.schema_revision, 7);
+        assert!(!digests.contains(&snapshot.digest));
+        digests.push(snapshot.digest);
+        let scene = ValidatedScene::from_node_scene(parts.scene);
+        let allocations = allocation_counter::measure(|| {
+            let primitive = scene.meshes().next().unwrap().primitives().next().unwrap();
+            let effective = primitive.effective_material();
+            assert_eq!(effective.is_some(), assignment.effective().is_some());
+            assert_eq!(
+                primitive.authored_material().is_some(),
+                assignment.authored().is_some()
+            );
+            match primitive.material_assignment() {
+                crate::MaterialAssignment::Unspecified => assert!(effective.is_none()),
+                crate::MaterialAssignment::Authored(material) => {
+                    assert!(matches!(assignment, crate::MaterialAssignment::Authored(_)));
+                    assert_eq!(material.id(), effective.unwrap().id());
+                }
+                crate::MaterialAssignment::ImplicitDefault(material) => {
+                    assert!(matches!(
+                        assignment,
+                        crate::MaterialAssignment::ImplicitDefault(_)
+                    ));
+                    assert_eq!(material.id(), effective.unwrap().id());
+                    assert!(primitive.authored_material().is_none());
+                }
+            }
+        });
+        assert_eq!(allocations.count_total, 0);
+        assert_eq!(allocations.bytes_total, 0);
+        drop(scene);
+        drop(parts.report);
+        assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    }
+}
+
+#[test]
 fn attribute_lookup_matches_semantic_and_domain_without_allocation() {
     let factory = factory();
     let account = account(&factory);
@@ -568,7 +652,7 @@ fn attribute_lookup_matches_semantic_and_domain_without_allocation() {
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::TriangleList,
         Presence::Present(&indices),
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 5),
     )];
     let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -713,7 +797,7 @@ fn spatial_readers_follow_node_attachments_and_preserve_unknowns() {
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::Points,
         Presence::Absent,
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 2),
     )];
     let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -833,7 +917,7 @@ fn spatial_and_tangent_readers_borrow_retained_values_after_authoring_storage_is
         let primitives = [GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::Points,
             Presence::Absent,
-            Presence::Absent,
+            crate::MaterialAssignment::Unspecified,
             AuthoringRange::new(0, 2),
         )];
         let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];

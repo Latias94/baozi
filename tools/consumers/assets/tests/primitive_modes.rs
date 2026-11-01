@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use baozi::{
-    AssetPath, Importer, Mat4, MemoryAssetIo, MorphDeltaSemantic, TopologyKind, ValidatedScene,
-    postprocess::list_vertices,
+    AssetPath, Importer, Mat4, MaterialAssignment, MemoryAssetIo, MorphDeltaSemantic, TopologyKind,
+    ValidatedScene, postprocess::list_vertices,
 };
 use baozi_asset_consumer::{ApplicationAsset, Result};
 use serde_json::{Value, json};
@@ -250,7 +250,10 @@ fn seven_modes_preserve_source_order_and_owned_deformation_tuples() -> Result<()
         (1, 14, 2)
     );
     for (index, (draw, (topology, sources))) in asset.draws.iter().zip(expected_draws).enumerate() {
-        assert_eq!((draw.mesh, draw.primitive, draw.material), (0, index, None));
+        assert_eq!(
+            (draw.mesh, draw.primitive, draw.material),
+            (0, index, MaterialAssignment::ImplicitDefault(0))
+        );
         assert_eq!(draw.topology, topology);
         assert_eq!(draw.indices.len(), sources.len());
         assert_eq!(draw.vertices.len(), if index % 2 == 0 { 6 } else { 5 });
@@ -299,8 +302,8 @@ fn seven_modes_preserve_source_order_and_owned_deformation_tuples() -> Result<()
                 Some(TANGENT.map(|v| f64::from(v).to_bits()))
             );
             assert_eq!(
-                vertex.uv.map(|v| v.map(f64::to_bits)),
-                Some(UVS[source].map(|v| f64::from(v).to_bits()))
+                draw.uv_stream(0).unwrap().values[packed].map(f64::to_bits),
+                UVS[source].map(|v| f64::from(v).to_bits())
             );
             assert_eq!(
                 morph.values[packed].map(f32::to_bits),
@@ -317,14 +320,18 @@ fn seven_modes_preserve_source_order_and_owned_deformation_tuples() -> Result<()
             );
         }
     }
-    for (name, weight) in [("first", 0.5), ("second", 0.25)] {
+    assert_eq!(asset.mesh_morph_weights, [vec![0.5]]);
+    for (name, weights) in [("first", None), ("second", Some([0.25]))] {
         let instance = asset
             .instances
             .iter()
             .find(|i| asset.nodes[i.node].name.as_deref() == Some(name))
             .ok_or("missing owned instance")?;
         assert_eq!((instance.mesh, instance.skin), (0, Some(0)));
-        assert_eq!(instance.morph_weights, [weight]);
+        assert_eq!(
+            instance.morph_weights.as_deref(),
+            weights.as_ref().map(|w| w.as_slice())
+        );
     }
     assert_eq!(asset.skins.len(), 1);
     let skin = &asset.skins[0];
@@ -381,9 +388,12 @@ fn two_point_loops_retain_both_directed_edges_after_scene_drop() -> Result<()> {
         assert_eq!(draw.topology, TopologyKind::LineList);
         assert_eq!(draw.indices, [0, 1, 1, 0]);
         assert_eq!(draw.vertices.len(), 2);
-        assert!(draw.vertices.iter().all(|vertex| {
-            vertex.normal.is_none() && vertex.tangent.is_none() && vertex.uv.is_none()
-        }));
+        assert!(
+            draw.vertices
+                .iter()
+                .all(|vertex| { vertex.normal.is_none() && vertex.tangent.is_none() })
+        );
+        assert!(draw.uv_streams.is_empty());
         for (&index, source) in draw.indices.iter().zip(sources) {
             assert_eq!(
                 draw.vertices[usize::try_from(index)?]

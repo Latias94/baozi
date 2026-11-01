@@ -2,6 +2,7 @@
 
 mod admission;
 mod detect;
+mod document;
 mod error;
 mod json_syntax;
 mod options;

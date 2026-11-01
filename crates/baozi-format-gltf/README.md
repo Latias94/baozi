@@ -2,8 +2,8 @@
 
 Selected glTF 2.0 / GLB importer backend for source builds, enabled through the
 [baozi facade](https://github.com/Latias94/baozi/blob/main/crates/baozi/README.md)'s `format-gltf` feature or `all-formats`.
-It is outside `default-formats`. The maintained decoder based on `gltf-rs` remains
-private and replaceable; custom registration uses the experimental importer API.
+It is outside `default-formats`. Its private Baozi document owns metered typed tables and
+borrows admitted source ranges; custom registration uses the experimental importer API.
 
 The [exact selected profile](https://github.com/Latias94/baozi/blob/main/docs/formats/gltf.md) governs support:
 
@@ -29,6 +29,8 @@ The [exact selected profile](https://github.com/Latias94/baozi/blob/main/docs/fo
   pixel decoding. Selected dependencies use the origin-qualified session resolver;
   external URIs use the restricted relative-path profile and embedded data URLs
   require base64. URI schemes for remote fetching are unsupported.
+- Distinguish authored material assignments from the shared generated PBR default used when a
+  selected primitive omits its binding. Effective material reads require no source-format guessing.
 - Preserve selected `extras` as exact `application/json` byte values owned by source identities,
   including JSON null, scalars, and nested sites. No source JSON is interpreted as scene behavior.
 - Support typed `KHR_materials_unlit` at material objects and `KHR_texture_transform` at documented

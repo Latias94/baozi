@@ -128,7 +128,7 @@ fn build_fixture<'scope>(
         topology: GeometryTopologyAuthoring::TriangleList,
         has_indices: true,
         indices: values(scope, &[2, 0, 1])?,
-        material: None,
+        material_assignment: MaterialAssignment::Unspecified,
         attributes: one(scope, positions)?,
         influence_offsets: values(scope, &[])?,
         influences: values(scope, &[])?,
@@ -137,9 +137,17 @@ fn build_fixture<'scope>(
     };
     let appearance = AppearanceStorage {
         images: scope.metered_vec(ImportStorageClass::FormatNormalization, "fixture-images"),
+        image_names: scope.metered_vec(
+            ImportStorageClass::FormatNormalization,
+            "fixture-image-names",
+        ),
         encoded_image_payloads: scope
             .metered_vec(ImportStorageClass::FormatNormalization, "fixture-images"),
         samplers: scope.metered_vec(ImportStorageClass::FormatNormalization, "fixture-samplers"),
+        sampler_names: scope.metered_vec(
+            ImportStorageClass::FormatNormalization,
+            "fixture-sampler-names",
+        ),
         sampler_provenance: values(scope, &[])?,
         textures: scope.metered_vec(ImportStorageClass::FormatNormalization, "fixture-textures"),
         texture_provenance: values(scope, &[])?,
@@ -153,6 +161,7 @@ fn build_fixture<'scope>(
         sampler_ids: values(scope, &[])?,
         texture_ids: values(scope, &[])?,
         default_sampler: None,
+        default_material: None,
         material_ids: values(scope, &[])?,
     };
     let mesh = LogicalMeshStorage {

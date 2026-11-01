@@ -8,7 +8,8 @@ use crate::canonical_scene::store::schema::CanonicalSchema;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SceneEditEvidenceTag;
 
-/// Flattened primitive-local source-corner triples, in output triangle order.
+/// Flattened primitive-local source-corner triples, in output triangle order. Selected edits
+/// prefix the sequence with the actual origin count, so an absent relation is represented by [0].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SceneGeometryCornerOriginsTag;
 
@@ -22,9 +23,13 @@ impl CanonicalSchema for SceneEditEvidenceTag {
 
 pub(super) const REVISION: u32 = 4;
 pub(super) const OPERATION_TRIANGULATE: u32 = 1;
+#[cfg(test)]
 pub(super) const OPERATION_NORMALS: u32 = 2;
 pub(super) const OPERATION_SPACE_CONVERSION: u32 = 3;
+#[cfg(test)]
 pub(super) const OPERATION_TANGENTS: u32 = 4;
+pub(super) const OPERATION_SELECTION: u32 = 5;
+pub(super) const SELECTION_CORNER_PREFIX_FIELDS: usize = 1;
 pub(super) const OPERATION_SEMANTIC_VERSION: u32 = 1;
 pub(super) const OUTCOME_CHANGED: u32 = 1;
 pub(super) const OUTCOME_FAILED: u32 = 2;
@@ -40,7 +45,9 @@ pub(super) mod field {
     pub(crate) const OUTCOME: usize = 1;
     pub(crate) const SEMANTIC_VERSION: usize = 2;
     pub(crate) const OPERATION_KIND: usize = 3;
+    #[cfg(test)]
     pub(crate) const VERTEX_COUNT: usize = 7;
+    #[cfg(test)]
     pub(crate) const SOURCE_CORNER_COUNT: usize = 8;
     pub(crate) const OPTIONS_ALGORITHM: usize = 15;
     pub(crate) const OPTIONS_DIGEST_FIRST: usize = 16;
@@ -67,6 +74,7 @@ pub(super) mod space_field {
 }
 
 /// Operation-specific cells in a normal-generation root. Other cells retain the common prefix.
+#[cfg(test)]
 pub(super) mod normal_field {
     pub(crate) const REMOVED_METADATA: usize = 7;
     pub(crate) const OUTPUT_NORMAL_ATTRIBUTE: usize = 12;
@@ -79,6 +87,7 @@ pub(super) mod normal_field {
 }
 
 /// The selected dependency domains are source domains; the output tangent is always Corner.
+#[cfg(test)]
 pub(super) mod tangent_field {
     pub(crate) const NORMAL_DOMAIN: usize = 7;
     pub(crate) const CORNER_COUNT: usize = 8;

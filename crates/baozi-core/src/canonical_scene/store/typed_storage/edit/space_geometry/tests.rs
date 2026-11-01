@@ -97,7 +97,7 @@ fn finish_fixture(
         face_count: faces,
         polygon_boundaries,
         indices,
-        material: None,
+        material: crate::MaterialAssignment::Unspecified,
         attributes: TableRange::new(0, storage.attributes.len()),
     });
     let name = TextRange(values(&mut storage.names, b"shared"));
@@ -804,7 +804,7 @@ fn mixed_primitive_packing_places_synthesized_indices_before_later_primitive_str
             face_count: 1,
             polygon_boundaries: None,
             indices: None,
-            material: None,
+            material: crate::MaterialAssignment::Unspecified,
             attributes: TableRange::new(0, 2),
         },
         StoredPrimitive {
@@ -814,7 +814,7 @@ fn mixed_primitive_packing_places_synthesized_indices_before_later_primitive_str
             face_count: 1,
             polygon_boundaries: None,
             indices: Some(later_indices),
-            material: None,
+            material: crate::MaterialAssignment::Unspecified,
             attributes: TableRange::new(2, 2),
         },
         StoredPrimitive {
@@ -824,7 +824,7 @@ fn mixed_primitive_packing_places_synthesized_indices_before_later_primitive_str
             face_count: 0,
             polygon_boundaries: None,
             indices: Some(empty_indices),
-            material: None,
+            material: crate::MaterialAssignment::Unspecified,
             attributes: TableRange::new(4, 0),
         },
     ]);

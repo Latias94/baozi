@@ -8,7 +8,10 @@ experimental importer extension API.
 The PLY 1.0 profile covers ASCII and binary little- and big-endian vertex/face
 geometry: positions, optional normals, common vertex colors and UVs, point clouds,
 triangles, and polygons. Supported custom scalar vertex properties retain typed
-attributes, including `f64` values; comments and `obj_info` become mesh metadata.
+attributes, including `f64` values; comments and `obj_info` become mesh metadata. Built-in Position,
+Normal and Texcoord streams preserve their declared precision independently: doubles and I32/U32
+components select F64, while float and smaller integer components select F32. Mixed streams select
+their widest component before allocation, preserving finite F64 values and signed zero.
 
 Materials, textures, sidecars, cameras, lights, skinning, morphs, and animation are
 unsupported. Non-scalar custom properties and non-geometry elements are skipped

@@ -310,10 +310,6 @@ fn check_dependency_directions(packages: &BTreeMap<String, Package>, violations:
 }
 
 fn allowed_production_dependency(source: &str, target: &str) -> bool {
-    // The maintained decoder is an excluded vendor package, private to this adapter.
-    if source == "baozi-format-gltf" && target == "baozi-gltf" {
-        return true;
-    }
     match source {
         "baozi-operation" | "baozi-io" => false,
         "baozi-core" => target == "baozi-operation",

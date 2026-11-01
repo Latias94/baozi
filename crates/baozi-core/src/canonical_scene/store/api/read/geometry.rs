@@ -502,10 +502,17 @@ impl<'s> PrimitiveRef<'s> {
             .take_polygon_boundaries()
             .map(|values| values.into_slice())
     }
-    pub fn material(self) -> Option<super::MaterialRef<'s>> {
+    /// Reads the complete authored/implicit/unspecified assignment without allocating.
+    pub fn material_assignment(self) -> crate::MaterialAssignment<super::MaterialRef<'s>> {
         self.read()
-            .material()
+            .material_assignment()
             .map(|index| super::MaterialRef::at(self.scene, index))
+    }
+    pub fn authored_material(self) -> Option<super::MaterialRef<'s>> {
+        self.material_assignment().authored()
+    }
+    pub fn effective_material(self) -> Option<super::MaterialRef<'s>> {
+        self.material_assignment().effective()
     }
     pub fn attributes(
         self,

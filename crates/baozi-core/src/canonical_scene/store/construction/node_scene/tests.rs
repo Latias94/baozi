@@ -979,7 +979,7 @@ fn many_primitives_materialize_into_one_typed_geometry_owner() {
             GeometryPrimitiveAuthoring::new(
                 GeometryTopologyAuthoring::Points,
                 Presence::Present(&index),
-                Presence::Absent,
+                crate::MaterialAssignment::Unspecified,
                 AuthoringRange::new(u32::try_from(primitive).expect("test primitive index"), 1),
             )
         })
@@ -1552,7 +1552,7 @@ fn invalid_geometry_payload_fault_is_a_build_invariant_rich_failure() {
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::Points,
         Presence::Absent,
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 1),
     )];
     let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];

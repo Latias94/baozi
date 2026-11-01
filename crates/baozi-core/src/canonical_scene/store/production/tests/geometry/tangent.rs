@@ -40,7 +40,7 @@ fn vertex_and_corner_tangents_keep_independent_conventions_on_one_primitive() {
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::TriangleList,
         Presence::Absent,
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 3),
     )];
     let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -99,7 +99,7 @@ fn tangent_schema_names_are_admitted_as_geometry_text_at_exact_limits() {
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::TriangleList,
         Presence::Absent,
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 2),
     )];
     let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -142,7 +142,7 @@ fn admission_rejects_incompatible_mikk_encoding_and_non_tangent_declarations() {
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::TriangleList,
         Presence::Absent,
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 2),
     )];
     let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -194,7 +194,7 @@ fn admission_rejects_incompatible_mikk_encoding_and_non_tangent_declarations() {
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::TriangleList,
         Presence::Absent,
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 1),
     )];
     assert!(matches!(

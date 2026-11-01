@@ -61,38 +61,39 @@ use super::{
     NodeSceneSnapshotLimits, SnapshotWorkMeter, capture_node_scene_with_test_transcript,
 };
 
-// Revision 6 moves tangent declarations from SceneSpace to attribute records.
+// Revision 7 distinguishes unspecified, authored and implicit-default material assignments.
 // SceneSpace ends after UV origin; camera/light right/up/forward axes retain their
 // revision 5 framing (c8 01 c9 03 ca 06 for the standard frame). The little-endian
-// revision word at bytes 40..44 is 6. Each complete handwritten transcript is
+// revision word at bytes 40..44 is 7. Existing unspecified/authored tags remain 0/1.
+// Each complete handwritten transcript is
 // independently SHA-256 checked; attribute schema versions remain unchanged.
 const KNOWN_SINGLE_TRS_DIGEST: [u8; 32] = [
-    0x86, 0x6e, 0xf8, 0xae, 0xde, 0x3d, 0x83, 0x0d, 0x1a, 0x05, 0xce, 0xe2, 0x67, 0xf8, 0xf1, 0x3a,
-    0x73, 0x0f, 0xd7, 0x6c, 0x5f, 0xa8, 0xaf, 0xd0, 0x1c, 0x29, 0x08, 0x94, 0xc8, 0x39, 0x82, 0xb2,
+    0xb4, 0x9e, 0x3c, 0x73, 0x2a, 0x74, 0xbe, 0xc8, 0x29, 0xf2, 0x34, 0x8c, 0x6d, 0x41, 0xc7, 0x6c,
+    0x0a, 0x11, 0x3a, 0xfc, 0x37, 0x6a, 0x00, 0xa3, 0xfb, 0x5a, 0xf8, 0xeb, 0x9d, 0x6c, 0x19, 0xb3,
 ];
 const KNOWN_GENERIC_METADATA_DIGEST: [u8; 32] = [
-    0xef, 0x58, 0x7f, 0xdd, 0xfa, 0x8d, 0x5e, 0x75, 0x3e, 0x12, 0x82, 0x71, 0x16, 0x88, 0xa8, 0x03,
-    0x41, 0x81, 0xe1, 0x65, 0x7f, 0xbb, 0x84, 0x2a, 0x9f, 0x2f, 0x89, 0x03, 0x49, 0x81, 0x42, 0x1b,
+    0xc6, 0xc8, 0x46, 0x67, 0xd9, 0xae, 0x49, 0x79, 0x65, 0xdc, 0x91, 0x33, 0xbe, 0x33, 0x9d, 0xec,
+    0x35, 0x91, 0xde, 0xce, 0x8a, 0x88, 0xe2, 0x3f, 0x28, 0xf5, 0x0e, 0x3f, 0x02, 0x99, 0x7f, 0xb6,
 ];
 // Known vectors are factored at canonical domain and owner-row boundaries, but every
 // assertion still compares the complete transcript byte for byte.
 const KNOWN_SINGLE_TRS_TRANSCRIPT_PREFIX_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740206000000030600000000",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740207000000030600000000",
     "000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00b30c010b0000000000000000ba0c010b0000000000000000",
     "040c01080d00000000000000000b0100000000000000050c01060d00000000000000000a020e000000000e000000000e0000",
     "00000e000000000e000000000e000000000e0000803f0e0000803f0e0000803f0e0000803f0b0a00000000000000da0c00c4",
     "0c00c50c00070c010b00000000000000000b0100000000000000",
 );
 const KNOWN_MATRIX_CHILD_DIGEST: [u8; 32] = [
-    0x6a, 0x5e, 0x7f, 0x07, 0x03, 0xbd, 0x35, 0x2b, 0xee, 0xbe, 0x96, 0xba, 0x8a, 0x24, 0xec, 0xb6,
-    0x18, 0xff, 0x28, 0x66, 0x6d, 0xaa, 0x7d, 0x55, 0x1d, 0x38, 0xa7, 0x3a, 0x2e, 0xeb, 0x08, 0x31,
+    0x78, 0x0f, 0xcd, 0xbf, 0x05, 0x1c, 0x86, 0xd6, 0xd1, 0xd7, 0x62, 0x50, 0xf9, 0xad, 0x20, 0x11,
+    0x4d, 0x54, 0xd3, 0xee, 0xc3, 0x03, 0x54, 0x9e, 0x01, 0x70, 0x78, 0x3e, 0x7d, 0x06, 0x23, 0xfe,
 ];
 const KNOWN_SPATIAL_DIGEST: [u8; 32] = [
-    0x5b, 0x82, 0x32, 0xfd, 0xe6, 0xdd, 0x4f, 0xa0, 0xdf, 0x4d, 0x6d, 0x5e, 0x69, 0x0f, 0xd2, 0x86,
-    0x46, 0xc7, 0x5a, 0x7d, 0x43, 0xd7, 0x07, 0xe5, 0x77, 0xfe, 0x1a, 0x1f, 0xbc, 0x5f, 0xb0, 0x9a,
+    0x36, 0x3d, 0xfa, 0x9e, 0x4b, 0x12, 0xad, 0x42, 0xc3, 0x15, 0xc8, 0x2d, 0x26, 0xbe, 0xb2, 0xe4,
+    0x06, 0x7c, 0x86, 0x23, 0x89, 0x67, 0x05, 0x8b, 0x3b, 0xfc, 0xbf, 0x5d, 0x80, 0xbe, 0xf0, 0x1d,
 ];
 const KNOWN_SPATIAL_TRANSCRIPT_PREFIX_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740206000000030600000000",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740207000000030600000000",
     "000000736861323536a60c01a7a802a904aa05ab0c01c67b14ae47e17a843fac01ad02b30c01b40d0000000000000000c801",
     "c903ca06b500b6c70000803fb70c01c70000c03fb8c7cdcccc3db90c01c70000c8420b0100000000000000ba0c01bb0d0000",
     "000000000000c801c903ca06bc02bd0c01c700004842be0c01c70000803ebf0c01c70000403fc0c70000803fc1c70000803f",
@@ -102,7 +103,7 @@ const KNOWN_SPATIAL_TRANSCRIPT_PREFIX_HEX: &str = concat!(
     "0000000000000b0100000000000000",
 );
 const KNOWN_MATRIX_CHILD_TRANSCRIPT_PREFIX_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740206000000030600000000",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740207000000030600000000",
     "000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00b30c010b0000000000000000ba0c010b0000000000000000",
     "040c01080d00000000000000000b0100000000000000050c01060d00000000000000000a010e0000803f0e000000000e0000",
     "00000e000000000e000000000e0000803f0e000000000e000000000e000000000e000000000e0000803f0e000000000e0000",
@@ -120,7 +121,7 @@ const EMPTY_PRE_PROFILE_DOMAINS_TRANSCRIPT_HEX: &str = concat!(
     "00780c01790c010b00000000000000007f0c010b0000000000000000",
 );
 const EMPTY_SCENE_TRANSCRIPT_PREFIX_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740206000000030600000000",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740207000000030600000000",
     "000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00b30c010b0000000000000000ba0c010b0000000000000000",
     "040c010b0000000000000000050c010b0000000000000000",
 );
@@ -231,11 +232,11 @@ const KNOWN_GENERIC_METADATA_TRANSCRIPT_HEX: &str = concat!(
     "cb03d00bcb04d005cb05d20000000000000000cb08d005cb06ce01cf0000000000000000",
 );
 const KNOWN_POINT_GEOMETRY_DIGEST: [u8; 32] = [
-    0x84, 0x9c, 0x84, 0xd8, 0x62, 0xc6, 0x7b, 0x8f, 0x60, 0x21, 0x52, 0xfe, 0x1c, 0x32, 0xcc, 0x04,
-    0xac, 0x72, 0x3b, 0x22, 0xbc, 0x8c, 0xbf, 0xf3, 0xc5, 0x76, 0xca, 0xef, 0x37, 0x8e, 0x62, 0x3d,
+    0x43, 0x80, 0x44, 0xc1, 0x47, 0xe3, 0x84, 0xcf, 0x14, 0xcf, 0x37, 0xa4, 0x06, 0x6f, 0x20, 0x0d,
+    0x08, 0x24, 0x4d, 0xa0, 0x0a, 0x7d, 0xee, 0x68, 0x81, 0x9c, 0xd3, 0xe5, 0x86, 0x28, 0x2e, 0x8e,
 ];
 const KNOWN_POINT_GEOMETRY_TRANSCRIPT_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740206000000030600000000",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740207000000030600000000",
     "000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00b30c010b0000000000000000ba0c010b0000000000000000",
     "040c01080d00000000000000000b0100000000000000050c01060d00000000000000000a020e000000000e000000000e0000",
     "00000e000000000e000000000e000000000e0000803f0e0000803f0e0000803f0e0000803f0b0a00000000000000da0c00c4",
@@ -718,7 +719,7 @@ fn point_geometry_scene(
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::Points,
         Presence::Absent,
-        Presence::Present(MaterialLocalId::new(0)),
+        crate::MaterialAssignment::Authored(MaterialLocalId::new(0)),
         AuthoringRange::new(0, 1),
     )];
     let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -774,7 +775,7 @@ fn f64_custom_geometry_scene(
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::Points,
         Presence::Absent,
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 2),
     )];
     let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -830,7 +831,7 @@ fn named_point_geometry_scene_with_shading(
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::Points,
         Presence::Absent,
-        Presence::Present(MaterialLocalId::new(0)),
+        crate::MaterialAssignment::Authored(MaterialLocalId::new(0)),
         AuthoringRange::new(0, 1),
     )];
     let logical_mesh = GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1));
@@ -883,7 +884,7 @@ fn point_index_presence_scene(
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::Points,
         indices,
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 1),
     )];
     let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -922,7 +923,7 @@ fn corner_normal_scene<'input>(
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::TriangleList,
         Presence::Absent,
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 2),
     )];
     let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -1026,19 +1027,19 @@ fn all_attribute_payload_kinds_scene(account: &PhysicalStorageAccount) -> NodeSc
         GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::TriangleList,
             Presence::Present(&triangle_indices),
-            Presence::Present(MaterialLocalId::new(0)),
+            crate::MaterialAssignment::Authored(MaterialLocalId::new(0)),
             AuthoringRange::new(0, 2),
         ),
         GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::Polygons(&polygon_boundaries),
             Presence::Present(&triangle_indices),
-            Presence::Absent,
+            crate::MaterialAssignment::Unspecified,
             AuthoringRange::new(2, 2),
         ),
         GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::TriangleList,
             Presence::Absent,
-            Presence::Absent,
+            crate::MaterialAssignment::Unspecified,
             AuthoringRange::new(4, 4),
         ),
     ];
@@ -1075,7 +1076,7 @@ fn known_vector_is_stable_and_human_reviewable() {
             .expect("known Scene snapshot");
 
     assert_eq!(snapshot.domain, "baozi.canonical-scene.snapshot");
-    assert_eq!(snapshot.schema_revision, 6);
+    assert_eq!(snapshot.schema_revision, 7);
     assert_eq!(snapshot.algorithm, NodeSceneSnapshotAlgorithm::Sha256);
     assert_eq!(snapshot.digest, KNOWN_SINGLE_TRS_DIGEST);
     assert!(transcript.complete);
@@ -2508,7 +2509,7 @@ fn tangent_attribute_convention_mutation_vectors_are_digest_visible() {
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::Points,
         Presence::Absent,
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 2),
     )];
     let snapshot = |conventions: &TangentConventions| {

@@ -7,6 +7,7 @@ use baozi::{
 mod custom_scene;
 mod gltf_scene;
 mod loss_reports;
+mod maturation;
 #[cfg(feature = "postprocess")]
 mod postprocess;
 
@@ -155,6 +156,7 @@ pub fn verify(expected: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     custom_scene::verify()?;
+    maturation::verify(&importer, expected)?;
     Ok(())
 }
 

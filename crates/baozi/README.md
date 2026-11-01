@@ -14,16 +14,21 @@ assigned Baozi maturity; enabling a feature does not imply full format coverage.
 
 The [glTF/GLB restrictions](https://github.com/Latias94/baozi/blob/main/docs/formats/gltf.md) apply, including selected
 scene closure, limited topology and extension support, and encoded images without
-pixel decoding. Optional `postprocess` provides single-primitive triangulation,
-flat/smooth normals, and whole-Scene coordinate/unit conversion including skin
+pixel decoding. Optional `postprocess` provides atomic selected-primitive triangle preparation,
+flat/smooth normals, explicit tangent generation, and whole-Scene coordinate/unit conversion including skin
 matrices, morph deltas, TRS animation curves, camera projections, and light definitions.
 Camera/light reference frames include reflection without adding placement nodes.
 Material thickness and signed displacement strength scale with units while image/text payloads
 remain shared. The allocation-free `triangle_vertices` reader exposes complete draw-Corner tuples
 for application-owned vertex/index buffers, preserving attribute domains without deduplication.
+Geometry retains admitted F32/F64 widths. Primitive material assignments distinguish an authored
+binding from a generated format default, and bounded owned Scene relations support parent and
+node-to-instance navigation without repeated full-Scene scans.
 
 Use memory or custom asset IO with `Importer::read_asset` for portable imports.
 Byte-only imports deny dependencies; sidecars require an asset IO/resolver path.
+The [host bundle example](https://github.com/Latias94/baozi/blob/main/crates/baozi/examples/import_host_bundle.rs)
+shows bounded application-owned file snapshots composed with memory IO and explicit import options.
 Repository native IO experiments live in the unpublished, standalone
 [`baozi-native-io-candidate`](https://github.com/Latias94/baozi/tree/main/candidates/baozi-native-io)
 package. Its callers explicitly open a `NativeDirectoryCapability`, construct a

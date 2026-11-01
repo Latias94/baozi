@@ -2,7 +2,7 @@ mod common;
 
 use baozi_core::{
     AlphaMode, AttributeDomain, AttributeElement, AttributeSemanticRef, ColorInterpretation,
-    PbrMetallicRoughnessFactors, ProvenanceKindRef, ShadingModel, TextureRole,
+    MaterialAssignment, PbrMetallicRoughnessFactors, ProvenanceKindRef, ShadingModel, TextureRole,
 };
 use baozi_format_gltf::GltfFailureCode;
 use baozi_import::{
@@ -199,7 +199,7 @@ fn mixed_lit_unlit_and_implicit_material_primitives_keep_their_links() -> TestRe
     let report = import_document(serde_json::to_vec(&document)?)?;
     let scene = report.scene();
     let materials = scene.materials().collect::<Vec<_>>();
-    assert_eq!(materials.len(), 2);
+    assert_eq!(materials.len(), 3);
     assert_eq!(materials[0].name(), Some("Red"));
     assert_eq!(
         materials[0].shading_model(),
@@ -215,9 +215,22 @@ fn mixed_lit_unlit_and_implicit_material_primitives_keep_their_links() -> TestRe
         .primitives()
         .collect::<Vec<_>>();
     assert_eq!(primitives.len(), 3);
-    assert_eq!(primitives[0].material().unwrap().id(), materials[0].id());
-    assert_eq!(primitives[1].material().unwrap().id(), materials[1].id());
-    assert!(primitives[2].material().is_none());
+    assert_eq!(
+        primitives[0].authored_material().unwrap().id(),
+        materials[0].id()
+    );
+    assert_eq!(
+        primitives[1].authored_material().unwrap().id(),
+        materials[1].id()
+    );
+    assert!(primitives[2].authored_material().is_none());
+    assert!(
+        matches!(primitives[2].material_assignment(), MaterialAssignment::ImplicitDefault(material) if material.id() == materials[2].id())
+    );
+    assert_eq!(
+        materials[2].shading_model(),
+        ShadingModel::PbrMetallicRoughness
+    );
     assert_eq!(
         report
             .source_scope_record()
@@ -284,7 +297,7 @@ fn unlit_preserves_alpha_double_sided_and_vertex_color_semantics() -> TestResult
             .primitives()
             .next()
             .unwrap();
-        let material = primitive.material().unwrap();
+        let material = primitive.authored_material().unwrap();
         assert_eq!(material.shading_model(), ShadingModel::Unlit);
         assert_eq!(material.alpha_mode(), expected);
         assert_eq!(material.double_sided(), double_sided);

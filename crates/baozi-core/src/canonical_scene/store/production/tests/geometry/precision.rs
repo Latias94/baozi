@@ -25,7 +25,7 @@ fn precision_contract_sparse_f64_charges_explicit_values_defaults_and_indices_at
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::Points,
         Presence::Absent,
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 1),
     )];
     let input = GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &[]);
@@ -92,13 +92,13 @@ fn precision_contract_f64_builtins_reject_nonfinite_dense_values_sparse_values_a
     let one_attribute = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::Points,
         Presence::Absent,
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 1),
     )];
     let two_attributes = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::Points,
         Presence::Absent,
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 2),
     )];
     for (semantic, lanes) in [
@@ -173,7 +173,7 @@ fn precision_contract_f64_admission_keeps_builtin_lanes_domains_and_color_restri
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::Points,
         Presence::Absent,
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 1),
     )];
     for (semantic, domain, lanes) in [
@@ -226,7 +226,7 @@ fn precision_contract_sparse_f64_checks_indices_tuple_shapes_and_domain_cardinal
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::TriangleList,
         Presence::Absent,
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 2),
     )];
     let values = [1.0_f64; 6];
@@ -325,7 +325,7 @@ fn precision_contract_sparse_f64_default_only_geometry_is_bounded_and_cancellabl
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::Points,
         Presence::Absent,
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 1),
     )];
     for count in [0, u32::MAX] {
@@ -397,7 +397,7 @@ fn precision_contract_sparse_f64_scalar_validation_polls_before_finishing_the_va
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::Points,
         Presence::Absent,
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 1),
     )];
     let mut control = TestControl {

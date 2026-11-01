@@ -10,16 +10,22 @@ use baozi_operation::{
     StoreBuildError, StorePlanError,
 };
 
+#[cfg(test)]
 use crate::canonical_scene::store::construction::node_scene::SceneStorage;
 use crate::canonical_scene::store::construction::node_scene::materialization::NodeSceneEvidenceRecipe;
 use crate::canonical_scene::store::schema::NodeSceneOutcomeEvidenceSchema;
+#[cfg(test)]
 use crate::canonical_scene::store::typed_storage::edit::GeometryTriangulationPlan;
-use crate::provenance::{DigestAlgorithm, OptionsDigest};
+#[cfg(test)]
+use crate::provenance::DigestAlgorithm;
+use crate::provenance::OptionsDigest;
+
+#[cfg(test)]
+use super::{SceneNormalReplacement, SceneTangentReplacement, SceneTriangulationReplacement};
 
 use super::{
     EditRequest, SceneEditEvidenceTag, SceneEditOutput, SceneEditPostflight,
-    SceneGeometryCornerOriginsTag, SceneGeometryFaceOffsetsTag, SceneNormalReplacement,
-    SceneTangentReplacement, SceneTriangulationReplacement, schema,
+    SceneGeometryCornerOriginsTag, SceneGeometryFaceOffsetsTag, schema,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -30,6 +36,7 @@ pub(super) struct SceneEditFacts {
 }
 
 impl SceneEditFacts {
+    #[cfg(test)]
     pub(super) fn new(
         input: &SceneStorage,
         replacement: SceneTriangulationReplacement<'_>,
@@ -68,6 +75,7 @@ impl SceneEditFacts {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn normals(
         input: &SceneStorage,
         replacement: SceneNormalReplacement<'_>,
@@ -113,6 +121,7 @@ impl SceneEditFacts {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn tangents(
         replacement: SceneTangentReplacement<'_>,
         geometry: &crate::canonical_scene::store::typed_storage::edit::tangents::GeometryTangentsPlan<'_>,
@@ -189,7 +198,7 @@ impl SceneEditFacts {
     }
 }
 
-fn digest_words(options: OptionsDigest) -> [u64; 4] {
+pub(super) fn digest_words(options: OptionsDigest) -> [u64; 4] {
     let bytes = options.as_bytes();
     std::array::from_fn(|word| {
         let start = word * 8;
@@ -234,11 +243,24 @@ impl<'a> SceneEditEvidenceRecipe<'a> {
     }
 
     fn corner_origins_plan(&self) -> Result<SequencePlan<u32>, StorePlanError> {
-        SequencePlan::new(self.facts.words[7] as usize)
+        let origins = self.facts.words[7] as usize;
+        let fields = if matches!(self.replacement, EditRequest::Selection { .. }) {
+            origins
+                .checked_add(schema::SELECTION_CORNER_PREFIX_FIELDS)
+                .ok_or(StorePlanError::SizeOverflow)?
+        } else {
+            origins
+        };
+        SequencePlan::new(fields)
     }
 
     fn face_offsets_plan(&self) -> Result<SequencePlan<u32>, StorePlanError> {
-        SequencePlan::new(self.replacement.face_offsets().len())
+        SequencePlan::new(match self.replacement {
+            EditRequest::Selection { replacements, .. } => {
+                super::selected::face_count(replacements)
+            }
+            _ => self.replacement.face_offsets().len(),
+        })
     }
 
     pub(super) const fn source_corner_triangles(&self) -> &'a [[u32; 3]] {
@@ -249,7 +271,8 @@ impl<'a> SceneEditEvidenceRecipe<'a> {
         self.replacement.face_offsets()
     }
 
-    /// The origin pair is present only for triangulation. Central validation follows every edge.
+    /// Selected edits always root the counted origin pair, including a zero-origin relation.
+    /// Direct triangulation also roots its origins. Central validation follows every edge.
     fn write_root_row(
         &self,
         row: &mut OutcomeEvidenceRecordRowWriter<'_>,
@@ -275,8 +298,8 @@ impl<'a> SceneEditEvidenceRecipe<'a> {
 }
 
 impl SceneEditPostflight<'_> {
-    /// Retains a two-member generated-attribute graph or four-member triangulation graph. Any member failure
-    /// aborts the whole success graph.
+    /// Retains a four-member selected/triangulation graph or a two-member space/test-fixture
+    /// graph. Any member failure aborts the whole success graph.
     pub fn build_evidence<O, PP, U>(
         &self,
         lane: &mut CanonicalOutcomeEvidenceLane<'_, O, PP, U, CanonicalInheritanceSource>,
@@ -296,15 +319,35 @@ impl SceneEditPostflight<'_> {
             Ok(reference) => reference,
             Err(_) => return lane.abort(),
         };
-        let corners = if !matches!(self.replacement, EditRequest::Triangulation(_)) {
+        let has_origins = matches!(
+            recipe.facts.words[0],
+            schema::OPERATION_SELECTION | schema::OPERATION_TRIANGULATE
+        );
+        let corners = if !has_origins {
             None
         } else {
             Some(match recipe.corner_origins_plan() {
                 Ok(plan) => {
                     match lane.try_retain_sequence(plan, SceneGeometryCornerOriginsTag, |writer| {
-                        for triangle in recipe.source_corner_triangles() {
-                            for &corner in triangle {
-                                writer.push(corner)?;
+                        match self.replacement {
+                            EditRequest::Selection { replacements, .. } => {
+                                writer.push(recipe.facts.words[7])?;
+                                for edit in replacements {
+                                    if let Some(o) = edit.origins {
+                                        for triangle in o.triangles {
+                                            for &corner in triangle {
+                                                writer.push(corner)?;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {
+                                for triangle in recipe.source_corner_triangles() {
+                                    for &corner in triangle {
+                                        writer.push(corner)?;
+                                    }
+                                }
                             }
                         }
                         Ok(())
@@ -316,13 +359,26 @@ impl SceneEditPostflight<'_> {
                 Err(_) => return lane.abort(),
             })
         };
-        let faces = if !matches!(self.replacement, EditRequest::Triangulation(_)) {
+        let faces = if !has_origins {
             None
         } else {
             Some(match recipe.face_offsets_plan() {
                 Ok(plan) => {
                     match lane.try_retain_sequence(plan, SceneGeometryFaceOffsetsTag, |writer| {
-                        writer.extend_from_slice(recipe.source_face_triangle_offsets())
+                        if let Some(super::EditStoragePlan::Selection(plan)) = self.storage {
+                            for i in 0..plan.edits().len() {
+                                writer
+                                    .extend_from_slice(&super::selected::target_words(plan, i))?;
+                            }
+                            for edit in plan.edits() {
+                                if let Some(o) = edit.origins {
+                                    writer.extend_from_slice(o.face_offsets)?;
+                                }
+                            }
+                            Ok(())
+                        } else {
+                            writer.extend_from_slice(recipe.source_face_triangle_offsets())
+                        }
                     }) {
                         Ok(reference) => reference,
                         Err(_) => return lane.abort(),

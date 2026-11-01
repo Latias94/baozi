@@ -26,11 +26,13 @@ use crate::canonical_scene::store::typed_storage::build::{
     BuildResult, TypedStorageBuildControl, TypedStorageBuildError, allocate, capacity, count_work,
     finish, push,
 };
+#[cfg(test)]
 use crate::canonical_scene::store::typed_storage::edit::normals::NormalAttributeMapping;
+#[cfg(test)]
 use crate::canonical_scene::store::typed_storage::edit::tangents::TangentAttributeMapping;
 use crate::canonical_scene::store::typed_storage::profile::build::ProfileStatePlan;
 use crate::canonical_scene::store::typed_storage::profile::edit_metadata::{
-    MetadataEditCursor, MetadataEditPlan,
+    MetadataEditCursor, MetadataEditPlan, MetadataOwnerDeletion,
 };
 use crate::canonical_scene::store::typed_storage::profile::{
     LineageCounts, LineageSegment, ProfileState, ProfileStorage, StoredOperation,
@@ -46,25 +48,35 @@ use super::plan::{CheckedCount, NodeSceneEditPlanError};
 
 /// Each changed owner retains its own parent set.
 #[derive(Debug, Clone, Copy)]
-pub(super) enum ProfileEditTargets {
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the source-bound plan is Copy and borrowed; boxing would add unmetered allocation"
+)]
+pub(super) enum ProfileEditTargets<'scene> {
     #[cfg(test)]
     Node(u32),
+    #[cfg(test)]
     Triangulation {
         primitive: usize,
     },
+    #[cfg(test)]
     Normals {
         primitive: u32,
         attributes: NormalAttributeMapping,
         smooth: bool,
     },
+    #[cfg(test)]
     Tangents {
         primitive: u32,
         attributes: TangentAttributeMapping,
     },
+    Selection(
+        crate::canonical_scene::store::typed_storage::edit::selected::GeometrySelectionPlan<'scene>,
+    ),
     Space(crate::space_conversion::SpaceConversion),
 }
 
-impl ProfileEditTargets {
+impl ProfileEditTargets<'_> {
     fn selects<C: TypedStorageBuildControl>(
         self,
         owner: CanonicalProfileOwner,
@@ -184,9 +196,11 @@ impl ProfileEditTargets {
             }
             #[cfg(test)]
             (Self::Node(target), CanonicalProfileOwner::Node(node)) => target == node,
+            #[cfg(test)]
             (Self::Triangulation { primitive }, CanonicalProfileOwner::Primitive(index)) => {
                 primitive == index as usize
             }
+            #[cfg(test)]
             (Self::Triangulation { primitive }, CanonicalProfileOwner::Attribute(index)) => {
                 geometry
                     .primitives
@@ -205,17 +219,33 @@ impl ProfileEditTargets {
                                 })
                     })
             }
+            #[cfg(test)]
             (Self::Normals { primitive, .. }, CanonicalProfileOwner::Primitive(index)) => {
                 primitive == index
             }
+            #[cfg(test)]
             (Self::Normals { attributes, .. }, CanonicalProfileOwner::Attribute(index)) => {
                 index == attributes.normal_attribute()
             }
+            #[cfg(test)]
             (Self::Tangents { primitive, .. }, CanonicalProfileOwner::Primitive(index)) => {
                 primitive == index
             }
+            #[cfg(test)]
             (Self::Tangents { attributes, .. }, CanonicalProfileOwner::Attribute(index)) => {
                 index == attributes.tangent_attribute()
+            }
+            (Self::Selection(plan), CanonicalProfileOwner::Primitive(index)) => plan.edit_for_primitive(index as usize).is_some(),
+            (Self::Selection(plan), CanonicalProfileOwner::Attribute(index)) => {
+                let next = plan.mappings().partition_point(|m| m.output_start <= index as usize);
+                next.checked_sub(1).is_some_and(|i| {
+                    let e = &plan.edits()[i];
+                    let m = plan.mapping(i);
+                    if index as usize >= m.output_start + m.output_count { return false; }
+                    e.normals.is_some() && m.output_normal == Some(index)
+                        || e.tangents.is_some() && m.output_tangent == Some(index)
+                        || e.origins.is_some() && plan.source_attribute(index).and_then(|i| geometry.attributes.get(i as usize)).is_some_and(|a| matches!(a.domain, AttributeDomain::Corner | AttributeDomain::Face))
+                })
             }
             _ => false,
         })
@@ -252,38 +282,49 @@ impl ProfileEditTargets {
 
     fn source_owner(self, output: CanonicalProfileOwner) -> Option<CanonicalProfileOwner> {
         match (self, output) {
+            #[cfg(test)]
             (Self::Normals { attributes, .. }, CanonicalProfileOwner::Attribute(index)) => {
                 attributes
                     .source_attribute(index)
                     .map(CanonicalProfileOwner::Attribute)
             }
+            #[cfg(test)]
             (Self::Tangents { attributes, .. }, CanonicalProfileOwner::Attribute(index)) => {
                 attributes
                     .source_attribute(index)
                     .map(CanonicalProfileOwner::Attribute)
             }
+            (Self::Selection(plan), CanonicalProfileOwner::Attribute(index)) => plan
+                .source_attribute(index)
+                .map(CanonicalProfileOwner::Attribute),
             _ => Some(output),
         }
     }
 
     fn output_owner(self, source: CanonicalProfileOwner) -> Option<CanonicalProfileOwner> {
         match (self, source) {
+            #[cfg(test)]
             (Self::Normals { attributes, .. }, CanonicalProfileOwner::Attribute(index)) => {
                 attributes
                     .output_attribute(index)
                     .map(CanonicalProfileOwner::Attribute)
             }
+            #[cfg(test)]
             (Self::Tangents { attributes, .. }, CanonicalProfileOwner::Attribute(index)) => {
                 attributes
                     .output_attribute(index)
                     .map(CanonicalProfileOwner::Attribute)
             }
+            (Self::Selection(plan), CanonicalProfileOwner::Attribute(index)) => plan
+                .output_attribute(index)
+                .map(CanonicalProfileOwner::Attribute),
             _ => Some(source),
         }
     }
 
     fn deleted_owner(self) -> Option<CanonicalProfileOwner> {
         match self {
+            #[cfg(test)]
             Self::Normals { attributes, .. } => attributes
                 .source_tangent()
                 .filter(|&index| attributes.output_attribute(index).is_none())
@@ -321,15 +362,15 @@ fn profile_owner(
         .filter(|row| row.owner == owner)
 }
 
-/// A bounded merge of at most five proven source-owner attachment lists.
+/// A bounded merge of at most six proven source-owner attachment lists.
 struct OwnerParents<'a> {
-    lists: [&'a [ProfileProvenanceRef]; 5],
+    lists: [&'a [ProfileProvenanceRef]; 6],
     maximum_depth: u32,
 }
 
 impl OwnerParents<'_> {
     fn iter(&self) -> impl Iterator<Item = ProfileProvenanceRef> + '_ {
-        let mut next = [0_usize; 5];
+        let mut next = [0_usize; 6];
         std::iter::from_fn(move || {
             let candidate = self
                 .lists
@@ -348,56 +389,55 @@ impl OwnerParents<'_> {
     }
 }
 
-fn owner_parents(
-    input: &SceneStorage,
+fn owner_parents<'a>(
+    input: &'a SceneStorage,
     layout: ProfileOwnerLayout,
-    targets: ProfileEditTargets,
+    targets: ProfileEditTargets<'_>,
     output_owner: CanonicalProfileOwner,
-) -> Option<OwnerParents<'_>> {
+) -> Option<OwnerParents<'a>> {
     let source = input.tables.profile.state.as_ref();
-    let mut owners = [None; 5];
-    if let (
-        ProfileEditTargets::Normals {
-            primitive,
-            attributes,
-            smooth,
-        },
-        CanonicalProfileOwner::Attribute(index),
-    ) = (targets, output_owner)
-        && index == attributes.normal_attribute()
+    let mut owners = [None; 6];
+    #[cfg(test)]
+    let reference = reference_parent_owners(targets, output_owner);
+    #[cfg(not(test))]
+    let reference: Option<[Option<CanonicalProfileOwner>; 6]> = None;
+    if let Some(reference) = reference {
+        owners = reference;
+    } else if let (ProfileEditTargets::Selection(plan), CanonicalProfileOwner::Attribute(index)) =
+        (targets, output_owner)
     {
-        owners[0] = Some(CanonicalProfileOwner::Primitive(primitive));
-        owners[1] = Some(CanonicalProfileOwner::Attribute(
-            attributes.source_position(),
-        ));
-        owners[2] = attributes
-            .source_normal()
-            .map(CanonicalProfileOwner::Attribute);
-        owners[3] = if smooth {
-            attributes
-                .source_smoothing_group()
-                .map(CanonicalProfileOwner::Attribute)
+        let next = plan
+            .mappings()
+            .partition_point(|m| m.output_start <= index as usize);
+        let selected = next.checked_sub(1)?;
+        let edit = plan.edits().get(selected)?;
+        let m = plan.mapping(selected);
+        if edit.normals.is_some() && m.output_normal == Some(index) {
+            owners[0] = Some(CanonicalProfileOwner::Primitive(m.row as u32));
+            owners[1] = m.position.map(CanonicalProfileOwner::Attribute);
+            owners[2] = m.normal.map(CanonicalProfileOwner::Attribute);
+            owners[3] = if edit.smooth {
+                m.smoothing.map(CanonicalProfileOwner::Attribute)
+            } else {
+                None
+            };
+        } else if edit.tangents.is_some() && m.output_tangent == Some(index) {
+            owners[0] = Some(CanonicalProfileOwner::Primitive(m.row as u32));
+            owners[1] = m.position.map(CanonicalProfileOwner::Attribute);
+            owners[2] = m.normal.map(CanonicalProfileOwner::Attribute);
+            owners[3] = m.uv.map(CanonicalProfileOwner::Attribute);
+            owners[4] = m.tangent.map(CanonicalProfileOwner::Attribute);
+            owners[5] = if edit.normals.is_some() && edit.smooth {
+                m.smoothing.map(CanonicalProfileOwner::Attribute)
+            } else {
+                None
+            };
         } else {
-            None
-        };
-    } else if let (
-        ProfileEditTargets::Tangents {
-            primitive,
-            attributes,
-        },
-        CanonicalProfileOwner::Attribute(index),
-    ) = (targets, output_owner)
-        && index == attributes.tangent_attribute()
-    {
-        owners[0] = Some(CanonicalProfileOwner::Primitive(primitive));
-        owners[1] = Some(CanonicalProfileOwner::Attribute(
-            attributes.source_position(),
-        ));
-        owners[2] = Some(CanonicalProfileOwner::Attribute(attributes.source_normal()));
-        owners[3] = Some(CanonicalProfileOwner::Attribute(attributes.source_uv()));
-        owners[4] = attributes
-            .source_tangent()
-            .map(CanonicalProfileOwner::Attribute);
+            owners[0] = plan
+                .source_attribute(index)
+                .map(CanonicalProfileOwner::Attribute);
+            owners[1] = Some(CanonicalProfileOwner::Primitive(m.row as u32));
+        }
     } else {
         owners[0] = Some(targets.source_owner(output_owner)?);
         if matches!(targets, ProfileEditTargets::Space(_)) {
@@ -405,7 +445,7 @@ fn owner_parents(
         }
     }
     let mut parents = OwnerParents {
-        lists: [&[]; 5],
+        lists: [&[]; 6],
         maximum_depth: 0,
     };
     for (index, owner) in owners.into_iter().enumerate() {
@@ -419,13 +459,13 @@ fn owner_parents(
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct NodeSceneEditProfilePlan {
+pub(super) struct NodeSceneEditProfilePlan<'scene> {
     source_layout: ProfileOwnerLayout,
     output_layout: ProfileOwnerLayout,
-    targets: ProfileEditTargets,
+    targets: ProfileEditTargets<'scene>,
     lineage: [CapacityPlan; 3],
     state: ProfileStatePlan,
-    metadata: MetadataEditPlan,
+    metadata: MetadataEditPlan<ProfileEditTargets<'scene>>,
     selection_work: u64,
     pub(super) source_segment_count: CheckedCount,
     pub(super) target_count: CheckedCount,
@@ -437,10 +477,10 @@ pub(super) struct NodeSceneEditProfilePlan {
     pub(super) maximum_depth: u32,
 }
 
-impl NodeSceneEditProfilePlan {
+impl<'scene> NodeSceneEditProfilePlan<'scene> {
     pub(super) fn try_new(
         input: &SceneStorage,
-        targets: ProfileEditTargets,
+        targets: ProfileEditTargets<'scene>,
         output: SceneEvidenceCounts,
         poll: &mut impl FnMut() -> Result<(), NodeSceneEditPlanError>,
     ) -> Result<Self, NodeSceneEditPlanError> {
@@ -456,7 +496,7 @@ impl NodeSceneEditProfilePlan {
         let source = input.tables.profile.state.as_ref();
         let metadata = MetadataEditPlan::try_new(
             &input.tables.profile,
-            targets.deleted_owner(),
+            targets,
             &mut ProfilePlanningControl(poll),
         )
         .map_err(|error| match error {
@@ -807,7 +847,7 @@ impl NodeSceneEditProfilePlan {
 pub(super) fn retain_edited_profile<O, PP, U>(
     lane: &mut CanonicalLane<'_, O, PP, U, CanonicalInheritanceSource>,
     input: &SceneStorage,
-    plan: NodeSceneEditProfilePlan,
+    plan: NodeSceneEditProfilePlan<'_>,
     operation: &OperationIdentity,
 ) -> Result<ProfileStorage, StoreRuntimeError>
 where
@@ -864,4 +904,70 @@ where
         },
     )?;
     Ok(ProfileStorage { state, metadata })
+}
+
+impl MetadataOwnerDeletion for ProfileEditTargets<'_> {
+    fn deletes(self, owner: CanonicalMetadataOwner) -> bool {
+        let CanonicalMetadataOwner::Entity(CanonicalProfileOwner::Attribute(index)) = owner else {
+            return false;
+        };
+        match self {
+            Self::Selection(plan) => plan.output_attribute(index).is_none(),
+            _ => self.deleted_owner() == Some(CanonicalProfileOwner::Attribute(index)),
+        }
+    }
+}
+
+#[cfg(test)]
+fn reference_parent_owners(
+    targets: ProfileEditTargets<'_>,
+    output_owner: CanonicalProfileOwner,
+) -> Option<[Option<CanonicalProfileOwner>; 6]> {
+    let mut owners = [None; 6];
+    if let (
+        ProfileEditTargets::Normals {
+            primitive,
+            attributes,
+            smooth,
+        },
+        CanonicalProfileOwner::Attribute(index),
+    ) = (targets, output_owner)
+        && index == attributes.normal_attribute()
+    {
+        owners[0] = Some(CanonicalProfileOwner::Primitive(primitive));
+        owners[1] = Some(CanonicalProfileOwner::Attribute(
+            attributes.source_position(),
+        ));
+        owners[2] = attributes
+            .source_normal()
+            .map(CanonicalProfileOwner::Attribute);
+        owners[3] = if smooth {
+            attributes
+                .source_smoothing_group()
+                .map(CanonicalProfileOwner::Attribute)
+        } else {
+            None
+        };
+    } else if let (
+        ProfileEditTargets::Tangents {
+            primitive,
+            attributes,
+        },
+        CanonicalProfileOwner::Attribute(index),
+    ) = (targets, output_owner)
+        && index == attributes.tangent_attribute()
+    {
+        owners[0] = Some(CanonicalProfileOwner::Primitive(primitive));
+        owners[1] = Some(CanonicalProfileOwner::Attribute(
+            attributes.source_position(),
+        ));
+        owners[2] = Some(CanonicalProfileOwner::Attribute(attributes.source_normal()));
+        owners[3] = Some(CanonicalProfileOwner::Attribute(attributes.source_uv()));
+        owners[4] = attributes
+            .source_tangent()
+            .map(CanonicalProfileOwner::Attribute);
+    } else {
+        return None;
+    }
+    Some(owners)
 }

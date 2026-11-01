@@ -19,15 +19,18 @@ pub use baozi_postprocess as postprocess;
 #[cfg(feature = "format-gltf")]
 pub use baozi_format_gltf::{GltfImportOptions, GltfSceneSelection, gltf_import_option_key};
 
+#[cfg(feature = "format-obj")]
+pub use baozi_format_obj::{ObjImportOptions, ObjTextDecodingMode, obj_import_option_key};
+
 pub use baozi_core::{
     Aabb, Color, FormatId, FormatIdError, Mat4, Quat, SceneGenerationId, Vec2, Vec3, Vec4,
 };
 pub use baozi_core::{
     AlphaCutoff, AlphaMode, ColorInterpretation, ExtensionSchemaId, ExtensionSchemaIdError,
-    LegacyMaterialFactors, MaterialFactorError, MaterialFactorField, MaterialFactors,
-    NamespacedName, NamespacedNameError, PbrMetallicRoughnessFactors, PbrSpecularGlossinessFactors,
-    ShadingModel, SupplementalPbrFactors, TextureBlendOperation, TextureChannel,
-    TextureChannelSwizzle, TextureRole, TextureStrength, TextureTransform,
+    LegacyMaterialFactors, MaterialAssignment, MaterialFactorError, MaterialFactorField,
+    MaterialFactors, NamespacedName, NamespacedNameError, PbrMetallicRoughnessFactors,
+    PbrSpecularGlossinessFactors, ShadingModel, SupplementalPbrFactors, TextureBlendOperation,
+    TextureChannel, TextureChannelSwizzle, TextureRole, TextureStrength, TextureTransform,
 };
 pub use baozi_core::{
     AnimationChannelRef, AnimationClipId, AnimationClipRef, AnimationExtrapolation,
@@ -76,6 +79,9 @@ pub use baozi_core::{
     ProvenanceOperationKindRef, ProvenanceOperationRef, ProvenanceRef,
 };
 pub use baozi_core::{
+    RelationsQueryError, RelationsQueryLimit, RelationsQueryLimits, SceneRelations,
+};
+pub use baozi_core::{
     TangentBasisConvention, TangentConventionField, TangentConventions,
     TangentConventionsValidationError, TangentHandednessEncoding, TangentSchemaBindingError,
 };
@@ -89,7 +95,7 @@ pub use baozi_import::{
     DiagnosticDetail, DiagnosticDetailValue, DiagnosticLineColumn, DiagnosticSeverity,
     DiagnosticSummary, FormatCapability, FormatDescriptor, FormatEncoding, FormatFailureDetail,
     FormatFailureDetailValue, FormatFailureEnvelope, FormatFailureEvidence, FormatImporter,
-    FormatOptionEnvelope, FormatOptionEnvelopeError, FormatOptionSchemaId,
+    FormatOptionEnvelope, FormatOptionEnvelopeError, FormatOptionKey, FormatOptionSchemaId,
     FormatOptionSchemaIdError, FormatOptionSchemaKey, FormatSelection, FormatUnavailability,
     ImportCause, ImportConfig, ImportConfigOverlay, ImportDiagnostic, ImportDimension,
     ImportDimensionSnapshot, ImportEvidence, ImportFailure, ImportInitializationError,

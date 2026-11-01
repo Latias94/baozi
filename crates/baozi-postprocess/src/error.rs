@@ -76,6 +76,11 @@ pub enum PostProcessRunError {
         #[source]
         failure: crate::TangentFailure,
     },
+    #[error("triangle preparation failed: {failure}")]
+    Preparation {
+        #[source]
+        failure: crate::PreparationFailure,
+    },
     /// Spatial conversion failed without replacing the input Scene.
     #[error("scene space conversion failed: {failure}")]
     SpaceConversion {

@@ -204,7 +204,7 @@ fn submit_triangle(scope: &ParseScope<'_>, input: Input) -> ParseResult<SceneDra
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::TriangleList,
         Presence::Present(&indices),
-        Presence::Absent,
+        baozi_import::authoring::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 2),
     )];
     let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];

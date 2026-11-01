@@ -14,11 +14,13 @@ pub use super::super::construction::node_scene::edit::transaction::{
     SceneEditHandoffToken, SceneEditJointCommit, SceneEditOutput, SceneEditPlan,
     SceneEditPostflight, SceneEditPublishedSuccess, SceneEditRejection, SceneEditTarget,
     SceneEditTransaction, SceneEditValidationProof, SceneGeometryCornerOriginsTag,
-    SceneGeometryFaceOffsetsTag, SceneNormalGenerationEvidence, SceneNormalReplacement,
-    SceneSpaceConversionEvidence, SceneSpaceConversionIssue, SceneTangentGenerationEvidence,
-    SceneTangentReplacement, SceneTriangulationEvidence, SceneTriangulationReplacement,
+    SceneGeometryFaceOffsetsTag, SceneSpaceConversionEvidence, SceneSpaceConversionIssue,
     consume_scene_edit_freeze_permit, resolve_scene_space_conversion,
     try_start_scene_edit_operation,
+};
+pub use super::super::construction::node_scene::edit::transaction::{
+    SceneGeometryPlanScratch, SceneGeometryPlanStorage, SceneGeometryReplacement,
+    SceneGeometrySelectionEvidence, SceneGeometryTargetEvidence, SceneTriangleOrigins,
 };
 pub use super::super::construction::node_scene::{
     NodeSceneActivationPostflight as SceneActivationPostflight,
@@ -154,6 +156,12 @@ pub const fn scene_failure_evidence_member_count() -> usize {
 pub const fn scene_failure_evidence_field_work() -> u64 {
     NODE_SCENE_EVIDENCE_FIELD_COUNT as u64
 }
+
+#[cfg(test)]
+pub use super::super::construction::node_scene::edit::transaction::{
+    SceneNormalGenerationEvidence, SceneNormalReplacement, SceneTangentGenerationEvidence,
+    SceneTangentReplacement, SceneTriangulationEvidence, SceneTriangulationReplacement,
+};
 
 #[cfg(test)]
 mod tests {

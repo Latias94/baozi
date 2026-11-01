@@ -23,7 +23,7 @@ mod spatial;
 mod tangent;
 
 const CANONICAL_SCENE_SNAPSHOT_DOMAIN: &str = "baozi.canonical-scene.snapshot";
-const CANONICAL_SCENE_SNAPSHOT_SCHEMA_REVISION: u32 = 6;
+const CANONICAL_SCENE_SNAPSHOT_SCHEMA_REVISION: u32 = 7;
 const NODE_SCENE_SNAPSHOT_ALGORITHM_ID: &str = "sha256";
 const NODE_SCENE_SNAPSHOT_POLL_INTERVAL: u64 = 64;
 const SNAPSHOT_PAYLOAD_CHUNK_BYTES: usize = 4 * 1024;
@@ -877,7 +877,8 @@ fn write_geometry(
         let polygon_boundary_count = primitive.polygon_boundary_count();
         let indices_present = primitive.indices_present();
         let index_count = primitive.index_count();
-        let material = primitive.material();
+        let assignment = primitive.material_assignment();
+        let material = assignment.effective();
         let attribute_offset = primitive.attribute_offset();
         let attribute_count = primitive.attribute_count();
 
@@ -921,15 +922,24 @@ fn write_geometry(
         transcript.write_tag(TAG_MATERIAL_REFERENCE)?;
         transcript.tagged_u8(
             TAG_PRESENCE,
-            if material.is_some() {
-                PRESENCE_PRESENT
-            } else {
-                PRESENCE_ABSENT
+            match assignment {
+                crate::MaterialAssignment::Unspecified => 0,
+                crate::MaterialAssignment::Authored(_) => 1,
+                crate::MaterialAssignment::ImplicitDefault(_) => 2,
             },
         )?;
         if let Some(material) = material {
             transcript.tagged_usize(TAG_REFERENCE, material)?;
         }
+        preview.geometry_field_word(
+            render,
+            "assignment",
+            match assignment {
+                crate::MaterialAssignment::Unspecified => "unspecified",
+                crate::MaterialAssignment::Authored(_) => "authored",
+                crate::MaterialAssignment::ImplicitDefault(_) => "implicit-default",
+            },
+        );
         preview.geometry_optional_reference(render, "material", material);
         transcript.write_tag(TAG_ATTRIBUTES)?;
         transcript.tagged_usize(TAG_ATTRIBUTE_OFFSET, attribute_offset)?;

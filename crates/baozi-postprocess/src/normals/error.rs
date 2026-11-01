@@ -58,6 +58,11 @@ pub enum NormalIssue {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum NormalCause {
+    #[error("the explicit tangent preparation failed: {cause}")]
+    Tangent {
+        #[source]
+        cause: crate::TangentCause,
+    },
     #[error("the target primitive could not be looked up: {source}")]
     Target {
         #[source]
@@ -83,8 +88,6 @@ pub enum NormalCause {
     Issue { issue: NormalIssue },
     #[error("normal generation size or work bound overflowed")]
     SizeOverflow,
-    #[error("normal generation requires {required} work units, above the {maximum} unit limit")]
-    WorkLimit { required: u64, maximum: u64 },
     #[error("normal generation stopped: {cause}")]
     Control {
         #[source]
@@ -231,15 +234,6 @@ impl From<super::input::InputError> for NormalCause {
     fn from(error: super::input::InputError) -> Self {
         use super::{input::InputError, kernel::Error};
         match error {
-            InputError::Target(source) => Self::Target { source },
-            InputError::UnsupportedTopology => Self::UnsupportedTopology,
-            InputError::Positions => Self::Positions,
-            InputError::SmoothingGroups => Self::SmoothingGroups,
-            InputError::TangentsRequireRemoval => Self::TangentsRequireRemoval,
-            InputError::MultipleNormalFields => Self::MultipleNormalFields,
-            InputError::MultipleTangentFields => Self::MultipleTangentFields,
-            InputError::SizeOverflow => Self::SizeOverflow,
-            InputError::WorkLimit { required, maximum } => Self::WorkLimit { required, maximum },
             InputError::Runtime(source) | InputError::Kernel(Error::Control(source)) => {
                 source.into()
             }

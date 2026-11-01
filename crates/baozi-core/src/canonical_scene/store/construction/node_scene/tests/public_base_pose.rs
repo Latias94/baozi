@@ -130,7 +130,7 @@ fn shared_triangle_scene(account: &PhysicalStorageAccount) -> ValidatedScene {
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::TriangleList,
         Presence::Absent,
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 3),
     )];
     let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -221,7 +221,7 @@ fn precision_contract_public_bounds_retain_f64_derived_values() {
         let primitives = [GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::Points,
             Presence::Absent,
-            Presence::Absent,
+            crate::MaterialAssignment::Unspecified,
             AuthoringRange::new(0, 1),
         )];
         let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -313,7 +313,7 @@ fn world_transforms_follow_authored_hierarchy_and_bound_each_shared_placement() 
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::TriangleList,
         Presence::Absent,
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 1),
     )];
     let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -432,7 +432,7 @@ fn authored_trs_supports_rotation_negative_and_zero_scale_without_sampling_anima
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::Points,
         Presence::Absent,
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 1),
     )];
     let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -524,7 +524,7 @@ fn shear_bounds_transform_actual_vertices_without_introducing_local_box_corners(
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::TriangleList,
         Presence::Absent,
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 1),
     )];
     let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -622,7 +622,7 @@ fn sparse_positions_match_dense_vertices_and_ignore_defaults_without_omissions()
         GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::Points,
             Presence::Absent,
-            Presence::Absent,
+            crate::MaterialAssignment::Unspecified,
             AuthoringRange::new(index as u32, 1),
         )
     });
@@ -736,7 +736,7 @@ fn precision_contract_public_f64_dense_and_sparse_bounds_preserve_logical_values
         GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::Points,
             Presence::Absent,
-            Presence::Absent,
+            crate::MaterialAssignment::Unspecified,
             AuthoringRange::new(index as u32, 1),
         )
     });
@@ -840,7 +840,7 @@ fn precision_contract_public_f64_positions_use_composed_f64_world_matrices() {
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::Points,
         Presence::Absent,
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 1),
     )];
     let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -909,31 +909,31 @@ fn bounds_distinguish_empty_points_indices_and_uninstanced_meshes() {
         GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::TriangleList,
             Presence::Present(&[0, 1, 2]),
-            Presence::Absent,
+            crate::MaterialAssignment::Unspecified,
             AuthoringRange::new(0, 1),
         ),
         GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::Points,
             Presence::Present(&[]),
-            Presence::Absent,
+            crate::MaterialAssignment::Unspecified,
             AuthoringRange::new(1, 1),
         ),
         GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::Points,
             Presence::Absent,
-            Presence::Absent,
+            crate::MaterialAssignment::Unspecified,
             AuthoringRange::new(2, 0),
         ),
         GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::Points,
             Presence::Absent,
-            Presence::Absent,
+            crate::MaterialAssignment::Unspecified,
             AuthoringRange::new(2, 1),
         ),
         GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::Points,
             Presence::Absent,
-            Presence::Absent,
+            crate::MaterialAssignment::Unspecified,
             AuthoringRange::new(3, 1),
         ),
     ];
@@ -1027,7 +1027,7 @@ fn morph_overrides_take_precedence_and_nonzero_weights_reject_even_empty_geometr
             let primitives = [GeometryPrimitiveAuthoring::new(
                 GeometryTopologyAuthoring::Points,
                 Presence::Absent,
-                Presence::Absent,
+                crate::MaterialAssignment::Unspecified,
                 AuthoringRange::new(0, 1),
             )];
             let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -1524,7 +1524,7 @@ fn numeric_position_failures_identify_instance_primitive_and_logical_vertex() {
                 GeometryPrimitiveAuthoring::new(
                     GeometryTopologyAuthoring::Points,
                     Presence::Absent,
-                    Presence::Absent,
+                    crate::MaterialAssignment::Unspecified,
                     AuthoringRange::new(index as u32, 1),
                 )
             });

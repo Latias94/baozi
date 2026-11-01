@@ -49,6 +49,10 @@ name = "import_memory_sidecars"
 required-features = ["format-obj"]
 
 [[example]]
+name = "import_host_bundle"
+required-features = ["format-obj"]
+
+[[example]]
 name = "diagnostics"
 required-features = ["format-obj"]
 

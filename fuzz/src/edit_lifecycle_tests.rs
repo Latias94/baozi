@@ -140,6 +140,40 @@ fn coordinate_seed_really_changes_numeric_positions() {
 }
 
 #[test]
+fn selected_preparation_publishes_both_meshes_once() {
+    let run = run(include_bytes!(
+        "../corpus/edit_lifecycle/prepare_two_meshes.bin"
+    ))
+    .unwrap();
+    let report = changed(&run.preparation);
+    assert_eq!(report.input_generation(), run.input_generation);
+    assert_eq!(report.output_generation(), run.scene.generation());
+    assert!(run.triangulation.is_none());
+    assert!(run.normals.is_none());
+    let effects = report.geometry_preparation().unwrap();
+    assert_eq!(effects.geometry_reconstruction_count(), 1);
+    assert_eq!(effects.len(), 2);
+    for primitive in run.scene.meshes().flat_map(|mesh| mesh.primitives()) {
+        assert_eq!(primitive.topology(), TopologyKind::TriangleList);
+        assert_eq!(primitive.corner_count(), 6);
+        assert_eq!(primitive.face_count(), 2);
+        let normals = dense_f32(primitive.normals(AttributeDomain::Corner).unwrap());
+        for normal in normals.chunks_exact(3) {
+            assert_eq!(normal, [0.0, 0.0, 1.0]);
+        }
+    }
+}
+
+#[test]
+fn selected_preparation_cancellation_returns_all_original_geometry() {
+    let mut seed = include_bytes!("../corpus/edit_lifecycle/prepare_two_meshes.bin").to_vec();
+    seed[3] = 1;
+    let run = run(&seed).unwrap();
+    assert_original(&run);
+    assert_token_cancellation(run.preparation.as_ref().unwrap().as_ref().unwrap_err());
+}
+
+#[test]
 fn complete_workflows_reacquire_ids_across_all_three_publications() {
     for (seed, selected) in [
         (

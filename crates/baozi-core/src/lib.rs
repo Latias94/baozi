@@ -32,6 +32,7 @@ mod math;
 mod namespaced;
 mod ordered_map;
 mod provenance;
+mod relations;
 #[allow(
     dead_code,
     reason = "canonical domain implementation is exposed through sealed views"
@@ -97,8 +98,8 @@ pub mod __scene_integration {
 
 pub use animation::{AnimationExtrapolation, AnimationInterpolation, AnimationTimeDomain};
 pub use appearance::{
-    AlphaCutoff, AlphaMode, ColorInterpretation, LegacyMaterialFactors, MaterialFactorError,
-    MaterialFactorField, MaterialFactors, PbrMetallicRoughnessFactors,
+    AlphaCutoff, AlphaMode, ColorInterpretation, LegacyMaterialFactors, MaterialAssignment,
+    MaterialFactorError, MaterialFactorField, MaterialFactors, PbrMetallicRoughnessFactors,
     PbrSpecularGlossinessFactors, ShadingModel, SupplementalPbrFactors, TextureBlendOperation,
     TextureChannel, TextureChannelSwizzle, TextureRole, TextureStrength, TextureTransform,
 };
@@ -170,6 +171,9 @@ pub use ordered_map::{
     OrderedMap, OrderedMapCapacityPlan, OrderedMapError, OrderedMapIter, PreparedOrderedMapCapacity,
 };
 pub use provenance::{DigestAlgorithm, SourceObjectKind};
+pub use relations::{
+    RelationsQueryError, RelationsQueryLimit, RelationsQueryLimits, SceneRelations,
+};
 pub use scene_space::{
     Axis, FrontFaceWinding, Handedness, SceneSpace, SceneSpaceField, SceneSpaceValidationError,
     UvOrigin,

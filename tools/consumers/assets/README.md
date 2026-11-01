@@ -1,29 +1,36 @@
 # Offline Real-Asset Consumer
 
 This unpublished standalone application exercises the public Baozi API with unchanged upstream
-assets and actual capability-bound filesystem access. It imports a model, triangulates polygons,
-converts the complete Scene to a known CCW processing space, preserves authored normals or generates
-missing normals, copies application buffers, and destroys the Scene before returning those
-buffers and detached import evidence.
+assets and actual capability-bound filesystem access. It imports a model, converts the complete
+Scene directly to the requested target space once, and calls `prepare_triangles` once for all
+primitive IDs acquired from that converted Scene. Preparation lowers topology and preserves
+authored normals or generates missing normals together in one selected transaction. The application
+then copies buffers and destroys the Scene before returning those buffers and detached import evidence.
 Before extraction it walks the retained provenance of each primitive through the public borrowed
 readers, sharing one visited set across draws. This reports reached source objects without
 inventing a persistent application provenance graph.
 
-`process_file` and `process` deliberately use a triangle processing workflow: polygon primitives
-are triangulated, TriangleList primitives are accepted, and points, lines, strips, fans, and loops
-are rejected before space conversion and normal generation. `ApplicationAsset::from_scene` is a
-separate direct extraction path for an already validated Scene. It explicitly uses `list_vertices`
+`process_file` and `process` use the shared triangle preparation workflow: TriangleList primitives
+are accepted, TriangleStrip/TriangleFan primitives are lowered to lists, and polygons are triangulated.
+Points and line modes, including LineLoop, are rejected during preparation. The normal policy is
+`NormalOptions::default()` with `NormalOrientation::SceneFrontFace { assume_unknown: None }`:
+generated normals follow the converted Scene's front-face declaration, and existing normals are
+preserved. The default tangent policy preserves existing tangents and rejects invalidating normal
+changes unless the caller chooses an explicit replacement/removal policy through the preparation API.
+`ApplicationAsset::from_scene` is a separate direct extraction path for an already validated Scene.
+It explicitly uses `list_vertices`
 to accept all seven glTF modes without editing the Scene, generating attributes, converting units
 or coordinates, or baking instance transforms. Callers choose any processing needed before direct
-extraction; polygons still require explicit triangulation. Broader extraction support does not
-broaden the CLI's editing workflow.
+extraction; polygons still require explicit triangulation. Direct extraction also accepts points
+and lines, which remain outside the triangle processing workflow.
 
 The target is left-handed, positive Y up, negative Z front, centimeters, with counter-clockwise front
 faces. UVs remain in their declared source convention. Formats with unknown spatial facts, including
 OBJ, need an explicit caller assumption. The native dependency remains an unregistered candidate;
 this tool does not add a filesystem backend to the portable library or its release target list.
-Library callers choosing a clockwise target receive a final winding conversion after normal
-generation. The tests cover both source windings against both target windings.
+Library callers choosing a clockwise target convert directly to that target before preparation;
+normal orientation follows its declared fronts. There is no temporary CCW processing space or
+second winding conversion after normal generation.
 glTF explicitly declares a +Z asset front, distinct from camera-local -Z viewing axes; conversion
 to this application's default target maps `(x, y, z)` to `(100x, 100y, -100z)`.
 
@@ -34,14 +41,25 @@ cargo +1.95.0 run --locked --release --manifest-path tools/consumers/assets/Carg
 cargo +1.95.0 run --locked --release --manifest-path tools/consumers/assets/Cargo.toml --target-dir target -- /path/to/assets model.obj --assume-standard-space
 cargo +1.95.0 nextest run --locked --manifest-path tools/consumers/assets/Cargo.toml --target-dir target --all-features --build-jobs 1 --test-threads 1
 cargo +1.95.0 nextest run --locked --manifest-path tools/consumers/assets/Cargo.toml --target-dir target --test primitive_modes --build-jobs 1 --test-threads 1
+cargo +1.95.0 nextest run --locked --manifest-path tools/consumers/assets/Cargo.toml --target-dir target --test material_output --test indexing --test unlit_materials --test deformation_seams --build-jobs 1 --test-threads 1
 ```
 
 `ROOT` is an ambient directory used to acquire the native capability; the asset path is relative to
 it. Dependencies resolve through the same capability. A successful invocation emits one JSON
 summary. Failures emit a cause chain on stderr and return a nonzero exit code. There is no automatic
 retry, hidden coordinate assumption, or automatic budget increase. `--max-work-units N` explicitly
-sets the import work allowance; its default is 200,000,000, including filesystem accounting.
-Postprocess operations use their documented default per-operation limits.
+sets only the import work allowance through `Options::max_work_units`; its default is 200,000,000,
+including filesystem accounting. `--postprocess-work N` and `--postprocess-bytes N` set
+`Options::postprocess_budgets.work` and `.storage_bytes` for the single `prepare_triangles` call.
+The default `PostProcessBudgets` allows 100,000,000 work items and 1,073,741,824 accounted storage
+bytes. These preparation budgets are separate from import limits and from application buffer
+allocations. Coordinate conversion retains its documented default operation limits; the two
+postprocess flags apply to triangle preparation, not conversion or a combined pipeline ledger.
+
+The processing order is one selected triangle-preparation transaction followed by one whole-Scene
+space conversion. Lowering first lets polygons/strips/fans enter a conversion that reverses winding.
+Generated Normal orientation uses the source winding or the explicitly supplied source assumption;
+the conversion then transports those normals and all Corner tuples together.
 
 ## Application layout
 
@@ -56,13 +74,18 @@ This is a concrete extraction example, not a new canonical representation or a g
   Degenerate elements remain in the output and still advance strip parity. Source primitive
   topology, indices, and shared mesh/instance relationships remain unchanged.
 - Reuse requires the same `PrimitiveVertex` identity and identical `to_bits()` values in every
-  selected Position, Normal, Tangent (including
-  W), UV0 and COLOR0 lane. These application fields use F64, with exact F32 widening. RGB colors
+  selected Position, Normal, Tangent (including W), every retained UV set and COLOR0 lane.
+  These application fields use F64, with exact F32 widening. RGB colors
   acquire an explicit alpha of one; RGBA and absent colors remain distinct. Indices follow first
   expanded tuple encounter order, independently of hash map iteration, and retain list element
   order and triangle winding. Distinct source vertices, signed-zero seams, and separate draw/material
-  boundaries stay distinct; there is no epsilon comparison or position welding. Simultaneous normal/tangent/
-  UV0/COLOR0 domains require an explicit application policy and are rejected here.
+  boundaries stay distinct; there is no epsilon comparison or position welding. Multiple domains
+  for the same Normal, Tangent, UV set or COLOR0 require an explicit policy and are rejected here.
+  `Vertex` contains Position, optional Normal/Tangent, and optional COLOR0. Ordered
+  `DrawBuffer::uv_streams` contain every retained Texcoord set, including unreferenced UV0,
+  its original domain, and F64 values in the same vertex order. `draw.uv_stream(set)` returns
+  exactly that set or `None`; it never substitutes UV0. Every stream participates in tuple
+  equality before index reuse, including signed-zero bits and UV1-only seams.
 - Skin influences use variable-length CSR rows without truncation. Each representative copies its
   complete joint/weight row once, preserving empty rows, all lanes, their sequence, and F32 bits.
   The core's separate source-order ordinals remain outside this selected application layout.
@@ -73,22 +96,55 @@ This is a concrete extraction example, not a new canonical representation or a g
   Influences and morph deltas are Vertex-domain values, so source identity guarantees their
   equivalence within a key. Any future selected Corner/Face deformation fields must also extend
   that key or keep their tuples separate.
-- Owned node hierarchy and authored transforms, mesh instances and their effective morph weights,
-  joint references and inverse bind matrices, animation times/values/cubic derivatives, material
-  shading model, alpha mode/cutoff, double-sided state, factors and texture image/UV/transform
-  references, and encoded images survive Scene destruction.
+- Owned node hierarchy and authored transforms, separate mesh default morph weights and optional
+  instance overrides, joint references, inverse bind matrices and skin matrix-space/correction
+  declarations, animation time domains, channel extrapolation, samples and cubic derivatives
+  survive Scene destruction. Authored matrices remain matrices.
   Opaque Scene IDs are mapped to application indices only after the final edit.
+- Materials retain names, shading model, alpha mode (including Mask cutoff), sidedness and the
+  complete `MaterialFactors` value: emissive, independent metallic/roughness, specular/glossiness,
+  legacy, and supplemental PBR groups. Every ordered binding retains texture identity, role, UV
+  set, channel mapping, color interpretation, transform, strength, blend operation and an owned
+  optional source key. Unlit keeps all lighting fallback factors and bindings.
+- Independent `textures`, `samplers` and `images` tables close every binding. A texture holds an
+  image index and sampler index; equal links do not merge texture identities. A sampler retains
+  the complete `SamplerState`, including independent minification/magnification, mipmap and U/V/W
+  addressing. An image owns `encoded_bytes` and an optional declared `media_type`; an unknown
+  media type stays unknown even when its filename or byte signature suggests a codec.
+  Image, Texture and Sampler names come only from their respective owners' retained
+  `org.baozi.gltf:source-name` metadata. Absent and explicitly empty names remain distinct;
+  no image-name or path fallback is copied into another owner.
+- `ApplicationAsset::uv_origin` preserves the scene declaration, including Unknown. Each draw's
+  `tangent_conventions` belongs to its selected tangent attribute and owns any namespaced basis
+  and encoding identity/version. The copier neither flips UVs nor infers a MikkTSpace convention.
 - Source-object glTF JSON metadata is copied explicitly with sanitized resource identity, format,
   versioned namespaced locator, site key, media type, and exact payload bytes. This subset omits
-  entity metadata, non-JSON values, and other formats' metadata. It does not parse or rewrite extras.
+  entity metadata beyond the source names described above, non-JSON values, and other formats'
+  metadata. It does not parse or rewrite extras.
   The unchanged `MorphPrimitivesTest` checks all 147 original `/asset/extras` bytes after edits and
   Scene destruction, together with both primitives, shared default morph weights, and its JPEG.
-- This application selects UV0/COLOR0 and a material/animation subset. It does not retain every material
-  channel, binding strength, sampler, skin-space declaration, animation time-domain/extrapolation
-  declaration, camera, light, custom attribute, or provenance attachment. It is not a round-trip
-  serializer or renderer. Image decoding, animation evaluation, skinning, tangent generation, GPU
-  packing are outside this example. `mesh_local_bounds` aggregates base
+- This application selects one domain for each normal, tangent, retained UV set and COLOR0.
+  It does not retain other color sets, cameras, lights, custom attributes or the complete provenance
+  graph. It is not a round-trip serializer or renderer. Image decoding, shading, tangent generation
+  and GPU packing remain outside this example. `mesh_local_bounds` aggregates base
   mesh-local positions; it does not apply instances, node transforms, skinning, or morph weights.
+
+Extraction checks every retained binding against each draw's selected UV streams, including
+Unlit fallback uses. Missing or ambiguous referenced sets return `UvExtractionError`, carrying
+mesh/primitive, material-local binding ordinal, set and issue kind. Unreferenced ambiguous sets
+also reject, with no binding ordinal. Unsupported UV scalar/width/domain profiles reject explicitly;
+this per-draw vertex layout accepts Vertex, Corner and Face UVs, and rejects Instance-domain UVs.
+The copier validates this closure before reading tuples and returns no partial `ApplicationAsset`.
+UV transforms, channel selection, color transfer and factors remain separate retained declarations;
+none is baked into the image or coordinates. Resolve a binding through `binding.texture`, then
+`asset.textures[...].image` and `.sampler`; resolve its UV stream with
+`draw.uv_stream(u32::from(binding.uv_set))`.
+
+`DrawBuffer::material` retains one `MaterialAssignment<usize>`: Unspecified, Authored, or
+ImplicitDefault. Its `.authored()` and `.effective()` accessors derive both views from that same
+assignment. Bindings and UV closure checks use the effective material; callers can still distinguish
+authored absence when an implicit default supplies shading data. The copier maps the canonical
+assignment directly, without inferring its origin from format identity or material values.
 
 For glTF `KHR_materials_unlit`, the owned material records `ShadingModel::Unlit`; its retained PBR
 base color, BaseColor binding and COLOR0 supply color, while alpha coverage and sidedness remain
@@ -96,6 +152,30 @@ explicit. Lighting factors and bindings remain authored fallback data. The examp
 facts without rendering or silently applying PBR lighting to Unlit. The self-authored
 `unlit_materials` integration tests cover optional/required declarations, texture transforms,
 fallback resources, space edits and detached owned values.
+`material_output` adds self-authored shared-image/different-sampler and equal-link/distinct-texture
+fixtures, UV1-only and unreferenced UV0 streams, nondefault filtering/addressing, full ordered binding
+semantics, source-owner names, declared/unknown image media type, F64 PLY UVs, legacy factors and
+named missing-UV failures for Unlit fallback. All full appearance assertions read owned output after
+the Scene, import evidence, importer, IO and fixture buffers are destroyed. The UV transform vector
+maps `(1/4,1/8)` to `(1/16,3/4)` using scale, 90-degree rotation, and translation, without decoding pixels.
+
+The separate `evaluate` reference in `src/evaluation.rs` consumes only these owned buffers. Select one clip
+with `Some(index)` or the authored pose with `None`; `SampleTime::Declared(f64)` uses the clip's
+time domain and `SampleTime::Seconds(f64)` requires a known positive frame/tick rate. It samples
+Step, Linear and CubicSpline TRS/morph curves with F64 math, normalized shortest-path slerp for
+linear rotations, and component Hermite followed by result-only normalization for cubic rotations.
+Derivatives remain in declared time units and are multiplied by the key interval. SourceDefault
+uses immutable authored components or instance-then-mesh weights; Constant uses the endpoint.
+Linear/Repeat extrapolation and TRS animation of matrix-authored nodes return named errors.
+Morph deltas precede canonical skin position evaluation, with no influence truncation, weight
+clamping or renormalization. Explicit skin corrections, singular instance transforms and zero
+quaternion results return named failures. Inversion tests numerical rank relative to the linear
+3x3 scale, allowing well-conditioned tiny or large uniform scales and affine shear. It checks
+both inverse multiplication residuals and translation cancellation before publishing positions;
+an inverse that cannot meet the F64 reference accuracy limit returns a named numeric failure.
+Output owns F64 local/world transforms, effective morph
+weights and per-instance draw positions. Playback clocks, blending, bounds and skin shading are
+outside this reference; see `tests/evaluation.rs` for independent analytic and reflected-space vectors.
 
 `BasePoseSpatialSnapshot::from_scene` is a separate, opt-in query before Scene destruction. It
 returns an owned `BasePoseWorldTransforms` table and scene-wide `Option<Aabb>` in the Scene's current
@@ -109,9 +189,10 @@ construction and bounds traversal. Both outputs survive Scene destruction. `worl
 a self-authored shared-instance glTF with ancestor transforms, nonuniform/negative scale, shear and
 an unreferenced vertex, plus the unchanged rigged, morph and animated upstream models.
 
-Topology/normal operations preserve mesh and primitive order. Their handles belong to a Scene
-generation, so the application reacquires each primitive after every publication. A two-polygon
-integration fixture exercises consecutive edits across multiple primitives. The unchanged real
+Preparation preserves mesh and primitive order. Handles belong to one Scene generation, so the
+application gathers the full selection after coordinate conversion and submits it in one call.
+It does not reacquire targets between per-primitive edits. The two-polygon integration fixture
+exercises multiple primitives in that selection. The unchanged real
 models and their independent expected facts are documented in [fixtures/README.md](fixtures/README.md).
 
 The borrowed `list_vertices` reader is a zero-allocation view of `ListVertex` tuples. Its `index()`
@@ -165,6 +246,11 @@ it does not reuse an imported Scene or average away individual observations. Nor
 the separately built `--allocation-metrics` variant belong in different artifact directories.
 
 Consumer summaries separate import, postprocess, provenance traversal and buffer extraction time.
+`postprocess_work` sums the coordinate-conversion and triangle-preparation reports;
+`changed_operations` counts changed reports from those two calls.
+`selected_geometry_reconstructions` comes from the preparation report's
+`geometry_reconstruction_count()` and records the actual selected transaction count. It is separate
+from the number of selected primitives, emitted draws and coordinate-conversion changes.
 `traced_primitive_owners`, `traced_provenance_nodes` and `traced_source_objects` count the owners
 and distinct retained ancestors actually reached. Library ledgers cover their existing operation
 scopes; the application's visited sets and indexed buffers use application allocation accounting.

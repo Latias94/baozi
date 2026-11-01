@@ -12,11 +12,29 @@ use crate::source_map::{
 pub(super) fn preflight(
     ctx: &ParseScope<'_>,
     map: &GltfSourceMap<'_>,
-    document: &gltf::Document,
+    document: &crate::document::Document<'_>,
     graph: &NodeGraph<'_, '_>,
     closure: &ResourceClosure<'_>,
     animations: &animation::AnimationContracts<'_, '_>,
 ) -> Result<()> {
+    for (index, image) in document.tables().images.iter().enumerate() {
+        ctx.charge_work(1)?;
+        if !closure.images.as_slice()[index] {
+            continue;
+        }
+        if image.uri.is_some() == image.buffer_view.is_some() {
+            return Err(GltfFailure::invalid_document(
+                "selected glTF image requires exactly one URI or bufferView source",
+            )
+            .into());
+        }
+        if image.buffer_view.is_some() && image.mime_type.is_none() {
+            return Err(GltfFailure::invalid_document(
+                "selected glTF bufferView image requires mimeType",
+            )
+            .into());
+        }
+    }
     let required = |kind, parent_index, source_index| -> Result<()> {
         let comparisons = u64::from(usize::BITS - map.entities().len().leading_zeros()) + 1;
         ctx.charge_work(comparisons)?;
@@ -59,7 +77,7 @@ pub(super) fn preflight(
             }
         }
     }
-    for (index, mesh) in document.as_json().meshes.iter().enumerate() {
+    for (index, mesh) in document.tables().meshes.iter().enumerate() {
         ctx.charge_work(1)?;
         if closure.meshes.as_slice()[index] {
             for primitive in 0..mesh.primitives.len() {
@@ -67,7 +85,7 @@ pub(super) fn preflight(
             }
         }
     }
-    for (index, clip) in document.as_json().animations.iter().enumerate() {
+    for (index, clip) in document.tables().animations.iter().enumerate() {
         ctx.charge_work(1)?;
         if !animations.selected_animations.as_slice()[index] {
             continue;
@@ -85,9 +103,9 @@ pub(super) fn preflight(
     }
 
     // Payload ownership comes from scanner contexts, so unknown data cannot disappear in serde.
-    ctx.charge_work(to_u64(document.as_json().extensions_used.len()))?;
+    ctx.charge_work(to_u64(document.tables().extensions_used.len()))?;
     let unlit_declared = document
-        .as_json()
+        .tables()
         .extensions_used
         .iter()
         .any(|name| name == KHR_MATERIALS_UNLIT);
@@ -178,7 +196,7 @@ pub(super) fn preflight(
 
 pub(super) fn selected(
     entity: SourceEntityId,
-    document: &gltf::Document,
+    document: &crate::document::Document<'_>,
     graph: &NodeGraph<'_, '_>,
     closure: &ResourceClosure<'_>,
     animations: &animation::AnimationContracts<'_, '_>,
@@ -217,7 +235,7 @@ pub(super) fn selected(
                 .unwrap_or(false);
             selected_clip
                 && document
-                    .as_json()
+                    .tables()
                     .animations
                     .get(animation)
                     .and_then(|clip| clip.channels.get(index))

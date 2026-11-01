@@ -108,6 +108,7 @@ pub fn verify(importer: &Importer) -> Result<(), Box<dyn std::error::Error>> {
         scene,
         normal_target,
         NormalOptions::default(),
+        baozi::postprocess::TangentPolicy::default(),
         PostProcessControl::default(),
     )
     .expect("authored normals are preserved by default")
@@ -121,10 +122,15 @@ pub fn verify(importer: &Importer) -> Result<(), Box<dyn std::error::Error>> {
         existing: ExistingNormals::Replace,
         ..NormalOptions::default()
     };
-    let (scene, generated) =
-        generate_normals(scene, normal_target, options, PostProcessControl::default())
-            .expect("explicit normal replacement must publish")
-            .into_parts();
+    let (scene, generated) = generate_normals(
+        scene,
+        normal_target,
+        options,
+        baozi::postprocess::TangentPolicy::default(),
+        PostProcessControl::default(),
+    )
+    .expect("explicit normal replacement must publish")
+    .into_parts();
     assert_eq!(generated.disposition(), PostProcessRunDisposition::Changed);
     assert!(generated.matches_scene(&scene));
     assert_eq!(generated.resources().current_live_bytes(), 0);

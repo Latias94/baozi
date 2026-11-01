@@ -22,12 +22,6 @@ use super::{PostProcessOwner, PostProcessProgressPhase, PostProcessProgressUnit}
 
 pub(crate) const MAX_WORK: u64 = 100_000_000;
 pub(crate) const MAX_BYTES: u64 = 1024 * 1024 * 1024;
-// `face_work_bound(n) = 32*n² + 128*n + 32` covers each polygon's triangulation and
-// origin construction. Its retained remap values, `3*(n-2)` corner origins plus one face
-// prefix, are below 1% of that bound for every n >= 3. One additional prefix starts at zero.
-// This terminal allowance lets central rejection validate every success-evidence member after
-// ordinary work has already been charged, without reserving unbounded work per input.
-const MAX_REMAP_EVIDENCE_VALIDATION_WORK: u64 = MAX_WORK / 100 + 1;
 pub(crate) const REJECTION_CODE: u32 = 0x5050_0001;
 const CATALOG: StoreSemanticCatalogId =
     StoreSemanticCatalogId::new(*b"baozi-postproc-1", NonZeroU32::MIN);
@@ -76,6 +70,31 @@ impl RuntimeKeys {
 pub(crate) fn plan_runtime(
     writer_limits: RetainedStoreBatchLimits,
 ) -> Option<(RuntimeKeys, StoreLedgerPlan, RetainedStoreStartPlan)> {
+    // The whole-Scene transaction uses the common four-slot publication table, while its
+    // two-member evidence has a fixed field count and needs no input-derived allowance.
+    plan_runtime_with_members(
+        writer_limits,
+        crate::PostProcessBudgets::default(),
+        SceneEditBootstrap::success_evidence_members(),
+    )
+}
+
+pub(crate) fn plan_selected_runtime(
+    writer_limits: RetainedStoreBatchLimits,
+    budgets: crate::PostProcessBudgets,
+) -> Option<(RuntimeKeys, StoreLedgerPlan, RetainedStoreStartPlan)> {
+    plan_runtime_with_members(
+        writer_limits,
+        budgets,
+        SceneEditBootstrap::failure_evidence_members(),
+    )
+}
+
+fn plan_runtime_with_members(
+    writer_limits: RetainedStoreBatchLimits,
+    budgets: crate::PostProcessBudgets,
+    max_evidence_members: usize,
+) -> Option<(RuntimeKeys, StoreLedgerPlan, RetainedStoreStartPlan)> {
     let domain = StoreKeyDomain::try_new(CATALOG).ok()?;
     let phase =
         |local| domain.try_admit_phase(StorePhaseSemanticId::new(CATALOG, NonZeroU64::new(local)?));
@@ -91,19 +110,17 @@ pub(crate) fn plan_runtime(
     };
     let terminal = dimension(RuntimeDimension::FailureTerminalWork)?;
     let terminal_records = dimension(RuntimeDimension::TerminalEvidenceRecords)?;
-    let validation_work =
-        SceneEditBootstrap::failure_field_work().checked_add(MAX_REMAP_EVIDENCE_VALIDATION_WORK)?;
     let terminal_work = RetainedStoreFailureTerminalWorkPlan::with_evidence_work(
         terminal,
-        SceneEditBootstrap::success_evidence_members(),
+        max_evidence_members,
         SceneEditBootstrap::failure_field_work(),
-        validation_work,
-        MAX_WORK,
-        MAX_WORK,
+        SceneEditBootstrap::failure_field_work(),
+        budgets.work,
+        budgets.work,
     )
     .ok()?;
     let limits = LedgerLimits::new(
-        MAX_BYTES,
+        budgets.storage_bytes,
         [
             (
                 keys.work,
@@ -115,16 +132,21 @@ pub(crate) fn plan_runtime(
             ),
             (
                 keys.scratch,
-                DimensionPolicy::reservable_bytes(0, 0, 0, MAX_BYTES),
+                DimensionPolicy::reservable_bytes(0, 0, 0, budgets.storage_bytes),
             ),
             (
                 keys.canonical,
-                DimensionPolicy::reservable_bytes(0, 0, MAX_BYTES, MAX_BYTES),
+                DimensionPolicy::reservable_bytes(
+                    0,
+                    0,
+                    budgets.storage_bytes,
+                    budgets.storage_bytes,
+                ),
             ),
             (
                 keys.evidence,
-                DimensionPolicy::reservable_bytes(0, 0, 0, MAX_BYTES)
-                    .with_published_outcome_evidence_limit(MAX_BYTES),
+                DimensionPolicy::reservable_bytes(0, 0, 0, budgets.storage_bytes)
+                    .with_published_outcome_evidence_limit(budgets.storage_bytes),
             ),
             (terminal, terminal_work.requirement().dimension_policy()),
             (

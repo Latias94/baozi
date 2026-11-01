@@ -3,18 +3,17 @@
     reason = "bounded runtime failures stay inline so allocation and cancellation rejection need no new allocation"
 )]
 
-use baozi_core::{
-    AttributeData, AttributeDomain, AttributeRef, AttributeSemanticRef, PrimitiveId, TopologyKind,
-    ValidatedScene,
-};
+use baozi_core::{AttributeData, AttributeRef};
 
 use crate::TriangulationCause;
-use crate::operation::runtime::{EditOperation, MAX_WORK, RuntimeKeys, ScratchVec, run_unit};
+use crate::operation::runtime::{EditOperation, RuntimeKeys, ScratchVec, run_unit};
 use crate::triangulation::{
     CornerScratch, TriangulationError, triangulate_polygon, validate_polygon_triangulation,
 };
 
-pub(super) struct PolygonInput<'a> {
+const MAX_SPARSE_COMPARISONS: u64 = 33;
+
+pub(crate) struct PolygonInput<'a> {
     positions: AttributeRef<'a>,
     face_sizes: &'a [u32],
     indices: Option<&'a [u32]>,
@@ -27,134 +26,38 @@ pub(crate) struct Origins {
     pub(crate) face_offsets: ScratchVec<u32>,
 }
 
-const MAX_SPARSE_COMPARISONS: u64 = 33;
-
-pub(super) fn inspect<'a>(
-    input: &'a ValidatedScene,
-    target: PrimitiveId,
+pub(crate) fn projected<'a>(
+    positions: AttributeRef<'a>,
+    face_sizes: &'a [u32],
+    indices: Option<&'a [u32]>,
     operation: &mut EditOperation,
     keys: RuntimeKeys,
-) -> Result<Option<PolygonInput<'a>>, TriangulationCause> {
-    let primitive = run_unit(operation, keys, || input.primitive(target))?
-        .map_err(|source| TriangulationCause::Target { source })?;
-    let (topology, faces, mut attributes) = run_unit(operation, keys, || {
-        (
-            primitive.topology(),
-            primitive.face_count(),
-            primitive.attributes(),
-        )
-    })?;
-    if topology == TopologyKind::TriangleList || (topology == TopologyKind::Polygons && faces == 0)
-    {
-        return Ok(None);
-    }
-    if topology != TopologyKind::Polygons {
-        return Err(TriangulationCause::UnsupportedTopology { topology });
-    }
-    let mut positions = None;
-    // Admit descriptor reads as well as inspection instead of hiding the search in `positions()`.
-    loop {
-        let more = run_unit(operation, keys, || {
-            let Some(attribute) = attributes.next() else {
-                return false;
-            };
-            if attribute.semantic() == AttributeSemanticRef::Position
-                && attribute.domain() == AttributeDomain::Vertex
-                && matches!(
-                    attribute.data(),
-                    AttributeData::DenseF32 { lanes: 3, .. }
-                        | AttributeData::DenseF64 { lanes: 3, .. }
-                        | AttributeData::SparseF32 { lanes: 3, .. }
-                        | AttributeData::SparseF64 { lanes: 3, .. }
-                )
-            {
-                positions = Some(attribute);
-            }
-            true
-        })?;
-        if !more {
-            break;
-        }
-    }
-    let positions = positions.ok_or(TriangulationCause::Positions)?;
-    // The face envelope includes one corner read. Separate index/tuple reads and scratch writes
-    // add two actions; sparse positions also need at most 33 admitted index comparisons.
-    let additional_read_work = 2 + if matches!(
-        positions.data(),
-        AttributeData::SparseF32 { .. } | AttributeData::SparseF64 { .. }
-    ) {
-        MAX_SPARSE_COMPARISONS
-    } else {
-        0
-    };
-    let (face_sizes, indices) = run_unit(operation, keys, || {
-        (primitive.polygon_face_sizes(), primitive.indices())
-    })?;
-    let face_sizes = face_sizes.ok_or(TriangulationCause::CoreRejected)?;
+) -> Result<PolygonInput<'a>, TriangulationCause> {
     let mut triangles = 0_usize;
     let mut max_corners = 0_usize;
-    let mut corners = 0_u64;
-    let mut work_bound = 0_u64;
-    for &count in face_sizes {
+    for &size in face_sizes {
         run_unit(operation, keys, || {
-            let count = count as usize;
+            let size = size as usize;
             triangles = triangles
                 .checked_add(
-                    count
-                        .checked_sub(2)
+                    size.checked_sub(2)
                         .ok_or(TriangulationCause::SizeOverflow)?,
                 )
                 .ok_or(TriangulationCause::SizeOverflow)?;
-            max_corners = max_corners.max(count);
-            corners = corners
-                .checked_add(count as u64)
-                .ok_or(TriangulationCause::SizeOverflow)?;
-            work_bound = work_bound
-                .checked_add(face_work_bound(count)?)
-                .and_then(|work| {
-                    work.checked_add((count as u64).checked_mul(additional_read_work)?)
-                })
-                .ok_or(TriangulationCause::SizeOverflow)?;
+            max_corners = max_corners.max(size);
             Ok::<_, TriangulationCause>(())
         })??;
     }
-    let _ = u32::try_from(
-        triangles
-            .checked_mul(3)
-            .ok_or(TriangulationCause::SizeOverflow)?,
-    )
-    .map_err(|_| TriangulationCause::SizeOverflow)?;
-    if corners != u64::from(primitive.corner_count()) || face_sizes.len() != faces as usize {
-        return Err(TriangulationCause::CoreRejected);
-    }
-    if work_bound > MAX_WORK {
-        return Err(TriangulationCause::WorkLimit {
-            required: work_bound,
-            maximum: MAX_WORK,
-        });
-    }
-    Ok(Some(PolygonInput {
+    Ok(PolygonInput {
         positions,
         face_sizes,
         indices,
         triangles,
         max_corners,
-    }))
+    })
 }
 
-// Clipping uses at most 6n ear tests (each scans n slots), plus ring admission, ear searches and
-// its internal geometric postflight. The independent checker adds <=12n^2+32n+1 callbacks. This
-// envelope also covers buffer initialization, checked corner reads, origin copying and prefixes.
-pub(super) fn face_work_bound(corners: usize) -> Result<u64, TriangulationCause> {
-    let n = u64::try_from(corners).map_err(|_| TriangulationCause::SizeOverflow)?;
-    n.checked_mul(n)
-        .and_then(|squared| squared.checked_mul(32))
-        .and_then(|work| work.checked_add(n.checked_mul(128)?))
-        .and_then(|work| work.checked_add(32))
-        .ok_or(TriangulationCause::SizeOverflow)
-}
-
-pub(super) fn build_origins(
+pub(crate) fn build_origins(
     source: PolygonInput<'_>,
     operation: &mut EditOperation,
     keys: RuntimeKeys,

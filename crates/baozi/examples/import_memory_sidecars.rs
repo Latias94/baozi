@@ -3,7 +3,11 @@
     reason = "facade examples preserve complete bounded terminal evidence by value"
 )]
 
-use baozi::{AssetPath, ImportDimension, Importer, MemoryAssetIo, Result};
+use baozi::{
+    AssetPath, ImportConfigOverlay, ImportDimension, ImportOperationControl, ImportRequest,
+    ImportRequestLayer, Importer, MemoryAssetIo, ObjImportOptions, OptionCompileLimits,
+    ResourceLimits, ResourceLimitsOverlay, Result,
+};
 use std::sync::Arc;
 
 // A complete 1x1 RGB PNG containing one red pixel.
@@ -49,7 +53,32 @@ map_Kd textures/red.png
     )?;
     io.try_insert(texture_path, Arc::from(RED_PNG))?;
 
-    let report = Importer::new()?.read_asset(&io, model_path)?;
+    let importer = Importer::new()?;
+    let mut limits = ResourceLimits::default();
+    limits.max_primary_asset_bytes = 1024 * 1024;
+    limits.max_dependency_asset_bytes = 1024 * 1024;
+    limits.max_total_asset_bytes = 3 * 1024 * 1024;
+    limits.max_live_bytes = 16 * 1024 * 1024;
+    let layer = ImportRequestLayer::new(
+        ImportConfigOverlay::default()
+            .with_resource_limits(ResourceLimitsOverlay::from_limits(limits)),
+    )
+    .try_with_format_option(
+        ObjImportOptions::default()
+            .to_envelope()
+            .expect("static OBJ options are valid"),
+    )
+    .expect("one OBJ option fits the request");
+    let request = importer.prepare_request(
+        &ImportRequest::new().with_caller_layer(layer),
+        OptionCompileLimits::default(),
+    )?;
+    let report = importer.read_asset_with_request(
+        &io,
+        model_path,
+        &request,
+        ImportOperationControl::default(),
+    )?;
     let scene = report.scene();
     let opened_assets = report
         .ledger()

@@ -5,15 +5,19 @@ Controlled operations on immutable validated Scenes, exposed to applications as
 `postprocess` feature. Scene operations return a Scene and retained operation
 evidence on success, or the original Scene on ordinary failure.
 
-Current operations triangulate one polygon primitive, generate flat or smooth
-Corner normals or UV-derivative tangents on one triangle-list primitive, and convert a whole Scene's
-coordinate basis and units. Triangulation requires simple planar rings without
-holes and retains Corner/Face origins. Normal generation preserves authored
-normals by default.
+`prepare_triangles` accepts an explicit primitive selection, lowers polygons/strips/fans,
+optionally generates flat or smooth Corner normals, and applies one explicit Tangent policy.
+It plans and reconstructs geometry once and publishes at most one generation. Work/storage
+budgets and normal orientation are caller choices; any failure returns the original Scene.
+Single-target triangulation/normal/tangent functions use this same engine. Polygon triangulation
+requires simple planar rings without holes and retains Corner/Face origins. Normal generation
+preserves authored normals by default. Whole-Scene coordinate and unit conversion remains a
+separate operation.
 
 Tangent generation explicitly selects the Normal domain and Texcoord set/domain, preserving
 authored Tangents by default. The allocation-free Triangle UV Derivative v1 kernel generates
-Corner F32x4 with `SignInW`, without cross-face welding or averaging and without a MikkTSpace
+Corner F32x4 or F64x4 according to dependency and replaced-field widths, with `SignInW`,
+without cross-face welding or averaging and without a MikkTSpace
 compatibility claim. Tangent conventions belong to each attribute; reflection checks every
 stream's encoding. Generation rejects degenerate frames and authored morph deltas on the target.
 

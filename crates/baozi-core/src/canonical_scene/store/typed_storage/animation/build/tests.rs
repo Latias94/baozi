@@ -123,7 +123,7 @@ fn with_fixture<T>(action: impl FnOnce(&ValidatedAnimationBatch<'_, u64>) -> T) 
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::Points,
         Presence::Absent,
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 0),
     )];
     let instances = [

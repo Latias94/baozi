@@ -86,7 +86,9 @@ normalize authored vectors or alter the tangent-generation declaration. A reflec
 unhandled present tangent encoding returns a typed capability error.
 
 `generate_tangents` selects one Vertex or Corner Normal field and a Vertex or Corner Texcoord
-set explicitly, then generates dense Corner F32x4 values on one TriangleList primitive. Its
+set explicitly, then generates dense Corner F32x4 or F64x4 values, retaining the widest selected
+dependency or replaced-field width. The direct function requires TriangleList; selected triangle
+preparation can lower polygons/strips/fans and generate fields in one transaction. Its
 `TriangleUvDerivative` convention uses per-triangle UV derivatives and Gram-Schmidt projection,
 without cross-face welding or averaging. It does not claim MikkTSpace compatibility. Existing
 Tangents are preserved by default; explicit replacement requires a single authored stream.

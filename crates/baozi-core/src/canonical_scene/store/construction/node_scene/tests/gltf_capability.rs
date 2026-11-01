@@ -736,9 +736,18 @@ fn encode_gltf_source(
         encoder.presence(primitive.indices(), |encoder, indices| {
             encode_u32_slice(encoder, indices);
         });
-        encoder.presence(primitive.material(), |encoder, material| {
-            encoder.u32(material.index());
-        });
+        match primitive.material_assignment() {
+            crate::MaterialAssignment::Unspecified => encoder.u8(0),
+            crate::MaterialAssignment::Authored(material) => {
+                encoder.u8(1);
+                encoder.u32(material.index());
+            }
+            crate::MaterialAssignment::ImplicitDefault(material) => {
+                encoder.u8(2);
+                encoder.u32(material.index());
+            }
+        }
+
         let attributes = primitive.attributes();
         encoder.u32(attributes.offset());
         encoder.u32(attributes.count());
@@ -1253,13 +1262,13 @@ fn with_gltf_capability_input<R>(
         GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::TriangleList,
             Presence::Present(&TRIANGLE_INDICES),
-            Presence::Present(MaterialLocalId::new(0)),
+            crate::MaterialAssignment::Authored(MaterialLocalId::new(0)),
             AuthoringRange::new(0, 3),
         ),
         GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::TriangleList,
             Presence::Present(&TRIANGLE_INDICES),
-            Presence::Present(primitive_one_material),
+            crate::MaterialAssignment::Authored(primitive_one_material),
             AuthoringRange::new(3, 3),
         ),
     ];
@@ -2214,7 +2223,10 @@ pub(in crate::canonical_scene::store) fn inspect_gltf_capability_semantics_with_
                 primitive.take_indices().expect("glTF primitive indices"),
                 &TRIANGLE_INDICES,
             );
-            assert_eq!(primitive.material(), Some(source_index));
+            assert_eq!(
+                primitive.material_assignment().effective(),
+                Some(source_index)
+            );
             assert_eq!(primitive.attribute_offset(), source_index * 3);
             assert_eq!(primitive.attribute_count(), 3);
         }
@@ -2865,7 +2877,7 @@ fn observe_facade_typed_view(
                     primitive.polygon_boundaries_present(),
                     primitive.indices_present(),
                     primitive.index_count(),
-                    primitive.material(),
+                    primitive.material_assignment().effective(),
                     primitive.attribute_offset(),
                     primitive.attribute_count(),
                 ),
@@ -2877,7 +2889,11 @@ fn observe_facade_typed_view(
             if let Some(indices) = primitive.take_indices() {
                 let _ = drain_geometry_u32(indices, &mut transcript, "primitive-index")?;
             }
-            mark_optional_index(&mut reference_closure, primitive.material(), material_count);
+            mark_optional_index(
+                &mut reference_closure,
+                primitive.material_assignment().effective(),
+                material_count,
+            );
             mark_range(
                 &mut reference_closure,
                 primitive.attribute_offset(),
@@ -3641,7 +3657,7 @@ fn gltf_shape_materializes_all_five_canonical_domains() {
     );
 
     let (full, bounded) = capture_gltf_capability_snapshots_for_probe(&parts);
-    assert_eq!(full.schema_revision, 6);
+    assert_eq!(full.schema_revision, 7);
     assert_eq!(bounded.digest, full.digest);
     assert_eq!(bounded.totals, full.totals);
     assert!(bounded.preview.bytes_truncated || bounded.preview.items_truncated);

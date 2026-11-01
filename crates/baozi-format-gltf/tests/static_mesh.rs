@@ -10,11 +10,6 @@ use common::{
     interleaved_triangle_gltf, sidecar_options, triangle_bin, triangle_glb, triangle_gltf,
     triangle_gltf_with_buffer_uri, triangle_png,
 };
-use gltf::json::{
-    self,
-    accessor::{ComponentType, GenericComponentType},
-    validation::{Checked, USize64},
-};
 
 #[test]
 fn imports_static_mesh_material_texture_uri_and_hierarchy() -> TestResult<()> {
@@ -519,7 +514,7 @@ fn triangle_strip_preserves_its_authored_topology() -> TestResult<()> {
 }
 
 #[test]
-fn malformed_accessor_root_is_rejected_by_backend_validation() -> TestResult<()> {
+fn malformed_accessor_root_is_rejected_by_document_validation() -> TestResult<()> {
     let gltf = String::from_utf8(triangle_gltf())
         .expect("fixture is valid utf-8")
         .replace(r#""accessors""#, r#""acceOsors""#)
@@ -656,12 +651,12 @@ fn integer_texcoord_must_be_normalized_before_reader() -> TestResult<()> {
 
 #[test]
 fn vertex_relative_byte_offset_must_align_to_four_before_dependency_io() -> TestResult<()> {
-    for (component, offset) in [(ComponentType::U8, 1), (ComponentType::U16, 2)] {
-        let mut document = json::Root::from_slice(&triangle_gltf())?;
-        let accessor = &mut document.accessors[2];
-        accessor.component_type = Checked::Valid(GenericComponentType(component));
-        accessor.normalized = true;
-        accessor.byte_offset = Some(USize64(offset));
+    for (component, offset) in [(5121, 1), (5123, 2)] {
+        let mut document = serde_json::from_slice::<serde_json::Value>(&triangle_gltf())?;
+        let accessor = &mut document["accessors"][2];
+        accessor["componentType"] = serde_json::json!(component);
+        accessor["normalized"] = serde_json::json!(true);
+        accessor["byteOffset"] = serde_json::json!(offset);
         let (result, diagnostics) = import_assets_result(
             "models/scene.gltf",
             [("models/scene.gltf", serde_json::to_vec(&document)?)],
@@ -685,11 +680,11 @@ fn vertex_relative_byte_offset_must_align_to_four_before_dependency_io() -> Test
 
 #[test]
 fn imports_packed_u16_texcoords_with_two_byte_aligned_view() -> TestResult<()> {
-    let mut document = json::Root::from_slice(&triangle_gltf())?;
-    document.accessors[2].component_type = Checked::Valid(GenericComponentType(ComponentType::U16));
-    document.accessors[2].normalized = true;
-    document.buffer_views[2].byte_offset = Some(USize64(74));
-    document.buffer_views[2].byte_length = USize64(12);
+    let mut document = serde_json::from_slice::<serde_json::Value>(&triangle_gltf())?;
+    document["accessors"][2]["componentType"] = serde_json::json!(5123);
+    document["accessors"][2]["normalized"] = serde_json::json!(true);
+    document["bufferViews"][2]["byteOffset"] = serde_json::json!(74);
+    document["bufferViews"][2]["byteLength"] = serde_json::json!(12);
     let mut binary = triangle_bin();
     for (bytes, value) in
         binary[74..86]
@@ -892,21 +887,26 @@ fn data_uri_buffer_retains_only_the_declared_prefix() -> TestResult<()> {
 }
 
 #[test]
-fn opaque_backend_allocation_respects_live_memory_limit() -> TestResult<()> {
-    let mut options = sidecar_options();
-    options.limits.max_live_bytes = 128 * 1024;
-    let (result, diagnostics) = import_assets_result(
-        "models/scene.gltf",
+fn static_document_storage_respects_the_measured_live_memory_limit() -> TestResult<()> {
+    const SOURCE: &str = "models/scene.gltf";
+    let assets = || {
         [
-            ("models/scene.gltf", triangle_gltf()),
+            (SOURCE, triangle_gltf()),
             ("models/triangle.bin", triangle_bin()),
-        ],
-        options,
-    )?;
-    let error = expected_error(result)?;
-
+            ("models/textures/base.png", triangle_png()),
+        ]
+    };
+    let (report, diagnostics) = import_assets(SOURCE, assets(), sidecar_options())?;
     assert!(diagnostics.is_empty());
-    assert_resource_limit(&error, "max_live_bytes");
+    let peak = report.ledger().peak_live_bytes();
+    drop(report);
+    let mut options = sidecar_options();
+    options.limits.max_live_bytes = peak - 1;
+    let (result, diagnostics) = import_assets_result(SOURCE, assets(), options)?;
+    let failure = expected_error(result)?;
+    assert!(diagnostics.is_empty());
+    assert_resource_limit(&failure, "max_live_bytes");
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
     Ok(())
 }
 
@@ -914,7 +914,7 @@ fn opaque_backend_allocation_respects_live_memory_limit() -> TestResult<()> {
 fn data_uri_decode_work_is_budgeted() -> TestResult<()> {
     let document = data_uri_gltf();
     let mut options = GltfTestOptions::memory();
-    options.limits.max_decode_work = (document.len() * 2) as u64;
+    options.limits.max_decode_work = document.len() as u64;
     let (result, diagnostics) =
         import_assets_result("scene.gltf", [("scene.gltf", document)], options)?;
     let error = expected_error(result)?;

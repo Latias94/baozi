@@ -20,9 +20,20 @@ use super::{TableRange, TextRange};
 #[cfg(test)]
 mod tests;
 
+pub(in crate::canonical_scene::store) trait MetadataOwnerDeletion:
+    Copy
+{
+    fn deletes(self, owner: CanonicalMetadataOwner) -> bool;
+}
+impl MetadataOwnerDeletion for Option<CanonicalProfileOwner> {
+    fn deletes(self, owner: CanonicalMetadataOwner) -> bool {
+        self.map(CanonicalMetadataOwner::Entity) == Some(owner)
+    }
+}
+
 #[derive(Clone, Copy)]
-pub(in crate::canonical_scene::store) struct MetadataEditPlan {
-    deleted: Option<CanonicalProfileOwner>,
+pub(in crate::canonical_scene::store) struct MetadataEditPlan<D = Option<CanonicalProfileOwner>> {
+    deleted: D,
     input_entries: u32,
     output_entries: u32,
     removed_entries: u32,
@@ -30,12 +41,12 @@ pub(in crate::canonical_scene::store) struct MetadataEditPlan {
     capacities: [CapacityPlan; 7],
 }
 
-impl MetadataEditPlan {
+impl<D: MetadataOwnerDeletion> MetadataEditPlan<D> {
     /// Scans descriptors once, with no payload-sized allocation or payload traversal.
     /// The caller supplies the already validated source used later by `build_payloads`.
     pub(in crate::canonical_scene::store) fn try_new<C: TypedStorageBuildControl>(
         profile: &ProfileStorage,
-        deleted: Option<CanonicalProfileOwner>,
+        deleted: D,
         control: &mut C,
     ) -> BuildResult<Self, C::Error> {
         Self::for_entries(
@@ -49,7 +60,7 @@ impl MetadataEditPlan {
     fn for_entries<C: TypedStorageBuildControl>(
         entries: &[StoredMetadataEntry],
         payloads: &MetadataPayloads,
-        deleted: Option<CanonicalProfileOwner>,
+        deleted: D,
         control: &mut C,
     ) -> BuildResult<Self, C::Error> {
         let input_entries =
@@ -64,7 +75,7 @@ impl MetadataEditPlan {
                     let entry = *entry;
                     source.remap_inner(entry, true)?;
                     validate_text_ranges(entry, &payloads.text)?;
-                    if deleted.map(CanonicalMetadataOwner::Entity) == Some(entry.owner) {
+                    if deleted.deletes(entry.owner) {
                         removed_entries = removed_entries.checked_add(1)?;
                     } else {
                         output.remap(entry)?;
@@ -187,10 +198,7 @@ impl MetadataEditPlan {
         let mut kept = 0_u32;
         for entry in entries {
             let entry = control
-                .run_unit(|| {
-                    (self.deleted.map(CanonicalMetadataOwner::Entity) != Some(entry.owner))
-                        .then_some(*entry)
-                })
+                .run_unit(|| (!self.deleted.deletes(entry.owner)).then_some(*entry))
                 .map_err(TypedStorageBuildError::Control)?;
             let Some(entry) = entry else {
                 continue;

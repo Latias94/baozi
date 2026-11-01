@@ -139,19 +139,19 @@ fn with_fixture<T>(
         GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::TriangleList,
             Presence::Absent,
-            Presence::Absent,
+            crate::MaterialAssignment::Unspecified,
             AuthoringRange::new(0, 1),
         ),
         GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::Points,
             Presence::Absent,
-            Presence::Absent,
+            crate::MaterialAssignment::Unspecified,
             AuthoringRange::new(1, 0),
         ),
         GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::Points,
             Presence::Absent,
-            Presence::Absent,
+            crate::MaterialAssignment::Unspecified,
             AuthoringRange::new(1, 0),
         ),
     ];

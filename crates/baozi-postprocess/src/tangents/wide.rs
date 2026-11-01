@@ -16,11 +16,11 @@ const OUTPUT_EPSILON: f64 = 8.0 * f64::EPSILON;
 
 /// Source declarations select each determinant independently of output width.
 #[derive(Clone, Copy)]
-pub(super) struct Sources {
-    pub(super) position_f64: bool,
-    pub(super) uv_f64: bool,
-    pub(super) position_scale: precision::Pow2Scale,
-    pub(super) uv_scale: precision::Pow2Scale,
+pub(crate) struct Sources {
+    pub(crate) position_f64: bool,
+    pub(crate) uv_f64: bool,
+    pub(crate) position_scale: precision::Pow2Scale,
+    pub(crate) uv_scale: precision::Pow2Scale,
 }
 
 #[cfg(test)]
@@ -58,7 +58,7 @@ fn triangle(
 
 /// The adapter admits one common Position/UV scale over the entire retained primitive.
 /// Three-row arithmetic remains fixed-size and does not allocate.
-pub(super) fn triangle_with_sources(
+pub(crate) fn triangle_with_sources(
     face: usize,
     positions: [[f64; 3]; 3],
     normals: [[f64; 3]; 3],

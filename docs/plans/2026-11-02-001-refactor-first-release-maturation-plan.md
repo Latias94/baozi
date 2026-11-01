@@ -227,6 +227,9 @@ Use power-of-two-scaled F64 numerical kernels with explicit uncertainty/underflo
 
 ### U3. Own selected-profile glTF decoding
 
+**Status:** Integrated; 332/332 importer package tests and independent ownership/semantics reviews
+pass. Final immutable-source target, sanitizer and archive qualification remains U8 work.
+
 **Goal:** Replace the uncontrolled owning backend and its release dependencies.
 **Requirements:** R1, R5, R12–R14; KTD1 and KTD6.
 **Dependencies:** U1 independent fixes; schema construction may overlap U2 without editing core scalar files.
@@ -247,6 +250,12 @@ Delete both glTF forks and their dependency edges after complete migration; pres
 **Verification:** Relevant importer/facade/consumer suites and Linux sanitizer smoke pass; production graphs contain no `baozi-gltf`, `baozi-gltf-json`, upstream `gltf` or `gltf-json` path.
 
 ### U4. Publish one selected-geometry transaction
+
+**Status:** Integrated and independently reviewed; the Windows/MSRV complete workspace passes
+2,855/2,855 with four existing manual skips. Immutable-source target/archive qualification
+remains U8 work.
+Shared mutable plan mappings were replaced by an exclusively initialized metered owner and
+immutable sealed views. Mixed selections retain every target's final identity and disposition.
 
 **Goal:** Replace repeated full-Scene rebuilds with bounded batch reconstruction.
 **Requirements:** R3, R6–R8, R14; KTD3–KTD4.
@@ -269,6 +278,10 @@ Delete the old consumer loop and any operation implementation duplicated by the 
 
 ### U5. Complete public relations and effective semantics
 
+**Status:** Integrated; public material, reverse-relations and format-option regressions pass in
+the complete workspace and independent feature cases. Immutable archive/target qualification
+remains U8 work.
+
 **Goal:** Make common scene navigation and effective materials format-neutral.
 **Requirements:** R5, R9–R10, R14; KTD6–KTD7.
 **Dependencies:** U3's document/source identity cutover; U2 precision contracts.
@@ -290,6 +303,10 @@ The example owns filesystem selection and authority; it does not require or prom
 
 ### U6. Close the static application output profile
 
+**Status:** Integrated; independent static-output review has no remaining findings. The independent
+asset consumer passes 74/74 on Windows/MSRV, including U7; strict Clippy and formatting pass.
+Immutable archive/target qualification remains U8 work.
+
 **Goal:** Application-owned output retains every meaning its chosen profile promises.
 **Requirements:** R2, R9–R10; KTD8.
 **Dependencies:** U2, U4–U5.
@@ -307,6 +324,9 @@ Avoid adding a renderer or a universal vertex-layout abstraction to core.
 **Verification:** Real-asset and hand-calculated fixtures complete import, preparation and complete copy-out through public interfaces.
 
 ### U7. Prove animation consumption
+
+**Status:** Integrated; 21/21 focused evaluator tests pass and independent inverse review has no
+remaining findings. The complete consumer passes 74/74; immutable-source qualification remains U8.
 
 **Goal:** Demonstrate how an ordinary application combines retained deformation and curves.
 **Requirements:** R11; KTD8.

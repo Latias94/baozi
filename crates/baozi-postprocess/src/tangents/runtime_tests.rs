@@ -4,6 +4,7 @@ use std::sync::{
 };
 
 use super::*;
+use crate::PostProcessRunError;
 use crate::test_fixtures;
 use baozi_core::{AttributeDomain, AttributeSemanticRef, SceneSnapshotLimits};
 

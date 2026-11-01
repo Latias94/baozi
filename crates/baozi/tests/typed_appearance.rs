@@ -145,7 +145,12 @@ fn facade_reads_material_factors_bindings_and_encoded_images() {
 
     for (mesh, material) in scene.meshes().zip(scene.materials()) {
         assert_eq!(
-            mesh.primitives().next().unwrap().material().unwrap().id(),
+            mesh.primitives()
+                .next()
+                .unwrap()
+                .effective_material()
+                .unwrap()
+                .id(),
             material.id()
         );
     }
@@ -307,7 +312,7 @@ fn scene_without_appearance_has_empty_independent_iterators() {
             .primitives()
             .next()
             .unwrap()
-            .material()
+            .effective_material()
             .is_none()
     );
 }

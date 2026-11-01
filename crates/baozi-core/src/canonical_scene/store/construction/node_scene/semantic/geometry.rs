@@ -488,7 +488,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneGeometryPrimitive<'scene> 
     indices_present: bool,
     index_count: usize,
     indices: Option<NodeSceneGeometryU32Cursor<'scene>>,
-    material: Option<usize>,
+    material: crate::MaterialAssignment<usize>,
     attribute_offset: usize,
     attribute_count: usize,
 }
@@ -542,7 +542,9 @@ impl<'scene> NodeSceneGeometryPrimitive<'scene> {
         self.indices.take()
     }
 
-    pub(in crate::canonical_scene::store) const fn material(&self) -> Option<usize> {
+    pub(in crate::canonical_scene::store) const fn material_assignment(
+        &self,
+    ) -> crate::MaterialAssignment<usize> {
         self.material
     }
 

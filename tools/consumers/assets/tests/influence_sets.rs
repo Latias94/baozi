@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use baozi::{
-    AssetPath, Axis, FrontFaceWinding, Handedness, Importer, InfluenceRowRef, Mat4, MemoryAssetIo,
-    ProvenanceKindRef, TargetSpace, TopologyKind, ValidatedScene,
+    AssetPath, Axis, FrontFaceWinding, Handedness, Importer, InfluenceRowRef, Mat4,
+    MaterialAssignment, MemoryAssetIo, ProvenanceKindRef, TargetSpace, TopologyKind,
+    ValidatedScene,
     postprocess::{
         PostProcessControl, PostProcessRunDisposition, SpaceConversionOptions, convert_scene_space,
         list_vertices,
@@ -296,7 +297,10 @@ fn assert_owned_asset(
         (1, 1, 2, 2)
     );
     let draw = &asset.draws[0];
-    assert_eq!((draw.mesh, draw.primitive, draw.material), (0, 0, None));
+    assert_eq!(
+        (draw.mesh, draw.primitive, draw.material),
+        (0, 0, MaterialAssignment::ImplicitDefault(0))
+    );
     assert_eq!(draw.topology, TopologyKind::TriangleList);
     assert_eq!(draw.vertices.len(), POSITIONS.len());
     let (sources, packed, seam) = if converted {
@@ -309,7 +313,8 @@ fn assert_owned_asset(
         draw.vertices[seam[0]].position,
         draw.vertices[seam[1]].position
     );
-    assert_ne!(draw.vertices[seam[0]].uv, draw.vertices[seam[1]].uv);
+    let uvs = &draw.uv_stream(0).ok_or("missing owned UV0")?.values;
+    assert_ne!(uvs[seam[0]], uvs[seam[1]]);
     let rows = draw
         .influences
         .as_ref()
@@ -338,7 +343,7 @@ fn assert_owned_asset(
             [x, y, z]
         };
         assert_eq!(draw.vertices[index].position, expected);
-        assert_eq!(draw.vertices[index].uv, Some(UVS[source].map(f64::from)));
+        assert_eq!(uvs[index], UVS[source].map(f64::from));
         let range = rows.offsets[index]..rows.offsets[index + 1];
         assert_eq!(
             &rows.joints[range.clone()],

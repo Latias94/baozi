@@ -12,11 +12,10 @@ use crate::{PostProcessControlCause, PostProcessResourceEvidence};
 use baozi_core::__scene_integration::integration::{
     ResolvedSceneSpaceConversion, SceneCanonicalRootTag, SceneEditAdmission, SceneEditEvidence,
     SceneEditEvidenceTag, SceneEditOutput, SceneEditPostflight, SceneEditRejection,
-    SceneEditTransaction, SceneEditValidationProof, SceneNormalReplacement,
-    SceneSpaceConversionIssue, SceneTangentReplacement, SceneTriangulationReplacement,
+    SceneEditTransaction, SceneEditValidationProof, SceneSpaceConversionIssue,
     consume_scene_edit_freeze_permit,
 };
-use baozi_core::{PrimitiveId, SceneValidationLimits, ValidatedScene};
+use baozi_core::{SceneValidationLimits, ValidatedScene};
 use baozi_operation::__retained_store_integration::activation::{
     ActivatedCanonicalStoreSession, CanonicalActivationOutcome, CanonicalActivationSeal,
     CanonicalCandidateStoreSession, CanonicalCentralValidationOutcome, CanonicalFreezePermitIssue,
@@ -32,20 +31,19 @@ use baozi_operation::{
     StoreTerminalCause,
 };
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the selection owns its metered scratch inline and releases it before terminal preparation"
+)]
 pub(crate) enum PreparedEdit<'a> {
-    Triangulation {
-        target: PrimitiveId,
-        origins: crate::triangulate::input::Origins,
-    },
-    Normals {
-        target: PrimitiveId,
-        options: crate::NormalOptions,
-        values: crate::normals::input::GeneratedNormals,
-    },
-    Tangents {
-        target: PrimitiveId,
-        options: crate::TangentOptions,
-        values: crate::tangents::input::GeneratedTangents,
+    Selection {
+        replacements:
+            &'a [baozi_core::__scene_integration::integration::SceneGeometryReplacement<'a>],
+        mappings: baozi_core::__scene_integration::integration::SceneGeometryPlanStorage<
+            PostProcessOwner,
+        >,
+        digest: baozi_core::__scene_integration::authoring::OptionsDigest,
+        limits: SceneValidationLimits,
     },
     Space {
         resolved: ResolvedSceneSpaceConversion<'a>,
@@ -54,58 +52,26 @@ pub(crate) enum PreparedEdit<'a> {
 
 impl PreparedEdit<'_> {
     fn transaction<'a>(
-        &'a self,
+        &'a mut self,
         input: &'a ValidatedScene,
         admission: SceneEditAdmission,
     ) -> baozi_core::__scene_integration::integration::SceneEditTransaction<'a> {
         match self {
-            Self::Triangulation { target, origins } => admission.into_transaction(
+            Self::Selection {
+                replacements,
+                mappings,
+                digest,
+                limits,
+            } => admission.into_geometry_transaction(
                 input,
-                SceneTriangulationReplacement::new(
-                    *target,
-                    origins.triangles.values(),
-                    origins.face_offsets.values(),
-                    crate::triangulate::OPTIONS,
-                ),
-                SceneValidationLimits::default(),
-            ),
-            Self::Normals {
-                target,
-                options,
-                values,
-            } => admission.into_normal_transaction(
-                input,
-                SceneNormalReplacement::new(
-                    *target,
-                    values.values(),
-                    values.had_normal(),
-                    options.tangents == crate::TangentHandling::Remove,
-                    options.mode == crate::NormalMode::Smooth,
-                    options.digest(),
-                ),
-                SceneValidationLimits::default(),
+                replacements,
+                mappings.scratch(),
+                *digest,
+                *limits,
             ),
             Self::Space { resolved } => {
                 admission.into_space_transaction(*resolved, SceneValidationLimits::default())
             }
-            Self::Tangents {
-                target,
-                options,
-                values,
-            } => admission.into_tangent_transaction(
-                input,
-                SceneTangentReplacement::new(
-                    *target,
-                    values.values(),
-                    values.had_tangent(),
-                    options.normal_domain,
-                    options.uv_set,
-                    options.uv_domain,
-                    &crate::tangents::CONVENTIONS,
-                    options.digest(),
-                ),
-                SceneValidationLimits::default(),
-            ),
         }
     }
 }
@@ -247,7 +213,7 @@ pub(crate) fn execute_changed(
     input: &ValidatedScene,
     owner: EditOwner,
     admission: SceneEditAdmission,
-    data: PreparedEdit<'_>,
+    mut data: PreparedEdit<'_>,
 ) -> EditResult {
     let mut transaction = data.transaction(input, admission);
     let activated = activate_edit(owner, &mut transaction)?;

@@ -8,7 +8,7 @@
 - Declaration evidence: Unverified
 - Baozi maturity: None (no current `BaoziVerified` evidence record)
 - Public facade feature: `format-gltf` (also included in `all-formats`)
-- Parser backend: maintained `baozi-gltf` / `baozi-gltf-json` packages based on `gltf-rs` 1.4.1
+- Parser: private Baozi selected-profile document with metered tables and borrowed source ranges
 - Extensions: `.gltf`, `.glb`
 - Media types: `model/gltf+json`, `model/gltf-binary`
 - Encoding: JSON plus binary buffers, base64 buffer data URIs, or GLB container
@@ -22,22 +22,26 @@
 Enable `baozi/format-gltf` to register it through `Importer::new()`, or register `GltfImporter`
 in a custom registry. The curated default format set remains OBJ/MTL and STL.
 
-The dependency on `gltf-rs` is intentionally hidden inside this crate. Baozi does not expose
-`gltf-rs` types in public API, so the backend can later be forked or replaced by a Baozi-owned parser
-without changing facade users. The ownership and replacement boundary is defined in
+The private document borrows admitted JSON/BIN and unescaped strings, owns metered typed tables,
+and admits escaped-string storage before decoding. Accessor reads use checked immutable buffer
+layouts. Document/index owners are destroyed after normalization and before canonical submission;
+no owning generic JSON tree or opaque allocation multiplier participates in production decoding.
+The ownership and replacement boundary is defined in
 [`ADR 0027`](../adr/0027-gltf-backend-ownership-and-replacement-policy.md).
 
 The crate remains `publish = false` until package/release checks are complete. Source admission
 does not assign Beta/Stable maturity or a full glTF conformance claim.
 
-The `gltf_import` fuzz target executed the six known malformed JSON/GLB reproducers and
+The previous decoder's `gltf_import` fuzz target executed the six known malformed JSON/GLB reproducers and
 a bounded 256-run Linux ASan campaign on the immutable `2dc2fc8` source archive. The maintained
 validator corrections reject the demonstrated out-of-range POSITION reference and missing camera
 projection payload without a panic fallback. That integration also passed the complete workspace
 suite, normalized/source-mapping regressions, and independent debug/release typed consumers on
 ordinary Windows main stacks. Exact execution scope is recorded in
 the [delivery progress](../reviews/2026-10-29-delivery-progress.md). The short campaign establishes
-baseline malformed-input safety for that source state; it is not sustained fuzz evidence.
+baseline malformed-input safety for that source state; it does not qualify the replacement
+document. Fresh target/sanitizer and archive-consumer evidence belongs to the
+[maturation execution record](../reviews/2026-11-02-first-release-maturation.md).
 
 ## Supported Profile
 
@@ -116,11 +120,11 @@ baseline malformed-input safety for that source state; it is not sustained fuzz 
   evidence from URI strings.
 - Development resource-limit coverage for primary assets, decoded JSON text surfaces, external
   buffers, base64 buffer data URIs, GLB BIN payloads, diagnostics, and cooperative cancellation.
-- GLB admission retains borrowed JSON and BIN views over the primary snapshot. Only the JSON view is
-  deserialized into a private `gltf::Document`; selected BIN-backed buffers are copied later through
-  Baozi's metered buffer loader, and BIN size does not expand the opaque backend allowance.
+- GLB admission retains borrowed JSON and BIN views over the primary snapshot. The JSON view feeds
+  the metered structural index and typed document; selected BIN-backed buffers are copied later
+  through the metered buffer loader. BIN size does not expand document storage.
 - Global `extensionsUsed` and `extensionsRequired` declarations are checked after JSON-root decode
-  and before backend document validation. Empty or duplicate names and a required name missing from
+  and before selected closure interpretation. Empty or duplicate names and a required name missing from
   `extensionsUsed` are invalid; unsupported required extensions return typed format failure, while
   unsupported optional declarations without retained payloads emit
   `gltf.extension_uninterpreted_declaration` after selected-payload validation. Unsupported retained
@@ -298,9 +302,8 @@ line-record grammar.
 Materializing the complete JSON surface as `ConformedTextInput` would add a decoded copy and line
 index without enforcing duplicate-key, nesting, token, object, array, string, number, GLB chunk, or
 padding limits. U6 therefore uses one borrowed, bounded JSON/GLB admission path that preserves
-container-relative raw ranges and exposes the validated BIN chunk separately. The parser enters the
-bootstrap backend through `gltf::json::Root` and `gltf::Document`, so the backend never receives the
-GLB container or materializes its BIN payload.
+container-relative raw ranges and exposes the validated BIN chunk separately. The private typed
+document borrows these surfaces and the source index; it never materializes an extra GLB BIN copy.
 
 - Plain `.gltf` counts the complete JSON document against `max_decoded_utf8_bytes`. GLB counts only
   its JSON chunk; the 12-byte container header, chunk header, and BIN chunks are excluded from the
@@ -308,9 +311,9 @@ GLB container or materializes its BIN payload.
 - JSON UTF-8 validation is incremental and polls for every at-most-4096-byte window. An incomplete
   code point at a window edge carries its at-most-three-byte prefix into the next validation window.
   The JSON slice remains borrowed, so decoded-text admission creates no fictitious live allocation;
-  the opaque `gltf-rs` document graph is covered separately by a conservative JSON-sized backend
-  allowance. GLB BIN bytes remain part of the metered primary snapshot and selected-buffer copy, not
-  that opaque allowance.
+  the structural index, typed tables, nested collections and decoded escaped strings have their
+  actual metered owners. GLB BIN bytes remain part of the admitted primary snapshot and selected
+  buffer copy, with no opaque expansion allowance.
 - A leading UTF-8 BOM is forbidden on the JSON surface. Invalid UTF-8 and BOM evidence use raw
   container-relative offsets: zero-based within a plain `.gltf`, and based at the GLB JSON payload
   offset within `.glb`.
@@ -351,10 +354,10 @@ and import-contract tests.
   reference-bearing schemas, and a sealed bridge for stable canonical dependency evidence remain
   outside this profile. Unsupported selected payloads are rejected. Selected dependency provenance and the complete successful
   input manifest are now compiled and tested, global extension declarations are gated, and GLB BIN
-  data is isolated from the bootstrap backend. Canonical dependency identities remain
+  data stays borrowed until selected buffer materialization. Canonical dependency identities remain
   session-opaque; the successful input manifest retains resolver stability evidence.
-- The maintained backend remains private and replaceable. Canonical authoring reads the bounded
-  normalized model after backend data and its allowance have been released.
+- The selected-profile document remains private. Canonical authoring reads the bounded normalized
+  model after document tables, decoded strings and syntax indexes have been released.
 
 ## Descriptive Source Extras
 
@@ -405,8 +408,8 @@ with the explicit restrictions listed below.
 
 - The JSON document and `asset` must be objects. `asset.version` is a required string;
   `asset.minVersion` may be absent but must be a string when present, including in a GLB JSON chunk.
-  Neither arrays accepted by a backend struct visitor nor explicit null version properties are
-  admitted. Version components are ASCII decimal integers in `0..=999999999`, without leading
+  Arrays and explicit null version properties are rejected. Version components are ASCII decimal
+  integers in `0..=999999999`, without leading
   zeros, separated by exactly one dot. Comparisons are numeric, and `minVersion > version` is an
   invalid document.
 - The supported asset profile requires major version 2. Future 2.x minor versions remain compatible
@@ -414,8 +417,8 @@ with the explicit restrictions listed below.
   including one paired with `minVersion: "2.0"`, or any other well-formed minimum is an unsupported
   profile, reported as `gltf.unsupported_feature`. Invalid syntax, types, or minimum ordering use
   `gltf.invalid_document`. Reasons identify `asset.version` or `asset.minVersion` as applicable.
-  Schema/version scanning is charged to `WorkUnits` before backend decoding and dependency IO;
-  its temporary storage is covered by the existing JSON-sized backend allowance.
+  Schema/version validation is charged to `WorkUnits` before dependency IO; typed tables,
+  decoded strings and validation scratch use their actual metered owners.
 - Selected external buffers and images share one relative IRI path decoder. Literal non-ASCII
   characters and their UTF-8 percent encodings identify the same resource. Escapes are decoded
   exactly once; `+` stays a literal plus sign, and `%252F` identifies literal `%2F` filename text.

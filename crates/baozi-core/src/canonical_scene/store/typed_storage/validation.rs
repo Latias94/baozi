@@ -164,6 +164,7 @@ impl GeometryStorage {
                         .is_none()
                     || primitive
                         .material
+                        .effective()
                         .is_some_and(|index| index as usize >= material_count)
                 {
                     return false;

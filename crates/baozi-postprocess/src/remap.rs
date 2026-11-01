@@ -1,6 +1,6 @@
 use std::{fmt, ops::Range};
 
-use baozi_core::{__scene_integration::integration::SceneTriangulationEvidence, PrimitiveId};
+use baozi_core::{__scene_integration::integration::SceneGeometrySelectionEvidence, PrimitiveId};
 use thiserror::Error;
 
 /// A generation- and mesh-qualified source vertex endpoint.
@@ -37,36 +37,69 @@ pub enum TriangulationRemapError {
 /// The actual rooted evidence store is owned here, independently of either Scene. Borrowing this
 /// value borrows the operation's retained origins; no intermediate Scene generation is invented.
 pub struct TriangulationRemap {
-    evidence: SceneTriangulationEvidence,
+    preparation: crate::GeometryPreparationReport,
 }
 
 impl TriangulationRemap {
-    pub(crate) const fn new(evidence: SceneTriangulationEvidence) -> Self {
-        Self { evidence }
+    pub(crate) const fn selected(evidence: SceneGeometrySelectionEvidence) -> Self {
+        Self {
+            preparation: crate::GeometryPreparationReport::new(evidence),
+        }
+    }
+
+    /// Actual selected transaction effects backing this retained origin relation.
+    pub const fn preparation(&self) -> &crate::GeometryPreparationReport {
+        &self.preparation
     }
 
     pub fn input_target(&self) -> PrimitiveId {
-        self.evidence.input_target()
+        self.preparation
+            .evidence
+            .target(0)
+            .expect("published lowering target")
+            .input_target()
     }
     pub fn output_target(&self) -> PrimitiveId {
-        self.evidence.output_target()
+        self.preparation
+            .evidence
+            .target(0)
+            .expect("published lowering target")
+            .output_target()
     }
 
     /// Returns one source corner ordinal for every output corner, in triangle order.
     pub fn source_corner_origins(&self) -> &[u32] {
-        self.evidence.source_corner_origins()
+        self.preparation
+            .evidence
+            .target(0)
+            .expect("published lowering target")
+            .corner_origins()
+            .expect("published origins")
     }
 
     /// Returns source-face output-triangle prefix offsets, including both endpoints.
     pub fn source_face_triangle_offsets(&self) -> &[u32] {
-        self.evidence.source_face_triangle_offsets()
+        self.preparation
+            .evidence
+            .target(0)
+            .expect("published lowering target")
+            .face_offsets()
+            .expect("published offsets")
     }
 
-    pub const fn source_corner_count(&self) -> u32 {
-        self.evidence.source_corner_count()
+    pub fn source_corner_count(&self) -> u32 {
+        self.preparation
+            .evidence
+            .target(0)
+            .expect("published lowering target")
+            .source_corner_count()
     }
-    pub const fn vertex_count(&self) -> u32 {
-        self.evidence.vertex_count()
+    pub fn vertex_count(&self) -> u32 {
+        self.preparation
+            .evidence
+            .target(0)
+            .expect("published lowering target")
+            .vertex_count()
     }
 
     /// Triangulation preserves all vertex values and their order; no vertex is added or removed.

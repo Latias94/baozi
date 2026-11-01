@@ -1183,6 +1183,132 @@ fn dimension_policy_tightening_is_monotonic_and_preserves_existing_evidence() {
 }
 
 #[test]
+fn terminal_work_transfer_preserves_both_total_caps_and_all_prior_work() {
+    let ledger = test_ledger(
+        LedgerLimits::new(
+            0,
+            [
+                (Dimension::Bytes, DimensionPolicy::counter(100, 90, 0)),
+                (Dimension::Records, DimensionPolicy::counter(18, 18, 0)),
+            ],
+        )
+        .unwrap(),
+    );
+    ledger.charge_attempted(Dimension::Bytes, 24).unwrap();
+    ledger.charge_consumed(Dimension::Bytes, 12).unwrap();
+    let before = ledger.dimension_evidence(Dimension::Bytes).unwrap();
+    ledger
+        .transfer_failure_terminal_work(Dimension::Bytes, Dimension::Records, 30)
+        .unwrap();
+    assert_eq!(ledger.dimension_evidence(Dimension::Bytes).unwrap(), before);
+    assert_eq!(
+        ledger.dimension_evidence(Dimension::Records).unwrap(),
+        DimensionSnapshot::default()
+    );
+    let state = lock(&ledger.state);
+    let ordinary = dimension_entry(&state.dimensions, Dimension::Bytes)
+        .unwrap()
+        .policy;
+    let terminal = dimension_entry(&state.dimensions, Dimension::Records)
+        .unwrap()
+        .policy;
+    assert_eq!(ordinary, DimensionPolicy::counter(70, 60, 0));
+    assert_eq!(terminal, DimensionPolicy::counter(48, 48, 0));
+    assert_eq!(ordinary.attempted_limit() + terminal.attempted_limit(), 118);
+    assert_eq!(ordinary.consumed_limit() + terminal.consumed_limit(), 108);
+}
+
+#[test]
+fn terminal_work_transfer_rejects_spent_attempted_or_consumed_capacity_atomically() {
+    for (attempted_limit, consumed_limit, attempted, consumed, transfer, class) in [
+        (60, 60, 55, 20, 6, CounterClass::Attempted),
+        (60, 20, 10, 10, 11, CounterClass::Consumed),
+    ] {
+        let ordinary = DimensionPolicy::counter(attempted_limit, consumed_limit, 0);
+        let terminal = DimensionPolicy::counter(18, 18, 0);
+        let ledger = test_ledger(
+            LedgerLimits::new(
+                0,
+                [(Dimension::Bytes, ordinary), (Dimension::Records, terminal)],
+            )
+            .unwrap(),
+        );
+        ledger
+            .charge_attempted(Dimension::Bytes, attempted)
+            .unwrap();
+        ledger.charge_consumed(Dimension::Bytes, consumed).unwrap();
+        let before = ledger.dimension_evidence(Dimension::Bytes).unwrap();
+        assert!(
+            matches!(ledger.transfer_failure_terminal_work(Dimension::Bytes, Dimension::Records, transfer),
+            Err(LedgerCause::LimitExceeded { class: actual, .. }) if actual == class)
+        );
+        assert_eq!(ledger.dimension_evidence(Dimension::Bytes).unwrap(), before);
+        let state = lock(&ledger.state);
+        assert_eq!(
+            dimension_entry(&state.dimensions, Dimension::Bytes)
+                .unwrap()
+                .policy,
+            ordinary
+        );
+        assert_eq!(
+            dimension_entry(&state.dimensions, Dimension::Records)
+                .unwrap()
+                .policy,
+            terminal
+        );
+    }
+}
+
+#[test]
+fn terminal_work_transfer_respects_pending_work_and_current_tightened_policy() {
+    let ledger = test_ledger(
+        LedgerLimits::new(
+            0,
+            [
+                (Dimension::Bytes, DimensionPolicy::counter(60, 60, 0)),
+                (Dimension::Records, DimensionPolicy::counter(18, 18, 0)),
+            ],
+        )
+        .unwrap(),
+    );
+    let mut permit = ledger.try_admit_linear_work(Dimension::Bytes, 10).unwrap();
+    assert!(matches!(
+        ledger.transfer_failure_terminal_work(Dimension::Bytes, Dimension::Records, 1),
+        Err(LedgerCause::OutstandingLinearWorkPermits { count: 1 })
+    ));
+    permit.complete(0, 4).unwrap();
+    drop(permit);
+    let before = ledger.dimension_evidence(Dimension::Bytes).unwrap();
+    ledger
+        .tighten_dimension_policy(Dimension::Bytes, DimensionPolicy::counter(15, 15, 0))
+        .unwrap();
+    assert!(matches!(
+        ledger.transfer_failure_terminal_work(Dimension::Bytes, Dimension::Records, 6),
+        Err(LedgerCause::LimitExceeded {
+            class: CounterClass::Attempted,
+            ..
+        })
+    ));
+    ledger
+        .transfer_failure_terminal_work(Dimension::Bytes, Dimension::Records, 5)
+        .unwrap();
+    assert_eq!(ledger.dimension_evidence(Dimension::Bytes).unwrap(), before);
+    let state = lock(&ledger.state);
+    assert_eq!(
+        dimension_entry(&state.dimensions, Dimension::Bytes)
+            .unwrap()
+            .policy,
+        DimensionPolicy::counter(10, 10, 0)
+    );
+    assert_eq!(
+        dimension_entry(&state.dimensions, Dimension::Records)
+            .unwrap()
+            .policy,
+        DimensionPolicy::counter(23, 23, 0)
+    );
+}
+
+#[test]
 fn snapshot_failure_cleanup_is_structurally_storage_before_accounting() {
     let source = ledger_snapshot_source();
     let cleanup = source

@@ -929,8 +929,8 @@ fn sparse_index_scan_decode_work_is_admitted_once_for_a_shared_accessor() -> Tes
         .unwrap()
         .push(shared);
     let primary = serde_json::to_vec(&document)?;
-    // The admitted syntax/source-map scan and backend document decode each consume the JSON.
-    let primary_decode = u64::try_from(primary.len())?.checked_mul(2).unwrap();
+    // Syntax/source admission consumes JSON once; typed field decoding uses WorkUnits.
+    let primary_decode = u64::try_from(primary.len())?;
     let [base, indices, values] = buffers;
     let execute = |max_decode_work| {
         let mut options = sidecar_options();

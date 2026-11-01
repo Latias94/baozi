@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-11-01
+updated: 2026-11-02
 authors:
   - Codex
 decision_type: architecture
@@ -27,67 +27,58 @@ related:
 
 ## Context
 
-glTF is broad enough that a bootstrap decoder accelerates useful coverage, but a decoder backend may
-allocate before Baozi admission, abort on malformed data, omit source spans, or encode assumptions
-that conflict with Baozi's canonical Scene. Translating backend handles directly through core's
-canonical authoring boundary would spread those assumptions through material, accessor, skin, morph,
-animation, and extension code, making replacement a whole-importer rewrite.
-
-The selected backend name, version, and active exceptions are transient implementation evidence kept
-in the linked backend research notes, not durable decisions in this ADR.
+The owning gltf-rs decoder required an opaque input-byte expansion allowance and a maintained
+pair of distribution packages. That allowance did not bind every input-controlled collection,
+escaped string and validation temporary to its actual owner. The selected profile already has
+explicit source ranges, accessor contracts, selected closure and a normalized submission seam.
+Owning that bounded document directly closes the allocation gap without replacing the canonical
+Scene or expanding the supported glTF profile.
 
 ## Decision
 
-`baozi-format-gltf` owns glTF semantics. Any third-party decoder is a private, replaceable syntax
-backend behind Baozi admission and a format-private normalized model. Backend objects, types,
-lifetimes, errors, validation messages, and feature flags never cross the format-crate boundary.
+`baozi-format-gltf` owns a private selected-profile document over the immutable primary snapshot.
+The iterative JSON scanner builds one admitted structural index and the raw source map. Typed
+tables and nested collections use existing metered storage; raw JSON/BIN and unescaped strings
+borrow the snapshot. Escaped strings decode once after their capacity is admitted. There is no
+owning generic JSON Value tree, global allocator context, opaque byte multiplier or legacy decoder
+feature. The maintained `baozi-gltf` and `baozi-gltf-json` production paths are removed at cutover.
 
-Accepted freezes this ownership and replacement boundary. It does not approve any active backend for
-Beta/Stable or claim the full normalized pipeline is implemented.
-
-### Maintained Backend Corrections
-
-When an upstream validator defect is demonstrated, a narrow licensed source correction may be
-maintained at that defect's owner. Baozi must not accumulate an overlapping general validator around
-an unchanged panic-capable backend. The maintained dependency identity must survive independent
-workspace resolution and Cargo packaging; a root-only registry override cannot establish that
-property. Keep an explicit source revision, original licenses, a small change inventory, and direct
-backend regressions that do not rely on Baozi's panic containment.
-
-Installing a correction does not satisfy sanitizer admission, complete the normalized boundary, or
-authorize first-party registration. Those execution gates and source-identity guarantees remain
-separate. Current package identities and correction evidence are in the linked backend notes.
+Schema/default/enum/reference validation is global where the source format requires it. Selected
+payload interpretation, dependencies, losses, accessor layouts and normalized semantics retain
+one format-owned authority. The document does not become a second semantic importer. Its views,
+indices, errors and lifetimes remain private; public consumers use canonical Baozi types.
 
 ### Required Pipeline
 
 1. `ImportSession` supplies the single immutable primary `.gltf`/GLB snapshot.
-2. Baozi performs bounded container/JSON admission before backend entry: magic/version/length, nesting,
-   object/array/string/number/token budgets, and strict text profile where applicable.
-3. Required and optional buffers/images are requested only through `ParseScope`; the backend receives
-   no raw `AssetIo` or host path.
-4. Before backend entry, the adapter reserves a conservative opaque-backend allowance through the
-   session's `baozi-operation` capability, checks cancellation, then decodes private backend state and
-   charges observable work. Post-decode measurement cannot retroactively satisfy this admission gate.
-5. Backend state is converted into a bounded owned `NormalizedGltf` model using Baozi-owned IDs,
-   stable raw source spans, typed causes, and dependency identities. Where the backend omits spans, a
-   Baozi-owned admitted syntax map reconstructs them before backend state may be dropped.
-6. Backend objects are dropped as soon as normalization no longer needs them; phase reservations make
-   any overlap explicit.
-7. Scene construction reads only `NormalizedGltf` plus session-owned immutable dependency snapshots.
-8. Central validation, not the backend or format crate, creates the `ValidatedScene` proof.
+2. Bounded container/JSON admission validates framing, strict text, nesting, tokens and ranges
+   while building the structural index and source inventory through admitted storage.
+3. Typed document decoding admits every input-controlled allocation before it grows. Collection
+   and escaped-string owners carry their charges until destruction; getters borrow and allocate
+   nothing. Syntax/index lookup does not repeatedly reparse full JSON objects.
+4. Global document checks precede selected closure and payload contracts. Only selected buffers
+   and images enter dependency IO, through `ParseScope`; the document has no host path or raw IO.
+5. Accessor readers bind checked dense/sparse layouts to immutable buffer slices. Normalization
+   copies selected semantics into the existing bounded `NormalizedGltf` model and source profile.
+6. Prepared handles, typed document, structural index and their charges are released before
+   canonical submission. Retained snapshots and normalized data keep their independent owners.
+7. Scene construction reads normalized semantics and admitted immutable resource ranges only.
+8. Central validation creates the `ValidatedScene` proof and controls publication.
 
 ```mermaid
 flowchart TB
-    Primary[Immutable glTF or GLB snapshot] --> Admission[Baozi structural and text admission]
-    Admission --> Backend[Private replaceable decoder]
-    Scope[ParseScope dependency snapshots] --> Backend
-    Backend --> Normalize[Owned format-private NormalizedGltf]
-    Scope --> Normalize
-    Normalize --> Drop[Drop backend state and release allowance]
-    Drop --> Author[Bounded core authoring from normalized semantics only]
-    Author --> Validate[Central bounded validation]
-    Validate --> Report[ImportReport]
+    Primary[Immutable glTF or GLB snapshot] --> Syntax[Metered syntax index and source map]
+    Syntax --> Document[Private selected-profile typed document]
+    Document --> Closure[Validated selected closure and accessor contracts]
+    Scope[ParseScope dependency snapshots] --> Normalize
+    Closure --> Normalize[Owned normalized selected semantics]
+    Normalize --> Release[Release document and index]
+    Release --> Author[Bounded canonical authoring]
+    Author --> Validate[Central validation and publication]
 ```
+
+Acceptance freezes this ownership boundary. It does not assign Beta/Stable maturity, claim full
+glTF conformance or qualify unexecuted targets.
 
 ### Normalized Model Contract
 
@@ -126,9 +117,9 @@ required entity ranges fail before canonical construction.
 Scene construction is a separately testable normalized-model consumer. Its module may import glTF
 format-owned model/types and borrow core's bounded authoring capability, but must not import, name, or
 accept a decoder-backend module/type. A hand-built normalized fixture must exercise it without
-invoking the backend. Backend drop and opaque-allowance release occur before canonical authoring;
-any intentionally retained primary or dependency snapshot remains separately reserved, so the peak
-records real overlap without charging a released backend allowance.
+invoking document decoding. Document/index destruction occurs before canonical authoring; any
+retained primary or dependency snapshot remains separately admitted, so peak-live evidence records
+actual overlap without retaining a decoder allowance.
 
 Stable source range means a raw byte range into the immutable primary or dependency snapshot, not a
 backend object path or decoded character offset. If a claimed semantic or diagnostic cannot obtain a
@@ -208,7 +199,7 @@ A backend version/path is admissible only while it satisfies:
 - no abort or uncaught panic on admitted malformed inputs in Linux sanitizer fuzzing;
 - enough source identity/span information for stable Baozi diagnostics or a Baozi-owned layer that
   reconstructs it safely;
-- operation/budget hooks or a declared conservative allowance plus subprocess RSS/timeout evidence;
+- pre-allocation metering at each input-controlled owner, with bounded work and cancellation;
 - strict glTF UTF-8/JSON behavior under ADR 0035; and
 - conformance fixtures for every feature claimed in the support matrix.
 
@@ -218,11 +209,9 @@ affected backend slice, rejects/replaces it, or moves it behind an admitted non-
 boundary. Experimental maturity cannot keep a baseline-unsafe slice reachable through the first-party
 format or `all-formats`.
 
-An opaque call without a mid-call cancellation checkpoint may remain Experimental only when Baozi's
-preflight proves a strict finite input, work, and memory envelope and polls immediately before and
-after entry. If that finite envelope cannot be enforced, the path fails admission. Once baseline
-safety passes, incomplete semantic breadth, sustained campaign history, independent oracle evidence,
-or packaging evidence may retain Experimental maturity under ADR 0011.
+Missing semantic breadth, sustained campaign history, independent oracle evidence or packaging
+evidence may retain Experimental maturity after baseline safety passes. An opaque allowance is
+not an alternative to owner-bound allocation admission in the selected-profile document.
 
 ### Replacement Triggers
 
@@ -277,7 +266,7 @@ Negative:
 | --- | --- | --- |
 | Normalized model merely mirrors backend types | High | Baozi-owned IDs/contracts and backend-leak symbol/dependency tests. |
 | Backend allocates/aborts before preflight | Critical | Disable/unregister until structural admission and sanitizer/RSS gates pass; an opaque allowance alone is insufficient. |
-| Intermediate overlap exceeds memory | High | Phase reservations, prompt backend drop, and peak-live scale tests. |
+| Intermediate overlap exceeds memory | High | Metered owners, prompt document/index release, and peak-live scale tests. |
 | Replacement changes semantic output silently | High | Backend-independent normalized and canonical golden/conformance suite. |
 | Optional extension data is silently lost | High | Required/optional extension disposition plus explicit diagnostic/loss policy. |
 
@@ -288,7 +277,7 @@ Negative:
 | Backend privacy | Public API, rustdoc, snapshots, reports, diagnostics, and core IR contain no backend type/name dependency. |
 | IO authority | Instrumented tests prove every external buffer/image request goes through `ParseScope` and policy. |
 | Normalized firewall | Scene construction tests run from a backend-independent normalized fixture; dependency/lint checks prove canonical authoring code imports no backend module or type. |
-| Backend lifetime | Drop instrumentation proves backend state and opaque allowance are gone before canonical authoring, while snapshot/model/construction overlap remains visible in peak-live evidence. |
+| Backend lifetime | Drop/ledger regressions prove document and index owners are gone before canonical authoring, while snapshot/model/construction overlap remains visible in peak-live evidence. |
 | Source mapping | Backend-provided and Baozi-reconstructed spans both resolve to stable raw ranges; a fixture with unavailable required ranges fails before canonical construction. |
 | Admission | Oversized/deep/dense JSON, invalid GLB lengths, accessor overflow, and sparse ranges fail before unsafe allocation/materialization. |
 | Admission versus maturity | A baseline-unsafe backend slice is absent from first-party registration/all-formats, while fixtures with only missing non-safety evidence remain eligible for Experimental. |

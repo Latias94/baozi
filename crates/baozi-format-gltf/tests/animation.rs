@@ -224,9 +224,9 @@ fn animation_output_count_is_rejected_before_payload_admission() -> TestResult<(
 #[test]
 fn animation_accessor_byte_stride_fails_before_dependency_io() -> TestResult<()> {
     for (view, stride) in [(0, 4), (1, 12), (2, 16), (3, 12)] {
-        let mut document = gltf::json::Root::from_slice(base_animation_json())?;
-        document.buffers[0].uri = Some("animation.bin".to_owned());
-        document.buffer_views[view].byte_stride = Some(gltf::json::buffer::Stride(stride));
+        let mut document = serde_json::from_slice::<serde_json::Value>(base_animation_json())?;
+        document["buffers"][0]["uri"] = serde_json::json!("animation.bin");
+        document["bufferViews"][view]["byteStride"] = serde_json::json!(stride);
         let (result, diagnostics) = import_assets_result(
             "strided-animation.gltf",
             [("strided-animation.gltf", serde_json::to_vec(&document)?)],

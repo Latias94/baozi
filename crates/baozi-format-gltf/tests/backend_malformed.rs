@@ -14,17 +14,6 @@ const PERSPECTIVE_WITHOUT_PAYLOAD: &[u8] =
 const ORTHOGRAPHIC_WITHOUT_PAYLOAD: &[u8] =
     include_bytes!("fixtures/backend_malformed/orthographic_without_payload.gltf");
 
-// Call the backend directly: the importer panic fallback must not make these regressions pass.
-fn assert_backend_rejection(document: &[u8]) {
-    let root = gltf::json::Root::from_slice(document).expect("fixture must deserialize");
-    let error =
-        gltf::Document::from_json(root).expect_err("backend must reject malformed metadata");
-    assert!(
-        matches!(error, gltf::Error::Validation(_)),
-        "expected a backend validation error, got {error:?}"
-    );
-}
-
 fn assert_import_rejection(source: &'static str, document: Vec<u8>) -> TestResult<()> {
     let (result, diagnostics) =
         import_assets_result(source, [(source, document)], GltfTestOptions::memory())?;
@@ -51,11 +40,6 @@ fn assert_import_rejection(source: &'static str, document: Vec<u8>) -> TestResul
 }
 
 #[test]
-fn backend_position_reference_returns_an_error_without_unwinding() {
-    assert_backend_rejection(POSITION_OOB);
-}
-
-#[test]
 fn position_reference_is_rejected_without_panic_fallback_in_json_and_glb() -> TestResult<()> {
     assert_import_rejection("position-oob.gltf", POSITION_OOB.to_vec())?;
     assert_import_rejection("position-oob.glb", glb_with_json(POSITION_OOB))?;
@@ -63,25 +47,18 @@ fn position_reference_is_rejected_without_panic_fallback_in_json_and_glb() -> Te
 }
 
 #[test]
-fn backend_camera_kind_requires_its_projection_payload() {
-    assert_backend_rejection(PERSPECTIVE_WITHOUT_PAYLOAD);
-    assert_backend_rejection(ORTHOGRAPHIC_WITHOUT_PAYLOAD);
-}
-
-#[test]
-fn backend_empty_scene_allows_omitted_optional_nodes_and_roundtrips() -> TestResult<()> {
+fn empty_scene_allows_omitted_optional_nodes_in_json_and_glb() -> TestResult<()> {
     let bytes = br#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{}]}"#;
-    let root = gltf::json::Root::from_slice(bytes)?;
-    assert_eq!(root.scenes.len(), 1);
-    assert!(root.scenes[0].nodes.is_empty());
-    let encoded = serde_json::to_vec(&root)?;
-    let value: Value = serde_json::from_slice(&encoded)?;
-    assert!(value["scenes"][0].get("nodes").is_none());
-    for document in [encoded, glb_with_json(bytes)] {
-        let document = gltf::Gltf::from_slice(&document)?.document;
-        let scene = document.default_scene().expect("declared empty scene");
-        assert_eq!(scene.index(), 0);
-        assert_eq!(scene.nodes().len(), 0);
+    for (source, document) in [
+        ("empty.gltf", bytes.to_vec()),
+        ("empty.glb", glb_with_json(bytes)),
+    ] {
+        let (result, diagnostics) =
+            import_assets_result(source, [(source, document)], GltfTestOptions::memory())?;
+        assert!(diagnostics.is_empty());
+        let report = result?;
+        assert_eq!(report.scene().meshes().count(), 0);
+        assert_eq!(report.ledger().current_live_bytes(), 0);
     }
     Ok(())
 }
@@ -103,13 +80,17 @@ fn valid_camera_discriminators_remain_readable() -> TestResult<()> {
     ] {
         let mut root: Value = serde_json::from_slice(document)?;
         root["cameras"][0]["type"] = json!(kind);
-        let document = gltf::Gltf::from_slice(&serde_json::to_vec(&root)?)?.document;
-        let camera = document.cameras().next().expect("fixture has one camera");
-        assert!(matches!(
-            (kind, camera.projection()),
-            ("orthographic", gltf::camera::Projection::Orthographic(_))
-                | ("perspective", gltf::camera::Projection::Perspective(_))
-        ));
+        root["nodes"] = json!([{ "camera": 0 }]);
+        let bytes = serde_json::to_vec(&root)?;
+        for (source, document) in [
+            ("valid-camera.gltf", bytes.clone()),
+            ("valid-camera.glb", glb_with_json(&bytes)),
+        ] {
+            let (result, diagnostics) =
+                import_assets_result(source, [(source, document)], GltfTestOptions::memory())?;
+            assert!(diagnostics.is_empty());
+            assert_eq!(result?.scene().cameras().count(), 1);
+        }
     }
     Ok(())
 }
@@ -140,7 +121,6 @@ fn animation_metadata() -> Value {
 #[test]
 fn invalid_animation_sampler_metadata_is_rejected_before_reading() -> TestResult<()> {
     let baseline = animation_metadata();
-    gltf::Gltf::from_slice(&serde_json::to_vec(&baseline)?)?;
 
     let mut missing_sampler = baseline.clone();
     missing_sampler["animations"][0]["channels"][0]["sampler"] = json!(1);
@@ -158,7 +138,6 @@ fn invalid_animation_sampler_metadata_is_rejected_before_reading() -> TestResult
         missing_output,
     ] {
         let document = serde_json::to_vec(&root)?;
-        assert_backend_rejection(&document);
         assert_import_rejection("invalid-sampler.gltf", document)?;
     }
     Ok(())

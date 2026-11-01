@@ -1,9 +1,10 @@
 use super::{
     AccessorContract, AccessorOwner, AccessorSources, BufferData, ContentError,
     MeshInstanceStorage, PARSER_POLL_INTERVAL, Result, accessor_provenance, authoring_u32,
-    finish_gltf_operation, gltf_parse_error, provenance_work_bound, safe_gltf, to_u64,
-    try_extend_provenance_unique, try_vec_capacity, try_vec_filled, validate_accessor,
+    gltf_parse_error, provenance_work_bound, to_u64, try_extend_provenance_unique,
+    try_vec_capacity, try_vec_filled, validate_accessor, with_poll,
 };
+use crate::document::schema as json;
 use baozi_import::authoring::{
     AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationClipAuthoring,
     AnimationExtrapolation, AnimationInterpolation, AnimationTargetAuthoring, AnimationTimeDomain,
@@ -13,10 +14,6 @@ use baozi_import::{
     DiagnosticCode, ImportStorageClass, ImportWorkClass, ImportWorkScope, MeteredString,
     MeteredVec, ParseScope, SourceScopeEntityKind,
 };
-use gltf::animation::util::ReadOutputs;
-use gltf::json;
-use gltf::json::validation::Checked;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 
 const MAX_CHANNEL_PROVENANCE_SOURCES: usize = 2 * AccessorSources::MAX_SOURCES;
 
@@ -58,7 +55,7 @@ struct AnimationClipContract<'document> {
 
 #[derive(Debug, Clone)]
 struct AnimationChannelContract<'document> {
-    source: gltf::animation::Channel<'document>,
+    source: crate::document::Channel<'document>,
     source_index: usize,
     animation_index: usize,
     channel_index: usize,
@@ -72,7 +69,7 @@ struct AnimationChannelContract<'document> {
 
 #[derive(Debug, Clone)]
 struct AnimationDurationContract<'document> {
-    source: gltf::animation::Channel<'document>,
+    source: crate::document::Channel<'document>,
     animation_index: usize,
     channel_index: usize,
     key_count: usize,
@@ -137,20 +134,18 @@ pub(super) struct AnimationStorage<'scope> {
 
 pub(super) fn preflight<'scope, 'document>(
     ctx: &'scope ParseScope<'_>,
-    gltf: &'document gltf::Document,
+    gltf: &'document crate::document::Document<'_>,
     selected_nodes: &[bool],
 ) -> Result<AnimationContracts<'scope, 'document>> {
-    safe_gltf(ctx, "glTF animation preflight", || {
-        preflight_inner(ctx, gltf, selected_nodes)
-    })?
+    with_poll(ctx, || preflight_inner(ctx, gltf, selected_nodes))?
 }
 
 fn preflight_inner<'scope, 'document>(
     ctx: &'scope ParseScope<'_>,
-    gltf: &'document gltf::Document,
+    gltf: &'document crate::document::Document<'_>,
     selected_nodes: &[bool],
 ) -> Result<AnimationContracts<'scope, 'document>> {
-    let source_animations = &gltf.as_json().animations;
+    let source_animations = &gltf.tables().animations;
     let source_channel_count = source_animations
         .iter()
         .try_fold(0usize, |total, animation| {
@@ -173,7 +168,7 @@ fn preflight_inner<'scope, 'document>(
     let mut morph_widths = try_vec_filled(
         ctx,
         ImportStorageClass::FormatNormalization,
-        gltf.as_json().meshes.len(),
+        gltf.tables().meshes.len(),
         None,
         "gltf-animation-morph-widths",
     )?;
@@ -206,11 +201,12 @@ fn preflight_inner<'scope, 'document>(
     let mut retained_channel_count = 0usize;
     let mut visited_channels = 0usize;
 
-    for (animation_index, animation) in gltf.animations().enumerate() {
+    for animation in gltf.animations() {
+        let animation_index = animation.index();
         let source_animation = source_animations.get(animation_index).ok_or_else(|| {
             gltf_parse_error(
                 ctx,
-                format!("glTF animation {animation_index} is out of range"),
+                format_args!("glTF animation {animation_index} is out of range"),
             )
         })?;
         let materialization_offset = materialization_channels.len();
@@ -234,7 +230,7 @@ fn preflight_inner<'scope, 'document>(
             let source_channel = source_animation.channels.get(channel_index).ok_or_else(|| {
                 gltf_parse_error(
                     ctx,
-                    format!(
+                    format_args!(
                         "glTF animation {animation_index} channel {channel_index} is out of range"
                     ),
                 )
@@ -243,24 +239,19 @@ fn preflight_inner<'scope, 'document>(
             let Some(selected) = selected_nodes.get(source_node_index).copied() else {
                 return Err(gltf_parse_error(
                     ctx,
-                    format!(
+                    format_args!(
                         "glTF animation {animation_index} channel {channel_index} targets missing node {source_node_index}"
                     ),
                 ));
             };
-            let property = checked_property(
-                ctx,
-                animation_index,
-                channel_index,
-                source_channel.target.path.as_ref(),
-            )?;
+            let property = map_property(source_channel.target.path);
             let sampler = source_animation
                 .samplers
                 .get(source_channel.sampler.value())
                 .ok_or_else(|| {
                     gltf_parse_error(
                         ctx,
-                        format!(
+                        format_args!(
                             "glTF animation {animation_index} channel {channel_index} sampler reference is out of range"
                         ),
                     )
@@ -283,7 +274,7 @@ fn preflight_inner<'scope, 'document>(
             if input.count == 0 {
                 return Err(gltf_parse_error(
                     ctx,
-                    format!(
+                    format_args!(
                         "glTF animation {animation_index} channel {channel_index} input accessor is empty"
                     ),
                 ));
@@ -305,13 +296,13 @@ fn preflight_inner<'scope, 'document>(
             }
 
             let source_node = gltf
-                .as_json()
+                .tables()
                 .nodes
                 .get(source_node_index)
                 .ok_or_else(|| {
                     gltf_parse_error(
                         ctx,
-                        format!(
+                        format_args!(
                             "glTF animation {animation_index} channel {channel_index} targets missing node {source_node_index}"
                         ),
                     )
@@ -319,7 +310,7 @@ fn preflight_inner<'scope, 'document>(
             if source_node.matrix.is_some() && property != AnimationProperty::MorphWeights {
                 return Err(gltf_parse_error(
                     ctx,
-                    format!(
+                    format_args!(
                         "glTF animation {animation_index} channel {channel_index} targets matrix-authored node {source_node_index}"
                     ),
                 ));
@@ -340,7 +331,7 @@ fn preflight_inner<'scope, 'document>(
             if *seen == animation_index {
                 return Err(gltf_parse_error(
                     ctx,
-                    format!(
+                    format_args!(
                         "glTF animation {animation_index} has a duplicate animation target at channel {channel_index}"
                     ),
                 ));
@@ -359,7 +350,7 @@ fn preflight_inner<'scope, 'document>(
                         )
                     })?
                     .value();
-                let mesh = gltf.as_json().meshes.get(mesh_index).ok_or_else(|| {
+                let mesh = gltf.tables().meshes.get(mesh_index).ok_or_else(|| {
                     channel_error_at(
                         ctx,
                         animation_index,
@@ -396,16 +387,11 @@ fn preflight_inner<'scope, 'document>(
                 property.accessor_width()
             };
 
-            let interpolation = checked_interpolation(
-                ctx,
-                animation_index,
-                channel_index,
-                sampler.interpolation.as_ref(),
-            )?;
+            let interpolation = map_interpolation(sampler.interpolation);
             if interpolation == AnimationInterpolation::CubicSpline && input.count < 2 {
                 return Err(gltf_parse_error(
                     ctx,
-                    format!(
+                    format_args!(
                         "glTF animation {animation_index} channel {channel_index} cubic spline requires at least two keys"
                     ),
                 ));
@@ -437,7 +423,7 @@ fn preflight_inner<'scope, 'document>(
             if output.count != expected_output_count {
                 return Err(gltf_parse_error(
                     ctx,
-                    format!(
+                    format_args!(
                         "glTF animation {animation_index} channel {channel_index} output accessor count {} does not match expected {expected_output_count}",
                         output.count
                     ),
@@ -478,7 +464,7 @@ fn preflight_inner<'scope, 'document>(
         if runtime_channel_count != source_animation.channels.len() {
             return Err(gltf_parse_error(
                 ctx,
-                format!(
+                format_args!(
                     "glTF animation {animation_index} produced {runtime_channel_count} channels, expected {}",
                     source_animation.channels.len()
                 ),
@@ -529,7 +515,7 @@ fn preflight_inner<'scope, 'document>(
     if visited_channels != source_channel_count {
         return Err(gltf_parse_error(
             ctx,
-            format!(
+            format_args!(
                 "glTF animation iterator produced {visited_channels} channels, expected {source_channel_count}"
             ),
         ));
@@ -591,50 +577,20 @@ fn record_channel_losses(
     Ok(())
 }
 
-fn checked_property(
-    ctx: &ParseScope<'_>,
-    animation_index: usize,
-    channel_index: usize,
-    property: Checked<&json::animation::Property>,
-) -> Result<AnimationProperty> {
+fn map_property(property: json::animation::Property) -> AnimationProperty {
     match property {
-        Checked::Valid(json::animation::Property::Translation) => {
-            Ok(AnimationProperty::Translation)
-        }
-        Checked::Valid(json::animation::Property::Rotation) => Ok(AnimationProperty::Rotation),
-        Checked::Valid(json::animation::Property::Scale) => Ok(AnimationProperty::Scale),
-        Checked::Valid(json::animation::Property::MorphTargetWeights) => {
-            Ok(AnimationProperty::MorphWeights)
-        }
-        Checked::Invalid => Err(gltf_parse_error(
-            ctx,
-            format!(
-                "glTF animation {animation_index} channel {channel_index} has an invalid target path"
-            ),
-        )),
+        json::animation::Property::Translation => AnimationProperty::Translation,
+        json::animation::Property::Rotation => AnimationProperty::Rotation,
+        json::animation::Property::Scale => AnimationProperty::Scale,
+        json::animation::Property::MorphTargetWeights => AnimationProperty::MorphWeights,
     }
 }
 
-fn checked_interpolation(
-    ctx: &ParseScope<'_>,
-    animation_index: usize,
-    channel_index: usize,
-    interpolation: Checked<&json::animation::Interpolation>,
-) -> Result<AnimationInterpolation> {
+fn map_interpolation(interpolation: json::animation::Interpolation) -> AnimationInterpolation {
     match interpolation {
-        Checked::Valid(json::animation::Interpolation::Step) => Ok(AnimationInterpolation::Step),
-        Checked::Valid(json::animation::Interpolation::Linear) => {
-            Ok(AnimationInterpolation::Linear)
-        }
-        Checked::Valid(json::animation::Interpolation::CubicSpline) => {
-            Ok(AnimationInterpolation::CubicSpline)
-        }
-        Checked::Invalid => Err(gltf_parse_error(
-            ctx,
-            format!(
-                "glTF animation {animation_index} channel {channel_index} has an invalid interpolation"
-            ),
-        )),
+        json::animation::Interpolation::Step => AnimationInterpolation::Step,
+        json::animation::Interpolation::Linear => AnimationInterpolation::Linear,
+        json::animation::Interpolation::CubicSpline => AnimationInterpolation::CubicSpline,
     }
 }
 
@@ -918,25 +874,17 @@ fn read_duration_channel(
     work: &mut ImportWorkScope<'_, '_, 3>,
 ) -> Result<(f64, AccessorSources)> {
     let source = accessor_provenance(ctx, buffers, contract.source.sampler().input())?;
-    let reader = safe_gltf(ctx, "glTF animation duration reader construction", || {
-        contract.source.reader(|buffer| {
-            buffers
-                .get(buffer.index())
-                .and_then(Option::as_ref)
-                .map(BufferData::as_slice)
-        })
-    })?;
-    let mut input = safe_gltf(ctx, "glTF animation duration input reader", || {
-        reader.read_inputs()
-    })?
-    .ok_or_else(|| {
-        channel_error_at(
-            ctx,
-            contract.animation_index,
-            contract.channel_index,
-            "input accessor could not be read",
-        )
-    })?;
+    let source_accessor = contract.source.sampler().input();
+    let mut input = super::accessor::bind(ctx, source_accessor, buffers)?
+        .scalars()
+        .ok_or_else(|| {
+            channel_error_at(
+                ctx,
+                contract.animation_index,
+                contract.channel_index,
+                "input accessor could not be read",
+            )
+        })?;
     let mut previous = None;
     for key in 0..contract.key_count {
         if key.is_multiple_of(PARSER_POLL_INTERVAL) {
@@ -1028,15 +976,8 @@ fn read_channel<'scope>(
             previous = Some(source);
         }
     }
-    let reader = safe_gltf(ctx, "glTF animation reader construction", || {
-        contract.source.reader(|buffer| {
-            buffers
-                .get(buffer.index())
-                .and_then(Option::as_ref)
-                .map(BufferData::as_slice)
-        })
-    })?;
-    let input = safe_gltf(ctx, "glTF animation input reader", || reader.read_inputs())?
+    let input = super::accessor::bind(ctx, sampler.input(), buffers)?
+        .scalars()
         .ok_or_else(|| channel_error(ctx, contract, "input accessor could not be read"))?;
     let (times, duration) = read_times(ctx, contract, input, work)?;
 
@@ -1068,12 +1009,12 @@ fn read_channel<'scope>(
         "gltf-animation-out-tangents",
     )?;
 
-    let output = safe_gltf(ctx, "glTF animation output reader", || {
-        reader.read_outputs()
-    })?
-    .ok_or_else(|| channel_error(ctx, contract, "output accessor could not be read"))?;
-    match (contract.property, output) {
-        (AnimationProperty::Translation, ReadOutputs::Translations(output)) => {
+    let output = super::accessor::bind(ctx, sampler.output(), buffers)?;
+    match contract.property {
+        AnimationProperty::Translation | AnimationProperty::Scale => {
+            let output = output
+                .vectors::<3>()
+                .ok_or_else(|| channel_error(ctx, contract, "output accessor shape is invalid"))?;
             read_output_vectors(
                 ctx,
                 contract,
@@ -1084,18 +1025,10 @@ fn read_channel<'scope>(
                 work,
             )?;
         }
-        (AnimationProperty::Rotation, ReadOutputs::Rotations(output)) => {
-            read_output_vectors(
-                ctx,
-                contract,
-                output.into_f32(),
-                &mut values,
-                &mut in_tangents,
-                &mut out_tangents,
-                work,
-            )?;
-        }
-        (AnimationProperty::Scale, ReadOutputs::Scales(output)) => {
+        AnimationProperty::Rotation => {
+            let output = output.vectors::<4>().ok_or_else(|| {
+                channel_error(ctx, contract, "rotation accessor shape is invalid")
+            })?;
             read_output_vectors(
                 ctx,
                 contract,
@@ -1106,21 +1039,19 @@ fn read_channel<'scope>(
                 work,
             )?;
         }
-        (AnimationProperty::MorphWeights, ReadOutputs::MorphTargetWeights(output)) => {
+        AnimationProperty::MorphWeights => {
+            let output = output
+                .scalars()
+                .ok_or_else(|| channel_error(ctx, contract, "weight accessor shape is invalid"))?;
             read_output_weights(
                 ctx,
                 contract,
-                output.into_f32(),
+                output,
                 &mut values,
                 &mut in_tangents,
                 &mut out_tangents,
                 work,
             )?;
-        }
-        _ => {
-            return Err(ContentError::from(super::GltfFailure::internal(
-                "animation output reader did not match its admitted target",
-            )));
         }
     }
     if times.len() != contract.key_count
@@ -1307,10 +1238,10 @@ fn read_output_vectors<const N: usize>(
 }
 
 fn next_gltf_value<T>(
-    operation: &'static str,
+    _operation: &'static str,
     values: &mut impl Iterator<Item = T>,
 ) -> Result<Option<T>> {
-    finish_gltf_operation(operation, catch_unwind(AssertUnwindSafe(|| values.next())))
+    Ok(values.next())
 }
 
 fn channel_error(
@@ -1369,7 +1300,7 @@ fn channel_error_at(
 ) -> ContentError {
     gltf_parse_error(
         ctx,
-        format!("glTF animation {animation_index} channel {channel_index} {reason}"),
+        format_args!("glTF animation {animation_index} channel {channel_index} {reason}"),
     )
 }
 

@@ -299,12 +299,8 @@ fn extension_declaration_sort_obeys_the_work_budget() -> TestResult<()> {
 }
 
 #[test]
-fn backend_accepted_duplicate_keys_fail_before_backend_allocation() -> TestResult<()> {
+fn duplicate_keys_fail_before_document_decode() -> TestResult<()> {
     let document = br#"{"asset":{"version":"2.0"},"vendor":{"a":1,"a":2}}"#.to_vec();
-    assert!(
-        gltf::Gltf::from_slice(&document).is_ok(),
-        "the differential fixture must be accepted by the current backend"
-    );
     let duplicate = br#""a""#;
     let duplicate_offset = document
         .windows(duplicate.len())
@@ -346,7 +342,7 @@ fn backend_accepted_duplicate_keys_fail_before_backend_allocation() -> TestResul
     );
     assert!(
         dimension_attempted(failure.ledger(), ImportDimension::ScratchBytes) < 32 * 1024,
-        "the backend allowance must not be attempted"
+        "duplicate-key admission must stay within its configured live budget"
     );
     assert_eq!(failure.ledger().current_live_bytes(), 0);
     assert_eq!(
@@ -363,10 +359,6 @@ fn backend_accepted_duplicate_keys_fail_before_backend_allocation() -> TestResul
 #[test]
 fn escaped_and_literal_object_keys_share_one_duplicate_identity_in_glb() -> TestResult<()> {
     let json = br#"{"asset":{"version":"2.0"},"vendor":{"a":1,"\u0061":2}}"#;
-    assert!(
-        gltf::Gltf::from_slice(json).is_ok(),
-        "the differential fixture must be accepted by the current backend"
-    );
     let duplicate = br#""\u0061""#;
     let relative_offset = json
         .windows(duplicate.len())
@@ -495,7 +487,6 @@ fn valid_json_extras_preserve_the_complete_admitted_grammar_family() -> TestResu
         }
     }"#
     .to_vec();
-    assert!(gltf::Gltf::from_slice(&document).is_ok());
 
     let (result, diagnostics) = import_assets_result(
         "grammar-family.gltf",
@@ -571,7 +562,7 @@ fn glb_authored_json_whitespace_before_space_padding_remains_valid() -> TestResu
 }
 
 #[test]
-fn glb_bin_bytes_do_not_expand_the_backend_allowance() -> TestResult<()> {
+fn glb_bin_bytes_do_not_expand_document_storage() -> TestResult<()> {
     let mut json = minimal_gltf();
     json.push(b' ');
     assert!(json.len().is_multiple_of(4));
@@ -621,7 +612,7 @@ fn glb_bin_bytes_do_not_expand_the_backend_allowance() -> TestResult<()> {
 }
 
 #[test]
-fn json_token_and_container_limits_fail_before_backend_decode() -> TestResult<()> {
+fn json_token_and_container_limits_fail_before_document_decode() -> TestResult<()> {
     let minimal = minimal_gltf();
 
     let mut token_options = GltfTestOptions::memory();
@@ -646,9 +637,9 @@ fn json_token_and_container_limits_fail_before_backend_decode() -> TestResult<()
         dimension_consumed(token_failure.ledger(), ImportDimension::DecodeWork)
             < minimal.len() as u64
     );
-    assert!(
-        dimension_attempted(token_failure.ledger(), ImportDimension::ScratchBytes) < 64 * 1024,
-        "the token limit must fail before the backend allowance"
+    assert_eq!(
+        dimension_attempted(token_failure.ledger(), ImportDimension::DependencyReference),
+        0
     );
     assert_eq!(token_failure.ledger().current_live_bytes(), 0);
 
@@ -721,7 +712,7 @@ fn json_token_and_container_limits_fail_before_backend_decode() -> TestResult<()
 }
 
 #[test]
-fn json_string_number_and_nesting_limits_are_bounded_before_backend_decode() -> TestResult<()> {
+fn json_string_number_and_nesting_limits_are_bounded_before_document_decode() -> TestResult<()> {
     for (source, document, resource) in [
         (
             "string-token-limit.gltf",
@@ -771,52 +762,25 @@ fn json_string_number_and_nesting_limits_are_bounded_before_backend_decode() -> 
 }
 
 #[test]
-fn syntax_valid_backend_rejection_remains_fail_closed() -> TestResult<()> {
+fn syntax_valid_schema_rejection_remains_fail_closed() -> TestResult<()> {
     let document = br#"{"asset":{"version":"2.0"},"scene":"not-an-index"}"#.to_vec();
-    let backend_allowance = (document.len() as u64)
-        .checked_mul(65)
-        .and_then(|bytes| bytes.checked_add(64 * 1024))
-        .expect("test backend allowance must fit u64");
-    let calibration = vec![b' '; document.len()];
-    let (calibration_result, calibration_diagnostics) = import_assets_result(
-        "backend-baseline.gltf",
-        [("backend-baseline.gltf", calibration)],
-        GltfTestOptions::memory(),
-    )?;
-    let calibration_failure = expected_error(calibration_result)?;
-    assert!(calibration_diagnostics.is_empty());
-    assert_eq!(
-        gltf_failure(&calibration_failure)?.code(),
-        GltfFailureCode::InvalidDocument.as_str()
-    );
-    let baseline_peak = calibration_failure.ledger().peak_live_bytes();
-    let live_limit = baseline_peak
-        .checked_add(backend_allowance)
-        .expect("test live-memory limit must fit u64");
-    let mut options = GltfTestOptions::memory();
-    options.limits.max_live_bytes = live_limit;
-
-    let (result, diagnostics) = import_assets_result(
-        "backend-rejection.gltf",
-        [("backend-rejection.gltf", document)],
-        options,
-    )?;
-    let failure = expected_error(result)?;
-    let envelope = gltf_failure(&failure)?;
-
-    assert!(diagnostics.is_empty());
-    assert_eq!(envelope.code(), GltfFailureCode::InvalidDocument.as_str());
-    assert!(
-        string_detail(envelope, "reason").is_some_and(|reason| reason.contains("invalid glTF"))
-    );
-    assert!(
-        failure.ledger().peak_live_bytes() >= backend_allowance,
-        "syntax scratch must be released before the opaque backend allowance; peak {}, reason {:?}, decode {}",
-        failure.ledger().peak_live_bytes(),
-        string_detail(envelope, "reason"),
-        dimension_attempted(failure.ledger(), ImportDimension::DecodeWork)
-    );
-    assert!(failure.ledger().peak_live_bytes() <= live_limit);
-    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    for (source, bytes) in [
+        ("schema.gltf", document.clone()),
+        ("schema.glb", glb_with_json(&document)),
+    ] {
+        let (result, diagnostics) =
+            import_assets_result(source, [(source, bytes)], GltfTestOptions::memory())?;
+        let failure = expected_error(result)?;
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            gltf_failure(&failure)?.code(),
+            GltfFailureCode::InvalidDocument.as_str()
+        );
+        assert_eq!(
+            dimension_attempted(failure.ledger(), ImportDimension::DependencyReference),
+            0
+        );
+        assert_eq!(failure.ledger().current_live_bytes(), 0);
+    }
     Ok(())
 }

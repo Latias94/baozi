@@ -2,6 +2,43 @@
 
 use super::*;
 
+pub(super) fn bind<'bytes>(
+    ctx: &ParseScope<'_>,
+    accessor: crate::document::Accessor<'_>,
+    buffers: &'bytes [Option<BufferData<'_>>],
+) -> Result<crate::document::read::Bound<'bytes>> {
+    Ok(crate::document::read::bind(ctx, accessor, |index| {
+        buffers
+            .get(index)
+            .and_then(Option::as_ref)
+            .map(BufferData::as_slice)
+    })?)
+}
+
+pub(super) fn vectors<'bytes, const N: usize>(
+    ctx: &ParseScope<'_>,
+    accessor: crate::document::Accessor<'_>,
+    buffers: &'bytes [Option<BufferData<'_>>],
+) -> Result<crate::document::read::Floats<'bytes, N>> {
+    bind(ctx, accessor, buffers)?.vectors().ok_or_else(|| {
+        GltfFailure::invalid_accessor(
+            Some(accessor.index()),
+            "accessor vector shape differs from its contract",
+        )
+        .into()
+    })
+}
+
+pub(super) fn optional_vectors<'bytes, const N: usize>(
+    ctx: &ParseScope<'_>,
+    accessor: Option<crate::document::Accessor<'_>>,
+    buffers: &'bytes [Option<BufferData<'_>>],
+) -> Result<Option<crate::document::read::Floats<'bytes, N>>> {
+    accessor
+        .map(|accessor| vectors(ctx, accessor, buffers))
+        .transpose()
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct AccessorContract {
     components: &'static [json::accessor::ComponentType],
@@ -48,54 +85,32 @@ pub(super) struct AccessorInfo {
 
 pub(super) fn validate_accessor(
     ctx: &ParseScope<'_>,
-    gltf: &gltf::Document,
+    gltf: &crate::document::Document<'_>,
     accessor_index: usize,
     owner: AccessorOwner,
     label: &'static str,
     contract: AccessorContract,
 ) -> Result<AccessorInfo> {
-    let accessor = gltf
-        .as_json()
-        .accessors
-        .get(accessor_index)
-        .ok_or_else(|| {
-            GltfFailure::invalid_accessor(
-                Some(accessor_index),
-                format_args!("{owner} {label} accessor reference is out of range"),
-            )
-        })?;
-    let component = match accessor.component_type {
-        Checked::Valid(component) => component.0,
-        Checked::Invalid => {
-            return Err(ContentError::parse(
-                ctx.source().to_string(),
-                None,
-                format!("{owner} {label} accessor has an invalid component type"),
-            ));
-        }
-    };
-    let dimension = match accessor.type_ {
-        Checked::Valid(dimension) => dimension,
-        Checked::Invalid => {
-            return Err(ContentError::parse(
-                ctx.source().to_string(),
-                None,
-                format!("{owner} {label} accessor has an invalid type"),
-            ));
-        }
-    };
+    let accessor = gltf.tables().accessors.get(accessor_index).ok_or_else(|| {
+        GltfFailure::invalid_accessor(
+            Some(accessor_index),
+            format_args!("{owner} {label} accessor reference is out of range"),
+        )
+    })?;
+    let component = accessor.component_type;
+    let dimension = accessor.type_;
     if !contract.components.contains(&component) || !contract.dimensions.contains(&dimension) {
         return Err(ContentError::parse(
-            ctx.source().to_string(),
+            ctx.source(),
             None,
-            format!("{owner} {label} accessor type is unsupported"),
+            format_args!("{owner} {label} accessor type is unsupported"),
         ));
     }
     if accessor.normalized && component == json::accessor::ComponentType::F32 {
         return Err(ContentError::parse(
-            ctx.source().to_string(),
+            ctx.source(),
             None,
-            format!("{owner} float {label} accessor must not be normalized"),
+            format_args!("{owner} float {label} accessor must not be normalized"),
         ));
     }
     if accessor.normalized
@@ -112,9 +127,9 @@ pub(super) fn validate_accessor(
         && !accessor.normalized
     {
         return Err(ContentError::parse(
-            ctx.source().to_string(),
+            ctx.source(),
             None,
-            format!("{owner} integer {label} accessor must be normalized"),
+            format_args!("{owner} integer {label} accessor must be normalized"),
         ));
     }
     validate_accessor_layout(
@@ -131,7 +146,7 @@ pub(super) fn validate_accessor(
         },
     )?;
 
-    let count = usize::try_from(accessor.count.0)
+    let count = usize::try_from(accessor.count)
         .map_err(|_| ctx.allocation_failure("gltf-accessor-count"))?;
     Ok(AccessorInfo { count })
 }
@@ -149,11 +164,11 @@ struct AccessorLayoutCheck<'a> {
 
 fn validate_accessor_layout(
     ctx: &ParseScope<'_>,
-    gltf: &gltf::Document,
+    gltf: &crate::document::Document<'_>,
     check: AccessorLayoutCheck<'_>,
 ) -> Result<()> {
     let invalid = |reason| GltfFailure::invalid_accessor(Some(check.index), reason);
-    if check.accessor.count.0 == 0 {
+    if check.accessor.count == 0 {
         return Err(invalid("accessor count must be positive").into());
     }
     let component_size = component_size(check.component);
@@ -163,7 +178,6 @@ fn validate_accessor_layout(
     check
         .accessor
         .count
-        .0
         .checked_mul(element_size)
         .and_then(|bytes| usize::try_from(bytes).ok())
         .ok_or_else(|| ctx.allocation_failure("gltf-accessor-decoded-size"))?;
@@ -179,7 +193,7 @@ fn validate_accessor_layout(
     let Some(sparse) = &check.accessor.sparse else {
         return Ok(());
     };
-    if sparse.count.0 == 0 || sparse.count.0 > check.accessor.count.0 {
+    if sparse.count == 0 || sparse.count > check.accessor.count {
         return Err(
             invalid("sparse count must be positive and no greater than accessor count").into(),
         );
@@ -187,13 +201,10 @@ fn validate_accessor_layout(
     // The private sequential sparse reader uses a u32 logical element cursor.
     ctx.enforce_resource_limit(
         "gltf-sparse-accessor-count",
-        check.accessor.count.0,
+        check.accessor.count,
         u64::from(u32::MAX),
     )?;
-    let index_component = match sparse.indices.component_type {
-        Checked::Valid(component) => component.0,
-        Checked::Invalid => return Err(invalid("sparse index component type is invalid").into()),
-    };
+    let index_component = sparse.indices.component_type;
     let index_size = match index_component {
         json::accessor::ComponentType::U8 => 1,
         json::accessor::ComponentType::U16 => 2,
@@ -203,13 +214,13 @@ fn validate_accessor_layout(
     for (view, offset, alignment, size) in [
         (
             sparse.indices.buffer_view.value(),
-            sparse.indices.byte_offset.0,
+            sparse.indices.byte_offset,
             index_size,
             index_size,
         ),
         (
             sparse.values.buffer_view.value(),
-            sparse.values.byte_offset.0,
+            sparse.values.byte_offset,
             component_size,
             element_size,
         ),
@@ -218,17 +229,16 @@ fn validate_accessor_layout(
         if buffer_view.byte_stride.is_some() || buffer_view.target.is_some() {
             return Err(invalid("sparse bufferView must not define byteStride or target").into());
         }
-        let view_offset = buffer_view.byte_offset.map_or(0, |offset| offset.0);
+        let view_offset = buffer_view.byte_offset.map_or(0, |offset| offset);
         if !offset.is_multiple_of(alignment) || !view_offset.is_multiple_of(alignment) {
             return Err(invalid("sparse offsets must each align to component size").into());
         }
         let end = sparse
             .count
-            .0
             .checked_mul(size)
             .and_then(|size| offset.checked_add(size))
             .ok_or_else(|| invalid("sparse accessor range overflow"))?;
-        if end > buffer_view.byte_length.0 {
+        if end > buffer_view.byte_length {
             return Err(invalid("sparse bufferView byteLength does not cover data").into());
         }
     }
@@ -236,27 +246,27 @@ fn validate_accessor_layout(
 }
 
 fn checked_buffer_view<'a>(
-    gltf: &'a gltf::Document,
+    gltf: &'a crate::document::Document<'_>,
     check: AccessorLayoutCheck<'_>,
     index: usize,
 ) -> Result<&'a json::buffer::View> {
     let invalid = |reason| GltfFailure::invalid_accessor(Some(check.index), reason);
     let view = gltf
-        .as_json()
+        .tables()
         .buffer_views
         .get(index)
         .ok_or_else(|| invalid("accessor bufferView reference is out of range"))?;
     let buffer = gltf
-        .as_json()
+        .tables()
         .buffers
         .get(view.buffer.value())
         .ok_or_else(|| invalid("accessor buffer reference is out of range"))?;
     let end = view
         .byte_offset
-        .map_or(0, |offset| offset.0)
-        .checked_add(view.byte_length.0)
+        .map_or(0, |offset| offset)
+        .checked_add(view.byte_length)
         .ok_or_else(|| invalid("accessor bufferView range overflow"))?;
-    if end > buffer.byte_length.0 {
+    if end > buffer.byte_length {
         return Err(invalid("accessor bufferView exceeds declared buffer byteLength").into());
     }
     Ok(view)
@@ -264,7 +274,7 @@ fn checked_buffer_view<'a>(
 
 fn validate_base_layout(
     ctx: &ParseScope<'_>,
-    gltf: &gltf::Document,
+    gltf: &crate::document::Document<'_>,
     check: AccessorLayoutCheck<'_>,
     component_size: u64,
     element_size: u64,
@@ -276,29 +286,29 @@ fn validate_base_layout(
     let stride = match buffer_view.byte_stride {
         Some(_) if !check.contract.allow_stride => {
             return Err(ContentError::parse(
-                ctx.source().to_string(),
+                ctx.source(),
                 None,
-                format!(
+                format_args!(
                     "{} {} accessor uses byteStride where it is unsupported",
                     check.owner, check.label
                 ),
             ));
         }
-        Some(stride) if !stride.0.is_multiple_of(4) => {
+        Some(stride) if !stride.is_multiple_of(4) => {
             return Err(GltfFailure::invalid_accessor(
                 Some(check.index),
                 "accessor byteStride must be a multiple of four",
             )
             .into());
         }
-        Some(stride) => stride.0 as u64,
+        Some(stride) => stride as u64,
         None => element_size,
     };
     if stride < element_size {
         return Err(ContentError::parse(
-            ctx.source().to_string(),
+            ctx.source(),
             None,
-            format!(
+            format_args!(
                 "{} {} byteStride is smaller than the accessor element size",
                 check.owner, check.label
             ),
@@ -306,18 +316,18 @@ fn validate_base_layout(
     }
     if !stride.is_multiple_of(component_size) {
         return Err(ContentError::parse(
-            ctx.source().to_string(),
+            ctx.source(),
             None,
-            format!(
+            format_args!(
                 "{} {} byteStride is not aligned to component size",
                 check.owner, check.label
             ),
         ));
     }
 
-    let view_offset = buffer_view.byte_offset.map_or(0, |offset| offset.0);
-    let view_length = buffer_view.byte_length.0;
-    let accessor_offset = check.accessor.byte_offset.map_or(0, |offset| offset.0);
+    let view_offset = buffer_view.byte_offset.map_or(0, |offset| offset);
+    let view_length = buffer_view.byte_length;
+    let accessor_offset = check.accessor.byte_offset.map_or(0, |offset| offset);
     if check.contract.allow_stride && !accessor_offset.is_multiple_of(4) {
         return Err(GltfFailure::invalid_accessor(
             Some(check.index),
@@ -329,33 +339,33 @@ fn validate_base_layout(
         || !view_offset.is_multiple_of(component_size)
     {
         return Err(ContentError::parse(
-            ctx.source().to_string(),
+            ctx.source(),
             None,
-            format!(
+            format_args!(
                 "{} {} byte offset is not aligned to component size",
                 check.owner, check.label
             ),
         ));
     }
 
-    let required = required_accessor_bytes(check.accessor.count.0, element_size, stride)
-        .ok_or_else(|| {
+    let required =
+        required_accessor_bytes(check.accessor.count, element_size, stride).ok_or_else(|| {
             gltf_parse_error(
                 ctx,
-                format!("{} {} byte range overflow", check.owner, check.label),
+                format_args!("{} {} byte range overflow", check.owner, check.label),
             )
         })?;
     let accessor_end = accessor_offset.checked_add(required).ok_or_else(|| {
         gltf_parse_error(
             ctx,
-            format!("{} {} accessor range overflow", check.owner, check.label),
+            format_args!("{} {} accessor range overflow", check.owner, check.label),
         )
     })?;
     if accessor_end > view_length {
         return Err(ContentError::parse(
-            ctx.source().to_string(),
+            ctx.source(),
             None,
-            format!(
+            format_args!(
                 "{} {} bufferView byteLength does not cover accessor data",
                 check.owner, check.label
             ),
@@ -370,11 +380,11 @@ fn validate_base_layout(
 /// silently retain base values. Borrow the admitted buffers instead of collecting another table.
 pub(super) fn validate_sparse_indices(
     ctx: &ParseScope<'_>,
-    gltf: &gltf::Document,
+    gltf: &crate::document::Document<'_>,
     buffers: &[Option<BufferData<'_>>],
     closure: &ResourceClosure<'_>,
 ) -> Result<()> {
-    use gltf::accessor::sparse::IndexType;
+    use crate::document::IndexType;
 
     for (ordinal, accessor) in gltf.accessors().enumerate() {
         ctx.charge_work(1)?;

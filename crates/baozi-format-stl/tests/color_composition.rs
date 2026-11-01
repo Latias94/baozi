@@ -43,7 +43,9 @@ fn assert_composition(
     assert_eq!(scene.primitive_count(), 1);
     let primitive = scene.meshes().next().unwrap().primitives().next().unwrap();
     assert_eq!(primitive.vertex_count() as usize, 3 * expected_facets.len());
-    let material = primitive.material().expect("STL material binding");
+    let material = primitive
+        .effective_material()
+        .expect("STL material binding");
     assert_eq!(material.alpha_mode(), expected_alpha);
     let factors = material.factors();
     assert!(factors.legacy().is_none());

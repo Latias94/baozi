@@ -38,8 +38,6 @@ pub enum TangentCause {
     Issue { issue: TangentIssue },
     #[error("tangent generation size or work bound overflowed")]
     SizeOverflow,
-    #[error("tangent generation requires {required} work units, above the {maximum} unit limit")]
-    WorkLimit { required: u64, maximum: u64 },
     #[error("tangent generation stopped: {cause}")]
     Control {
         #[source]
@@ -186,16 +184,11 @@ impl From<super::input::InputError> for TangentCause {
     fn from(error: super::input::InputError) -> Self {
         use super::input::InputError;
         match error {
-            InputError::Target(source) => Self::Target { source },
-            InputError::UnsupportedTopology => Self::UnsupportedTopology,
             InputError::Positions => Self::Positions,
             InputError::NormalField => Self::NormalField,
             InputError::UvField => Self::UvField,
             InputError::UnsupportedDomain => Self::UnsupportedDomain,
-            InputError::MultipleTangentFields => Self::MultipleTangentFields,
-            InputError::MorphDeltas => Self::MorphDeltas,
             InputError::SizeOverflow => Self::SizeOverflow,
-            InputError::WorkLimit { required, maximum } => Self::WorkLimit { required, maximum },
             InputError::Runtime(source) => source.into(),
             InputError::Issue(issue) => Self::Issue { issue },
         }

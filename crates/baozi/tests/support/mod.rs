@@ -120,7 +120,7 @@ pub(crate) fn submit_point_geometry_scene(scope: &mut ParseScope<'_>) -> ParseRe
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::Points,
         Presence::Absent,
-        Presence::Absent,
+        baozi::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 1),
     )];
     let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];

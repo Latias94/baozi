@@ -340,7 +340,7 @@ impl<'a> GeometryAttributeAuthoring<'a> {
 pub struct GeometryPrimitiveAuthoring<'a> {
     topology: GeometryTopologyAuthoring<'a>,
     indices: Presence<&'a [u32]>,
-    material: Presence<MaterialLocalId>,
+    material: crate::MaterialAssignment<MaterialLocalId>,
     attributes: AuthoringRange,
 }
 
@@ -348,7 +348,7 @@ impl<'a> GeometryPrimitiveAuthoring<'a> {
     pub const fn new(
         topology: GeometryTopologyAuthoring<'a>,
         indices: Presence<&'a [u32]>,
-        material: Presence<MaterialLocalId>,
+        material: crate::MaterialAssignment<MaterialLocalId>,
         attributes: AuthoringRange,
     ) -> Self {
         Self {
@@ -367,7 +367,9 @@ impl<'a> GeometryPrimitiveAuthoring<'a> {
         self.indices
     }
 
-    pub(in crate::canonical_scene::store) const fn material(self) -> Presence<MaterialLocalId> {
+    pub(in crate::canonical_scene::store) const fn material_assignment(
+        self,
+    ) -> crate::MaterialAssignment<MaterialLocalId> {
         self.material
     }
 

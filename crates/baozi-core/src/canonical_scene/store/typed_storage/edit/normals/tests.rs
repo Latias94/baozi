@@ -307,7 +307,7 @@ fn geometry(normal: bool, tangent: bool) -> GeometryStorage {
             face_count: 1,
             polygon_boundaries: None,
             indices: None,
-            material: Some(0),
+            material: crate::MaterialAssignment::Authored(0),
             attributes: TableRange::new(0, target_start),
         },
         StoredPrimitive {
@@ -317,7 +317,7 @@ fn geometry(normal: bool, tangent: bool) -> GeometryStorage {
             face_count: 2,
             polygon_boundaries: None,
             indices: Some(indices),
-            material: Some(1),
+            material: crate::MaterialAssignment::Authored(1),
             attributes: TableRange::new(target_start, target_end - target_start),
         },
         StoredPrimitive {
@@ -327,7 +327,7 @@ fn geometry(normal: bool, tangent: bool) -> GeometryStorage {
             face_count: 1,
             polygon_boundaries: Some(boundaries),
             indices: Some(right_indices),
-            material: None,
+            material: crate::MaterialAssignment::Unspecified,
             attributes: TableRange::new(target_end, storage.attributes.len() - target_end),
         },
     ];
@@ -739,15 +739,9 @@ fn replace_and_add_keep_canonical_order_preserve_payloads_and_compact_removed_ra
                 }
                 let actual =
                     &output.attributes[plan.output_attribute(index as u32).unwrap() as usize];
-                assert!(
-                    compare_payload(
-                        row.payload,
-                        actual.payload,
-                        &source,
-                        &output,
-                        &mut Control::default()
-                    )
-                    .unwrap()
+                assert_eq!(
+                    payload_signature(row.payload, &source),
+                    payload_signature(actual.payload, &output)
                 );
             }
         }
@@ -1368,7 +1362,7 @@ fn correspondence_compares_bits_and_sparse_explicitness_and_rejects_descriptor_c
             };
             output.u32_values[indices.start()] = 0;
         },
-        |output| output.primitives[1].material = Some(0),
+        |output| output.primitives[1].material = crate::MaterialAssignment::Authored(0),
         |output| output.u32_values.push(0),
     ];
     for mutate in mutations {
@@ -1451,4 +1445,71 @@ fn correspondence_is_independent_of_private_pool_offsets() {
         Ok(true)
     );
     assert_eq!(control.completed, plan.correspondence_work());
+}
+
+fn payload_signature(
+    payload: StoredAttributePayload,
+    storage: &GeometryStorage,
+) -> (u8, Vec<u32>, Vec<u8>, Vec<u8>) {
+    macro_rules! dense {
+        ($tag:expr, $range:expr, $pool:ident) => {{
+            (
+                $tag,
+                Vec::new(),
+                $range
+                    .get(&storage.$pool)
+                    .unwrap()
+                    .iter()
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect(),
+                Vec::new(),
+            )
+        }};
+    }
+    macro_rules! sparse {
+        ($tag:expr, $indices:expr, $values:expr, $default:expr, $pool:ident) => {{
+            (
+                $tag,
+                $indices.get(&storage.u32_values).unwrap().to_vec(),
+                $values
+                    .get(&storage.$pool)
+                    .unwrap()
+                    .iter()
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect(),
+                $default
+                    .get(&storage.$pool)
+                    .unwrap()
+                    .iter()
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect(),
+            )
+        }};
+    }
+    match payload {
+        StoredAttributePayload::DenseF32(r) => dense!(0, r, f32_values),
+        StoredAttributePayload::DenseF64(r) => dense!(1, r, f64_values),
+        StoredAttributePayload::DenseU32(r) => dense!(2, r, u32_values),
+        StoredAttributePayload::DenseI32(r) => dense!(3, r, i32_values),
+        StoredAttributePayload::SparseF32 {
+            indices,
+            values,
+            default,
+        } => sparse!(4, indices, values, default, f32_values),
+        StoredAttributePayload::SparseF64 {
+            indices,
+            values,
+            default,
+        } => sparse!(5, indices, values, default, f64_values),
+        StoredAttributePayload::SparseU32 {
+            indices,
+            values,
+            default,
+        } => sparse!(6, indices, values, default, u32_values),
+        StoredAttributePayload::SparseI32 {
+            indices,
+            values,
+            default,
+        } => sparse!(7, indices, values, default, i32_values),
+    }
 }

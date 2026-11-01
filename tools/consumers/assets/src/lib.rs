@@ -3,19 +3,21 @@
 //! A concrete offline consumer using only public Baozi and native-candidate APIs.
 
 mod buffers;
+mod evaluation;
 
 pub use buffers::*;
+pub use evaluation::*;
 
 use std::{collections::HashSet, path::Path, time::Instant};
 
 use baozi::{
     AssetIo, AssetPath, Axis, FrontFaceWinding, Handedness, ImportConfigOverlay, ImportDimension,
     ImportEvidence, ImportOperationControl, ImportRequest, ImportRequestLayer, Importer,
-    OptionCompileLimits, PrimitiveRef, ProvenanceKindRef, ResourceLimitsOverlay, TargetSpace,
-    TopologyKind, ValidatedScene,
+    OptionCompileLimits, ProvenanceKindRef, ResourceLimitsOverlay, TargetSpace, ValidatedScene,
     postprocess::{
-        NormalOptions, PostProcessControl, PostProcessReport, SpaceConversionOptions,
-        convert_scene_space, generate_normals, triangulate_primitive,
+        NormalOptions, NormalOrientation, PostProcessBudgets, PostProcessControl,
+        PostProcessReport, SpaceConversionOptions, TrianglePreparationOptions, convert_scene_space,
+        prepare_triangles,
     },
 };
 use baozi_native_io_candidate::{FileSystemAssetIo, NativeDirectoryCapability};
@@ -27,6 +29,7 @@ pub struct Options {
     pub target: TargetSpace,
     pub source_assumptions: Option<TargetSpace>,
     pub max_work_units: u64,
+    pub postprocess_budgets: PostProcessBudgets,
 }
 
 impl Default for Options {
@@ -42,6 +45,7 @@ impl Default for Options {
             .expect("fixed application coordinate convention is valid"),
             source_assumptions: None,
             max_work_units: 200_000_000,
+            postprocess_budgets: PostProcessBudgets::default(),
         }
     }
 }
@@ -60,6 +64,7 @@ pub struct Metrics {
     pub max_postprocess_peak_live_bytes: u64,
     pub opened_assets: u64,
     pub changed_operations: usize,
+    pub selected_geometry_reconstructions: u32,
     pub traced_primitive_owners: usize,
     pub traced_provenance_nodes: usize,
     pub traced_source_objects: usize,
@@ -110,43 +115,39 @@ pub fn process(io: &dyn AssetIo, source: AssetPath, options: Options) -> Result<
     };
     let (mut scene, import_evidence) = report.into_parts();
     let started = Instant::now();
-    // These operations preserve logical mesh/primitive order. Reacquire a current-generation
-    // handle at each edit boundary; never reuse a collected ID after an earlier edit publishes.
-    for mesh in 0..scene.mesh_count() {
-        let count = scene
-            .meshes()
-            .nth(mesh)
-            .ok_or("missing logical mesh")?
-            .primitive_count();
-        for primitive in 0..count {
-            let current = primitive_at(&scene, mesh, primitive)?;
-            let id = current.id();
-            match current.topology() {
-                TopologyKind::Polygons => {
-                    let (next, report) =
-                        triangulate_primitive(scene, id, PostProcessControl::default())?
-                            .into_parts();
-                    record(&mut metrics, &report);
-                    scene = next;
-                }
-                TopologyKind::TriangleList => {}
-                topology => return Err(format!("application requires triangle meshes, found {topology:?} in mesh {mesh}, primitive {primitive}").into()),
-            }
+    let mut targets = Vec::new();
+    targets.try_reserve_exact(scene.primitive_count())?;
+    for mesh in scene.meshes() {
+        for primitive in mesh.primitives() {
+            targets.push(primitive.id());
         }
     }
-    // Normal generation uses the stored numeric cross product. Establish CCW fronts before
-    // generating a missing field, including when the caller declares a clockwise source.
-    let normal_space = TargetSpace::try_new(
-        options.target.handedness(),
-        options.target.up_axis(),
-        options.target.front_axis(),
-        options.target.unit_scale_to_meters(),
-        FrontFaceWinding::CounterClockwise,
-    )?;
-    let (next, report) = convert_scene_space(
+    let (prepared, report) = prepare_triangles(
         scene,
+        &targets,
+        TrianglePreparationOptions {
+            normals: Some(NormalOptions::default()),
+            orientation: NormalOrientation::SceneFrontFace {
+                assume_unknown: options
+                    .source_assumptions
+                    .map(TargetSpace::front_face_winding),
+            },
+            budgets: options.postprocess_budgets,
+            ..TrianglePreparationOptions::default()
+        },
+        PostProcessControl::default(),
+    )?
+    .into_parts();
+    record(&mut metrics, &report);
+    metrics.selected_geometry_reconstructions = report
+        .geometry_preparation()
+        .map_or(0, |report| report.geometry_reconstruction_count());
+    drop(report);
+    drop(targets);
+    let (converted, report) = convert_scene_space(
+        prepared,
         SpaceConversionOptions {
-            target: normal_space,
+            target: options.target,
             source_assumptions: options.source_assumptions,
         },
         PostProcessControl::default(),
@@ -154,39 +155,7 @@ pub fn process(io: &dyn AssetIo, source: AssetPath, options: Options) -> Result<
     .into_parts();
     record(&mut metrics, &report);
     drop(report);
-    scene = next;
-    for mesh in 0..scene.mesh_count() {
-        let count = scene
-            .meshes()
-            .nth(mesh)
-            .ok_or("missing logical mesh")?
-            .primitive_count();
-        for primitive in 0..count {
-            let id = primitive_at(&scene, mesh, primitive)?.id();
-            let (next, report) = generate_normals(
-                scene,
-                id,
-                NormalOptions::default(),
-                PostProcessControl::default(),
-            )?
-            .into_parts();
-            record(&mut metrics, &report);
-            scene = next;
-        }
-    }
-    if options.target.front_face_winding() != normal_space.front_face_winding() {
-        let (next, report) = convert_scene_space(
-            scene,
-            SpaceConversionOptions {
-                target: options.target,
-                source_assumptions: None,
-            },
-            PostProcessControl::default(),
-        )?
-        .into_parts();
-        record(&mut metrics, &report);
-        scene = next;
-    }
+    scene = converted;
     metrics.postprocess_micros = started.elapsed().as_micros();
 
     let started = Instant::now();
@@ -240,14 +209,6 @@ fn trace_primitive_sources(scene: &ValidatedScene, metrics: &mut Metrics) -> Res
     metrics.traced_provenance_nodes = visited.len();
     metrics.traced_source_objects = sources.len();
     Ok(())
-}
-
-fn primitive_at(scene: &ValidatedScene, mesh: usize, primitive: usize) -> Result<PrimitiveRef<'_>> {
-    scene
-        .meshes()
-        .nth(mesh)
-        .and_then(|m| m.primitives().nth(primitive))
-        .ok_or_else(|| format!("missing mesh {mesh}, primitive {primitive} after edit").into())
 }
 
 fn record(metrics: &mut Metrics, report: &PostProcessReport) {

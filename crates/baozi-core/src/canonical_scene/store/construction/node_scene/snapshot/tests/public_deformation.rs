@@ -199,7 +199,7 @@ fn deformation_scene(account: &PhysicalStorageAccount) -> NodeSceneSuccessParts 
         GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::Points,
             Presence::Absent,
-            Presence::Absent,
+            crate::MaterialAssignment::Unspecified,
             if index == 0 {
                 AuthoringRange::new(0, 3)
             } else {

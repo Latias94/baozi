@@ -15,6 +15,7 @@ use baozi_operation::{
 };
 use thiserror::Error;
 
+#[cfg(test)]
 use crate::attribute::AttributeDomain;
 use crate::canonical_scene::store::construction::GENERATION_EXHAUSTED_CODE;
 use crate::canonical_scene::store::construction::node_scene::SceneStorage;
@@ -91,12 +92,17 @@ pub struct SceneEditHandoffToken {
 /// Published effects for exactly one concrete Scene operation.
 #[must_use = "published Scene edit evidence owns its rooted storage"]
 pub enum SceneEditEvidence {
+    #[cfg(test)]
     Triangulation(SceneTriangulationEvidence),
+    #[cfg(test)]
     Normals(SceneNormalGenerationEvidence),
+    #[cfg(test)]
     Tangents(SceneTangentGenerationEvidence),
     SpaceConversion(SceneSpaceConversionEvidence),
+    Selection(SceneGeometrySelectionEvidence),
 }
 
+#[cfg(test)]
 struct GeometryEvidenceOwner {
     input_target: PrimitiveId,
     output_target: PrimitiveId,
@@ -179,6 +185,7 @@ impl SceneSpaceConversionEvidence {
 }
 
 /// Triangulation evidence with both centrally validated origin relations present.
+#[cfg(test)]
 pub struct SceneTriangulationEvidence {
     owner: GeometryEvidenceOwner,
     corner_origins: baozi_operation::OutcomeEvidenceSequenceRef<u32, SceneGeometryCornerOriginsTag>,
@@ -187,6 +194,7 @@ pub struct SceneTriangulationEvidence {
     vertices: u32,
 }
 
+#[cfg(test)]
 impl SceneTriangulationEvidence {
     pub const fn input_target(&self) -> PrimitiveId {
         self.owner.input_target
@@ -225,6 +233,7 @@ impl SceneTriangulationEvidence {
 
 /// Normal-generation effects decoded once from the centrally validated root.
 /// The retained root owner remains alive independently of the Scene.
+#[cfg(test)]
 pub struct SceneNormalGenerationEvidence {
     owner: GeometryEvidenceOwner,
     effects: u32,
@@ -232,6 +241,7 @@ pub struct SceneNormalGenerationEvidence {
     normal_attribute: u32,
 }
 
+#[cfg(test)]
 impl SceneNormalGenerationEvidence {
     pub const fn input_target(&self) -> PrimitiveId {
         self.owner.input_target
@@ -263,6 +273,7 @@ impl SceneNormalGenerationEvidence {
 }
 
 /// Tangent-generation facts retained independently of the published Scene.
+#[cfg(test)]
 pub struct SceneTangentGenerationEvidence {
     owner: GeometryEvidenceOwner,
     replaced: bool,
@@ -273,6 +284,7 @@ pub struct SceneTangentGenerationEvidence {
     uv_domain: AttributeDomain,
 }
 
+#[cfg(test)]
 impl SceneTangentGenerationEvidence {
     pub const fn input_generation(&self) -> SceneGenerationId {
         self.owner.input_target.generation()
@@ -382,6 +394,35 @@ impl SceneEditHandoffToken {
                 return Err(invalid);
             }
             match root.scalar::<u32>(0, super::schema::field::OPERATION_KIND) {
+                Some(super::schema::OPERATION_SELECTION) => {
+                    let super::SceneEditTarget::WholeScene(input_generation) =
+                        self.proof.input_target
+                    else {
+                        return Err(invalid);
+                    };
+                    let targets = root.scalar::<u32>(0, 4).ok_or(invalid)?;
+                    let corners = root
+                        .sequence_ref::<u32, SceneGeometryCornerOriginsTag>(
+                            0,
+                            super::schema::field::CORNER_ORIGINS,
+                        )
+                        .ok_or(invalid)?;
+                    let faces = root
+                        .sequence_ref::<u32, SceneGeometryFaceOffsetsTag>(
+                            0,
+                            super::schema::field::FACE_OFFSETS,
+                        )
+                        .ok_or(invalid)?;
+                    SceneEditEvidence::Selection(SceneGeometrySelectionEvidence {
+                        store: published.outcome_evidence,
+                        input_generation,
+                        output_generation: self.generation.id(),
+                        targets,
+                        corners,
+                        faces,
+                    })
+                }
+                #[cfg(test)]
                 Some(super::schema::OPERATION_NORMALS) => {
                     let super::SceneEditTarget::Primitive(input_target) = self.proof.input_target
                     else {
@@ -424,6 +465,7 @@ impl SceneEditHandoffToken {
                         normal_attribute,
                     })
                 }
+                #[cfg(test)]
                 Some(super::schema::OPERATION_TANGENTS) => {
                     let super::SceneEditTarget::Primitive(input_target) = self.proof.input_target
                     else {
@@ -484,6 +526,7 @@ impl SceneEditHandoffToken {
                         uv_domain,
                     })
                 }
+                #[cfg(test)]
                 Some(super::schema::OPERATION_TRIANGULATE) => {
                     let super::SceneEditTarget::Primitive(input_target) = self.proof.input_target
                     else {
@@ -612,6 +655,7 @@ impl SceneEditHandoffToken {
     }
 }
 
+#[cfg(test)]
 fn decode_tangent_domain(value: u32) -> Option<AttributeDomain> {
     match value {
         0 => Some(AttributeDomain::Vertex),
@@ -696,4 +740,139 @@ where
             seal,
         )
     }))
+}
+
+/// The rooted selected-target descriptors and origins from one atomic publication.
+pub struct SceneGeometrySelectionEvidence {
+    store: PublishedOutcomeEvidenceStore<RecordBlock, SceneEditEvidenceTag>,
+    input_generation: SceneGenerationId,
+    output_generation: SceneGenerationId,
+    targets: u32,
+    corners: baozi_operation::OutcomeEvidenceSequenceRef<u32, SceneGeometryCornerOriginsTag>,
+    faces: baozi_operation::OutcomeEvidenceSequenceRef<u32, SceneGeometryFaceOffsetsTag>,
+}
+
+impl SceneGeometrySelectionEvidence {
+    pub const fn input_generation(&self) -> SceneGenerationId {
+        self.input_generation
+    }
+    pub const fn output_generation(&self) -> SceneGenerationId {
+        self.output_generation
+    }
+    pub fn reconstruction_work_items(&self) -> u64 {
+        self.store
+            .root()
+            .scalar::<u64>(0, super::schema::field::SOURCE_UNIT_BITS)
+            .expect("validated reconstruction work")
+    }
+    pub fn geometry_reconstruction_count(&self) -> u32 {
+        self.store
+            .root()
+            .scalar::<u32>(0, 5)
+            .expect("validated reconstruction count")
+    }
+    pub fn reconstructed_primitive_count(&self) -> u32 {
+        self.store
+            .root()
+            .scalar::<u32>(0, 6)
+            .expect("validated reconstructed primitive count")
+    }
+    pub fn removed_metadata_entries(&self) -> u32 {
+        self.store
+            .root()
+            .scalar::<u32>(0, 7)
+            .expect("validated metadata count")
+    }
+    pub const fn len(&self) -> usize {
+        self.targets as usize
+    }
+    pub const fn is_empty(&self) -> bool {
+        self.targets == 0
+    }
+    pub fn target(&self, index: usize) -> Option<SceneGeometryTargetEvidence<'_>> {
+        if index >= self.len() {
+            return None;
+        }
+        let all = self.store.sequence(self.faces)?.as_slice();
+        let words = all.get(
+            index * super::selected::TARGET_WORDS..(index + 1) * super::selected::TARGET_WORDS,
+        )?;
+        Some(SceneGeometryTargetEvidence { owner: self, words })
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct SceneGeometryTargetEvidence<'a> {
+    owner: &'a SceneGeometrySelectionEvidence,
+    words: &'a [u32],
+}
+impl SceneGeometryTargetEvidence<'_> {
+    /// Whether this target actually lowered topology or generated/removed a field.
+    pub fn changed(self) -> bool {
+        self.words[10] & 0x0f != 0
+    }
+    pub fn input_target(self) -> PrimitiveId {
+        PrimitiveId::new(
+            crate::identity::LogicalMeshId::new(self.owner.input_generation, self.words[0]),
+            self.words[1],
+        )
+    }
+    pub fn output_target(self) -> PrimitiveId {
+        self.input_target().rebind(self.owner.output_generation)
+    }
+    pub fn source_corner_count(self) -> u32 {
+        self.words[4]
+    }
+    pub fn vertex_count(self) -> u32 {
+        self.words[3]
+    }
+    pub fn output_corner_count(self) -> u32 {
+        self.words[6]
+    }
+    pub fn output_face_count(self) -> u32 {
+        self.words[7]
+    }
+    pub fn normal_attribute_index(self) -> Option<u32> {
+        (self.words[8] != u32::MAX).then_some(self.words[8])
+    }
+    pub fn tangent_attribute_index(self) -> Option<u32> {
+        (self.words[9] != u32::MAX).then_some(self.words[9])
+    }
+    pub fn lowered(self) -> bool {
+        self.words[10] & 1 != 0
+    }
+    pub fn removed_tangent(self) -> bool {
+        self.words[10] & 8 != 0
+    }
+    pub fn replaced_normal(self) -> bool {
+        self.words[10] & 16 != 0
+    }
+    pub fn replaced_tangent(self) -> bool {
+        self.words[10] & 32 != 0
+    }
+    pub fn smooth(self) -> bool {
+        self.words[10] & 64 != 0
+    }
+}
+impl<'a> SceneGeometryTargetEvidence<'a> {
+    pub fn corner_origins(self) -> Option<&'a [u32]> {
+        if !self.lowered() {
+            return None;
+        }
+        self.owner
+            .store
+            .sequence(self.owner.corners)?
+            .as_slice()
+            .get(self.words[11] as usize..self.words[11] as usize + self.words[6] as usize)
+    }
+    pub fn face_offsets(self) -> Option<&'a [u32]> {
+        if !self.lowered() {
+            return None;
+        }
+        self.owner
+            .store
+            .sequence(self.owner.faces)?
+            .as_slice()
+            .get(self.words[12] as usize..self.words[12] as usize + self.words[13] as usize)
+    }
 }

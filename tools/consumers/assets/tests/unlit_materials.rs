@@ -4,8 +4,8 @@ use baozi::{
     AlphaMode, AssetOpenErrorKind, AssetPath, AttributeData, AttributeDomain, AttributeSemanticRef,
     DiagnosticSeverity, ImmutableMemoryAssetIo, ImportCause, ImportConfigOverlay, ImportDimension,
     ImportLossKind, ImportOperationControl, ImportRequest, ImportRequestLayer, Importer,
-    LossPolicy, OptionCompileLimits, ScopeAbortCause, ShadingModel, SourceScopeEntityKind,
-    TextureRole, TextureTransform, ValidatedScene,
+    LossPolicy, MaterialAssignment, OptionCompileLimits, ScopeAbortCause, ShadingModel,
+    SourceScopeEntityKind, TextureRole, TextureTransform, ValidatedScene,
     postprocess::{
         PostProcessControl, PostProcessRunDisposition, SpaceConversionOptions, convert_scene_space,
     },
@@ -239,11 +239,25 @@ fn optional_and_required_unlit_survive_conversion_and_source_owner_destruction()
             (4, 4, 5)
         );
         for (index, material) in asset.materials.iter().enumerate() {
-            assert_eq!(asset.draws[index].material, Some(index));
-            for vertex in &asset.draws[index].vertices {
+            assert_eq!(
+                asset.draws[index].material,
+                MaterialAssignment::Authored(index)
+            );
+            let draw = &asset.draws[index];
+            assert_eq!(
+                draw.uv_streams
+                    .iter()
+                    .map(|stream| stream.set)
+                    .collect::<Vec<_>>(),
+                [0, 1]
+            );
+            for (vertex_index, vertex) in draw.vertices.iter().enumerate() {
                 let source = UV0
                     .chunks_exact(2)
-                    .position(|uv| vertex.uv == Some([f64::from(uv[0]), f64::from(uv[1])]))
+                    .position(|uv| {
+                        draw.uv_stream(0).unwrap().values[vertex_index]
+                            == [f64::from(uv[0]), f64::from(uv[1])]
+                    })
                     .ok_or("missing source UV for owned vertex color")?;
                 let expected: [f32; 4] = COLORS[source * 4..source * 4 + 4].try_into()?;
                 assert_eq!(
@@ -282,8 +296,11 @@ fn optional_and_required_unlit_survive_conversion_and_source_owner_destruction()
             assert_eq!([emissive.x, emissive.y, emissive.z], [0.125, 0.25, 0.5]);
             assert_eq!(material.bindings.len(), BINDINGS.len());
             for (image, binding) in material.bindings.iter().enumerate() {
-                assert_eq!((binding.role, binding.image), (BINDINGS[image].0, image));
-                assert_eq!(asset.images[binding.image], PNG);
+                assert_eq!((binding.role, binding.texture), (BINDINGS[image].0, image));
+                let texture = &asset.textures[binding.texture];
+                assert_eq!(texture.image, image);
+                assert_eq!(asset.images[texture.image].encoded_bytes, PNG);
+                assert!(texture.sampler < asset.samplers.len());
                 let transform = binding.transform;
                 if image == 0 {
                     assert_eq!(binding.uv_set, 1);
@@ -373,11 +390,14 @@ fn unlit_base_factor_and_plain_texture_keep_default_material_state() -> Result<(
         if textured {
             let binding = &material.bindings[0];
             assert_eq!(
-                (binding.role, binding.image, binding.uv_set),
+                (binding.role, binding.texture, binding.uv_set),
                 (TextureRole::BaseColor, 0, 0)
             );
             assert_eq!(binding.transform, TextureTransform::IDENTITY);
-            assert_eq!(asset.images[binding.image], PNG);
+            assert_eq!(
+                asset.images[asset.textures[binding.texture].image].encoded_bytes,
+                PNG
+            );
         }
     }
     Ok(())

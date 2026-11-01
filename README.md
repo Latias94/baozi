@@ -7,8 +7,8 @@ Current status: experimental parser foundation. STL, OBJ/MTL, and PLY have owned
 fixture and fuzz coverage. The glTF/GLB selected-scene PBR, skin, morph, and TRS animation profile
 is available through `format-gltf`; its [exact restrictions](docs/formats/gltf.md) apply.
 Scene nodes, geometry, materials, images, skins, morphs, and animation have borrowed typed readers.
-The optional `postprocess` feature provides explicit single-primitive triangulation, flat/smooth
-normal generation, and whole-Scene coordinate/unit conversion including skins, morph deltas,
+The optional `postprocess` feature provides atomic selected-primitive triangle preparation,
+flat/smooth normals, explicit tangent generation, and whole-Scene coordinate/unit conversion including skins, morph deltas,
 TRS animation curves, camera projections, light definitions, and material lengths.
 Its allocation-free `triangle_vertices` reader exposes borrowed application tuples; applications
 select their fields and allocate their own vertex/index buffers.
@@ -34,7 +34,7 @@ Bounded snapshots are available separately for test and debug evidence.
 | `baozi-format-stl` | STL importer |
 | `baozi-format-obj` | OBJ/MTL importer |
 | `baozi-format-ply` | PLY importer; admitted for source builds but not yet published |
-| `baozi-format-gltf` | Selected glTF/GLB profile with a private maintained decoder; source-admitted |
+| `baozi-format-gltf` | Selected glTF/GLB profile with a private metered document decoder; source-admitted |
 | `baozi-test-support` | Format maturity and generated fixture helpers |
 | `baozi-xtask` | Bounded repository conformance and architecture-support checks; ADR semantics remain human-reviewed |
 
@@ -81,6 +81,12 @@ cargo run --locked -p baozi --example diagnostics
 cargo run --locked -p baozi --example wasm_memory
 ```
 
+For host files and relative sidecars, the [host bundle example](crates/baozi/examples/import_host_bundle.rs)
+snapshots an explicit approved OBJ/MTL/image list into `MemoryAssetIo`, with per-file and aggregate
+limits. Run `cargo run --locked -p baozi --example import_host_bundle -- <bundle-directory>` with
+the three relative paths listed in the example. The application chooses filesystem authority and
+link policy; the importer receives immutable memory assets.
+
 Baozi requires the Rust standard library; `default-features = false` selects no built-in formats.
 The curated `default-formats` set contains STL and OBJ/MTL, while `all-formats` also enables PLY and glTF/GLB.
 Individual `format-stl`, `format-obj`, `format-ply`, and `format-gltf` features enable one parser each. Optional
@@ -93,11 +99,14 @@ benchmarks require `format-obj`.
 that registry before freezing it; `Importer::builder()` starts an empty registry. Format authoring
 remains in the `baozi_import` extension API.
 
-With `format-obj` and `postprocess` enabled, triangulate a polygon and generate smooth Corner normals:
+With `format-obj` and `postprocess` enabled, lower a polygon and generate Corner normals in one
+transaction:
 
 ```rust
 use baozi::{AttributeDomain, Importer};
-use baozi::postprocess::{NormalOptions, PostProcessControl, generate_normals, triangulate_primitive};
+use baozi::postprocess::{
+    NormalOptions, PostProcessControl, TrianglePreparationOptions, prepare_triangles,
+};
 
 let import = Importer::new()?.read_bytes(
     "quad.obj",
@@ -105,38 +114,54 @@ let import = Importer::new()?.read_bytes(
 )?;
 let (scene, import_evidence) = import.into_parts();
 let target = scene.meshes().next().unwrap().primitives().next().unwrap().id();
-let outcome = triangulate_primitive(scene, target, PostProcessControl::default())?;
-let (triangles, report) = outcome.into_parts();
-assert!(report.matches_scene(&triangles));
-let target = report.triangulation_remap().unwrap().output_target();
-let (scene, normals_report) = generate_normals(
-    triangles, target, NormalOptions::default(), PostProcessControl::default(),
+let (scene, report) = prepare_triangles(
+    scene,
+    &[target],
+    TrianglePreparationOptions {
+        normals: Some(NormalOptions::default()),
+        ..Default::default()
+    },
+    PostProcessControl::default(),
 )?.into_parts();
-let target = normals_report.normal_generation().unwrap().output_target();
+assert!(report.matches_scene(&scene));
+let preparation = report.geometry_preparation().unwrap();
+assert_eq!(preparation.geometry_reconstruction_count(), 1);
+let target = preparation.target(0).unwrap().output_target();
 assert!(scene.primitive(target)?.normals(AttributeDomain::Corner).is_some());
 ```
 
 Import evidence retains its original generation; the postprocess report identifies the output.
 Failures return the original immutable Scene through `PostProcessRunFailure::into_parts()`.
-Triangulation preserves authored attributes through explicit origins and rejects malformed or
+The selected request accepts any number of current-generation primitive IDs. It plans and
+reconstructs geometry once, then publishes one generation. Duplicate/stale IDs, a later target
+failure, cancellation, or exhausted `PostProcessBudgets` return the original Scene. Reports retain
+final-generation IDs for every selected target, including unchanged targets in a mixed request.
+Lowering preserves exact strip/fan assembly and polygon Corner/Face origins. Triangulation rejects malformed or
 numerically unresolved polygons. Its report owns the actual Corner/Face relation independently of
 either Scene. Triangles still retain separate attribute domains; this operation does not produce a
 vertex buffer. The `triangle_vertices` reader described below supplies their draw-order tuples.
 
 Normal generation preserves authored normals by default. `ExistingNormals::Replace` explicitly
-replaces them, and `TangentHandling::Remove` authorizes deleting invalidated tangents and their
+replaces them, and `TangentPolicy::Remove` authorizes deleting invalidated tangents and their
 owner-local metadata. Smooth mode shares area-weighted normals by Vertex identity and Face
 smoothing groups; group zero is hard per face, and UV seams do not split a shared Vertex.
 Attribute lookup requires both semantic and domain, so `normals(AttributeDomain::Corner)` and
 `texcoords(set, AttributeDomain::Vertex)` select the intended stream explicitly.
 
+`NormalOrientation::StoredOrder` uses the retained triangle tuple. `SceneFrontFace` uses the
+Scene's winding declaration and requires an explicit assumption when it is unknown. The request
+keeps the Scene's spatial declaration and index order. `generate_normals(scene, target, options,
+tangent_policy, control)` and the other single-target functions use this same transaction.
+
 `generate_tangents(scene, target, TangentOptions::new(normal_domain, uv_set, uv_domain), control)`
-selects the Normal and UV fields explicitly and emits dense Corner F32x4. The Triangle UV Derivative
+selects the Normal and UV fields explicitly and emits dense Corner F32x4 or F64x4 according to
+the widest dependency or replaced field. The Triangle UV Derivative
 v1 algorithm preserves mirrored seams, uses `SignInW`, and performs no cross-face welding or
 averaging. It does not claim MikkTSpace compatibility. Existing Tangents are preserved by default;
 `ExistingTangents::Replace` replaces a single authored stream. Each Tangent owns its construction
 and encoding declarations. Degenerate frames and authored morph deltas on the target reject
-without replacing the Scene.
+without replacing the Scene. Position, Normal, Tangent and Texcoord attributes retain their
+declared F32/F64 precision; application packing is an explicit conversion.
 
 `convert_scene_space(scene, options, control)` converts an entire Scene to a validated
 `TargetSpace`. The target contains handedness, signed up/front axes, meters per unit, and front-face

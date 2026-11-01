@@ -59,7 +59,7 @@ fn source_scene(account: &PhysicalStorageAccount, polygon: bool) -> NodeSceneSuc
     let primitives = [GeometryPrimitiveAuthoring::new(
         topology,
         Presence::Present(indices),
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 3),
     )];
     let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];

@@ -83,12 +83,15 @@ Crates intended for eventual publication:
 - `baozi-format-stl`
 - `baozi-format-obj`
 - `baozi-format-ply`
-- `baozi-format-gltf` and its maintained `baozi-gltf` / `baozi-gltf-json` dependencies
+- `baozi-format-gltf`
 
-The [2026-11-01 first-release audit](../reviews/2026-11-01-first-release-usability-audit.md)
-selects these twelve packages as the portable 0.1.0 candidate, with STL/OBJ defaults
-and PLY/selected-glTF opt-ins. It records confirmed correctness and workflow gaps
-and the [remaining implementation plan](../plans/2026-11-01-011-feat-first-release-usability-plan.md).
+The [reviewed maturation plan](../plans/2026-11-02-001-refactor-first-release-maturation-plan.md)
+selects these ten packages as the portable 0.1.0 candidate after the owned-document cutover,
+with STL/OBJ defaults and PLY/selected-glTF opt-ins. Its implementation units address the earlier
+audit's correctness and application-workflow gaps through owned decoding, precision preservation
+and selected edits; their current verification status is recorded separately.
+The [finite candidate record](../release/portable-0.1.0-candidate.md) lists this exact unit and
+the PLY/glTF publication eligibility boundaries.
 Candidate selection and local archive success do not enable publication or change
 the eligibility flags below. Its public registry observation is documentary,
 not the approved expected-state manifest required for a real train.
@@ -137,16 +140,14 @@ Canonical release order:
 6. `baozi-format-obj`
 7. `baozi-postprocess` (after its versioned OBJ development dependency)
 8. `baozi-format-ply` after its publication gate is complete
-9. `baozi-gltf-json`, `baozi-gltf`, then `baozi-format-gltf` after their publication gates are complete
+9. `baozi-format-gltf` after its publication gate is complete
 10. `baozi`
 
 Package each crate from a clean checkout of the exact tagged release commit with
 `cargo package --locked -p <crate>`. Registry release packaging must not use `--allow-dirty` or
 `--no-verify`.
-The `-p` form selects root workspace members only. The excluded maintained glTF
-packages need their own `--manifest-path` selection and reviewed lock inputs;
-settle those before the real train. The local rehearsal's temporary workspace
-does not establish the real clean-tag publication procedure for those packages.
+All ten portable packages are root workspace members. The independently maintained native
+candidate/helper workspaces remain outside this portable train and its publication procedure.
 The corresponding real upload command is
 `cargo publish --locked --registry crates-io -p <crate>`; a dry run adds `--dry-run` to that exact
 locked command. Record the local packaged `.crate` SHA-256 before upload and require the post-publish

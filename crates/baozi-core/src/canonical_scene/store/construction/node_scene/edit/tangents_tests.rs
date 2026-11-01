@@ -113,13 +113,13 @@ fn source_scene(account: &PhysicalStorageAccount, had_tangent: bool) -> NodeScen
         GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::TriangleList,
             Presence::Present(&indices),
-            Presence::Absent,
+            crate::MaterialAssignment::Unspecified,
             AuthoringRange::new(0, second),
         ),
         GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::TriangleList,
             Presence::Absent,
-            Presence::Absent,
+            crate::MaterialAssignment::Unspecified,
             AuthoringRange::new(second, 1),
         ),
     ];

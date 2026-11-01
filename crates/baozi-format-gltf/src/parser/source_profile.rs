@@ -4,6 +4,7 @@ use super::{
     ContentError, GltfFailure, PreparedDocument, Result, authoring_u32, extras::SourceExtras,
     gltf_parse_error, model::NormalizedGltf,
 };
+use crate::document::schema as json;
 use crate::source_map::{
     GltfSourceMap, SourceEntity, SourceEntityId, SourceEntityKind, SourcePayloadKind,
 };
@@ -13,7 +14,6 @@ use baozi_import::authoring::{
 use baozi_import::{
     CapacityPlan, ImportStorageClass, MeteredOpaqueAllowance, MeteredVec, ParseScope,
 };
-use gltf::json::{self, validation::Checked};
 
 const SOURCE_SCHEMA: &str = "org.baozi.gltf:source-object";
 
@@ -288,12 +288,12 @@ fn source_locator<'scope>(
 /// IDs cross this boundary; no JSON or backend object is retained by the normalized model.
 pub(super) fn associate(
     ctx: &ParseScope<'_>,
-    document: &gltf::Document,
+    document: &crate::document::Document<'_>,
     prepared: &PreparedDocument<'_, '_>,
     model: &mut NormalizedGltf<'_>,
 ) -> Result<()> {
     let profile = &mut model.sources;
-    let root = document.as_json();
+    let root = document.tables();
     let scene_source = prepared
         .node_graph
         .selection_outcome
@@ -379,6 +379,9 @@ pub(super) fn associate(
                 .ok_or_else(|| gltf_parse_error(ctx, "glTF implicit sampler source is missing"))?;
             profile.link(ctx, ProfileOwner::Sampler(sampler.index()), source)?;
         }
+    }
+    if let Some(material) = model.appearance.default_material {
+        profile.link(ctx, ProfileOwner::Material(material.index()), DOCUMENT)?;
     }
     let mut binding_index = 0;
     for (index, id) in model.appearance.material_ids.as_slice().iter().enumerate() {
@@ -525,12 +528,9 @@ pub(super) fn associate(
                     }
                 };
                 charge_lookup(ctx, primitive.attributes.len(), 1)?;
-                let accessor = primitive
-                    .attributes
-                    .get(&Checked::Valid(semantic))
-                    .ok_or_else(|| {
-                        gltf_parse_error(ctx, "glTF attribute source accessor is missing")
-                    })?;
+                let accessor = primitive.attributes.get(&semantic).ok_or_else(|| {
+                    gltf_parse_error(ctx, "glTF attribute source accessor is missing")
+                })?;
                 let owner = ProfileOwner::Attribute(authoring_u32(
                     ctx,
                     attribute_index,
@@ -672,7 +672,7 @@ pub(super) fn associate(
 fn link_accessor(
     ctx: &ParseScope<'_>,
     profile: &mut SelectedSourceProfile<'_>,
-    root: &json::Root,
+    root: &json::Tables<'_>,
     owner: ProfileOwner,
     index: usize,
 ) -> Result<()> {
@@ -700,7 +700,7 @@ fn link_accessor(
 fn link_view(
     ctx: &ParseScope<'_>,
     profile: &mut SelectedSourceProfile<'_>,
-    root: &json::Root,
+    root: &json::Tables<'_>,
     owner: ProfileOwner,
     index: usize,
 ) -> Result<()> {

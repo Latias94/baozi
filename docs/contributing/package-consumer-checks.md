@@ -106,6 +106,13 @@ assumed source units, and evidence lifetime after Scene teardown. It builds appl
 vertex/index buffers from complete borrowed draw tuples and checks them after dropping the Scene.
 Global vertex deduplication is a separate caller policy.
 
+The same fixed consumer also checks first-release maturation semantics. PLY cases retain adjacent
+F64 Position values, signed zero and F64 world bounds. glTF cases distinguish authored `{}` from
+one generated implicit material and use an owned parent/placement index after Scene teardown.
+Postprocess cases prepare two polygon meshes with normals in one bounded reconstruction and
+publication, rejecting the old handles. These are ordinary public calls in the unchanged consumer
+source, executed against extracted archives along with the older cases.
+
 Every OBJ-enabled case also checks a partial-UV input: the default policy retains a typed loss
 rejection, while explicit `SourceSemanticLoss` authority permits dropping the incomplete UV channel
 and preserves the complete authored Corner normals. The consumer names `ImportEvidence` and the
@@ -114,9 +121,9 @@ reads the retained report after dropping its Scene. The glTF cases inspect the s
 scene identity and selected/omitted node counts through the same facade. Ordinary report consumers
 need no parser-authoring import to name these return types.
 
-The glTF feature's complete local production closure includes
-the maintained `baozi-gltf` and `baozi-gltf-json` packages as actual `.crate` artifacts.
-No consumer-root patch or checkout dependency substitutes for those artifacts.
+The owned selected-profile glTF document adds no maintained decoder package to the portable
+ten-package production closure. Every local production package is checked as its unchanged
+`.crate` artifact; no consumer-root patch or checkout dependency substitutes for those artifacts.
 The owning maintainer updates `check_features.py` and the supported-format list when
 changing admission. A command-line flag cannot admit another format.
 

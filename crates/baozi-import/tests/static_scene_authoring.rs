@@ -143,9 +143,9 @@ impl FormatImporter for CustomImporter {
         ];
         let has_appearance = matches!(self.input, Input::Appearance | Input::PrimaryImage);
         let material = if has_appearance {
-            Presence::Present(MaterialLocalId::new(0))
+            baozi_import::authoring::MaterialAssignment::Authored(MaterialLocalId::new(0))
         } else {
-            Presence::Absent
+            baozi_import::authoring::MaterialAssignment::Unspecified
         };
         let primitives = [
             GeometryPrimitiveAuthoring::new(
@@ -157,7 +157,7 @@ impl FormatImporter for CustomImporter {
             GeometryPrimitiveAuthoring::new(
                 GeometryTopologyAuthoring::TriangleList,
                 Presence::Present(&indices),
-                Presence::Absent,
+                baozi_import::authoring::MaterialAssignment::Unspecified,
                 AuthoringRange::new(1, 1),
             ),
         ];
@@ -428,7 +428,7 @@ fn appearance_owners_receive_the_same_document_source() {
         .primitives()
         .next()
         .unwrap()
-        .material()
+        .effective_material()
         .unwrap();
     assert_eq!(material.name(), Some("paint"));
     assert_eq!(material.bindings().next().unwrap().uv_set(), u16::MAX);

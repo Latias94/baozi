@@ -6,6 +6,11 @@
 mod evidence;
 mod publication;
 mod schema;
+mod selected;
+pub use selected::{
+    SceneGeometryPlanScratch, SceneGeometryPlanStorage, SceneGeometryReplacement,
+    SceneTriangleOrigins,
+};
 mod space;
 #[cfg(test)]
 mod tangents_tests;
@@ -52,6 +57,7 @@ use baozi_operation::{
 use thiserror::Error;
 
 use crate::SceneValidationLimits;
+#[cfg(test)]
 use crate::attribute::{AttributeDomain, TangentConventions};
 use crate::canonical_scene::store::api::scene::ValidatedScene;
 use crate::canonical_scene::store::construction::ConstructionBrand;
@@ -61,6 +67,8 @@ use crate::canonical_scene::store::schema::{
     NODE_SCENE_EVIDENCE_FIELD_COUNT, NodeSceneOutcomeEvidenceSchema,
 };
 use crate::canonical_scene::store::typed_storage::build::TypedStorageBuildControl;
+use crate::canonical_scene::store::typed_storage::edit::VectorValues;
+#[cfg(test)]
 use crate::canonical_scene::store::typed_storage::edit::normals::{
     GeometryNormalsPlan, NormalWritePolicy, TangentPolicy,
 };
@@ -75,10 +83,13 @@ use crate::canonical_scene::store::typed_storage::edit::space_deformation::{
 use crate::canonical_scene::store::typed_storage::edit::space_geometry::GeometrySpacePlanError;
 use crate::canonical_scene::store::typed_storage::edit::space_nodes::NodeSpacePlanError;
 use crate::canonical_scene::store::typed_storage::edit::space_spatial::SpatialSpacePlanError;
+#[cfg(test)]
 use crate::canonical_scene::store::typed_storage::edit::tangents::GeometryTangentsPlan;
+#[cfg(test)]
 use crate::canonical_scene::store::typed_storage::edit::{
-    GeometryTriangulationPlan, TriangulationOrigins, VectorValues,
+    GeometryTriangulationPlan, TriangulationOrigins,
 };
+#[cfg(test)]
 use crate::geometry::TopologyKind;
 use crate::identity::{PrimitiveId, SceneGenerationId};
 use crate::provenance::OptionsDigest;
@@ -90,6 +101,7 @@ const FAILURE_EVIDENCE_MEMBERS: usize = 2;
 const FAILURE_FIELD_WORK: u64 = (schema::ROOT_FIELDS + NODE_SCENE_EVIDENCE_FIELD_COUNT) as u64;
 
 /// Borrowed origins for one changed polygon primitive. All indices are source primitive-local.
+#[cfg(test)]
 #[derive(Clone, Copy)]
 pub struct SceneTriangulationReplacement<'a> {
     target: PrimitiveId,
@@ -98,6 +110,7 @@ pub struct SceneTriangulationReplacement<'a> {
     options_digest: OptionsDigest,
 }
 
+#[cfg(test)]
 impl<'a> SceneTriangulationReplacement<'a> {
     pub const fn new(
         target: PrimitiveId,
@@ -195,6 +208,18 @@ impl SceneEditBootstrap {
         FAILURE_FIELD_WORK
     }
 
+    /// Exact fields in the four-member selected graph. The corner sequence owns one count
+    /// prefix even when no target lowers topology; target headers and face offsets are separate.
+    pub fn selected_evidence_field_work(
+        corner_fields: u32,
+        target_and_face_fields: u32,
+    ) -> Option<u64> {
+        Self::failure_field_work()
+            .checked_add(schema::SELECTION_CORNER_PREFIX_FIELDS as u64)?
+            .checked_add(u64::from(corner_fields))?
+            .checked_add(u64::from(target_and_face_fields))
+    }
+
     pub fn failure_terminal_work_requirement()
     -> Result<RetainedStoreFailureTerminalWorkRequirement, StorePlanError> {
         RetainedStoreFailureTerminalWorkPlan::requirement_for_evidence_work(
@@ -218,6 +243,7 @@ impl SceneEditAdmission {
     }
 
     /// No input-dependent reads, allocation, or publication occur until metered preflight.
+    #[cfg(test)]
     pub fn into_transaction<'a>(
         self,
         input: &'a ValidatedScene,
@@ -227,6 +253,7 @@ impl SceneEditAdmission {
         self.transaction(input, EditRequest::Triangulation(replacement), limits)
     }
 
+    #[cfg(test)]
     pub fn into_normal_transaction<'a>(
         self,
         input: &'a ValidatedScene,
@@ -236,6 +263,7 @@ impl SceneEditAdmission {
         self.transaction(input, EditRequest::Normals(replacement), limits)
     }
 
+    #[cfg(test)]
     pub fn into_tangent_transaction<'a>(
         self,
         input: &'a ValidatedScene,
@@ -266,6 +294,7 @@ impl SceneEditAdmission {
             evidence: self.evidence,
             brand: self.brand,
             storage: None,
+            selection_scratch: None,
             execution: Some(self),
         }
     }
@@ -330,6 +359,7 @@ where
 }
 
 /// Source-bound corner normals and the explicit authored-field treatment.
+#[cfg(test)]
 #[derive(Clone, Copy)]
 pub struct SceneNormalReplacement<'a> {
     target: PrimitiveId,
@@ -340,6 +370,7 @@ pub struct SceneNormalReplacement<'a> {
     options_digest: OptionsDigest,
 }
 
+#[cfg(test)]
 impl<'a> SceneNormalReplacement<'a> {
     pub const fn new(
         target: PrimitiveId,
@@ -364,6 +395,7 @@ impl<'a> SceneNormalReplacement<'a> {
 ///
 /// `had_tangent` explicitly selects replacement; false permits only addition. Conventions belong
 /// to the resulting attribute and must declare `TriangleUvDerivative` with `SignInW`.
+#[cfg(test)]
 #[derive(Clone, Copy)]
 pub struct SceneTangentReplacement<'a> {
     target: PrimitiveId,
@@ -376,6 +408,7 @@ pub struct SceneTangentReplacement<'a> {
     options_digest: OptionsDigest,
 }
 
+#[cfg(test)]
 impl<'a> SceneTangentReplacement<'a> {
     #[allow(clippy::too_many_arguments)]
     pub const fn new(
@@ -403,9 +436,16 @@ impl<'a> SceneTangentReplacement<'a> {
 
 #[derive(Clone, Copy)]
 enum EditRequest<'a> {
+    #[cfg(test)]
     Triangulation(SceneTriangulationReplacement<'a>),
+    #[cfg(test)]
     Normals(SceneNormalReplacement<'a>),
+    #[cfg(test)]
     Tangents(SceneTangentReplacement<'a>),
+    Selection {
+        replacements: &'a [SceneGeometryReplacement<'a>],
+        digest: OptionsDigest,
+    },
     ConvertSpace(ResolvedSceneSpaceConversion<'a>),
 }
 
@@ -419,22 +459,30 @@ pub enum SceneEditTarget {
 impl<'a> EditRequest<'a> {
     fn target(self) -> SceneEditTarget {
         match self {
+            #[cfg(test)]
             Self::Triangulation(v) => SceneEditTarget::Primitive(v.target),
+            #[cfg(test)]
             Self::Normals(v) => SceneEditTarget::Primitive(v.target),
+            #[cfg(test)]
             Self::Tangents(v) => SceneEditTarget::Primitive(v.target),
+            Self::Selection { replacements, .. } => {
+                SceneEditTarget::WholeScene(replacements[0].target.generation())
+            }
             Self::ConvertSpace(v) => SceneEditTarget::WholeScene(v.input.generation()),
         }
     }
     const fn triangles(self) -> &'a [[u32; 3]] {
         match self {
+            #[cfg(test)]
             Self::Triangulation(v) => v.triangles,
-            Self::Normals(_) | Self::Tangents(_) | Self::ConvertSpace(_) => &[],
+            _ => &[],
         }
     }
     const fn face_offsets(self) -> &'a [u32] {
         match self {
+            #[cfg(test)]
             Self::Triangulation(v) => v.face_offsets,
-            Self::Normals(_) | Self::Tangents(_) | Self::ConvertSpace(_) => &[],
+            _ => &[],
         }
     }
 }
@@ -445,26 +493,40 @@ impl<'a> EditRequest<'a> {
     reason = "bounded source-bound plan headers stay inline without another allocation; one-MiB-stack tests cover direct operations"
 )]
 enum EditStoragePlan<'a> {
+    #[cfg(test)]
     Triangulation(GeometryTriangulationPlan<'a>),
+    #[cfg(test)]
     Normals(GeometryNormalsPlan<'a>),
+    #[cfg(test)]
     Tangents(GeometryTangentsPlan<'a>),
+    Selection(
+        crate::canonical_scene::store::typed_storage::edit::selected::GeometrySelectionPlan<'a>,
+    ),
     ConvertSpace(SceneSpacePlan<'a>),
 }
 
 impl EditStoragePlan<'_> {
     fn correspondence_work(self) -> u64 {
         match self {
+            #[cfg(test)]
             Self::Triangulation(v) => v.correspondence_work(),
+            #[cfg(test)]
             Self::Normals(v) => v.correspondence_work(),
+            #[cfg(test)]
             Self::Tangents(v) => v.correspondence_work(),
+            Self::Selection(plan) => plan.correspondence_work(),
             Self::ConvertSpace(plan) => plan.correspondence_work(),
         }
     }
     fn name_bytes(self) -> usize {
         match self {
+            #[cfg(test)]
             Self::Triangulation(v) => v.name_bytes(),
+            #[cfg(test)]
             Self::Normals(v) => v.name_bytes(),
+            #[cfg(test)]
             Self::Tangents(v) => v.name_bytes(),
+            Self::Selection(plan) => plan.name_bytes(),
             Self::ConvertSpace(plan) => plan.name_bytes(),
         }
     }
@@ -475,14 +537,52 @@ impl EditStoragePlan<'_> {
         counts: super::super::SceneEvidenceCounts,
     ) -> Option<evidence::SceneEditFacts> {
         match (self, replacement) {
+            #[cfg(test)]
             (Self::Triangulation(plan), EditRequest::Triangulation(replacement)) => {
                 Some(evidence::SceneEditFacts::new(input, replacement, &plan))
             }
+            #[cfg(test)]
             (Self::Normals(plan), EditRequest::Normals(replacement)) => {
                 evidence::SceneEditFacts::normals(input, replacement, &plan, counts)
             }
+            #[cfg(test)]
             (Self::Tangents(plan), EditRequest::Tangents(replacement)) => {
                 evidence::SceneEditFacts::tangents(replacement, &plan)
+            }
+            (
+                Self::Selection(plan),
+                EditRequest::Selection {
+                    replacements,
+                    digest,
+                },
+            ) => {
+                let corners = selected::corner_count(replacements);
+                let faces = selected::face_count(replacements);
+                Some(evidence::SceneEditFacts {
+                    words: [
+                        schema::OPERATION_SELECTION,
+                        replacements.len() as u32,
+                        1,
+                        plan.source_geometry().primitives.len() as u32,
+                        input
+                            .proof
+                            .counts()
+                            .profile_metadata_entry_count
+                            .checked_sub(counts.profile_metadata_entry_count)?,
+                        0,
+                        0,
+                        corners as u32,
+                        faces as u32,
+                        plan.output_attribute_count(),
+                        schema::PRESERVE_VERTEX_IDENTITY
+                            | schema::PRESERVE_SOURCE_FIELDS_BY_ORIGIN
+                            | schema::PRESERVE_SCALAR_BITS_AND_SPARSE_ENCODING,
+                        schema::INVALIDATE_PRIMITIVE_MESH_SCENE_BOUNDS,
+                        0,
+                    ],
+                    digest: evidence::digest_words(digest),
+                    units: [plan.work(), plan.correspondence_work()],
+                })
             }
             (Self::ConvertSpace(plan), EditRequest::ConvertSpace(resolved)) => {
                 (std::ptr::eq(input, resolved.input.as_node_scene())
@@ -501,11 +601,17 @@ impl EditStoragePlan<'_> {
         control: &mut C,
     ) -> Result<bool, C::Error> {
         match self {
+            #[cfg(test)]
             Self::Triangulation(plan) => {
                 plan.validate_correspondence(actual.geometry.as_ref(), control)
             }
+            #[cfg(test)]
             Self::Normals(plan) => plan.validate_correspondence(actual.geometry.as_ref(), control),
+            #[cfg(test)]
             Self::Tangents(plan) => plan.validate_correspondence(actual.geometry.as_ref(), control),
+            Self::Selection(plan) => {
+                plan.validate_correspondence(actual.geometry.as_ref(), control)
+            }
             Self::ConvertSpace(plan) => plan.validate_correspondence(actual, control),
         }
     }
@@ -635,6 +741,8 @@ fn map_animation_space(error: AnimationSpacePlanError<StoreRuntimeError>) -> Sce
 
 #[derive(Debug, Error)]
 pub enum SceneEditRejection {
+    #[error("normal replacement requires explicit replacement or removal of the dependent tangent")]
+    TangentDependency,
     #[error("the generated field would narrow its {semantic:?} precision dependency")]
     PrecisionLoss {
         semantic: crate::attribute::AttributeSemanticKind,
@@ -666,6 +774,7 @@ pub struct SceneEditTransaction<'a> {
     execution: Option<SceneEditAdmission>,
     brand: ConstructionBrand,
     storage: Option<EditStoragePlan<'a>>,
+    selection_scratch: Option<SceneGeometryPlanScratch<'a>>,
 }
 
 /// Borrowed postflight description, independent of the operation and its scoped scratch owner.
@@ -771,6 +880,7 @@ impl<'a> SceneEditTransaction<'a> {
             .map_err(|cause| StoreRuntimeError::Plan(cause.into()))?;
         semantic.resize(&mut reservation, bytes)?;
         let input = self.input;
+        #[cfg(test)]
         let target_row = if let SceneEditTarget::Primitive(target) = self.replacement.target() {
             Some(semantic.run_unit(|| {
                 // Public lookup validates generation, logical-mesh ownership, and the local index.
@@ -795,11 +905,13 @@ impl<'a> SceneEditTransaction<'a> {
                     .get(row)
                     .ok_or(SceneEditCompileError::InvalidTarget)?;
                 let valid_topology = match self.replacement {
+                    #[cfg(test)]
                     EditRequest::Triangulation(_) => primitive.topology == TopologyKind::Polygons,
+                    #[cfg(test)]
                     EditRequest::Normals(_) | EditRequest::Tangents(_) => {
                         primitive.topology == TopologyKind::TriangleList
                     }
-                    EditRequest::ConvertSpace(_) => false,
+                    EditRequest::Selection { .. } | EditRequest::ConvertSpace(_) => false,
                 };
                 if !valid_topology || primitive.face_count == 0 {
                     return Err(SceneEditCompileError::InvalidSource);
@@ -810,6 +922,7 @@ impl<'a> SceneEditTransaction<'a> {
             None
         };
         let (plan, pending) = match self.replacement {
+            #[cfg(test)]
             EditRequest::Triangulation(replacement) => {
                 let plan = GeometryTriangulationPlan::try_new(
                     input.as_node_scene().read_geometry(),
@@ -834,6 +947,7 @@ impl<'a> SceneEditTransaction<'a> {
                 .map_err(map_plan)?;
                 (EditStoragePlan::Triangulation(plan), pending)
             }
+            #[cfg(test)]
             EditRequest::Normals(replacement) => {
                 let target = target_row.ok_or(SceneEditCompileError::InvalidTarget)?;
                 check_morph_dependencies(
@@ -849,6 +963,7 @@ impl<'a> SceneEditTransaction<'a> {
                 check_derivation_width(
                     input.as_node_scene().read_geometry(),
                     target,
+                    #[cfg(test)]
                     EditRequest::Normals(replacement),
                     semantic,
                 )?;
@@ -883,6 +998,7 @@ impl<'a> SceneEditTransaction<'a> {
                 .map_err(map_plan)?;
                 (EditStoragePlan::Normals(plan), pending)
             }
+            #[cfg(test)]
             EditRequest::Tangents(replacement) => {
                 let target = target_row.ok_or(SceneEditCompileError::InvalidTarget)?;
                 check_morph_dependencies(
@@ -894,6 +1010,7 @@ impl<'a> SceneEditTransaction<'a> {
                 check_derivation_width(
                     input.as_node_scene().read_geometry(),
                     target,
+                    #[cfg(test)]
                     EditRequest::Tangents(replacement),
                     semantic,
                 )?;
@@ -922,6 +1039,18 @@ impl<'a> SceneEditTransaction<'a> {
                 .map_err(map_plan)?;
                 (EditStoragePlan::Tangents(plan), pending)
             }
+            EditRequest::Selection {
+                replacements,
+                digest,
+            } => selected::plan(
+                input,
+                replacements,
+                self.selection_scratch
+                    .take()
+                    .ok_or(SceneEditCompileError::InvalidSource)?,
+                digest,
+                semantic,
+            )?,
             EditRequest::ConvertSpace(resolved) => {
                 space::check_capabilities(resolved, semantic)?;
                 let plan = SceneSpacePlan::try_new(
@@ -961,11 +1090,18 @@ impl<'a> SceneEditTransaction<'a> {
         let extra_work = (schema::ROOT_FIELDS as u64)
             // The rebound Scene plan already includes its Scene-count evidence record.
             .checked_add(
-                (self.replacement.triangles().len() as u64)
-                    .checked_mul(3)
-                    .ok_or(StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?,
+                match self.replacement {
+                    EditRequest::Selection { replacements, .. } => {
+                        (selected::corner_count(replacements) as u64)
+                            .checked_add(schema::SELECTION_CORNER_PREFIX_FIELDS as u64)
+                            .and_then(|n| n.checked_add(selected::face_count(replacements) as u64))
+                    }
+                    _ => (self.replacement.triangles().len() as u64)
+                        .checked_mul(3)
+                        .and_then(|n| n.checked_add(self.replacement.face_offsets().len() as u64)),
+                }
+                .ok_or(StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?,
             )
-            .and_then(|n| n.checked_add(self.replacement.face_offsets().len() as u64))
             .and_then(|n| n.checked_add(plan.correspondence_work()))
             .and_then(|n| n.checked_add(pending.counts.central_validation_plan.work().get()))
             .and_then(std::num::NonZeroU64::new)
@@ -1086,15 +1222,19 @@ impl<O: OperationOwner> SceneEditExecutionPlan<'_, '_, O> {
     > {
         let pending = &self.sealed[0];
         let plan = match &pending.program {
+            #[cfg(test)]
             NodeSceneEditProgram::TriangulatePrimitive(geometry) => {
                 EditStoragePlan::Triangulation(*geometry)
             }
+            #[cfg(test)]
             NodeSceneEditProgram::GenerateNormals { geometry, .. } => {
                 EditStoragePlan::Normals(*geometry)
             }
+            #[cfg(test)]
             NodeSceneEditProgram::GenerateTangents(geometry) => {
                 EditStoragePlan::Tangents(*geometry)
             }
+            NodeSceneEditProgram::SelectedGeometry(plan) => EditStoragePlan::Selection(*plan),
             NodeSceneEditProgram::ConvertSpace(plan) => EditStoragePlan::ConvertSpace(*plan),
             #[cfg(test)]
             NodeSceneEditProgram::NodeTransform(_) => {
@@ -1194,6 +1334,7 @@ fn check_morph_dependencies<C: TypedStorageBuildControl<Error = StoreRuntimeErro
 }
 
 /// Candidate output must retain the widest dependency or replaced field's precision.
+#[cfg(test)]
 fn check_derivation_width<C: TypedStorageBuildControl<Error = StoreRuntimeError>>(
     geometry: &crate::canonical_scene::store::typed_storage::GeometryStorage,
     target: usize,
@@ -1218,11 +1359,13 @@ fn check_derivation_width<C: TypedStorageBuildControl<Error = StoreRuntimeError>
             use crate::canonical_scene::store::typed_storage::StoredAttributePayload as P;
             use crate::canonical_scene::store::typed_storage::StoredAttributeSemantic as S;
             let dependency = match replacement {
+                #[cfg(test)]
                 EditRequest::Normals(replacement) => match attribute.semantic {
                     S::Position => Some(K::Position),
                     S::Normal if replacement.replace_existing => Some(K::Normal),
                     _ => None,
                 },
+                #[cfg(test)]
                 EditRequest::Tangents(replacement) => match attribute.semantic {
                     S::Position => Some(K::Position),
                     S::Normal if attribute.domain == replacement.normal_domain => Some(K::Normal),
@@ -1301,6 +1444,18 @@ mod tests {
         assert_eq!(evidence.scene_counts().record_plan().rows(), 1);
         assert_eq!(evidence.scene_counts().record_plan().fields(), 34);
         assert_eq!(SceneEditBootstrap::failure_field_work(), 59);
+    }
+
+    #[test]
+    fn selected_evidence_qualification_includes_the_nonempty_origin_count_prefix() {
+        assert_eq!(
+            SceneEditBootstrap::selected_evidence_field_work(0, 18),
+            Some(78)
+        );
+        assert_eq!(
+            SceneEditBootstrap::selected_evidence_field_work(6, 21),
+            Some(87)
+        );
     }
 
     #[test]

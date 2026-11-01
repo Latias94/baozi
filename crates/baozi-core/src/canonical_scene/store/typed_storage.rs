@@ -313,7 +313,7 @@ pub(super) struct StoredPrimitive {
     pub(super) face_count: u32,
     pub(super) polygon_boundaries: Option<TableRange<u32>>,
     pub(super) indices: Option<TableRange<u32>>,
-    pub(super) material: Option<u32>,
+    pub(super) material: crate::MaterialAssignment<u32>,
     pub(super) attributes: TableRange<StoredAttribute>,
 }
 

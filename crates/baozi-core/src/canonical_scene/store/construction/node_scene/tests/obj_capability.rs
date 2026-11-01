@@ -44,10 +44,11 @@ const REVISION_4_OBJ_CAPABILITY_ORACLE_DIGEST: [u8; 32] = [
     0xd4, 0x0b, 0x56, 0x43, 0x0d, 0x9c, 0x63, 0xb5, 0x8d, 0x6f, 0xc4, 0x86, 0x70, 0x34, 0x19, 0xc2,
 ];
 // Independently SHA-256 checked from the fixture's 2,185-byte semantic encoding:
-// revision 6, no global tangent declarations, unchanged OBJ payload and profile owners.
+// revision 7, no global tangent declarations, unchanged OBJ payload and profile owners.
+// The test below independently restores the revision-4 framing and checks its frozen digest.
 const KNOWN_OBJ_CAPABILITY_DIGEST: [u8; 32] = [
-    0xbc, 0xab, 0x0b, 0x66, 0xcb, 0xb8, 0xb0, 0x10, 0x9b, 0xac, 0x19, 0xe8, 0x72, 0xe6, 0x90, 0x78,
-    0xfc, 0x0f, 0xe1, 0x4e, 0xd8, 0x12, 0x9a, 0x1f, 0x84, 0xec, 0x50, 0xbd, 0x55, 0xe5, 0x71, 0x0a,
+    0x52, 0x48, 0x26, 0xea, 0xbc, 0x2b, 0x36, 0xe4, 0x0b, 0xc2, 0xa3, 0x11, 0x2d, 0x8c, 0xeb, 0xbb,
+    0x39, 0x58, 0x27, 0x1c, 0xe3, 0x8b, 0xfd, 0xfe, 0x44, 0x44, 0x85, 0xbc, 0x46, 0x0f, 0x87, 0x2c,
 ];
 const OBJ_FACES: [ObjTriangle; 2] = [
     ObjTriangle {
@@ -182,7 +183,7 @@ impl ObjCanonicalProjection<'_> {
         let primitives = [GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::TriangleList,
             Presence::Present(&self.position_indices),
-            Presence::Absent,
+            crate::MaterialAssignment::Unspecified,
             AuthoringRange::new(0, 4),
         )];
         let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -609,7 +610,7 @@ pub(in crate::canonical_scene::store) fn inspect_obj_capability_semantics_for_pr
     assert_eq!(vertex_count, 3);
     assert_eq!(corner_count, 6);
     assert_eq!(face_count, 2);
-    assert_eq!(primitive.material(), None);
+    assert_eq!(primitive.material_assignment().effective(), None);
     assert_eq!(primitive.attribute_offset(), 0);
     assert_eq!(primitive.attribute_count(), 4);
     assert!(!primitive.polygon_boundaries_present());
@@ -857,7 +858,7 @@ fn normalized_obj_corner_fixture_closes_the_canonical_scene_path() {
     assert!(transcript.complete);
     let mut previous = transcript.bytes;
     assert_eq!(previous.len(), 2_185);
-    assert_eq!(&previous[40..44], &6_u32.to_le_bytes());
+    assert_eq!(&previous[40..44], &7_u32.to_le_bytes());
     // Spatial + SceneSpace; unknown handedness/up/front, absent units, unknown winding/UV.
     assert_eq!(
         &previous[59..76],

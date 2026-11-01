@@ -55,6 +55,7 @@ fn triangulate_generate_and_convert_preserves_vertex_identity_and_corner_pairing
         scene,
         target,
         NormalOptions::default(),
+        baozi_postprocess::TangentPolicy::Preserve,
         PostProcessControl::default(),
     )
     .unwrap()

@@ -333,11 +333,10 @@ impl<'batch, 'input> ValidatedGeometryPrimitive<'batch, 'input> {
         self.plan.face_count
     }
 
-    pub(in crate::canonical_scene::store) const fn material(&self) -> Option<MaterialLocalId> {
-        match self.input.material() {
-            Presence::Absent => None,
-            Presence::Present(material) => Some(material),
-        }
+    pub(in crate::canonical_scene::store) const fn material_assignment(
+        &self,
+    ) -> crate::MaterialAssignment<MaterialLocalId> {
+        self.input.material_assignment()
     }
 
     #[cfg(test)]
@@ -1217,18 +1216,19 @@ where
                     );
                 }
 
-                let has_material = if let Presence::Present(material) = primitive.material() {
-                    if material.index() >= appearance_material_count {
-                        return Err(GeometryAuthoringSemanticError::MaterialOutOfRange {
-                            primitive: primitive_index,
-                            material: material.index(),
-                            appearance_material_count,
-                        });
-                    }
-                    true
-                } else {
-                    false
-                };
+                let has_material =
+                    if let Some(material) = primitive.material_assignment().effective() {
+                        if material.index() >= appearance_material_count {
+                            return Err(GeometryAuthoringSemanticError::MaterialOutOfRange {
+                                primitive: primitive_index,
+                                material: material.index(),
+                                appearance_material_count,
+                            });
+                        }
+                        true
+                    } else {
+                        false
+                    };
                 let attribute_indices = checked_range(attribute_range, input.attributes().len())?;
                 Ok((
                     attribute_range,

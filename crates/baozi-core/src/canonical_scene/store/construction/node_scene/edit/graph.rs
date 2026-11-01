@@ -56,6 +56,7 @@ where
                 lane.try_share_storage(&pending.input.tables.geometry)?,
             )
         }
+        #[cfg(test)]
         NodeSceneEditProgram::TriangulatePrimitive(plan) => {
             let nodes = lane.try_share_storage(&pending.input.tables.nodes)?;
             let geometry = lane.try_retain_storage(
@@ -66,6 +67,7 @@ where
             )?;
             (nodes, geometry)
         }
+        #[cfg(test)]
         NodeSceneEditProgram::GenerateNormals { geometry: plan, .. } => {
             let nodes = lane.try_share_storage(&pending.input.tables.nodes)?;
             let geometry = lane.try_retain_storage(
@@ -76,7 +78,18 @@ where
             )?;
             (nodes, geometry)
         }
+        #[cfg(test)]
         NodeSceneEditProgram::GenerateTangents(plan) => {
+            let nodes = lane.try_share_storage(&pending.input.tables.nodes)?;
+            let geometry = lane.try_retain_storage(
+                plan.capacities(),
+                plan.work(),
+                plan.name_bytes() as u64,
+                |control| plan.materialize(control).map_err(map_build),
+            )?;
+            (nodes, geometry)
+        }
+        NodeSceneEditProgram::SelectedGeometry(plan) => {
             let nodes = lane.try_share_storage(&pending.input.tables.nodes)?;
             let geometry = lane.try_retain_storage(
                 plan.capacities(),

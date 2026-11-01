@@ -47,7 +47,7 @@ fn obj_geometry_and_hierarchy_are_directly_readable() {
     };
     assert_eq!(uv, &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0]);
     assert!(primitive.normals(AttributeDomain::Corner).is_none());
-    assert!(primitive.material().is_none());
+    assert!(primitive.effective_material().is_none());
     let instance = scene.mesh_instances().next().unwrap();
     assert_eq!(instance.mesh().id(), mesh.id());
     assert_eq!(

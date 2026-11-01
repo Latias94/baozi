@@ -5,7 +5,7 @@ use serde_json::json;
 
 fn run() -> Result<()> {
     let mut args = std::env::args_os().skip(1);
-    let root = args.next().map(PathBuf::from).ok_or("usage: baozi-asset-consumer ROOT RELATIVE_ASSET [--assume-standard-space] [--max-work-units N]")?;
+    let root = args.next().map(PathBuf::from).ok_or("usage: baozi-asset-consumer ROOT RELATIVE_ASSET [--assume-standard-space] [--max-work-units N] [--postprocess-work N] [--postprocess-bytes N]")?;
     let source = args
         .next()
         .ok_or("missing relative asset path")?
@@ -24,6 +24,19 @@ fn run() -> Result<()> {
                     .to_str()
                     .ok_or("work limit must be UTF-8")?
                     .parse()?
+            }
+            Some("--postprocess-work") | Some("--postprocess-bytes") => {
+                let value: u64 = args
+                    .next()
+                    .ok_or("missing postprocess limit")?
+                    .to_str()
+                    .ok_or("postprocess limit must be UTF-8")?
+                    .parse()?;
+                if arg == "--postprocess-work" {
+                    options.postprocess_budgets.work = value;
+                } else {
+                    options.postprocess_budgets.storage_bytes = value;
+                }
             }
             _ => return Err(format!("unknown argument: {}", arg.to_string_lossy()).into()),
         }
@@ -72,9 +85,10 @@ fn run() -> Result<()> {
             "postprocess_work": metrics.postprocess_work, "import_peak_live_bytes": metrics.import_peak_live_bytes,
             "max_postprocess_peak_live_bytes": metrics.max_postprocess_peak_live_bytes,
             "opened_assets": metrics.opened_assets, "changed_operations": metrics.changed_operations,
+            "selected_geometry_reconstructions": metrics.selected_geometry_reconstructions,
         "allocations": allocations,
             "target": "left-handed Y-up centimeters; counter-clockwise fronts",
-            "memory_note": "library counters are operation-local; application buffers, decoder allowances and process RSS are separate"
+            "memory_note": "library counters are operation-local; application buffers and process RSS are separate"
         })
     );
     Ok(())

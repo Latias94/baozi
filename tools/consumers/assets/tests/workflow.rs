@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
 
 use baozi::{
     AnimationInterpolation, AssetPath, AttributeSemanticRef, FormatFailureDetailValue,
@@ -37,6 +37,21 @@ fn upstream_models_match_source_counts_and_converted_mesh_bounds() -> Result<()>
         .map_err(|e| format!("{name}: {e}"))?;
         let asset = &output.asset;
         let counts = &fixture["counts"];
+        let implicit_materials: BTreeSet<_> = asset
+            .draws
+            .iter()
+            .filter_map(|draw| {
+                if let baozi::MaterialAssignment::ImplicitDefault(index) = draw.material {
+                    Some(index)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            implicit_materials.len() <= 1,
+            "one shared generated glTF default"
+        );
         for (key, actual) in [
             ("nodes", asset.nodes.len()),
             ("meshes", asset.mesh_count),
@@ -44,7 +59,11 @@ fn upstream_models_match_source_counts_and_converted_mesh_bounds() -> Result<()>
             ("mesh_instances", asset.instances.len()),
             ("skins", asset.skins.len()),
             ("animations", asset.animations.len()),
-            ("materials", asset.materials.len()),
+            // The pinned independent source manifest counts authored definitions only.
+            (
+                "materials",
+                asset.materials.len() - implicit_materials.len(),
+            ),
             ("images", asset.images.len()),
         ] {
             assert_eq!(
@@ -121,13 +140,17 @@ fn texture_bytes_material_binding_uvs_and_reflected_winding_survive_scene_drop()
     let output = process_file(&fixtures(), &model("BoxTextured"), Options::default())?;
     let asset = output.asset;
     assert_eq!(
-        asset.images[0],
+        asset.images[0].encoded_bytes,
         std::fs::read(fixtures().join("upstream/Models/BoxTextured/glTF/CesiumLogoFlat.png"))?
     );
     let binding = &asset.materials[0].bindings[0];
-    assert_eq!(binding.image, 0);
+    assert_eq!(asset.textures[binding.texture].image, 0);
     assert_eq!(binding.uv_set, 0);
-    assert!(asset.draws[0].vertices.iter().all(|v| v.uv.is_some()));
+    let uv_set = u32::from(binding.uv_set);
+    let uvs = asset.draws[0]
+        .uv_stream(uv_set)
+        .ok_or("missing bound UV set")?;
+    assert_eq!(uvs.values.len(), asset.draws[0].vertices.len());
     let standard = process_file(
         &fixtures(),
         &model("BoxTextured"),
@@ -138,6 +161,14 @@ fn texture_bytes_material_binding_uvs_and_reflected_winding_survive_scene_drop()
     )?;
     let before = &standard.asset.draws[0];
     let after = &asset.draws[0];
+    let before_uvs = &before
+        .uv_stream(uv_set)
+        .ok_or("missing source UV set")?
+        .values;
+    let after_uvs = &after
+        .uv_stream(uv_set)
+        .ok_or("missing converted UV set")?
+        .values;
     assert_eq!((after.vertices.len(), after.indices.len()), (24, 36));
     for (before_triangle, after_triangle) in before
         .indices
@@ -145,9 +176,14 @@ fn texture_bytes_material_binding_uvs_and_reflected_winding_survive_scene_drop()
         .zip(after.indices.chunks_exact(3))
     {
         for (lane, source) in [0, 2, 1].into_iter().enumerate() {
-            let before = &before.vertices[usize::try_from(before_triangle[source])?];
-            let after = &after.vertices[usize::try_from(after_triangle[lane])?];
-            assert_eq!(after.uv, before.uv);
+            let before_index = usize::try_from(before_triangle[source])?;
+            let after_index = usize::try_from(after_triangle[lane])?;
+            assert_eq!(
+                after_uvs[after_index].map(f64::to_bits),
+                before_uvs[before_index].map(f64::to_bits)
+            );
+            let before = &before.vertices[before_index];
+            let after = &after.vertices[after_index];
             let p = before.position;
             assert_eq!(after.position, [-p[0] * 100.0, p[1] * 100.0, p[2] * 100.0]);
         }
@@ -311,7 +347,11 @@ fn morph_streams_and_weight_animation_remain_app_owned() -> Result<()> {
     assert!(draw.vertices.iter().all(|v| v.tangent.is_some()));
     assert_eq!(draw.morphs.len(), 6);
     assert!(draw.morphs.iter().all(|m| m.values.len() == 24));
-    assert_eq!(asset.instances[0].morph_weights, [0.0, 0.0]);
+    assert_eq!(
+        asset.mesh_morph_weights[asset.instances[0].mesh],
+        [0.0, 0.0]
+    );
+    assert!(asset.instances[0].morph_weights.is_none());
     let first = draw
         .morphs
         .iter()
@@ -373,7 +413,8 @@ fn unchanged_morph_primitives_keep_source_json_after_edits_and_scene_drop() -> R
         assert_eq!(asset.draws[1].indices.len(), 24);
         assert_eq!(asset.materials.len(), 2);
         assert_ne!(asset.draws[0].material, asset.draws[1].material);
-        assert_eq!(asset.instances[0].morph_weights, [0.5]);
+        assert_eq!(asset.mesh_morph_weights[asset.instances[0].mesh], [0.5]);
+        assert!(asset.instances[0].morph_weights.is_none());
         for draw in &asset.draws {
             let delta = draw
                 .morphs
@@ -384,7 +425,7 @@ fn unchanged_morph_primitives_keep_source_json_after_edits_and_scene_drop() -> R
             assert!((delta.values.iter().map(|v| v[1]).fold(0.0, f32::max) - 20.0).abs() < 0.00001);
         }
         assert_eq!(
-            asset.images[0],
+            asset.images[0].encoded_bytes,
             std::fs::read(
                 fixtures().join("upstream/Models/MorphPrimitivesTest/glTF/uv_texture.jpg")
             )?
@@ -506,7 +547,7 @@ fn unchanged_upstream_policy_rejections_are_typed() -> Result<()> {
 }
 
 #[test]
-fn consecutive_polygon_edits_reacquire_current_generation_handles() -> Result<()> {
+fn polygon_selection_uses_one_geometry_publication_before_space_conversion() -> Result<()> {
     let io = MemoryAssetIo::new();
     let path = AssetPath::new("two.obj")?;
     io.try_insert(path.clone(), Arc::from(b"o first\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nf 1 2 3 4\no second\nv 0 0 1\nv 1 0 1\nv 1 1 1\nv 0 1 1\nf 5 6 7 8\n".as_slice()))?;
@@ -527,7 +568,8 @@ fn consecutive_polygon_edits_reacquire_current_generation_handles() -> Result<()
             .iter()
             .all(|d| d.vertices.len() == 4 && d.indices.len() == 6)
     );
-    assert_eq!(output.metrics.changed_operations, 5);
+    assert_eq!(output.metrics.changed_operations, 2);
+    assert_eq!(output.metrics.selected_geometry_reconstructions, 1);
     assert_eq!(
         output.asset.bounds(),
         Some([[-100.0, 0.0, 0.0], [0.0, 100.0, 100.0]])

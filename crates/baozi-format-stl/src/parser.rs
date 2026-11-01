@@ -249,7 +249,9 @@ fn scene_from_parsed<'scope>(
                         primitives.try_push(GeometryPrimitiveAuthoring::new(
                             GeometryTopologyAuthoring::TriangleList,
                             Presence::Absent,
-                            Presence::Present(MaterialLocalId::new(0)),
+                            baozi_import::authoring::MaterialAssignment::Authored(
+                                MaterialLocalId::new(0),
+                            ),
                             attribute_range,
                         ))?;
                         primitive_patches.try_push(PrimitivePatch {
@@ -320,7 +322,7 @@ fn scene_from_parsed<'scope>(
         *primitive = GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::TriangleList,
             Presence::Present(values),
-            Presence::Present(MaterialLocalId::new(0)),
+            baozi_import::authoring::MaterialAssignment::Authored(MaterialLocalId::new(0)),
             patch.attributes,
         );
     }

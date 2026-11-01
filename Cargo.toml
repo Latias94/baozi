@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-exclude = ["candidates/baozi-native-io", "tools/consumers/scene", "tools/consumers/assets", "vendor/gltf", "vendor/gltf-json"]
+exclude = ["candidates/baozi-native-io", "tools/consumers/scene", "tools/consumers/assets"]
 
 [workspace.package]
 version = "0.1.0"
@@ -33,7 +33,5 @@ mint = "0.5"
 triomphe = { version = "=0.1.17", default-features = false }
 scopeguard = "=1.2.0"
 criterion = { version = "0.8.2", default-features = false }
-gltf = { package = "baozi-gltf", path = "vendor/gltf", version = "=0.1.0", default-features = false, features = ["extensions", "extras", "KHR_materials_unlit", "KHR_texture_transform", "names", "utils"] }
-serde = "1"
 serde_json = "1"
 sha2 = "0.11.1"

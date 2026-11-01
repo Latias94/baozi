@@ -138,7 +138,7 @@ impl FormatImporter for Importer {
         let primitives = [GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::TriangleList,
             Presence::Present(&[0, 1, 2]),
-            Presence::Absent,
+            baozi_core::MaterialAssignment::Unspecified,
             AuthoringRange::new(0, 3),
         )];
         let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];

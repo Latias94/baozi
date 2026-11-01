@@ -79,7 +79,7 @@ pub(super) fn submit(
         } else {
             Presence::Absent
         },
-        Presence::Absent,
+        baozi_core::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 4),
     )];
     let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -408,4 +408,93 @@ fn polygons_require_the_explicit_geometric_triangulation_operation() {
             topology: TopologyKind::Polygons
         }
     );
+}
+
+#[test]
+fn explicit_lowering_preserves_deformation_owners_origins_and_source_identity_tables() {
+    type TupleBits = (u32, Vec<u32>, Vec<u32>, Vec<u32>, Vec<Option<[u32; 3]>>);
+    fn tuples(primitive: PrimitiveRef<'_>) -> Vec<TupleBits> {
+        let targets: Vec<_> = primitive
+            .mesh()
+            .morph_target_definitions()
+            .map(|t| t.id())
+            .collect();
+        list_vertices(primitive)
+            .unwrap()
+            .vertices()
+            .map(|tuple| {
+                let row = tuple.influences().unwrap();
+                let deltas = targets
+                    .iter()
+                    .flat_map(|&target| {
+                        [
+                            MorphDeltaSemantic::Position,
+                            MorphDeltaSemantic::Normal,
+                            MorphDeltaSemantic::Tangent,
+                        ]
+                        .map(|semantic| {
+                            tuple
+                                .morph_delta(target, semantic)
+                                .unwrap()
+                                .map(|v| [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()])
+                        })
+                    })
+                    .collect();
+                (
+                    tuple.source_vertex().index,
+                    row.joint_indices().to_vec(),
+                    row.source_orders().to_vec(),
+                    row.weights().iter().map(|v| v.to_bits()).collect(),
+                    deltas,
+                )
+            })
+            .collect()
+    }
+    for topology in [
+        GeometryTopologyAuthoring::TriangleStrip,
+        GeometryTopologyAuthoring::TriangleFan,
+    ] {
+        let (scene, import) = import_fixture(Fixture::DeformedAssembly(topology)).into_parts();
+        let source = scene.meshes().next().unwrap().primitives().next().unwrap();
+        let target = source.id();
+        let expected = tuples(source);
+        let origins: Vec<_> = list_vertices(source)
+            .unwrap()
+            .vertices()
+            .map(|v| v.source_corner().index)
+            .collect();
+        let before = scene
+            .capture_snapshot(SceneSnapshotLimits::try_new(32 * 1024, 128, 1_000_000).unwrap())
+            .unwrap();
+        let (scene, report) = baozi_postprocess::prepare_triangles(
+            scene,
+            &[target],
+            baozi_postprocess::TrianglePreparationOptions::default(),
+            baozi_postprocess::PostProcessControl::default(),
+        )
+        .unwrap()
+        .into_parts();
+        assert!(!import.matches_scene(&scene));
+        let target = report.geometry_preparation().unwrap().target(0).unwrap();
+        assert_eq!(target.source_corner_origins().unwrap(), origins);
+        assert_eq!(
+            tuples(scene.primitive(target.output_target()).unwrap()),
+            expected
+        );
+        let after = scene
+            .capture_snapshot(SceneSnapshotLimits::try_new(32 * 1024, 128, 1_000_000).unwrap())
+            .unwrap();
+        assert_eq!(before.profile_source_count(), after.profile_source_count());
+        assert_eq!(
+            before.profile_resource_count(),
+            after.profile_resource_count()
+        );
+        assert_eq!(
+            before.profile_metadata_entry_count(),
+            after.profile_metadata_entry_count()
+        );
+        drop(scene);
+        drop(import);
+        assert_eq!(target.source_corner_origins().unwrap(), origins);
+    }
 }

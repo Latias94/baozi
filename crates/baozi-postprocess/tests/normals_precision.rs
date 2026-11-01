@@ -171,7 +171,7 @@ impl FormatImporter for PrecisionImporter {
             } else {
                 Presence::Present(&fixture.indices)
             },
-            Presence::Absent,
+            baozi_core::MaterialAssignment::Unspecified,
             AuthoringRange::new(0, attributes.len() as u32),
         )];
         let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -297,8 +297,8 @@ fn generate(fixture: &Fixture, mode: NormalMode) -> PostProcessRunOutcome {
         NormalOptions {
             mode,
             existing: ExistingNormals::Replace,
-            ..NormalOptions::default()
         },
+        baozi_postprocess::TangentPolicy::Preserve,
         PostProcessControl::default(),
     )
     .expect("well-conditioned normals must publish at retained width");
@@ -385,6 +385,7 @@ fn reject(fixture: &Fixture, mode: NormalMode) -> NormalIssue {
             mode,
             ..NormalOptions::default()
         },
+        baozi_postprocess::TangentPolicy::Preserve,
         PostProcessControl::default(),
     )
     .expect_err("unresolved geometry must not publish a generation");
@@ -726,6 +727,7 @@ fn preserving_authored_f64_normals_keeps_the_original_generation_without_kernel_
         scene,
         target,
         NormalOptions::default(),
+        baozi_postprocess::TangentPolicy::Preserve,
         PostProcessControl::default(),
     )
     .unwrap();

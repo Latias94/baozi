@@ -33,7 +33,7 @@ attribute expansion.
 
 A `LogicalMesh` owns one or more `Primitive` values. Logical identity, name, provenance, morph target
 definitions, and default morph weights belong to the logical mesh. Each primitive independently
-owns topology, indices, an optional material binding, geometric attributes, morph delta streams,
+owns topology, indices, a typed material assignment, geometric attributes, morph delta streams,
 primitive bounds state, and provenance. Primitive, logical-mesh, and scene bounds are three different
 derived owners; none substitutes for another.
 
@@ -58,7 +58,7 @@ classDiagram
       Topology topology
       IndexStream indices
       Attribute[] attributes
-      MaterialId? material
+      MaterialAssignment material
       DerivedBounds bounds
     }
     class MeshInstance {
@@ -76,7 +76,8 @@ classDiagram
     MeshInstance "1" *-- "0..*" Attribute
 ```
 
-Every primitive is homogeneous: one topology and one optional material. Supported raw topologies
+Every primitive is homogeneous: one topology and one material assignment. The assignment is
+`Unspecified`, `Authored(MaterialId)` or `ImplicitDefault(MaterialId)` under ADR 0012. Supported raw topologies
 include points, line lists, line strips, line loops, triangle lists/strips/fans where
 source-preserving, and polygons with explicit face boundaries. Patches are admitted only when a
 producer and bounded descriptor exist; no placeholder topology variant is added in advance.

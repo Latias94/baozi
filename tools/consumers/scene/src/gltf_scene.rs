@@ -510,8 +510,11 @@ fn assert_scene(scene: &ValidatedScene) {
             primitive.id()
         );
     }
-    assert_eq!(primitives[0].material().unwrap().name(), Some("Coat"));
-    assert_eq!(primitives[1].material().unwrap().name(), Some(""));
+    assert_eq!(
+        primitives[0].authored_material().unwrap().name(),
+        Some("Coat")
+    );
+    assert_eq!(primitives[1].authored_material().unwrap().name(), Some(""));
     assert_appearance(scene);
     assert_deformation(scene);
     assert_animation(scene);
@@ -697,11 +700,11 @@ fn assert_animation(scene: &ValidatedScene) {
             assert_eq!(channel.key_times(), &[0.25, 1.5]);
             assert_eq!(
                 channel.pre_extrapolation(),
-                AnimationExtrapolation::SourceDefault
+                AnimationExtrapolation::Constant
             );
             assert_eq!(
                 channel.post_extrapolation(),
-                AnimationExtrapolation::SourceDefault
+                AnimationExtrapolation::Constant
             );
         }
     }

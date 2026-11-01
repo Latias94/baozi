@@ -17,18 +17,19 @@ Baozi currently uses `repo-ref/assimp` as local reference material only. Do not 
 
 ## gltf-rs
 
-`vendor/gltf` and `vendor/gltf-json` contain the gltf-rs `gltf` and `gltf-json`
-1.4.1 source, release revision `0f1e94f5e2307de7336be6d3a65c38c4d34aea08`,
-originally authored by David Harvey-Macaulay and the gltf-rs contributors.
+The former gltf-rs `gltf` and `gltf-json` 1.4.1 decoder used release revision
+`0f1e94f5e2307de7336be6d3a65c38c4d34aea08`, originally authored by
+David Harvey-Macaulay and the gltf-rs contributors.
 Upstream: <https://github.com/gltf-rs/gltf>.
 
-The source is licensed `MIT OR Apache-2.0`. The original
-[MIT](vendor/gltf/LICENSE-MIT) and [Apache-2.0](vendor/gltf/LICENSE-APACHE)
-license texts are retained in each package. Baozi maintains distinct package
-identities, narrow JSON validation corrections, and explicit unsupported morph-payload retention.
-The complete changes are recorded
-in [reader maintenance](vendor/gltf/BAOZI_PATCHES.md) and
-[JSON maintenance](vendor/gltf-json/BAOZI_PATCHES.md).
+That source is licensed `MIT OR Apache-2.0`; its original
+[MIT license](https://github.com/gltf-rs/gltf/blob/0f1e94f5e2307de7336be6d3a65c38c4d34aea08/LICENSE-MIT) and
+[Apache-2.0 license](https://github.com/gltf-rs/gltf/blob/0f1e94f5e2307de7336be6d3a65c38c4d34aea08/LICENSE-APACHE)
+remain available at the exact upstream source revision. The complete vendor trees and both
+maintained package identities were removed when Baozi's owned selected-profile document replaced
+them. The current portable dependency graph contains no gltf-rs decoder package. Historical source
+and its original notices remain in repository history; the archived qualification for that older
+decoder is not qualification of its replacement.
 
 ## cap-std project
 

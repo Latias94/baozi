@@ -1494,6 +1494,94 @@ where
         validate_dimension_state(dimension, policy, entry.state)
     }
 
+    /// Moves unused ordinary counter capacity into the dormant failure-terminal counter.
+    /// Both policies change under one lock; all counters and both combined limits are preserved.
+    pub(crate) fn transfer_failure_terminal_work(
+        &self,
+        ordinary_dimension: D,
+        terminal_dimension: D,
+        additional_work: u64,
+    ) -> Result<(), LedgerCause<D>> {
+        let mut state = lock(&self.state);
+        Self::ensure_open(&state)?;
+        if state.active_linear_work_permits != 0 {
+            return Err(LedgerCause::OutstandingLinearWorkPermits {
+                count: state.active_linear_work_permits,
+            });
+        }
+        let position = |dimension| {
+            state
+                .dimensions
+                .binary_search_by_key(&dimension, |entry| entry.dimension)
+                .map_err(|_| LedgerCause::UnknownDimension { dimension })
+        };
+        let ordinary = position(ordinary_dimension)?;
+        let terminal = position(terminal_dimension)?;
+        if ordinary == terminal {
+            return Err(LedgerCause::DimensionPolicyShapeMismatch {
+                dimension: ordinary_dimension,
+            });
+        }
+        for index in [ordinary, terminal] {
+            let entry = &state.dimensions[index];
+            if entry.policy
+                != DimensionPolicy::counter(
+                    entry.policy.attempted_limit,
+                    entry.policy.consumed_limit,
+                    0,
+                )
+            {
+                return Err(LedgerCause::DimensionPolicyShapeMismatch {
+                    dimension: entry.dimension,
+                });
+            }
+            validate_dimension_state(entry.dimension, entry.policy, entry.state)?;
+        }
+        let ordinary_policy = state.dimensions[ordinary].policy;
+        let terminal_policy = state.dimensions[terminal].policy;
+        let subtract = |class, limit: u64| {
+            limit
+                .checked_sub(additional_work)
+                .ok_or(LedgerCause::LimitExceeded {
+                    class,
+                    dimension: ordinary_dimension,
+                    value: additional_work,
+                    limit,
+                })
+        };
+        let add = |class, limit: u64| {
+            limit
+                .checked_add(additional_work)
+                .ok_or(LedgerCause::ArithmeticOverflow {
+                    class,
+                    dimension: terminal_dimension,
+                })
+        };
+        let ordinary_policy = DimensionPolicy::counter(
+            subtract(CounterClass::Attempted, ordinary_policy.attempted_limit)?,
+            subtract(CounterClass::Consumed, ordinary_policy.consumed_limit)?,
+            0,
+        );
+        let terminal_policy = DimensionPolicy::counter(
+            add(CounterClass::Attempted, terminal_policy.attempted_limit)?,
+            add(CounterClass::Consumed, terminal_policy.consumed_limit)?,
+            0,
+        );
+        validate_dimension_state(
+            ordinary_dimension,
+            ordinary_policy,
+            state.dimensions[ordinary].state,
+        )?;
+        validate_dimension_state(
+            terminal_dimension,
+            terminal_policy,
+            state.dimensions[terminal].state,
+        )?;
+        state.dimensions[ordinary].policy = ordinary_policy;
+        state.dimensions[terminal].policy = terminal_policy;
+        Ok(())
+    }
+
     /// Charges non-refundable work that was actually completed or observed.
     pub fn charge_consumed(&self, dimension: D, amount: u64) -> Result<(), LedgerCause<D>> {
         let mut state = lock(&self.state);

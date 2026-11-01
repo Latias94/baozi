@@ -14,22 +14,21 @@ pub(crate) struct AdmittedSurfaces<'scope> {
     json_bytes: &'scope [u8],
     bin_bytes: Option<&'scope [u8]>,
     source_map: GltfSourceMap<'scope>,
+    index: json_syntax::JsonIndex<'scope>,
 }
 
 impl<'scope> AdmittedSurfaces<'scope> {
-    pub(crate) const fn json_bytes(&self) -> &'scope [u8] {
-        self.json_bytes
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        &'scope [u8],
+        Option<&'scope [u8]>,
+        GltfSourceMap<'scope>,
+        json_syntax::JsonIndex<'scope>,
+    ) {
+        (self.json_bytes, self.bin_bytes, self.source_map, self.index)
     }
-
-    pub(crate) const fn bin_bytes(&self) -> Option<&'scope [u8]> {
-        self.bin_bytes
-    }
-
-    pub(crate) const fn source_map(&self) -> &GltfSourceMap<'scope> {
-        &self.source_map
-    }
-
-    /// Transfer the complete metered map into the normalized owner after copying the BIN view.
+    #[cfg(test)]
     pub(crate) fn into_source_map(self) -> GltfSourceMap<'scope> {
         self.source_map
     }
@@ -49,11 +48,13 @@ pub(crate) fn admit<'scope>(ctx: &'scope ParseScope<'_>) -> ParseResult<Admitted
             false,
         )
     };
-    let source_map = json_syntax::admit(ctx, surface.json_bytes, surface.json_raw_base, is_glb)?;
+    let (source_map, index) =
+        json_syntax::admit(ctx, surface.json_bytes, surface.json_raw_base, is_glb)?;
     Ok(AdmittedSurfaces {
         json_bytes: surface.json_bytes,
         bin_bytes: surface.bin_bytes,
         source_map,
+        index,
     })
 }
 

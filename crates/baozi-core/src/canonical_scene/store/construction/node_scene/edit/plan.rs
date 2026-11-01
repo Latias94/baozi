@@ -104,17 +104,23 @@ impl NodeTransformEditTarget {
 pub(super) enum NodeSceneEditProgram<'scene> {
     #[cfg(test)]
     NodeTransform(NodeTransformRewrite),
+    #[cfg(test)]
     TriangulatePrimitive(
         crate::canonical_scene::store::typed_storage::edit::GeometryTriangulationPlan<'scene>,
     ),
+    #[cfg(test)]
     GenerateNormals {
         geometry: crate::canonical_scene::store::typed_storage::edit::normals::GeometryNormalsPlan<
             'scene,
         >,
         smooth: bool,
     },
+    #[cfg(test)]
     GenerateTangents(
         crate::canonical_scene::store::typed_storage::edit::tangents::GeometryTangentsPlan<'scene>,
+    ),
+    SelectedGeometry(
+        crate::canonical_scene::store::typed_storage::edit::selected::GeometrySelectionPlan<'scene>,
     ),
     ConvertSpace(SceneSpacePlan<'scene>),
 }
@@ -160,6 +166,13 @@ impl NodeSceneEditProgram<'_> {
         match self {
             Self::NodeTransform(_) => OperationKind::Transform,
             Self::TriangulatePrimitive(_) => OperationKind::Split,
+            Self::SelectedGeometry(geometry) => {
+                if geometry.changes_fields() {
+                    OperationKind::Generated
+                } else {
+                    OperationKind::Split
+                }
+            }
             Self::GenerateNormals { .. } | Self::GenerateTangents(_) => OperationKind::Generated,
             Self::ConvertSpace(_) => OperationKind::Transform,
         }
@@ -171,7 +184,7 @@ impl NodeSceneEditProgram<'_> {
 /// Counts are fixed before an operation starts, so admission never has to rediscover
 /// semantic shape or perform a fallible integer conversion after mutation begins.
 #[derive(Clone, Copy)]
-pub(super) struct NodeSceneEditFixedCounts {
+pub(super) struct NodeSceneEditFixedCounts<'scene> {
     pub(super) evidence: SceneEvidenceCounts,
     pub(super) central_validation_plan: NodeSceneCentralValidationPlan,
     pub(super) canonical_blocks: CheckedCount,
@@ -185,14 +198,14 @@ pub(super) struct NodeSceneEditFixedCounts {
     pub(super) primitives: CheckedCount,
     pub(super) attributes: CheckedCount,
     pub(super) mesh_instances: CheckedCount,
-    pub(super) profile: NodeSceneEditProfilePlan,
+    pub(super) profile: NodeSceneEditProfilePlan<'scene>,
 }
 
-impl NodeSceneEditFixedCounts {
+impl<'scene> NodeSceneEditFixedCounts<'scene> {
     #[cfg(test)]
     fn try_new_node_transform(
         input: &SceneStorage,
-        program: &NodeSceneEditProgram<'_>,
+        program: &NodeSceneEditProgram<'scene>,
         source_node_rows: usize,
         source_root_rows: usize,
         source_edge_rows: usize,
@@ -209,7 +222,7 @@ impl NodeSceneEditFixedCounts {
 
     fn try_new_for_program(
         input: &SceneStorage,
-        program: &NodeSceneEditProgram<'_>,
+        program: &NodeSceneEditProgram<'scene>,
         source_node_rows: usize,
         source_root_rows: usize,
         source_edge_rows: usize,
@@ -220,11 +233,13 @@ impl NodeSceneEditFixedCounts {
             NodeSceneEditProgram::NodeTransform(rewrite) => {
                 ProfileEditTargets::Node(rewrite.target().canonical_row.as_u32())
             }
+            #[cfg(test)]
             NodeSceneEditProgram::TriangulatePrimitive(geometry) => {
                 ProfileEditTargets::Triangulation {
                     primitive: geometry.target_row(),
                 }
             }
+            #[cfg(test)]
             NodeSceneEditProgram::GenerateNormals { geometry, smooth } => {
                 ProfileEditTargets::Normals {
                     primitive: u32::try_from(geometry.target_row())
@@ -233,11 +248,13 @@ impl NodeSceneEditFixedCounts {
                     smooth: *smooth,
                 }
             }
+            #[cfg(test)]
             NodeSceneEditProgram::GenerateTangents(geometry) => ProfileEditTargets::Tangents {
                 primitive: u32::try_from(geometry.target_row())
                     .map_err(|_| StorePlanError::SizeOverflow)?,
                 attributes: geometry.attribute_mapping(),
             },
+            NodeSceneEditProgram::SelectedGeometry(plan) => ProfileEditTargets::Selection(*plan),
             NodeSceneEditProgram::ConvertSpace(plan) => {
                 ProfileEditTargets::Space(plan.conversion())
             }
@@ -246,13 +263,18 @@ impl NodeSceneEditFixedCounts {
         // The concrete operation supplies the final domain counts before profile planning.
         let mut evidence = source_evidence;
         match program {
+            #[cfg(test)]
             NodeSceneEditProgram::GenerateNormals { geometry, .. } => {
                 evidence.attribute_count = geometry.output_attribute_count();
             }
+            #[cfg(test)]
             NodeSceneEditProgram::GenerateTangents(geometry) => {
                 evidence.attribute_count = geometry.output_attribute_count();
             }
             _ => {}
+        }
+        if let NodeSceneEditProgram::SelectedGeometry(plan) = program {
+            evidence.attribute_count = plan.output_attribute_count();
         }
         let profile = NodeSceneEditProfilePlan::try_new(input, targets, evidence, poll)?;
         let counts = profile.output_counts;
@@ -272,13 +294,17 @@ impl NodeSceneEditFixedCounts {
         let geometry_work = match program {
             #[cfg(test)]
             NodeSceneEditProgram::NodeTransform(_) => None,
+            #[cfg(test)]
             NodeSceneEditProgram::TriangulatePrimitive(geometry) => {
                 Some(geometry.validation_work())
             }
+            #[cfg(test)]
             NodeSceneEditProgram::GenerateNormals { geometry, .. } => {
                 Some(geometry.validation_work())
             }
+            #[cfg(test)]
             NodeSceneEditProgram::GenerateTangents(geometry) => Some(geometry.validation_work()),
+            NodeSceneEditProgram::SelectedGeometry(plan) => Some(plan.validation_work()),
             NodeSceneEditProgram::ConvertSpace(plan) => Some(plan.geometry().validation_work()),
         };
         if let Some(work) = geometry_work {
@@ -399,7 +425,7 @@ pub(in crate::canonical_scene::store) struct PendingNodeSceneEdit {
     input_root: CanonicalBlockRef<SceneDirectorySchema>,
     rewrite: NodeTransformRewrite,
     pub(super) operation: OperationIdentity,
-    pub(super) counts: NodeSceneEditFixedCounts,
+    pub(super) counts: NodeSceneEditFixedCounts<'static>,
     pub(super) invalidations: CanonicalInvalidations,
 }
 
@@ -409,7 +435,7 @@ pub(super) struct BoundPendingNodeSceneEdit<'scene> {
     pub(super) input: &'scene SceneStorage,
     pub(super) program: NodeSceneEditProgram<'scene>,
     pub(super) operation: OperationIdentity,
-    pub(super) counts: NodeSceneEditFixedCounts,
+    pub(super) counts: NodeSceneEditFixedCounts<'scene>,
     #[cfg(test)]
     pub(super) invalidations: CanonicalInvalidations,
 }
@@ -486,6 +512,39 @@ impl PendingNodeSceneEdit {
 }
 
 impl<'scene> BoundPendingNodeSceneEdit<'scene> {
+    pub(super) fn try_selected_geometry(
+        input: &'scene SceneStorage,
+        geometry: crate::canonical_scene::store::typed_storage::edit::selected::GeometrySelectionPlan<'scene>,
+        options: crate::provenance::OptionsDigest,
+        poll: &mut impl FnMut() -> Result<(), NodeSceneEditPlanError>,
+    ) -> Result<Self, NodeSceneEditPlanError> {
+        let kind = if geometry.changes_fields() {
+            OperationKind::Generated
+        } else {
+            OperationKind::Split
+        };
+        let program = NodeSceneEditProgram::SelectedGeometry(geometry);
+        let proof = input.proof;
+        let counts = NodeSceneEditFixedCounts::try_new_for_program(
+            input,
+            &program,
+            proof.source_node_count(),
+            proof.source_root_count(),
+            proof.source_edge_count(),
+            poll,
+        )?;
+        Ok(Self {
+            _seal: BoundSourceSeal,
+            input,
+            program,
+            operation: OperationIdentity::new(kind, options),
+            counts,
+            #[cfg(test)]
+            invalidations: CanonicalInvalidations::scene_bounds_invalidated(),
+        })
+    }
+
+    #[cfg(test)]
     pub(super) fn try_tangents(
         input: &'scene SceneStorage,
         geometry: crate::canonical_scene::store::typed_storage::edit::tangents::GeometryTangentsPlan<'scene>,
@@ -545,6 +604,7 @@ impl<'scene> BoundPendingNodeSceneEdit<'scene> {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn try_normals(
         input: &'scene SceneStorage,
         geometry: crate::canonical_scene::store::typed_storage::edit::normals::GeometryNormalsPlan<
@@ -577,6 +637,7 @@ impl<'scene> BoundPendingNodeSceneEdit<'scene> {
 }
 
 impl<'scene> BoundPendingNodeSceneEdit<'scene> {
+    #[cfg(test)]
     pub(super) fn try_triangulation(
         input: &'scene SceneStorage,
         geometry: crate::canonical_scene::store::typed_storage::edit::GeometryTriangulationPlan<

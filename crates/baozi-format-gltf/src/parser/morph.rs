@@ -52,7 +52,7 @@ fn add_cells(ctx: &ParseScope<'_>, cells: &mut usize, count: usize) -> Result<()
 pub(super) fn target_count(
     ctx: &ParseScope<'_>,
     mesh_index: usize,
-    mesh: &json::mesh::Mesh,
+    mesh: &json::mesh::Mesh<'_>,
 ) -> Result<usize> {
     let mut count = None;
     for (primitive_index, primitive) in mesh.primitives.iter().enumerate() {
@@ -61,7 +61,7 @@ pub(super) fn target_count(
             if targets.is_empty() {
                 return Err(gltf_parse_error(
                     ctx,
-                    format!(
+                    format_args!(
                         "glTF mesh {mesh_index} primitive {primitive_index} has an empty targets array"
                     ),
                 ));
@@ -69,7 +69,9 @@ pub(super) fn target_count(
             if count.is_some_and(|count| count != targets.len()) {
                 return Err(gltf_parse_error(
                     ctx,
-                    format!("glTF mesh {mesh_index} primitives disagree on morph target count"),
+                    format_args!(
+                        "glTF mesh {mesh_index} primitives disagree on morph target count"
+                    ),
                 ));
             }
             count = Some(targets.len());
@@ -87,7 +89,7 @@ fn validate_weights(
     if weights.is_empty() || weights.len() != expected {
         return Err(gltf_parse_error(
             ctx,
-            format!("{owner} morph weight count must equal {expected}"),
+            format_args!("{owner} morph weight count must equal {expected}"),
         ));
     }
     for chunk in weights.chunks(PARSER_POLL_INTERVAL) {
@@ -95,20 +97,16 @@ fn validate_weights(
         if chunk.iter().any(|value| !value.is_finite()) {
             return Err(gltf_parse_error(
                 ctx,
-                format!("{owner} morph weights must be finite"),
+                format_args!("{owner} morph weights must be finite"),
             ));
         }
     }
     Ok(())
 }
 
-type MorphAccessor = (
-    Semantic,
-    MorphDeltaSemantic,
-    Option<json::Index<json::accessor::Accessor>>,
-);
+type MorphAccessor = (Semantic, MorphDeltaSemantic, Option<json::Index>);
 
-fn target_accessors(target: &json::mesh::MorphTarget) -> [MorphAccessor; 3] {
+fn target_accessors(target: &json::mesh::MorphTarget<'_>) -> [MorphAccessor; 3] {
     [
         (
             Semantic::Positions,
@@ -133,24 +131,17 @@ fn validate_position_bounds(
     accessor: &json::accessor::Accessor,
     index: usize,
 ) -> Result<([f32; 3], [f32; 3])> {
-    let vector = |value: Option<&serde_json::Value>| -> Option<[f32; 3]> {
-        let values = value?.as_array()?;
-        let [x, y, z] = values.as_slice() else {
-            return None;
-        };
-        let vector = [x.as_f64()? as f32, y.as_f64()? as f32, z.as_f64()? as f32];
-        vector
-            .iter()
-            .all(|value| value.is_finite())
-            .then_some(vector)
-    };
-    let bounds = vector(accessor.min.as_ref()).zip(vector(accessor.max.as_ref()));
+    let bounds = accessor
+        .min
+        .and_then(json::accessor::Bounds::vec3)
+        .zip(accessor.max.and_then(json::accessor::Bounds::vec3))
+        .filter(|(min, max)| min.iter().chain(max).all(|value| value.is_finite()));
     let Some((min, max)) =
         bounds.filter(|(min, max)| min.iter().zip(max).all(|(min, max)| *min <= *max))
     else {
         return Err(gltf_parse_error(
             ctx,
-            format!(
+            format_args!(
                 "glTF morph POSITION accessor {index} requires ordered finite VEC3 min and max"
             ),
         ));
@@ -160,12 +151,12 @@ fn validate_position_bounds(
 
 pub(super) fn preflight<'scope>(
     ctx: &'scope ParseScope<'_>,
-    document: &gltf::Document,
+    document: &crate::document::Document<'_>,
     closure: &ResourceClosure<'_>,
     geometry: &GeometryContracts<'_>,
     selected_nodes: &[bool],
 ) -> Result<MorphContracts<'scope>> {
-    let root = document.as_json();
+    let root = document.tables();
     let mut contracts = MorphContracts {
         meshes: try_vec_capacity(
             ctx,
@@ -225,10 +216,10 @@ pub(super) fn preflight<'scope>(
                 for (semantic, kind, accessor) in target_accessors(target) {
                     let Some(accessor) = accessor else { continue };
                     ctx.charge_work(1)?;
-                    if !primitive.attributes.contains_key(&Checked::Valid(semantic)) {
+                    if !primitive.attributes.contains_key(&semantic) {
                         return Err(gltf_parse_error(
                             ctx,
-                            format!(
+                            format_args!(
                                 "glTF mesh {mesh_index} primitive {primitive_index} morph {kind:?} has no corresponding base attribute"
                             ),
                         ));
@@ -250,7 +241,7 @@ pub(super) fn preflight<'scope>(
                     if info.count != vertex_count {
                         return Err(gltf_parse_error(
                             ctx,
-                            format!(
+                            format_args!(
                                 "glTF mesh {mesh_index} primitive {primitive_index} morph accessor count must equal {vertex_count}"
                             ),
                         ));
@@ -286,7 +277,7 @@ pub(super) fn preflight<'scope>(
             let mesh = node.mesh.ok_or_else(|| {
                 gltf_parse_error(
                     ctx,
-                    format!("glTF node {node_index} has morph weights without a mesh"),
+                    format_args!("glTF node {node_index} has morph weights without a mesh"),
                 )
             })?;
             let width = contracts
@@ -307,7 +298,7 @@ pub(super) fn preflight<'scope>(
 
 pub(super) fn build_storage<'scope>(
     ctx: &'scope ParseScope<'_>,
-    document: &gltf::Document,
+    document: &crate::document::Document<'_>,
     buffers: &[Option<BufferData<'_>>],
     geometry: &GeometryContracts<'_>,
     contracts: &MorphContracts<'_>,
@@ -365,13 +356,11 @@ pub(super) fn build_storage<'scope>(
                         for (_, semantic, accessor) in target_accessors(target) {
                             let Some(accessor) = accessor else { continue };
                             let declared_bounds = if semantic == MorphDeltaSemantic::Position {
-                                Some(validate_position_bounds(ctx, &document.as_json().accessors[accessor.value()], accessor.value())?)
+                                Some(validate_position_bounds(ctx, &document.tables().accessors[accessor.value()], accessor.value())?)
                             } else { None };
                             let accessor = document.accessors().nth(accessor.value()).ok_or_else(|| gltf_parse_error(ctx, "glTF morph accessor disappeared"))?;
-                            let provenance = accessor_provenance(ctx, buffers, accessor.clone())?;
-                            let values = safe_gltf(ctx, "glTF morph delta reader", || {
-                                gltf::accessor::Iter::<[f32; 3]>::new(accessor, |buffer| buffers.get(buffer.index()).and_then(Option::as_ref).map(BufferData::as_slice))
-                            })?.ok_or_else(|| gltf_parse_error(ctx, "glTF morph delta could not be read"))?;
+                            let provenance = accessor_provenance(ctx, buffers, accessor)?;
+                            let values = accessor::vectors::<3>(ctx, accessor, buffers)?;
                             let count = vertices.checked_mul(3).ok_or_else(|| ctx.allocation_failure("gltf-morph-value-count"))?;
                             let mut output = try_vec_capacity(ctx, class, count, "gltf-morph-delta-values")?;
                             let mut minimum = [f32::INFINITY; 3];

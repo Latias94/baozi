@@ -6,25 +6,19 @@
 use baozi_core::__scene_integration::integration::SceneVectorValues;
 use baozi_core::{
     AttributeData, AttributeDomain, AttributeElement, AttributeRef, AttributeSemanticRef,
-    PrimitiveId, SceneLookupError, TopologyKind, ValidatedScene,
 };
 use baozi_operation::StoreRuntimeError;
 
-use super::{ExistingTangents, TangentIssue, TangentOptions, kernel};
-use crate::operation::runtime::{EditOperation, MAX_WORK, RuntimeKeys, ScratchVec, run_unit};
+use super::{TangentIssue, kernel};
+use crate::operation::runtime::{EditOperation, RuntimeKeys, ScratchVec, run_unit};
 
 #[derive(Debug)]
-pub(super) enum InputError {
-    Target(SceneLookupError),
-    UnsupportedTopology,
+pub(crate) enum InputError {
     Positions,
     NormalField,
     UvField,
     UnsupportedDomain,
-    MultipleTangentFields,
-    MorphDeltas,
     SizeOverflow,
-    WorkLimit { required: u64, maximum: u64 },
     Issue(TangentIssue),
     Runtime(StoreRuntimeError),
 }
@@ -35,20 +29,19 @@ impl From<StoreRuntimeError> for InputError {
     }
 }
 
-pub(super) struct TangentInput<'s> {
+pub(crate) struct TangentInput<'s> {
     corners: u32,
     indices: Option<&'s [u32]>,
     positions: AttributeRef<'s>,
-    normals: AttributeRef<'s>,
+    normals: ProjectedNormals<'s>,
+    origins: Option<&'s [[u32; 3]]>,
     uvs: AttributeRef<'s>,
-    had_tangent: bool,
     sources: super::wide::Sources,
     wide_output: bool,
 }
 
 pub(crate) struct GeneratedTangents {
     values: TangentValues,
-    had_tangent: bool,
 }
 
 enum TangentValues {
@@ -63,161 +56,9 @@ impl GeneratedTangents {
             TangentValues::F64(values) => SceneVectorValues::F64(values.values()),
         }
     }
-    pub(crate) const fn had_tangent(&self) -> bool {
-        self.had_tangent
-    }
 }
 
-pub(super) fn inspect<'s>(
-    scene: &'s ValidatedScene,
-    target: PrimitiveId,
-    options: TangentOptions,
-    operation: &mut EditOperation,
-    keys: RuntimeKeys,
-) -> Result<Option<TangentInput<'s>>, InputError> {
-    let primitive =
-        run_unit(operation, keys, || scene.primitive(target))?.map_err(InputError::Target)?;
-    let (topology, corners, indices, mut attributes) = run_unit(operation, keys, || {
-        (
-            primitive.topology(),
-            primitive.corner_count(),
-            primitive.indices(),
-            primitive.attributes(),
-        )
-    })?;
-    if topology != TopologyKind::TriangleList {
-        return Err(InputError::UnsupportedTopology);
-    }
-    if corners == 0 {
-        return Ok(None);
-    }
-    let attribute_count = attributes.len();
-    let mut positions = None;
-    let mut normals = None;
-    let mut uvs = None;
-    let mut tangents = 0;
-    let mut replaced_wide = false;
-    loop {
-        let more = run_unit(operation, keys, || {
-            let Some(attribute) = attributes.next() else {
-                return false;
-            };
-            match attribute.semantic() {
-                AttributeSemanticRef::Position => positions = Some(attribute),
-                AttributeSemanticRef::Normal if attribute.domain() == options.normal_domain => {
-                    normals = Some(attribute);
-                }
-                AttributeSemanticRef::Texcoord(set)
-                    if set == options.uv_set && attribute.domain() == options.uv_domain =>
-                {
-                    uvs = Some(attribute);
-                }
-                AttributeSemanticRef::Tangent => {
-                    tangents += 1;
-                    replaced_wide |= is_f64(attribute);
-                }
-                _ => {}
-            }
-            true
-        })?;
-        if !more {
-            break;
-        }
-    }
-    if tangents != 0 && options.existing == ExistingTangents::Preserve {
-        return Ok(None);
-    }
-    if tangents > 1 {
-        return Err(InputError::MultipleTangentFields);
-    }
-    if !matches!(
-        options.normal_domain,
-        AttributeDomain::Vertex | AttributeDomain::Corner
-    ) || !matches!(
-        options.uv_domain,
-        AttributeDomain::Vertex | AttributeDomain::Corner
-    ) {
-        return Err(InputError::UnsupportedDomain);
-    }
-    let positions = positions.ok_or(InputError::Positions)?;
-    let normals = normals.ok_or(InputError::NormalField)?;
-    let uvs = uvs.ok_or(InputError::UvField)?;
-    if positions.domain() != AttributeDomain::Vertex || positions.lanes() != 3 {
-        return Err(InputError::Positions);
-    }
-    if normals.lanes() != 3 {
-        return Err(InputError::NormalField);
-    }
-    if uvs.lanes() != 2 {
-        return Err(InputError::UvField);
-    }
-
-    // Reading each retained morph target is charged, including empty targets. Any delta would
-    // need a separate derived tangent frame and cannot be carried into this base-only profile.
-    let mut morphs = run_unit(operation, keys, || primitive.morph_targets())?;
-    let morph_count = u64::try_from(morphs.len()).map_err(|_| InputError::SizeOverflow)?;
-    loop {
-        let next = run_unit(operation, keys, || {
-            morphs.next().map(|target| target.delta_count())
-        })?;
-        match next {
-            Some(0) => {}
-            Some(_) => return Err(InputError::MorphDeltas),
-            None => break,
-        }
-    }
-    // Sparse lookups are binary searches over validated u32 indices: at most 33 comparisons
-    // plus one fixed read per field. Each triangle action bounds nine field reads and a fixed
-    // stack-only kernel; initialization and preflight/publication retain separate admission.
-    let wide_output = replaced_wide || is_f64(positions) || is_f64(normals) || is_f64(uvs);
-    let scale_work = if wide_output {
-        retained_scalar_count(positions)?
-            .checked_add(retained_scalar_count(uvs)?)
-            .and_then(|count| count.checked_mul(2))
-            .ok_or(InputError::SizeOverflow)?
-    } else {
-        0
-    };
-    let required = u64::from(corners)
-        .checked_mul(110)
-        .and_then(|work| work.checked_add(scale_work))
-        .and_then(|work| work.checked_add(u64::try_from(attribute_count).ok()?))
-        .and_then(|work| work.checked_add(morph_count))
-        .and_then(|work| work.checked_add(16))
-        .ok_or(InputError::SizeOverflow)?;
-    if required > MAX_WORK {
-        return Err(InputError::WorkLimit {
-            required,
-            maximum: MAX_WORK,
-        });
-    }
-    let sources = super::wide::Sources {
-        position_f64: is_f64(positions),
-        uv_f64: is_f64(uvs),
-        position_scale: if wide_output {
-            admit_scale(positions, operation, keys)?
-        } else {
-            crate::precision::common_scale(0.0)
-        },
-        uv_scale: if wide_output {
-            admit_scale(uvs, operation, keys)?
-        } else {
-            crate::precision::common_scale(0.0)
-        },
-    };
-    Ok(Some(TangentInput {
-        corners,
-        indices,
-        positions,
-        normals,
-        uvs,
-        had_tangent: tangents != 0,
-        sources,
-        wide_output,
-    }))
-}
-
-pub(super) fn generate(
+pub(crate) fn generate(
     source: TangentInput<'_>,
     operation: &mut EditOperation,
     keys: RuntimeKeys,
@@ -245,8 +86,19 @@ pub(super) fn generate(
                 source.indices.map_or(corner, |ids| ids[corner] as usize)
             })?;
             positions[local] = read(source.positions, vertex, corner, operation, keys)?;
-            normals[local] = read(source.normals, vertex, corner, operation, keys)?;
-            uvs[local] = read(source.uvs, vertex, corner, operation, keys)?;
+            let original_corner = source.origins.map_or(corner, |o| o[face][local] as usize);
+            normals[local] = match source.normals {
+                ProjectedNormals::Authored(attribute) => {
+                    read(attribute, vertex, original_corner, operation, keys)?
+                }
+                ProjectedNormals::Generated(SceneVectorValues::F32(values)) => {
+                    run_unit(operation, keys, || values[corner].map(f64::from))?
+                }
+                ProjectedNormals::Generated(SceneVectorValues::F64(values)) => {
+                    run_unit(operation, keys, || values[corner])?
+                }
+            };
+            uvs[local] = read(source.uvs, vertex, original_corner, operation, keys)?;
         }
         match &mut values {
             TangentValues::F32(values) => {
@@ -286,57 +138,14 @@ pub(super) fn generate(
             }
         }
     }
-    Ok(GeneratedTangents {
-        values,
-        had_tangent: source.had_tangent,
-    })
+    Ok(GeneratedTangents { values })
 }
 
-fn is_f64(attribute: AttributeRef<'_>) -> bool {
+pub(crate) fn is_f64(attribute: AttributeRef<'_>) -> bool {
     matches!(
         attribute.data(),
         AttributeData::DenseF64 { .. } | AttributeData::SparseF64 { .. }
     )
-}
-
-fn retained_scalar_count(attribute: AttributeRef<'_>) -> Result<u64, InputError> {
-    let (values, default) = match attribute.data() {
-        AttributeData::DenseF32 { values, .. } => (values.len(), 0),
-        AttributeData::DenseF64 { values, .. } => (values.len(), 0),
-        AttributeData::SparseF32 {
-            values,
-            default,
-            indices,
-            logical_count,
-            ..
-        } => (
-            values.len(),
-            if indices.len() < logical_count as usize {
-                default.len()
-            } else {
-                0
-            },
-        ),
-        AttributeData::SparseF64 {
-            values,
-            default,
-            indices,
-            logical_count,
-            ..
-        } => (
-            values.len(),
-            if indices.len() < logical_count as usize {
-                default.len()
-            } else {
-                0
-            },
-        ),
-        _ => return Err(InputError::Positions),
-    };
-    values
-        .checked_add(default)
-        .and_then(|n| u64::try_from(n).ok())
-        .ok_or(InputError::SizeOverflow)
 }
 
 /// Sparse explicit values and a used default cover exactly the logical magnitudes, even when
@@ -426,7 +235,7 @@ fn visit_scalars(
     }
 }
 
-fn admit_scale(
+pub(crate) fn admit_scale(
     attribute: AttributeRef<'_>,
     operation: &mut EditOperation,
     keys: RuntimeKeys,
@@ -442,7 +251,7 @@ fn admit_scale(
     Ok(scale)
 }
 
-fn read<const N: usize>(
+pub(crate) fn read<const N: usize>(
     attribute: AttributeRef<'_>,
     vertex: usize,
     corner: usize,
@@ -485,4 +294,54 @@ fn read<const N: usize>(
             _ => InputError::UvField,
         }),
     })?
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ProjectedNormals<'a> {
+    Authored(AttributeRef<'a>),
+    Generated(SceneVectorValues<'a, 3>),
+}
+impl<'a> TangentInput<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn projected(
+        corners: u32,
+        indices: Option<&'a [u32]>,
+        positions: AttributeRef<'a>,
+        normals: ProjectedNormals<'a>,
+        uvs: AttributeRef<'a>,
+        origins: Option<&'a [[u32; 3]]>,
+        replaced_wide: bool,
+        operation: &mut EditOperation,
+        keys: RuntimeKeys,
+    ) -> Result<Self, InputError> {
+        let normal_wide = match normals {
+            ProjectedNormals::Authored(a) => is_f64(a),
+            ProjectedNormals::Generated(v) => v.is_f64(),
+        };
+        let wide_output = replaced_wide || is_f64(positions) || normal_wide || is_f64(uvs);
+        let sources = super::wide::Sources {
+            position_f64: is_f64(positions),
+            uv_f64: is_f64(uvs),
+            position_scale: if wide_output {
+                admit_scale(positions, operation, keys)?
+            } else {
+                crate::precision::common_scale(0.0)
+            },
+            uv_scale: if wide_output {
+                admit_scale(uvs, operation, keys)?
+            } else {
+                crate::precision::common_scale(0.0)
+            },
+        };
+        Ok(Self {
+            corners,
+            indices,
+            positions,
+            normals,
+            uvs,
+            origins,
+            sources,
+            wide_output,
+        })
+    }
 }

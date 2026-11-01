@@ -1368,7 +1368,10 @@ fn submit_complete_batch<'scope>(
         primitives.try_push_reserved(GeometryPrimitiveAuthoring::new(
             topology,
             Presence::Present(segment.indices.as_slice()),
-            segment.material.map_or(Presence::Absent, Presence::Present),
+            segment.material.map_or(
+                baozi_import::authoring::MaterialAssignment::Unspecified,
+                baozi_import::authoring::MaterialAssignment::Authored,
+            ),
             attribute_range,
         ))?;
         let mut logical_mesh = GeometryLogicalMeshAuthoring::new(AuthoringRange::new(local, 1));

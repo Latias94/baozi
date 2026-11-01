@@ -35,7 +35,7 @@ use baozi_io::AssetPath;
 use baozi_postprocess::{
     ExistingNormals, NormalCause, NormalOptions, PostProcessControl, PostProcessResourceEvidence,
     PostProcessRunDisposition, PostProcessRunError, SpaceConversionCause, SpaceConversionIssue,
-    SpaceConversionOptions, TangentHandling, convert_scene_space, generate_normals,
+    SpaceConversionOptions, convert_scene_space, generate_normals,
 };
 
 const FORMAT: &str = "dev.baozi.test.space-deformation-animation";
@@ -233,7 +233,7 @@ impl FormatImporter for DeformationAnimationImporter {
         let primitives = [GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::TriangleList,
             Presence::Present(&[0, 1, 2]),
-            Presence::Absent,
+            baozi_core::MaterialAssignment::Unspecified,
             AuthoringRange::new(0, 3),
         )];
         let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -638,9 +638,10 @@ fn normal_edits_reject_dependent_morph_deltas_without_publishing() {
                 target,
                 NormalOptions {
                     existing: ExistingNormals::Replace,
-                    tangents: TangentHandling::Remove,
+
                     ..NormalOptions::default()
                 },
+                baozi_postprocess::TangentPolicy::Remove,
                 PostProcessControl::default(),
             );
             let failure = result.expect_err("dependent morph delta must reject normal replacement");
@@ -683,6 +684,7 @@ fn normal_preservation_and_position_only_morphs_keep_their_meaning() {
             scene,
             target,
             NormalOptions::default(),
+            baozi_postprocess::TangentPolicy::Preserve,
             PostProcessControl::default(),
         )
         .unwrap()
@@ -696,9 +698,10 @@ fn normal_preservation_and_position_only_morphs_keep_their_meaning() {
                 target,
                 NormalOptions {
                     existing: ExistingNormals::Replace,
-                    tangents: TangentHandling::Remove,
+
                     ..NormalOptions::default()
                 },
+                baozi_postprocess::TangentPolicy::Remove,
                 PostProcessControl::default(),
             )
             .unwrap()

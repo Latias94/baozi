@@ -33,7 +33,7 @@ use baozi_io::AssetPath;
 use baozi_postprocess::{
     ExistingNormals, NormalCause, NormalMode, NormalOptions, PostProcessControl,
     PostProcessOperation, PostProcessReport, PostProcessResourceEvidence,
-    PostProcessRunDisposition, PostProcessRunError, TangentHandling, generate_normals,
+    PostProcessRunDisposition, PostProcessRunError, generate_normals,
 };
 
 const FORMAT: &str = "dev.baozi.test.normals-metadata";
@@ -158,13 +158,13 @@ impl FormatImporter for MetadataImporter {
             GeometryPrimitiveAuthoring::new(
                 GeometryTopologyAuthoring::TriangleList,
                 Presence::Present(&INDICES),
-                Presence::Absent,
+                baozi_core::MaterialAssignment::Unspecified,
                 AuthoringRange::new(0, second_start),
             ),
             GeometryPrimitiveAuthoring::new(
                 GeometryTopologyAuthoring::TriangleList,
                 Presence::Absent,
-                Presence::Absent,
+                baozi_core::MaterialAssignment::Unspecified,
                 AuthoringRange::new(second_start, 2),
             ),
         ];
@@ -615,9 +615,14 @@ fn default_tangent_rejection_returns_the_original_scene_and_all_metadata() {
         } else {
             NormalOptions::default()
         };
-        assert_eq!(options.tangents, TangentHandling::Reject);
-        let failure = generate_normals(scene, input, options, PostProcessControl::default())
-            .expect_err("generating normals requires explicit Tangent removal");
+        let failure = generate_normals(
+            scene,
+            input,
+            options,
+            baozi_postprocess::TangentPolicy::default(),
+            PostProcessControl::default(),
+        )
+        .expect_err("generating normals requires explicit Tangent removal");
         assert_eq!(failure.input().generation(), generation);
         assert!(import_evidence.matches_scene(failure.input()));
         assert_eq!(snapshot(failure.input()), before);
@@ -673,13 +678,18 @@ fn replace_and_remove_preserves_other_metadata_and_accepts_a_second_new_target_o
     let input = target(&scene);
     let options = NormalOptions {
         existing: ExistingNormals::Replace,
-        tangents: TangentHandling::Remove,
+
         ..NormalOptions::default()
     };
-    let (scene, first_report) =
-        generate_normals(scene, input, options, PostProcessControl::default())
-            .expect("explicit replacement/removal must publish")
-            .into_parts();
+    let (scene, first_report) = generate_normals(
+        scene,
+        input,
+        options,
+        baozi_postprocess::TangentPolicy::Remove,
+        PostProcessControl::default(),
+    )
+    .expect("explicit replacement/removal must publish")
+    .into_parts();
     let first_target = assert_changed_report(&first_report, &scene, input, options, true, true, 2);
     assert!(!import_evidence.matches_scene(&scene));
     let first_snapshot = snapshot(&scene);
@@ -706,12 +716,16 @@ fn replace_and_remove_preserves_other_metadata_and_accepts_a_second_new_target_o
     let options = NormalOptions {
         mode: NormalMode::Flat,
         existing: ExistingNormals::Replace,
-        ..NormalOptions::default()
     };
-    let (scene, second_report) =
-        generate_normals(scene, first_target, options, PostProcessControl::default())
-            .expect("the newly published target must support another operation")
-            .into_parts();
+    let (scene, second_report) = generate_normals(
+        scene,
+        first_target,
+        options,
+        baozi_postprocess::TangentPolicy::Preserve,
+        PostProcessControl::default(),
+    )
+    .expect("the newly published target must support another operation")
+    .into_parts();
     let second_target = assert_changed_report(
         &second_report,
         &scene,
@@ -760,13 +774,16 @@ fn add_and_remove_keeps_the_attribute_count_and_retains_a_detached_effect_report
     );
     assert_eq!(before.attribute_count(), 7);
     assert_eq!(before.profile_metadata_entry_count(), 7);
-    let options = NormalOptions {
-        tangents: TangentHandling::Remove,
-        ..NormalOptions::default()
-    };
-    let (scene, report) = generate_normals(scene, input, options, PostProcessControl::default())
-        .expect("adding Normal and removing Tangent must keep the total attribute count")
-        .into_parts();
+    let options = NormalOptions::default();
+    let (scene, report) = generate_normals(
+        scene,
+        input,
+        options,
+        baozi_postprocess::TangentPolicy::Remove,
+        PostProcessControl::default(),
+    )
+    .expect("adding Normal and removing Tangent must keep the total attribute count")
+    .into_parts();
     let output = assert_changed_report(&report, &scene, input, options, false, true, 2);
     let after = snapshot(&scene);
     assert_eq!(after.attribute_count(), before.attribute_count());
@@ -797,6 +814,7 @@ fn default_preserve_keeps_authored_normal_tangent_and_metadata_unchanged() {
         scene,
         input,
         NormalOptions::default(),
+        baozi_postprocess::TangentPolicy::Preserve,
         PostProcessControl::default(),
     )
     .expect("preserving authored normals does not invalidate Tangent")

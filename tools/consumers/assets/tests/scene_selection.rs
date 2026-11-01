@@ -220,7 +220,7 @@ fn assert_owned_projection(asset: &ApplicationAsset, scene_index: usize) -> Resu
         let draw = &asset.draws[dense];
         assert_eq!(
             (draw.mesh, draw.primitive, draw.material),
-            (dense, 0, Some(dense))
+            (dense, 0, baozi::MaterialAssignment::Authored(dense))
         );
         assert_eq!(draw.topology, TopologyKind::TriangleList);
         assert_eq!(draw.indices, [0, 1, 2, 0, 2, 1]);

@@ -215,7 +215,7 @@ fn submit_rich(scope: &ParseScope<'_>) -> ParseResult<SceneDraft> {
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::TriangleList,
         Presence::Present(&RICH_INDICES),
-        Presence::Absent,
+        baozi_core::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 12),
     )];
     let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -272,7 +272,7 @@ fn submit_simple(scope: &ParseScope<'_>, fixture: Fixture) -> ParseResult<SceneD
     let primitives = [GeometryPrimitiveAuthoring::new(
         topology,
         indices,
-        Presence::Absent,
+        baozi_core::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 1),
     )];
     let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -326,19 +326,19 @@ fn submit_deformed(
         GeometryPrimitiveAuthoring::new(
             topology,
             Presence::Present(&[0, 1, 2, 0, 2, 1]),
-            Presence::Absent,
+            baozi_core::MaterialAssignment::Unspecified,
             AuthoringRange::new(0, 2),
         ),
         GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::TriangleList,
             Presence::Present(&[2, 1, 0]),
-            Presence::Absent,
+            baozi_core::MaterialAssignment::Unspecified,
             AuthoringRange::new(2, 1),
         ),
         GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::TriangleList,
             Presence::Absent,
-            Presence::Absent,
+            baozi_core::MaterialAssignment::Unspecified,
             AuthoringRange::new(3, 1),
         ),
     ];

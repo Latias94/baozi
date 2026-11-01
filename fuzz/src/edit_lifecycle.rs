@@ -6,11 +6,12 @@ use baozi::{
     AssetPath, AttributeDomain, AttributeElement, Axis, FrontFaceWinding, Handedness, PrimitiveId,
     PrimitiveRef, SceneGenerationId, SceneLookupError, TargetSpace, TopologyKind, ValidatedScene,
     postprocess::{
-        ExistingNormals, NormalCause, NormalMode, NormalOptions, PostProcessCancellationOrigin,
-        PostProcessCancellationToken, PostProcessControl, PostProcessControlCause,
-        PostProcessReport, PostProcessRunDisposition, PostProcessRunError, PostProcessRunFailure,
-        PostProcessRunOutcome, SpaceConversionCause, SpaceConversionOptions, TriangulationCause,
-        convert_scene_space, generate_normals, triangle_vertices, triangulate_primitive,
+        ExistingNormals, NormalCause, NormalMode, NormalOptions, PostProcessBudgets,
+        PostProcessCancellationOrigin, PostProcessCancellationToken, PostProcessControl,
+        PostProcessControlCause, PostProcessReport, PostProcessRunDisposition, PostProcessRunError,
+        PostProcessRunFailure, PostProcessRunOutcome, SpaceConversionCause, SpaceConversionOptions,
+        TangentPolicy, TrianglePreparationOptions, TriangulationCause, convert_scene_space,
+        generate_normals, prepare_triangles, triangle_vertices, triangulate_primitive,
     },
 };
 use baozi_format_obj::{FORMAT_ID as OBJ_FORMAT_ID, ObjImporter};
@@ -31,6 +32,7 @@ pub struct LifecycleRun {
     pub scene: ValidatedScene,
     pub triangulation: Option<Result<PostProcessReport, PostProcessRunError>>,
     pub normals: Option<Result<PostProcessReport, PostProcessRunError>>,
+    pub preparation: Option<Result<PostProcessReport, PostProcessRunError>>,
     pub conversion: Option<Result<PostProcessReport, PostProcessRunError>>,
 }
 
@@ -74,10 +76,42 @@ pub fn run(data: &[u8]) -> Option<LifecycleRun> {
     let cancellation = data[3] % 4;
     let mut triangulation = None;
     let mut normals = None;
+    let mut preparation = None;
     let mut conversion = None;
 
     // Order is fixed, with at most one edit per operation. Only the selected primitive is edited.
-    if operations & 1 != 0
+    if operations & 8 != 0 {
+        let mut targets = Vec::new();
+        targets.try_reserve_exact(scene.primitive_count()).ok()?;
+        for primitive in scene.meshes().flat_map(|mesh| mesh.primitives()) {
+            if matches!(
+                primitive.topology(),
+                TopologyKind::Polygons
+                    | TopologyKind::TriangleList
+                    | TopologyKind::TriangleStrip
+                    | TopologyKind::TriangleFan
+            ) {
+                targets.push(primitive.id());
+            }
+        }
+        let before = SceneState::capture(&scene, selected);
+        let cancelled = matches!(cancellation, 1 | 2);
+        let options = TrianglePreparationOptions {
+            normals: Some(normal_options(policy)),
+            budgets: PostProcessBudgets {
+                work: 4_000_000,
+                storage_bytes: 16 * 1024 * 1024,
+            },
+            ..TrianglePreparationOptions::default()
+        };
+        let result = prepare_triangles(scene, &targets, options, control(cancelled));
+        let (next, result) = finish_edit(result, before, cancelled);
+        scene = next;
+        preparation = Some(result);
+    }
+
+    if operations & 8 == 0
+        && operations & 1 != 0
         && let Some(primitive) = primitive_at(&scene, selected)
         && matches!(
             primitive.topology(),
@@ -94,27 +128,22 @@ pub fn run(data: &[u8]) -> Option<LifecycleRun> {
     }
 
     // Reacquire a current-generation ID after triangulation, including failed/unchanged attempts.
-    if operations & 2 != 0
+    if operations & 8 == 0
+        && operations & 2 != 0
         && let Some(primitive) = primitive_at(&scene, selected)
         && primitive.topology() == TopologyKind::TriangleList
     {
         let target = primitive.id();
         let before = SceneState::capture(&scene, selected);
         let cancelled = cancellation == 2;
-        let options = NormalOptions {
-            mode: if policy & 1 == 0 {
-                NormalMode::Smooth
-            } else {
-                NormalMode::Flat
-            },
-            existing: if policy & 2 == 0 {
-                ExistingNormals::Preserve
-            } else {
-                ExistingNormals::Replace
-            },
-            ..NormalOptions::default()
-        };
-        let result = generate_normals(scene, target, options, control(cancelled));
+        let options = normal_options(policy);
+        let result = generate_normals(
+            scene,
+            target,
+            options,
+            TangentPolicy::Preserve,
+            control(cancelled),
+        );
         let (next, result) = finish_edit(result, before, cancelled);
         scene = next;
         normals = Some(result);
@@ -153,8 +182,24 @@ pub fn run(data: &[u8]) -> Option<LifecycleRun> {
         scene,
         triangulation,
         normals,
+        preparation,
         conversion,
     })
+}
+
+fn normal_options(policy: u8) -> NormalOptions {
+    NormalOptions {
+        mode: if policy & 1 == 0 {
+            NormalMode::Smooth
+        } else {
+            NormalMode::Flat
+        },
+        existing: if policy & 2 == 0 {
+            ExistingNormals::Preserve
+        } else {
+            ExistingNormals::Replace
+        },
+    }
 }
 
 fn primitive_at(scene: &ValidatedScene, selected: usize) -> Option<PrimitiveRef<'_>> {
@@ -252,6 +297,12 @@ fn finish_edit(
                 PostProcessRunError::SpaceConversion { failure } => {
                     matches!(failure.cause(), SpaceConversionCause::Start { .. })
                 }
+                PostProcessRunError::Preparation { failure } => {
+                    matches!(
+                        failure.cause(),
+                        baozi::postprocess::PreparationCause::Start(_)
+                    )
+                }
                 _ => false,
             };
             if cancelled && !startup_failure {
@@ -275,6 +326,10 @@ pub fn assert_token_cancellation(error: &PostProcessRunError) {
         },
         PostProcessRunError::SpaceConversion { failure } => match failure.cause() {
             SpaceConversionCause::Control { cause } => cause,
+            other => panic!("expected token cancellation, found {other:?}"),
+        },
+        PostProcessRunError::Preparation { failure } => match failure.cause() {
+            baozi::postprocess::PreparationCause::Control(cause) => cause,
             other => panic!("expected token cancellation, found {other:?}"),
         },
         other => panic!("expected a started edit with token cancellation, found {other:?}"),

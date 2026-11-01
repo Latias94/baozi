@@ -1,6 +1,6 @@
 use baozi::{
     AttributeData, AttributeDomain, Importer, MorphDeltaSemantic,
-    postprocess::{NormalMode, NormalOptions, PostProcessControl, generate_normals},
+    postprocess::{NormalMode, NormalOptions, PostProcessControl, TangentPolicy, generate_normals},
 };
 use baozi_asset_consumer::{ApplicationAsset, Result};
 use serde_json::json;
@@ -105,6 +105,7 @@ fn flat_normal_seams_reindex_morphs_and_influences_after_scene_drop() -> Result<
             mode: NormalMode::Flat,
             ..NormalOptions::default()
         },
+        TangentPolicy::default(),
         PostProcessControl::default(),
     )?
     .into_parts();
@@ -164,7 +165,7 @@ fn flat_normal_seams_reindex_morphs_and_influences_after_scene_drop() -> Result<
             Some(normal_bits[corner])
         );
         assert!(vertex.tangent.is_none());
-        assert!(vertex.uv.is_none());
+        assert!(draw.uv_streams.is_empty());
         assert_eq!(
             morph.values[index].map(f32::to_bits),
             POSITION_DELTAS[source].map(f32::to_bits)

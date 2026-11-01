@@ -175,12 +175,14 @@ The [maintained dependency closure](reviews/2026-11-01-native-dependency-closure
 root patches and rehearses real archives on Windows and Linux. Device draw limits remain a
 concrete consumer candidate.
 
-The [first-release usability audit](reviews/2026-11-01-first-release-usability-audit.md) selects a
-twelve-package portable candidate and identifies correctness and caller-workflow gaps that must
-precede publication. The [next plan](plans/2026-11-01-011-feat-first-release-usability-plan.md)
-prioritizes glTF allocation admission, PLY precision, morph-aware derived edits, then bounded batch
-geometry preparation and complete application consumption. Its package/target evidence keeps exact
-revision boundaries. Local archives and configured CI do not establish public registry availability
+The [first-release usability audit](reviews/2026-11-01-first-release-usability-audit.md) identifies
+correctness and caller-workflow gaps that must precede publication. The reviewed
+[maturation plan](plans/2026-11-02-001-refactor-first-release-maturation-plan.md) supersedes the
+earlier usability implementation plan. It replaces the owning glTF forks with a metered document,
+preserves F64 geometry, consolidates selected edits into one publication and completes static and
+animated application output. The fork cutover reduces the portable closure from twelve packages
+to ten. Execution is tracked in the [maturation review](reviews/2026-11-02-first-release-maturation.md),
+with exact source/target boundaries. Local archives and configured CI do not establish public registry availability
 or target promotion. The first canonical train is verified through a registry-only consumer before
 retiring the placeholder 0.0.1, following [release policy](contributing/release-policy.md).
 Exporters, a renderer, automatic recovery, native registration and a generic asset compiler remain

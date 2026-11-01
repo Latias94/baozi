@@ -22,11 +22,12 @@ distinct Vertex and Corner streams for the same semantic. Lookup is linear in th
 attribute count. Iteration retains borrowed namespaced custom semantics instead of allocating a
 name for each read.
 
-`AttributeData` distinguishes dense F32/F64/U32/I32 and sparse F32/U32/I32 payloads. Dense `values`
+`AttributeData` distinguishes dense and sparse F32/F64/U32/I32 payloads. Dense `values`
 are tightly packed scalars with an explicit lane count. Sparse payloads expose sorted logical element
 indices, one explicit element per index, and one default element. `AttributeRef::len()` includes
 implicit defaults. Applications must choose how to consume these representations; readers do not
-implicitly densify or reduce precision. In particular, F64 custom PLY data remains F64.
+implicitly densify or reduce precision. Position, Normal, Tangent and Texcoord streams retain
+their admitted F32 or F64 width independently; custom F64 PLY data also remains F64.
 
 `attribute.element(index: usize)` selects one logical element as
 `Option<AttributeElement<'scene>>`. `AttributeElement::F32`, `F64`, `U32`, and `I32` contain borrowed
@@ -50,12 +51,38 @@ to `TangentConventions::UNKNOWN`; conventions belong to that descriptor rather t
 default. The selected glTF profile declares an unknown construction algorithm and `SignInW` on each
 imported base Tangent attribute.
 
+## Selected triangle preparation
+
+`baozi::postprocess::prepare_triangles` accepts a slice of current-generation primitive IDs and
+one finite request. `TriangleLowering::Lists` lowers polygons, strips and fans; optional
+`NormalOptions` and `TangentPolicy` then generate or preserve the requested fields. One admitted
+geometry reconstruction and central validation publish at most one new generation. Work and
+storage caps come from `PostProcessBudgets`. Duplicate/stale targets, unsupported dependencies,
+a later target's numerical failure or cancellation return the original immutable Scene.
+Consumed work never exceeds the supplied cap. Attempted-work evidence also retains the final
+denied envelope, so a rejected request may report a larger attempted count without executing it.
+
+`NormalOrientation::StoredOrder` uses the exact retained triangle tuple.
+`SceneFrontFace { assume_unknown }` follows declared winding, requiring an explicit assumption
+when that fact is unknown and a new Normal is needed. This operation retains index order and
+SceneSpace. To reflect or change whole-Scene winding, first lower any polygons/strips/fans that
+need it, then call `convert_scene_space`; that conversion transports the generated fields and
+Corner tuples together.
+
+For a changed selection, `report.geometry_preparation().targets()` exposes every selected input
+ID, final output ID and `disposition()`, including targets that needed no geometry edit. Their
+values and provenance remain unchanged even though their handles acquire the new generation.
+Topology origins and generated-field indices describe only actual effects. The report owns
+this evidence after Scene teardown. An entirely unchanged request returns the original generation,
+so its input IDs remain valid. The single-target triangulation/Normal/Tangent functions use this
+same transaction.
+
 ## Application list buffers
 
 Use `baozi::postprocess::list_vertices(primitive)` to explicitly obtain list draw tuples from
 Points, LineList, LineStrip, LineLoop, TriangleList, TriangleStrip or TriangleFan. It returns
 `Result<ListVertices<'scene>, VertexLayoutError>`. The borrowed Scene retains its original topology.
-Polygons require the existing explicit `triangulate_primitive` geometry operation first.
+Polygons require explicit `triangulate_primitive` or selected triangle preparation first.
 `triangle_vertices(primitive)` is the strict TriangleList entry and returns the same shared view
 and tuple types; it rejects every other topology, even when empty. The former triangle-only public
 type names are replaced by `ListVertices` and `ListVertex`.
@@ -132,6 +159,21 @@ accounting. Repeated Corner data can produce larger buffers than a deduplicated 
 allocations do not imply small application buffers. The helper does not truncate influences,
 reduce precision, or authorize such losses.
 
+### Authored and effective material assignments
+
+`primitive.material_assignment()` returns one typed value: `MaterialAssignment::Unspecified`,
+`Authored(material)` or `ImplicitDefault(material)`. The material view has the same Scene lifetime
+and generation as the primitive. `authored_material()` returns a material only for an authored
+binding; `effective_material()` returns either authored or implicit shading data. These helpers
+derive from the same assignment and allocate nothing. An unspecified assignment supplies no
+format-independent fallback material.
+
+The glTF profile creates one shared generated default PBR material when selected primitives omit
+their material binding. An authored empty material remains authored even when its factors match
+that default. Source-scope counts describe authored material objects; canonical material inventory
+also includes generated defaults. Applications can select effective shading and inspect authored
+presence without inferring a format from IDs or paths.
+
 ## Hierarchy and spatial declarations
 
 `nodes()` and `node_count()` contain source nodes. `roots()` gives the ordered actual roots; it does
@@ -139,9 +181,17 @@ not expose the implementation's synthetic root. Every node has independently ite
 `children()` and a source-preserving `authored_transform()`. Matrix and TRS forms remain distinct;
 `local_matrix()` derives a matrix when the application needs one.
 
-Parent lookup is not currently exposed. Traverse from the roots and maintain application traversal
-state when parent relationships are required. A future direct parent lookup must retain an admitted
-index rather than scan the graph on every getter.
+`scene.relations(RelationsQueryLimits::new(max_work, max_bytes), cancellation)` builds an opt-in
+owned `SceneRelations` index. `relations.parent(node_id)` returns the optional parent ID;
+`relations.instances(node_id)` returns an allocation-free exact-size iterator over that node's
+mesh-instance IDs in Scene inventory order. Roots have no parent, and a node without a placement
+has an empty instance row. Both lookups check generation before range.
+
+Construction takes O(nodes + edges + instances) work and admits its parent, CSR-offset, instance
+ordinal and temporary cursor capacities before allocation. Query limits and optional cancellation
+are independent of import accounting. `allocated_bytes()` reports actual retained table capacity;
+construction byte limits include temporary cursor storage. The index owns no Scene or resource
+payload and remains readable after Scene teardown. Derive a new index for any edited generation.
 
 ### Base-pose world transforms and static bounds
 
@@ -149,7 +199,8 @@ index rather than scan the graph on every getter.
 `BasePoseWorldTransforms` table in one linear forest traversal. Use
 `SpatialQueryLimits::new(max_work, max_bytes)` and optionally borrow a `CancellationToken`.
 The table preserves the originating generation and may outlive the Scene. Its
-`node_transform(NodeId)` checks generation/range and returns a local-to-world `Mat4` in O(1).
+`node_transform(NodeId)` checks generation/range and returns a column-major
+`[[f64; 4]; 4]` local-to-world matrix in O(1).
 Every ancestor contributes `parent_world * local`, including nodes without attached geometry.
 Coordinates, units and unknown declarations remain those of the Scene.
 
@@ -173,12 +224,14 @@ prevent a query. Other static instances can be queried individually. Whole-Scene
 fails on any unsupported placement, without publishing a partial bound. No contributing vertices
 returns `None`; an actual point returns `Some` with equal minimum and maximum.
 
-TRS and matrix products use F64 intermediates. Local components, world components at each node,
-and transformed vertex components round to F32 at their respective boundaries. The component dot
+Authored `Mat4` and TRS components retain their F32 contract. Query derivation widens those
+components and composes local/world matrices in F64 without a per-node F32 projection. Dense
+and sparse Position elements of either width enter F64 point arithmetic directly. Component dot
 products add terms in increasing column order, with translation last for a point. Nonfinite
-results and nonzero F64 values rounding to zero are errors, including for root transforms.
-Bounds enclose these rounded F32 world vertices; they are not certified intervals over exact real
-arithmetic. Negative, nonuniform and zero scales need no inverse and are supported.
+F64 results and nonzero products underflowing to zero are errors, including for root transforms.
+`Aabb::min` and `max` are `[f64; 3]` bounds over the computed F64 world vertices. The result has
+no certified interval guarantee over exact real arithmetic. Negative, nonuniform and zero scales
+need no inverse and are supported.
 
 World-table construction allocates fallibly under the explicit capacity-byte limit; traversal
 needs no separate parent index or queue. Work counts initialized slots, evaluated nodes, visited
@@ -208,7 +261,7 @@ Coordinate conversion composes this intrinsic basis without adding nodes or chan
 
 ## Materials and images
 
-`primitive.material()` follows its optional material. A material exposes its authored name, shading
+`primitive.effective_material()` follows its effective assignment. A material exposes its authored name, shading
 model, alpha behavior, factor groups, and ordered bindings. Legacy diffuse factors retain their own
 meaning; they are not reinterpreted as PBR base color by a getter.
 
@@ -423,7 +476,8 @@ handedness declarations; a morph delta does not own or override those convention
 
 `scene.animation_clips()` exposes borrowed names, typed targets, key times, values, and tangents.
 See [reading retained animation](reading-animation.md) for time domains and interpolation. These
-readers expose retained data; curve evaluation and geometry transformations remain separate work.
+readers expose retained data. The application-owned CPU reference linked there demonstrates
+curve, morph and skin evaluation without adding a playback engine to the Scene model.
 
 The [independent consumer](../../tools/consumers/scene) exercises actual public geometry and hierarchy
 values outside workspace feature unification. Its fixed feature cases run with

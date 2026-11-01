@@ -33,8 +33,6 @@ pub enum TriangulationCause {
     },
     #[error("triangulation size or work bound overflowed")]
     SizeOverflow,
-    #[error("triangulation requires {required} work units, above the {maximum} unit limit")]
-    WorkLimit { required: u64, maximum: u64 },
     #[error("triangulation stopped: {cause}")]
     Control {
         #[source]

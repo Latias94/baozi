@@ -26,10 +26,12 @@ operation or native promotion was used.
 
 ## Execution status
 
-U1 implementation and Windows/MSRV verification are complete; U2–U8 are pending.
-The current
-portable graph still has twelve packages. Its reduction to ten depends on the
-complete U3 decoder cutover and deletion of both maintained glTF forks.
+U1 and U2 implementation/component verification are complete at the revisions below.
+U3 through U7 are integrated with Windows/MSRV workspace and independent-consumer checks complete.
+The all-feature Cargo graph now has ten portable production packages: the owning glTF decoder
+and both maintained forks have been removed. This graph observation is not an archive build or
+registry availability result. U8 target, sanitizer and unchanged-archive qualification remains
+pending until the final source is committed and tested.
 
 Actual publication, retirement of the existing `0.0.1`, target promotion and
 unexecuted hosted checks remain separate work. A completed implementation unit
@@ -191,3 +193,116 @@ world-bounds regression awaits U3's decoder integration, alongside its concurren
 animation/appearance changes. Full workspace, target, sanitizer and unchanged
 archive-consumer qualification remain U8 work. This component result does not
 qualify a new target or establish release readiness.
+
+## U3 through U7: owned decoding and complete application workflows
+
+These units are integrated together because the default-material contract and selected transaction
+change canonical authoring, public reads, snapshot framing and their downstream callers. The
+final combined checks and immutable source identity are recorded below when complete; earlier
+component runs are not presented as final archive qualification.
+
+### Owned glTF document
+
+The private document reuses the iterative admitted JSON index and source map. Typed tables,
+nested collections and escaped strings acquire their metered owners before growth. JSON/BIN
+surfaces and unescaped text borrow the immutable primary snapshot. Checked dense/sparse accessor
+reads feed the existing selected closure, normalized data and canonical submission. Document and
+index owners are released before submission. The owning generic schema decoder, decoder-specific
+panic shim and expansion multiplier are removed, together with both maintained glTF forks and
+their manifest/lockfile edges. Full all-feature Cargo metadata resolves ten portable production
+packages and no retired/upstream glTF decoder package.
+
+Independent ownership and semantic review found no remaining decoder findings. Three migration
+errors were corrected with selected/omitted regressions: generic textureInfo ignores normal-only
+`scale`; an explicit null sparse byte offset rejects rather than defaulting; known optional morph
+references treat null as absent while unknown properties still validate their required index.
+The complete importer package passed 332/332 before final integration.
+
+### Selected geometry and plan ownership
+
+One selected plan counts, reconstructs and compares the geometry table, retaining source scalar
+bits, sparse encoding, Vertex identity and exact strip/fan assembly. Primitive-local projected
+inputs let lowering, Normal and Tangent stages share one final transaction. Single-target functions
+delegate to the same production engine; their former full-table reconstruction implementations
+are gone. Small test-only headers retain existing numeric/teardown coverage through that engine.
+
+Independent review found a real plan-isolation defect: plan-specific mappings were cached in
+shared replacement `Cell`s, so a second overlapping plan could overwrite a live plan's origins.
+The replacement descriptors now contain no mutable plan cache. An independently metered mapping
+owner lends an exclusive initialization capability, then immutable sealed rows; the caller cannot
+reuse that owner's rows while any plan/postflight borrow remains live. The application transaction
+owns and drops that scratch before terminal preparation. A real core regression plans A, completes
+B, rejects a later B and then centrally validates/publishes A with its original strip/fan origins.
+
+The common core seam now enforces Normal-to-Tangent invalidation independently of the public
+adapter, including Tangent morph dependencies. Mixed selections retain an evidence header and
+final-generation ID for every selected target. Actual no-ops have Unchanged disposition and keep
+their original values/provenance; an entirely unchanged request keeps the original Scene. These
+correct the other two U4 review findings. Focused independent re-review has no remaining findings.
+
+Terminal work starts with the exact minimal failure guarantee. Once actual selection cardinalities
+are known, operation transfers only unused ordinary capacity to protected validation under one
+ledger lock. Both configured caps and every historical attempted/consumed counter are preserved.
+Selected evidence includes its nonempty zero-origin count prefix, actual target headers and origin
+ranges. Space conversion uses the known four-slot table capacity with its exact two-member field
+work. The implementation neither reserves a storage-derived multiplier nor weakens member checks.
+Attempted evidence retains a denied envelope; only admitted work may consume the hard allowance.
+
+### Material semantics, navigation and public onboarding
+
+`MaterialAssignment` replaces the ambiguous optional binding across authoring, canonical storage
+and public reads. Authored and effective accessors derive from one Unspecified/Authored/ImplicitDefault
+tag. Selected glTF primitives needing a fallback share one generated PBR default, parented by the
+document source; authored material counts and absence remain distinct. Image, Texture and Sampler
+retain independent names. Snapshot revision 7 records the assignment tag. Frozen transcript tests
+retain independent prior-framing checks rather than accepting implementation-generated digests
+without an oracle.
+
+`SceneRelations` owns bounded parent and node-to-instance CSR data. Construction admits exact
+work/capacity and polls cancellation; generation-checked reads allocate nothing and can outlive the
+source Scene. Public tests cover forests, placements, stale handles and limits. The facade exports
+common OBJ options and the host-bundle example snapshots only an explicitly approved bounded list
+into memory IO. No filesystem authority or native qualification is inferred from that example.
+
+### Complete owned application output and evaluation
+
+The independent asset consumer retains every UV set, material factor/binding field, texture/image/
+sampler identity, owner name, declared media type and encoded payload. All UV lane bits participate
+in tuple reuse, including signed zero; missing/ambiguous referenced streams produce named failures.
+Scene UV origin and attribute Tangent declarations remain explicit. Public copy/drop tests retain
+these values after Scene, report, importer and IO teardown. Static-output review has no findings.
+
+Its application-owned CPU reference evaluates declared F64 time/rates, Step/Linear/CubicSpline
+TRS/morph curves, hierarchy, morph-before-skin and complete unnormalized influence rows. Known
+rates permit seconds conversion; unknown-rate ticks remain usable in their declared domain.
+Constant and SourceDefault extrapolation stay distinct. Quaternion linear interpolation uses
+shortest-path slerp; cubic uses component Hermite with raw derivatives, then normalization.
+
+Inverse review exposed a rounded nonzero pivot on an exactly singular matrix, a false translation
+rejection on a well-conditioned affine matrix, and a rounded-zero residual that admitted an
+inaccurate inverse. Scaled rank/condition checks, conservative original-operand residual bounds
+and complete-vector translation scaling correct those cases. Both new numeric counterexamples
+were observed red in Rust before correction. The final focused evaluator run passed 21/21,
+`c655024c-e364-4395-a562-cc2ac70c6fb1`; independent directed arithmetic/source re-review has no
+remaining inverse finding. The complete independent consumer passed 74/74 with one existing manual
+skip, `c3ef0604-6a8d-4591-a5e5-83ccbc0ff46a`, before final format/lint cleanup.
+
+The processing recipe now prepares the selection once before whole-Scene conversion, allowing
+polygon reflection without a temporary coordinate space. Generated normals use source winding
+or its explicit assumption. Source material fixture counts exclude the generated default and are
+checked separately. Fixed scale tests require one selected reconstruction and at most two changed
+pipeline operations rather than the former per-primitive loop.
+
+### Final integration qualification
+
+The Windows/MSRV full workspace passes 2,855/2,855 with four existing manual skips,
+run `1ec0b0e6-8421-4f36-9fb1-aaad24e83f90`; all 58 doctests pass. Fuzz seeds pass 12/12
+(`28d6ab69-31dd-4a73-b173-3a77d9504705`), all twelve independent feature cases execute
+successfully, and the final asset consumer passes 74/74 with one existing manual skip
+(`b472764e-8784-4e4a-93cb-6647cb6fd4cb`). Strict all-target/all-feature Clippy passes for
+the workspace and asset consumer, and library Clippy passes for the fuzz harness. Formatting
+checks pass for the root, both consumers and fuzz workspaces. Archive/target qualification
+remains U8 work. Raw failing and corrected logs and independent receipts remain in
+`.git/baozi-review/maturation-plan/`; no failed run is relabeled as a final pass. The finite
+[portable candidate record](../release/portable-0.1.0-candidate.md) keeps publication eligibility
+and actual distribution qualification separate.

@@ -195,6 +195,12 @@ representation remains available through `AttributeRef::data()`; sampling alloca
 
 Resource identity, sampling, and material usage are separate:
 
+Each primitive's `MaterialAssignment` distinguishes `Unspecified`, `Authored(material)` and
+`ImplicitDefault(material)`. Authored and effective readers derive from this one retained value.
+Normative generated defaults have ordinary material owners and generated provenance; source
+absence does not require applications to guess from a format ID. Authored source counts remain
+separate from canonical inventory, which may also contain generated materials.
+
 - `Image` owns one immutable bounded encoded payload and media/encoding evidence.
 - `Sampler` owns filter and address behavior; an explicit default exists when the source omits one.
 - `Texture` pairs one `ImageId` with one `SamplerId` and carries no material role.

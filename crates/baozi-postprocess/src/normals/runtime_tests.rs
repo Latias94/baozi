@@ -4,6 +4,7 @@ use std::sync::{
 };
 
 use super::*;
+use crate::PostProcessRunError;
 
 use crate::test_fixtures as common;
 
@@ -44,7 +45,13 @@ fn run(stop: usize, panic: bool) -> usize {
         stop,
         panic,
     });
-    let result = generate_normals(scene, target, NormalOptions::default(), control);
+    let result = generate_normals(
+        scene,
+        target,
+        NormalOptions::default(),
+        crate::TangentPolicy::Preserve,
+        control,
+    );
     if stop == usize::MAX {
         let (scene, report) = result
             .expect("the baseline must publish normals")
@@ -133,6 +140,7 @@ fn caller_unwind_releases_scene_and_detached_normal_evidence() {
                 scene,
                 target,
                 NormalOptions::default(),
+                crate::TangentPolicy::Preserve,
                 PostProcessControl::default(),
             )
             .unwrap()

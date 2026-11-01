@@ -1,10 +1,7 @@
 //! Complete source influence sets, streamed into the existing Vertex-major CSR rows.
 
 use super::*;
-use gltf::mesh::util::{
-    ReadWeights,
-    weights::{Cast as _, F32},
-};
+use crate::document::read::Weights as ReadWeights;
 use std::cell::RefCell;
 
 #[derive(Debug, Clone, Copy)]
@@ -24,7 +21,7 @@ pub(super) struct InfluenceRows<'scope> {
 
 pub(super) fn preflight(
     ctx: &ParseScope<'_>,
-    primitive: &json::mesh::Primitive,
+    primitive: &json::mesh::Primitive<'_>,
     vertex_count: usize,
     owner: AccessorOwner,
 ) -> Result<InfluenceContract> {
@@ -35,14 +32,14 @@ pub(super) fn preflight(
     for semantic in primitive.attributes.keys() {
         ctx.charge_work(1)?;
         let (set, expected, label) = match semantic {
-            Checked::Valid(json::mesh::Semantic::Joints(set)) => (*set, &mut joints, "JOINTS"),
-            Checked::Valid(json::mesh::Semantic::Weights(set)) => (*set, &mut weights, "WEIGHTS"),
+            json::mesh::Semantic::Joints(set) => (*set, &mut joints, "JOINTS"),
+            json::mesh::Semantic::Weights(set) => (*set, &mut weights, "WEIGHTS"),
             _ => continue,
         };
         if set != *expected {
             return Err(gltf_parse_error(
                 ctx,
-                format!("{owner} has non-contiguous {label} sets"),
+                format_args!("{owner} has non-contiguous {label} sets"),
             ));
         }
         *expected = expected
@@ -52,7 +49,7 @@ pub(super) fn preflight(
     if joints != weights {
         return Err(gltf_parse_error(
             ctx,
-            format!(
+            format_args!(
                 "{owner} JOINTS and WEIGHTS attributes must be provided together for every set"
             ),
         ));
@@ -94,7 +91,7 @@ pub(super) fn preflight(
 pub(super) fn build_rows<'scope>(
     ctx: &'scope ParseScope<'_>,
     buffers: &[Option<BufferData<'_>>],
-    primitive: &gltf::Primitive<'_>,
+    primitive: &crate::document::Primitive<'_>,
     contract: InfluenceContract,
 ) -> Result<InfluenceRows<'scope>> {
     let class = ImportStorageClass::SceneConstruction;
@@ -114,12 +111,6 @@ pub(super) fn build_rows<'scope>(
         });
     }
 
-    let reader = primitive.reader(|buffer| {
-        buffers
-            .get(buffer.index())
-            .and_then(Option::as_ref)
-            .map(BufferData::as_slice)
-    });
     let mut sets = ctx.metered_vec(
         ImportStorageClass::FormatNormalization,
         "gltf-influence-set-readers",
@@ -128,19 +119,22 @@ pub(super) fn build_rows<'scope>(
     let mut quantized = true;
     for set in 0..contract.set_count {
         poll_parser_loop(ctx, set as usize)?;
-        let joints = reader.read_joints(set).ok_or_else(|| {
-            gltf_parse_error(ctx, format!("glTF JOINTS_{set} accessor could not be read"))
-        })?;
-        let weights = reader.read_weights(set).ok_or_else(|| {
-            gltf_parse_error(
-                ctx,
-                format!("glTF WEIGHTS_{set} accessor could not be read"),
-            )
-        })?;
+        let joint_source = primitive
+            .get(&Semantic::Joints(set))
+            .ok_or_else(|| gltf_parse_error(ctx, "glTF joint accessor disappeared"))?;
+        let weight_source = primitive
+            .get(&Semantic::Weights(set))
+            .ok_or_else(|| gltf_parse_error(ctx, "glTF weight accessor disappeared"))?;
+        let joints = accessor::bind(ctx, joint_source, buffers)?
+            .joints()
+            .ok_or_else(|| gltf_parse_error(ctx, "glTF joint accessor encoding is invalid"))?;
+        let weights = accessor::bind(ctx, weight_source, buffers)?
+            .weights()
+            .ok_or_else(|| gltf_parse_error(ctx, "glTF weight accessor encoding is invalid"))?;
         quantized &= !matches!(&weights, ReadWeights::F32(_));
         // MeteredVec restricts mutable slices to Copy elements. Each inline cell holds only
         // borrowed iterator state; interior mutation cannot replace or grow the metered table.
-        sets.try_push_reserved(RefCell::new((joints.into_u16(), weights)))?;
+        sets.try_push_reserved(RefCell::new((joints, weights)))?;
     }
 
     let mut nonzero_joints = try_vec_capacity(
@@ -249,11 +243,11 @@ fn next_weights(weights: &mut ReadWeights<'_>) -> Option<([f32; 4], u64)> {
     match weights {
         ReadWeights::U8(values) => values.next().map(|values| {
             let sum = values.iter().map(|&value| u64::from(value) * 257).sum();
-            (F32::cast_u8(values), sum)
+            (values.map(|value| value as f32 * 255.0_f32.recip()), sum)
         }),
         ReadWeights::U16(values) => values.next().map(|values| {
             let sum = values.iter().map(|&value| u64::from(value)).sum();
-            (F32::cast_u16(values), sum)
+            (values.map(|value| value as f32 * 65535.0_f32.recip()), sum)
         }),
         ReadWeights::F32(values) => values.next().map(|values| (values, 0)),
     }

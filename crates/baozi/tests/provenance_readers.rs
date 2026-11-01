@@ -95,7 +95,7 @@ impl FormatImporter for ProvenanceFixture {
             GeometryPrimitiveAuthoring::new(
                 GeometryTopologyAuthoring::Polygons(&faces),
                 Presence::Present(&indices),
-                Presence::Absent,
+                baozi::MaterialAssignment::Unspecified,
                 AuthoringRange::new(index as u32 * 3, 3),
             )
         });
@@ -431,8 +431,8 @@ fn facade_rejects_tokens_from_another_scene_even_with_identical_source_identitie
 fn facade_keeps_source_joins_after_triangulation_conversion_and_tangent_deletion() {
     use baozi::postprocess::{
         ExistingNormals, NormalMode, NormalOptions, PostProcessControl, PostProcessRunDisposition,
-        SpaceConversionOptions, TangentHandling, convert_scene_space, generate_normals,
-        triangulate_primitive,
+        SpaceConversionOptions, TangentPolicy, TrianglePreparationOptions, convert_scene_space,
+        prepare_triangles, triangulate_primitive,
     };
     use baozi::{
         AttributeSemanticRef, Axis, FrontFaceWinding, Handedness, TargetSpace, TopologyKind,
@@ -507,13 +507,16 @@ fn facade_keeps_source_joins_after_triangulation_conversion_and_tangent_deletion
         .unwrap()
         .metadata_owner();
     let target = primitive.id();
-    let generated = generate_normals(
+    let generated = prepare_triangles(
         scene,
-        target,
-        NormalOptions {
-            mode: NormalMode::Flat,
-            existing: ExistingNormals::Replace,
-            tangents: TangentHandling::Remove,
+        &[target],
+        TrianglePreparationOptions {
+            normals: Some(NormalOptions {
+                mode: NormalMode::Flat,
+                existing: ExistingNormals::Replace,
+            }),
+            tangents: TangentPolicy::Remove,
+            ..TrianglePreparationOptions::default()
         },
         PostProcessControl::default(),
     )

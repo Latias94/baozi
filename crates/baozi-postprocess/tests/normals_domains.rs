@@ -13,7 +13,7 @@ use baozi_import::{
 use baozi_io::AssetPath;
 use baozi_postprocess::{
     ExistingNormals, NormalCause, NormalOptions, PostProcessControl, PostProcessRunError,
-    TangentHandling, generate_normals,
+    generate_normals,
 };
 
 #[derive(Clone, Copy)]
@@ -79,7 +79,7 @@ impl FormatImporter for DomainImporter {
         let primitives = [GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::TriangleList,
             Presence::Absent,
-            Presence::Absent,
+            baozi_core::MaterialAssignment::Unspecified,
             AuthoringRange::new(0, 3),
         )];
         let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -134,9 +134,10 @@ fn valid_multiple_attribute_domains_fail_with_a_capability_error_before_replacem
             target,
             NormalOptions {
                 existing: ExistingNormals::Replace,
-                tangents: TangentHandling::Remove,
+
                 ..NormalOptions::default()
             },
+            baozi_postprocess::TangentPolicy::Remove,
             PostProcessControl::default(),
         )
         .unwrap_err();

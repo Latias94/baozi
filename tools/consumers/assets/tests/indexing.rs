@@ -17,7 +17,7 @@ struct CornerBits {
     position: [u64; 3],
     normal: Option<[u64; 3]>,
     tangent: Option<[u64; 4]>,
-    uv: Option<[u64; 2]>,
+    uvs: Vec<(u32, [u64; 2])>,
     influences: Option<(Vec<u32>, Vec<u32>)>,
     morphs: Vec<(usize, MorphDeltaSemantic, [u32; 3])>,
 }
@@ -52,6 +52,13 @@ fn selected_bits<const N: usize>(
 }
 
 fn source_corner(tuple: ListVertex<'_>) -> Result<CornerBits> {
+    let mut uvs = Vec::new();
+    for field in tuple.attributes() {
+        if let AttributeSemanticRef::Texcoord(set) = field.attribute().semantic() {
+            uvs.push((set, field_bits(field.element())));
+        }
+    }
+    uvs.sort_unstable_by_key(|&(set, _)| set);
     let mut morphs = Vec::new();
     for (target_index, target) in tuple.primitive().morph_targets().enumerate() {
         for delta in target.deltas() {
@@ -70,7 +77,7 @@ fn source_corner(tuple: ListVertex<'_>) -> Result<CornerBits> {
             .ok_or("missing source positions")?,
         normal: selected_bits(tuple, AttributeSemanticRef::Normal),
         tangent: selected_bits(tuple, AttributeSemanticRef::Tangent),
-        uv: selected_bits(tuple, AttributeSemanticRef::Texcoord(0)),
+        uvs,
         influences: tuple.influences().map(|row| {
             (
                 row.joint_indices().to_vec(),
@@ -102,7 +109,11 @@ fn owned_corner(draw: &DrawBuffer, index: usize) -> CornerBits {
         position: vertex.position.map(f64::to_bits),
         normal: vertex.normal.map(|v| v.map(f64::to_bits)),
         tangent: vertex.tangent.map(|v| v.map(f64::to_bits)),
-        uv: vertex.uv.map(|v| v.map(f64::to_bits)),
+        uvs: draw
+            .uv_streams
+            .iter()
+            .map(|stream| (stream.set, stream.values[index].map(f64::to_bits)))
+            .collect(),
         influences: draw.influences.as_ref().map(|rows| {
             let range = rows.offsets[index]..rows.offsets[index + 1];
             (
@@ -218,9 +229,12 @@ fn corner_uv_normal_and_signed_zero_seams_split_only_the_necessary_sources() -> 
         let vertex_count = if indices[4] == 2 { 5 } else { 6 };
         assert_eq!(draw.vertices.len(), vertex_count, "{face}");
         if face.contains("1/6/1") {
-            assert_eq!(draw.vertices[0].uv.unwrap()[0].to_bits(), 0.0_f64.to_bits());
             assert_eq!(
-                draw.vertices[3].uv.unwrap()[0].to_bits(),
+                draw.uv_stream(0).unwrap().values[0][0].to_bits(),
+                0.0_f64.to_bits()
+            );
+            assert_eq!(
+                draw.uv_stream(0).unwrap().values[3][0].to_bits(),
                 (-0.0_f64).to_bits()
             );
         }

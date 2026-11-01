@@ -189,13 +189,13 @@ fn source_scene(
         GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::TriangleList,
             Presence::Present(&indices),
-            Presence::Absent,
+            crate::MaterialAssignment::Unspecified,
             AuthoringRange::new(0, second_start),
         ),
         GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::TriangleList,
             Presence::Absent,
-            Presence::Absent,
+            crate::MaterialAssignment::Unspecified,
             AuthoringRange::new(second_start, 2),
         ),
     ];
@@ -489,7 +489,23 @@ fn expected_parents(
     parents
 }
 
-fn assert_valid_profile(profile: &ProfileStorage, plan: NodeSceneEditProfilePlan) {
+#[derive(Clone, Copy)]
+struct ProfileValidationFacts {
+    output_counts: crate::canonical_scene::store::validation::ProfileMeteredCounts,
+    output_layout: crate::canonical_scene::store::production::ProfileOwnerLayout,
+    maximum_depth: u32,
+}
+impl From<NodeSceneEditProfilePlan<'_>> for ProfileValidationFacts {
+    fn from(plan: NodeSceneEditProfilePlan<'_>) -> Self {
+        Self {
+            output_counts: plan.output_counts,
+            output_layout: plan.output_layout,
+            maximum_depth: plan.maximum_depth,
+        }
+    }
+}
+fn assert_valid_profile(profile: &ProfileStorage, plan: impl Into<ProfileValidationFacts>) {
+    let plan = plan.into();
     let mut depths = vec![0; plan.output_counts.provenance_count as usize];
     let mut control = Control::default();
     let proof = profile
@@ -733,8 +749,9 @@ fn smooth_replacement_retains_distinct_parent_sets_and_compacts_removed_tangent_
             .expect("infallible correspondence control")
     );
 
+    let validation_facts = ProfileValidationFacts::from(plan);
     drop(source);
-    assert_valid_profile(&output.output().profile, plan);
+    assert_valid_profile(&output.output().profile, validation_facts);
     assert_metadata(&output.output().profile, true, 2, 6);
     drop(output);
     assert!(!account.snapshot().poisoned());
@@ -821,8 +838,9 @@ fn adding_smooth_normals_reindexes_following_owners_without_copying_metadata_pay
             .expect("infallible correspondence control")
     );
 
+    let validation_facts = ProfileValidationFacts::from(plan);
     drop(source);
-    assert_valid_profile(&output.output().profile, plan);
+    assert_valid_profile(&output.output().profile, validation_facts);
     assert_metadata(&output.output().profile, false, 2, 6);
     drop(output);
     assert!(!account.snapshot().poisoned());
@@ -904,8 +922,9 @@ fn flat_replacement_excludes_smoothing_group_and_unrelated_attribute_provenance(
             .expect("infallible correspondence control")
     );
 
+    let validation_facts = ProfileValidationFacts::from(plan);
     drop(source);
-    assert_valid_profile(&output.output().profile, plan);
+    assert_valid_profile(&output.output().profile, validation_facts);
     assert_metadata(&output.output().profile, true, 2, 6);
     drop(output);
     assert!(!account.snapshot().poisoned());
@@ -1146,8 +1165,9 @@ fn space_conversion_rebinds_changed_deformation_and_curve_owners_with_exact_sele
         tables.appearance.payloads.as_ref(),
         source.scene.tables.appearance.payloads.as_ref()
     ));
+    let validation_facts = ProfileValidationFacts::from(plan);
     drop(source);
-    assert_valid_profile(&output.output().profile, plan);
+    assert_valid_profile(&output.output().profile, validation_facts);
     drop(output);
     assert!(!account.snapshot().poisoned());
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
@@ -1472,8 +1492,9 @@ fn spatial_conversion_rebinds_camera_and_light_provenance_without_changing_node_
     let mut control = Control::default();
     assert!(space.validate_correspondence(tables, &mut control).unwrap());
     assert_eq!(control.0, space.correspondence_work());
+    let validation_facts = ProfileValidationFacts::from(plan);
     drop(source);
-    assert_valid_profile(&output.output().profile, plan);
+    assert_valid_profile(&output.output().profile, validation_facts);
     drop(output);
     assert!(!account.snapshot().poisoned());
     assert_eq!(account.snapshot().live_retained_bytes(), 0);

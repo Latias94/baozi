@@ -472,7 +472,7 @@ impl GeometryStoragePlan {
                     face_count: primitive.face_count(),
                     polygon_boundaries,
                     indices,
-                    material: primitive.material().map(|id| id.index()),
+                    material: primitive.material_assignment().map(|id| id.index()),
                     attributes: TableRange::new(
                         primitive.attribute_range().offset() as usize,
                         primitive.attribute_range().count() as usize,

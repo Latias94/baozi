@@ -1,17 +1,21 @@
-use std::collections::{BTreeMap, HashMap};
+use std::{collections::HashMap, fmt, num::NonZeroU32};
 
 use baozi::{
-    Aabb, AnimationInterpolation, AnimationTarget, AttributeDomain, AttributeElement,
-    AttributeSemanticRef, AuthoredTransform, BasePoseWorldTransforms, CancellationToken, Mat4,
-    MaterialFactors, MetadataOwnerRef, MetadataValueRef, MorphDeltaSemantic, PrimitiveId,
-    SourceObjectLocatorRef, SpatialQueryError, SpatialQueryLimits, TextureRole, TextureTransform,
-    TopologyKind, ValidatedScene,
+    Aabb, AnimationExtrapolation, AnimationInterpolation, AnimationTarget, AnimationTimeDomain,
+    AttributeData, AttributeDomain, AttributeElement, AttributeRef, AttributeSemanticRef,
+    AuthoredTransform, BasePoseWorldTransforms, CancellationToken, ColorInterpretation, Mat4,
+    MaterialAssignment, MaterialFactors, MetadataOwnerRef, MetadataValueRef, MorphDeltaSemantic,
+    PrimitiveId, PrimitiveRef, SamplerState, SceneProfileOwner, SkinMatrixSpaces,
+    SourceObjectLocatorRef, SpatialQueryError, SpatialQueryLimits, TangentBasisRef,
+    TangentEncodingRef, TextureBlendOperation, TextureChannelSwizzle, TextureRole, TextureStrength,
+    TextureTransform, TopologyKind, UvOrigin, ValidatedScene,
     postprocess::{PrimitiveVertex, list_vertices},
 };
 
 use crate::Result;
 
-/// This application chooses F64 positions/normals/tangents, UV0, and linear COLOR_0.
+/// This application chooses F64 positions/normals/tangents and linear COLOR_0.
+/// UVs live in parallel per-draw streams, with every retained set participating in indexing.
 /// RGB colors gain alpha one; absent colors remain absent and RGBA alpha stays authored.
 /// F32 inputs widen exactly. Reuse requires the same source vertex and selected field bits.
 /// It does not weld distinct source vertices, truncate influences, or decode images.
@@ -20,7 +24,6 @@ pub struct Vertex {
     pub position: [f64; 3],
     pub normal: Option<[f64; 3]>,
     pub tangent: Option<[f64; 4]>,
-    pub uv: Option<[f64; 2]>,
     pub color: Option<[f64; 4]>,
 }
 
@@ -40,21 +43,24 @@ struct VertexKey {
     position: [u64; 3],
     normal: Option<[u64; 3]>,
     tangent: Option<[u64; 4]>,
-    uv: Option<[u64; 2]>,
+    uvs: Vec<[u64; 2]>,
     color: Option<[u64; 4]>,
 }
 
 impl VertexKey {
-    fn new(source: PrimitiveVertex, vertex: &Vertex) -> Self {
-        Self {
+    fn new(source: PrimitiveVertex, vertex: &Vertex, uvs: &[[f64; 2]]) -> Result<Self> {
+        let mut uv_bits = Vec::new();
+        uv_bits.try_reserve_exact(uvs.len())?;
+        uv_bits.extend(uvs.iter().map(|uv| uv.map(f64::to_bits)));
+        Ok(Self {
             primitive: source.primitive,
             source_vertex: source.index,
             position: vertex.position.map(f64::to_bits),
             normal: vertex.normal.map(|v| v.map(f64::to_bits)),
             tangent: vertex.tangent.map(|v| v.map(f64::to_bits)),
-            uv: vertex.uv.map(|v| v.map(f64::to_bits)),
+            uvs: uv_bits,
             color: vertex.color.map(|v| v.map(f64::to_bits)),
-        }
+        })
     }
 }
 
@@ -65,10 +71,15 @@ struct IndexedVertices {
     // Expanded output tuple ordinals, which can differ from source Corner indices.
     representative_corners: Vec<usize>,
     influences: Option<Influences>,
+    uv_streams: Vec<UvStream>,
 }
 
 impl IndexedVertices {
-    fn new(tuple_count: usize, has_influences: bool) -> Result<Self> {
+    fn new(
+        tuple_count: usize,
+        has_influences: bool,
+        uv_sets: &[(u32, AttributeDomain)],
+    ) -> Result<Self> {
         let mut indices = Vec::new();
         indices.try_reserve_exact(tuple_count)?;
         let influences = if has_influences {
@@ -82,12 +93,22 @@ impl IndexedVertices {
         } else {
             None
         };
+        let mut uv_streams = Vec::new();
+        uv_streams.try_reserve_exact(uv_sets.len())?;
+        for &(set, domain) in uv_sets {
+            uv_streams.push(UvStream {
+                set,
+                domain,
+                values: Vec::new(),
+            });
+        }
         Ok(Self {
             lookup: HashMap::new(),
             vertices: Vec::new(),
             indices,
             representative_corners: Vec::new(),
             influences,
+            uv_streams,
         })
     }
 
@@ -95,10 +116,14 @@ impl IndexedVertices {
         &mut self,
         source: PrimitiveVertex,
         vertex: Vertex,
+        uvs: &[[f64; 2]],
         influences: Option<(&[u32], &[f32])>,
     ) -> Result<()> {
         self.indices.try_reserve(1)?;
-        let key = VertexKey::new(source, &vertex);
+        if uvs.len() != self.uv_streams.len() {
+            return Err("UV tuple width does not match the selected streams".into());
+        }
+        let key = VertexKey::new(source, &vertex, uvs)?;
         let index = if let Some(&index) = self.lookup.get(&key) {
             index
         } else {
@@ -106,6 +131,9 @@ impl IndexedVertices {
             self.lookup.try_reserve(1)?;
             self.vertices.try_reserve(1)?;
             self.representative_corners.try_reserve(1)?;
+            for stream in &mut self.uv_streams {
+                stream.values.try_reserve(1)?;
+            }
             if let Some(out) = &mut self.influences {
                 let (joints, weights) = influences.ok_or("missing influence row")?;
                 out.offsets.try_reserve(1)?;
@@ -116,6 +144,9 @@ impl IndexedVertices {
                 out.offsets.push(out.joints.len());
             }
             self.vertices.push(vertex);
+            for (stream, &uv) in self.uv_streams.iter_mut().zip(uvs) {
+                stream.values.push(uv);
+            }
             self.representative_corners.push(self.indices.len());
             // Output order comes only from first output tuple encounter, never map iteration.
             self.lookup.insert(key, index);
@@ -137,17 +168,91 @@ pub struct MorphStream {
     pub values: Vec<[f32; 3]>,
 }
 
+/// A retained UV set in output vertex order. No set, domain, transform, or origin is inferred.
+#[derive(Debug)]
+pub struct UvStream {
+    pub set: u32,
+    pub domain: AttributeDomain,
+    pub values: Vec<[f64; 2]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UvExtractionErrorKind {
+    Missing,
+    AmbiguousDomain,
+    UnsupportedFormat,
+}
+
+/// A failed retained binding/UV closure. Binding ordinals are local to the draw's material.
+/// An unreferenced ambiguous/unsupported stream has no binding ordinal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UvExtractionError {
+    pub mesh: usize,
+    pub primitive: usize,
+    pub binding: Option<usize>,
+    pub uv_set: u32,
+    pub kind: UvExtractionErrorKind,
+}
+
+impl fmt::Display for UvExtractionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "mesh {} primitive {} binding {:?} UV set {}: {:?}",
+            self.mesh, self.primitive, self.binding, self.uv_set, self.kind
+        )
+    }
+}
+
+impl std::error::Error for UvExtractionError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TangentBasis {
+    Unknown,
+    MikkTspace,
+    TriangleUvDerivative,
+    Namespaced { name: String, version: NonZeroU32 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TangentEncoding {
+    Unknown,
+    SignInW,
+    Namespaced { name: String, version: NonZeroU32 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TangentConventions {
+    pub domain: AttributeDomain,
+    pub basis: TangentBasis,
+    pub encoding: TangentEncoding,
+}
+
 #[derive(Debug)]
 pub struct DrawBuffer {
     pub mesh: usize,
     pub primitive: usize,
-    pub material: Option<usize>,
+    /// Preserves authored absence independently from the effective material's application index.
+    pub material: MaterialAssignment<usize>,
     /// Explicit list topology of these buffers, independent of the source primitive topology.
     pub topology: TopologyKind,
     pub vertices: Vec<Vertex>,
+    /// Ordered by set; all values use exactly the same vertex indices as `vertices`.
+    pub uv_streams: Vec<UvStream>,
+    pub tangent_conventions: Option<TangentConventions>,
     pub indices: Vec<u32>,
     pub influences: Option<Influences>,
     pub morphs: Vec<MorphStream>,
+}
+
+impl DrawBuffer {
+    /// Looks up exactly the requested set, without substituting another UV stream.
+    pub fn uv_stream(&self, set: u32) -> Option<&UvStream> {
+        self.uv_streams
+            .binary_search_by_key(&set, |stream| stream.set)
+            .ok()
+            .map(|index| &self.uv_streams[index])
+    }
 }
 
 #[derive(Debug)]
@@ -162,13 +267,15 @@ pub struct Instance {
     pub node: usize,
     pub mesh: usize,
     pub skin: Option<usize>,
-    pub morph_weights: Vec<f32>,
+    /// An authored instance override; absence resolves to the mesh defaults at evaluation time.
+    pub morph_weights: Option<Vec<f32>>,
 }
 
 #[derive(Debug)]
 pub struct Skin {
     pub joints: Vec<usize>,
     pub inverse_binds: Vec<Mat4>,
+    pub matrix_spaces: SkinMatrixSpaces,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,6 +290,8 @@ pub enum ChannelTarget {
 pub struct Channel {
     pub target: ChannelTarget,
     pub interpolation: AnimationInterpolation,
+    pub pre_extrapolation: AnimationExtrapolation,
+    pub post_extrapolation: AnimationExtrapolation,
     pub width: usize,
     pub times: Vec<f64>,
     pub values: Vec<f32>,
@@ -194,15 +303,41 @@ pub struct Channel {
 pub struct Clip {
     pub name: Option<String>,
     pub duration: f64,
+    pub time_domain: AnimationTimeDomain,
     pub channels: Vec<Channel>,
 }
 
 #[derive(Debug)]
 pub struct Binding {
     pub role: TextureRole,
-    pub image: usize,
+    pub texture: usize,
     pub uv_set: u16,
+    pub channel_mapping: TextureChannelSwizzle,
+    pub color_interpretation: ColorInterpretation,
     pub transform: TextureTransform,
+    pub strength: TextureStrength,
+    pub blend: TextureBlendOperation,
+    pub source_key: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct Texture {
+    pub name: Option<String>,
+    pub image: usize,
+    pub sampler: usize,
+}
+
+#[derive(Debug)]
+pub struct Sampler {
+    pub name: Option<String>,
+    pub state: SamplerState,
+}
+
+#[derive(Debug)]
+pub struct Image {
+    pub name: Option<String>,
+    pub encoded_bytes: Vec<u8>,
+    pub media_type: Option<String>,
 }
 
 #[derive(Debug)]
@@ -264,6 +399,8 @@ impl BasePoseSpatialSnapshot {
 #[derive(Debug)]
 pub struct ApplicationAsset {
     pub mesh_count: usize,
+    /// One default-weight vector per mesh, independent of instance overrides and animation.
+    pub mesh_morph_weights: Vec<Vec<f32>>,
     pub roots: Vec<usize>,
     pub nodes: Vec<Node>,
     pub draws: Vec<DrawBuffer>,
@@ -271,7 +408,10 @@ pub struct ApplicationAsset {
     pub skins: Vec<Skin>,
     pub animations: Vec<Clip>,
     pub materials: Vec<Material>,
-    pub images: Vec<Vec<u8>>,
+    pub textures: Vec<Texture>,
+    pub samplers: Vec<Sampler>,
+    pub images: Vec<Image>,
+    pub uv_origin: UvOrigin,
     pub source_json_metadata: Vec<SourceJsonMetadata>,
 }
 
@@ -284,54 +424,86 @@ impl ApplicationAsset {
     pub fn from_scene(scene: &ValidatedScene) -> Result<Self> {
         // Public IDs stay opaque. The application creates its own dense indices exactly once,
         // after the final Scene edit, for references that must outlive that Scene.
-        let nodes: BTreeMap<_, _> = scene
-            .nodes()
-            .enumerate()
-            .map(|(i, n)| (n.id(), i))
-            .collect();
-        let meshes: BTreeMap<_, _> = scene
-            .meshes()
-            .enumerate()
-            .map(|(i, m)| (m.id(), i))
-            .collect();
-        let skins: BTreeMap<_, _> = scene
-            .skins()
-            .enumerate()
-            .map(|(i, s)| (s.id(), i))
-            .collect();
-        let instances: BTreeMap<_, _> = scene
-            .mesh_instances()
-            .enumerate()
-            .map(|(i, m)| (m.id(), i))
-            .collect();
-        let materials: BTreeMap<_, _> = scene
-            .materials()
-            .enumerate()
-            .map(|(i, m)| (m.id(), i))
-            .collect();
-        let images: BTreeMap<_, _> = scene
-            .images()
-            .enumerate()
-            .map(|(i, m)| (m.id(), i))
-            .collect();
+        let nodes = dense_indices(scene.nodes().map(|n| n.id()))?;
+        let meshes = dense_indices(scene.meshes().map(|m| m.id()))?;
+        let skins = dense_indices(scene.skins().map(|s| s.id()))?;
+        let instances = dense_indices(scene.mesh_instances().map(|i| i.id()))?;
+        let material_indices = dense_indices(scene.materials().map(|m| m.id()))?;
+        let image_indices = dense_indices(scene.images().map(|i| i.id()))?;
+        let texture_indices = dense_indices(scene.textures().map(|t| t.id()))?;
+        let sampler_indices = dense_indices(scene.samplers().map(|s| s.id()))?;
+        let mut materials = Vec::new();
+        materials.try_reserve_exact(scene.material_count())?;
+        for material in scene.materials() {
+            let mut bindings = Vec::new();
+            bindings.try_reserve_exact(material.binding_count())?;
+            for binding in material.bindings() {
+                bindings.push(Binding {
+                    role: binding.role(),
+                    texture: texture_indices[&binding.texture().id()],
+                    uv_set: binding.uv_set(),
+                    channel_mapping: binding.channel_mapping(),
+                    color_interpretation: binding.color_interpretation(),
+                    transform: binding.transform(),
+                    strength: binding.strength(),
+                    blend: binding.blend(),
+                    source_key: copy_name(binding.source_key())?,
+                });
+            }
+            materials.push(Material {
+                name: copy_name(material.name())?,
+                shading_model: material.shading_model(),
+                alpha_mode: material.alpha_mode(),
+                double_sided: material.double_sided(),
+                factors: material.factors(),
+                bindings,
+            });
+        }
+        let mut textures = Vec::new();
+        textures.try_reserve_exact(scene.texture_count())?;
+        for texture in scene.textures() {
+            textures.push(Texture {
+                name: None,
+                image: image_indices[&texture.image().id()],
+                sampler: sampler_indices[&texture.sampler().id()],
+            });
+        }
+        let mut samplers = Vec::new();
+        samplers.try_reserve_exact(scene.sampler_count())?;
+        for sampler in scene.samplers() {
+            samplers.push(Sampler {
+                name: None,
+                state: sampler.state(),
+            });
+        }
+        let mut images = Vec::new();
+        images.try_reserve_exact(scene.image_count())?;
+        for image in scene.images() {
+            images.push(Image {
+                name: None,
+                encoded_bytes: copy_slice(image.encoded_bytes())?,
+                media_type: copy_name(image.media_type())?,
+            });
+        }
         let mut draws = Vec::new();
         for (mesh_index, mesh) in scene.meshes().enumerate() {
             for (primitive_index, primitive) in mesh.primitives().enumerate() {
                 let tuples = list_vertices(primitive)?;
+                let material = primitive
+                    .material_assignment()
+                    .map(|m| material_indices[&m.id()]);
+                let bindings = material
+                    .effective()
+                    .map_or(&[][..], |index| materials[index].bindings.as_slice());
+                let uv_sets = select_uv_sets(primitive, bindings, mesh_index, primitive_index)?;
                 let mut indexed =
-                    IndexedVertices::new(tuples.len(), primitive.influences().is_some())?;
-                // The app selects one normal, tangent, UV0 and COLOR_0 field. Ambiguous
+                    IndexedVertices::new(tuples.len(), primitive.influences().is_some(), &uv_sets)?;
+                // The app selects one normal, tangent, each UV set and COLOR_0 field. Ambiguous
                 // simultaneous domains require an explicit application policy, never priority.
                 let normal = select_domain(
                     primitive
                         .attributes()
                         .filter(|a| a.semantic() == AttributeSemanticRef::Normal)
-                        .map(|a| a.domain()),
-                )?;
-                let uv = select_domain(
-                    primitive
-                        .attributes()
-                        .filter(|a| a.semantic() == AttributeSemanticRef::Texcoord(0))
                         .map(|a| a.domain()),
                 )?;
                 let tangent = select_domain(
@@ -346,6 +518,18 @@ impl ApplicationAsset {
                         .filter(|a| a.semantic() == AttributeSemanticRef::Color(0))
                         .map(|a| a.domain()),
                 )?;
+                let tangent_conventions = tangent
+                    .map(|domain| {
+                        copy_tangent_conventions(
+                            primitive
+                                .attribute(AttributeSemanticRef::Tangent, domain)
+                                .ok_or("missing selected tangent descriptor")?,
+                        )
+                    })
+                    .transpose()?
+                    .flatten();
+                let mut uv_values = Vec::new();
+                uv_values.try_reserve_exact(uv_sets.len())?;
                 for tuple in tuples.vertices() {
                     let position = tuple
                         .attribute(AttributeSemanticRef::Position, AttributeDomain::Vertex)
@@ -372,16 +556,6 @@ impl ApplicationAsset {
                                 )
                             })
                             .transpose()?,
-                        uv: uv
-                            .map(|domain| {
-                                numeric(
-                                    tuple
-                                        .attribute(AttributeSemanticRef::Texcoord(0), domain)
-                                        .expect("selected field exists")
-                                        .element(),
-                                )
-                            })
-                            .transpose()?,
                         color: color
                             .map(|domain| {
                                 numeric_color(
@@ -393,11 +567,30 @@ impl ApplicationAsset {
                             })
                             .transpose()?,
                     };
+                    uv_values.clear();
+                    for &(set, domain) in &uv_sets {
+                        let error = |kind| UvExtractionError {
+                            mesh: mesh_index,
+                            primitive: primitive_index,
+                            binding: bindings
+                                .iter()
+                                .position(|binding| u32::from(binding.uv_set) == set),
+                            uv_set: set,
+                            kind,
+                        };
+                        let field = tuple
+                            .attribute(AttributeSemanticRef::Texcoord(set), domain)
+                            .ok_or_else(|| error(UvExtractionErrorKind::Missing))?;
+                        let value = numeric(field.element())
+                            .map_err(|_| error(UvExtractionErrorKind::UnsupportedFormat))?;
+                        uv_values.push(value);
+                    }
                     // Influences and morphs are Vertex-domain values: source identity makes
                     // them equivalent for every matching key, so copy only its representative.
                     indexed.push(
                         tuple.source_vertex(),
                         vertex,
+                        &uv_values,
                         tuple
                             .influences()
                             .map(|row| (row.joint_indices(), row.weights())),
@@ -429,138 +622,176 @@ impl ApplicationAsset {
                 draws.push(DrawBuffer {
                     mesh: mesh_index,
                     primitive: primitive_index,
-                    material: primitive.material().map(|m| materials[&m.id()]),
+                    material,
                     topology: tuples.topology(),
                     vertices: indexed.vertices,
+                    uv_streams: indexed.uv_streams,
+                    tangent_conventions,
                     indices: indexed.indices,
                     influences: indexed.influences,
                     morphs,
                 });
             }
         }
-        let animations = scene
-            .animation_clips()
-            .map(|clip| {
-                let channels = clip
-                    .channels()
-                    .map(|c| {
-                        let target = match c.target() {
-                            AnimationTarget::NodeTranslation(id) => {
-                                ChannelTarget::Translation(nodes[&id])
-                            }
-                            AnimationTarget::NodeRotation(id) => {
-                                ChannelTarget::Rotation(nodes[&id])
-                            }
-                            AnimationTarget::NodeScale(id) => ChannelTarget::Scale(nodes[&id]),
-                            AnimationTarget::MeshInstanceMorphWeights(id) => {
-                                ChannelTarget::MorphWeights(instances[&id])
-                            }
-                        };
-                        Channel {
-                            target,
-                            interpolation: c.interpolation(),
-                            width: c.value_width(),
-                            times: c.key_times().to_vec(),
-                            values: c.values().to_vec(),
-                            in_tangents: c.in_tangents().map(<[f32]>::to_vec),
-                            out_tangents: c.out_tangents().map(<[f32]>::to_vec),
+        let mut animations = Vec::new();
+        animations.try_reserve_exact(scene.animation_clip_count())?;
+        for clip in scene.animation_clips() {
+            let mut channels = Vec::new();
+            channels.try_reserve_exact(clip.channel_count())?;
+            for c in clip.channels() {
+                let target = match c.target() {
+                    AnimationTarget::NodeTranslation(id) => ChannelTarget::Translation(nodes[&id]),
+                    AnimationTarget::NodeRotation(id) => ChannelTarget::Rotation(nodes[&id]),
+                    AnimationTarget::NodeScale(id) => ChannelTarget::Scale(nodes[&id]),
+                    AnimationTarget::MeshInstanceMorphWeights(id) => {
+                        ChannelTarget::MorphWeights(instances[&id])
+                    }
+                };
+                channels.push(Channel {
+                    target,
+                    interpolation: c.interpolation(),
+                    pre_extrapolation: c.pre_extrapolation(),
+                    post_extrapolation: c.post_extrapolation(),
+                    width: c.value_width(),
+                    times: copy_slice(c.key_times())?,
+                    values: copy_slice(c.values())?,
+                    in_tangents: c.in_tangents().map(copy_slice).transpose()?,
+                    out_tangents: c.out_tangents().map(copy_slice).transpose()?,
+                });
+            }
+            animations.push(Clip {
+                name: copy_name(clip.name())?,
+                duration: clip.duration(),
+                time_domain: clip.time_domain(),
+                channels,
+            });
+        }
+        let mut mesh_morph_weights = Vec::new();
+        mesh_morph_weights.try_reserve_exact(scene.mesh_count())?;
+        for mesh in scene.meshes() {
+            mesh_morph_weights.push(copy_slice(mesh.default_morph_weights())?);
+        }
+        let mut copied_nodes = Vec::new();
+        copied_nodes.try_reserve_exact(nodes.len())?;
+        for node in scene.nodes() {
+            let mut children = Vec::new();
+            children.try_reserve_exact(node.children().len())?;
+            for child in node.children() {
+                children.push(nodes[&child.id()]);
+            }
+            copied_nodes.push(Node {
+                name: copy_name(node.name())?,
+                transform: node.authored_transform(),
+                children,
+            });
+        }
+        let mut roots = Vec::new();
+        roots.try_reserve_exact(scene.roots().len())?;
+        for node in scene.roots() {
+            roots.push(nodes[&node.id()]);
+        }
+        let mut copied_instances = Vec::new();
+        copied_instances.try_reserve_exact(instances.len())?;
+        for instance in scene.mesh_instances() {
+            copied_instances.push(Instance {
+                node: nodes[&instance.node().id()],
+                mesh: meshes[&instance.mesh().id()],
+                skin: instance.skin().map(|skin| skins[&skin.id()]),
+                morph_weights: instance.morph_weights().map(copy_slice).transpose()?,
+            });
+        }
+        let mut copied_skins = Vec::new();
+        copied_skins.try_reserve_exact(skins.len())?;
+        for skin in scene.skins() {
+            let mut joints = Vec::new();
+            joints.try_reserve_exact(skin.joints().len())?;
+            for joint in skin.joints() {
+                joints.push(nodes[&joint]);
+            }
+            let mut inverse_binds = Vec::new();
+            inverse_binds.try_reserve_exact(skin.inverse_bind_matrices().len())?;
+            for matrix in skin.inverse_bind_matrices() {
+                inverse_binds.push(matrix);
+            }
+            copied_skins.push(Skin {
+                joints,
+                inverse_binds,
+                matrix_spaces: skin.matrix_spaces(),
+            });
+        }
+        let mut source_json_metadata = Vec::new();
+        for entry in scene.metadata_entries() {
+            if let MetadataOwnerRef::Entity(owner) = entry.owner() {
+                // Source names belong to these independent owners, never to a display fallback.
+                if entry.key() == "org.baozi.gltf:source-name" {
+                    let target = match owner.descriptor() {
+                        SceneProfileOwner::Image(index) => {
+                            Some(&mut images[usize::try_from(index)?].name)
                         }
-                    })
-                    .collect();
-                Clip {
-                    name: clip.name().map(str::to_owned),
-                    duration: clip.duration(),
-                    channels,
+                        SceneProfileOwner::Texture(index) => {
+                            Some(&mut textures[usize::try_from(index)?].name)
+                        }
+                        SceneProfileOwner::Sampler(index) => {
+                            Some(&mut samplers[usize::try_from(index)?].name)
+                        }
+                        _ => None,
+                    };
+                    if let Some(target) = target {
+                        let MetadataValueRef::String(name) = entry.value() else {
+                            return Err("source object name metadata must contain a string".into());
+                        };
+                        *target = Some(copy_text(name)?);
+                    }
                 }
-            })
-            .collect();
+                continue;
+            }
+            let MetadataOwnerRef::SourceObject(source) = entry.owner() else {
+                continue;
+            };
+            let MetadataValueRef::Bytes {
+                media_type,
+                payload,
+            } = entry.value()
+            else {
+                continue;
+            };
+            if source.format() != "org.baozi.gltf" || media_type != "application/json" {
+                continue;
+            }
+            let SourceObjectLocatorRef::Namespaced {
+                schema,
+                schema_version,
+                value,
+            } = source.locator()
+            else {
+                continue;
+            };
+            source_json_metadata.try_reserve(1)?;
+            source_json_metadata.push(SourceJsonMetadata {
+                resource: copy_text(source.resource().identity())?,
+                format: copy_text(source.format())?,
+                locator_schema: copy_text(schema)?,
+                locator_schema_version: schema_version,
+                locator: copy_text(value)?,
+                key: copy_text(entry.key())?,
+                media_type: copy_text(media_type)?,
+                payload: copy_slice(payload)?,
+            });
+        }
         Ok(Self {
             mesh_count: scene.mesh_count(),
-            roots: scene.roots().map(|n| nodes[&n.id()]).collect(),
-            nodes: scene
-                .nodes()
-                .map(|n| Node {
-                    name: n.name().map(str::to_owned),
-                    transform: n.authored_transform(),
-                    children: n.children().map(|c| nodes[&c.id()]).collect(),
-                })
-                .collect(),
-            instances: scene
-                .mesh_instances()
-                .map(|i| Instance {
-                    node: nodes[&i.node().id()],
-                    mesh: meshes[&i.mesh().id()],
-                    skin: i.skin().map(|s| skins[&s.id()]),
-                    morph_weights: i
-                        .morph_weights()
-                        .unwrap_or_else(|| i.mesh().default_morph_weights())
-                        .to_vec(),
-                })
-                .collect(),
-            skins: scene
-                .skins()
-                .map(|s| Skin {
-                    joints: s.joints().map(|id| nodes[&id]).collect(),
-                    inverse_binds: s.inverse_bind_matrices().collect(),
-                })
-                .collect(),
+            mesh_morph_weights,
+            roots,
+            nodes: copied_nodes,
+            instances: copied_instances,
+            skins: copied_skins,
             animations,
-            materials: scene
-                .materials()
-                .map(|m| Material {
-                    name: m.name().map(str::to_owned),
-                    shading_model: m.shading_model(),
-                    alpha_mode: m.alpha_mode(),
-                    double_sided: m.double_sided(),
-                    factors: m.factors(),
-                    bindings: m
-                        .bindings()
-                        .map(|b| Binding {
-                            role: b.role(),
-                            image: images[&b.texture().image().id()],
-                            uv_set: b.uv_set(),
-                            transform: b.transform(),
-                        })
-                        .collect(),
-                })
-                .collect(),
-            images: scene.images().map(|i| i.encoded_bytes().to_vec()).collect(),
-            source_json_metadata: scene
-                .metadata_entries()
-                .filter_map(|entry| {
-                    let MetadataOwnerRef::SourceObject(source) = entry.owner() else {
-                        return None;
-                    };
-                    let MetadataValueRef::Bytes {
-                        media_type,
-                        payload,
-                    } = entry.value()
-                    else {
-                        return None;
-                    };
-                    if source.format() != "org.baozi.gltf" || media_type != "application/json" {
-                        return None;
-                    }
-                    let SourceObjectLocatorRef::Namespaced {
-                        schema,
-                        schema_version,
-                        value,
-                    } = source.locator()
-                    else {
-                        return None;
-                    };
-                    Some(SourceJsonMetadata {
-                        resource: source.resource().identity().to_owned(),
-                        format: source.format().to_owned(),
-                        locator_schema: schema.to_owned(),
-                        locator_schema_version: schema_version,
-                        locator: value.to_owned(),
-                        key: entry.key().to_owned(),
-                        media_type: media_type.to_owned(),
-                        payload: payload.to_vec(),
-                    })
-                })
-                .collect(),
+            materials,
+            textures,
+            samplers,
+            images,
+            uv_origin: scene.space().uv_origin,
+            source_json_metadata,
             draws,
         })
     }
@@ -584,6 +815,151 @@ impl ApplicationAsset {
         }
         Some(result)
     }
+}
+
+fn dense_indices<I: Eq + std::hash::Hash>(
+    ids: impl ExactSizeIterator<Item = I>,
+) -> Result<HashMap<I, usize>> {
+    let mut indices = HashMap::new();
+    indices.try_reserve(ids.len())?;
+    for (index, id) in ids.enumerate() {
+        indices.insert(id, index);
+    }
+    Ok(indices)
+}
+
+fn copy_slice<T: Copy>(source: &[T]) -> Result<Vec<T>> {
+    let mut output = Vec::new();
+    output.try_reserve_exact(source.len())?;
+    output.extend_from_slice(source);
+    Ok(output)
+}
+
+fn copy_name(source: Option<&str>) -> Result<Option<String>> {
+    source.map(copy_text).transpose()
+}
+
+fn copy_text(source: &str) -> Result<String> {
+    let mut output = String::new();
+    output.try_reserve_exact(source.len())?;
+    output.push_str(source);
+    Ok(output)
+}
+
+fn select_uv_sets(
+    primitive: PrimitiveRef<'_>,
+    bindings: &[Binding],
+    mesh: usize,
+    primitive_index: usize,
+) -> Result<Vec<(u32, AttributeDomain)>> {
+    let mut selected = Vec::new();
+    for attribute in primitive.attributes() {
+        if let AttributeSemanticRef::Texcoord(set) = attribute.semantic() {
+            selected.try_reserve(1)?;
+            selected.push((set, attribute.domain()));
+        }
+    }
+    selected.sort_unstable_by_key(|&(set, _)| set);
+    validate_uv_sets(&selected, bindings, mesh, primitive_index)?;
+    for &(set, domain) in &selected {
+        let attribute = primitive
+            .attribute(AttributeSemanticRef::Texcoord(set), domain)
+            .ok_or("missing selected UV descriptor")?;
+        if domain == AttributeDomain::Instance
+            || attribute.lanes() != 2
+            || !matches!(
+                attribute.data(),
+                AttributeData::DenseF32 { .. }
+                    | AttributeData::DenseF64 { .. }
+                    | AttributeData::SparseF32 { .. }
+                    | AttributeData::SparseF64 { .. }
+            )
+        {
+            return Err(UvExtractionError {
+                mesh,
+                primitive: primitive_index,
+                binding: bindings
+                    .iter()
+                    .position(|binding| u32::from(binding.uv_set) == set),
+                uv_set: set,
+                kind: UvExtractionErrorKind::UnsupportedFormat,
+            }
+            .into());
+        }
+    }
+    Ok(selected)
+}
+
+fn validate_uv_sets(
+    selected: &[(u32, AttributeDomain)],
+    bindings: &[Binding],
+    mesh: usize,
+    primitive_index: usize,
+) -> Result<()> {
+    for (index, binding) in bindings.iter().enumerate() {
+        let set = u32::from(binding.uv_set);
+        let count = selected
+            .iter()
+            .filter(|&&(candidate, _)| candidate == set)
+            .count();
+        if count != 1 {
+            return Err(UvExtractionError {
+                mesh,
+                primitive: primitive_index,
+                binding: Some(index),
+                uv_set: set,
+                kind: if count == 0 {
+                    UvExtractionErrorKind::Missing
+                } else {
+                    UvExtractionErrorKind::AmbiguousDomain
+                },
+            }
+            .into());
+        }
+    }
+    for pair in selected.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            return Err(UvExtractionError {
+                mesh,
+                primitive: primitive_index,
+                binding: None,
+                uv_set: pair[0].0,
+                kind: UvExtractionErrorKind::AmbiguousDomain,
+            }
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn copy_tangent_conventions(attribute: AttributeRef<'_>) -> Result<Option<TangentConventions>> {
+    attribute
+        .tangent_conventions()
+        .map(|conventions| {
+            Ok(TangentConventions {
+                domain: attribute.domain(),
+                basis: match conventions.basis {
+                    TangentBasisRef::Unknown => TangentBasis::Unknown,
+                    TangentBasisRef::MikkTspace => TangentBasis::MikkTspace,
+                    TangentBasisRef::TriangleUvDerivative => TangentBasis::TriangleUvDerivative,
+                    TangentBasisRef::Namespaced { name, version } => TangentBasis::Namespaced {
+                        name: copy_text(name)?,
+                        version,
+                    },
+                },
+                encoding: match conventions.encoding {
+                    TangentEncodingRef::Unknown => TangentEncoding::Unknown,
+                    TangentEncodingRef::SignInW => TangentEncoding::SignInW,
+                    TangentEncodingRef::Namespaced { name, version } => {
+                        TangentEncoding::Namespaced {
+                            name: copy_text(name)?,
+                            version,
+                        }
+                    }
+                },
+            })
+        })
+        .transpose()
 }
 
 fn select_domain(
@@ -656,7 +1032,6 @@ mod tests {
             position: [16_777_217.0, -0.0, f64::from_bits(1)],
             normal: Some([0.0, 0.0, 1.0]),
             tangent: Some([1.0, 0.0, 0.0, 1.0]),
-            uv: Some([0.0, 0.0]),
             color: Some([0.0, 0.5, 0.75, 1.0]),
         }
     }
@@ -673,10 +1048,6 @@ mod tests {
         assert_eq!(
             actual.tangent.map(|v| v.map(f64::to_bits)),
             expected.tangent.map(|v| v.map(f64::to_bits))
-        );
-        assert_eq!(
-            actual.uv.map(|v| v.map(f64::to_bits)),
-            expected.uv.map(|v| v.map(f64::to_bits))
         );
         assert_eq!(
             actual.color.map(|v| v.map(f64::to_bits)),
@@ -698,10 +1069,6 @@ mod tests {
         tangent.tangent = Some([0.0, 1.0, 0.0, 1.0]);
         let mut tangent_w = base.clone();
         tangent_w.tangent = Some([1.0, 0.0, 0.0, -1.0]);
-        let mut uv = base.clone();
-        uv.uv = Some([0.5, 0.0]);
-        let mut signed_zero_uv = base.clone();
-        signed_zero_uv.uv = Some([-0.0, 0.0]);
         let mut color = base.clone();
         color.color = Some([0.25, 0.5, 0.75, 1.0]);
         let mut color_alpha = base.clone();
@@ -719,8 +1086,6 @@ mod tests {
             signed_zero_normal,
             tangent,
             tangent_w,
-            uv,
-            signed_zero_uv,
             color,
             color_alpha,
             signed_zero_color,
@@ -735,9 +1100,14 @@ mod tests {
                 base.clone(),
             ];
             for _ in 0..2 {
-                let mut packed = IndexedVertices::new(corners.len(), false)?;
+                let mut packed = IndexedVertices::new(corners.len(), false, &[])?;
                 for (&index, vertex) in [0, 1, 2, 0, 2, 1].iter().zip(&corners) {
-                    packed.push(PrimitiveVertex { primitive, index }, vertex.clone(), None)?;
+                    packed.push(
+                        PrimitiveVertex { primitive, index },
+                        vertex.clone(),
+                        &[],
+                        None,
+                    )?;
                 }
                 assert_eq!(packed.indices, [0, 1, 2, 3, 2, 1]);
                 assert_eq!(packed.vertices.len(), 4);
@@ -759,13 +1129,16 @@ mod tests {
         let sources = [0, 1, 2, 0, 2, 1, 0, 2, 1];
         let mut corners = vec![vertex(); sources.len()];
         corners[6].tangent = Some([1.0, 0.0, 0.0, -1.0]);
-        corners[8].uv = Some([-0.0, 0.0]);
-        let mut packed = IndexedVertices::new(corners.len(), true)?;
-        for (&index, vertex) in sources.iter().zip(&corners) {
+        let mut uvs = vec![[0.0, 0.0]; sources.len()];
+        uvs[8] = [-0.0, 0.0];
+        let mut packed =
+            IndexedVertices::new(corners.len(), true, &[(0, AttributeDomain::Vertex)])?;
+        for ((&index, vertex), &uv) in sources.iter().zip(&corners).zip(&uvs) {
             let source = usize::try_from(index)?;
             packed.push(
                 PrimitiveVertex { primitive, index },
                 vertex.clone(),
+                &[uv],
                 Some((joints[source], weights[source])),
             )?;
         }
@@ -776,10 +1149,16 @@ mod tests {
         assert_eq!(rows.offsets, [0, 5, 5, 6, 11, 11]);
         assert_eq!(rows.joints.len(), 11);
         assert_eq!(rows.weights.len(), 11);
-        for ((&index, &source), expected) in packed.indices.iter().zip(&sources).zip(&corners) {
+        for (((&index, &source), expected), uv) in
+            packed.indices.iter().zip(&sources).zip(&corners).zip(&uvs)
+        {
             let index = usize::try_from(index)?;
             let source = usize::try_from(source)?;
             assert_vertex_bits(&packed.vertices[index], expected);
+            assert_eq!(
+                packed.uv_streams[0].values[index].map(f64::to_bits),
+                uv.map(f64::to_bits)
+            );
             let range = rows.offsets[index]..rows.offsets[index + 1];
             assert_eq!(&rows.joints[range.clone()], joints[source]);
             assert_eq!(
@@ -793,6 +1172,93 @@ mod tests {
                     .collect::<Vec<_>>()
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn every_uv_set_and_f64_lane_bit_participates_in_tuple_reuse() -> Result<()> {
+        let primitive = primitive_id()?;
+        let sets = [
+            (0, AttributeDomain::Vertex),
+            (1, AttributeDomain::Corner),
+            (70_000, AttributeDomain::Face),
+        ];
+        let baseline = [[0.0, -0.0], [0.25, 16_777_217.0], [f64::from_bits(1), 0.5]];
+        for set in 0..sets.len() {
+            for lane in 0..2 {
+                let mut changed = baseline;
+                changed[set][lane] = f64::from_bits(changed[set][lane].to_bits() ^ 1);
+                let mut packed = IndexedVertices::new(3, false, &sets)?;
+                for uv in [baseline, changed, baseline] {
+                    packed.push(
+                        PrimitiveVertex {
+                            primitive,
+                            index: 0,
+                        },
+                        vertex(),
+                        &uv,
+                        None,
+                    )?;
+                }
+                assert_eq!(packed.indices, [0, 1, 0]);
+                for (stream, expected) in packed.uv_streams.iter().zip(baseline) {
+                    assert_eq!(
+                        stream.values[0].map(f64::to_bits),
+                        expected.map(f64::to_bits)
+                    );
+                }
+            }
+        }
+        let mut packed = IndexedVertices::new(2, false, &sets)?;
+        let mut signed_zero = baseline;
+        signed_zero[1][0] = -0.0;
+        let mut positive_zero = baseline;
+        positive_zero[1][0] = 0.0;
+        for uv in [positive_zero, signed_zero] {
+            packed.push(
+                PrimitiveVertex {
+                    primitive,
+                    index: 0,
+                },
+                vertex(),
+                &uv,
+                None,
+            )?;
+        }
+        assert_eq!(packed.indices, [0, 1]);
+        Ok(())
+    }
+
+    #[test]
+    fn ambiguous_uv_domains_name_the_draw_binding_and_set() -> Result<()> {
+        let selected = [(1, AttributeDomain::Vertex), (1, AttributeDomain::Corner)];
+        let binding = Binding {
+            role: TextureRole::Normal,
+            texture: 0,
+            uv_set: 1,
+            channel_mapping: TextureChannelSwizzle::RGB,
+            color_interpretation: ColorInterpretation::Data,
+            transform: TextureTransform::IDENTITY,
+            strength: TextureStrength::ONE,
+            blend: TextureBlendOperation::Replace,
+            source_key: None,
+        };
+        let error = validate_uv_sets(&selected, &[binding], 2, 3).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<UvExtractionError>(),
+            Some(&UvExtractionError {
+                mesh: 2,
+                primitive: 3,
+                binding: Some(0),
+                uv_set: 1,
+                kind: UvExtractionErrorKind::AmbiguousDomain,
+            })
+        );
+        let error = validate_uv_sets(&selected, &[], 2, 3).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<UvExtractionError>().unwrap().binding,
+            None
+        );
         Ok(())
     }
 
@@ -842,7 +1308,7 @@ mod tests {
 
     #[test]
     fn allocation_and_index_overflow_return_structured_failures() -> Result<()> {
-        let error = IndexedVertices::new(usize::MAX, false)
+        let error = IndexedVertices::new(usize::MAX, false, &[])
             .err()
             .ok_or("oversized allocation unexpectedly succeeded")?;
         assert!(
@@ -855,7 +1321,7 @@ mod tests {
             let error = vertex_index(overflow).unwrap_err();
             assert!(error.downcast_ref::<std::num::TryFromIntError>().is_some());
         }
-        let empty = IndexedVertices::new(0, true)?;
+        let empty = IndexedVertices::new(0, true, &[])?;
         assert!(empty.vertices.is_empty());
         assert!(empty.indices.is_empty());
         assert_eq!(empty.influences.ok_or("missing empty CSR")?.offsets, [0]);

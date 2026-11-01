@@ -117,7 +117,7 @@ impl FormatImporter for CustomScene {
         let primitives = [GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::TriangleList,
             Presence::Present(&indices),
-            Presence::Absent,
+            baozi::MaterialAssignment::Unspecified,
             AuthoringRange::new(0, 3),
         )];
         let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];

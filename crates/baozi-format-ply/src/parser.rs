@@ -1893,7 +1893,7 @@ fn scene_from_parsed<'scope>(
     let primitive = GeometryPrimitiveAuthoring::new(
         topology,
         index_presence,
-        Presence::Absent,
+        baozi_import::authoring::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, attribute_count),
     );
     let mesh_instance =

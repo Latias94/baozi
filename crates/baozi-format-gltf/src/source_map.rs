@@ -129,8 +129,7 @@ pub(crate) struct SourcePayload {
     pub(crate) value_range: SourceRange,
 }
 
-/// Admission-owned storage, independent of the decoder graph and its opaque allowance.
-/// Moving this owner into NormalizedGltf keeps the complete allocation reservation alive.
+/// Admission-owned source ranges, retained with the typed document during normalization.
 /// Copying an individual range does not retain that reservation or the primary snapshot;
 /// callers must keep the map and the session-owned immutable snapshot for their required phase.
 pub(crate) struct GltfSourceMap<'scope> {

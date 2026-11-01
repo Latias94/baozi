@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 fn canonical_build_work(units: Option<usize>) -> Result<NonZeroU64, StoreRuntimeError> {
     let units = units.ok_or(StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
     let units =
@@ -27,6 +30,35 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    /// Qualifies the exact possible failure-validation work once, before session activation.
+    ///
+    /// Only unused capacity from the supplied ordinary counter dimension can move. The operation
+    /// preserves both total work limits, every attempted/consumed counter, the startup construction
+    /// bound, and at least the startup member and validation guarantees. Evidence members are
+    /// still individually qualified against their sealed plans when they are constructed.
+    pub fn qualify_failure_validation_work(
+        &mut self,
+        ordinary_work_dimension: StoreDimensionKey,
+        max_evidence_members: usize,
+        validation_work_limit: u64,
+    ) -> Result<(), StoreRuntimeError> {
+        self.raw
+            .preflight_failure_validation_work()
+            .map_err(|cause| map_writer_error(&cause))?;
+        if self.raw.is_terminal_only() {
+            return Err(StoreRuntimeError::FallbackOnly);
+        }
+        self.validate_dimension_key(ordinary_work_dimension)?;
+        self.producer_host().poll()?;
+        self.raw
+            .qualify_failure_validation_work(
+                ordinary_work_dimension,
+                max_evidence_members,
+                validation_work_limit,
+            )
+            .map_err(|cause| map_writer_error(&cause))
+    }
+
     /// Moves the operation into the session-lifetime outcome owner before canonical activation.
     pub fn into_session_outcome_owner(
         self,

@@ -2,9 +2,11 @@
 
 ## Purpose
 
-`baozi-format-gltf` uses `gltf-rs` 1.4.x as a private bootstrap dependency.
-This note records backend hazards that affect Baozi's parser ownership, fuzzing, diagnostics, resource limits, or future fork work.
-It is not a public API contract; ADR 0027 remains the architectural policy.
+This is historical investigation evidence for Baozi's former `gltf-rs` 1.4.x bootstrap dependency.
+The 2026-11-02 metered-document cutover removes that decoder and both maintained forks from the
+production graph. [ADR 0027](../adr/0027-gltf-backend-ownership-and-replacement-policy.md) and the
+[current profile](../formats/gltf.md) describe the replacement. The dated observations below retain
+their original source and verification scope; they do not describe the current parser boundary.
 
 ## Selected Profile Admission (2026-10-29)
 
@@ -19,7 +21,7 @@ Earlier quarantine and proposed correction sections below remain historical inve
 They do not describe current facade registration. Publication and Beta/Stable maturity remain
 separate from source admission.
 
-## Current Backend Boundary
+## Historical Backend Boundary
 
 - `gltf-rs` types are contained inside `baozi-format-gltf`.
 - Public Baozi APIs expose owned `Scene`, `ImportReport`, diagnostics, and options only.

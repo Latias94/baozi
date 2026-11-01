@@ -197,15 +197,6 @@ impl GltfFailure {
         )
     }
 
-    pub(crate) fn parser_panicked(operation: &'static str) -> Self {
-        Self::new(
-            GltfFailureCode::ParserPanicked,
-            Some(operation),
-            None,
-            "the glTF backend panicked while processing untrusted input",
-        )
-    }
-
     pub(crate) fn unsupported_at(
         subject: &'static str,
         byte_offset: u64,

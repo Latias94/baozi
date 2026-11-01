@@ -12,6 +12,44 @@ use thiserror::Error;
 /// Maximum UTF-8 bytes in one format-owned texture source key.
 pub const MAX_TEXTURE_SOURCE_KEY_BYTES: usize = 128;
 
+/// One primitive's authored material choice and its effective shading assignment.
+///
+/// The same closed value carries producer-local identities during authoring and borrowed
+/// material views during reading. An implicit default has a real material owner and provenance;
+/// its absence in the source remains distinct from an authored binding to equivalent factors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MaterialAssignment<M> {
+    Unspecified,
+    Authored(M),
+    ImplicitDefault(M),
+}
+
+impl<M> MaterialAssignment<M> {
+    pub fn map<N>(self, map: impl FnOnce(M) -> N) -> MaterialAssignment<N> {
+        match self {
+            Self::Unspecified => MaterialAssignment::Unspecified,
+            Self::Authored(material) => MaterialAssignment::Authored(map(material)),
+            Self::ImplicitDefault(material) => MaterialAssignment::ImplicitDefault(map(material)),
+        }
+    }
+}
+
+impl<M: Copy> MaterialAssignment<M> {
+    pub const fn authored(self) -> Option<M> {
+        match self {
+            Self::Authored(material) => Some(material),
+            Self::Unspecified | Self::ImplicitDefault(_) => None,
+        }
+    }
+
+    pub const fn effective(self) -> Option<M> {
+        match self {
+            Self::Authored(material) | Self::ImplicitDefault(material) => Some(material),
+            Self::Unspecified => None,
+        }
+    }
+}
+
 /// The primary rendering model selected for one material.
 ///
 /// Factor groups are retained independently, so selecting a PBR model never

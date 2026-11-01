@@ -193,7 +193,7 @@ fn storage_scale_pipeline_preserves_admission_budget_and_cancellation() {
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::TriangleList,
         Presence::Present(&indices),
-        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 1),
     )];
     let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -332,7 +332,7 @@ fn independent_indexed_primitive_buffers_scale() {
                 GeometryPrimitiveAuthoring::new(
                     GeometryTopologyAuthoring::TriangleList,
                     Presence::Present(indices),
-                    Presence::Absent,
+                    crate::MaterialAssignment::Unspecified,
                     AuthoringRange::new(u32::try_from(index).unwrap(), 1),
                 )
             })
@@ -587,7 +587,7 @@ fn shared_eight_mib_points_payload_node_edit_scale() {
         let primitives = [GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::Points,
             Presence::Present(&indices),
-            Presence::Absent,
+            crate::MaterialAssignment::Unspecified,
             AuthoringRange::new(0, 1),
         )];
         let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -895,7 +895,7 @@ fn influence_and_metadata_validation_scale() {
             let primitives = [GeometryPrimitiveAuthoring::new(
                 GeometryTopologyAuthoring::Points,
                 Presence::Present(&indices),
-                Presence::Absent,
+                crate::MaterialAssignment::Unspecified,
                 AuthoringRange::new(0, 1),
             )];
             let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];

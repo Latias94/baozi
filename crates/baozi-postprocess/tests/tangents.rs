@@ -631,7 +631,7 @@ fn precancelled_generation_returns_the_input_and_releases_resources() {
 }
 
 #[test]
-fn indexed_work_limit_rejection_is_atomic_before_generated_scratch_allocation() {
+fn tight_selected_work_budget_rejects_indexed_generation_before_output_allocation() {
     let (scene, import_evidence) = import_fixture(Fixture::WorkLimit).into_parts();
     let input = primitive(&scene);
     let target = input.id();
@@ -652,13 +652,20 @@ fn indexed_work_limit_rejection_is_atomic_before_generated_scratch_allocation() 
     // The digest covers every index; only its diagnostic preview is deliberately bounded.
     let limits = SceneSnapshotLimits::try_new(4096, 16, 20_000_000).unwrap();
     let before = scene.capture_snapshot(limits).unwrap();
-    let failure = generate_tangents(
+    let failure = baozi_postprocess::prepare_triangles(
         scene,
-        target,
-        vertex_options(),
+        &[target],
+        baozi_postprocess::TrianglePreparationOptions {
+            tangents: baozi_postprocess::TangentPolicy::Generate(vertex_options()),
+            budgets: baozi_postprocess::PostProcessBudgets {
+                work: 150,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
         PostProcessControl::default(),
     )
-    .expect_err("909,093 indexed Corners exceed the fixed tangent work envelope");
+    .expect_err("the explicit 150-unit allowance cannot complete indexed generation");
     assert_eq!(failure.input().generation(), generation);
     assert!(import_evidence.matches_scene(failure.input()));
     assert_eq!(non_tangent_fields(primitive(failure.input())), fields);
@@ -669,14 +676,25 @@ fn indexed_work_limit_rejection_is_atomic_before_generated_scratch_allocation() 
     let after = failure.input().capture_snapshot(limits).unwrap();
     assert_eq!(after.digest(), before.digest());
     assert_eq!(after.preview(), before.preview());
-    let PostProcessRunError::Tangents { failure: tangent } = failure.error() else {
-        panic!("expected typed tangent work admission failure")
+    let PostProcessRunError::Preparation {
+        failure: preparation,
+    } = failure.error()
+    else {
+        panic!("expected typed selected work admission failure")
     };
     assert!(
-        matches!(tangent.cause(), TangentCause::WorkLimit { required, maximum } if required > maximum && *maximum == 100_000_000)
+        matches!(
+            preparation.cause(),
+            baozi_postprocess::PreparationCause::Runtime(
+                baozi_operation::StoreRuntimeError::Ledger(_)
+            )
+        ),
+        "expected a work admission failure, found {preparation:?}"
     );
-    let resources = tangent.resources().unwrap();
-    assert_eq!(resources.peak_staging_bytes(), 0);
+    let resources = preparation.resources().unwrap();
+    assert!(resources.consumed_work_items() <= 150);
+    assert!(resources.attempted_work_items() >= resources.consumed_work_items());
+    assert!(resources.peak_staging_bytes() < 909_093 * std::mem::size_of::<[f32; 4]>() as u64);
     assert_eq!(resources.current_live_bytes(), 0);
     assert_eq!(resources.active_reservations(), 0);
     assert_eq!(resources.committed_canonical_bytes(), 0);
@@ -923,7 +941,7 @@ impl FormatImporter for FieldImporter {
         let primitives = [GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::TriangleList,
             Presence::Present(&indices),
-            Presence::Absent,
+            baozi_core::MaterialAssignment::Unspecified,
             AuthoringRange::new(0, attributes.len() as u32),
         )];
         let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
@@ -1263,7 +1281,7 @@ fn replacing_multiple_authored_tangent_fields_requires_an_explicit_selection_pol
 }
 
 #[test]
-fn every_authored_morph_delta_rejects_generation_including_position_only() {
+fn dependent_normal_and_tangent_morph_deltas_reject_while_position_only_is_preserved() {
     for semantic in [
         MorphDeltaSemantic::Position,
         MorphDeltaSemantic::Normal,
@@ -1310,13 +1328,46 @@ fn every_authored_morph_delta_rejects_generation_including_position_only() {
             }
             _ => panic!("the fixture must retain its authored morph representation"),
         }
-        let scene = assert_rejected(
-            scene,
-            target,
-            replacement(vertex_options()),
-            PostProcessControl::default(),
-            |cause| matches!(cause, TangentCause::MorphDeltas),
-        );
+        let scene = if semantic == MorphDeltaSemantic::Position {
+            let fields = non_tangent_fields(primitive(&scene));
+            let baozi_core::MorphDeltaData::Dense { values } = delta.data() else {
+                panic!("dense Position delta")
+            };
+            let expected: Vec<_> = values.iter().map(|v| v.to_bits()).collect();
+            let (scene, report) = generate_tangents(
+                scene,
+                target,
+                replacement(vertex_options()),
+                PostProcessControl::default(),
+            )
+            .unwrap()
+            .into_parts();
+            assert_eq!(report.disposition(), PostProcessRunDisposition::Changed);
+            assert_eq!(non_tangent_fields(primitive(&scene)), fields);
+            let baozi_core::MorphDeltaData::Dense { values } = primitive(&scene)
+                .morph_targets()
+                .next()
+                .unwrap()
+                .delta(semantic)
+                .unwrap()
+                .data()
+            else {
+                panic!("retained Position delta")
+            };
+            assert_eq!(
+                values.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                expected
+            );
+            scene
+        } else {
+            assert_rejected(
+                scene,
+                target,
+                replacement(vertex_options()),
+                PostProcessControl::default(),
+                |cause| matches!(cause, TangentCause::MorphDeltas),
+            )
+        };
         assert!(
             primitive(&scene)
                 .morph_targets()
@@ -1331,7 +1382,7 @@ fn every_authored_morph_delta_rejects_generation_including_position_only() {
 #[test]
 fn preserve_returns_before_morph_rejection_but_replace_rejects_the_same_input() {
     let (scene, import_evidence) = import_fixture(Fixture::Morph {
-        semantic: Some(MorphDeltaSemantic::Position),
+        semantic: Some(MorphDeltaSemantic::Normal),
         authored: true,
     })
     .into_parts();
@@ -1406,6 +1457,7 @@ fn precision_contract_replacing_wide_base_fields_never_projects_to_f32() {
                 scene,
                 target,
                 NormalOptions::default(),
+                baozi_postprocess::TangentPolicy::Preserve,
                 PostProcessControl::default(),
             )
         } else {
@@ -1429,6 +1481,7 @@ fn precision_contract_replacing_wide_base_fields_never_projects_to_f32() {
                     existing: ExistingNormals::Replace,
                     ..NormalOptions::default()
                 },
+                baozi_postprocess::TangentPolicy::Preserve,
                 PostProcessControl::default(),
             )
         } else {

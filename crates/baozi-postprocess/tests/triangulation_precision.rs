@@ -109,7 +109,7 @@ impl FormatImporter for PrecisionImporter {
         let primitives = [GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::Polygons(&[4]),
             Presence::Present(&indices),
-            Presence::Absent,
+            baozi_core::MaterialAssignment::Unspecified,
             AuthoringRange::new(0, 2),
         )];
         let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];

@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-11-01
+updated: 2026-11-02
 authors:
   - Codex
 decision_type: architecture
@@ -25,6 +25,21 @@ conflating resource identity, sampling behavior, and material interpretation pre
 reuse when one image is sampled in multiple ways or used once as color and once as data.
 
 ## Decision
+
+Each primitive retains exactly one `MaterialAssignment`: `Unspecified`, `Authored(material)` or
+`ImplicitDefault(material)`. Authoring uses producer-local material IDs; borrowed Scene reads
+return generation-bound material views from that same value. `authored_material()` and
+`effective_material()` derive from the assignment. The ambiguous optional `material()` reader
+is removed, without a compatibility alias. Central validation checks both bound variants against
+the material inventory, and geometry edits copy the tag with its material identity.
+
+glTF publishes one shared generated PBR default when selected primitives omit a binding. It is
+opaque and single-sided, with white RGBA base color, metallic and roughness factors one, zero
+emissive and no texture bindings or name. An explicit empty source material remains authored.
+The generated default has existing Generated provenance parented by the primary document;
+it does not invent an authored material object or increment authored source-scope counts.
+The assignment tag participates in snapshot revision 7, distinguishing equal effective factors
+with different source presence. A producer with no normative default may retain `Unspecified`.
 
 The canonical scene has three separate dense identities:
 

@@ -34,6 +34,7 @@ fn smooth_normals_cross_uv_seams_and_keep_authored_data() {
         scene,
         target,
         NormalOptions::default(),
+        baozi_postprocess::TangentPolicy::Preserve,
         PostProcessControl::default(),
     )
     .expect("smooth normals should publish");
@@ -131,10 +132,15 @@ fn flat_normals_and_zero_smoothing_groups_keep_hard_edges() {
             mode,
             ..NormalOptions::default()
         };
-        let (scene, report) =
-            generate_normals(scene, target, options, PostProcessControl::default())
-                .unwrap()
-                .into_parts();
+        let (scene, report) = generate_normals(
+            scene,
+            target,
+            options,
+            baozi_postprocess::TangentPolicy::Preserve,
+            PostProcessControl::default(),
+        )
+        .unwrap()
+        .into_parts();
         let primitive = scene
             .primitive(report.normal_generation().unwrap().output_target())
             .unwrap();
@@ -173,6 +179,7 @@ fn authored_normals_require_explicit_replacement() {
         scene,
         target,
         NormalOptions::default(),
+        baozi_postprocess::TangentPolicy::Preserve,
         PostProcessControl::default(),
     )
     .unwrap()
@@ -184,9 +191,15 @@ fn authored_normals_require_explicit_replacement() {
         existing: ExistingNormals::Replace,
         ..NormalOptions::default()
     };
-    let (scene, report) = generate_normals(scene, target, options, PostProcessControl::default())
-        .unwrap()
-        .into_parts();
+    let (scene, report) = generate_normals(
+        scene,
+        target,
+        options,
+        baozi_postprocess::TangentPolicy::Preserve,
+        PostProcessControl::default(),
+    )
+    .unwrap()
+    .into_parts();
     assert!(
         report
             .normal_generation()
@@ -224,6 +237,7 @@ fn normal_generation_and_detached_evidence_cross_threads_on_a_one_mib_stack() {
                 scene,
                 target,
                 NormalOptions::default(),
+                baozi_postprocess::TangentPolicy::Preserve,
                 PostProcessControl::default(),
             )
             .expect("normal generation must fit an ordinary caller stack")
@@ -266,6 +280,7 @@ fn degenerate_and_cancelled_generation_return_the_original_scene() {
             scene,
             target,
             NormalOptions::default(),
+            baozi_postprocess::TangentPolicy::Preserve,
             PostProcessControl::default().with_cancellation(cancellation),
         )
         .unwrap_err();

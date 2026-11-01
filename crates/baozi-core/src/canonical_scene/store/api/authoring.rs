@@ -37,10 +37,10 @@ pub use super::super::production::input::{
 };
 pub use crate::animation::{AnimationExtrapolation, AnimationInterpolation, AnimationTimeDomain};
 pub use crate::appearance::{
-    AlphaMode, AppearanceBuildError, ColorInterpretation, LegacyMaterialFactors, MaterialFactors,
-    PbrMetallicRoughnessFactors, PbrSpecularGlossinessFactors, ShadingModel,
-    SupplementalPbrFactors, TextureBlendOperation, TextureChannel, TextureChannelSwizzle,
-    TextureRole, TextureSourceKey, TextureStrength, TextureTransform,
+    AlphaMode, AppearanceBuildError, ColorInterpretation, LegacyMaterialFactors,
+    MaterialAssignment, MaterialFactors, PbrMetallicRoughnessFactors, PbrSpecularGlossinessFactors,
+    ShadingModel, SupplementalPbrFactors, TextureBlendOperation, TextureChannel,
+    TextureChannelSwizzle, TextureRole, TextureSourceKey, TextureStrength, TextureTransform,
 };
 pub use crate::attribute::{
     AttributeDomain, AttributeSemantic, CustomAttributeSemantic, TangentBasisConvention,

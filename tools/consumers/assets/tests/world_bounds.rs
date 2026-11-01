@@ -1,9 +1,8 @@
 use std::{path::PathBuf, sync::Arc};
 
 use baozi::{
-    Aabb, AssetPath, CancellationToken, Importer, Mat4, MemoryAssetIo, SceneEntityKind,
-    SceneLookupError, SpatialQueryError, SpatialQueryLimit, SpatialQueryLimits, TargetSpace,
-    ValidatedScene, Vec3,
+    Aabb, AssetPath, CancellationToken, Importer, MemoryAssetIo, SceneEntityKind, SceneLookupError,
+    SpatialQueryError, SpatialQueryLimit, SpatialQueryLimits, TargetSpace, ValidatedScene,
     postprocess::{
         PostProcessControl, PostProcessRunDisposition, SpaceConversionOptions, convert_scene_space,
     },
@@ -115,59 +114,53 @@ fn shared_instance_world_bounds_and_transforms_survive_scene_destruction() -> Re
     assert_eq!(snapshot.world_transforms.node_count(), 3);
     assert_eq!(
         snapshot.world_transforms.node_transform(root)?,
-        Mat4 {
-            cols: [
-                [2.0, 0.0, 0.0, 0.0],
-                [0.0, 3.0, 0.0, 0.0],
-                [0.0, 0.0, -1.0, 0.0],
-                [10.0, 20.0, 30.0, 1.0],
-            ]
-        }
+        [
+            [2.0, 0.0, 0.0, 0.0],
+            [0.0, 3.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0, 0.0],
+            [10.0, 20.0, 30.0, 1.0],
+        ]
     );
     // parent_world * local gives (12 - 2x, 14 + 6y, 26 - z).
     assert_eq!(
         snapshot.world_transforms.node_transform(first_node)?,
-        Mat4 {
-            cols: [
-                [-2.0, 0.0, 0.0, 0.0],
-                [0.0, 6.0, 0.0, 0.0],
-                [0.0, 0.0, -1.0, 0.0],
-                [12.0, 14.0, 26.0, 1.0],
-            ]
-        }
+        [
+            [-2.0, 0.0, 0.0, 0.0],
+            [0.0, 6.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0, 0.0],
+            [12.0, 14.0, 26.0, 1.0],
+        ]
     );
     assert_eq!(
         first_bounds,
         Some(Aabb {
-            min: Vec3::new(4.0, -16.0, 24.0),
-            max: Vec3::new(14.0, 32.0, 27.0),
+            min: [4.0, -16.0, 24.0],
+            max: [14.0, 32.0, 27.0],
         })
     );
     // The authored shear gives (4 + 2x + 2y, 26 + 3y, 31 + 2z). Transforming a local AABB's
     // corners would incorrectly widen X to [-8, 18]; actual vertices give [-2, 10].
     assert_eq!(
         snapshot.world_transforms.node_transform(second_node)?,
-        Mat4 {
-            cols: [
-                [2.0, 0.0, 0.0, 0.0],
-                [2.0, 3.0, 0.0, 0.0],
-                [0.0, 0.0, 2.0, 0.0],
-                [4.0, 26.0, 31.0, 1.0],
-            ]
-        }
+        [
+            [2.0, 0.0, 0.0, 0.0],
+            [2.0, 3.0, 0.0, 0.0],
+            [0.0, 0.0, 2.0, 0.0],
+            [4.0, 26.0, 31.0, 1.0],
+        ]
     );
     assert_eq!(
         second_bounds,
         Some(Aabb {
-            min: Vec3::new(-2.0, 11.0, 29.0),
-            max: Vec3::new(10.0, 35.0, 35.0),
+            min: [-2.0, 11.0, 29.0],
+            max: [10.0, 35.0, 35.0],
         })
     );
     assert_eq!(
         snapshot.scene_bounds,
         Some(Aabb {
-            min: Vec3::new(-2.0, -16.0, 24.0),
-            max: Vec3::new(14.0, 35.0, 35.0),
+            min: [-2.0, -16.0, 24.0],
+            max: [14.0, 35.0, 35.0],
         })
     );
     assert_eq!(asset.instances.len(), 2);
@@ -226,8 +219,44 @@ fn coordinate_conversion_requires_a_fresh_world_transform_table() -> Result<()> 
     assert_eq!(
         fresh_table.scene_bounds(&scene, limits(), None)?,
         Some(Aabb {
-            min: Vec3::new(-14.0, -16.0, -35.0),
-            max: Vec3::new(2.0, 35.0, -24.0),
+            min: [-14.0, -16.0, -35.0],
+            max: [2.0, 35.0, -24.0],
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn ply_double_positions_and_world_bounds_survive_application_copy_and_scene_drop() -> Result<()> {
+    let source = AssetPath::new("double-points.ply")?;
+    let bytes = b"ply\nformat ascii 1.0\nelement vertex 2\nproperty double x\nproperty double y\nproperty double z\nend_header\n16777216 -0 5e-324\n16777217 0 1e-100\n";
+    let io = MemoryAssetIo::new();
+    io.try_insert(source.clone(), Arc::<[u8]>::from(bytes.as_slice()))?;
+    let (scene, evidence) = Importer::new()?.read_asset(&io, source)?.into_parts();
+    assert!(evidence.loss_evidence().is_empty());
+    let spatial = BasePoseSpatialSnapshot::from_scene(&scene, limits(), None)?;
+    let asset = ApplicationAsset::from_scene(&scene)?;
+    drop(scene);
+    drop(evidence);
+
+    assert_eq!(asset.draws.len(), 1);
+    let vertices = &asset.draws[0].vertices;
+    assert_eq!(vertices.len(), 2);
+    let expected = [
+        [16_777_216.0, -0.0, f64::from_bits(1)],
+        [16_777_217.0, 0.0, 1e-100],
+    ];
+    for (vertex, expected) in vertices.iter().zip(expected) {
+        assert_eq!(
+            vertex.position.map(f64::to_bits),
+            expected.map(f64::to_bits)
+        );
+    }
+    assert_eq!(
+        spatial.scene_bounds,
+        Some(Aabb {
+            min: [16_777_216.0, 0.0, f64::from_bits(1)],
+            max: [16_777_217.0, 0.0, 1e-100],
         })
     );
     Ok(())
@@ -263,7 +292,13 @@ fn deformed_upstream_assets_keep_buffer_extraction_and_reject_base_vertex_bounds
         // Computing authored node transforms does not evaluate geometry deformation.
         let transforms = scene.base_pose_world_transforms(limits(), None)?;
         let node = instance.node().id();
-        assert!(transforms.node_transform(node)?.is_finite());
+        assert!(
+            transforms
+                .node_transform(node)?
+                .iter()
+                .flatten()
+                .all(|value| value.is_finite())
+        );
         assert_eq!(
             transforms
                 .instance_bounds(instance, limits(), None)
@@ -280,7 +315,13 @@ fn deformed_upstream_assets_keep_buffer_extraction_and_reject_base_vertex_bounds
         );
         let asset = ApplicationAsset::from_scene(&scene)?;
         drop(scene);
-        assert!(transforms.node_transform(node)?.is_finite());
+        assert!(
+            transforms
+                .node_transform(node)?
+                .iter()
+                .flatten()
+                .all(|value| value.is_finite())
+        );
         assert!(!asset.draws.is_empty());
         if model == "RiggedSimple" {
             assert!(
@@ -306,7 +347,12 @@ fn animated_zero_weight_base_pose_can_be_queried_without_sampling() -> Result<()
         asset
             .instances
             .iter()
-            .flat_map(|instance| &instance.morph_weights)
+            .flat_map(|instance| {
+                instance
+                    .morph_weights
+                    .as_deref()
+                    .unwrap_or(&asset.mesh_morph_weights[instance.mesh])
+            })
             .all(|weight| *weight == 0.0)
     );
     let snapshot = BasePoseSpatialSnapshot::from_scene(&scene, limits(), None)?;
@@ -314,9 +360,16 @@ fn animated_zero_weight_base_pose_can_be_queried_without_sampling() -> Result<()
     let node = scene.nodes().next().ok_or("missing animated node")?.id();
     drop(scene);
     assert_eq!(snapshot.world_transforms.generation(), generation);
-    assert!(snapshot.world_transforms.node_transform(node)?.is_finite());
+    assert!(
+        snapshot
+            .world_transforms
+            .node_transform(node)?
+            .iter()
+            .flatten()
+            .all(|value| value.is_finite())
+    );
     let bounds = snapshot.scene_bounds.ok_or("missing base-pose bounds")?;
-    assert!(bounds.min.is_finite() && bounds.max.is_finite());
+    assert!(bounds.min.into_iter().chain(bounds.max).all(f64::is_finite));
     assert!(!asset.draws[0].morphs.is_empty());
     Ok(())
 }

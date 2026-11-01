@@ -7,6 +7,12 @@ mod error;
 mod normals;
 mod operation;
 mod precision;
+mod prepare;
+pub use prepare::{
+    GeometryPreparationReport, NormalOrientation, PostProcessBudgets, PreparationCause,
+    PreparationFailure, PreparedPrimitiveReport, TangentPolicy, TriangleLowering,
+    TrianglePreparationOptions, prepare_triangles,
+};
 mod remap;
 mod report;
 mod scene_edit;
@@ -42,7 +48,7 @@ pub use triangulation::PolygonError as TriangulationIssue;
 
 pub use normals::{
     ExistingNormals, NormalCause, NormalFailure, NormalGenerationReport, NormalIssue, NormalMode,
-    NormalOptions, TangentHandling, generate_normals,
+    NormalOptions, generate_normals,
 };
 pub use space::{
     SpaceConversionCause, SpaceConversionFailure, SpaceConversionIssue, SpaceConversionOptions,

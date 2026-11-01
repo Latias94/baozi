@@ -4,6 +4,10 @@ use crate::canonical_scene::store::typed_storage::{
 };
 use std::num::NonZeroU32;
 
+const GENERATED_CONVENTIONS: StoredTangentConventions = StoredTangentConventions {
+    basis: StoredTangentBasis::TriangleUvDerivative,
+    encoding: StoredTangentEncoding::SignInW,
+};
 const CONVENTIONS: TangentConventions = TangentConventions {
     basis: TangentBasisConvention::TriangleUvDerivative,
     encoding: TangentHandednessEncoding::SignInW,
@@ -260,7 +264,7 @@ fn geometry(tangent: bool) -> GeometryStorage {
             face_count: 1,
             polygon_boundaries: None,
             indices: None,
-            material: None,
+            material: crate::MaterialAssignment::Unspecified,
             attributes: TableRange::new(0, target_start),
         },
         StoredPrimitive {
@@ -270,7 +274,7 @@ fn geometry(tangent: bool) -> GeometryStorage {
             face_count: 2,
             polygon_boundaries: None,
             indices: Some(indices),
-            material: None,
+            material: crate::MaterialAssignment::Unspecified,
             attributes: TableRange::new(target_start, target_end - target_start),
         },
         StoredPrimitive {
@@ -280,7 +284,7 @@ fn geometry(tangent: bool) -> GeometryStorage {
             face_count: 1,
             polygon_boundaries: None,
             indices: None,
-            material: None,
+            material: crate::MaterialAssignment::Unspecified,
             attributes: TableRange::new(target_end, source.attributes.len() - target_end),
         },
     ];

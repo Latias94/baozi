@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-10
-updated: 2026-11-01
+updated: 2026-11-02
 authors:
   - Codex
 decision_type: architecture
@@ -202,10 +202,48 @@ record counts. Each commitment uses the dimension with its own declared unit. Fr
 counters describe the terminal operation boundary; they are not dynamic measurements of later
 Scene or report teardown.
 
+### Selected Geometry Preparation (2026-11-02)
+
+`prepare_triangles` owns the finite order of topology lowering, optional Normal generation and
+one Tangent policy for an explicit selection. It accepts input-generation `PrimitiveId` values,
+rejects duplicates and stale handles, and returns an exact no-op for an unchanged selection.
+`TriangleLowering::Lists` lowers Polygons, TriangleStrip and TriangleFan into TriangleList;
+`Preserve` requires TriangleList. Strip parity and fan tuples are exactly those of `list_vertices`,
+including degenerate assembly elements. Corner and Face origins transport all retained attributes,
+including sparse defaults and F64 bits; Vertex identities preserve influences and morph ordering.
+
+One admitted selection plan counts, reconstructs and compares the geometry table. Primitive-local
+projected inputs feed the numeric kernels without intermediate Scenes. The common transaction
+rebuilds affected profile mappings once, centrally validates the candidate once and publishes at
+most one generation. A later target failure, exhausted work/storage or cancellation returns the
+original Scene. Single-target triangulation, Normal and Tangent functions delegate to this engine;
+the previous production reconstruction implementations are deleted.
+
+`PostProcessBudgets` supplies hard operation work and storage limits. `NormalOptions` contains only
+mode and existing-field policy; `TangentPolicy::{Preserve, Remove, Generate}` is the sole Tangent
+decision. The direct Normal function receives that policy as a separate argument.
+`NormalOrientation::StoredOrder` uses the retained tuple cross product.
+`SceneFrontFace { assume_unknown }` derives the sign from the declared winding or an explicit
+unknown-winding assumption. This affects generated Normal direction, retaining the exact assembled
+indices and SceneSpace declaration. Whole-Scene basis/winding conversion remains a separate
+`convert_scene_space` transaction.
+
+The selected evidence graph owns the edit root, Scene counts, flattened Corner origins and
+per-target headers with Face offsets. Its bounded counts derive from the actual prepared selection.
+Every selected target exposes input/output IDs and its Changed/Unchanged disposition, with
+origins and generated-field indices only for actual effects. In a mixed selection, an unchanged
+target receives its final-generation ID without acquiring fabricated edit provenance. An entirely
+unchanged selection returns the original Scene and keeps its input IDs valid. A Normal
+preservation request that only generates Tangents reports those geometry effects without claiming
+that a Normal was generated. Normal/Tangent delta dependencies reject invalidating base edits at
+the common transaction seam, including explicitly empty sparse descriptors. Preserve-existing
+no-ops and Position-only morphs retain their meanings.
+
 ### Direct Normal Generation
 
-`generate_normals` targets one `TriangleList` primitive and produces a dense F32, three-lane
-Corner `Normal` attribute. It borrows dense F32 Vertex positions directly. Its oriented face cross
+`generate_normals` targets one `TriangleList` primitive and produces a dense, three-lane
+Corner `Normal` attribute. It borrows dense or sparse F32/F64 Vertex positions. The output retains
+the widest Position or replaced Normal width. Its oriented face cross
 is `(b - a) × (c - a)` in the stored numeric basis; it does not infer a front-facing direction from
 unknown Scene conventions. Smooth mode shares area-weighted normals by Vertex identity and
 optional dense U32 Face smoothing groups; group zero keeps each face hard. Coincident positions
@@ -226,7 +264,7 @@ owner-local metadata. Typed attribute reads require both semantic and domain.
 
 `NormalOptions` makes source-field changes explicit. The default `ExistingNormals::Preserve`
 returns the exact input unchanged when a Normal exists. `Replace` authorizes replacement. If a
-Tangent would be invalidated, the default rejects; `TangentHandling::Remove` authorizes deleting
+Tangent would be invalidated, `TangentPolicy::Preserve` rejects; `TangentPolicy::Remove` authorizes deleting
 that attribute and only its owner-local metadata. No tangent generation is implied. Vertex,
 Corner, and Face identities, indices, other attributes, and unrelated primitive values remain
 unchanged, including dense/sparse encoding and scalar bits.
@@ -242,19 +280,18 @@ deleted descriptors.
 
 Postprocess retains generated values in charged scratch until core compares every candidate value
 with that exact borrowed replacement and centrally validates the candidate. It then drops scratch
-before final preparation. The operation reuses triangulation's existing geometry transaction,
-generation reservation, and publication protocol. Its evidence graph has only the edit root and
-Scene-count child; no empty remap sequences are constructed. The core handoff returns a closed enum
-with operation-specific evidence. Each variant owns its actual
-rooted store and exposes only the applicable facts; a Normal result cannot be used as a remap.
-Public `NormalGenerationReport` owns the latter directly, without duplicating decoded effects.
+before final preparation. The operation reuses the selected geometry transaction, generation
+reservation and publication protocol. `NormalGenerationReport` owns selected preparation evidence
+and exposes its actual Normal and Tangent effects without duplicating decoded payloads. Targets
+whose topology did not change have no Corner/Face origin range.
 
 ### Direct Tangent Generation
 
 `generate_tangents` consumes one TriangleList target and explicit Normal domain and Texcoord
 set/domain selections. The admitted domains are independently Vertex or Corner. The private
 **Baozi Triangle UV Derivative v1** kernel derives each face's increasing-U direction, projects
-against each normalized selected Normal and emits dense Corner F32x4. It neither averages nor
+against each normalized selected Normal and emits dense Corner F32x4 or F64x4, retaining the
+widest selected Position, Normal, Texcoord or replaced Tangent width. It neither averages nor
 welds across faces and does not claim MikkTSpace equivalence. The generated attribute owns
 `TriangleUvDerivative` construction and `SignInW` reconstruction declarations; no Scene-space
 declaration changes. See the [verified algorithm decision and numeric
@@ -290,7 +327,7 @@ the plan. No transaction API accepts an independently replaceable input alongsid
 value. Its closed program extends the existing transaction, central validation, fallback,
 generation, and publication path rather than defining a second edit protocol.
 
-The conversion transports every F32 Position, Normal, and Tangent across every authored
+The conversion transports every F32/F64 Position, Normal, and Tangent across every authored
 domain, including sparse defaults and explicit entries. ADR 0008 supplies the arithmetic. Dense
 and sparse Corner attributes follow triangle index-lane reversal; sparse indices remain sorted
 without input-sized sorting scratch. A nonindexed triangle gains explicit indices so Vertex
