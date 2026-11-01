@@ -1,19 +1,18 @@
 use crate::mtl::{
-    self, MaterialLibrary, ParsedAlphaMode, ParsedMaterial, ParsedMetadata, ParsedMetadataValue,
-    ParsedTexture,
+    self, MaterialLibrary, ParsedMaterial, ParsedMetadata, ParsedMetadataValue, ParsedTexture,
 };
 use crate::obj::{Face, FaceVertex, ParsedObj, StateNameId};
 use crate::parser::usize_amount;
 use crate::{FORMAT_ID, ObjFailure, diffuse_texture_role};
 use baozi_import::authoring::{
-    AlphaMode as CanonicalAlphaMode, AnimationAuthoringBatch, AppearanceAuthoringBatch,
-    AttributeDomain, AttributeSemantic, AuthoredTransform, AuthoringRange, Color,
-    ColorInterpretation, DeformationAuthoringBatch, ExtensionValueRef, FormatId,
-    GeometryAttributeAuthoring, GeometryAuthoringBatch, GeometryLogicalMeshAuthoring,
-    GeometryMeshInstanceAuthoring, GeometryPrimitiveAuthoring, GeometryTopologyAuthoring,
-    ImageAuthoring, ImageLocalId, LegacyMaterialFactors, LineageAuthoringBatch, LogicalMeshLocalId,
-    LogicalMorphAuthoring, MAX_ENTITY_NAME_BYTES, MaterialAuthoring, MaterialBindingAuthoring,
-    MaterialFactors, MaterialLocalId, MeshInstanceDeformationAuthoring, MetadataAuthoringBatch,
+    AlphaMode, AnimationAuthoringBatch, AppearanceAuthoringBatch, AttributeDomain,
+    AttributeSemantic, AuthoredTransform, AuthoringRange, Color, ColorInterpretation,
+    DeformationAuthoringBatch, ExtensionValueRef, FormatId, GeometryAttributeAuthoring,
+    GeometryAuthoringBatch, GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring,
+    GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, ImageAuthoring, ImageLocalId,
+    LegacyMaterialFactors, LineageAuthoringBatch, LogicalMeshLocalId, LogicalMorphAuthoring,
+    MAX_ENTITY_NAME_BYTES, MaterialAuthoring, MaterialBindingAuthoring, MaterialFactors,
+    MaterialLocalId, MeshInstanceDeformationAuthoring, MetadataAuthoringBatch,
     MetadataAuthoringEntry, NamespacedName, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId,
     ObservedResourceAuthoring, OwnerProvenanceAuthoring, Presence, PrimitiveDeformationAuthoring,
     ProfileAuthoringBatch, ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring,
@@ -961,7 +960,7 @@ impl MaterialBindings<'_, '_> {
 struct BuiltMaterial<'input, 'scope> {
     name: &'input str,
     shading_model: CanonicalShadingModel,
-    alpha_mode: CanonicalAlphaMode,
+    alpha_mode: AlphaMode,
     factors: MaterialFactors,
     metadata: Option<&'input ParsedMetadata<'scope>>,
     diffuse_texture: Option<BuiltTexture<'scope>>,
@@ -1083,7 +1082,6 @@ fn build_material<'input, 'scope>(
             scope,
             name,
             CanonicalShadingModel::Phong,
-            CanonicalAlphaMode::Opaque,
             Vec3::ZERO,
             Color::WHITE,
             Vec3::ZERO,
@@ -1107,20 +1105,10 @@ fn material_from_parsed<'input, 'scope>(
         .transpose()?
         .flatten();
 
-    let alpha_mode = if parsed.base_color.a < 1.0 {
-        CanonicalAlphaMode::Blend
-    } else {
-        match parsed.alpha_mode {
-            ParsedAlphaMode::Opaque => CanonicalAlphaMode::Opaque,
-            ParsedAlphaMode::Blend => CanonicalAlphaMode::Blend,
-        }
-    };
-
     material_from_factors(
         scope,
         parsed.name.as_str(),
         CanonicalShadingModel::Phong,
-        alpha_mode,
         parsed.ambient,
         parsed.base_color,
         parsed.specular,
@@ -1172,7 +1160,6 @@ fn material_from_factors<'input, 'scope>(
     scope: &ParseScope<'_>,
     name: &'input str,
     shading_model: CanonicalShadingModel,
-    alpha_mode: CanonicalAlphaMode,
     ambient: Vec3,
     base_color: Color,
     specular: Vec3,
@@ -1190,6 +1177,11 @@ fn material_from_factors<'input, 'scope>(
         base_color.a,
     )
     .map_err(|_| scope.format_failure(ObjFailure::internal("invalid-material-factors")))?;
+    let alpha_mode = if legacy.opacity() < 1.0 {
+        AlphaMode::Blend
+    } else {
+        AlphaMode::Opaque
+    };
     let factors = MaterialFactors::try_new(
         Vec3::new(emissive.r, emissive.g, emissive.b),
         None,

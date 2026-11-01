@@ -1,8 +1,9 @@
 mod common;
 
+use baozi_core::AlphaMode;
 use baozi_import::{
-    ImportCause, ImportDimension, ImportTerminalCause, ImportTerminalFailureClass, ResourceLimits,
-    SceneSnapshot, ScopeAbortCause,
+    ImportCause, ImportDimension, ImportReport, ImportTerminalCause, ImportTerminalFailureClass,
+    ResourceLimits, SceneSnapshot, ScopeAbortCause,
 };
 use common::{
     TestResult, expected_failure, import_assets, import_assets_result, scene_snapshot,
@@ -32,6 +33,137 @@ fn material_factor_bits(snapshot: &SceneSnapshot, material: usize, factor: usize
 
 fn sidecar_limits() -> ResourceLimits {
     ResourceLimits::default()
+}
+
+fn import_opacity_material(statements: &str) -> TestResult<ImportReport> {
+    let obj = b"mtllib material.mtl\nusemtl paint\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+    let mtl = format!("newmtl paint\n{statements}\n");
+    import_assets(
+        "model.obj",
+        [
+            ("model.obj", obj.as_slice()),
+            ("material.mtl", mtl.as_bytes()),
+        ],
+        sidecar_limits(),
+    )
+}
+
+fn assert_material_opacity(report: &ImportReport, opacity: f32, alpha_mode: AlphaMode) {
+    assert_eq!(report.scene().material_count(), 1);
+    let material = report.scene().materials().next().unwrap();
+    assert_eq!(material.name(), Some("paint"));
+    let legacy = material.factors().legacy().unwrap();
+    assert_eq!(legacy.opacity(), opacity);
+    assert_eq!(material.alpha_mode(), alpha_mode);
+}
+
+#[test]
+fn mtl_opacity_repeated_statements_ending_at_one_are_opaque() -> TestResult<()> {
+    for statements in ["d 0.25\nd 1", "Tr 0.75\nTr 0"] {
+        let report = import_opacity_material(statements)?;
+        assert!(report.diagnostics().is_empty(), "{statements}");
+        assert_material_opacity(&report, 1.0, AlphaMode::Opaque);
+    }
+    Ok(())
+}
+
+#[test]
+fn mtl_opacity_interleaved_statements_ending_at_one_are_opaque() -> TestResult<()> {
+    for statements in [
+        "d 0.25\nTr 0",
+        "Tr 0.75\nd 1",
+        "d 0.25\nTr 0.5\nKd 0.125 0.25 0.5\nd 1",
+        "Tr 0.75\nd 0.5\nKd 0.125 0.25 0.5\nTr 0",
+    ] {
+        let report = import_opacity_material(statements)?;
+        assert!(report.diagnostics().is_empty(), "{statements}");
+        assert_material_opacity(&report, 1.0, AlphaMode::Opaque);
+    }
+    Ok(())
+}
+
+#[test]
+fn mtl_opacity_repeated_and_interleaved_fractional_endings_blend() -> TestResult<()> {
+    for (statements, opacity) in [
+        ("d 1\nd 0.25", 0.25),
+        ("Tr 0\nTr 0.75", 0.25),
+        ("d 1\nTr 0.25", 0.75),
+        ("Tr 0\nd 0.75", 0.75),
+        ("d 0.25\nTr 0\nd 0.5", 0.5),
+        ("Tr 0.75\nd 1\nTr 0.5", 0.5),
+    ] {
+        let report = import_opacity_material(statements)?;
+        assert!(report.diagnostics().is_empty(), "{statements}");
+        assert_material_opacity(&report, opacity, AlphaMode::Blend);
+    }
+    Ok(())
+}
+
+#[test]
+fn mtl_opacity_redefinitions_in_one_library_replace_the_whole_material() -> TestResult<()> {
+    for (last_definition, opacity, alpha_mode) in [
+        ("", 1.0, AlphaMode::Opaque),
+        ("d 0.5\nd 1", 1.0, AlphaMode::Opaque),
+        ("Tr 0.5\nTr 0", 1.0, AlphaMode::Opaque),
+        ("d 1\nTr 0.25", 0.75, AlphaMode::Blend),
+    ] {
+        let statements = format!(
+            "Kd 1 0 0\nKa 0.25\nKs 0.5\nd 0.25\nmap_Kd old.png\nnewmtl paint\n{last_definition}"
+        );
+        let report = import_opacity_material(&statements)?;
+        assert_material_opacity(&report, opacity, alpha_mode);
+        let material = report.scene().materials().next().unwrap();
+        let legacy = material.factors().legacy().unwrap();
+        assert_eq!(legacy.diffuse(), baozi_core::Vec3::new(1.0, 1.0, 1.0));
+        assert_eq!(legacy.ambient(), baozi_core::Vec3::ZERO);
+        assert_eq!(legacy.specular(), baozi_core::Vec3::ZERO);
+        assert_eq!(material.binding_count(), 0);
+        assert_eq!(report.scene().texture_count(), 0);
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(
+            report.diagnostics()[0].code().as_str(),
+            "obj.mtl_duplicate_material"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn mtl_opacity_redefinitions_across_libraries_replace_the_whole_material() -> TestResult<()> {
+    let obj = b"mtllib first.mtl second.mtl\nusemtl paint\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+    let first = b"newmtl paint\nKd 1 0 0\nKa 0.25\nKs 0.5\nTr 0.75\nmap_Kd old.png\n";
+
+    for (last_definition, opacity, alpha_mode) in [
+        ("", 1.0, AlphaMode::Opaque),
+        ("d 0.5\nTr 0", 1.0, AlphaMode::Opaque),
+        ("Tr 0.5\nd 1", 1.0, AlphaMode::Opaque),
+        ("Tr 0\nd 0.75", 0.75, AlphaMode::Blend),
+    ] {
+        let second = format!("newmtl paint\n{last_definition}\n");
+        let report = import_assets(
+            "model.obj",
+            [
+                ("model.obj", obj.as_slice()),
+                ("first.mtl", first.as_slice()),
+                ("second.mtl", second.as_bytes()),
+            ],
+            sidecar_limits(),
+        )?;
+        assert_material_opacity(&report, opacity, alpha_mode);
+        let material = report.scene().materials().next().unwrap();
+        let legacy = material.factors().legacy().unwrap();
+        assert_eq!(legacy.diffuse(), baozi_core::Vec3::new(1.0, 1.0, 1.0));
+        assert_eq!(legacy.ambient(), baozi_core::Vec3::ZERO);
+        assert_eq!(legacy.specular(), baozi_core::Vec3::ZERO);
+        assert_eq!(material.binding_count(), 0);
+        assert_eq!(report.scene().texture_count(), 0);
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(
+            report.diagnostics()[0].code().as_str(),
+            "obj.mtl_duplicate_material"
+        );
+    }
+    Ok(())
 }
 
 #[test]

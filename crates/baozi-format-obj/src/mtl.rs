@@ -217,15 +217,8 @@ pub(crate) struct ParsedMaterial<'scope> {
     pub ambient: Vec3,
     pub specular: Vec3,
     pub emissive: Color,
-    pub alpha_mode: ParsedAlphaMode,
     pub metadata: ParsedMetadata<'scope>,
     pub diffuse_texture: Option<ParsedTexture<'scope>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ParsedAlphaMode {
-    Opaque,
-    Blend,
 }
 
 pub(crate) struct ParsedTexture<'scope> {
@@ -280,7 +273,6 @@ impl<'scope> ParsedMaterial<'scope> {
             ambient: Vec3::ZERO,
             specular: Vec3::ZERO,
             emissive: Color::linear_rgba(0.0, 0.0, 0.0, 1.0),
-            alpha_mode: ParsedAlphaMode::Opaque,
             metadata: ParsedMetadata {
                 entries: scope.metered_ordered_map(
                     ImportStorageClass::FormatNormalization,
@@ -450,9 +442,6 @@ fn parse_mtl<'scope>(
                     && let Some(alpha) = parse_scalar(scope, snapshot, &tokens, line_number, "d")?
                 {
                     material.base_color.a = alpha;
-                    if alpha < 1.0 {
-                        material.alpha_mode = ParsedAlphaMode::Blend;
-                    }
                 }
             }
             "Tr" => {
@@ -460,11 +449,7 @@ fn parse_mtl<'scope>(
                     && let Some(transparency) =
                         parse_scalar(scope, snapshot, &tokens, line_number, "Tr")?
                 {
-                    let alpha = 1.0 - transparency;
-                    material.base_color.a = alpha;
-                    if alpha < 1.0 {
-                        material.alpha_mode = ParsedAlphaMode::Blend;
-                    }
+                    material.base_color.a = 1.0 - transparency;
                 }
             }
             "Ke" => {
