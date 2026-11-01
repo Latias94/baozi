@@ -15,9 +15,10 @@ pub use super::super::construction::node_scene::edit::transaction::{
     SceneEditPostflight, SceneEditPublishedSuccess, SceneEditRejection, SceneEditTarget,
     SceneEditTransaction, SceneEditValidationProof, SceneGeometryCornerOriginsTag,
     SceneGeometryFaceOffsetsTag, SceneNormalGenerationEvidence, SceneNormalReplacement,
-    SceneSpaceConversionEvidence, SceneSpaceConversionIssue, SceneTriangulationEvidence,
-    SceneTriangulationReplacement, consume_scene_edit_freeze_permit,
-    resolve_scene_space_conversion, try_start_scene_edit_operation,
+    SceneSpaceConversionEvidence, SceneSpaceConversionIssue, SceneTangentGenerationEvidence,
+    SceneTangentReplacement, SceneTriangulationEvidence, SceneTriangulationReplacement,
+    consume_scene_edit_freeze_permit, resolve_scene_space_conversion,
+    try_start_scene_edit_operation,
 };
 pub use super::super::construction::node_scene::{
     NodeSceneActivationPostflight as SceneActivationPostflight,

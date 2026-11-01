@@ -226,8 +226,6 @@ pub(super) enum SpatialBuildFault {
     LightCount,
     InvalidUnitScale,
     CoincidentAxes,
-    MissingMikkTspaceEncoding,
-    UnexpectedSchemaNameBytes,
     NonFiniteLightTint,
     NonCanonicalZeroEmission,
     CameraAttachmentOutOfRange,
@@ -237,13 +235,11 @@ pub(super) enum SpatialBuildFault {
 }
 
 impl SpatialBuildFault {
-    pub(super) const ALL: [Self; 12] = [
+    pub(super) const ALL: [Self; 10] = [
         Self::CameraCount,
         Self::LightCount,
         Self::InvalidUnitScale,
         Self::CoincidentAxes,
-        Self::MissingMikkTspaceEncoding,
-        Self::UnexpectedSchemaNameBytes,
         Self::NonFiniteLightTint,
         Self::NonCanonicalZeroEmission,
         Self::CameraAttachmentOutOfRange,
@@ -261,16 +257,6 @@ impl SpatialBuildFault {
             Self::LightCount => storage.lights.clear(),
             Self::InvalidUnitScale => storage.space.unit_scale_to_meters = Some(0.0),
             Self::CoincidentAxes => storage.space.front_axis = storage.space.up_axis,
-            Self::MissingMikkTspaceEncoding => {
-                storage.space.tangent_basis = crate::TangentBasisConvention::MikkTspace;
-            }
-            Self::UnexpectedSchemaNameBytes => {
-                storage.space.tangent_basis = crate::TangentBasisConvention::Namespaced {
-                    schema_id: crate::ExtensionSchemaId::new("test:spatial_fault", 1).unwrap(),
-                };
-                storage.space.tangent_handedness_encoding =
-                    crate::TangentHandednessEncoding::SignInW;
-            }
             Self::NonFiniteLightTint => {
                 let light = storage.lights[0];
                 let mut tint = light.tint();

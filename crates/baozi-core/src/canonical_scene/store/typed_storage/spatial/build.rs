@@ -8,12 +8,11 @@ use crate::canonical_scene::store::typed_storage::build::{
 
 use super::*;
 
-/// One inline space action, one action per row, and one string action per inline name byte.
+/// One inline space action and one action per camera/light row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::canonical_scene::store) struct SpatialStoragePlan {
     cameras: CapacityPlan,
     lights: CapacityPlan,
-    name_bytes: usize,
 }
 
 impl SpatialStoragePlan {
@@ -23,32 +22,22 @@ impl SpatialStoragePlan {
         Self::for_shape(
             u32::try_from(source.cameras.len()).map_err(|_| StorePlanError::SizeOverflow)?,
             u32::try_from(source.lights.len()).map_err(|_| StorePlanError::SizeOverflow)?,
-            u64::try_from(schema_name_bytes(&source.space))
-                .map_err(|_| StorePlanError::SizeOverflow)?,
         )
     }
 
     pub(in crate::canonical_scene::store) fn new<R>(
         batch: &ValidatedSpatialBatch<'_, R>,
     ) -> Result<Self, StorePlanError> {
-        Self::for_shape(
-            batch.camera_count(),
-            batch.light_count(),
-            u64::from(batch.tangent_basis_schema_name_bytes())
-                .checked_add(u64::from(batch.tangent_encoding_schema_name_bytes()))
-                .ok_or(StorePlanError::SizeOverflow)?,
-        )
+        Self::for_shape(batch.camera_count(), batch.light_count())
     }
 
     pub(in crate::canonical_scene::store) fn for_shape(
         cameras: u32,
         lights: u32,
-        name_bytes: u64,
     ) -> Result<Self, StorePlanError> {
         Ok(Self {
             cameras: capacity::<CameraProjection>(u64::from(cameras))?,
             lights: capacity::<LightDefinition>(u64::from(lights))?,
-            name_bytes: usize::try_from(name_bytes).map_err(|_| StorePlanError::SizeOverflow)?,
         })
     }
 
@@ -64,14 +53,9 @@ impl SpatialStoragePlan {
         self.lights.desired_capacity() as u32
     }
 
-    pub(in crate::canonical_scene::store) const fn name_bytes(self) -> usize {
-        self.name_bytes
-    }
-
     pub(in crate::canonical_scene::store) fn work(self) -> Result<u64, StorePlanError> {
         count_work(self.capacities())?
-            .checked_add(u64::try_from(self.name_bytes).map_err(|_| StorePlanError::SizeOverflow)?)
-            .and_then(|work| work.checked_add(1))
+            .checked_add(1)
             .ok_or(StorePlanError::SizeOverflow)
     }
 
@@ -79,7 +63,7 @@ impl SpatialStoragePlan {
         self.work()
     }
 
-    /// Initialized storage header plus typed rows; names are already inline in SceneSpace.
+    /// Initialized storage header plus typed rows.
     /// Allocator spare capacity and retained-owner infrastructure are admitted separately.
     pub(in crate::canonical_scene::store) fn canonical_bytes(self) -> Result<u64, StorePlanError> {
         [
@@ -112,19 +96,11 @@ impl SpatialStoragePlan {
         mut control: C,
     ) -> BuildResult<SpatialStorage, C::Error> {
         let source = batch.scene_space();
-        if schema_name_bytes(source) != self.name_bytes {
-            return Err(TypedStorageBuildError::Invariant);
-        }
         let mut cameras = allocate(self.cameras)?;
         let mut lights = allocate(self.lights)?;
         let space = control
             .run_unit(|| source.clone())
             .map_err(TypedStorageBuildError::Control)?;
-        for byte in schema_name_iter(source) {
-            control
-                .run_string_unit(|| byte)
-                .map_err(TypedStorageBuildError::Control)?;
-        }
         for camera in batch.cameras() {
             push(&mut cameras, self.cameras, *camera, &mut control)?;
         }

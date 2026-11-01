@@ -5,6 +5,7 @@
 //! owner can therefore be shared by a new generation without rewriting its rows or payloads.
 
 use std::marker::PhantomData;
+use std::num::NonZeroU32;
 use std::ops::Range;
 
 use baozi_operation::__retained_store_integration::authority::SharedRetainedStorage as RetainedStorage;
@@ -232,9 +233,67 @@ pub(super) enum StoredAttributePayload {
     },
 }
 
+/// Attribute-owned declarations; extension text lives in this geometry owner's names pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct StoredTangentConventions {
+    pub(super) basis: StoredTangentBasis,
+    pub(super) encoding: StoredTangentEncoding,
+}
+
+impl StoredTangentConventions {
+    #[cfg(test)]
+    pub(super) const UNKNOWN: Self = Self {
+        basis: StoredTangentBasis::Unknown,
+        encoding: StoredTangentEncoding::Unknown,
+    };
+
+    pub(super) fn schema_names(self) -> impl Iterator<Item = TextRange> {
+        [
+            match self.basis {
+                StoredTangentBasis::Namespaced { name, .. } => Some(name),
+                _ => None,
+            },
+            match self.encoding {
+                StoredTangentEncoding::Namespaced { name, .. } => Some(name),
+                _ => None,
+            },
+        ]
+        .into_iter()
+        .flatten()
+    }
+
+    pub(super) const fn is_valid(self) -> bool {
+        !matches!(self.basis, StoredTangentBasis::MikkTspace)
+            || matches!(self.encoding, StoredTangentEncoding::SignInW)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StoredTangentBasis {
+    Unknown,
+    MikkTspace,
+    /// Per-triangle UV derivatives followed by normalized Gram-Schmidt orthogonalization.
+    TriangleUvDerivative,
+    Namespaced {
+        name: TextRange,
+        version: NonZeroU32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StoredTangentEncoding {
+    Unknown,
+    SignInW,
+    Namespaced {
+        name: TextRange,
+        version: NonZeroU32,
+    },
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(super) struct StoredAttribute {
     pub(super) semantic: StoredAttributeSemantic,
+    pub(super) tangent_conventions: Option<StoredTangentConventions>,
     pub(super) domain: AttributeDomain,
     pub(super) lanes: u8,
     pub(super) element_count: u32,

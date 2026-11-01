@@ -64,9 +64,14 @@ baseline malformed-input safety for that source state; it is not sustained fuzz 
   occlusion, and emissive texture bindings, including the extension `texCoord` override. Its
   finite transform and canonical UV-set bounds are checked before dependency I/O, and the values
   participate in the canonical material-binding snapshot.
-- Y-up, right-handed, +Z asset front, meters scene space metadata, counter-clockwise fronts, upper-left UV origin,
-  and `SignInW` tangent handedness. The tangent construction algorithm remains unknown; importing
-  authored tangents does not claim MikkTSpace generation.
+- Y-up, right-handed, +Z asset front, meters scene space metadata, counter-clockwise fronts, and
+  upper-left UV origin.
+- Each imported base `TANGENT` attribute owns `TangentConventions` with an unknown construction
+  algorithm and `SignInW` handedness encoding. Read these facts through that attribute's
+  `tangent_conventions()`, independently of its primitive's other streams and the Scene's spatial
+  declarations. An absent base tangent has no convention declaration. Morph `TANGENT` deltas
+  retain their separate VEC3 delta semantics; importing authored tangents does not claim MikkTSpace
+  generation.
 - Node translation, rotation, and scale animation with source clip/channel identity, duration, time
   domain, interpolation, retained channel order, and non-contiguous source indexes preserved through
   canonical storage. Whole clips outside the selected scene are scope omissions; mixed-target clips

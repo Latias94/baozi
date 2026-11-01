@@ -5,7 +5,7 @@
 //! node placements remain unchanged.
 //!
 //! Preflight, materialization, and correspondence each charge one inline SceneSpace action, one
-//! action per inline schema-name byte, and one action per camera/light. The enclosing retained
+//! action per camera/light. The enclosing retained
 //! lane admits the existing two capacities; this module owns no lease or selection cache.
 
 use baozi_operation::{CapacityPlan, StorePlanError};
@@ -73,11 +73,6 @@ impl<'a> SpatialSpacePlan<'a> {
         if !valid {
             return Err(SpatialSpacePlanError::Invariant);
         }
-        for byte in schema_name_iter(&source.space) {
-            control
-                .run_string_unit(|| byte)
-                .map_err(SpatialSpacePlanError::Control)?;
-        }
         for (camera, &value) in source.cameras.iter().enumerate() {
             control
                 .run_unit(|| convert_camera(value, conversion))
@@ -123,10 +118,6 @@ impl<'a> SpatialSpacePlan<'a> {
         self.work
     }
 
-    pub(in crate::canonical_scene::store) fn name_bytes(self) -> usize {
-        self.shape.name_bytes()
-    }
-
     /// Local buffers drop before an error or unwind returns to the enclosing retained lane.
     pub(in crate::canonical_scene::store) fn materialize<C: TypedStorageBuildControl>(
         self,
@@ -138,11 +129,6 @@ impl<'a> SpatialSpacePlan<'a> {
         let space = control
             .run_unit(|| converted_space(&self.source.space, self.conversion))
             .map_err(TypedStorageBuildError::Control)?;
-        for byte in schema_name_iter(&self.source.space) {
-            control
-                .run_string_unit(|| byte)
-                .map_err(TypedStorageBuildError::Control)?;
-        }
         for &source in &self.source.cameras {
             if cameras.len() >= camera_capacity.desired_capacity()
                 || cameras.len() == cameras.capacity()
@@ -200,13 +186,6 @@ impl<'a> SpatialSpacePlan<'a> {
         })? != Some(true)
         {
             return Ok(false);
-        }
-        for (source, actual) in
-            schema_name_iter(&self.source.space).zip(schema_name_iter(&actual.space))
-        {
-            if control.run_unit(|| source == actual)? != Some(true) {
-                return Ok(false);
-            }
         }
         for (&source, &actual) in self.source.cameras.iter().zip(&actual.cameras) {
             if control.run_unit(|| {
@@ -341,15 +320,6 @@ fn converted_space(source: &SceneSpace, conversion: SpaceConversion) -> SceneSpa
         front_face_winding: target.front_face_winding(),
         ..source.clone()
     }
-}
-
-fn schema_name_iter(space: &SceneSpace) -> impl Iterator<Item = u8> + '_ {
-    space
-        .tangent_basis
-        .schema_id()
-        .into_iter()
-        .chain(space.tangent_handedness_encoding.schema_id())
-        .flat_map(|schema| schema.name().as_str().bytes())
 }
 
 fn same_space(source: &SceneSpace, actual: &SceneSpace) -> bool {

@@ -309,6 +309,11 @@ fn canonical_authoring_accepts_a_hand_built_model_without_a_decoder()
     let primitive = mesh.primitives().next().unwrap();
     assert_eq!(primitive.indices(), Some([2, 0, 1].as_slice()));
     assert_eq!(primitive.vertex_count(), 3);
+    assert!(
+        primitive
+            .attributes()
+            .all(|attribute| attribute.tangent_conventions().is_none())
+    );
     assert_eq!(
         primitive
             .morph_targets()

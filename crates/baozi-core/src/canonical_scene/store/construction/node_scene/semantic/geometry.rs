@@ -1,8 +1,11 @@
+use std::num::NonZeroU32;
+
 use baozi_operation::StoredScalar;
 
 use crate::attribute::AttributeDomain;
 use crate::canonical_scene::store::typed_storage::{
-    GeometryStorage, StoredAttributePayload, StoredAttributeSemantic, TableRange,
+    GeometryStorage, StoredAttributePayload, StoredAttributeSemantic, StoredTangentBasis,
+    StoredTangentEncoding, TableRange,
 };
 use crate::canonical_scene::store::validation::NodeSceneValidationProof;
 use crate::geometry::TopologyKind;
@@ -137,6 +140,40 @@ impl<'scene> NodeSceneGeometryTables<'scene> {
                     .ok_or_else(|| invariant("attribute semantic name is unavailable"))?,
             ),
         };
+        let tangent_conventions = attribute
+            .tangent_conventions
+            .map(|conventions| -> NodeSceneSemanticResult<_> {
+                Ok(NodeSceneGeometryTangentConventions {
+                    basis: match conventions.basis {
+                        StoredTangentBasis::Unknown => NodeSceneGeometryTangentBasis::Unknown,
+                        StoredTangentBasis::MikkTspace => NodeSceneGeometryTangentBasis::MikkTspace,
+                        StoredTangentBasis::TriangleUvDerivative => {
+                            NodeSceneGeometryTangentBasis::TriangleUvDerivative
+                        }
+                        StoredTangentBasis::Namespaced { name, version } => {
+                            NodeSceneGeometryTangentBasis::Namespaced {
+                                name: name.get(&self.storage.names).ok_or_else(|| {
+                                    invariant("tangent basis schema name is unavailable")
+                                })?,
+                                version,
+                            }
+                        }
+                    },
+                    encoding: match conventions.encoding {
+                        StoredTangentEncoding::Unknown => NodeSceneGeometryTangentEncoding::Unknown,
+                        StoredTangentEncoding::SignInW => NodeSceneGeometryTangentEncoding::SignInW,
+                        StoredTangentEncoding::Namespaced { name, version } => {
+                            NodeSceneGeometryTangentEncoding::Namespaced {
+                                name: name.get(&self.storage.names).ok_or_else(|| {
+                                    invariant("tangent encoding schema name is unavailable")
+                                })?,
+                                version,
+                            }
+                        }
+                    },
+                })
+            })
+            .transpose()?;
         use NodeSceneGeometryAttributePayload as P;
         use NodeSceneGeometryScalarKind as S;
         let (payload, scalar_kind, sparse, explicit_count, scalar_count) = match attribute.payload {
@@ -234,6 +271,7 @@ impl<'scene> NodeSceneGeometryTables<'scene> {
         Ok(NodeSceneGeometryAttribute {
             source_index: row,
             semantic,
+            tangent_conventions,
             domain: attribute.domain,
             scalar_kind,
             lanes: attribute.lanes,
@@ -530,11 +568,40 @@ pub(in crate::canonical_scene::store) enum NodeSceneGeometryPayloadKind {
     Sparse,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::canonical_scene::store) struct NodeSceneGeometryTangentConventions<'scene> {
+    pub(in crate::canonical_scene::store) basis: NodeSceneGeometryTangentBasis<'scene>,
+    pub(in crate::canonical_scene::store) encoding: NodeSceneGeometryTangentEncoding<'scene>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::canonical_scene::store) enum NodeSceneGeometryTangentBasis<'scene> {
+    Unknown,
+    MikkTspace,
+    /// Per-triangle UV derivatives followed by normalized Gram-Schmidt orthogonalization.
+    TriangleUvDerivative,
+    Namespaced {
+        name: &'scene str,
+        version: NonZeroU32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::canonical_scene::store) enum NodeSceneGeometryTangentEncoding<'scene> {
+    Unknown,
+    SignInW,
+    Namespaced {
+        name: &'scene str,
+        version: NonZeroU32,
+    },
+}
+
 /// One attribute descriptor coupled to its exact typed payload cursors.
 #[must_use = "the attribute payload cursors must be consumed or deliberately discarded"]
 pub(in crate::canonical_scene::store) struct NodeSceneGeometryAttribute<'scene> {
     source_index: usize,
     semantic: NodeSceneGeometryAttributeSemantic<'scene>,
+    tangent_conventions: Option<NodeSceneGeometryTangentConventions<'scene>>,
     domain: AttributeDomain,
     scalar_kind: NodeSceneGeometryScalarKind,
     lanes: u8,
@@ -555,6 +622,12 @@ impl<'scene> NodeSceneGeometryAttribute<'scene> {
         &self,
     ) -> NodeSceneGeometryAttributeSemantic<'scene> {
         self.semantic
+    }
+
+    pub(in crate::canonical_scene::store) const fn tangent_conventions(
+        &self,
+    ) -> Option<NodeSceneGeometryTangentConventions<'scene>> {
+        self.tangent_conventions
     }
 
     pub(in crate::canonical_scene::store) const fn domain(&self) -> AttributeDomain {

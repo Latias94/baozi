@@ -1,9 +1,10 @@
 use baozi_core::{
     AnimationChannelRef, AnimationExtrapolation, AnimationInterpolation, AnimationTarget,
-    AnimationTimeDomain, AttributeDomain, Axis, FormatId, FrontFaceWinding, Handedness, Mat4,
-    MorphDeltaData, MorphDeltaRef, MorphDeltaSemantic, NumericConversionError,
+    AnimationTimeDomain, AttributeDomain, AttributeSemanticRef, Axis, FormatId, FrontFaceWinding,
+    Handedness, Mat4, MorphDeltaData, MorphDeltaRef, MorphDeltaSemantic, NumericConversionError,
     SceneAnimationSamplePart, SceneSnapshot, SceneSnapshotLimits, SkinMatrixCorrection,
-    SkinMatrixSpace, SkinMatrixSpaces, TargetSpace, ValidatedScene, Vec3,
+    SkinMatrixSpace, SkinMatrixSpaces, TangentBasisRef, TangentEncodingRef, TargetSpace,
+    ValidatedScene, Vec3,
 };
 use baozi_import::authoring::{
     AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationClipAuthoring,
@@ -20,7 +21,8 @@ use baozi_import::authoring::{
     ProvenanceNodeAuthoring, ResourceIdentity, ResourceIdentityLocalId, ResourceSnapshotAuthoring,
     SceneAuthoringBatch, SceneSpace, SessionOpaqueReason, SkinAuthoring, SkinLocalId,
     SourceIdentityAuthoring, SourceIdentityLocalId, SourceObjectKind, SourceObjectLocator,
-    SpatialAuthoringBatch, TangentBasisConvention, TangentHandednessEncoding, UvOrigin,
+    SpatialAuthoringBatch, TangentBasisConvention, TangentConventions, TangentHandednessEncoding,
+    UvOrigin,
 };
 use baozi_import::{
     CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
@@ -217,7 +219,11 @@ impl FormatImporter for DeformationAnimationImporter {
                 4,
                 &[1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0],
                 Presence::Absent,
-            ),
+            )
+            .with_tangent_conventions(TangentConventions {
+                basis: TangentBasisConvention::MikkTspace,
+                encoding: TangentHandednessEncoding::SignInW,
+            }),
         ];
         let primitives = [GeometryPrimitiveAuthoring::new(
             GeometryTopologyAuthoring::TriangleList,
@@ -485,13 +491,11 @@ impl FormatImporter for DeformationAnimationImporter {
         )];
         let space = SceneSpace {
             uv_origin: UvOrigin::LowerLeft,
-            tangent_basis: TangentBasisConvention::MikkTspace,
-            tangent_handedness_encoding: TangentHandednessEncoding::SignInW,
             ..SceneSpace::STANDARD_TARGET
         };
         space
             .validate_complete()
-            .expect("fixture space must declare complete spatial, UV, and tangent conventions");
+            .expect("fixture space must declare complete spatial and UV conventions");
         scope.submit_scene(SceneAuthoringBatch::new(
             SpatialAuthoringBatch::new(&space, &[], &[]),
             NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
@@ -644,6 +648,13 @@ fn assert_deformation(
         assert_eq!(definition.mesh().id(), mesh.id());
     }
     let primitive = mesh.primitives().next().unwrap();
+    let conventions = primitive
+        .attribute(AttributeSemanticRef::Tangent, AttributeDomain::Vertex)
+        .unwrap()
+        .tangent_conventions()
+        .unwrap();
+    assert_eq!(conventions.basis, TangentBasisRef::MikkTspace);
+    assert_eq!(conventions.encoding, TangentEncodingRef::SignInW);
     let influences = primitive.influences().unwrap();
     assert_eq!(influences.len(), 3);
     let first = influences.get(0).unwrap();
@@ -916,6 +927,16 @@ fn conversion_conjugates_skin_matrices_and_transports_all_morph_representations(
     );
     let primitive = scene.meshes().next().unwrap().primitives().next().unwrap();
     assert_eq!(primitive.indices().unwrap(), [0, 2, 1]);
+    let baozi_core::AttributeData::DenseF32 { lanes: 4, values } = primitive
+        .attribute(AttributeSemanticRef::Tangent, AttributeDomain::Vertex)
+        .unwrap()
+        .data()
+    else {
+        panic!("base tangents must retain their authored F32 representation")
+    };
+    for tangent in values.as_chunks::<4>().0 {
+        assert_eq!(tangent, &[0.0, 1.0, 0.0, -1.0]);
+    }
     assert_animation_headers(&scene);
     assert_source_order(&snapshot(&scene));
 }

@@ -23,7 +23,7 @@ pub use deformation::{
 };
 pub use geometry::{
     AttributeData, AttributeElement, AttributeRef, AttributeSemanticRef, LogicalMeshRef,
-    MeshInstanceRef, PrimitiveRef,
+    MeshInstanceRef, PrimitiveRef, TangentBasisRef, TangentConventionsRef, TangentEncodingRef,
 };
 pub use metadata::{
     EntityMetadataOwner, MetadataArrayRef, MetadataEntryRef, MetadataOwnerRef, MetadataValueRef,
@@ -35,7 +35,7 @@ pub use provenance::{
     ProvenanceEvidenceRef, ProvenanceId, ProvenanceKindRef, ProvenanceLookupError,
     ProvenanceOperationKindRef, ProvenanceOperationRef, ProvenanceRef,
 };
-pub use spatial::{CameraRef, LightRef, SceneSpaceRef, TangentBasisRef, TangentEncodingRef};
+pub use spatial::{CameraRef, LightRef, SceneSpaceRef};
 
 fn expect_validated<T>(result: NodeSceneSemanticResult<T>) -> T {
     result.unwrap_or_else(|error: NodeSceneSemanticError| {

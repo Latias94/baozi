@@ -1,6 +1,6 @@
 use super::*;
 use crate::entity::AuthoredTransformKind;
-use crate::scene_space::{TangentBasisConvention, TangentHandednessEncoding, UvOrigin};
+use crate::scene_space::UvOrigin;
 
 const AXES: [Axis; 6] = [
     Axis::PositiveX,
@@ -475,11 +475,6 @@ fn explicit_complete_assumption_fills_only_unknown_fields_and_records_the_actual
             .assumed_fields()
             .contains(SceneSpaceField::UvOrigin)
     );
-    assert!(
-        !conversion
-            .assumed_fields()
-            .contains(SceneSpaceField::TangentBasis)
-    );
 
     let source = SceneSpace {
         up_axis: Axis::Unknown,
@@ -577,7 +572,7 @@ fn assumption_conflicts_retain_the_field_and_exact_typed_values() {
 }
 
 #[test]
-fn invalid_source_facts_are_rejected_while_uv_and_tangent_conventions_are_preserved() {
+fn invalid_source_facts_are_rejected_while_uv_origin_is_preserved() {
     let source = SceneSpace {
         unit_scale_to_meters: Some(-0.0),
         ..scene(TargetSpace::STANDARD)
@@ -603,8 +598,6 @@ fn invalid_source_facts_are_rejected_while_uv_and_tangent_conventions_are_preser
     );
     let source = SceneSpace {
         uv_origin: UvOrigin::LowerLeft,
-        tangent_basis: TangentBasisConvention::MikkTspace,
-        tangent_handedness_encoding: TangentHandednessEncoding::SignInW,
         ..scene(TargetSpace::STANDARD)
     };
     let before = source.clone();

@@ -95,6 +95,16 @@ fn assert_morphs(report: &ImportReport) {
             .iter()
             .all(|primitive| primitive.morph_target_count() == 2)
     );
+    for primitive in &primitives {
+        // Only the base TANGENT descriptor carries conventions; morph deltas remain VEC3 values.
+        assert_eq!(
+            primitive
+                .attributes()
+                .filter(|attribute| attribute.tangent_conventions().is_some())
+                .count(),
+            1
+        );
+    }
     let first = primitives[0].morph_targets().next().unwrap();
     assert_eq!(first.id(), definitions[0].id());
     assert_eq!(first.delta_count(), 3);

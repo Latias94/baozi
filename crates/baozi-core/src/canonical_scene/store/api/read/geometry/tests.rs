@@ -16,6 +16,7 @@ fn attribute(data: AttributeData<'_>, count: u32) -> AttributeRef<'_> {
             crate::canonical_scene::store::production::CanonicalProfileOwner::Attribute(0),
         ),
         semantic: AttributeSemanticRef::Custom("test:element"),
+        tangent_conventions: None,
         domain: AttributeDomain::Vertex,
         lanes,
         count,

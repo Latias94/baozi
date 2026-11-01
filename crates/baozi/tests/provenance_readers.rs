@@ -1,8 +1,9 @@
 use baozi::{
-    CapabilityStatus, DigestAlgorithm, EntityMetadataOwner, FormatCapability, FormatDescriptor,
-    FormatEncoding, FormatId, ImportReport, Importer, MetadataOwnerRef, MetadataValueRef,
-    ProvenanceKindRef, ProvenanceLookupError, ProvenanceOperationKindRef, ProvenanceRef,
-    ReadConfidence, SourceIdentityRef, SourceObjectKind, SourceObjectLocatorRef, ValidatedScene,
+    AttributeSemanticRef, CapabilityStatus, DigestAlgorithm, EntityMetadataOwner, FormatCapability,
+    FormatDescriptor, FormatEncoding, FormatId, ImportReport, Importer, MetadataOwnerRef,
+    MetadataValueRef, ProvenanceKindRef, ProvenanceLookupError, ProvenanceOperationKindRef,
+    ProvenanceRef, ReadConfidence, SourceIdentityRef, SourceObjectKind, SourceObjectLocatorRef,
+    TangentBasisRef, TangentEncodingRef, ValidatedScene,
 };
 use baozi_import::authoring::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, AttributeDomain, AttributeSemantic,
@@ -213,6 +214,25 @@ fn fixture_report() -> ImportReport {
         .unwrap()
         .read_bytes("fixture.provenance", b"fixture")
         .unwrap()
+}
+
+#[test]
+fn facade_keeps_undeclared_tangent_conventions_unknown_on_each_attribute() {
+    let report = fixture_report();
+    for primitive in report.scene().meshes().next().unwrap().primitives() {
+        let tangent = primitive
+            .attribute(AttributeSemanticRef::Tangent, AttributeDomain::Vertex)
+            .unwrap();
+        let conventions = tangent.tangent_conventions().unwrap();
+        assert_eq!(conventions.basis, TangentBasisRef::Unknown);
+        assert_eq!(conventions.encoding, TangentEncodingRef::Unknown);
+        assert!(
+            primitive
+                .attributes()
+                .filter(|attribute| attribute.semantic() != AttributeSemanticRef::Tangent)
+                .all(|attribute| attribute.tangent_conventions().is_none())
+        );
+    }
 }
 
 fn only_attachment(scene: &ValidatedScene, owner: EntityMetadataOwner) -> ProvenanceRef<'_> {

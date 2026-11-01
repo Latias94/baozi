@@ -15,6 +15,7 @@ use baozi_operation::{
 };
 use thiserror::Error;
 
+use crate::attribute::AttributeDomain;
 use crate::canonical_scene::store::construction::GENERATION_EXHAUSTED_CODE;
 use crate::canonical_scene::store::construction::node_scene::SceneStorage;
 use crate::canonical_scene::store::schema::SceneDirectorySchema;
@@ -92,6 +93,7 @@ pub struct SceneEditHandoffToken {
 pub enum SceneEditEvidence {
     Triangulation(SceneTriangulationEvidence),
     Normals(SceneNormalGenerationEvidence),
+    Tangents(SceneTangentGenerationEvidence),
     SpaceConversion(SceneSpaceConversionEvidence),
 }
 
@@ -260,6 +262,59 @@ impl SceneNormalGenerationEvidence {
     }
 }
 
+/// Tangent-generation facts retained independently of the published Scene.
+pub struct SceneTangentGenerationEvidence {
+    owner: GeometryEvidenceOwner,
+    replaced: bool,
+    tangent_attribute: u32,
+    corners: u32,
+    normal_domain: AttributeDomain,
+    uv_set: u32,
+    uv_domain: AttributeDomain,
+}
+
+impl SceneTangentGenerationEvidence {
+    pub const fn input_generation(&self) -> SceneGenerationId {
+        self.owner.input_target.generation()
+    }
+
+    pub const fn output_generation(&self) -> SceneGenerationId {
+        self.owner.output_target.generation()
+    }
+
+    pub const fn input_target(&self) -> PrimitiveId {
+        self.owner.input_target
+    }
+
+    pub const fn output_target(&self) -> PrimitiveId {
+        self.owner.output_target
+    }
+
+    pub const fn replaced_tangent(&self) -> bool {
+        self.replaced
+    }
+
+    pub const fn tangent_attribute_index(&self) -> u32 {
+        self.tangent_attribute
+    }
+
+    pub const fn corner_count(&self) -> u32 {
+        self.corners
+    }
+
+    pub const fn normal_domain(&self) -> AttributeDomain {
+        self.normal_domain
+    }
+
+    pub const fn uv_set(&self) -> u32 {
+        self.uv_set
+    }
+
+    pub const fn uv_domain(&self) -> AttributeDomain {
+        self.uv_domain
+    }
+}
+
 /// Exact published Scene, rooted remap evidence, and operation ledger evidence.
 #[must_use = "the published Scene edit must be transferred to its host"]
 pub struct SceneEditPublishedSuccess {
@@ -367,6 +422,66 @@ impl SceneEditHandoffToken {
                         effects,
                         removed_metadata,
                         normal_attribute,
+                    })
+                }
+                Some(super::schema::OPERATION_TANGENTS) => {
+                    let super::SceneEditTarget::Primitive(input_target) = self.proof.input_target
+                    else {
+                        return Err(invalid);
+                    };
+                    if root.scalar::<u64>(0, super::schema::field::SOURCE_UNIT_BITS) != Some(0)
+                        || root.scalar::<u64>(0, super::schema::field::TARGET_UNIT_BITS) != Some(0)
+                        || root.scalar::<u8>(0, super::schema::field::CORNER_ORIGINS) != Some(0)
+                        || root.scalar::<u8>(0, super::schema::field::FACE_OFFSETS) != Some(0)
+                    {
+                        return Err(invalid);
+                    }
+                    let normal_domain = decode_tangent_domain(
+                        root.scalar::<u32>(0, super::schema::tangent_field::NORMAL_DOMAIN)
+                            .ok_or(invalid)?,
+                    )
+                    .ok_or(invalid)?;
+                    let uv_domain = decode_tangent_domain(
+                        root.scalar::<u32>(0, super::schema::tangent_field::UV_DOMAIN)
+                            .ok_or(invalid)?,
+                    )
+                    .ok_or(invalid)?;
+                    let uv_set = root
+                        .scalar::<u32>(0, super::schema::tangent_field::UV_SET)
+                        .ok_or(invalid)?;
+                    let replaced = root
+                        .scalar::<u32>(0, super::schema::tangent_field::REPLACED_TANGENT)
+                        .filter(|value| *value <= 1)
+                        .ok_or(invalid)?
+                        != 0;
+                    let tangent_attribute = root
+                        .scalar::<u32>(0, super::schema::tangent_field::OUTPUT_TANGENT_ATTRIBUTE)
+                        .ok_or(invalid)?;
+                    let attributes = root
+                        .scalar::<u32>(0, super::schema::tangent_field::OUTPUT_ATTRIBUTE_COUNT)
+                        .ok_or(invalid)?;
+                    let corners = root
+                        .scalar::<u32>(0, super::schema::tangent_field::CORNER_COUNT)
+                        .filter(|count| *count != 0 && count.is_multiple_of(3))
+                        .ok_or(invalid)?;
+                    if tangent_attribute >= attributes
+                        || root.scalar::<u32>(0, super::schema::tangent_field::FACE_COUNT)
+                            != Some(corners / 3)
+                    {
+                        return Err(invalid);
+                    }
+                    SceneEditEvidence::Tangents(SceneTangentGenerationEvidence {
+                        owner: GeometryEvidenceOwner {
+                            input_target,
+                            output_target: input_target.rebind(self.generation.id()),
+                            store: published.outcome_evidence,
+                        },
+                        replaced,
+                        tangent_attribute,
+                        corners,
+                        normal_domain,
+                        uv_set,
+                        uv_domain,
                     })
                 }
                 Some(super::schema::OPERATION_TRIANGULATE) => {
@@ -494,6 +609,14 @@ impl SceneEditHandoffToken {
             evidence,
             ledger_evidence: published.ledger_evidence,
         })
+    }
+}
+
+fn decode_tangent_domain(value: u32) -> Option<AttributeDomain> {
+    match value {
+        0 => Some(AttributeDomain::Vertex),
+        1 => Some(AttributeDomain::Corner),
+        _ => None,
     }
 }
 

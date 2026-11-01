@@ -21,8 +21,105 @@ pub(in crate::canonical_scene::store) mod space_deformation;
 pub(in crate::canonical_scene::store) mod space_geometry;
 pub(in crate::canonical_scene::store) mod space_nodes;
 pub(in crate::canonical_scene::store) mod space_spatial;
+pub(in crate::canonical_scene::store) mod tangents;
 
 type EditResult<T, E> = Result<T, TypedStorageBuildError<E>>;
+
+/// Copies the text owned by exactly one descriptor and updates only its text ranges.
+/// Callers rebuild names in attribute order, followed by logical-mesh names.
+pub(in crate::canonical_scene::store) fn copy_attribute_names<C: TypedStorageBuildControl>(
+    source: &GeometryStorage,
+    mut attribute: StoredAttribute,
+    names: &mut Vec<u8>,
+    plan: CapacityPlan,
+    control: &mut C,
+) -> EditResult<StoredAttribute, C::Error> {
+    use super::{StoredAttributeSemantic, StoredTangentBasis, StoredTangentEncoding, TextRange};
+    let mut copy = |range: TextRange| -> EditResult<TextRange, C::Error> {
+        let text = range
+            .get(&source.names)
+            .ok_or(TypedStorageBuildError::Invariant)?;
+        super::build::append_name(
+            names,
+            plan,
+            crate::canonical_scene::store::production::Presence::Present(text),
+            control,
+        )?
+        .ok_or(TypedStorageBuildError::Invariant)
+    };
+    if let StoredAttributeSemantic::Custom(name) = attribute.semantic {
+        attribute.semantic = StoredAttributeSemantic::Custom(copy(name)?);
+    }
+    if let Some(conventions) = &mut attribute.tangent_conventions {
+        if let StoredTangentBasis::Namespaced { name, .. } = &mut conventions.basis {
+            *name = copy(*name)?;
+        }
+        if let StoredTangentEncoding::Namespaced { name, .. } = &mut conventions.encoding {
+            *name = copy(*name)?;
+        }
+    }
+    Ok(attribute)
+}
+
+/// Compares inline declaration kinds and versions; schema bytes are compared separately.
+pub(in crate::canonical_scene::store) fn same_tangent_convention_kinds(
+    source: Option<super::StoredTangentConventions>,
+    actual: Option<super::StoredTangentConventions>,
+) -> bool {
+    use super::{StoredTangentBasis as B, StoredTangentEncoding as E};
+    match (source, actual) {
+        (None, None) => true,
+        (Some(source), Some(actual)) => {
+            let basis = match (source.basis, actual.basis) {
+                (B::Namespaced { version: left, .. }, B::Namespaced { version: right, .. }) => {
+                    left == right
+                }
+                (left, right) => left == right,
+            };
+            let encoding = match (source.encoding, actual.encoding) {
+                (E::Namespaced { version: left, .. }, E::Namespaced { version: right, .. }) => {
+                    left == right
+                }
+                (left, right) => left == right,
+            };
+            basis && encoding
+        }
+        _ => false,
+    }
+}
+
+/// Compares schema text by borrowing both geometry name pools, one metered action per byte.
+pub(in crate::canonical_scene::store) fn compare_tangent_schema_names<
+    C: super::validation::TypedStorageValidationControl,
+>(
+    source: Option<super::StoredTangentConventions>,
+    actual: Option<super::StoredTangentConventions>,
+    source_names: &[u8],
+    actual_names: &[u8],
+    control: &mut C,
+) -> Result<bool, C::Error> {
+    if !same_tangent_convention_kinds(source, actual) {
+        return Ok(false);
+    }
+    if let (Some(source), Some(actual)) = (source, actual) {
+        for (source, actual) in source.schema_names().zip(actual.schema_names()) {
+            let (Some(source), Some(actual)) =
+                (source.0.get(source_names), actual.0.get(actual_names))
+            else {
+                return Ok(false);
+            };
+            if source.len() != actual.len() {
+                return Ok(false);
+            }
+            for (&source, &actual) in source.iter().zip(actual) {
+                if control.run_unit(|| source == actual)? != Some(true) {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(true)
+}
 
 /// Primitive-local source corners, grouped into triangles in source-face order.
 #[derive(Clone, Copy)]
@@ -699,6 +796,7 @@ impl GeometryTriangulationPlan<'_> {
             let lanes = source.lanes as usize;
             check!(
                 actual.semantic == source.semantic
+                    && actual.tangent_conventions == source.tangent_conventions
                     && actual.domain == source.domain
                     && actual.lanes == source.lanes
                     && actual.element_count == gather.output_count
@@ -1365,6 +1463,7 @@ mod tests {
             ],
             attributes: vec![
                 StoredAttribute {
+                    tangent_conventions: None,
                     semantic: StoredAttributeSemantic::Position,
                     domain: AttributeDomain::Vertex,
                     lanes: 3,
@@ -1372,6 +1471,7 @@ mod tests {
                     payload: StoredAttributePayload::DenseF32(TableRange::new(0, 15)),
                 },
                 StoredAttribute {
+                    tangent_conventions: None,
                     semantic: StoredAttributeSemantic::Normal,
                     domain: AttributeDomain::Corner,
                     lanes: 3,
@@ -1379,6 +1479,7 @@ mod tests {
                     payload: StoredAttributePayload::DenseF32(TableRange::new(15, 21)),
                 },
                 StoredAttribute {
+                    tangent_conventions: None,
                     semantic: StoredAttributeSemantic::SmoothingGroup,
                     domain: AttributeDomain::Face,
                     lanes: 1,
@@ -1390,6 +1491,7 @@ mod tests {
                     },
                 },
                 StoredAttribute {
+                    tangent_conventions: None,
                     semantic: StoredAttributeSemantic::Custom(corner_f64),
                     domain: AttributeDomain::Corner,
                     lanes: 2,
@@ -1397,6 +1499,7 @@ mod tests {
                     payload: StoredAttributePayload::DenseF64(TableRange::new(0, 14)),
                 },
                 StoredAttribute {
+                    tangent_conventions: None,
                     semantic: StoredAttributeSemantic::Custom(corner_sparse),
                     domain: AttributeDomain::Corner,
                     lanes: 1,
@@ -1408,6 +1511,7 @@ mod tests {
                     },
                 },
                 StoredAttribute {
+                    tangent_conventions: None,
                     semantic: StoredAttributeSemantic::Custom(face_dense),
                     domain: AttributeDomain::Face,
                     lanes: 1,
@@ -1415,6 +1519,7 @@ mod tests {
                     payload: StoredAttributePayload::DenseU32(TableRange::new(6, 2)),
                 },
                 StoredAttribute {
+                    tangent_conventions: None,
                     semantic: StoredAttributeSemantic::Position,
                     domain: AttributeDomain::Vertex,
                     lanes: 3,
@@ -1596,6 +1701,102 @@ mod tests {
                 Err(TypedStorageBuildError::Invariant)
             ));
         }
+    }
+
+    #[test]
+    fn triangulation_copies_tangent_declarations_with_corner_payloads_and_schema_text() {
+        use crate::canonical_scene::store::typed_storage::{
+            StoredTangentBasis, StoredTangentConventions, StoredTangentEncoding,
+        };
+        let basis = "test:polygon-basis";
+        let encoding = "test:polygon-sign";
+        let declarations = Some(StoredTangentConventions {
+            basis: StoredTangentBasis::Namespaced {
+                name: TextRange(TableRange::new(0, basis.len())),
+                version: std::num::NonZeroU32::new(2).unwrap(),
+            },
+            encoding: StoredTangentEncoding::Namespaced {
+                name: TextRange(TableRange::new(basis.len(), encoding.len())),
+                version: std::num::NonZeroU32::new(3).unwrap(),
+            },
+        });
+        let source = GeometryStorage {
+            logical_meshes: vec![StoredLogicalMesh {
+                primitives: TableRange::new(0, 1),
+                name: None,
+            }],
+            primitives: vec![StoredPrimitive {
+                topology: TopologyKind::Polygons,
+                vertex_count: 4,
+                corner_count: 4,
+                face_count: 1,
+                polygon_boundaries: Some(TableRange::new(0, 1)),
+                indices: Some(TableRange::new(1, 4)),
+                material: None,
+                attributes: TableRange::new(0, 2),
+            }],
+            attributes: vec![
+                StoredAttribute {
+                    semantic: StoredAttributeSemantic::Position,
+                    tangent_conventions: None,
+                    domain: AttributeDomain::Vertex,
+                    lanes: 3,
+                    element_count: 4,
+                    payload: StoredAttributePayload::DenseF32(TableRange::new(0, 12)),
+                },
+                StoredAttribute {
+                    semantic: StoredAttributeSemantic::Tangent,
+                    tangent_conventions: declarations,
+                    domain: AttributeDomain::Corner,
+                    lanes: 4,
+                    element_count: 4,
+                    payload: StoredAttributePayload::DenseF32(TableRange::new(12, 16)),
+                },
+            ],
+            mesh_instances: vec![],
+            names: [basis.as_bytes(), encoding.as_bytes()].concat(),
+            f32_values: vec![0.0; 28],
+            f64_values: vec![],
+            u32_values: vec![4, 0, 1, 2, 3],
+            i32_values: vec![],
+        };
+        assert_eq!(
+            source.validate(&mut Control::default(), [1, 1, 2, 0], 1, 0),
+            Ok(true)
+        );
+        let triangles = [[0, 1, 2], [0, 2, 3]];
+        let offsets = [0, 2];
+        let plan = GeometryTriangulationPlan::try_new(
+            &source,
+            0,
+            TriangulationOrigins {
+                triangles: &triangles,
+                face_offsets: &offsets,
+            },
+            &mut Control::default(),
+        )
+        .unwrap();
+        let mut output = plan.materialize(&mut Control::default()).unwrap();
+        assert_eq!(output.attributes[1].element_count, 6);
+        assert_eq!(output.attributes[1].tangent_conventions, declarations);
+        assert_eq!(output.names, source.names);
+        assert_eq!(
+            output.validate(&mut Control::default(), [1, 1, 2, 0], 1, 0),
+            Ok(true)
+        );
+        assert_eq!(
+            plan.validate_correspondence(&output, &mut Control::default()),
+            Ok(true)
+        );
+        output.attributes[1]
+            .tangent_conventions
+            .as_mut()
+            .unwrap()
+            .basis = StoredTangentBasis::Unknown;
+        assert_eq!(
+            plan.validate_correspondence(&output, &mut Control::default()),
+            Ok(false)
+        );
     }
 
     #[test]

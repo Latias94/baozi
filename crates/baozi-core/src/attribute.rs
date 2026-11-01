@@ -1,5 +1,12 @@
 use crate::namespaced::{NamespacedName, NamespacedNameError};
 
+mod tangent;
+
+pub use tangent::{
+    TangentBasisConvention, TangentConventionField, TangentConventions,
+    TangentConventionsValidationError, TangentHandednessEncoding, TangentSchemaBindingError,
+};
+
 /// The owner-controlled cardinality domain of an attribute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AttributeDomain {

@@ -113,6 +113,9 @@ pub(super) enum NodeSceneEditProgram<'scene> {
         >,
         smooth: bool,
     },
+    GenerateTangents(
+        crate::canonical_scene::store::typed_storage::edit::tangents::GeometryTangentsPlan<'scene>,
+    ),
     ConvertSpace(SceneSpacePlan<'scene>),
 }
 
@@ -157,7 +160,7 @@ impl NodeSceneEditProgram<'_> {
         match self {
             Self::NodeTransform(_) => OperationKind::Transform,
             Self::TriangulatePrimitive(_) => OperationKind::Split,
-            Self::GenerateNormals { .. } => OperationKind::Generated,
+            Self::GenerateNormals { .. } | Self::GenerateTangents(_) => OperationKind::Generated,
             Self::ConvertSpace(_) => OperationKind::Transform,
         }
     }
@@ -230,6 +233,11 @@ impl NodeSceneEditFixedCounts {
                     smooth: *smooth,
                 }
             }
+            NodeSceneEditProgram::GenerateTangents(geometry) => ProfileEditTargets::Tangents {
+                primitive: u32::try_from(geometry.target_row())
+                    .map_err(|_| StorePlanError::SizeOverflow)?,
+                attributes: geometry.attribute_mapping(),
+            },
             NodeSceneEditProgram::ConvertSpace(plan) => {
                 ProfileEditTargets::Space(plan.conversion())
             }
@@ -237,8 +245,14 @@ impl NodeSceneEditFixedCounts {
         let source_evidence = input.proof.counts();
         // The concrete operation supplies the final domain counts before profile planning.
         let mut evidence = source_evidence;
-        if let NodeSceneEditProgram::GenerateNormals { geometry, .. } = program {
-            evidence.attribute_count = geometry.output_attribute_count();
+        match program {
+            NodeSceneEditProgram::GenerateNormals { geometry, .. } => {
+                evidence.attribute_count = geometry.output_attribute_count();
+            }
+            NodeSceneEditProgram::GenerateTangents(geometry) => {
+                evidence.attribute_count = geometry.output_attribute_count();
+            }
+            _ => {}
         }
         let profile = NodeSceneEditProfilePlan::try_new(input, targets, evidence, poll)?;
         let counts = profile.output_counts;
@@ -264,6 +278,7 @@ impl NodeSceneEditFixedCounts {
             NodeSceneEditProgram::GenerateNormals { geometry, .. } => {
                 Some(geometry.validation_work())
             }
+            NodeSceneEditProgram::GenerateTangents(geometry) => Some(geometry.validation_work()),
             NodeSceneEditProgram::ConvertSpace(plan) => Some(plan.geometry().validation_work()),
         };
         if let Some(work) = geometry_work {
@@ -471,6 +486,33 @@ impl PendingNodeSceneEdit {
 }
 
 impl<'scene> BoundPendingNodeSceneEdit<'scene> {
+    pub(super) fn try_tangents(
+        input: &'scene SceneStorage,
+        geometry: crate::canonical_scene::store::typed_storage::edit::tangents::GeometryTangentsPlan<'scene>,
+        options: crate::provenance::OptionsDigest,
+        poll: &mut impl FnMut() -> Result<(), NodeSceneEditPlanError>,
+    ) -> Result<Self, NodeSceneEditPlanError> {
+        let program = NodeSceneEditProgram::GenerateTangents(geometry);
+        let proof = input.proof;
+        let counts = NodeSceneEditFixedCounts::try_new_for_program(
+            input,
+            &program,
+            proof.source_node_count(),
+            proof.source_root_count(),
+            proof.source_edge_count(),
+            poll,
+        )?;
+        Ok(Self {
+            _seal: BoundSourceSeal,
+            input,
+            program,
+            operation: OperationIdentity::new(OperationKind::Generated, options),
+            counts,
+            #[cfg(test)]
+            invalidations: CanonicalInvalidations::scene_bounds_invalidated(),
+        })
+    }
+
     pub(super) fn try_space_conversion(
         input: &'scene SceneStorage,
         plan: SceneSpacePlan<'scene>,

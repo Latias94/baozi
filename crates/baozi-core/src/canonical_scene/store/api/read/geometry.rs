@@ -1,9 +1,11 @@
 use std::fmt;
+use std::num::NonZeroU32;
 
 use super::super::super::construction::node_scene::semantic::geometry::{
     NodeSceneGeometryAttribute, NodeSceneGeometryAttributePayload,
     NodeSceneGeometryAttributeSemantic, NodeSceneGeometryLogicalMesh,
     NodeSceneGeometryMeshInstance, NodeSceneGeometryPrimitive, NodeSceneGeometryTables,
+    NodeSceneGeometryTangentBasis, NodeSceneGeometryTangentEncoding,
 };
 use super::{ValidatedScene, checked_index, expect_validated};
 use crate::attribute::AttributeDomain;
@@ -32,6 +34,34 @@ pub enum AttributeSemanticRef<'s> {
     Color(u32),
     SmoothingGroup,
     Custom(&'s str),
+}
+
+/// The tangent construction convention, including borrowed extension identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TangentBasisRef<'s> {
+    Unknown,
+    MikkTspace,
+    /// Per-triangle UV derivatives followed by normalized Gram-Schmidt orthogonalization.
+    TriangleUvDerivative,
+    Namespaced {
+        name: &'s str,
+        version: NonZeroU32,
+    },
+}
+
+/// The tangent handedness encoding used to reconstruct this attribute's bitangent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TangentEncodingRef<'s> {
+    Unknown,
+    SignInW,
+    Namespaced { name: &'s str, version: NonZeroU32 },
+}
+
+/// Allocation-free declarations borrowed from exactly one tangent descriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TangentConventionsRef<'s> {
+    pub basis: TangentBasisRef<'s>,
+    pub encoding: TangentEncodingRef<'s>,
 }
 
 /// Typed scalar slices for one attribute. Sparse indices are sorted logical element indices;
@@ -94,6 +124,7 @@ pub enum AttributeElement<'s> {
 pub struct AttributeRef<'s> {
     metadata_owner: super::EntityMetadataOwner,
     semantic: AttributeSemanticRef<'s>,
+    tangent_conventions: Option<TangentConventionsRef<'s>>,
     domain: AttributeDomain,
     lanes: u8,
     count: u32,
@@ -113,6 +144,28 @@ impl<'s> AttributeRef<'s> {
             S::SmoothingGroup => AttributeSemanticRef::SmoothingGroup,
             S::Custom(name) => AttributeSemanticRef::Custom(name),
         };
+        let tangent_conventions =
+            attribute
+                .tangent_conventions()
+                .map(|conventions| TangentConventionsRef {
+                    basis: match conventions.basis {
+                        NodeSceneGeometryTangentBasis::Unknown => TangentBasisRef::Unknown,
+                        NodeSceneGeometryTangentBasis::MikkTspace => TangentBasisRef::MikkTspace,
+                        NodeSceneGeometryTangentBasis::TriangleUvDerivative => {
+                            TangentBasisRef::TriangleUvDerivative
+                        }
+                        NodeSceneGeometryTangentBasis::Namespaced { name, version } => {
+                            TangentBasisRef::Namespaced { name, version }
+                        }
+                    },
+                    encoding: match conventions.encoding {
+                        NodeSceneGeometryTangentEncoding::Unknown => TangentEncodingRef::Unknown,
+                        NodeSceneGeometryTangentEncoding::SignInW => TangentEncodingRef::SignInW,
+                        NodeSceneGeometryTangentEncoding::Namespaced { name, version } => {
+                            TangentEncodingRef::Namespaced { name, version }
+                        }
+                    },
+                });
         let domain = attribute.domain();
         let lanes = attribute.lanes();
         let count = attribute.element_count();
@@ -176,6 +229,7 @@ impl<'s> AttributeRef<'s> {
         Self {
             metadata_owner,
             semantic,
+            tangent_conventions,
             domain,
             lanes,
             count,
@@ -202,6 +256,11 @@ impl<'s> AttributeRef<'s> {
     pub const fn is_empty(self) -> bool {
         self.count == 0
     }
+    /// Returns explicit declarations for Tangent; other attribute semantics return `None`.
+    pub const fn tangent_conventions(self) -> Option<TangentConventionsRef<'s>> {
+        self.tangent_conventions
+    }
+
     pub const fn data(self) -> AttributeData<'s> {
         self.data
     }

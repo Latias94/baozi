@@ -104,6 +104,7 @@ fn fixture() -> Fixture {
     for (index, (vertices, start)) in [(3, 0), (0, 9), (1, 9)].into_iter().enumerate() {
         geometry.attributes.push(StoredAttribute {
             semantic: StoredAttributeSemantic::Position,
+            tangent_conventions: None,
             domain: AttributeDomain::Vertex,
             lanes: 3,
             element_count: vertices,

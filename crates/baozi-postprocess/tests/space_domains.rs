@@ -1,12 +1,13 @@
 use baozi_core::{
     AttributeData, AttributeDomain, AttributeSemanticRef, Axis, FormatId, FrontFaceWinding,
-    Handedness, TargetSpace, ValidatedScene,
+    Handedness, TangentBasisRef, TangentEncodingRef, TargetSpace, ValidatedScene,
 };
 use baozi_import::authoring::{
     AttributeSemantic, AuthoredTransform, AuthoringRange, CustomAttributeSemantic,
     GeometryAttributeAuthoring, GeometryLogicalMeshAuthoring, GeometryPrimitiveAuthoring,
     GeometryTopologyAuthoring, NodeAuthoringNode, NodeLocalId, Presence, Quat, SceneSpace,
-    StaticSceneBuilder, TangentBasisConvention, TangentHandednessEncoding, UvOrigin, Vec3,
+    StaticSceneBuilder, TangentBasisConvention, TangentConventions, TangentHandednessEncoding,
+    UvOrigin, Vec3,
 };
 use baozi_import::{
     CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
@@ -26,6 +27,7 @@ enum Fixture {
     Supported,
     Custom,
     UnknownEncoding,
+    UnknownCornerEncoding,
 }
 
 struct DomainImporter(Fixture);
@@ -53,6 +55,10 @@ impl FormatImporter for DomainImporter {
         let positions = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
         let normals = [1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0];
         let tangents = [1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, -1.0, 0.0, 0.0, 1.0, 1.0];
+        let known_conventions = TangentConventions {
+            basis: TangentBasisConvention::MikkTspace,
+            encoding: TangentHandednessEncoding::SignInW,
+        };
         let mut attributes = vec![
             GeometryAttributeAuthoring::f32(
                 AttributeSemantic::Position,
@@ -83,13 +89,28 @@ impl FormatImporter for DomainImporter {
                 4,
                 &tangents,
                 Presence::Absent,
-            ),
+            )
+            .with_tangent_conventions(if matches!(self.0, Fixture::UnknownEncoding) {
+                TangentConventions::UNKNOWN
+            } else {
+                known_conventions.clone()
+            }),
             GeometryAttributeAuthoring::f32(
                 AttributeSemantic::Tangent,
                 AttributeDomain::Corner,
                 4,
                 &tangents,
                 Presence::Absent,
+            )
+            .with_tangent_conventions(
+                if matches!(
+                    self.0,
+                    Fixture::UnknownEncoding | Fixture::UnknownCornerEncoding
+                ) {
+                    TangentConventions::UNKNOWN
+                } else {
+                    known_conventions
+                },
             ),
         ];
         let custom = [f64::from_bits(0x3ff0_0000_0000_0001), -0.0, 7.0];
@@ -125,8 +146,6 @@ impl FormatImporter for DomainImporter {
         } else {
             SceneSpace {
                 uv_origin: UvOrigin::LowerLeft,
-                tangent_basis: TangentBasisConvention::MikkTspace,
-                tangent_handedness_encoding: TangentHandednessEncoding::SignInW,
                 ..SceneSpace::STANDARD_TARGET
             }
         };
@@ -218,11 +237,13 @@ fn conversion_transports_all_normal_tangent_domains_and_sparse_explicitness() {
             ],
         ),
     ] {
-        let AttributeData::DenseF32 { values, lanes: 4 } = output
+        let tangent = output
             .attribute(AttributeSemanticRef::Tangent, domain)
-            .unwrap()
-            .data()
-        else {
+            .unwrap();
+        let conventions = tangent.tangent_conventions().unwrap();
+        assert_eq!(conventions.basis, TangentBasisRef::MikkTspace);
+        assert_eq!(conventions.encoding, TangentEncodingRef::SignInW);
+        let AttributeData::DenseF32 { values, lanes: 4 } = tangent.data() else {
             panic!("tangents");
         };
         assert_eq!(values, expected);
@@ -249,6 +270,10 @@ fn unsupported_present_semantics_return_typed_locations_without_a_new_generation
         (
             Fixture::UnknownEncoding,
             SpaceConversionIssue::TangentEncoding { attribute: 3 },
+        ),
+        (
+            Fixture::UnknownCornerEncoding,
+            SpaceConversionIssue::TangentEncoding { attribute: 4 },
         ),
     ] {
         let scene = scene(fixture);

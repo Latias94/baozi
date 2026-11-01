@@ -3612,7 +3612,7 @@ fn gltf_shape_materializes_all_five_canonical_domains() {
     );
 
     let (full, bounded) = capture_gltf_capability_snapshots_for_probe(&parts);
-    assert_eq!(full.schema_revision, 5);
+    assert_eq!(full.schema_revision, 6);
     assert_eq!(bounded.digest, full.digest);
     assert_eq!(bounded.totals, full.totals);
     assert!(bounded.preview.bytes_truncated || bounded.preview.items_truncated);

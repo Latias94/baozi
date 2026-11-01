@@ -71,35 +71,31 @@ impl<'a> SceneSpacePlan<'a> {
             .and_then(|work| work.checked_add(spatial.correspondence_work()))
             .and_then(|work| work.checked_add(appearance.correspondence_work()))
             .ok_or_else(overflow)?;
-        let name_bytes = spatial
-            .name_bytes()
-            .checked_add(if conversion.changes_coordinates() {
-                nodes.name_bytes()
+        let name_bytes = (if conversion.changes_coordinates() {
+            nodes.name_bytes()
+        } else {
+            0
+        })
+        .checked_add(if conversion.is_identity() {
+            0
+        } else {
+            geometry.name_bytes()
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(if deformation.changes_storage() {
+                deformation.name_bytes()
             } else {
                 0
             })
-            .and_then(|bytes| {
-                bytes.checked_add(if conversion.is_identity() {
-                    0
-                } else {
-                    geometry.name_bytes()
-                })
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(if animation.changes_storage() {
+                animation.name_bytes()
+            } else {
+                0
             })
-            .and_then(|bytes| {
-                bytes.checked_add(if deformation.changes_storage() {
-                    deformation.name_bytes()
-                } else {
-                    0
-                })
-            })
-            .and_then(|bytes| {
-                bytes.checked_add(if animation.changes_storage() {
-                    animation.name_bytes()
-                } else {
-                    0
-                })
-            })
-            .ok_or_else(overflow)?;
+        })
+        .ok_or_else(overflow)?;
         Ok(Self {
             source,
             conversion,

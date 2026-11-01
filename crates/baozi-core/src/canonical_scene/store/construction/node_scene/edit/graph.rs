@@ -76,6 +76,16 @@ where
             )?;
             (nodes, geometry)
         }
+        NodeSceneEditProgram::GenerateTangents(plan) => {
+            let nodes = lane.try_share_storage(&pending.input.tables.nodes)?;
+            let geometry = lane.try_retain_storage(
+                plan.capacities(),
+                plan.work(),
+                plan.name_bytes() as u64,
+                |control| plan.materialize(control).map_err(map_build),
+            )?;
+            (nodes, geometry)
+        }
         NodeSceneEditProgram::ConvertSpace(plan) => {
             let conversion = plan.conversion();
             let nodes = plan.nodes();
@@ -111,12 +121,9 @@ where
     )?;
     let spatial = if let NodeSceneEditProgram::ConvertSpace(plan) = &pending.program {
         let spatial = plan.spatial();
-        lane.try_retain_storage(
-            spatial.capacities(),
-            spatial.work(),
-            spatial.name_bytes() as u64,
-            |control| spatial.materialize(control).map_err(map_build),
-        )?
+        lane.try_retain_storage(spatial.capacities(), spatial.work(), 0, |control| {
+            spatial.materialize(control).map_err(map_build)
+        })?
     } else {
         lane.try_share_storage(&pending.input.tables.spatial)?
     };

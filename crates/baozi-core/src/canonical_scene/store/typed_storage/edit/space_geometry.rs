@@ -537,6 +537,7 @@ impl<'a> GeometrySpacePlan<'a> {
                 };
                 if control.run_unit(|| {
                     row.semantic == attribute.semantic
+                        && row.tangent_conventions == attribute.tangent_conventions
                         && row.domain == attribute.domain
                         && row.lanes == attribute.lanes
                         && row.element_count == attribute.element_count

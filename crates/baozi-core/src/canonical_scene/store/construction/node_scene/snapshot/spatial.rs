@@ -1,10 +1,7 @@
 use crate::entity::{CameraProjection, LightKindCategory};
 use crate::scene_space::{Axis, FrontFaceWinding, Handedness, UvOrigin};
 
-use super::super::semantic::{
-    NodeSceneSemanticView, NodeSceneSpatialSceneSpace, NodeSceneSpatialTangentBasis,
-    NodeSceneSpatialTangentEncoding,
-};
+use super::super::semantic::{NodeSceneSemanticView, NodeSceneSpatialSceneSpace};
 use super::{
     CanonicalDigestEncoder, NodeSceneSnapshotError, PRESENCE_ABSENT, PRESENCE_PRESENT, PreviewSink,
     SnapshotWorkMeter, TAG_COLLECTION_TOTAL, TAG_PRESENCE, TAG_REFERENCE, map_snapshot_invariant,
@@ -18,10 +15,6 @@ const TAG_FRONT_AXIS: u8 = 170;
 const TAG_UNIT_SCALE: u8 = 171;
 const TAG_FRONT_FACE_WINDING: u8 = 172;
 const TAG_UV_ORIGIN: u8 = 173;
-const TAG_TANGENT_BASIS: u8 = 175;
-const TAG_SCHEMA_NAME: u8 = 176;
-const TAG_SCHEMA_VERSION: u8 = 177;
-const TAG_TANGENT_ENCODING: u8 = 178;
 const TAG_CAMERAS: u8 = 179;
 const TAG_CAMERA: u8 = 180;
 const TAG_PROJECTION: u8 = 181;
@@ -63,12 +56,6 @@ const WINDING_COUNTER_CLOCKWISE: u8 = 2;
 const UV_ORIGIN_UNKNOWN: u8 = 0;
 const UV_ORIGIN_UPPER_LEFT: u8 = 1;
 const UV_ORIGIN_LOWER_LEFT: u8 = 2;
-const TANGENT_BASIS_UNKNOWN: u8 = 0;
-const TANGENT_BASIS_MIKKTSPACE: u8 = 1;
-const TANGENT_BASIS_NAMESPACED: u8 = 2;
-const TANGENT_ENCODING_UNKNOWN: u8 = 0;
-const TANGENT_ENCODING_SIGN_IN_W: u8 = 1;
-const TANGENT_ENCODING_NAMESPACED: u8 = 2;
 const CAMERA_PERSPECTIVE: u8 = 0;
 const CAMERA_ORTHOGRAPHIC: u8 = 1;
 const LIGHT_DIRECTIONAL: u8 = 0;
@@ -346,7 +333,7 @@ pub(super) fn write_node_attachment(
 }
 
 fn write_scene_space(
-    scene_space: NodeSceneSpatialSceneSpace<'_>,
+    scene_space: NodeSceneSpatialSceneSpace,
     transcript: &mut CanonicalDigestEncoder,
     preview: &mut PreviewSink,
     work: &mut SnapshotWorkMeter<'_>,
@@ -388,61 +375,7 @@ fn write_scene_space(
     preview.push_str(winding_name(scene_space.front_face_winding()));
     preview.push_str(" uv_origin=");
     preview.push_str(uv_origin_name(scene_space.uv_origin()));
-    write_tangent_basis(scene_space.tangent_basis(), transcript, preview)?;
-    write_tangent_encoding(scene_space.tangent_encoding(), transcript, preview)?;
     preview.push_str("\n");
-    Ok(())
-}
-
-fn write_tangent_basis(
-    value: NodeSceneSpatialTangentBasis<'_>,
-    transcript: &mut CanonicalDigestEncoder,
-    preview: &mut PreviewSink,
-) -> Result<(), NodeSceneSnapshotError> {
-    let (tag, name, schema) = match value {
-        NodeSceneSpatialTangentBasis::Unknown => (TANGENT_BASIS_UNKNOWN, "unknown", None),
-        NodeSceneSpatialTangentBasis::MikkTspace => (TANGENT_BASIS_MIKKTSPACE, "mikk_tspace", None),
-        NodeSceneSpatialTangentBasis::Namespaced(schema) => {
-            (TANGENT_BASIS_NAMESPACED, "namespaced", Some(schema))
-        }
-    };
-    transcript.tagged_u8(TAG_TANGENT_BASIS, tag)?;
-    preview.push_str(" tangent_basis=");
-    preview.push_str(name);
-    if let Some(schema) = schema {
-        transcript.tagged_bytes(TAG_SCHEMA_NAME, schema.name().as_bytes())?;
-        transcript.tagged_u32(TAG_SCHEMA_VERSION, schema.version().get())?;
-        preview.push_str(" tangent_basis_schema_name=");
-        preview.push_str(schema.name());
-        preview.push_str(" tangent_basis_schema_version=");
-        preview.push_u64(u64::from(schema.version().get()));
-    }
-    Ok(())
-}
-
-fn write_tangent_encoding(
-    value: NodeSceneSpatialTangentEncoding<'_>,
-    transcript: &mut CanonicalDigestEncoder,
-    preview: &mut PreviewSink,
-) -> Result<(), NodeSceneSnapshotError> {
-    let (tag, name, schema) = match value {
-        NodeSceneSpatialTangentEncoding::Unknown => (TANGENT_ENCODING_UNKNOWN, "unknown", None),
-        NodeSceneSpatialTangentEncoding::SignInW => (TANGENT_ENCODING_SIGN_IN_W, "sign_in_w", None),
-        NodeSceneSpatialTangentEncoding::Namespaced(schema) => {
-            (TANGENT_ENCODING_NAMESPACED, "namespaced", Some(schema))
-        }
-    };
-    transcript.tagged_u8(TAG_TANGENT_ENCODING, tag)?;
-    preview.push_str(" tangent_handedness_encoding=");
-    preview.push_str(name);
-    if let Some(schema) = schema {
-        transcript.tagged_bytes(TAG_SCHEMA_NAME, schema.name().as_bytes())?;
-        transcript.tagged_u32(TAG_SCHEMA_VERSION, schema.version().get())?;
-        preview.push_str(" tangent_handedness_encoding_schema_name=");
-        preview.push_str(schema.name());
-        preview.push_str(" tangent_handedness_encoding_schema_version=");
-        preview.push_u64(u64::from(schema.version().get()));
-    }
     Ok(())
 }
 

@@ -4,12 +4,12 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::ValidatedScene;
-use crate::canonical_scene::store::typed_storage::StoredAttributeSemantic;
+use crate::canonical_scene::store::typed_storage::{
+    StoredAttributeSemantic, StoredTangentEncoding,
+};
 use crate::geometry::TopologyKind;
 use crate::provenance::OptionsDigest;
-use crate::scene_space::{
-    Axis, FrontFaceWinding, Handedness, SceneSpaceField, TangentHandednessEncoding,
-};
+use crate::scene_space::{Axis, FrontFaceWinding, Handedness, SceneSpaceField};
 use crate::space_conversion::{
     NumericConversionError, SourceSpaceError, SpaceConversion, TargetSpace,
 };
@@ -214,17 +214,9 @@ pub(super) fn assumed_mask(conversion: SpaceConversion) -> u8 {
 }
 
 pub(super) fn tangent_requires_encoding(input: &ValidatedScene, attribute: usize) -> bool {
-    matches!(
-        input.as_node_scene().read_geometry().attributes[attribute].semantic,
-        StoredAttributeSemantic::Tangent
-    ) && !matches!(
-        input
-            .as_node_scene()
-            .tables
-            .spatial
-            .as_ref()
-            .space
-            .tangent_handedness_encoding,
-        TangentHandednessEncoding::SignInW
-    )
+    let attribute = &input.as_node_scene().read_geometry().attributes[attribute];
+    matches!(attribute.semantic, StoredAttributeSemantic::Tangent)
+        && !attribute.tangent_conventions.is_some_and(|conventions| {
+            matches!(conventions.encoding, StoredTangentEncoding::SignInW)
+        })
 }

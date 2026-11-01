@@ -38,13 +38,16 @@ use super::{
 const OBJ_POSITIONS: [[f32; 3]; 3] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
 const OBJ_TEXCOORDS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.5, 0.5]];
 const OBJ_NORMALS: [[f32; 3]; 2] = [[0.0, 0.0, 1.0], [0.0, 0.0, -1.0]];
-const PREVIOUS_OBJ_CAPABILITY_DIGEST: [u8; 32] = [
+// Frozen revision 4 oracle for this fixture's test-only migration bridge.
+const REVISION_4_OBJ_CAPABILITY_ORACLE_DIGEST: [u8; 32] = [
     0x45, 0x12, 0x6f, 0x21, 0x0c, 0x1a, 0x56, 0x40, 0x0c, 0x33, 0xc3, 0x50, 0x2e, 0x64, 0xcd, 0xbc,
     0xd4, 0x0b, 0x56, 0x43, 0x0d, 0x9c, 0x63, 0xb5, 0x8d, 0x6f, 0xc4, 0x86, 0x70, 0x34, 0x19, 0xc2,
 ];
+// Independently SHA-256 checked from the fixture's 2,185-byte semantic encoding:
+// revision 6, no global tangent declarations, unchanged OBJ payload and profile owners.
 const KNOWN_OBJ_CAPABILITY_DIGEST: [u8; 32] = [
-    0x1b, 0x31, 0xf2, 0x40, 0xbe, 0x1f, 0x7e, 0xbc, 0xfe, 0x69, 0x6b, 0x3a, 0x3b, 0x8b, 0xe6, 0xb3,
-    0x2a, 0x7d, 0x8c, 0x99, 0x2b, 0x30, 0xf6, 0xb9, 0xd6, 0x8f, 0x20, 0x90, 0x25, 0x1d, 0x48, 0xdc,
+    0xbc, 0xab, 0x0b, 0x66, 0xcb, 0xb8, 0xb0, 0x10, 0x9b, 0xac, 0x19, 0xe8, 0x72, 0xe6, 0x90, 0x78,
+    0xfc, 0x0f, 0xe1, 0x4e, 0xd8, 0x12, 0x9a, 0x1f, 0x84, 0xec, 0x50, 0xbd, 0x55, 0xe5, 0x71, 0x0a,
 ];
 const OBJ_FACES: [ObjTriangle; 2] = [
     ObjTriangle {
@@ -844,19 +847,31 @@ fn normalized_obj_corner_fixture_closes_the_canonical_scene_path() {
     assert_eq!(canonical_shape.face_count, 2);
     let (full, bounded) = capture_obj_capability_snapshots_for_probe(&parts);
 
-    // This fixture contains no camera/light rows: only the revision word changes.
-    // Restoring revision 4 must reproduce the previous complete transcript digest;
-    // unrelated payload, ordering, scalar, and provenance changes remain excluded.
+    // Frozen test-only oracle: this fixture has no Tangent, camera, or light rows.
+    // Restore the two removed global Unknown declarations after UV origin and the
+    // revision 4 word. The old digest then excludes unrelated payload, ordering,
+    // scalar, and provenance changes; it is not a supported compatibility encoder.
     let (_, transcript) =
         capture_node_scene_with_test_transcript(&parts.scene, snapshot_limits(8_192, 64), None)
             .expect("bounded complete OBJ transcript");
     assert!(transcript.complete);
     let mut previous = transcript.bytes;
-    assert_eq!(&previous[40..44], &5_u32.to_le_bytes());
+    assert_eq!(previous.len(), 2_185);
+    assert_eq!(&previous[40..44], &6_u32.to_le_bytes());
+    // Spatial + SceneSpace; unknown handedness/up/front, absent units, unknown winding/UV.
+    assert_eq!(
+        &previous[59..76],
+        &[
+            0xa6, 0x0c, 0x01, 0xa7, 0xa8, 0x00, 0xa9, 0x00, 0xaa, 0x00, 0xab, 0x0c, 0x00, 0xac,
+            0x00, 0xad, 0x00,
+        ]
+    );
+    assert_eq!(&previous[76..79], &[0xb3, 0x0c, 0x01]); // Camera collection follows.
+    let _ = previous.splice(76..76, [0xaf, 0x00, 0xb2, 0x00]);
     previous[40..44].copy_from_slice(&4_u32.to_le_bytes());
     assert_eq!(
         <[u8; 32]>::from(Sha256::digest(&previous)),
-        PREVIOUS_OBJ_CAPABILITY_DIGEST
+        REVISION_4_OBJ_CAPABILITY_ORACLE_DIGEST
     );
     assert_eq!(full.digest, KNOWN_OBJ_CAPABILITY_DIGEST);
     assert_eq!(bounded.digest, full.digest);

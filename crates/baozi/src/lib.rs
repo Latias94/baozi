@@ -44,8 +44,8 @@ pub use baozi_core::{
     LogicalMeshRef, MaterialBindingRef, MaterialId, MaterialRef, MeshInstanceId, MeshInstanceRef,
     MipmapFilter, NodeChildren, NodeId, NodeRef, PrimitiveId, PrimitiveRef, SamplerId, SamplerRef,
     SamplerState, SceneEntityKind, SceneLookupError, SceneSpaceRef, TangentBasisRef,
-    TangentEncodingRef, TexelFilter, TextureAddressMode, TextureId, TextureRef, TopologyKind,
-    TrsTransform, UvOrigin,
+    TangentConventionsRef, TangentEncodingRef, TexelFilter, TextureAddressMode, TextureId,
+    TextureRef, TopologyKind, TrsTransform, UvOrigin,
 };
 pub use baozi_core::{
     CameraProjectionError, LightDefinition, LightEmissionError, LightError, LightKindCategory,
@@ -53,8 +53,7 @@ pub use baozi_core::{
 };
 pub use baozi_core::{
     ConventionValue, NumericConversionError, SceneSpace, SceneSpaceField,
-    SceneSpaceValidationError, SourceSpaceError, TangentBasisConvention, TangentHandednessEncoding,
-    TargetSpace,
+    SceneSpaceValidationError, SourceSpaceError, TargetSpace,
 };
 pub use baozi_core::{
     DigestAlgorithm, EntityMetadataOwner, MetadataArrayRef, MetadataEntryRef, MetadataOwnerRef,
@@ -69,6 +68,10 @@ pub use baozi_core::{
 pub use baozi_core::{
     ProvenanceEvidenceRef, ProvenanceId, ProvenanceKindRef, ProvenanceLookupError,
     ProvenanceOperationKindRef, ProvenanceOperationRef, ProvenanceRef,
+};
+pub use baozi_core::{
+    TangentBasisConvention, TangentConventionField, TangentConventions,
+    TangentConventionsValidationError, TangentHandednessEncoding, TangentSchemaBindingError,
 };
 pub use baozi_import::{
     AuthorizedDependency, CapabilityStatus, CauseOwner, ConformancePolicy,

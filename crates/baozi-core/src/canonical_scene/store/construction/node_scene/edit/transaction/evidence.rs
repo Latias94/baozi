@@ -19,7 +19,7 @@ use crate::provenance::{DigestAlgorithm, OptionsDigest};
 use super::{
     EditRequest, SceneEditEvidenceTag, SceneEditOutput, SceneEditPostflight,
     SceneGeometryCornerOriginsTag, SceneGeometryFaceOffsetsTag, SceneNormalReplacement,
-    SceneTriangulationReplacement, schema,
+    SceneTangentReplacement, SceneTriangulationReplacement, schema,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -102,6 +102,35 @@ impl SceneEditFacts {
                             .is_some_and(|index| mapping.output_attribute(index).is_none()),
                     ) * schema::normal_field::REMOVED_TANGENT)
                     | (u32::from(replacement.smooth) * schema::normal_field::SMOOTH),
+                geometry.output_attribute_count(),
+                match replacement.options_digest.algorithm() {
+                    DigestAlgorithm::Sha256 => 0,
+                    DigestAlgorithm::Blake3 => 1,
+                },
+            ],
+            digest: digest_words(replacement.options_digest),
+            units: [0; 2],
+        })
+    }
+
+    pub(super) fn tangents(
+        replacement: SceneTangentReplacement<'_>,
+        geometry: &crate::canonical_scene::store::typed_storage::edit::tangents::GeometryTangentsPlan<'_>,
+    ) -> Option<Self> {
+        let mapping = geometry.attribute_mapping();
+        Some(Self {
+            words: [
+                schema::OPERATION_TANGENTS,
+                replacement.target.logical_mesh().index(),
+                replacement.target.local(),
+                geometry.target_row() as u32,
+                schema::tangent_domain_word(replacement.normal_domain)?,
+                geometry.output_corner_count(),
+                replacement.uv_set,
+                schema::tangent_domain_word(replacement.uv_domain)?,
+                u32::from(mapping.source_tangent().is_some()),
+                mapping.tangent_attribute(),
+                geometry.output_corner_count() / 3,
                 geometry.output_attribute_count(),
                 match replacement.options_digest.algorithm() {
                     DigestAlgorithm::Sha256 => 0,
@@ -246,7 +275,7 @@ impl<'a> SceneEditEvidenceRecipe<'a> {
 }
 
 impl SceneEditPostflight<'_> {
-    /// Retains a two-member normal graph or four-member triangulation graph. Any member failure
+    /// Retains a two-member generated-attribute graph or four-member triangulation graph. Any member failure
     /// aborts the whole success graph.
     pub fn build_evidence<O, PP, U>(
         &self,

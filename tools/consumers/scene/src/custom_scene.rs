@@ -1,6 +1,9 @@
 //! A downstream plugin using only parser authoring contracts and public Scene views.
 
-use baozi::{AttributeData, AuthoredTransformKind, Importer, Mat4, SceneValidationError, Vec3};
+use baozi::{
+    AttributeData, AttributeSemanticRef, AuthoredTransformKind, Importer, Mat4,
+    SceneValidationError, TangentBasisRef, TangentConventionsRef, TangentEncodingRef, Vec3,
+};
 use baozi_import::authoring::{
     AlphaMode, AttributeDomain, AttributeSemantic, AuthoredTransform, AuthoringRange,
     CameraLocalId, CameraProjection, Color, ColorInterpretation, GeometryAttributeAuthoring,
@@ -9,8 +12,9 @@ use baozi_import::authoring::{
     LightLocalId, LocalAxes, LogicalMeshLocalId, MaterialAuthoring, MaterialBindingAuthoring,
     MaterialFactors, NodeAuthoringNode, NodeLocalId, NodeParent, Presence, SamplerAuthoring,
     SamplerLocalId, SamplerState, ShadingModel, StaticSceneBuilder, SupplementalPbrFactors,
-    TextureAuthoring, TextureBlendOperation, TextureChannelSwizzle, TextureLocalId, TextureRole,
-    TextureSourceKey, TextureStrength, TextureTransform,
+    TangentBasisConvention, TangentConventions, TangentHandednessEncoding, TextureAuthoring,
+    TextureBlendOperation, TextureChannelSwizzle, TextureLocalId, TextureRole, TextureSourceKey,
+    TextureStrength, TextureTransform,
 };
 use baozi_import::{
     CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
@@ -89,6 +93,17 @@ impl FormatImporter for CustomScene {
                 &[0.0, 0.0, 1.0],
                 &[0.0, 0.0, 0.0],
             ),
+            GeometryAttributeAuthoring::f32(
+                AttributeSemantic::Tangent,
+                AttributeDomain::Vertex,
+                4,
+                &[1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0],
+                Presence::Absent,
+            )
+            .with_tangent_conventions(TangentConventions {
+                basis: TangentBasisConvention::Unknown,
+                encoding: TangentHandednessEncoding::SignInW,
+            }),
         ];
         let indices = [
             0,
@@ -103,7 +118,7 @@ impl FormatImporter for CustomScene {
             GeometryTopologyAuthoring::TriangleList,
             Presence::Present(&indices),
             Presence::Absent,
-            AuthoringRange::new(0, 2),
+            AuthoringRange::new(0, 3),
         )];
         let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
         let instances = [GeometryMeshInstanceAuthoring::new(
@@ -232,6 +247,7 @@ pub(super) fn verify() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(indices, &[1]);
     assert_eq!(values, &[0.0, 0.0, 1.0]);
     assert_eq!(default, &[0.0, 0.0, 0.0]);
+    assert_tangent(scene, [1.0, 0.0, 0.0, 1.0]);
     let CameraProjection::Orthographic(camera) = child.camera().unwrap().projection() else {
         panic!("custom orthographic camera");
     };
@@ -336,6 +352,7 @@ fn verify_spatial_conversion(scene: baozi::ValidatedScene) {
     assert_eq!(light.kind().inner_cone_radians(), Some(0.25));
     assert_eq!(light.kind().outer_cone_radians(), Some(0.5));
     assert_eq!(light.intensity(), 7.0);
+    assert_tangent(&scene, [-1.0, 0.0, 0.0, -1.0]);
     assert_appearance(&scene, 3.0, -1.5);
     assert_eq!(
         scene.images().next().unwrap().encoded_bytes().as_ptr(),
@@ -375,7 +392,31 @@ fn verify_spatial_conversion(scene: baozi::ValidatedScene) {
         scene.lights().next().unwrap().definition().axes(),
         LocalAxes::STANDARD
     );
+    assert_tangent(&scene, [1.0, 0.0, 0.0, 1.0]);
     assert_appearance(&scene, 1.5, -0.75);
+}
+
+fn assert_tangent(scene: &baozi::ValidatedScene, expected: [f32; 4]) {
+    let primitive = scene.meshes().next().unwrap().primitives().next().unwrap();
+    assert!(
+        primitive
+            .attributes()
+            .filter(|attribute| attribute.semantic() != AttributeSemanticRef::Tangent)
+            .all(|attribute| attribute.tangent_conventions().is_none())
+    );
+    let tangent = primitive
+        .attribute(AttributeSemanticRef::Tangent, AttributeDomain::Vertex)
+        .unwrap();
+    let conventions: TangentConventionsRef<'_> = tangent.tangent_conventions().unwrap();
+    assert_eq!(conventions.basis, TangentBasisRef::Unknown);
+    assert_eq!(conventions.encoding, TangentEncodingRef::SignInW);
+    let AttributeData::DenseF32 { lanes: 4, values } = tangent.data() else {
+        panic!("expected dense tangents with four lanes")
+    };
+    assert_eq!(values.len(), 12);
+    for value in values.chunks_exact(4) {
+        assert_eq!(value, expected);
+    }
 }
 
 fn assert_appearance(scene: &baozi::ValidatedScene, thickness: f32, displacement: f32) {

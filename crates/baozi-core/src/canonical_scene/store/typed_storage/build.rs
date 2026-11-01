@@ -2,6 +2,8 @@
 
 use baozi_operation::{CapacityPlan, CapacityPlanError, StorePlanError};
 
+use crate::attribute::{TangentBasisConvention, TangentConventions, TangentHandednessEncoding};
+
 use crate::canonical_scene::store::production::{
     GeometryAttributePayloadAuthoring, GeometryTopologyAuthoring, Presence, ValidatedGeometryBatch,
     ValidatedNodeBatch,
@@ -313,6 +315,7 @@ impl GeometryStoragePlan {
     ) -> Result<Self, StorePlanError> {
         let name_bytes = u64::from(batch.logical_mesh_name_byte_count())
             .checked_add(u64::from(batch.attribute_semantic_name_byte_count()))
+            .and_then(|bytes| bytes.checked_add(u64::from(batch.tangent_schema_name_byte_count())))
             .ok_or(StorePlanError::SizeOverflow)?;
         let plan = Self {
             logical_meshes: capacity::<StoredLogicalMesh>(u64::from(batch.logical_mesh_count()))?,
@@ -415,6 +418,12 @@ impl GeometryStoragePlan {
                 .ok_or(TypedStorageBuildError::Invariant)?,
                 _ => TextRange(TableRange::new(0, 0)),
             };
+            let tangent_conventions = append_tangent_conventions(
+                &mut storage.names,
+                self.names,
+                attribute.tangent_conventions(),
+                &mut unit,
+            )?;
             let payload =
                 self.append_payload(&mut storage, attribute.authored_payload(), &mut unit)?;
             push(
@@ -422,6 +431,7 @@ impl GeometryStoragePlan {
                 self.attributes,
                 StoredAttribute {
                     semantic: StoredAttributeSemantic::from_authored(attribute.semantic(), custom),
+                    tangent_conventions,
                     domain: attribute.domain(),
                     lanes: attribute.lanes(),
                     element_count: attribute.element_count(),
@@ -612,6 +622,47 @@ impl GeometryStoragePlan {
             },
         })
     }
+}
+
+fn append_tangent_conventions<C: TypedStorageBuildControl>(
+    names: &mut Vec<u8>,
+    plan: CapacityPlan,
+    conventions: Option<&TangentConventions>,
+    unit: &mut C,
+) -> BuildResult<Option<StoredTangentConventions>, C::Error> {
+    let Some(conventions) = conventions else {
+        return Ok(None);
+    };
+    let basis = match &conventions.basis {
+        TangentBasisConvention::Unknown => StoredTangentBasis::Unknown,
+        TangentBasisConvention::MikkTspace => StoredTangentBasis::MikkTspace,
+        TangentBasisConvention::TriangleUvDerivative => StoredTangentBasis::TriangleUvDerivative,
+        TangentBasisConvention::Namespaced { schema_id } => StoredTangentBasis::Namespaced {
+            name: append_name(
+                names,
+                plan,
+                Presence::Present(schema_id.name().as_str()),
+                unit,
+            )?
+            .ok_or(TypedStorageBuildError::Invariant)?,
+            version: schema_id.version(),
+        },
+    };
+    let encoding = match &conventions.encoding {
+        TangentHandednessEncoding::Unknown => StoredTangentEncoding::Unknown,
+        TangentHandednessEncoding::SignInW => StoredTangentEncoding::SignInW,
+        TangentHandednessEncoding::Namespaced { schema_id } => StoredTangentEncoding::Namespaced {
+            name: append_name(
+                names,
+                plan,
+                Presence::Present(schema_id.name().as_str()),
+                unit,
+            )?
+            .ok_or(TypedStorageBuildError::Invariant)?,
+            version: schema_id.version(),
+        },
+    };
+    Ok(Some(StoredTangentConventions { basis, encoding }))
 }
 
 /// Initialized bytes only; capacity qualification remains in the allocation plans.

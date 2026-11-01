@@ -8,21 +8,12 @@ impl SpatialStorage {
         control: &mut C,
         expected_cameras: usize,
         expected_lights: usize,
-        expected_name_bytes: usize,
     ) -> Result<bool, C::Error> {
-        if self.cameras.len() != expected_cameras
-            || self.lights.len() != expected_lights
-            || schema_name_bytes(&self.space) != expected_name_bytes
-        {
+        if self.cameras.len() != expected_cameras || self.lights.len() != expected_lights {
             return Ok(false);
         }
         if control.run_unit(|| self.space.validate().is_ok())? != Some(true) {
             return Ok(false);
-        }
-        for byte in schema_name_iter(&self.space) {
-            if control.run_unit(|| byte.is_ascii())? != Some(true) {
-                return Ok(false);
-            }
         }
         for &camera in &self.cameras {
             if control.run_unit(|| valid_camera(camera))? != Some(true) {

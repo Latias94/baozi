@@ -51,6 +51,7 @@ fn geometry() -> GeometryStorage {
         }],
         attributes: vec![
             StoredAttribute {
+                tangent_conventions: None,
                 semantic: StoredAttributeSemantic::Position,
                 domain: AttributeDomain::Vertex,
                 lanes: 3,
@@ -58,6 +59,7 @@ fn geometry() -> GeometryStorage {
                 payload: StoredAttributePayload::DenseF32(TableRange::new(0, 9)),
             },
             StoredAttribute {
+                tangent_conventions: None,
                 semantic: StoredAttributeSemantic::Normal,
                 domain: AttributeDomain::Corner,
                 lanes: 3,
@@ -69,6 +71,7 @@ fn geometry() -> GeometryStorage {
                 },
             },
             StoredAttribute {
+                tangent_conventions: None,
                 semantic: StoredAttributeSemantic::SmoothingGroup,
                 domain: AttributeDomain::Face,
                 lanes: 1,
@@ -76,6 +79,7 @@ fn geometry() -> GeometryStorage {
                 payload: StoredAttributePayload::DenseU32(TableRange::new(2, 1)),
             },
             StoredAttribute {
+                tangent_conventions: None,
                 semantic: StoredAttributeSemantic::Custom(TextRange(TableRange::new(0, 8))),
                 domain: AttributeDomain::Vertex,
                 lanes: 1,
@@ -95,6 +99,113 @@ fn geometry() -> GeometryStorage {
         f64_values: vec![1.0e200, 2.0e200, 3.0e200],
         u32_values: vec![0, 2, 7, 0, 1, 2],
         i32_values: vec![],
+    }
+}
+
+fn tangent_geometry() -> GeometryStorage {
+    GeometryStorage {
+        logical_meshes: vec![StoredLogicalMesh {
+            primitives: TableRange::new(0, 1),
+            name: None,
+        }],
+        primitives: vec![StoredPrimitive {
+            topology: TopologyKind::TriangleList,
+            vertex_count: 3,
+            corner_count: 3,
+            face_count: 1,
+            polygon_boundaries: None,
+            indices: None,
+            material: None,
+            attributes: TableRange::new(0, 3),
+        }],
+        attributes: vec![
+            StoredAttribute {
+                semantic: StoredAttributeSemantic::Position,
+                tangent_conventions: None,
+                domain: AttributeDomain::Vertex,
+                lanes: 3,
+                element_count: 3,
+                payload: StoredAttributePayload::DenseF32(TableRange::new(0, 9)),
+            },
+            StoredAttribute {
+                semantic: StoredAttributeSemantic::Tangent,
+                tangent_conventions: Some(StoredTangentConventions::UNKNOWN),
+                domain: AttributeDomain::Vertex,
+                lanes: 4,
+                element_count: 3,
+                payload: StoredAttributePayload::DenseF32(TableRange::new(9, 12)),
+            },
+            StoredAttribute {
+                semantic: StoredAttributeSemantic::Tangent,
+                tangent_conventions: Some(StoredTangentConventions {
+                    basis: StoredTangentBasis::Namespaced {
+                        name: TextRange(TableRange::new(0, 10)),
+                        version: std::num::NonZeroU32::new(2).unwrap(),
+                    },
+                    encoding: StoredTangentEncoding::Namespaced {
+                        name: TextRange(TableRange::new(10, 9)),
+                        version: std::num::NonZeroU32::new(3).unwrap(),
+                    },
+                }),
+                domain: AttributeDomain::Corner,
+                lanes: 4,
+                element_count: 3,
+                payload: StoredAttributePayload::DenseF32(TableRange::new(21, 12)),
+            },
+        ],
+        mesh_instances: vec![],
+        names: b"test:basistest:sign".to_vec(),
+        f32_values: vec![0.0; 33],
+        f64_values: vec![],
+        u32_values: vec![],
+        i32_values: vec![],
+    }
+}
+
+#[test]
+fn tangent_declarations_are_inline_and_central_validation_closes_their_exact_text_ranges() {
+    let storage = tangent_geometry();
+    let allocations = allocation_counter::measure(|| {
+        assert_eq!(
+            storage.validate(&mut Control::default(), [1, 1, 3, 0], 1, 0),
+            Ok(true)
+        );
+    });
+    assert_eq!(allocations.count_total, 0);
+    let corruptions: [fn(&mut GeometryStorage); 7] = [
+        |s| s.attributes[0].tangent_conventions = Some(StoredTangentConventions::UNKNOWN),
+        |s| s.attributes[1].tangent_conventions = None,
+        |s| {
+            s.attributes[1].tangent_conventions.as_mut().unwrap().basis =
+                StoredTangentBasis::MikkTspace
+        },
+        |s| {
+            s.attributes[2].tangent_conventions.as_mut().unwrap().basis =
+                StoredTangentBasis::Namespaced {
+                    name: TextRange(TableRange::new(1, 9)),
+                    version: std::num::NonZeroU32::new(2).unwrap(),
+                };
+        },
+        |s| {
+            s.attributes[2]
+                .tangent_conventions
+                .as_mut()
+                .unwrap()
+                .encoding = StoredTangentEncoding::Namespaced {
+                name: TextRange(TableRange::new(0, 9)),
+                version: std::num::NonZeroU32::new(3).unwrap(),
+            };
+        },
+        |s| s.names[0] = b'T',
+        |s| s.names.push(b'x'),
+    ];
+    for corrupt in corruptions {
+        let mut storage = tangent_geometry();
+        corrupt(&mut storage);
+        assert_eq!(
+            storage.validate(&mut Control::default(), [1, 1, 3, 0], 1, 0),
+            Ok(false)
+        );
     }
 }
 

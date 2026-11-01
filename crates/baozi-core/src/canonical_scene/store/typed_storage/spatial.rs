@@ -8,29 +8,9 @@ pub(in crate::canonical_scene::store) mod build;
 mod tests;
 mod validation;
 
-/// SceneSpace and its bounded extension identities are entirely inline.
+/// Spatial declarations are inline; tangent declarations belong to geometry attributes.
 pub(in crate::canonical_scene::store) struct SpatialStorage {
     pub(in crate::canonical_scene::store) space: SceneSpace,
     pub(in crate::canonical_scene::store) cameras: Vec<CameraProjection>,
     pub(in crate::canonical_scene::store) lights: Vec<LightDefinition>,
-}
-
-pub(in crate::canonical_scene::store) fn schema_name_bytes(space: &SceneSpace) -> usize {
-    space
-        .tangent_basis
-        .schema_id()
-        .map_or(0, |schema| schema.name().as_str().len())
-        + space
-            .tangent_handedness_encoding
-            .schema_id()
-            .map_or(0, |schema| schema.name().as_str().len())
-}
-
-fn schema_name_iter(space: &SceneSpace) -> impl Iterator<Item = u8> + '_ {
-    space
-        .tangent_basis
-        .schema_id()
-        .into_iter()
-        .chain(space.tangent_handedness_encoding.schema_id())
-        .flat_map(|schema| schema.name().as_str().bytes())
 }

@@ -423,11 +423,6 @@ fn authored_gltf_tangents_reflect_without_claiming_a_construction_algorithm() ->
     let (scene, _) = report.into_parts();
     assert_eq!(scene.space().front_axis, baozi::Axis::PositiveZ);
     assert_eq!(scene.space().uv_origin, UvOrigin::UpperLeft);
-    assert_eq!(scene.space().tangent_basis, TangentBasisRef::Unknown);
-    assert_eq!(
-        scene.space().tangent_handedness_encoding,
-        TangentEncodingRef::SignInW
-    );
     let tangents = |scene: &baozi::ValidatedScene| -> Vec<[f32; 4]> {
         let attribute = scene
             .meshes()
@@ -439,6 +434,9 @@ fn authored_gltf_tangents_reflect_without_claiming_a_construction_algorithm() ->
             .attributes()
             .find(|a| a.semantic() == AttributeSemanticRef::Tangent)
             .unwrap();
+        let conventions = attribute.tangent_conventions().unwrap();
+        assert_eq!(conventions.basis, TangentBasisRef::Unknown);
+        assert_eq!(conventions.encoding, TangentEncodingRef::SignInW);
         let baozi::AttributeData::DenseF32 { values, .. } = attribute.data() else {
             panic!("expected dense tangents");
         };
@@ -460,7 +458,6 @@ fn authored_gltf_tangents_reflect_without_claiming_a_construction_algorithm() ->
     for (before, after) in before.iter().zip(tangents(&scene)) {
         assert_eq!(after, [before[0], before[1], -before[2], -before[3]]);
     }
-    assert_eq!(scene.space().tangent_basis, TangentBasisRef::Unknown);
     Ok(())
 }
 

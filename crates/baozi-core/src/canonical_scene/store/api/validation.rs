@@ -375,6 +375,12 @@ pub enum SceneValidationError {
     AttributeScalarShape { attribute: usize, lanes: u8 },
     #[error("attribute {attribute} uses unsupported built-in domain or scalar format")]
     AttributeSchema { attribute: usize },
+    #[error("attribute {attribute} has invalid tangent conventions: {source}")]
+    TangentConventions {
+        attribute: usize,
+        #[source]
+        source: crate::attribute::TangentConventionsValidationError,
+    },
     #[error("attribute {attribute} has non-finite floating-point source value at scalar {scalar}")]
     NonFiniteAttributeValue { attribute: usize, scalar: usize },
     #[error("attribute {attribute} source projection is valid only for the Corner domain")]
@@ -1237,6 +1243,7 @@ impl SceneValidationError {
             | Self::ZeroAttributeLanes { .. }
             | Self::AttributeScalarShape { .. }
             | Self::AttributeSchema { .. }
+            | Self::TangentConventions { .. }
             | Self::NonFiniteAttributeValue { .. }
             | Self::SourceProjectionDomain { .. }
             | Self::SourceProjectionCardinality { .. }
@@ -1430,6 +1437,7 @@ impl SceneValidationError {
             Self::ZeroAttributeLanes { .. } => "geometry.zero-attribute-lanes",
             Self::AttributeScalarShape { .. } => "geometry.attribute-scalar-shape",
             Self::AttributeSchema { .. } => "geometry.attribute-schema",
+            Self::TangentConventions { .. } => "geometry.tangent-conventions",
             Self::NonFiniteAttributeValue { .. } => "geometry.non-finite-attribute-value",
             Self::SourceProjectionDomain { .. } => "geometry.source-projection-domain",
             Self::SourceProjectionCardinality { .. } => "geometry.source-projection-cardinality",

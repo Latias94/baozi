@@ -3,7 +3,6 @@
 //! This module describes and validates source or target conventions. It does
 //! not transform geometry, hierarchy data, animation, or derived attributes.
 
-use crate::extension::ExtensionSchemaId;
 use std::fmt;
 use thiserror::Error;
 
@@ -87,77 +86,6 @@ impl UvOrigin {
     }
 }
 
-/// Algorithm or externally defined convention used to construct tangent space.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum TangentBasisConvention {
-    Unknown,
-    MikkTspace,
-    Namespaced { schema_id: ExtensionSchemaId },
-}
-
-impl TangentBasisConvention {
-    /// Creates an external tangent-basis behavior backed by a declarative schema.
-    pub fn try_namespaced(
-        schema_id: Option<ExtensionSchemaId>,
-    ) -> Result<Self, SceneSpaceSchemaBindingError> {
-        let schema_id = schema_id.ok_or(SceneSpaceSchemaBindingError::SchemaRequired {
-            field: SceneSpaceField::TangentBasis,
-        })?;
-        Ok(Self::Namespaced { schema_id })
-    }
-
-    pub const fn is_unknown(&self) -> bool {
-        matches!(self, Self::Unknown)
-    }
-
-    /// Returns the schema defining an external tangent-basis convention.
-    pub const fn schema_id(&self) -> Option<&ExtensionSchemaId> {
-        match self {
-            Self::Namespaced { schema_id } => Some(schema_id),
-            Self::Unknown | Self::MikkTspace => None,
-        }
-    }
-}
-
-/// Encoding used to reconstruct the bitangent from a tangent attribute.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum TangentHandednessEncoding {
-    Unknown,
-
-    /// Reconstructs the bitangent as
-    /// `tangent.w * cross(normal, tangent.xyz)`.
-    SignInW,
-
-    /// A bounded extension convention defined outside Baozi core.
-    Namespaced {
-        schema_id: ExtensionSchemaId,
-    },
-}
-
-impl TangentHandednessEncoding {
-    /// Creates an external handedness encoding backed by a declarative schema.
-    pub fn try_namespaced(
-        schema_id: Option<ExtensionSchemaId>,
-    ) -> Result<Self, SceneSpaceSchemaBindingError> {
-        let schema_id = schema_id.ok_or(SceneSpaceSchemaBindingError::SchemaRequired {
-            field: SceneSpaceField::TangentHandednessEncoding,
-        })?;
-        Ok(Self::Namespaced { schema_id })
-    }
-
-    pub const fn is_unknown(&self) -> bool {
-        matches!(self, Self::Unknown)
-    }
-
-    /// Returns the schema defining an external tangent-handedness encoding.
-    pub const fn schema_id(&self) -> Option<&ExtensionSchemaId> {
-        match self {
-            Self::Namespaced { schema_id } => Some(schema_id),
-            Self::Unknown | Self::SignInW => None,
-        }
-    }
-}
-
 /// Coordinate, unit, and render conventions carried by a scene.
 ///
 /// Unknown source facts remain explicit. [`Self::validate`] accepts a partial
@@ -171,8 +99,6 @@ pub struct SceneSpace {
     pub unit_scale_to_meters: Option<f64>,
     pub front_face_winding: FrontFaceWinding,
     pub uv_origin: UvOrigin,
-    pub tangent_basis: TangentBasisConvention,
-    pub tangent_handedness_encoding: TangentHandednessEncoding,
 }
 
 impl SceneSpace {
@@ -184,14 +110,11 @@ impl SceneSpace {
         unit_scale_to_meters: None,
         front_face_winding: FrontFaceWinding::Unknown,
         uv_origin: UvOrigin::Unknown,
-        tangent_basis: TangentBasisConvention::Unknown,
-        tangent_handedness_encoding: TangentHandednessEncoding::Unknown,
     };
 
     /// The standard spatial target for an explicit conversion request.
     ///
-    /// UV origin and tangent conventions intentionally remain unknown so a
-    /// caller must preserve them or explicitly name target conventions.
+    /// UV origin intentionally remains unknown. Tangent conventions belong to each attribute.
     pub const STANDARD_TARGET: Self = Self {
         handedness: Handedness::Right,
         up_axis: Axis::PositiveY,
@@ -199,8 +122,6 @@ impl SceneSpace {
         unit_scale_to_meters: Some(1.0),
         front_face_winding: FrontFaceWinding::CounterClockwise,
         uv_origin: UvOrigin::Unknown,
-        tangent_basis: TangentBasisConvention::Unknown,
-        tangent_handedness_encoding: TangentHandednessEncoding::Unknown,
     };
 
     pub const fn unknown() -> Self {
@@ -213,9 +134,7 @@ impl SceneSpace {
 
     /// Validates a partial scene-space descriptor.
     ///
-    /// Individual conventions may remain unknown. The tangent construction
-    /// algorithm and handedness encoding are independent facts, except that
-    /// declaring MikkTSpace also requires its defined sign-in-W encoding.
+    /// Individual spatial and UV conventions may remain unknown.
     pub fn validate(&self) -> Result<(), SceneSpaceValidationError> {
         if let Some(scale) = self.unit_scale_to_meters {
             if !scale.is_finite() {
@@ -231,15 +150,6 @@ impl SceneSpace {
                 up_axis: self.up_axis,
                 front_axis: self.front_axis,
             });
-        }
-
-        if matches!(self.tangent_basis, TangentBasisConvention::MikkTspace)
-            && !matches!(
-                self.tangent_handedness_encoding,
-                TangentHandednessEncoding::SignInW
-            )
-        {
-            return Err(SceneSpaceValidationError::MikkTspaceRequiresSignInW);
         }
 
         Ok(())
@@ -261,10 +171,6 @@ impl SceneSpace {
             Some(SceneSpaceField::FrontFaceWinding)
         } else if self.uv_origin.is_unknown() {
             Some(SceneSpaceField::UvOrigin)
-        } else if self.tangent_basis.is_unknown() {
-            Some(SceneSpaceField::TangentBasis)
-        } else if self.tangent_handedness_encoding.is_unknown() {
-            Some(SceneSpaceField::TangentHandednessEncoding)
         } else {
             None
         };
@@ -291,8 +197,6 @@ pub enum SceneSpaceField {
     UnitScaleToMeters,
     FrontFaceWinding,
     UvOrigin,
-    TangentBasis,
-    TangentHandednessEncoding,
 }
 
 impl fmt::Display for SceneSpaceField {
@@ -304,17 +208,8 @@ impl fmt::Display for SceneSpaceField {
             Self::UnitScaleToMeters => "unit scale to meters",
             Self::FrontFaceWinding => "front-face winding",
             Self::UvOrigin => "UV origin",
-            Self::TangentBasis => "tangent-basis convention",
-            Self::TangentHandednessEncoding => "tangent-handedness encoding",
         })
     }
-}
-
-/// Why an external scene-space behavior could not be bound declaratively.
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-pub enum SceneSpaceSchemaBindingError {
-    #[error("namespaced scene-space {field} requires an admitted extension schema")]
-    SchemaRequired { field: SceneSpaceField },
 }
 
 /// Why a scene-space descriptor is invalid or incomplete.
@@ -328,9 +223,6 @@ pub enum SceneSpaceValidationError {
 
     #[error("up axis {up_axis:?} and front axis {front_axis:?} share an underlying axis")]
     CoincidentAxes { up_axis: Axis, front_axis: Axis },
-
-    #[error("MikkTSpace tangent basis requires tangent handedness encoded as a sign in w")]
-    MikkTspaceRequiresSignInW,
 
     #[error("complete scene space has an unknown {field}")]
     UnknownField { field: SceneSpaceField },
@@ -348,8 +240,6 @@ mod tests {
             unit_scale_to_meters: Some(1.0),
             front_face_winding: FrontFaceWinding::CounterClockwise,
             uv_origin: UvOrigin::UpperLeft,
-            tangent_basis: TangentBasisConvention::MikkTspace,
-            tangent_handedness_encoding: TangentHandednessEncoding::SignInW,
         }
     }
 
@@ -373,7 +263,6 @@ mod tests {
 
         assert_eq!(space.validate(), Ok(()));
         assert_eq!(space.uv_origin, UvOrigin::Unknown);
-        assert_eq!(space.tangent_basis, TangentBasisConvention::Unknown);
         assert_eq!(
             space.validate_complete(),
             Err(SceneSpaceValidationError::UnknownField {
@@ -491,14 +380,6 @@ mod tests {
                 },
                 SceneSpaceField::UvOrigin,
             ),
-            (
-                SceneSpace {
-                    tangent_basis: TangentBasisConvention::Unknown,
-                    tangent_handedness_encoding: TangentHandednessEncoding::Unknown,
-                    ..complete_space()
-                },
-                SceneSpaceField::TangentBasis,
-            ),
         ];
 
         for (space, field) in cases {
@@ -507,105 +388,5 @@ mod tests {
                 Err(SceneSpaceValidationError::UnknownField { field })
             );
         }
-    }
-
-    #[test]
-    fn tangent_encoding_is_known_independently_of_its_construction_algorithm() {
-        let space = SceneSpace {
-            tangent_basis: TangentBasisConvention::Unknown,
-            tangent_handedness_encoding: TangentHandednessEncoding::SignInW,
-            ..complete_space()
-        };
-        assert_eq!(space.validate(), Ok(()));
-        assert_eq!(
-            space.validate_complete(),
-            Err(SceneSpaceValidationError::UnknownField {
-                field: SceneSpaceField::TangentBasis,
-            })
-        );
-    }
-
-    #[test]
-    fn external_tangent_algorithm_does_not_imply_an_encoding() {
-        let schema_id = ExtensionSchemaId::new("example:tangent-basis", 1).unwrap();
-        let space = SceneSpace {
-            tangent_basis: TangentBasisConvention::Namespaced { schema_id },
-            tangent_handedness_encoding: TangentHandednessEncoding::Unknown,
-            ..complete_space()
-        };
-        assert_eq!(space.validate(), Ok(()));
-        assert_eq!(
-            space.validate_complete(),
-            Err(SceneSpaceValidationError::UnknownField {
-                field: SceneSpaceField::TangentHandednessEncoding,
-            })
-        );
-    }
-
-    #[test]
-    fn mikk_tspace_requires_its_known_encoding() {
-        let space = SceneSpace {
-            tangent_basis: TangentBasisConvention::MikkTspace,
-            ..SceneSpace::default()
-        };
-        assert_eq!(
-            space.validate(),
-            Err(SceneSpaceValidationError::MikkTspaceRequiresSignInW)
-        );
-    }
-
-    #[test]
-    fn mikk_tspace_rejects_a_contradictory_handedness_encoding() {
-        let schema_id = ExtensionSchemaId::new("example:tangent-sign", 1)
-            .expect("test tangent-handedness schema should be canonical");
-        let encoding = TangentHandednessEncoding::try_namespaced(Some(schema_id))
-            .expect("schema-bound tangent handedness should be accepted");
-        let space = SceneSpace {
-            tangent_basis: TangentBasisConvention::MikkTspace,
-            tangent_handedness_encoding: encoding,
-            ..SceneSpace::default()
-        };
-
-        assert_eq!(
-            space.validate(),
-            Err(SceneSpaceValidationError::MikkTspaceRequiresSignInW)
-        );
-    }
-
-    #[test]
-    fn namespaced_tangent_conventions_are_preserved() {
-        assert_eq!(
-            TangentBasisConvention::try_namespaced(None),
-            Err(SceneSpaceSchemaBindingError::SchemaRequired {
-                field: SceneSpaceField::TangentBasis,
-            })
-        );
-        assert_eq!(
-            TangentHandednessEncoding::try_namespaced(None),
-            Err(SceneSpaceSchemaBindingError::SchemaRequired {
-                field: SceneSpaceField::TangentHandednessEncoding,
-            })
-        );
-
-        let basis_schema = ExtensionSchemaId::new("example:tangent-basis", 2)
-            .expect("test tangent-basis schema should be canonical");
-        let handedness_schema = ExtensionSchemaId::new("example:tangent-sign", 3)
-            .expect("test tangent-handedness schema should be canonical");
-        let mut space = complete_space();
-        space.handedness = Handedness::Left;
-        space.front_face_winding = FrontFaceWinding::Clockwise;
-        space.uv_origin = UvOrigin::LowerLeft;
-        space.tangent_basis = TangentBasisConvention::try_namespaced(Some(basis_schema.clone()))
-            .expect("schema-bound tangent basis should be accepted");
-        space.tangent_handedness_encoding =
-            TangentHandednessEncoding::try_namespaced(Some(handedness_schema.clone()))
-                .expect("schema-bound tangent handedness should be accepted");
-
-        assert_eq!(space.validate_complete(), Ok(()));
-        assert_eq!(space.tangent_basis.schema_id(), Some(&basis_schema));
-        assert_eq!(
-            space.tangent_handedness_encoding.schema_id(),
-            Some(&handedness_schema)
-        );
     }
 }

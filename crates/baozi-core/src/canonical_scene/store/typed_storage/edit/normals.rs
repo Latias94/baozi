@@ -13,8 +13,9 @@ use super::super::validation::TypedStorageValidationControl;
 use super::{
     EditResult, GeometryStorage, ScalarCounts, StoredAttribute, StoredAttributePayload,
     StoredLogicalMesh, StoredMeshInstance, StoredPrimitive, TableRange, TypedStorageBuildControl,
-    TypedStorageBuildError, add_count, allocate, append, capacity, copy_optional, overflow, push,
-    same_range, validate_dense_range,
+    TypedStorageBuildError, add_count, allocate, append, capacity, compare_tangent_schema_names,
+    copy_attribute_names, copy_optional, overflow, push, same_range, same_tangent_convention_kinds,
+    validate_dense_range,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,6 +185,7 @@ impl<'a> GeometryNormalsPlan<'a> {
         let mut source_smoothing_group = None;
         let mut scalars = ScalarCounts::default();
         let mut next_name = 0_usize;
+        let mut removed_name_bytes = 0_usize;
         for (index, attribute) in source.attributes.iter().enumerate() {
             let counts = control
                 .run_unit(|| {
@@ -193,6 +195,19 @@ impl<'a> GeometryNormalsPlan<'a> {
                             return Err(TypedStorageBuildError::Invariant);
                         }
                         add_count(&mut next_name, name.0.len())?;
+                    }
+                    if let Some(conventions) = attribute.tangent_conventions {
+                        for name in conventions.schema_names() {
+                            if name.0.start() != next_name || name.get(&source.names).is_none() {
+                                return Err(TypedStorageBuildError::Invariant);
+                            }
+                            add_count(&mut next_name, name.0.len())?;
+                            if target_attributes.contains(&index)
+                                && attribute.semantic == StoredAttributeSemantic::Tangent
+                            {
+                                add_count(&mut removed_name_bytes, name.0.len())?;
+                            }
+                        }
                     }
                     if target_attributes.contains(&index) {
                         // The source is canonical: Position ranks 0, Normal 1, and every other
@@ -317,7 +332,13 @@ impl<'a> GeometryNormalsPlan<'a> {
             capacity::<StoredPrimitive, C::Error>(source.primitives.len())?,
             capacity::<StoredAttribute, C::Error>(output_attributes as usize)?,
             capacity::<StoredMeshInstance, C::Error>(source.mesh_instances.len())?,
-            capacity::<u8, C::Error>(source.names.len())?,
+            capacity::<u8, C::Error>(
+                source
+                    .names
+                    .len()
+                    .checked_sub(removed_name_bytes)
+                    .ok_or_else(overflow)?,
+            )?,
             capacity::<f32, C::Error>(scalars.f32s)?,
             capacity::<f64, C::Error>(scalars.f64s)?,
             capacity::<u32, C::Error>(scalars.u32s)?,
@@ -328,7 +349,7 @@ impl<'a> GeometryNormalsPlan<'a> {
                 .ok_or_else(overflow)
         })?;
         let validation_work = work
-            .checked_sub(u64::try_from(source.names.len()).map_err(|_| overflow())?)
+            .checked_sub(u64::try_from(capacities[4].desired_capacity()).map_err(|_| overflow())?)
             .and_then(|count| count.checked_add(u64::try_from(source.primitives.len()).ok()?))
             .ok_or_else(overflow)?;
         Ok(Self {
@@ -374,7 +395,7 @@ impl<'a> GeometryNormalsPlan<'a> {
     }
 
     pub(in crate::canonical_scene::store) const fn name_bytes(&self) -> usize {
-        self.source.names.len()
+        self.capacities[4].desired_capacity()
     }
 
     pub(in crate::canonical_scene::store) const fn attribute_mapping(
@@ -491,17 +512,6 @@ impl<'a> GeometryNormalsPlan<'a> {
             u32_values: allocate(u32s)?,
             i32_values: allocate(i32s)?,
         };
-        // Normal/Tangent never own a custom name, so no name range needs to move.
-        for &byte in &self.source.names {
-            if output.names.len() >= names.desired_capacity()
-                || output.names.len() == output.names.capacity()
-            {
-                return Err(TypedStorageBuildError::Invariant);
-            }
-            control
-                .run_string_unit(|| output.names.push(byte))
-                .map_err(TypedStorageBuildError::Control)?;
-        }
         for index in 0..self.output_attribute_count() {
             // Add emits Normal at its canonical insertion point; Replace uses the original row.
             let row = if index == self.normal_attribute() {
@@ -511,6 +521,7 @@ impl<'a> GeometryNormalsPlan<'a> {
                 }
                 StoredAttribute {
                     semantic: StoredAttributeSemantic::Normal,
+                    tangent_conventions: None,
                     domain: AttributeDomain::Corner,
                     lanes: 3,
                     element_count: self.output_corner_count(),
@@ -524,6 +535,8 @@ impl<'a> GeometryNormalsPlan<'a> {
                     .source_attribute(index)
                     .and_then(|index| self.source.attributes.get(index as usize))
                     .ok_or(TypedStorageBuildError::Invariant)?;
+                let source =
+                    copy_attribute_names(self.source, *source, &mut output.names, names, control)?;
                 StoredAttribute {
                     payload: copy_payload(
                         source.payload,
@@ -532,7 +545,7 @@ impl<'a> GeometryNormalsPlan<'a> {
                         self.capacities,
                         control,
                     )?,
-                    ..*source
+                    ..source
                 }
             };
             push(&mut output.attributes, attributes, row, control)?;
@@ -560,12 +573,26 @@ impl<'a> GeometryNormalsPlan<'a> {
             };
             push(&mut output.primitives, primitives, row, control)?;
         }
-        append(
-            &mut output.logical_meshes,
-            meshes,
-            &self.source.logical_meshes,
-            control,
-        )?;
+        for source in &self.source.logical_meshes {
+            let name = match source.name {
+                Some(name) => super::super::build::append_name(
+                    &mut output.names,
+                    names,
+                    crate::canonical_scene::store::production::Presence::Present(
+                        name.get(&self.source.names)
+                            .ok_or(TypedStorageBuildError::Invariant)?,
+                    ),
+                    control,
+                )?,
+                None => None,
+            };
+            push(
+                &mut output.logical_meshes,
+                meshes,
+                StoredLogicalMesh { name, ..*source },
+                control,
+            )?;
+        }
         append(
             &mut output.mesh_instances,
             instances,
@@ -643,6 +670,7 @@ impl<'a> GeometryNormalsPlan<'a> {
             if index as u32 == self.normal_attribute() {
                 check!(
                     row.semantic == StoredAttributeSemantic::Normal
+                        && row.tangent_conventions.is_none()
                         && row.domain == AttributeDomain::Corner
                         && row.lanes == 3
                         && row.element_count == self.output_corner_count()
@@ -666,6 +694,10 @@ impl<'a> GeometryNormalsPlan<'a> {
                 };
                 check!(
                     same_semantic_kind(source.semantic, row.semantic)
+                        && same_tangent_convention_kinds(
+                            source.tangent_conventions,
+                            row.tangent_conventions
+                        )
                         && source.domain == row.domain
                         && source.lanes == row.lanes
                         && source.element_count == row.element_count
@@ -683,6 +715,15 @@ impl<'a> GeometryNormalsPlan<'a> {
                         control,
                     )?
                 {
+                    return Ok(false);
+                }
+                if !compare_tangent_schema_names(
+                    source.tangent_conventions,
+                    row.tangent_conventions,
+                    &self.source.names,
+                    &actual.names,
+                    control,
+                )? {
                     return Ok(false);
                 }
                 if !compare_payload(source.payload, row.payload, self.source, actual, control)? {
@@ -754,7 +795,7 @@ impl<'a> GeometryNormalsPlan<'a> {
     }
 }
 
-fn attribute_scalar_counts<E>(
+pub(super) fn attribute_scalar_counts<E>(
     source: &GeometryStorage,
     attribute: StoredAttribute,
 ) -> EditResult<ScalarCounts, E> {
@@ -813,7 +854,7 @@ fn attribute_scalar_counts<E>(
     Ok(counts)
 }
 
-fn copy_payload<C: TypedStorageBuildControl>(
+pub(super) fn copy_payload<C: TypedStorageBuildControl>(
     payload: StoredAttributePayload,
     source: &GeometryStorage,
     output: &mut GeometryStorage,
@@ -897,7 +938,7 @@ fn same_semantic_kind(source: StoredAttributeSemantic, actual: StoredAttributeSe
     }
 }
 
-fn compare_values<T: Copy, C: TypedStorageValidationControl>(
+pub(super) fn compare_values<T: Copy, C: TypedStorageValidationControl>(
     source: &[T],
     actual: &[T],
     equal: impl Fn(T, T) -> bool,
@@ -928,7 +969,7 @@ fn compare_ranges<T: Copy, C: TypedStorageValidationControl>(
     compare_values(source, actual, equal, control)
 }
 
-fn compare_optional_ranges<T: Copy + PartialEq, C: TypedStorageValidationControl>(
+pub(super) fn compare_optional_ranges<T: Copy + PartialEq, C: TypedStorageValidationControl>(
     source_range: Option<TableRange<T>>,
     actual_range: Option<TableRange<T>>,
     source: &[T],
@@ -949,7 +990,7 @@ fn compare_optional_ranges<T: Copy + PartialEq, C: TypedStorageValidationControl
     }
 }
 
-fn compare_payload<C: TypedStorageValidationControl>(
+pub(super) fn compare_payload<C: TypedStorageValidationControl>(
     source_payload: StoredAttributePayload,
     actual_payload: StoredAttributePayload,
     source: &GeometryStorage,

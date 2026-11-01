@@ -36,7 +36,15 @@ fn source_scene(account: &PhysicalStorageAccount, polygon: bool) -> NodeSceneSuc
             4,
             &tangents,
             Presence::Absent,
-        ),
+        )
+        .with_tangent_conventions(crate::TangentConventions {
+            basis: crate::TangentBasisConvention::Namespaced {
+                schema_id: crate::ExtensionSchemaId::new("test:metadata-basis", 2).unwrap(),
+            },
+            encoding: crate::TangentHandednessEncoding::Namespaced {
+                schema_id: crate::ExtensionSchemaId::new("test:metadata-sign", 3).unwrap(),
+            },
+        }),
     ];
     let indices: &[u32] = if polygon {
         &[0, 1, 2, 3]
@@ -157,6 +165,10 @@ fn normal_deletion_keeps_same_index_source_metadata_and_exact_json_after_source_
     let factory = test_factory();
     let account = test_account(&factory, 1024);
     let source = source_scene(&account, false);
+    assert_eq!(
+        source.scene.read_geometry().names.as_slice(),
+        b"test:metadata-basistest:metadata-sign"
+    );
     let geometry = GeometryNormalsPlan::try_new(
         source.scene.read_geometry(),
         0,
@@ -177,6 +189,15 @@ fn normal_deletion_keeps_same_index_source_metadata_and_exact_json_after_source_
     .unwrap();
     let plan = pending.counts.profile;
     let output = retain_edit(pending);
+    let output_geometry = output.output().geometry.as_ref();
+    assert!(output_geometry.names.is_empty());
+    assert_eq!(output_geometry.attributes.len(), 2);
+    assert!(
+        output_geometry
+            .attributes
+            .iter()
+            .all(|attribute| attribute.tangent_conventions.is_none())
+    );
     assert_valid_profile(&output.output().profile, plan);
     assert_source_payload(&output.output().profile, 1);
     assert!(

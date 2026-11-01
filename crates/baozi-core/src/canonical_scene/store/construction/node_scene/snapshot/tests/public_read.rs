@@ -291,13 +291,38 @@ fn spatial_readers_follow_node_attachments_and_preserve_unknowns() {
         LocalAxes::STANDARD,
         white_emission(2.0),
     )];
+    let positions = [0.0_f32, 0.0, 0.0];
+    let tangents = [1.0_f32, 0.0, 0.0, 1.0];
+    let attributes = [
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Position,
+            AttributeDomain::Vertex,
+            3,
+            &positions,
+            Presence::Absent,
+        ),
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Tangent,
+            AttributeDomain::Vertex,
+            4,
+            &tangents,
+            Presence::Absent,
+        ),
+    ];
+    let primitives = [GeometryPrimitiveAuthoring::new(
+        GeometryTopologyAuthoring::Points,
+        Presence::Absent,
+        Presence::Absent,
+        AuthoringRange::new(0, 2),
+    )];
+    let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
     let parts = build_scene_with_spatial_appearance_and_geometry(
         &account,
         &roots,
         &nodes,
         SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &cameras, &lights),
         AppearanceAuthoringBatch::empty(),
-        GeometryAuthoringBatch::empty(),
+        GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &[]),
     );
     let scene = ValidatedScene::from_node_scene(parts.scene);
     let node = scene.roots().next().unwrap();
@@ -332,14 +357,22 @@ fn spatial_readers_follow_node_attachments_and_preserve_unknowns() {
     assert_eq!(scene.light(light.id()).unwrap().id(), light.id());
     assert_eq!(scene.space().handedness, Handedness::Unknown);
     assert_eq!(scene.space().unit_scale_to_meters, None);
-    assert_eq!(scene.space().tangent_basis, crate::TangentBasisRef::Unknown);
+    let primitive = scene.meshes().next().unwrap().primitives().next().unwrap();
+    assert_eq!(primitive.positions().unwrap().tangent_conventions(), None);
+    let conventions = primitive
+        .attribute(AttributeSemanticRef::Tangent, AttributeDomain::Vertex)
+        .unwrap()
+        .tangent_conventions()
+        .unwrap();
+    assert_eq!(conventions.basis, crate::TangentBasisRef::Unknown);
+    assert_eq!(conventions.encoding, crate::TangentEncodingRef::Unknown);
     drop(scene);
     drop(parts.report);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
 }
 
 #[test]
-fn spatial_readers_borrow_retained_values_after_authoring_storage_is_dropped() {
+fn spatial_and_tangent_readers_borrow_retained_values_after_authoring_storage_is_dropped() {
     let factory = factory();
     let account = account(&factory);
     let reflected_axes =
@@ -374,16 +407,42 @@ fn spatial_readers_borrow_retained_values_after_authoring_storage_is_dropped() {
                 Presence::Present(LightLocalId::new(index as u32)),
             )
         });
-        let space = namespaced_scene_space();
+        let space = spatial_scene_space();
         let cameras = projections;
         let lights = light_definitions;
+        let positions = [0.0_f32, 0.0, 0.0];
+        let tangents = [1.0_f32, 0.0, 0.0, 1.0];
+        let attributes = [
+            GeometryAttributeAuthoring::f32(
+                AttributeSemantic::Position,
+                AttributeDomain::Vertex,
+                3,
+                &positions,
+                Presence::Absent,
+            ),
+            GeometryAttributeAuthoring::f32(
+                AttributeSemantic::Tangent,
+                AttributeDomain::Vertex,
+                4,
+                &tangents,
+                Presence::Absent,
+            )
+            .with_tangent_conventions(namespaced_tangent_conventions()),
+        ];
+        let primitives = [GeometryPrimitiveAuthoring::new(
+            GeometryTopologyAuthoring::Points,
+            Presence::Absent,
+            Presence::Absent,
+            AuthoringRange::new(0, 2),
+        )];
+        let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
         build_scene_with_spatial_appearance_and_geometry(
             &account,
             &roots,
             &nodes,
             SpatialAuthoringBatch::new(&space, &cameras, &lights),
             AppearanceAuthoringBatch::empty(),
-            GeometryAuthoringBatch::empty(),
+            GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &[]),
         )
     };
     let scene = ValidatedScene::from_node_scene(parts.scene);
@@ -398,13 +457,24 @@ fn spatial_readers_borrow_retained_values_after_authoring_storage_is_dropped() {
         );
         assert_eq!(space.front_face_winding, FrontFaceWinding::Clockwise);
         assert_eq!(space.uv_origin, UvOrigin::LowerLeft);
-        let crate::TangentBasisRef::Namespaced { name, version } = space.tangent_basis else {
+        let primitive = scene.meshes().next().unwrap().primitives().next().unwrap();
+        assert_eq!(primitive.positions().unwrap().tangent_conventions(), None);
+        let tangent = primitive
+            .attribute(AttributeSemanticRef::Tangent, AttributeDomain::Vertex)
+            .unwrap();
+        assert_eq!(
+            tangent.data(),
+            AttributeData::DenseF32 {
+                lanes: 4,
+                values: &[1.0, 0.0, 0.0, 1.0],
+            }
+        );
+        let conventions = tangent.tangent_conventions().unwrap();
+        let crate::TangentBasisRef::Namespaced { name, version } = conventions.basis else {
             panic!("the retained tangent-basis identity must remain borrowed");
         };
         assert_eq!((name, version.get()), ("example:tangent-basis", 2));
-        let crate::TangentEncodingRef::Namespaced { name, version } =
-            space.tangent_handedness_encoding
-        else {
+        let crate::TangentEncodingRef::Namespaced { name, version } = conventions.encoding else {
             panic!("the retained tangent encoding must remain borrowed");
         };
         assert_eq!((name, version.get()), ("example:tangent-sign", 3));

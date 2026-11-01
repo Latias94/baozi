@@ -1,4 +1,4 @@
-use crate::attribute::{AttributeDomain, AttributeSemantic};
+use crate::attribute::{AttributeDomain, AttributeSemantic, TangentConventions};
 
 use super::appearance::MaterialLocalId;
 use super::{NodeLocalId, Presence};
@@ -100,6 +100,7 @@ pub struct GeometryAttributeAuthoring<'a> {
     semantic: AttributeSemantic,
     domain: AttributeDomain,
     payload: GeometryAttributePayloadAuthoring<'a>,
+    tangent_conventions: Option<TangentConventions>,
 }
 
 impl<'a> GeometryAttributeAuthoring<'a> {
@@ -111,6 +112,11 @@ impl<'a> GeometryAttributeAuthoring<'a> {
         source_indices: Presence<&'a [u32]>,
     ) -> Self {
         Self {
+            tangent_conventions: if matches!(&semantic, AttributeSemantic::Tangent) {
+                Some(TangentConventions::UNKNOWN)
+            } else {
+                None
+            },
             semantic,
             domain,
             payload: GeometryAttributePayloadAuthoring::DenseF32 {
@@ -133,6 +139,11 @@ impl<'a> GeometryAttributeAuthoring<'a> {
         values: &'a [f64],
     ) -> Self {
         Self {
+            tangent_conventions: if matches!(&semantic, AttributeSemantic::Tangent) {
+                Some(TangentConventions::UNKNOWN)
+            } else {
+                None
+            },
             semantic,
             domain,
             payload: GeometryAttributePayloadAuthoring::DenseF64 { lanes, values },
@@ -146,6 +157,11 @@ impl<'a> GeometryAttributeAuthoring<'a> {
         values: &'a [u32],
     ) -> Self {
         Self {
+            tangent_conventions: if matches!(&semantic, AttributeSemantic::Tangent) {
+                Some(TangentConventions::UNKNOWN)
+            } else {
+                None
+            },
             semantic,
             domain,
             payload: GeometryAttributePayloadAuthoring::DenseU32 { lanes, values },
@@ -159,6 +175,11 @@ impl<'a> GeometryAttributeAuthoring<'a> {
         values: &'a [i32],
     ) -> Self {
         Self {
+            tangent_conventions: if matches!(&semantic, AttributeSemantic::Tangent) {
+                Some(TangentConventions::UNKNOWN)
+            } else {
+                None
+            },
             semantic,
             domain,
             payload: GeometryAttributePayloadAuthoring::DenseI32 { lanes, values },
@@ -175,6 +196,11 @@ impl<'a> GeometryAttributeAuthoring<'a> {
         default: &'a [f32],
     ) -> Self {
         Self {
+            tangent_conventions: if matches!(&semantic, AttributeSemantic::Tangent) {
+                Some(TangentConventions::UNKNOWN)
+            } else {
+                None
+            },
             semantic,
             domain,
             payload: GeometryAttributePayloadAuthoring::SparseF32 {
@@ -197,6 +223,11 @@ impl<'a> GeometryAttributeAuthoring<'a> {
         default: &'a [u32],
     ) -> Self {
         Self {
+            tangent_conventions: if matches!(&semantic, AttributeSemantic::Tangent) {
+                Some(TangentConventions::UNKNOWN)
+            } else {
+                None
+            },
             semantic,
             domain,
             payload: GeometryAttributePayloadAuthoring::SparseU32 {
@@ -220,6 +251,11 @@ impl<'a> GeometryAttributeAuthoring<'a> {
         default: &'a [i32],
     ) -> Self {
         Self {
+            tangent_conventions: if matches!(&semantic, AttributeSemantic::Tangent) {
+                Some(TangentConventions::UNKNOWN)
+            } else {
+                None
+            },
             semantic,
             domain,
             payload: GeometryAttributePayloadAuthoring::SparseI32 {
@@ -230,6 +266,20 @@ impl<'a> GeometryAttributeAuthoring<'a> {
                 default,
             },
         }
+    }
+
+    /// Declares construction and reconstruction conventions for this exact tangent attribute.
+    ///
+    /// Central validation rejects this declaration on any other semantic.
+    pub fn with_tangent_conventions(mut self, conventions: TangentConventions) -> Self {
+        self.tangent_conventions = Some(conventions);
+        self
+    }
+
+    pub(in crate::canonical_scene::store) const fn tangent_conventions(
+        &self,
+    ) -> Option<&TangentConventions> {
+        self.tangent_conventions.as_ref()
     }
 
     pub(in crate::canonical_scene::store) const fn semantic(&self) -> &AttributeSemantic {

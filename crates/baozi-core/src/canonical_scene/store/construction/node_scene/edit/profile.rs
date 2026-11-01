@@ -4,6 +4,10 @@
 #[path = "normals_tests.rs"]
 mod normals_tests;
 
+#[cfg(test)]
+#[path = "tangents_tests.rs"]
+mod tangents_tests;
+
 use baozi_operation::__retained_store_integration::activation::CanonicalLane;
 use baozi_operation::__retained_store_integration::authority::CanonicalInheritanceSource;
 use baozi_operation::{
@@ -23,6 +27,7 @@ use crate::canonical_scene::store::typed_storage::build::{
     finish, push,
 };
 use crate::canonical_scene::store::typed_storage::edit::normals::NormalAttributeMapping;
+use crate::canonical_scene::store::typed_storage::edit::tangents::TangentAttributeMapping;
 use crate::canonical_scene::store::typed_storage::profile::build::ProfileStatePlan;
 use crate::canonical_scene::store::typed_storage::profile::edit_metadata::{
     MetadataEditCursor, MetadataEditPlan,
@@ -51,6 +56,10 @@ pub(super) enum ProfileEditTargets {
         primitive: u32,
         attributes: NormalAttributeMapping,
         smooth: bool,
+    },
+    Tangents {
+        primitive: u32,
+        attributes: TangentAttributeMapping,
     },
     Space(crate::space_conversion::SpaceConversion),
 }
@@ -202,6 +211,12 @@ impl ProfileEditTargets {
             (Self::Normals { attributes, .. }, CanonicalProfileOwner::Attribute(index)) => {
                 index == attributes.normal_attribute()
             }
+            (Self::Tangents { primitive, .. }, CanonicalProfileOwner::Primitive(index)) => {
+                primitive == index
+            }
+            (Self::Tangents { attributes, .. }, CanonicalProfileOwner::Attribute(index)) => {
+                index == attributes.tangent_attribute()
+            }
             _ => false,
         })
     }
@@ -242,6 +257,11 @@ impl ProfileEditTargets {
                     .source_attribute(index)
                     .map(CanonicalProfileOwner::Attribute)
             }
+            (Self::Tangents { attributes, .. }, CanonicalProfileOwner::Attribute(index)) => {
+                attributes
+                    .source_attribute(index)
+                    .map(CanonicalProfileOwner::Attribute)
+            }
             _ => Some(output),
         }
     }
@@ -249,6 +269,11 @@ impl ProfileEditTargets {
     fn output_owner(self, source: CanonicalProfileOwner) -> Option<CanonicalProfileOwner> {
         match (self, source) {
             (Self::Normals { attributes, .. }, CanonicalProfileOwner::Attribute(index)) => {
+                attributes
+                    .output_attribute(index)
+                    .map(CanonicalProfileOwner::Attribute)
+            }
+            (Self::Tangents { attributes, .. }, CanonicalProfileOwner::Attribute(index)) => {
                 attributes
                     .output_attribute(index)
                     .map(CanonicalProfileOwner::Attribute)
@@ -296,15 +321,15 @@ fn profile_owner(
         .filter(|row| row.owner == owner)
 }
 
-/// A bounded merge of at most four proven source-owner attachment lists.
+/// A bounded merge of at most five proven source-owner attachment lists.
 struct OwnerParents<'a> {
-    lists: [&'a [ProfileProvenanceRef]; 4],
+    lists: [&'a [ProfileProvenanceRef]; 5],
     maximum_depth: u32,
 }
 
 impl OwnerParents<'_> {
     fn iter(&self) -> impl Iterator<Item = ProfileProvenanceRef> + '_ {
-        let mut next = [0_usize; 4];
+        let mut next = [0_usize; 5];
         std::iter::from_fn(move || {
             let candidate = self
                 .lists
@@ -330,7 +355,7 @@ fn owner_parents(
     output_owner: CanonicalProfileOwner,
 ) -> Option<OwnerParents<'_>> {
     let source = input.tables.profile.state.as_ref();
-    let mut owners = [None; 4];
+    let mut owners = [None; 5];
     if let (
         ProfileEditTargets::Normals {
             primitive,
@@ -355,6 +380,24 @@ fn owner_parents(
         } else {
             None
         };
+    } else if let (
+        ProfileEditTargets::Tangents {
+            primitive,
+            attributes,
+        },
+        CanonicalProfileOwner::Attribute(index),
+    ) = (targets, output_owner)
+        && index == attributes.tangent_attribute()
+    {
+        owners[0] = Some(CanonicalProfileOwner::Primitive(primitive));
+        owners[1] = Some(CanonicalProfileOwner::Attribute(
+            attributes.source_position(),
+        ));
+        owners[2] = Some(CanonicalProfileOwner::Attribute(attributes.source_normal()));
+        owners[3] = Some(CanonicalProfileOwner::Attribute(attributes.source_uv()));
+        owners[4] = attributes
+            .source_tangent()
+            .map(CanonicalProfileOwner::Attribute);
     } else {
         owners[0] = Some(targets.source_owner(output_owner)?);
         if matches!(targets, ProfileEditTargets::Space(_)) {
@@ -362,7 +405,7 @@ fn owner_parents(
         }
     }
     let mut parents = OwnerParents {
-        lists: [&[]; 4],
+        lists: [&[]; 5],
         maximum_depth: 0,
     };
     for (index, owner) in owners.into_iter().enumerate() {

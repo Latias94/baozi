@@ -36,6 +36,20 @@ index returns `None`. F64 precision, integer values, signed zeros, and scalar bi
 The original `attribute.data()` remains available when source sparse representation matters; an
 element read does not create or retain a dense expansion.
 
+`attribute.tangent_conventions()` returns `Some(TangentConventionsRef { basis, encoding })` for a
+Tangent attribute and `None` for every other semantic. Each semantic/domain stream owns its own
+declaration. `TangentBasisRef` describes the construction algorithm; `TangentEncodingRef` describes
+bitangent reconstruction. Both preserve explicit unknown values and borrow any namespaced schema
+identity from the Scene. A missing Tangent attribute has no declaration; an existing Tangent with
+unknown conventions still returns `Some` with both facts unknown. Readers do not infer either fact
+from four-component values, normals, UVs, materials, or scene space.
+
+Custom importers declare these facts on `GeometryAttributeAuthoring` with
+`.with_tangent_conventions(TangentConventions { basis, encoding })`. Tangent constructors default
+to `TangentConventions::UNKNOWN`; conventions belong to that descriptor rather than a Scene-wide
+default. The selected glTF profile declares an unknown construction algorithm and `SignInW` on each
+imported base Tangent attribute.
+
 ## Application triangle buffers
 
 Use `baozi::postprocess::triangle_vertices(primitive)` after any explicit triangulation, normal
@@ -109,9 +123,10 @@ Parent lookup is not currently exposed. Traverse from the roots and maintain app
 state when parent relationships are required. A future direct parent lookup must retain an admitted
 index rather than scan the graph on every getter.
 
-Node camera/light attachments follow to scene-owned definitions. `scene.space()` preserves unknown
-axes, units, winding, UV origin, and tangent conventions. Reading never assigns missing units or
-performs an implicit coordinate conversion.
+Node camera/light attachments follow to scene-owned definitions. `scene.space()` returns the
+non-generic `SceneSpaceRef` with handedness, axes, units, winding, and UV origin, preserving unknown
+facts. Tangent conventions are read from the actual attribute. Reading never assigns missing units
+or performs an implicit coordinate conversion.
 
 Match `camera.projection()` as `CameraProjection::Perspective(parameters)` or
 `CameraProjection::Orthographic(parameters)`. Each payload includes its complete `axes()` alongside
@@ -335,7 +350,9 @@ weight, and source-order slices. Reading does not normalize, sort, or truncate w
 
 Logical morph definitions belong to a mesh. Primitive morph targets expose dense or sparse deltas
 without expanding them, and instances retain their authored weights. Names and optional payloads
-preserve the distinction between absence and authored emptiness.
+preserve the distinction between absence and authored emptiness. `MorphDeltaSemantic::Tangent`
+retains VEC3 delta semantics independently of the base Tangent attribute's construction and
+handedness declarations; a morph delta does not own or override those conventions.
 
 `scene.animation_clips()` exposes borrowed names, typed targets, key times, values, and tangents.
 See [reading retained animation](reading-animation.md) for time domains and interpolation. These

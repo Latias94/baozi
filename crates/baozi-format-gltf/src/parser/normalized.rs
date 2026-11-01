@@ -169,13 +169,22 @@ pub(super) fn submit_parts(
                 "gltf-complete-batch-attribute-offset",
             )?;
             for attribute in primitive.attributes.as_slice() {
-                attributes.try_push_reserved(GeometryAttributeAuthoring::f32(
+                let mut authored = GeometryAttributeAuthoring::f32(
                     attribute.semantic.clone(),
                     AttributeDomain::Vertex,
                     attribute.lanes,
                     attribute.values.as_slice(),
                     Presence::Absent,
-                ))?;
+                );
+                if attribute.semantic == AttributeSemantic::Tangent {
+                    // glTF defines bitangent reconstruction without identifying the
+                    // construction algorithm.
+                    authored = authored.with_tangent_conventions(TangentConventions {
+                        basis: TangentBasisConvention::Unknown,
+                        encoding: TangentHandednessEncoding::SignInW,
+                    });
+                }
+                attributes.try_push_reserved(authored)?;
             }
             let indices = if primitive.has_indices {
                 Presence::Present(primitive.indices.as_slice())
@@ -352,7 +361,6 @@ pub(super) fn submit_parts(
         mesh_instance_deformations.as_slice(),
     );
     // The asset front is +Z; camera-local viewing axes are a separate declaration.
-    // UV origin and bitangent reconstruction do not imply a tangent construction algorithm.
     let scene_space = SceneSpace {
         handedness: Handedness::Right,
         up_axis: Axis::PositiveY,
@@ -360,8 +368,6 @@ pub(super) fn submit_parts(
         unit_scale_to_meters: Some(1.0),
         front_face_winding: FrontFaceWinding::CounterClockwise,
         uv_origin: UvOrigin::UpperLeft,
-        tangent_basis: TangentBasisConvention::Unknown,
-        tangent_handedness_encoding: TangentHandednessEncoding::SignInW,
     };
     let spatial = SpatialAuthoringBatch::new(&scene_space, cameras.authored.as_slice(), &[]);
     let mut authored_nodes = ctx.metered_vec(

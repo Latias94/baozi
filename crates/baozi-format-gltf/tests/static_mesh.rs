@@ -24,6 +24,14 @@ fn imports_static_mesh_material_texture_uri_and_hierarchy() -> TestResult<()> {
 
     assert!(diagnostics.is_empty());
     assert!(report.scene().canonical_block_count() > 0);
+    assert!(
+        report
+            .scene()
+            .meshes()
+            .flat_map(|mesh| mesh.primitives())
+            .flat_map(|primitive| primitive.attributes())
+            .all(|attribute| attribute.tangent_conventions().is_none())
+    );
     Ok(())
 }
 

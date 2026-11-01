@@ -17,6 +17,8 @@ use crate::geometry::TopologyKind;
 
 use super::{TestControl, TestControlError, TestReservation};
 
+mod tangent;
+
 fn expected_geometry_bytes(rows: [usize; 4], scalars: [usize; 4], name_bytes: usize) -> u64 {
     use crate::canonical_scene::store::typed_storage::{
         GeometryStorage, StoredAttribute, StoredLogicalMesh, StoredMeshInstance, StoredPrimitive,

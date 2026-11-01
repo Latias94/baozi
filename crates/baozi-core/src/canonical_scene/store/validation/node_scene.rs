@@ -51,10 +51,6 @@ impl NodeSceneValidationProof {
         self.directory
     }
 
-    pub(in crate::canonical_scene::store) const fn spatial_name_bytes(&self) -> usize {
-        self.central_validation_plan.spatial_name_bytes()
-    }
-
     pub(in crate::canonical_scene::store) const fn profile_counts(&self) -> ProfileMeteredCounts {
         self.profile
     }
@@ -379,7 +375,6 @@ where
         session,
         expected_counts.camera_count as usize,
         expected_counts.light_count as usize,
-        validation_plan.spatial_name_bytes(),
     )? {
         return Ok(None);
     }

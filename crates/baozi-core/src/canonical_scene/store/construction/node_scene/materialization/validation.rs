@@ -356,6 +356,12 @@ pub(super) fn geometry_validation_error(
         Source::AttributeSchema { attribute } => SceneValidationError::AttributeSchema {
             attribute: *attribute,
         },
+        Source::TangentConventions { attribute, source } => {
+            SceneValidationError::TangentConventions {
+                attribute: *attribute,
+                source: *source,
+            }
+        }
         Source::NonFiniteAttributeValue { attribute, scalar } => {
             SceneValidationError::NonFiniteAttributeValue {
                 attribute: *attribute,

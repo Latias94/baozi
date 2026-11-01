@@ -187,6 +187,12 @@ impl GeometryStorage {
                     if previous.is_some_and(|prior| prior >= key) || !attribute_schema(attribute) {
                         return false;
                     }
+                    match (attribute.semantic, attribute.tangent_conventions) {
+                        (StoredAttributeSemantic::Tangent, Some(conventions))
+                            if conventions.is_valid() => {}
+                        (StoredAttributeSemantic::Tangent, _) | (_, Some(_)) => return false,
+                        (_, None) => {}
+                    }
                     previous = Some(key);
                     has_position |= attribute.semantic == StoredAttributeSemantic::Position;
                     let cardinality = match attribute.domain {
@@ -351,6 +357,20 @@ impl GeometryStorage {
                 return Ok(false);
             }
             pools.names += name.0.len();
+        }
+        if let Some(conventions) = attribute.tangent_conventions {
+            for name in conventions.schema_names() {
+                if name.0.len() > MAX_NAMESPACED_NAME_LEN || name.0.start() != pools.names {
+                    return Ok(false);
+                }
+                let Some(text) = name.get(&self.names) else {
+                    return Ok(false);
+                };
+                if crate::namespaced::validate_namespaced_name(text).is_err() {
+                    return Ok(false);
+                }
+                pools.names += name.0.len();
+            }
         }
         let lanes = usize::from(attribute.lanes);
         let Some(dense_count) = (attribute.element_count as usize).checked_mul(lanes) else {

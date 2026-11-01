@@ -103,6 +103,8 @@ pub use appearance::{
 };
 pub use attribute::{
     AttributeDomain, AttributeSemantic, AttributeSemanticKind, CustomAttributeSemantic,
+    TangentBasisConvention, TangentConventionField, TangentConventions,
+    TangentConventionsValidationError, TangentHandednessEncoding, TangentSchemaBindingError,
 };
 pub use canonical_scene::store::api::read::{
     AnimationChannelRef, AnimationClipRef, AnimationTarget,
@@ -110,8 +112,8 @@ pub use canonical_scene::store::api::read::{
 pub use canonical_scene::store::api::read::{
     AttributeData, AttributeElement, AttributeRef, AttributeSemanticRef, CameraRef, ImageRef,
     LightRef, LogicalMeshRef, MaterialBindingRef, MaterialRef, MeshInstanceRef, NodeChildren,
-    NodeRef, PrimitiveRef, SamplerRef, SceneSpaceRef, TangentBasisRef, TangentEncodingRef,
-    TextureRef,
+    NodeRef, PrimitiveRef, SamplerRef, SceneSpaceRef, TangentBasisRef, TangentConventionsRef,
+    TangentEncodingRef, TextureRef,
 };
 pub use canonical_scene::store::api::read::{
     EntityMetadataOwner, MetadataArrayRef, MetadataEntryRef, MetadataOwnerRef, MetadataValueRef,
@@ -166,7 +168,7 @@ pub use ordered_map::{
 pub use provenance::{DigestAlgorithm, SourceObjectKind};
 pub use scene_space::{
     Axis, FrontFaceWinding, Handedness, SceneSpace, SceneSpaceField, SceneSpaceValidationError,
-    TangentBasisConvention, TangentHandednessEncoding, UvOrigin,
+    UvOrigin,
 };
 pub use space_conversion::{
     ConventionValue, NumericConversionError, SourceSpaceError, TargetSpace,

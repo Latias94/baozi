@@ -3,6 +3,11 @@ use std::sync::atomic::AtomicU64;
 
 use baozi_operation::{PhysicalStorageAccount, PhysicalStorageAccountSnapshot, StoreRuntimeError};
 
+use crate::attribute::{AttributeDomain, AttributeSemantic};
+use crate::canonical_scene::store::construction::node_scene::semantic::geometry::{
+    NodeSceneGeometryAttributePayload, NodeSceneGeometryAttributeSemantic,
+    NodeSceneGeometryTangentBasis, NodeSceneGeometryTangentEncoding,
+};
 use crate::canonical_scene::store::construction::node_scene::semantic::{
     NodeSceneProfileMetadataValue, NodeSceneProfileProvenanceKind,
     NodeSceneProfileResourceStability, NodeSceneProfileSourceLocator, NodeSceneProfileStep,
@@ -17,13 +22,15 @@ use crate::canonical_scene::store::construction::node_scene::{
 };
 use crate::canonical_scene::store::construction::{STORE_DIMENSION, SceneConstructionError};
 use crate::canonical_scene::store::production::{
-    AnimationAuthoringBatch, AppearanceAuthoringBatch, CameraLocalId, CanonicalProfileOwner,
-    DeformationAuthoringBatch, GeometryAuthoringBatch, LightLocalId, MetadataAuthoringBatch,
+    AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, CameraLocalId,
+    CanonicalProfileOwner, DeformationAuthoringBatch, GeometryAttributeAuthoring,
+    GeometryAuthoringBatch, GeometryLogicalMeshAuthoring, GeometryPrimitiveAuthoring,
+    GeometryTopologyAuthoring, LightLocalId, LogicalMorphAuthoring, MetadataAuthoringBatch,
     MetadataAuthoringEntry, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId,
-    OwnerProvenanceAuthoring, Presence, ProfileAuthoringFailure, ProfileAuthoringLimit,
-    ProfileAuthoringSemanticError, ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring,
-    ResourceIdentityLocalId, SceneAuthoringBatch, SessionOpaqueReason, SourceIdentityAuthoring,
-    SourceIdentityLocalId, SpatialAuthoringBatch, SpatialAuthoringFailure,
+    OwnerProvenanceAuthoring, Presence, PrimitiveDeformationAuthoring, ProfileAuthoringFailure,
+    ProfileAuthoringLimit, ProfileAuthoringSemanticError, ProfileOwner, ProvenanceLocalId,
+    ProvenanceNodeAuthoring, ResourceIdentityLocalId, SceneAuthoringBatch, SessionOpaqueReason,
+    SourceIdentityAuthoring, SourceIdentityLocalId, SpatialAuthoringBatch, SpatialAuthoringFailure,
     SpatialAuthoringSemanticError,
 };
 use crate::entity::{
@@ -34,11 +41,11 @@ use crate::identity::SceneGenerationId;
 use crate::math::Color;
 use crate::namespaced::NamespacedName;
 use crate::provenance::SourceObjectKind;
-use crate::scene_space::{
-    Axis, FrontFaceWinding, Handedness, SceneSpace, TangentBasisConvention,
-    TangentHandednessEncoding, UvOrigin,
+use crate::scene_space::{Axis, FrontFaceWinding, Handedness, SceneSpace, UvOrigin};
+use crate::{
+    LocalAxes, SceneValidationLimits, TangentBasisConvention, TangentConventions,
+    TangentHandednessEncoding,
 };
-use crate::{LocalAxes, SceneValidationLimits};
 
 use super::{profile_fixture, terminal_failure_class, terminal_failure_code, test_limits};
 
@@ -50,6 +57,7 @@ enum ProfileClosureInputVariant {
     Baseline,
     MetadataMutation,
     SceneSpaceMutation,
+    TangentConventionsMutation,
     CameraOutOfRange,
     LightOutOfRange,
     SourceResourceOutOfRange,
@@ -255,15 +263,6 @@ fn profile_scene_space(variant: ProfileClosureInputVariant) -> SceneSpace {
         ),
         front_face_winding: FrontFaceWinding::Clockwise,
         uv_origin: UvOrigin::LowerLeft,
-        tangent_basis: TangentBasisConvention::try_namespaced(Some(extension_schema(
-            "baozi-tests:profile-closure-tangent-basis",
-            1,
-        )))
-        .expect("profile-closure tangent-basis convention"),
-        tangent_handedness_encoding: TangentHandednessEncoding::try_namespaced(Some(
-            extension_schema("baozi-tests:profile-closure-tangent-sign", 1),
-        ))
-        .expect("profile-closure tangent encoding convention"),
     }
 }
 
@@ -295,8 +294,54 @@ fn with_profile_closure_input_variant<R>(
     let spatial = SpatialAuthoringBatch::new(&scene_space, &cameras, &lights);
     let node_batch = NodeAuthoringBatch::new(Presence::Present(&roots), &nodes);
     let appearance = AppearanceAuthoringBatch::empty();
-    let geometry = GeometryAuthoringBatch::empty();
-    let deformation = DeformationAuthoringBatch::new(&[], &[], &[], &[], &[]);
+    let positions = [0.0_f32, 0.0, 0.0];
+    let tangents = [1.0_f32, 0.0, 0.0, 1.0];
+    let attributes = [
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Position,
+            AttributeDomain::Vertex,
+            3,
+            &positions,
+            Presence::Absent,
+        ),
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Tangent,
+            AttributeDomain::Vertex,
+            4,
+            &tangents,
+            Presence::Absent,
+        )
+        .with_tangent_conventions(TangentConventions {
+            basis: TangentBasisConvention::Namespaced {
+                schema_id: extension_schema(
+                    "baozi-tests:profile-closure-tangent-basis",
+                    if matches!(
+                        variant,
+                        ProfileClosureInputVariant::TangentConventionsMutation
+                    ) {
+                        2
+                    } else {
+                        1
+                    },
+                ),
+            },
+            encoding: TangentHandednessEncoding::Namespaced {
+                schema_id: extension_schema("baozi-tests:profile-closure-tangent-sign", 1),
+            },
+        }),
+    ];
+    let primitives = [GeometryPrimitiveAuthoring::new(
+        GeometryTopologyAuthoring::Points,
+        Presence::Absent,
+        Presence::Absent,
+        AuthoringRange::new(0, 2),
+    )];
+    let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
+    let geometry = GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &[]);
+    let logical_morphs = [LogicalMorphAuthoring::new(AuthoringRange::new(0, 0), &[])];
+    let primitive_deformations = [PrimitiveDeformationAuthoring::new(Presence::Absent, &[])];
+    let deformation =
+        DeformationAuthoringBatch::new(&[], &[], &logical_morphs, &primitive_deformations, &[]);
     let animation = AnimationAuthoringBatch::empty();
     let mut profile = profile_fixture(
         spatial,
@@ -327,6 +372,7 @@ fn with_profile_closure_input_variant<R>(
         ProfileClosureInputVariant::Baseline
         | ProfileClosureInputVariant::MetadataMutation
         | ProfileClosureInputVariant::SceneSpaceMutation
+        | ProfileClosureInputVariant::TangentConventionsMutation
         | ProfileClosureInputVariant::CameraOutOfRange
         | ProfileClosureInputVariant::LightOutOfRange => {}
     }
@@ -534,18 +580,87 @@ pub(in crate::canonical_scene::store) fn inspect_profile_closure_semantics_for_p
     );
 
     let geometry = cursor.geometry().expect("profile-closure geometry");
+    let mesh = geometry
+        .next_logical_mesh()
+        .expect("profile mesh read")
+        .expect("profile mesh");
+    assert_eq!(mesh.source_index(), 0);
+    assert_eq!((mesh.primitive_offset(), mesh.primitive_count()), (0, 1));
     assert!(
         geometry
             .next_logical_mesh()
             .expect("profile mesh end")
             .is_none()
     );
+    let primitive = geometry
+        .next_primitive()
+        .expect("profile primitive read")
+        .expect("profile primitive");
+    assert_eq!(primitive.source_index(), 0);
+    assert_eq!((primitive.vertex_count(), primitive.corner_count()), (1, 1));
+    assert_eq!(
+        (primitive.attribute_offset(), primitive.attribute_count()),
+        (0, 2)
+    );
+    assert!(!primitive.indices_present());
+    assert!(!primitive.polygon_boundaries_present());
     assert!(
         geometry
             .next_primitive()
             .expect("profile primitive end")
             .is_none()
     );
+    for (index, semantic, values) in [
+        (
+            0,
+            NodeSceneGeometryAttributeSemantic::Position,
+            &[0.0_f32, 0.0, 0.0][..],
+        ),
+        (
+            1,
+            NodeSceneGeometryAttributeSemantic::Tangent,
+            &[1.0_f32, 0.0, 0.0, 1.0][..],
+        ),
+    ] {
+        let attribute = geometry
+            .next_attribute()
+            .expect("profile attribute read")
+            .expect("profile attribute");
+        assert_eq!(attribute.source_index(), index);
+        assert_eq!(attribute.semantic(), semantic);
+        assert_eq!(attribute.domain(), AttributeDomain::Vertex);
+        assert_eq!(attribute.element_count(), 1);
+        if index == 0 {
+            assert_eq!(attribute.tangent_conventions(), None);
+        } else {
+            let conventions = attribute
+                .tangent_conventions()
+                .expect("profile tangent attribute conventions");
+            let NodeSceneGeometryTangentBasis::Namespaced { name, version } = conventions.basis
+            else {
+                panic!("profile tangent basis must retain its schema identity");
+            };
+            assert_eq!(
+                (name, version.get()),
+                ("baozi-tests:profile-closure-tangent-basis", 1)
+            );
+            let NodeSceneGeometryTangentEncoding::Namespaced { name, version } =
+                conventions.encoding
+            else {
+                panic!("profile tangent encoding must retain its schema identity");
+            };
+            assert_eq!(
+                (name, version.get()),
+                ("baozi-tests:profile-closure-tangent-sign", 1)
+            );
+        }
+        let NodeSceneGeometryAttributePayload::DenseF32 { values: actual } =
+            attribute.into_payload()
+        else {
+            panic!("profile attributes must retain dense f32 payloads");
+        };
+        assert_eq!(actual.into_slice(), values);
+    }
     assert!(
         geometry
             .next_attribute()
@@ -561,6 +676,12 @@ pub(in crate::canonical_scene::store) fn inspect_profile_closure_semantics_for_p
 
     let deformation = cursor.deformation().expect("profile-closure deformation");
     assert!(deformation.next_skin().expect("profile skin end").is_none());
+    let logical_morph = deformation
+        .next_logical_morph()
+        .expect("profile logical morph read")
+        .expect("profile logical morph");
+    assert_eq!(logical_morph.source_index(), 0);
+    assert_eq!(logical_morph.definition_count(), 0);
     assert!(
         deformation
             .next_logical_morph()
@@ -573,6 +694,13 @@ pub(in crate::canonical_scene::store) fn inspect_profile_closure_semantics_for_p
             .expect("profile morph definition end")
             .is_none()
     );
+    let primitive = deformation
+        .next_primitive()
+        .expect("profile deformation primitive read")
+        .expect("profile deformation primitive");
+    assert_eq!(primitive.source_index(), 0);
+    assert!(!primitive.influences_present());
+    assert_eq!(primitive.morph_target_count(), 0);
     assert!(
         deformation
             .next_primitive()
@@ -686,6 +814,10 @@ pub(in crate::canonical_scene::store) fn inspect_profile_closure_semantics_for_p
         CanonicalProfileOwner::Node(1),
         CanonicalProfileOwner::Camera(0),
         CanonicalProfileOwner::Light(0),
+        CanonicalProfileOwner::LogicalMesh(0),
+        CanonicalProfileOwner::Primitive(0),
+        CanonicalProfileOwner::Attribute(0),
+        CanonicalProfileOwner::Attribute(1),
     ];
     for (attachment_offset, expected_owner) in expected_owners.into_iter().enumerate() {
         let owner = profile
@@ -1055,13 +1187,16 @@ fn profile_closure_round_trips_spatial_lineage_and_metadata() {
     assert_eq!(observation.profile_resource_count, 1);
     assert_eq!(observation.profile_source_count, 1);
     assert_eq!(observation.profile_provenance_count, 1);
-    assert_eq!(observation.profile_owner_count, 5);
-    assert_eq!(observation.profile_attachment_count, 5);
+    assert_eq!(observation.profile_owner_count, 9);
+    assert_eq!(observation.profile_attachment_count, 9);
     assert_eq!(observation.profile_metadata_entry_count, 4);
 
     let (full, bounded) = capture_profile_closure_snapshots_for_probe(&parts);
     assert_eq!(full.totals.camera_count, 1);
     assert_eq!(full.totals.light_count, 1);
+    assert_eq!(full.totals.logical_mesh_count, 1);
+    assert_eq!(full.totals.primitive_count, 1);
+    assert_eq!(full.totals.attribute_count, 2);
     assert_eq!(full.totals.profile_metadata_entry_count, 4);
     assert!(bounded.preview.bytes_truncated || bounded.preview.items_truncated);
     assert_eq!(
@@ -1083,7 +1218,7 @@ fn profile_closure_round_trips_spatial_lineage_and_metadata() {
 }
 
 #[test]
-fn profile_and_scene_space_mutations_change_semantic_receipts() {
+fn profile_scene_space_and_tangent_attribute_mutations_change_semantic_receipts() {
     let factory = super::test_factory();
     let account = super::test_account(&factory, 512);
     let generation_source = AtomicU64::new(0);
@@ -1093,6 +1228,11 @@ fn profile_and_scene_space_mutations_change_semantic_receipts() {
         &account,
         &generation_source,
         ProfileClosureInputVariant::SceneSpaceMutation,
+    );
+    let tangent_mutation = build_profile_closure_scene_variant(
+        &account,
+        &generation_source,
+        ProfileClosureInputVariant::TangentConventionsMutation,
     );
     let baseline_snapshot = baseline
         .scene
@@ -1110,6 +1250,14 @@ fn profile_and_scene_space_mutations_change_semantic_receipts() {
             None,
         )
         .expect("profile mutation digest");
+    let tangent_snapshot = tangent_mutation
+        .scene
+        .capture_snapshot(
+            NodeSceneSnapshotLimits::try_new(0, 0, 1_000_000)
+                .expect("profile tangent mutation digest limits"),
+            None,
+        )
+        .expect("profile tangent mutation digest");
     let baseline_facade = super::project_gltf_facade_observation_v1_for_probe(&baseline.scene)
         .expect("profile baseline facade observation");
     let metadata_facade = super::project_gltf_facade_observation_v1_for_probe(&mutation.scene)
@@ -1118,6 +1266,8 @@ fn profile_and_scene_space_mutations_change_semantic_receipts() {
         super::project_gltf_facade_observation_v1_for_probe(&scene_space_mutation.scene)
             .expect("profile SceneSpace facade observation");
     assert_ne!(baseline_snapshot.digest, mutation_snapshot.digest);
+    assert_eq!(baseline_snapshot.totals, tangent_snapshot.totals);
+    assert_ne!(baseline_snapshot.digest, tangent_snapshot.digest);
     assert_eq!(baseline_facade.totals, metadata_facade.totals);
     assert_eq!(baseline_facade.totals, scene_space_facade.totals);
     assert_ne!(
@@ -1132,6 +1282,7 @@ fn profile_and_scene_space_mutations_change_semantic_receipts() {
         metadata_facade.transcript_digest,
         scene_space_facade.transcript_digest
     );
+    drop(tangent_mutation);
     drop(scene_space_mutation);
     drop(mutation);
     drop(baseline);

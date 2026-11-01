@@ -35,7 +35,6 @@ pub(in crate::canonical_scene::store) use profile::{
 };
 pub(in crate::canonical_scene::store) use spatial::{
     NodeSceneSpatialCamera, NodeSceneSpatialLight, NodeSceneSpatialSceneSpace,
-    NodeSceneSpatialTangentBasis, NodeSceneSpatialTangentEncoding,
 };
 
 pub(in crate::canonical_scene::store) type NodeSceneSemanticResult<T> =
@@ -238,7 +237,7 @@ impl<'scene> NodeSceneSemanticView<'scene> {
 
     pub(in crate::canonical_scene::store) fn scene_space(
         &self,
-    ) -> NodeSceneSemanticResult<NodeSceneSpatialSceneSpace<'scene>> {
+    ) -> NodeSceneSemanticResult<NodeSceneSpatialSceneSpace> {
         self.spatial.scene_space()
     }
 

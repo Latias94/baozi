@@ -6,6 +6,7 @@ use baozi_operation::{
 
 mod public_deformation;
 mod public_read;
+mod tangent_attributes;
 
 use crate::FormatId;
 use crate::appearance::{AlphaMode, MaterialFactors, MaterialSemantics, ShadingModel};
@@ -44,11 +45,11 @@ use crate::namespaced::NamespacedName;
 use crate::provenance::{
     OperationKind, OptionsDigest, ResourceIdentity, SourceObjectKind, SourceObjectLocator,
 };
-use crate::scene_space::{
-    Axis, FrontFaceWinding, Handedness, SceneSpace, TangentBasisConvention,
-    TangentHandednessEncoding, UvOrigin,
+use crate::scene_space::{Axis, FrontFaceWinding, Handedness, SceneSpace, UvOrigin};
+use crate::{
+    LocalAxes, SceneValidationLimits, TangentBasisConvention, TangentConventions,
+    TangentHandednessEncoding,
 };
-use crate::{LocalAxes, SceneValidationLimits};
 
 use super::super::edit::{
     NodeSceneEditTerminal, NodeTransformEditStart, try_begin_node_transform_edit,
@@ -60,55 +61,55 @@ use super::{
     NodeSceneSnapshotLimits, SnapshotWorkMeter, capture_node_scene_with_test_transcript,
 };
 
-// Revision 5 changes the little-endian revision word at bytes 40..44 from 4 to 5.
-// Camera and light references now precede tagged right/up/forward axes:
-// c8 01 c9 03 ca 06 for the standard frame. Other transcript bytes are unchanged.
-// Each digest is independently SHA-256 checked over the handwritten revision 5
-// transcript. Reverting only the declared revision/frame bytes reproduces its prior vector.
+// Revision 6 moves tangent declarations from SceneSpace to attribute records.
+// SceneSpace ends after UV origin; camera/light right/up/forward axes retain their
+// revision 5 framing (c8 01 c9 03 ca 06 for the standard frame). The little-endian
+// revision word at bytes 40..44 is 6. Each complete handwritten transcript is
+// independently SHA-256 checked; attribute schema versions remain unchanged.
 const KNOWN_SINGLE_TRS_DIGEST: [u8; 32] = [
-    0xd8, 0xab, 0xc9, 0x4d, 0xf2, 0x6a, 0x46, 0x40, 0xf7, 0xb2, 0xea, 0x0d, 0xb3, 0x57, 0xd3, 0xf1,
-    0x8c, 0x10, 0x1f, 0xe4, 0x7e, 0x49, 0xfc, 0x30, 0x5b, 0x69, 0x73, 0xe5, 0xfa, 0xfb, 0x8d, 0xe4,
+    0x86, 0x6e, 0xf8, 0xae, 0xde, 0x3d, 0x83, 0x0d, 0x1a, 0x05, 0xce, 0xe2, 0x67, 0xf8, 0xf1, 0x3a,
+    0x73, 0x0f, 0xd7, 0x6c, 0x5f, 0xa8, 0xaf, 0xd0, 0x1c, 0x29, 0x08, 0x94, 0xc8, 0x39, 0x82, 0xb2,
 ];
 const KNOWN_GENERIC_METADATA_DIGEST: [u8; 32] = [
-    0xc9, 0xf3, 0x4e, 0x2d, 0x0c, 0xf5, 0x74, 0xab, 0x28, 0x2d, 0xb7, 0xbc, 0x1b, 0xfa, 0xb1, 0x0d,
-    0xd5, 0xa1, 0x81, 0x7f, 0xb6, 0xfc, 0x0a, 0xd9, 0xd1, 0xc0, 0x0c, 0xfa, 0x2c, 0x68, 0x03, 0x6e,
+    0xef, 0x58, 0x7f, 0xdd, 0xfa, 0x8d, 0x5e, 0x75, 0x3e, 0x12, 0x82, 0x71, 0x16, 0x88, 0xa8, 0x03,
+    0x41, 0x81, 0xe1, 0x65, 0x7f, 0xbb, 0x84, 0x2a, 0x9f, 0x2f, 0x89, 0x03, 0x49, 0x81, 0x42, 0x1b,
 ];
 // Known vectors are factored at canonical domain and owner-row boundaries, but every
 // assertion still compares the complete transcript byte for byte.
 const KNOWN_SINGLE_TRS_TRANSCRIPT_PREFIX_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740205000000030600",
-    "000000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00af00b200b30c010b0000000000000000",
-    "ba0c010b0000000000000000040c01080d00000000000000000b0100000000000000050c01060d0000000000000000",
-    "0a020e000000000e000000000e000000000e000000000e000000000e000000000e0000803f0e0000803f0e0000803f",
-    "0e0000803f0b0a00000000000000da0c00c40c00c50c00070c010b00000000000000000b0100000000000000",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740206000000030600000000",
+    "000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00b30c010b0000000000000000ba0c010b0000000000000000",
+    "040c01080d00000000000000000b0100000000000000050c01060d00000000000000000a020e000000000e000000000e0000",
+    "00000e000000000e000000000e000000000e0000803f0e0000803f0e0000803f0e0000803f0b0a00000000000000da0c00c4",
+    "0c00c50c00070c010b00000000000000000b0100000000000000",
 );
 const KNOWN_MATRIX_CHILD_DIGEST: [u8; 32] = [
-    0x31, 0x9a, 0x4c, 0x64, 0x7f, 0xcc, 0x7b, 0x12, 0xd1, 0xcc, 0x48, 0x1c, 0x5b, 0x2e, 0x75, 0x35,
-    0x9f, 0x9d, 0x7f, 0x0c, 0x37, 0xee, 0xbe, 0x4d, 0x45, 0x98, 0x2d, 0xb8, 0x32, 0x63, 0xb8, 0x15,
+    0x6a, 0x5e, 0x7f, 0x07, 0x03, 0xbd, 0x35, 0x2b, 0xee, 0xbe, 0x96, 0xba, 0x8a, 0x24, 0xec, 0xb6,
+    0x18, 0xff, 0x28, 0x66, 0x6d, 0xaa, 0x7d, 0x55, 0x1d, 0x38, 0xa7, 0x3a, 0x2e, 0xeb, 0x08, 0x31,
 ];
 const KNOWN_SPATIAL_DIGEST: [u8; 32] = [
-    0x4e, 0x81, 0x54, 0xf4, 0xf0, 0x61, 0x8f, 0x86, 0x47, 0xc3, 0xf0, 0x1b, 0x3f, 0x8d, 0x65, 0xe7,
-    0x11, 0xa9, 0xb2, 0x46, 0x43, 0xca, 0x0f, 0x71, 0x48, 0x8d, 0xf6, 0xff, 0xdd, 0x08, 0x3d, 0xd9,
+    0x5b, 0x82, 0x32, 0xfd, 0xe6, 0xdd, 0x4f, 0xa0, 0xdf, 0x4d, 0x6d, 0x5e, 0x69, 0x0f, 0xd2, 0x86,
+    0x46, 0xc7, 0x5a, 0x7d, 0x43, 0xd7, 0x07, 0xe5, 0x77, 0xfe, 0x1a, 0x1f, 0xbc, 0x5f, 0xb0, 0x9a,
 ];
 const KNOWN_SPATIAL_TRANSCRIPT_PREFIX_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020500000003060000000000000073",
-    "6861323536a60c01a7a802a904aa05ab0c01c67b14ae47e17a843fac01ad02af02b015000000000000006578616d706c653a7461",
-    "6e67656e742d6261736973b102000000b202b014000000000000006578616d706c653a74616e67656e742d7369676eb103000000b30c",
-    "01b40d0000000000000000c801c903ca06b500b6c70000803fb70c01c70000c03fb8c7cdcccc3db90c01c70000c8420b0100000000000000ba0c01bb",
-    "0d0000000000000000c801c903ca06bc02bd0c01c700004842be0c01c70000803ebf0c01c70000403fc0c70000803fc1c70000803fc2c70000803fc3",
-    "c7000020410b0100000000000000040c01080d00000000000000000b0100000000000000050c01060d00000000000000000a020e0000",
-    "00000e000000000e000000000e000000000e000000000e000000000e0000803f0e0000803f0e0000803f0e0000803f0b0a0000000000",
-    "0000da0c00c40c010d0000000000000000c50c010d0000000000000000070c010b00000000000000000b0100000000000000",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740206000000030600000000",
+    "000000736861323536a60c01a7a802a904aa05ab0c01c67b14ae47e17a843fac01ad02b30c01b40d0000000000000000c801",
+    "c903ca06b500b6c70000803fb70c01c70000c03fb8c7cdcccc3db90c01c70000c8420b0100000000000000ba0c01bb0d0000",
+    "000000000000c801c903ca06bc02bd0c01c700004842be0c01c70000803ebf0c01c70000403fc0c70000803fc1c70000803f",
+    "c2c70000803fc3c7000020410b0100000000000000040c01080d00000000000000000b0100000000000000050c01060d0000",
+    "0000000000000a020e000000000e000000000e000000000e000000000e000000000e000000000e0000803f0e0000803f0e00",
+    "00803f0e0000803f0b0a00000000000000da0c00c40c010d0000000000000000c50c010d0000000000000000070c010b0000",
+    "0000000000000b0100000000000000",
 );
 const KNOWN_MATRIX_CHILD_TRANSCRIPT_PREFIX_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020500000003",
-    "0600000000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00af00b200b30c01",
-    "0b0000000000000000ba0c010b0000000000000000040c01080d00000000000000000b0100000000000000050c01060d00000000",
-    "000000000a010e0000803f0e000000000e000000000e000000000e000000000e0000803f0e000000000e000000",
-    "000e000000000e000000000e0000803f0e000000000e000080400e000000000e000000000e0000803f0b100000",
-    "0000000000da0c00c40c00c50c00070c01090d01000000000000000b0100000000000000060d01000000000000000a020e000000410e",
-    "000000000e000000000e000000000e000000000e000000000e0000803f0e0000803f0e0000803f0e0000803f0b",
-    "0a00000000000000da0c00c40c00c50c00070c010b00000000000000000b0200000000000000",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740206000000030600000000",
+    "000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00b30c010b0000000000000000ba0c010b0000000000000000",
+    "040c01080d00000000000000000b0100000000000000050c01060d00000000000000000a010e0000803f0e000000000e0000",
+    "00000e000000000e000000000e0000803f0e000000000e000000000e000000000e000000000e0000803f0e000000000e0000",
+    "80400e000000000e000000000e0000803f0b1000000000000000da0c00c40c00c50c00070c01090d01000000000000000b01",
+    "00000000000000060d01000000000000000a020e000000410e000000000e000000000e000000000e000000000e000000000e",
+    "0000803f0e0000803f0e0000803f0e0000803f0b0a00000000000000da0c00c40c00c50c00070c010b00000000000000000b",
+    "0200000000000000",
 );
 const EMPTY_PRE_PROFILE_DOMAINS_TRANSCRIPT_HEX: &str = concat!(
     "330c01340c010b0000000000000000380c010b0000000000000000400c010b000000000000000010",
@@ -119,9 +120,9 @@ const EMPTY_PRE_PROFILE_DOMAINS_TRANSCRIPT_HEX: &str = concat!(
     "00780c01790c010b00000000000000007f0c010b0000000000000000",
 );
 const EMPTY_SCENE_TRANSCRIPT_PREFIX_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740205000000030600",
-    "000000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00af00b200b30c010b0000000000000000",
-    "ba0c010b0000000000000000040c010b0000000000000000050c010b0000000000000000",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740206000000030600000000",
+    "000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00b30c010b0000000000000000ba0c010b0000000000000000",
+    "040c010b0000000000000000050c010b0000000000000000",
 );
 const EMPTY_METADATA_LANES_TRANSCRIPT_HEX: &str = concat!(
     "c8ce01cb00ce00cf0000000000000000cb01ce00cf0000000000000000cb02ce00cf0000000000000000",
@@ -230,32 +231,43 @@ const KNOWN_GENERIC_METADATA_TRANSCRIPT_HEX: &str = concat!(
     "cb03d00bcb04d005cb05d20000000000000000cb08d005cb06ce01cf0000000000000000",
 );
 const KNOWN_POINT_GEOMETRY_DIGEST: [u8; 32] = [
-    0xe8, 0x2b, 0xe9, 0x91, 0xb1, 0x66, 0x79, 0xc7, 0x07, 0x6c, 0xeb, 0xdf, 0x01, 0x30, 0xaf, 0x94,
-    0xb6, 0xee, 0x19, 0x7d, 0xc2, 0x3b, 0xe9, 0x92, 0xe1, 0x06, 0xfa, 0x4b, 0x59, 0x04, 0x0d, 0x1b,
+    0x84, 0x9c, 0x84, 0xd8, 0x62, 0xc6, 0x7b, 0x8f, 0x60, 0x21, 0x52, 0xfe, 0x1c, 0x32, 0xcc, 0x04,
+    0xac, 0x72, 0x3b, 0x22, 0xbc, 0x8c, 0xbf, 0xf3, 0xc5, 0x76, 0xca, 0xef, 0x37, 0x8e, 0x62, 0x3d,
 ];
 const KNOWN_POINT_GEOMETRY_TRANSCRIPT_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020500000003060000",
-    "0000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00af00b200b30c010b0000000000000000",
-    "ba0c010b0000000000000000040c01080d00000000000000000b0100000000000000050c01060d00000000000000000a02",
-    "0e000000000e000000000e000000000e000000000e000000000e000000000e0000803f0e0000803f0e0000803f0e0000",
-    "803f0b0a00000000000000da0c00c40c00c50c00070c010b00000000000000000b0100000000000000330c01340c010b000000000000000038",
-    "0c010b0000000000000000400c010b0000000000000000100c01110d00000000000000008e008f009000000000910092",
-    "00930094004800000000000000000b0000000000000000950000000000000000960b2700000000000000a500000000a5",
-    "00000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a5000000",
-    "00a500000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a500",
-    "000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000",
-    "a500000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a60c000b0100",
-    "000000000000440c010b00000000000000000f0c01120c01130d0000000000000000d80c002c00000000000000000b01000000",
-    "000000000b0100000000000000140c01150d00000000000000002e002f0100000030010000003101000000160c000b00",
-    "00000000000000170c000b0000000000000000180c010d0000000000000000192d00000000000000000b010000000000",
-    "00000b0100000000000000190c011a0d00000000000000001b001c00000000dc0c001d001e001f032000210022010000002301",
-    "000000240300000000000000250c010e0000803f0e000000400e000040400b0300000000000000260c000b0000000000",
-    "000000270c000b00000000000000000b0100000000000000280c01290d00000000000000002a00000000000000002b00",
-    "000000000000000b01000000000000004a0c014b0c010b00000000000000005d0c015e0d00000000000000005f000000",
-    "00000000000b0000000000000000600c010b00000000000000000b0100000000000000610c010b000000000000000066",
-    "0c01670d0000000000000000680c000b00000000000000006e0c000d00000000000000000b00000000000000000b0100",
-    "0000000000006e0c010b0000000000000000710c010b0000000000000000280c01290d00000000000000004c0c00600c",
-    "000b00000000000000000b0100000000000000780c01790c010b00000000000000007f0c010b0000000000000000",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740206000000030600000000",
+    "000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00b30c010b0000000000000000ba0c010b0000000000000000",
+    "040c01080d00000000000000000b0100000000000000050c01060d00000000000000000a020e000000000e000000000e0000",
+    "00000e000000000e000000000e000000000e0000803f0e0000803f0e0000803f0e0000803f0b0a00000000000000da0c00c4",
+    "0c00c50c00070c010b00000000000000000b0100000000000000330c01340c010b0000000000000000380c010b0000000000",
+    "000000400c010b0000000000000000100c01110d00000000000000008e008f00900000000091009200930094004800000000",
+    "000000000b0000000000000000950000000000000000960b2700000000000000a500000000a500000000a500000000a50000",
+    "0000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a50000",
+    "0000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a50000",
+    "0000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a50000",
+    "0000a500000000a500000000a500000000a500000000a500000000a60c000b0100000000000000440c010b00000000000000",
+    "000f0c01120c01130d0000000000000000d80c002c00000000000000000b01000000000000000b0100000000000000140c01",
+    "150d00000000000000002e002f0100000030010000003101000000160c000b0000000000000000170c000b00000000000000",
+    "00180c010d0000000000000000192d00000000000000000b01000000000000000b0100000000000000190c011a0d00000000",
+    "000000001b001c00000000dc0c001d001e001f032000210022010000002301000000240300000000000000250c010e000080",
+    "3f0e000000400e000040400b0300000000000000260c000b0000000000000000270c000b00000000000000000b0100000000",
+    "000000280c01290d00000000000000002a00000000000000002b00000000000000000b01000000000000004a0c014b0c010b",
+    "00000000000000005d0c015e0d00000000000000005f00000000000000000b0000000000000000600c010b00000000000000",
+    "000b0100000000000000610c010b0000000000000000660c01670d0000000000000000680c000b00000000000000006e0c00",
+    "0d00000000000000000b00000000000000000b01000000000000006e0c010b0000000000000000710c010b00000000000000",
+    "00280c01290d00000000000000004c0c00600c000b00000000000000000b0100000000000000780c01790c010b0000000000",
+    "0000007f0c010b0000000000000000",
+);
+// Attribute 1 is a vertex-domain, four-lane dense f32 Tangent. Its declaration
+// retains basis schema example:tangent-basis v2 and encoding example:tangent-sign v3,
+// followed by the unchanged authored [1, 0, 0, 1] values and absent sparse leaves.
+const KNOWN_NAMESPACED_TANGENT_ATTRIBUTE_TRANSCRIPT_HEX: &str = concat!(
+    "1a0d01000000000000001b021c00000000dc0c001d001e001f0420002100",
+    "22010000002301000000240400000000000000",
+    "e0e103e315000000000000006578616d706c653a74616e67656e742d6261736973e402000000",
+    "e202e314000000000000006578616d706c653a74616e67656e742d7369676ee403000000",
+    "250c010e0000803f0e000000000e000000000e0000803f0b0400000000000000",
+    "260c000b0000000000000000270c000b0000000000000000",
 );
 
 fn operation_limits() -> SceneConstructionLimits {
@@ -594,10 +606,10 @@ fn assert_hex_parts(actual: &[u8], expected: &[&str]) {
 }
 
 fn extension_schema(name: &str, version: u32) -> ExtensionSchemaId {
-    ExtensionSchemaId::new(name, version).expect("canonical spatial test schema")
+    ExtensionSchemaId::new(name, version).expect("canonical tangent attribute test schema")
 }
 
-fn namespaced_scene_space() -> SceneSpace {
+fn spatial_scene_space() -> SceneSpace {
     SceneSpace {
         handedness: Handedness::Left,
         up_axis: Axis::NegativeY,
@@ -605,15 +617,17 @@ fn namespaced_scene_space() -> SceneSpace {
         unit_scale_to_meters: Some(0.01),
         front_face_winding: FrontFaceWinding::Clockwise,
         uv_origin: UvOrigin::LowerLeft,
-        tangent_basis: TangentBasisConvention::try_namespaced(Some(extension_schema(
-            "example:tangent-basis",
-            2,
-        )))
-        .expect("namespaced tangent-basis convention"),
-        tangent_handedness_encoding: TangentHandednessEncoding::try_namespaced(Some(
-            extension_schema("example:tangent-sign", 3),
-        ))
-        .expect("namespaced tangent-encoding convention"),
+    }
+}
+
+fn namespaced_tangent_conventions() -> TangentConventions {
+    TangentConventions {
+        basis: TangentBasisConvention::Namespaced {
+            schema_id: extension_schema("example:tangent-basis", 2),
+        },
+        encoding: TangentHandednessEncoding::Namespaced {
+            schema_id: extension_schema("example:tangent-sign", 3),
+        },
     }
 }
 
@@ -1061,7 +1075,7 @@ fn known_vector_is_stable_and_human_reviewable() {
             .expect("known Scene snapshot");
 
     assert_eq!(snapshot.domain, "baozi.canonical-scene.snapshot");
-    assert_eq!(snapshot.schema_revision, 5);
+    assert_eq!(snapshot.schema_revision, 6);
     assert_eq!(snapshot.algorithm, NodeSceneSnapshotAlgorithm::Sha256);
     assert_eq!(snapshot.digest, KNOWN_SINGLE_TRS_DIGEST);
     assert!(transcript.complete);
@@ -1109,7 +1123,7 @@ fn known_vector_is_stable_and_human_reviewable() {
     assert_eq!(snapshot.totals.profile_owner_count, 3);
     assert_eq!(snapshot.totals.profile_attachment_count, 3);
     assert_eq!(snapshot.totals.profile_metadata_entry_count, 0);
-    assert_eq!(snapshot.totals.transcript_bytes, 1_010);
+    assert_eq!(snapshot.totals.transcript_bytes, 1_006);
     assert_eq!(snapshot.totals.work_units, 109);
     assert!(snapshot.preview.text.contains("roots(present,total=1)=[0]"));
     assert!(snapshot.preview.text.contains("transform=trs(total=10)"));
@@ -1579,7 +1593,7 @@ fn generic_metadata_round_trips_every_value_kind_without_provenance_ids() {
             KNOWN_GENERIC_METADATA_TRANSCRIPT_HEX,
         ],
     );
-    assert_eq!(snapshot.totals.transcript_bytes, 2_105);
+    assert_eq!(snapshot.totals.transcript_bytes, 2_101);
     assert!(
         snapshot
             .preview
@@ -2310,7 +2324,7 @@ fn spatial_known_vector_pins_scene_space_cameras_lights_and_attachments() {
         Presence::Present(CameraLocalId::new(0)),
         Presence::Present(LightLocalId::new(0)),
     )];
-    let scene_space = namespaced_scene_space();
+    let scene_space = spatial_scene_space();
     let projection =
         CameraProjection::perspective(LocalAxes::STANDARD, 1.0, Some(1.5), 0.1, Some(100.0))
             .expect("spatial known-vector camera");
@@ -2385,7 +2399,7 @@ fn spatial_known_vector_pins_scene_space_cameras_lights_and_attachments() {
             EMPTY_PROFILE_METADATA_TRANSCRIPT_HEX,
         ],
     );
-    assert_eq!(snapshot.totals.transcript_bytes, 1_322);
+    assert_eq!(snapshot.totals.transcript_bytes, 1_249);
     assert_eq!(snapshot.totals.work_units, 140);
     assert_eq!(snapshot.totals.camera_count, 1);
     assert_eq!(snapshot.totals.light_count, 1);
@@ -2394,11 +2408,7 @@ fn spatial_known_vector_pins_scene_space_cameras_lights_and_attachments() {
     assert!(snapshot.preview.text.contains(concat!(
         "scene_space handedness=left up_axis=negative_y front_axis=positive_z ",
         "unit_scale_to_meters_bits=0x3f847ae147ae147b ",
-        "front_face_winding=clockwise uv_origin=lower_left ",
-        "tangent_basis=namespaced tangent_basis_schema_name=example:tangent-basis ",
-        "tangent_basis_schema_version=2 tangent_handedness_encoding=namespaced ",
-        "tangent_handedness_encoding_schema_name=example:tangent-sign ",
-        "tangent_handedness_encoding_schema_version=3\n",
+        "front_face_winding=clockwise uv_origin=lower_left\n",
     )));
     assert!(snapshot.preview.text.contains(concat!(
         "camera[0] right_axis=positive_x up_axis=positive_y forward_axis=negative_z ",
@@ -2420,7 +2430,7 @@ fn spatial_known_vector_pins_scene_space_cameras_lights_and_attachments() {
 fn scene_space_field_mutation_vectors_are_digest_visible() {
     let factory = factory();
     let account = account(&factory);
-    let baseline = namespaced_scene_space();
+    let baseline = spatial_scene_space();
     let projection =
         CameraProjection::perspective(LocalAxes::STANDARD, 1.0, Some(1.5), 0.1, Some(100.0))
             .expect("SceneSpace mutation camera");
@@ -2480,75 +2490,145 @@ fn scene_space_field_mutation_vectors_are_digest_visible() {
                 ..baseline.clone()
             },
         ),
+    ];
+
+    for (label, mutation) in mutations {
+        assert_digest_mutation(label, baseline_digest, digest(&mutation));
+    }
+}
+
+#[test]
+fn tangent_attribute_convention_mutation_vectors_are_digest_visible() {
+    let factory = factory();
+    let account = account(&factory);
+    let baseline = namespaced_tangent_conventions();
+    let positions = [0.0_f32, 0.0, 0.0];
+    let tangents = [1.0_f32, 0.0, 0.0, 1.0];
+    let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
+    let primitives = [GeometryPrimitiveAuthoring::new(
+        GeometryTopologyAuthoring::Points,
+        Presence::Absent,
+        Presence::Absent,
+        AuthoringRange::new(0, 2),
+    )];
+    let snapshot = |conventions: &TangentConventions| {
+        let attributes = [
+            GeometryAttributeAuthoring::f32(
+                AttributeSemantic::Position,
+                AttributeDomain::Vertex,
+                3,
+                &positions,
+                Presence::Absent,
+            ),
+            GeometryAttributeAuthoring::f32(
+                AttributeSemantic::Tangent,
+                AttributeDomain::Vertex,
+                4,
+                &tangents,
+                Presence::Absent,
+            )
+            .with_tangent_conventions(conventions.clone()),
+        ];
+        let parts = build_scene_with_geometry(
+            &account,
+            &[],
+            &[],
+            GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &[]),
+        );
+        capture_node_scene_with_test_transcript(&parts.scene, snapshot_limits(16_384, 64), None)
+            .expect("tangent attribute convention snapshot")
+    };
+    let (baseline_snapshot, baseline_transcript) = snapshot(&baseline);
+    assert!(baseline_transcript.complete);
+    assert_eq!(
+        encode_hex(&baseline_transcript.bytes)
+            .matches(KNOWN_NAMESPACED_TANGENT_ATTRIBUTE_TRANSCRIPT_HEX)
+            .count(),
+        1,
+    );
+    assert_eq!(baseline_snapshot.totals.attribute_count, 2);
+    assert_eq!(baseline_snapshot.totals.tangent_schema_name_bytes, 41);
+    assert_eq!(baseline_snapshot.totals.attribute_semantic_name_bytes, 0);
+    assert!(
+        baseline_snapshot
+            .preview
+            .text
+            .contains("example:tangent-basis")
+    );
+    assert!(
+        baseline_snapshot
+            .preview
+            .text
+            .contains("example:tangent-sign")
+    );
+    let mutations = [
         (
             "tangent-basis schema name",
-            SceneSpace {
-                tangent_basis: TangentBasisConvention::try_namespaced(Some(extension_schema(
-                    "example:tangent-basis-v2",
-                    2,
-                )))
-                .expect("mutated tangent-basis name"),
+            TangentConventions {
+                basis: TangentBasisConvention::Namespaced {
+                    schema_id: extension_schema("example:tangent-basis-v2", 2),
+                },
                 ..baseline.clone()
             },
         ),
         (
             "tangent-basis schema version",
-            SceneSpace {
-                tangent_basis: TangentBasisConvention::try_namespaced(Some(extension_schema(
-                    "example:tangent-basis",
-                    4,
-                )))
-                .expect("mutated tangent-basis version"),
+            TangentConventions {
+                basis: TangentBasisConvention::Namespaced {
+                    schema_id: extension_schema("example:tangent-basis", 4),
+                },
                 ..baseline.clone()
             },
         ),
         (
             "tangent-encoding schema name",
-            SceneSpace {
-                tangent_handedness_encoding: TangentHandednessEncoding::try_namespaced(Some(
-                    extension_schema("example:tangent-sign-v2", 3),
-                ))
-                .expect("mutated tangent-encoding name"),
+            TangentConventions {
+                encoding: TangentHandednessEncoding::Namespaced {
+                    schema_id: extension_schema("example:tangent-sign-v2", 3),
+                },
                 ..baseline.clone()
             },
         ),
         (
             "tangent-encoding schema version",
-            SceneSpace {
-                tangent_handedness_encoding: TangentHandednessEncoding::try_namespaced(Some(
-                    extension_schema("example:tangent-sign", 5),
-                ))
-                .expect("mutated tangent-encoding version"),
+            TangentConventions {
+                encoding: TangentHandednessEncoding::Namespaced {
+                    schema_id: extension_schema("example:tangent-sign", 5),
+                },
                 ..baseline.clone()
             },
         ),
     ];
 
     for (label, mutation) in mutations {
-        assert_digest_mutation(label, baseline_digest, digest(&mutation));
+        assert_digest_mutation(
+            label,
+            baseline_snapshot.digest,
+            snapshot(&mutation).0.digest,
+        );
     }
 
-    let basis_category_baseline = SceneSpace {
-        tangent_handedness_encoding: TangentHandednessEncoding::SignInW,
+    let basis_category_baseline = TangentConventions {
+        encoding: TangentHandednessEncoding::SignInW,
         ..baseline.clone()
     };
-    let basis_category_mutation = SceneSpace {
-        tangent_basis: TangentBasisConvention::MikkTspace,
+    let basis_category_mutation = TangentConventions {
+        basis: TangentBasisConvention::MikkTspace,
         ..basis_category_baseline.clone()
     };
     assert_digest_mutation(
         "tangent-basis category",
-        digest(&basis_category_baseline),
-        digest(&basis_category_mutation),
+        snapshot(&basis_category_baseline).0.digest,
+        snapshot(&basis_category_mutation).0.digest,
     );
-    let encoding_category_mutation = SceneSpace {
-        tangent_handedness_encoding: TangentHandednessEncoding::SignInW,
+    let encoding_category_mutation = TangentConventions {
+        encoding: TangentHandednessEncoding::SignInW,
         ..baseline.clone()
     };
     assert_digest_mutation(
         "tangent-handedness encoding category",
-        baseline_digest,
-        digest(&encoding_category_mutation),
+        baseline_snapshot.digest,
+        snapshot(&encoding_category_mutation).0.digest,
     );
 }
 
@@ -2556,7 +2636,7 @@ fn scene_space_field_mutation_vectors_are_digest_visible() {
 fn camera_and_light_field_mutation_vectors_are_digest_visible() {
     let factory = factory();
     let account = account(&factory);
-    let scene_space = namespaced_scene_space();
+    let scene_space = spatial_scene_space();
     let baseline_projection =
         CameraProjection::perspective(LocalAxes::STANDARD, 1.0, Some(1.5), 0.1, Some(100.0))
             .expect("camera mutation baseline");
@@ -2764,7 +2844,7 @@ fn camera_and_light_field_mutation_vectors_are_digest_visible() {
 fn spatial_attachment_presence_and_reference_mutations_are_digest_visible() {
     let factory = factory();
     let account = account(&factory);
-    let scene_space = namespaced_scene_space();
+    let scene_space = spatial_scene_space();
     let projection =
         CameraProjection::perspective(LocalAxes::STANDARD, 1.0, Some(1.5), 0.1, Some(100.0))
             .expect("attachment mutation camera");
@@ -2969,7 +3049,7 @@ fn matrix_and_child_known_vector_pins_node_framing_and_empty_domains() {
     assert_eq!(snapshot.totals.node_count, 2);
     assert_eq!(snapshot.totals.root_count, 1);
     assert_eq!(snapshot.totals.edge_count, 1);
-    assert_eq!(snapshot.totals.transcript_bytes, 1_194);
+    assert_eq!(snapshot.totals.transcript_bytes, 1_190);
     assert_eq!(snapshot.totals.work_units, 137);
 }
 
@@ -3023,7 +3103,7 @@ fn point_geometry_known_vector_pins_complete_scene_framing() {
     assert_eq!(snapshot.totals.canonical_scalar_count, 3);
     assert_eq!(snapshot.totals.f32_scalar_count, 3);
     assert_eq!(snapshot.totals.u32_scalar_count, 0);
-    assert_eq!(snapshot.totals.transcript_bytes, 1_881);
+    assert_eq!(snapshot.totals.transcript_bytes, 1_877);
     assert_eq!(snapshot.totals.work_units, 194);
     assert!(snapshot.preview.text.contains("material[0]"));
     assert!(
@@ -3267,7 +3347,7 @@ fn empty_scene_snapshot_is_complete_and_deterministic() {
     assert_eq!(first_snapshot.totals.profile_provenance_node_count, 1);
     assert_eq!(first_snapshot.totals.profile_owner_count, 2);
     assert_eq!(first_snapshot.totals.profile_attachment_count, 2);
-    assert_eq!(first_snapshot.totals.transcript_bytes, 856);
+    assert_eq!(first_snapshot.totals.transcript_bytes, 852);
     assert_eq!(first_snapshot.totals.work_units, 87);
     assert!(transcript.complete);
     assert_hex_parts(
@@ -3895,7 +3975,7 @@ fn traversal_scales_linearly_while_preview_stays_bounded() {
         assert!(snapshot.preview.text.len() <= 64);
         assert_eq!(
             snapshot.totals.transcript_bytes,
-            856 + 154 * node_count as u64
+            852 + 154 * node_count as u64
         );
         assert_eq!(snapshot.totals.work_units, 87 + 22 * node_count as u64);
         assert_eq!(snapshot.totals.node_count, node_count);

@@ -83,7 +83,7 @@ fn multiple_node_placements_are_preserved_for_each_spatial_object() {
     assert_eq!(validated.light_count(), 1);
     assert_eq!(validated.edge_count(), 4);
     assert_eq!(validated.reference_count(), 4);
-    assert_eq!(validated.semantic_cell_count(), 37);
+    assert_eq!(validated.semantic_cell_count(), 35);
 }
 
 #[test]

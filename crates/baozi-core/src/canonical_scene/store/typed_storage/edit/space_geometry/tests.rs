@@ -68,6 +68,11 @@ fn attribute(
     payload: StoredAttributePayload,
 ) {
     storage.attributes.push(StoredAttribute {
+        tangent_conventions: if semantic == StoredAttributeSemantic::Tangent {
+            Some(crate::canonical_scene::store::typed_storage::StoredTangentConventions::UNKNOWN)
+        } else {
+            None
+        },
         semantic,
         domain,
         lanes,
@@ -385,6 +390,76 @@ fn assert_valid(storage: &GeometryStorage) -> u64 {
         Ok(true)
     );
     control.completed
+}
+
+#[test]
+fn geometry_conversion_retains_each_tangent_declaration_and_its_schema_ranges() {
+    use crate::canonical_scene::store::typed_storage::{
+        StoredTangentBasis, StoredTangentConventions, StoredTangentEncoding,
+    };
+    let mut source = triangles(true);
+    let basis = "test:external-basis";
+    let encoding = "test:external-sign";
+    let mut names = [basis.as_bytes(), encoding.as_bytes()].concat();
+    let schema_bytes = names.len();
+    names.extend_from_slice(&source.names);
+    source.names = names;
+    for attribute in &mut source.attributes {
+        if let StoredAttributeSemantic::Custom(name) = &mut attribute.semantic {
+            name.0 = TableRange::new(name.0.start() + schema_bytes, name.0.len());
+        }
+        if attribute.semantic == StoredAttributeSemantic::Tangent {
+            attribute.tangent_conventions = Some(if attribute.domain == AttributeDomain::Vertex {
+                StoredTangentConventions {
+                    basis: StoredTangentBasis::TriangleUvDerivative,
+                    encoding: StoredTangentEncoding::SignInW,
+                }
+            } else {
+                StoredTangentConventions {
+                    basis: StoredTangentBasis::Namespaced {
+                        name: TextRange(TableRange::new(0, basis.len())),
+                        version: std::num::NonZeroU32::new(2).unwrap(),
+                    },
+                    encoding: StoredTangentEncoding::Namespaced {
+                        name: TextRange(TableRange::new(basis.len(), encoding.len())),
+                        version: std::num::NonZeroU32::new(3).unwrap(),
+                    },
+                }
+            });
+        }
+    }
+    for mesh in &mut source.logical_meshes {
+        if let Some(name) = &mut mesh.name {
+            name.0 = TableRange::new(name.0.start() + schema_bytes, name.0.len());
+        }
+    }
+    assert_valid(&source);
+    let plan =
+        GeometrySpacePlan::try_new(&source, winding_only(), &mut Control::default()).unwrap();
+    let mut output = plan.materialize(&mut Control::default()).unwrap();
+    assert_valid(&output);
+    assert_eq!(source.names, output.names);
+    for (source, actual) in source.attributes.iter().zip(&output.attributes) {
+        assert_eq!(source.tangent_conventions, actual.tangent_conventions);
+    }
+    assert_eq!(
+        plan.validate_correspondence(&output, &mut Control::default()),
+        Ok(true)
+    );
+    output
+        .attributes
+        .iter_mut()
+        .find(|attribute| attribute.semantic == StoredAttributeSemantic::Tangent)
+        .unwrap()
+        .tangent_conventions
+        .as_mut()
+        .unwrap()
+        .basis = StoredTangentBasis::Unknown;
+    assert_valid(&output);
+    assert_eq!(
+        plan.validate_correspondence(&output, &mut Control::default()),
+        Ok(false)
+    );
 }
 
 #[test]

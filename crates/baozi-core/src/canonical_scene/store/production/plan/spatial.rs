@@ -118,8 +118,6 @@ struct SpatialValidationStorage<R> {
     peak_scratch_bytes: u64,
     // Scratch still physically live while this successful proof is held.
     retained_scratch_bytes: u64,
-    tangent_basis_schema_name_bytes: u32,
-    tangent_encoding_schema_name_bytes: u32,
     // Held solely to keep this proof coupled to its operation owner, even at zero bytes.
     _reservation: R,
 }
@@ -186,16 +184,6 @@ impl<'input, R> ValidatedSpatialBatch<'input, R> {
     #[cfg(test)]
     pub(in crate::canonical_scene::store) const fn peak_scratch_bytes(&self) -> u64 {
         self.compiled.peak_scratch_bytes
-    }
-
-    pub(in crate::canonical_scene::store) const fn tangent_basis_schema_name_bytes(&self) -> u32 {
-        self.compiled.tangent_basis_schema_name_bytes
-    }
-
-    pub(in crate::canonical_scene::store) const fn tangent_encoding_schema_name_bytes(
-        &self,
-    ) -> u32 {
-        self.compiled.tangent_encoding_schema_name_bytes
     }
 
     pub(in crate::canonical_scene::store) fn cameras(
@@ -424,7 +412,7 @@ where
     let peak_scratch_bytes = scratch_envelope.max(allocated_scratch_bytes);
     context.resize_scratch(&mut reservation, allocated_scratch_bytes)?;
 
-    let mut semantic_cells = 9_u64;
+    let mut semantic_cells = 7_u64;
     if input.scene_space().unit_scale_to_meters.is_some() {
         semantic_cells = semantic_cells.checked_add(1).ok_or(
             SpatialAuthoringSemanticError::AccountingOverflow {
@@ -433,30 +421,11 @@ where
         )?;
     }
 
-    let tangent_basis_schema_name_bytes = schema_name_bytes(
-        input.scene_space().tangent_basis.schema_id(),
-        "tangent-basis schema name",
-    )?;
-    let tangent_encoding_schema_name_bytes = schema_name_bytes(
-        input.scene_space().tangent_handedness_encoding.schema_id(),
-        "tangent-encoding schema name",
-    )?;
-    let schema_name_bytes = u64::from(tangent_basis_schema_name_bytes)
-        .checked_add(u64::from(tangent_encoding_schema_name_bytes))
-        .ok_or(SpatialAuthoringSemanticError::AccountingOverflow {
-            dimension: "SceneSpace schema names",
+    let canonical_bytes = SpatialStoragePlan::for_shape(camera_count, light_count)
+        .and_then(SpatialStoragePlan::canonical_bytes)
+        .map_err(|_| SpatialAuthoringSemanticError::AccountingOverflow {
+            dimension: "typed spatial footprint",
         })?;
-    semantic_cells = semantic_cells.checked_add(schema_name_bytes).ok_or(
-        SpatialAuthoringSemanticError::AccountingOverflow {
-            dimension: "SceneSpace schema-name semantic cells",
-        },
-    )?;
-    let canonical_bytes =
-        SpatialStoragePlan::for_shape(camera_count, light_count, schema_name_bytes)
-            .and_then(SpatialStoragePlan::canonical_bytes)
-            .map_err(|_| SpatialAuthoringSemanticError::AccountingOverflow {
-                dimension: "typed spatial footprint",
-            })?;
     // Typed row and schema extents are shape facts available before
     // payload traversal. Admit that envelope once; subsequent authored facts
     // enforce their incremental limits inside the action that observes them.
@@ -470,24 +439,6 @@ where
         canonical_bytes,
         limits.max_canonical_bytes(),
     )?;
-    for byte in input
-        .scene_space()
-        .tangent_basis
-        .schema_id()
-        .into_iter()
-        .flat_map(|schema| schema.name().as_str().as_bytes())
-        .chain(
-            input
-                .scene_space()
-                .tangent_handedness_encoding
-                .schema_id()
-                .into_iter()
-                .flat_map(|schema| schema.name().as_str().as_bytes()),
-        )
-    {
-        context.run_unit(SceneValidationWork::PayloadCell, || *byte)?;
-    }
-
     for (camera, authored) in input.cameras().iter().enumerate() {
         context.run_unit(SceneValidationWork::Entity, || {
             if !authored.validate() {
@@ -729,8 +680,6 @@ where
         validation_work: context.work,
         peak_scratch_bytes,
         retained_scratch_bytes,
-        tangent_basis_schema_name_bytes,
-        tangent_encoding_schema_name_bytes,
         _reservation: reservation,
     };
     Ok(ValidatedSpatialBatch::new(input, nodes, compiled))
@@ -742,17 +691,6 @@ fn collection_count(
 ) -> Result<u32, SpatialAuthoringSemanticError> {
     u32::try_from(count)
         .map_err(|_| SpatialAuthoringSemanticError::CountDomainTooLarge { collection })
-}
-
-fn schema_name_bytes(
-    schema: Option<&crate::extension::ExtensionSchemaId>,
-    dimension: &'static str,
-) -> Result<u32, SpatialAuthoringSemanticError> {
-    match schema {
-        Some(schema) => u32::try_from(schema.name().as_str().len())
-            .map_err(|_| SpatialAuthoringSemanticError::AccountingOverflow { dimension }),
-        None => Ok(0),
-    }
 }
 
 fn scratch_plan<T>(

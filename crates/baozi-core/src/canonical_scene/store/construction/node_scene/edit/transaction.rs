@@ -7,6 +7,8 @@ mod evidence;
 mod publication;
 mod schema;
 mod space;
+#[cfg(test)]
+mod tangents_tests;
 mod validation;
 use super::plan::{BoundPendingNodeSceneEdit, NodeSceneEditPlanError, NodeSceneEditProgram};
 use crate::canonical_scene::store::construction::node_scene::NodeSceneDraft;
@@ -50,6 +52,7 @@ use baozi_operation::{
 use thiserror::Error;
 
 use crate::SceneValidationLimits;
+use crate::attribute::{AttributeDomain, TangentConventions};
 use crate::canonical_scene::store::api::scene::ValidatedScene;
 use crate::canonical_scene::store::construction::ConstructionBrand;
 use crate::canonical_scene::store::construction::node_scene::geometry::map_build;
@@ -72,6 +75,7 @@ use crate::canonical_scene::store::typed_storage::edit::space_deformation::{
 use crate::canonical_scene::store::typed_storage::edit::space_geometry::GeometrySpacePlanError;
 use crate::canonical_scene::store::typed_storage::edit::space_nodes::NodeSpacePlanError;
 use crate::canonical_scene::store::typed_storage::edit::space_spatial::SpatialSpacePlanError;
+use crate::canonical_scene::store::typed_storage::edit::tangents::GeometryTangentsPlan;
 use crate::canonical_scene::store::typed_storage::edit::{
     GeometryTriangulationPlan, TriangulationOrigins,
 };
@@ -232,6 +236,15 @@ impl SceneEditAdmission {
         self.transaction(input, EditRequest::Normals(replacement), limits)
     }
 
+    pub fn into_tangent_transaction<'a>(
+        self,
+        input: &'a ValidatedScene,
+        replacement: SceneTangentReplacement<'a>,
+        limits: SceneValidationLimits,
+    ) -> SceneEditTransaction<'a> {
+        self.transaction(input, EditRequest::Tangents(replacement), limits)
+    }
+
     pub fn into_space_transaction<'a>(
         self,
         resolved: ResolvedSceneSpaceConversion<'a>,
@@ -347,10 +360,52 @@ impl<'a> SceneNormalReplacement<'a> {
     }
 }
 
+/// One generated corner tangent stream and its exact source attribute dependencies.
+///
+/// `had_tangent` explicitly selects replacement; false permits only addition. Conventions belong
+/// to the resulting attribute and must declare `TriangleUvDerivative` with `SignInW`.
+#[derive(Clone, Copy)]
+pub struct SceneTangentReplacement<'a> {
+    target: PrimitiveId,
+    values: &'a [[f32; 4]],
+    had_tangent: bool,
+    normal_domain: AttributeDomain,
+    uv_set: u32,
+    uv_domain: AttributeDomain,
+    conventions: &'a TangentConventions,
+    options_digest: OptionsDigest,
+}
+
+impl<'a> SceneTangentReplacement<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        target: PrimitiveId,
+        values: &'a [[f32; 4]],
+        had_tangent: bool,
+        normal_domain: AttributeDomain,
+        uv_set: u32,
+        uv_domain: AttributeDomain,
+        conventions: &'a TangentConventions,
+        options_digest: OptionsDigest,
+    ) -> Self {
+        Self {
+            target,
+            values,
+            had_tangent,
+            normal_domain,
+            uv_set,
+            uv_domain,
+            conventions,
+            options_digest,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum EditRequest<'a> {
     Triangulation(SceneTriangulationReplacement<'a>),
     Normals(SceneNormalReplacement<'a>),
+    Tangents(SceneTangentReplacement<'a>),
     ConvertSpace(ResolvedSceneSpaceConversion<'a>),
 }
 
@@ -366,19 +421,20 @@ impl<'a> EditRequest<'a> {
         match self {
             Self::Triangulation(v) => SceneEditTarget::Primitive(v.target),
             Self::Normals(v) => SceneEditTarget::Primitive(v.target),
+            Self::Tangents(v) => SceneEditTarget::Primitive(v.target),
             Self::ConvertSpace(v) => SceneEditTarget::WholeScene(v.input.generation()),
         }
     }
     const fn triangles(self) -> &'a [[u32; 3]] {
         match self {
             Self::Triangulation(v) => v.triangles,
-            Self::Normals(_) | Self::ConvertSpace(_) => &[],
+            Self::Normals(_) | Self::Tangents(_) | Self::ConvertSpace(_) => &[],
         }
     }
     const fn face_offsets(self) -> &'a [u32] {
         match self {
             Self::Triangulation(v) => v.face_offsets,
-            Self::Normals(_) | Self::ConvertSpace(_) => &[],
+            Self::Normals(_) | Self::Tangents(_) | Self::ConvertSpace(_) => &[],
         }
     }
 }
@@ -391,6 +447,7 @@ impl<'a> EditRequest<'a> {
 enum EditStoragePlan<'a> {
     Triangulation(GeometryTriangulationPlan<'a>),
     Normals(GeometryNormalsPlan<'a>),
+    Tangents(GeometryTangentsPlan<'a>),
     ConvertSpace(SceneSpacePlan<'a>),
 }
 
@@ -399,6 +456,7 @@ impl EditStoragePlan<'_> {
         match self {
             Self::Triangulation(v) => v.correspondence_work(),
             Self::Normals(v) => v.correspondence_work(),
+            Self::Tangents(v) => v.correspondence_work(),
             Self::ConvertSpace(plan) => plan.correspondence_work(),
         }
     }
@@ -406,6 +464,7 @@ impl EditStoragePlan<'_> {
         match self {
             Self::Triangulation(v) => v.name_bytes(),
             Self::Normals(v) => v.name_bytes(),
+            Self::Tangents(v) => v.name_bytes(),
             Self::ConvertSpace(plan) => plan.name_bytes(),
         }
     }
@@ -421,6 +480,9 @@ impl EditStoragePlan<'_> {
             }
             (Self::Normals(plan), EditRequest::Normals(replacement)) => {
                 evidence::SceneEditFacts::normals(input, replacement, &plan, counts)
+            }
+            (Self::Tangents(plan), EditRequest::Tangents(replacement)) => {
+                evidence::SceneEditFacts::tangents(replacement, &plan)
             }
             (Self::ConvertSpace(plan), EditRequest::ConvertSpace(resolved)) => {
                 (std::ptr::eq(input, resolved.input.as_node_scene())
@@ -443,6 +505,7 @@ impl EditStoragePlan<'_> {
                 plan.validate_correspondence(actual.geometry.as_ref(), control)
             }
             Self::Normals(plan) => plan.validate_correspondence(actual.geometry.as_ref(), control),
+            Self::Tangents(plan) => plan.validate_correspondence(actual.geometry.as_ref(), control),
             Self::ConvertSpace(plan) => plan.validate_correspondence(actual, control),
         }
     }
@@ -725,7 +788,9 @@ impl<'a> SceneEditTransaction<'a> {
                     .ok_or(SceneEditCompileError::InvalidTarget)?;
                 let valid_topology = match self.replacement {
                     EditRequest::Triangulation(_) => primitive.topology == TopologyKind::Polygons,
-                    EditRequest::Normals(_) => primitive.topology == TopologyKind::TriangleList,
+                    EditRequest::Normals(_) | EditRequest::Tangents(_) => {
+                        primitive.topology == TopologyKind::TriangleList
+                    }
                     EditRequest::ConvertSpace(_) => false,
                 };
                 if !valid_topology || primitive.face_count == 0 {
@@ -792,6 +857,34 @@ impl<'a> SceneEditTransaction<'a> {
                 )
                 .map_err(map_plan)?;
                 (EditStoragePlan::Normals(plan), pending)
+            }
+            EditRequest::Tangents(replacement) => {
+                let target = target_row.ok_or(SceneEditCompileError::InvalidTarget)?;
+                check_tangent_morphs(input.as_node_scene().read_deformation(), target, semantic)?;
+                let plan = GeometryTangentsPlan::try_new(
+                    input.as_node_scene().read_geometry(),
+                    target,
+                    replacement.values,
+                    replacement.had_tangent,
+                    replacement.normal_domain,
+                    replacement.uv_set,
+                    replacement.uv_domain,
+                    replacement.conventions,
+                    semantic,
+                )
+                .map_err(map_build)?;
+                let pending = BoundPendingNodeSceneEdit::try_tangents(
+                    input.as_node_scene(),
+                    plan,
+                    replacement.options_digest,
+                    &mut || {
+                        semantic
+                            .run_unit(|| ())
+                            .map_err(NodeSceneEditPlanError::from)
+                    },
+                )
+                .map_err(map_plan)?;
+                (EditStoragePlan::Tangents(plan), pending)
             }
             EditRequest::ConvertSpace(resolved) => {
                 space::check_capabilities(resolved, semantic)?;
@@ -963,6 +1056,9 @@ impl<O: OperationOwner> SceneEditExecutionPlan<'_, '_, O> {
             NodeSceneEditProgram::GenerateNormals { geometry, .. } => {
                 EditStoragePlan::Normals(*geometry)
             }
+            NodeSceneEditProgram::GenerateTangents(geometry) => {
+                EditStoragePlan::Tangents(*geometry)
+            }
             NodeSceneEditProgram::ConvertSpace(plan) => EditStoragePlan::ConvertSpace(*plan),
             #[cfg(test)]
             NodeSceneEditProgram::NodeTransform(_) => {
@@ -1026,6 +1122,35 @@ fn map_plan(cause: NodeSceneEditPlanError) -> SceneEditRejection {
         NodeSceneEditPlanError::SizeOverflow { .. } => SceneEditCompileError::SizeOverflow.into(),
         _ => SceneEditCompileError::InvalidSource.into(),
     }
+}
+
+/// A generated base tangent would no longer describe any authored geometric morph. Even empty
+/// sparse delta streams are authored deltas, so reject their descriptors before publication.
+fn check_tangent_morphs<C: TypedStorageBuildControl<Error = StoreRuntimeError>>(
+    deformation: &crate::canonical_scene::store::typed_storage::deformation::DeformationStorage,
+    target: usize,
+    control: &mut C,
+) -> Result<(), SceneEditRejection> {
+    let targets = control.run_unit(|| {
+        deformation
+            .primitives
+            .get(target)
+            .and_then(|primitive| primitive.morph_targets.get(&deformation.morph_targets))
+            .ok_or(SceneEditCompileError::InvalidSource)
+    })??;
+    for target in targets {
+        let valid = control.run_unit(|| {
+            target
+                .deltas
+                .checked(deformation.morph_deltas.len())
+                .is_some()
+                && target.deltas.is_empty()
+        })?;
+        if !valid {
+            return Err(SceneEditCompileError::InvalidSource.into());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

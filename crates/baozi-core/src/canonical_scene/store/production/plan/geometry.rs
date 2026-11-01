@@ -10,7 +10,10 @@ use std::ops::Range;
 use baozi_operation::{CapacityPlan, CapacityPlanError};
 use thiserror::Error;
 
-use crate::attribute::{AttributeDomain, AttributeSemantic, AttributeSemanticKind};
+use crate::attribute::{
+    AttributeDomain, AttributeSemantic, AttributeSemanticKind, TangentConventions,
+    TangentConventionsValidationError,
+};
 use crate::canonical_scene::store::typed_storage::build::GeometryStoragePlan;
 use crate::entity::validate_entity_name_str;
 use crate::geometry::TopologyKind;
@@ -99,6 +102,12 @@ pub(in crate::canonical_scene::store) enum GeometryAuthoringSemanticError {
     AttributeScalarShape { attribute: usize, lanes: u8 },
     #[error("attribute {attribute} uses unsupported built-in domain or scalar format")]
     AttributeSchema { attribute: usize },
+    #[error("attribute {attribute} has invalid tangent conventions: {source}")]
+    TangentConventions {
+        attribute: usize,
+        #[source]
+        source: TangentConventionsValidationError,
+    },
     #[error("attribute {attribute} has non-finite floating-point source value at scalar {scalar}")]
     NonFiniteAttributeValue { attribute: usize, scalar: usize },
     #[error("attribute {attribute} source projection is valid only for the Corner domain")]
@@ -362,6 +371,12 @@ impl<'input> ValidatedGeometryAttributeView<'_, 'input> {
         self.input.semantic()
     }
 
+    pub(in crate::canonical_scene::store) const fn tangent_conventions(
+        &self,
+    ) -> Option<&TangentConventions> {
+        self.input.tangent_conventions()
+    }
+
     pub(in crate::canonical_scene::store) const fn domain(&self) -> AttributeDomain {
         self.input.domain()
     }
@@ -433,6 +448,7 @@ struct GeometryValidationStorage<R> {
     logical_mesh_count: u32,
     logical_mesh_name_byte_count: u32,
     attribute_semantic_name_byte_count: u32,
+    tangent_schema_name_byte_count: u32,
     primitive_count: u32,
     mesh_instance_count: u32,
     attribute_count: u32,
@@ -480,6 +496,10 @@ impl<'input, R> ValidatedGeometryBatch<'input, R> {
         &self,
     ) -> u32 {
         self.compiled.attribute_semantic_name_byte_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn tangent_schema_name_byte_count(&self) -> u32 {
+        self.compiled.tangent_schema_name_byte_count
     }
 
     pub(in crate::canonical_scene::store) const fn primitive_count(&self) -> u32 {
@@ -678,6 +698,7 @@ struct GeometryValidationContext<'control, C: CanonicalAuthoringControl> {
     canonical_bytes: u64,
     rows: [u64; 4],
     name_bytes: u64,
+    tangent_schema_name_bytes: u32,
 }
 
 impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control, C> {
@@ -698,6 +719,7 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
             canonical_bytes: 0,
             rows: [0; 4],
             name_bytes: 0,
+            tangent_schema_name_bytes: 0,
         }
     }
 
@@ -1244,7 +1266,9 @@ where
             unowned: u32_to_usize(unowned, "unowned attribute count")?,
         })
     })??;
-    context.add_payload_blocks(block_for_u64(u64::from(attribute_semantic_name_offset)))?;
+    context.add_payload_blocks(block_for_u64(
+        u64::from(attribute_semantic_name_offset) + u64::from(context.tangent_schema_name_bytes),
+    ))?;
 
     for (instance_index, instance) in input.mesh_instances().iter().copied().enumerate() {
         context.run_unit(SceneValidationWork::Entity, || {
@@ -1282,6 +1306,7 @@ where
         logical_mesh_count,
         logical_mesh_name_byte_count: logical_mesh_name_offset,
         attribute_semantic_name_byte_count: attribute_semantic_name_offset,
+        tangent_schema_name_byte_count: context.tangent_schema_name_bytes,
         primitive_count,
         mesh_instance_count,
         attribute_count,
@@ -1664,6 +1689,28 @@ where
         }
         context.add_utf8_payload(usize_to_u64(name.len(), "attribute semantic name bytes")?)?;
         *attribute_semantic_name_offset = next;
+    }
+    if let Some(conventions) = attribute.tangent_conventions() {
+        for schema in [
+            conventions.basis.schema_id(),
+            conventions.encoding.schema_id(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let name = schema.name().as_str();
+            let count = collection_count(name.len(), "tangent schema name bytes")?;
+            context.tangent_schema_name_bytes = context
+                .tangent_schema_name_bytes
+                .checked_add(count)
+                .ok_or(GeometryAuthoringSemanticError::AccountingOverflow {
+                    dimension: "tangent schema name bytes",
+                })?;
+            context.add_utf8_payload(u64::from(count))?;
+            for &byte in name.as_bytes() {
+                context.run_unit(SceneValidationWork::PayloadCell, || byte)?;
+            }
+        }
     }
     match attribute.payload() {
         GeometryAttributePayloadAuthoring::DenseF32 {
@@ -2168,6 +2215,20 @@ fn validate_attribute_authored_shape(
     attribute_index: usize,
     attribute: &GeometryAttributeAuthoring<'_>,
 ) -> Result<(), GeometryAuthoringSemanticError> {
+    match (attribute.semantic(), attribute.tangent_conventions()) {
+        (AttributeSemantic::Tangent, Some(conventions)) => conventions.validate(),
+        (AttributeSemantic::Tangent, None) => {
+            Err(TangentConventionsValidationError::MissingConventions)
+        }
+        (_, Some(_)) => Err(TangentConventionsValidationError::UnexpectedConventions),
+        (_, None) => Ok(()),
+    }
+    .map_err(
+        |source| GeometryAuthoringSemanticError::TangentConventions {
+            attribute: attribute_index,
+            source,
+        },
+    )?;
     match attribute.payload() {
         GeometryAttributePayloadAuthoring::DenseF32 {
             lanes,

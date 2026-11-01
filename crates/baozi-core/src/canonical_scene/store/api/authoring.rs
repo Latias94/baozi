@@ -42,7 +42,11 @@ pub use crate::appearance::{
     SupplementalPbrFactors, TextureBlendOperation, TextureChannel, TextureChannelSwizzle,
     TextureRole, TextureSourceKey, TextureStrength, TextureTransform,
 };
-pub use crate::attribute::{AttributeDomain, AttributeSemantic, CustomAttributeSemantic};
+pub use crate::attribute::{
+    AttributeDomain, AttributeSemantic, CustomAttributeSemantic, TangentBasisConvention,
+    TangentConventionField, TangentConventions, TangentConventionsValidationError,
+    TangentHandednessEncoding, TangentSchemaBindingError,
+};
 pub use crate::deform::{MorphDeltaSemantic, SkinMatrixSpaces};
 pub use crate::entity::{
     AuthoredTransform, CameraProjection, EntityName, LightDefinition, LightEmissionError,
@@ -58,8 +62,5 @@ pub use crate::provenance::{
     ResourceIdentityError, SourceDisplayName, SourceLocatorValue, SourceObjectKind,
     SourceObjectLocator,
 };
-pub use crate::scene_space::{
-    Axis, FrontFaceWinding, Handedness, SceneSpace, TangentBasisConvention,
-    TangentHandednessEncoding, UvOrigin,
-};
+pub use crate::scene_space::{Axis, FrontFaceWinding, Handedness, SceneSpace, UvOrigin};
 pub use crate::{FormatId, LocalAxes, LocalAxesError, LocalAxis};

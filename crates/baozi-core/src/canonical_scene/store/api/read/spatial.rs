@@ -1,41 +1,19 @@
 use std::fmt;
-use std::num::NonZeroU32;
 
-use super::super::super::construction::node_scene::semantic::{
-    NodeSceneSpatialTangentBasis, NodeSceneSpatialTangentEncoding,
-};
 use super::{ValidatedScene, checked_index, expect_validated};
 use crate::entity::{CameraProjection, LightDefinition};
 use crate::identity::{CameraId, LightId, SceneEntityKind, SceneLookupError};
 use crate::scene_space::{Axis, FrontFaceWinding, Handedness, UvOrigin};
 
-/// The authored tangent basis, including allocation-free borrowed extension identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TangentBasisRef<'s> {
-    Unknown,
-    MikkTspace,
-    Namespaced { name: &'s str, version: NonZeroU32 },
-}
-
-/// The authored tangent handedness encoding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TangentEncodingRef<'s> {
-    Unknown,
-    SignInW,
-    Namespaced { name: &'s str, version: NonZeroU32 },
-}
-
 /// Source space declarations. Unknown conventions remain unknown until an explicit conversion.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct SceneSpaceRef<'s> {
+pub struct SceneSpaceRef {
     pub handedness: Handedness,
     pub up_axis: Axis,
     pub front_axis: Axis,
     pub unit_scale_to_meters: Option<f64>,
     pub front_face_winding: FrontFaceWinding,
     pub uv_origin: UvOrigin,
-    pub tangent_basis: TangentBasisRef<'s>,
-    pub tangent_handedness_encoding: TangentEncodingRef<'s>,
 }
 
 /// One camera definition. Node placements reference the definition independently.
@@ -117,7 +95,7 @@ impl fmt::Debug for LightRef<'_> {
 }
 
 impl ValidatedScene {
-    pub fn space(&self) -> SceneSpaceRef<'_> {
+    pub fn space(&self) -> SceneSpaceRef {
         let space =
             expect_validated(expect_validated(self.as_node_scene().semantic_view()).scene_space());
         SceneSpaceRef {
@@ -127,24 +105,6 @@ impl ValidatedScene {
             unit_scale_to_meters: space.unit_scale_to_meters(),
             front_face_winding: space.front_face_winding(),
             uv_origin: space.uv_origin(),
-            tangent_basis: match space.tangent_basis() {
-                NodeSceneSpatialTangentBasis::Unknown => TangentBasisRef::Unknown,
-                NodeSceneSpatialTangentBasis::MikkTspace => TangentBasisRef::MikkTspace,
-                NodeSceneSpatialTangentBasis::Namespaced(schema) => TangentBasisRef::Namespaced {
-                    name: schema.name(),
-                    version: schema.version(),
-                },
-            },
-            tangent_handedness_encoding: match space.tangent_encoding() {
-                NodeSceneSpatialTangentEncoding::Unknown => TangentEncodingRef::Unknown,
-                NodeSceneSpatialTangentEncoding::SignInW => TangentEncodingRef::SignInW,
-                NodeSceneSpatialTangentEncoding::Namespaced(schema) => {
-                    TangentEncodingRef::Namespaced {
-                        name: schema.name(),
-                        version: schema.version(),
-                    }
-                }
-            },
         }
     }
 

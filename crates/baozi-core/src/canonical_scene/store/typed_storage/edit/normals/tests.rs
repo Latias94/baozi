@@ -76,6 +76,11 @@ fn attribute(
 ) -> u32 {
     let index = storage.attributes.len() as u32;
     storage.attributes.push(StoredAttribute {
+        tangent_conventions: if semantic == StoredAttributeSemantic::Tangent {
+            Some(crate::canonical_scene::store::typed_storage::StoredTangentConventions::UNKNOWN)
+        } else {
+            None
+        },
         semantic,
         domain,
         lanes,
@@ -344,6 +349,258 @@ fn plan(source: &GeometryStorage) -> GeometryNormalsPlan<'_> {
         &mut Control::default(),
     )
     .expect("valid replacement")
+}
+
+#[test]
+fn removing_tangents_removes_only_their_schema_text_and_rebases_surviving_name_ranges() {
+    use crate::canonical_scene::store::typed_storage::{
+        StoredTangentBasis, StoredTangentConventions, StoredTangentEncoding,
+    };
+    let mut source = geometry(true, true);
+    let original_names = source.names.clone();
+    let basis = "test:removed-basis";
+    let encoding = "test:removed-sign";
+    let mut names = [basis.as_bytes(), encoding.as_bytes()].concat();
+    let removed_bytes = names.len();
+    names.extend_from_slice(&source.names);
+    source.names = names;
+    for attribute in &mut source.attributes {
+        if let StoredAttributeSemantic::Custom(name) = &mut attribute.semantic {
+            name.0 = TableRange::new(name.0.start() + removed_bytes, name.0.len());
+        }
+    }
+    for mesh in &mut source.logical_meshes {
+        if let Some(name) = &mut mesh.name {
+            name.0 = TableRange::new(name.0.start() + removed_bytes, name.0.len());
+        }
+    }
+    let tangent = source
+        .attributes
+        .iter_mut()
+        .find(|attribute| attribute.semantic == StoredAttributeSemantic::Tangent)
+        .unwrap();
+    tangent.tangent_conventions = Some(StoredTangentConventions {
+        basis: StoredTangentBasis::Namespaced {
+            name: TextRange(TableRange::new(0, basis.len())),
+            version: std::num::NonZeroU32::new(2).unwrap(),
+        },
+        encoding: StoredTangentEncoding::Namespaced {
+            name: TextRange(TableRange::new(basis.len(), encoding.len())),
+            version: std::num::NonZeroU32::new(3).unwrap(),
+        },
+    });
+    assert_eq!(
+        source.validate(
+            &mut Control::default(),
+            [1, 3, source.attributes.len(), 2],
+            3,
+            2
+        ),
+        Ok(true)
+    );
+    let plan = plan(&source);
+    assert_eq!(plan.name_bytes(), original_names.len());
+    let mut build = Control::default();
+    let output = plan.materialize(&mut build).unwrap();
+    assert_eq!(build.completed, plan.work());
+    assert_eq!(build.strings, original_names.len() as u64);
+    assert_eq!(output.names, original_names);
+    assert!(
+        output
+            .attributes
+            .iter()
+            .all(|attribute| attribute.tangent_conventions.is_none())
+    );
+    assert_eq!(
+        output.validate(
+            &mut Control::default(),
+            [1, 3, output.attributes.len(), 2],
+            3,
+            2
+        ),
+        Ok(true)
+    );
+    let mut correspondence = Control::default();
+    assert_eq!(
+        plan.validate_correspondence(&output, &mut correspondence),
+        Ok(true)
+    );
+    assert_eq!(correspondence.completed, plan.correspondence_work());
+}
+
+#[test]
+fn removing_target_tangent_preserves_other_primitive_tangent_conventions_and_names() {
+    use crate::canonical_scene::store::typed_storage::{
+        StoredTangentBasis, StoredTangentConventions, StoredTangentEncoding,
+    };
+    use std::num::NonZeroU32;
+
+    let mut source = geometry(true, true);
+    let original_names = std::mem::take(&mut source.names);
+    let custom_name_bytes = source.logical_meshes[0].name.unwrap().0.start();
+    let removed_basis = "test:removed-basis";
+    let retained_basis = "test:retained-basis";
+    let shared_encoding = "test:shared-sign";
+    let removed = StoredTangentConventions {
+        basis: StoredTangentBasis::Namespaced {
+            name: name(&mut source, removed_basis),
+            version: NonZeroU32::new(2).unwrap(),
+        },
+        encoding: StoredTangentEncoding::Namespaced {
+            name: name(&mut source, shared_encoding),
+            version: NonZeroU32::new(3).unwrap(),
+        },
+    };
+    let removed_name_bytes = source.names.len();
+    values(&mut source.names, &original_names[..custom_name_bytes]);
+    let retained = StoredTangentConventions {
+        basis: StoredTangentBasis::Namespaced {
+            name: name(&mut source, retained_basis),
+            version: NonZeroU32::new(5).unwrap(),
+        },
+        encoding: StoredTangentEncoding::Namespaced {
+            name: name(&mut source, shared_encoding),
+            version: NonZeroU32::new(7).unwrap(),
+        },
+    };
+    let retained_name_bytes = retained_basis.len() + shared_encoding.len();
+    values(&mut source.names, &original_names[custom_name_bytes..]);
+    for attribute in &mut source.attributes {
+        if let StoredAttributeSemantic::Custom(name) = &mut attribute.semantic {
+            name.0 = TableRange::new(name.0.start() + removed_name_bytes, name.0.len());
+        }
+    }
+    for mesh in &mut source.logical_meshes {
+        if let Some(name) = &mut mesh.name {
+            name.0 = TableRange::new(
+                name.0.start() + removed_name_bytes + retained_name_bytes,
+                name.0.len(),
+            );
+        }
+    }
+    let removed_attribute = source.primitives[1]
+        .attributes
+        .checked(source.attributes.len())
+        .unwrap()
+        .find(|&index| source.attributes[index].semantic == StoredAttributeSemantic::Tangent)
+        .unwrap();
+    source.attributes[removed_attribute].tangent_conventions = Some(removed);
+    let retained_values = [
+        1.0, -0.0, 0.0, -1.0, 0.0, 1.0, -0.0, 1.0, -0.0, 0.0, 1.0, -1.0, 1.0, 0.0, 0.0, 1.0,
+    ];
+    let payload = values(&mut source.f32_values, &retained_values);
+    let retained_attribute = attribute(
+        &mut source,
+        StoredAttributeSemantic::Tangent,
+        AttributeDomain::Corner,
+        4,
+        4,
+        StoredAttributePayload::DenseF32(payload),
+    );
+    source.attributes[retained_attribute as usize].tangent_conventions = Some(retained);
+    let right_attributes = source.primitives[2].attributes;
+    source.primitives[2].attributes =
+        TableRange::new(right_attributes.start(), right_attributes.len() + 1);
+    assert_eq!(
+        source.validate(
+            &mut Control::default(),
+            [1, 3, source.attributes.len(), 2],
+            3,
+            2
+        ),
+        Ok(true)
+    );
+
+    let mut expected_names = original_names[..custom_name_bytes].to_vec();
+    expected_names.extend_from_slice(retained_basis.as_bytes());
+    expected_names.extend_from_slice(shared_encoding.as_bytes());
+    expected_names.extend_from_slice(&original_names[custom_name_bytes..]);
+    let plan = plan(&source);
+    assert_eq!(plan.output_attribute(removed_attribute as u32), None);
+    let output_attribute = plan.output_attribute(retained_attribute).unwrap();
+    assert_eq!(output_attribute, retained_attribute - 1);
+    assert_eq!(
+        plan.source_attribute(output_attribute),
+        Some(retained_attribute)
+    );
+    assert_eq!(plan.name_bytes(), source.names.len() - removed_name_bytes);
+    let mut build = Control::default();
+    let output = plan.materialize(&mut build).unwrap();
+    assert_eq!(build.completed, plan.work());
+    assert_eq!(build.strings, expected_names.len() as u64);
+    assert_eq!(output.names, expected_names);
+    assert!(
+        output.primitives[1]
+            .attributes
+            .get(&output.attributes)
+            .unwrap()
+            .iter()
+            .all(
+                |attribute| attribute.semantic != StoredAttributeSemantic::Tangent
+                    && attribute.tangent_conventions.is_none()
+            )
+    );
+    assert_eq!(
+        output.primitives[2].attributes.len(),
+        right_attributes.len() + 1
+    );
+    assert!(
+        output.primitives[2]
+            .attributes
+            .checked(output.attributes.len())
+            .unwrap()
+            .contains(&(output_attribute as usize))
+    );
+    let row = output.attributes[output_attribute as usize];
+    assert_eq!(row.semantic, StoredAttributeSemantic::Tangent);
+    assert_eq!(row.domain, AttributeDomain::Corner);
+    assert_eq!(row.lanes, 4);
+    assert_eq!(row.element_count, 4);
+    let Some(StoredTangentConventions {
+        basis:
+            StoredTangentBasis::Namespaced {
+                name: basis,
+                version: basis_version,
+            },
+        encoding:
+            StoredTangentEncoding::Namespaced {
+                name: encoding,
+                version: encoding_version,
+            },
+    }) = row.tangent_conventions
+    else {
+        panic!("the other primitive retains both schema declarations");
+    };
+    assert_eq!(basis.get(&output.names), Some(retained_basis));
+    assert_eq!(basis_version.get(), 5);
+    assert_eq!(basis.0.start(), custom_name_bytes);
+    assert_eq!(encoding.get(&output.names), Some(shared_encoding));
+    assert_eq!(encoding_version.get(), 7);
+    assert_eq!(encoding.0.start(), custom_name_bytes + retained_basis.len());
+    let StoredAttributePayload::DenseF32(payload) = row.payload else {
+        panic!("the other primitive retains its tangent payload encoding");
+    };
+    assert_eq!(
+        payload
+            .get(&output.f32_values)
+            .unwrap()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        retained_values.map(f32::to_bits)
+    );
+    let mut validation = Control::default();
+    assert_eq!(
+        output.validate(&mut validation, [1, 3, output.attributes.len(), 2], 3, 2),
+        Ok(true)
+    );
+    assert_eq!(validation.completed, plan.validation_work());
+    let mut correspondence = Control::default();
+    assert_eq!(
+        plan.validate_correspondence(&output, &mut correspondence),
+        Ok(true)
+    );
+    assert_eq!(correspondence.completed, plan.correspondence_work());
 }
 
 #[test]

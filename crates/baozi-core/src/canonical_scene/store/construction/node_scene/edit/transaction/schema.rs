@@ -24,6 +24,7 @@ pub(super) const REVISION: u32 = 4;
 pub(super) const OPERATION_TRIANGULATE: u32 = 1;
 pub(super) const OPERATION_NORMALS: u32 = 2;
 pub(super) const OPERATION_SPACE_CONVERSION: u32 = 3;
+pub(super) const OPERATION_TANGENTS: u32 = 4;
 pub(super) const OPERATION_SEMANTIC_VERSION: u32 = 1;
 pub(super) const OUTCOME_CHANGED: u32 = 1;
 pub(super) const OUTCOME_FAILED: u32 = 2;
@@ -75,6 +76,28 @@ pub(super) mod normal_field {
     pub(crate) const REPLACED_NORMAL: u32 = 1;
     pub(crate) const REMOVED_TANGENT: u32 = 2;
     pub(crate) const SMOOTH: u32 = 4;
+}
+
+/// The selected dependency domains are source domains; the output tangent is always Corner.
+pub(super) mod tangent_field {
+    pub(crate) const NORMAL_DOMAIN: usize = 7;
+    pub(crate) const CORNER_COUNT: usize = 8;
+    pub(crate) const UV_SET: usize = 9;
+    pub(crate) const UV_DOMAIN: usize = 10;
+    pub(crate) const REPLACED_TANGENT: usize = 11;
+    pub(crate) const OUTPUT_TANGENT_ATTRIBUTE: usize = 12;
+    pub(crate) const FACE_COUNT: usize = 13;
+    pub(crate) const OUTPUT_ATTRIBUTE_COUNT: usize = 14;
+}
+
+pub(super) const fn tangent_domain_word(domain: crate::attribute::AttributeDomain) -> Option<u32> {
+    match domain {
+        crate::attribute::AttributeDomain::Vertex => Some(0),
+        crate::attribute::AttributeDomain::Corner => Some(1),
+        crate::attribute::AttributeDomain::Face | crate::attribute::AttributeDomain::Instance => {
+            None
+        }
+    }
 }
 
 pub(super) const ROOT_FIELDS: usize = 25;

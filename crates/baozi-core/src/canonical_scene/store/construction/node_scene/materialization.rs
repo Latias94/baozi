@@ -1151,7 +1151,6 @@ impl<'input, R> NodeSceneSealedPlan<'input, R> {
         let central_validation = NodeSceneCentralValidationPlan::try_new(
             validation_scratch,
             materialization.validation_work_units(validation_scratch, failure_evidence)?,
-            materialization.spatial.name_bytes(),
         )?;
         let success_requirements =
             materialization.success_requirements(central_validation, brand)?;
@@ -1262,11 +1261,10 @@ impl NodeSceneMaterializationPlans {
         let profile_shape = profile_batch.retention_shape();
         let canonical_string_bytes = [
             nodes_batch.node_name_byte_count(),
-            u64::from(spatial_batch.tangent_basis_schema_name_bytes()),
-            u64::from(spatial_batch.tangent_encoding_schema_name_bytes()),
             appearance_batch.text_byte_count(),
             u64::from(geometry_batch.logical_mesh_name_byte_count()),
             u64::from(geometry_batch.attribute_semantic_name_byte_count()),
+            u64::from(geometry_batch.tangent_schema_name_byte_count()),
             u64::from(deformation_batch.skin_name_byte_count()),
             u64::from(deformation_batch.morph_name_byte_count()),
             animation_batch.clip_name_byte_count(),
@@ -1368,7 +1366,7 @@ where
     let spatial = materialize!(lane.try_retain_storage(
         plans.spatial.capacities(),
         spatial_work,
-        plans.spatial.name_bytes() as u64,
+        0,
         |control| {
             #[allow(
                 unused_mut,

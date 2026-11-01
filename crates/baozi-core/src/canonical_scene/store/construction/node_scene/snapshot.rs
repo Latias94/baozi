@@ -19,9 +19,10 @@ mod appearance;
 mod deformation;
 mod profile;
 mod spatial;
+mod tangent;
 
 const CANONICAL_SCENE_SNAPSHOT_DOMAIN: &str = "baozi.canonical-scene.snapshot";
-const CANONICAL_SCENE_SNAPSHOT_SCHEMA_REVISION: u32 = 5;
+const CANONICAL_SCENE_SNAPSHOT_SCHEMA_REVISION: u32 = 6;
 const NODE_SCENE_SNAPSHOT_ALGORITHM_ID: &str = "sha256";
 const NODE_SCENE_SNAPSHOT_POLL_INTERVAL: u64 = 64;
 const SNAPSHOT_PAYLOAD_CHUNK_BYTES: usize = 4 * 1024;
@@ -214,6 +215,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneSnapshotTotals {
     pub(in crate::canonical_scene::store) u32_scalar_count: u64,
     pub(in crate::canonical_scene::store) i32_scalar_count: u64,
     pub(in crate::canonical_scene::store) attribute_semantic_name_bytes: u64,
+    pub(in crate::canonical_scene::store) tangent_schema_name_bytes: u64,
     pub(in crate::canonical_scene::store) skin_count: usize,
     pub(in crate::canonical_scene::store) logical_morph_count: usize,
     pub(in crate::canonical_scene::store) morph_definition_count: usize,
@@ -305,6 +307,7 @@ struct GeometryCollectionCounts {
 struct GeometryPayloadTotals {
     logical_mesh_name_bytes: u64,
     attribute_semantic_name_bytes: u64,
+    tangent_schema_name_bytes: u64,
     polygon_boundaries: u64,
     primitive_indices: u64,
     sparse_indices: u64,
@@ -736,6 +739,7 @@ fn capture_node_scene_with_encoder(
                 u32_scalar_count: geometry_totals.u32_scalars,
                 i32_scalar_count: geometry_totals.i32_scalars,
                 attribute_semantic_name_bytes: geometry_totals.attribute_semantic_name_bytes,
+                tangent_schema_name_bytes: geometry_totals.tangent_schema_name_bytes,
                 skin_count: deformation_counts.skins,
                 logical_morph_count: deformation_counts.logical_morphs,
                 morph_definition_count: deformation_counts.morph_definitions,
@@ -1002,6 +1006,16 @@ fn write_geometry(
         preview.geometry_field_u32(render, "elements", element_count);
         preview.geometry_field_u32(render, "explicit", explicit_element_count);
         preview.geometry_field_u64(render, "canonical_scalars", canonical_scalar_count);
+
+        if let Some(conventions) = attribute.tangent_conventions() {
+            let schema_bytes =
+                tangent::write_tangent_conventions(conventions, transcript, preview, work, render)?;
+            checked_add_count(
+                &mut totals.tangent_schema_name_bytes,
+                schema_bytes,
+                "tangent schema name bytes",
+            )?;
+        }
 
         write_attribute_payload(
             transcript,
@@ -2308,6 +2322,10 @@ impl PreviewSink {
         self.push_u64(geometry_payloads.logical_mesh_name_bytes);
         self.push_str(",attribute_semantic_name_bytes=");
         self.push_u64(geometry_payloads.attribute_semantic_name_bytes);
+        if geometry_payloads.tangent_schema_name_bytes != 0 {
+            self.push_str(",tangent_schema_name_bytes=");
+            self.push_u64(geometry_payloads.tangent_schema_name_bytes);
+        }
         self.push_str(",primitives=");
         self.push_usize(geometry.primitives);
         self.push_str(",attributes=");

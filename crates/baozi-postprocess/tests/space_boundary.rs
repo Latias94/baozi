@@ -2,8 +2,7 @@ mod common;
 
 use baozi_core::{
     AttributeData, AttributeDomain, Axis, ConventionValue, FrontFaceWinding, Handedness,
-    SceneSpaceField, SourceSpaceError, TangentBasisRef, TangentEncodingRef, TargetSpace,
-    ValidatedScene,
+    SceneSpaceField, SourceSpaceError, TargetSpace, ValidatedScene,
 };
 use baozi_postprocess::{
     NormalOptions, PostProcessCancellationToken, PostProcessControl, PostProcessControlCause,
@@ -66,10 +65,10 @@ fn triangulate_generate_and_convert_preserves_vertex_identity_and_corner_pairing
     let source_uvs = dense_f32(source.texcoords(0, AttributeDomain::Corner).unwrap(), 2).to_vec();
     let source_space = scene.space();
     let uv_origin = source_space.uv_origin;
-    assert_eq!(source_space.tangent_basis, TangentBasisRef::Unknown);
-    assert_eq!(
-        source_space.tangent_handedness_encoding,
-        TangentEncodingRef::Unknown
+    assert!(
+        source
+            .attributes()
+            .all(|attribute| attribute.tangent_conventions().is_none())
     );
     let conversion = options(reflected_centimeters());
     let (scene, report) = convert_scene_space(scene, conversion, PostProcessControl::default())
@@ -112,12 +111,12 @@ fn triangulate_generate_and_convert_preserves_vertex_identity_and_corner_pairing
     assert_eq!(space.unit_scale_to_meters, Some(0.01));
     assert_eq!(space.front_face_winding, FrontFaceWinding::CounterClockwise);
     assert_eq!(space.uv_origin, uv_origin);
-    assert_eq!(space.tangent_basis, TangentBasisRef::Unknown);
-    assert_eq!(
-        space.tangent_handedness_encoding,
-        TangentEncodingRef::Unknown
-    );
     let output = primitive(&scene);
+    assert!(
+        output
+            .attributes()
+            .all(|attribute| attribute.tangent_conventions().is_none())
+    );
     assert_eq!(
         (
             output.vertex_count(),

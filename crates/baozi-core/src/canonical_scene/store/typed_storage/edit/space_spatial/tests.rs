@@ -1,10 +1,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use crate::extension::ExtensionSchemaId;
 use crate::math::{Color, Vec3};
-use crate::scene_space::{
-    Axis, FrontFaceWinding, Handedness, TangentBasisConvention, TangentHandednessEncoding, UvOrigin,
-};
+use crate::scene_space::{Axis, FrontFaceWinding, Handedness, UvOrigin};
 use crate::{LocalAxes, TargetSpace};
 
 use super::*;
@@ -115,15 +112,9 @@ fn reflected_unusual_axes() -> LocalAxes {
     LocalAxes::try_new(Axis::PositiveY, Axis::PositiveX, Axis::PositiveZ).unwrap()
 }
 
-fn named_space() -> SceneSpace {
+fn source_space() -> SceneSpace {
     SceneSpace {
         uv_origin: UvOrigin::UpperLeft,
-        tangent_basis: TangentBasisConvention::Namespaced {
-            schema_id: ExtensionSchemaId::new("test:basis", 17).unwrap(),
-        },
-        tangent_handedness_encoding: TangentHandednessEncoding::Namespaced {
-            schema_id: ExtensionSchemaId::new("test:sign", 29).unwrap(),
-        },
         ..SceneSpace::STANDARD_TARGET
     }
 }
@@ -140,7 +131,7 @@ fn light(kind: LightKind, axes: LocalAxes, intensity: f32) -> LightDefinition {
 
 fn fixture() -> SpatialStorage {
     SpatialStorage {
-        space: named_space(),
+        space: source_space(),
         cameras: vec![
             CameraProjection::perspective(
                 LocalAxes::STANDARD,
@@ -263,16 +254,11 @@ fn reflection_permutation_and_units_convert_complete_definitions_in_source_order
         FrontFaceWinding::CounterClockwise
     );
     assert_eq!(actual.space.uv_origin, source.space.uv_origin);
-    assert_eq!(actual.space.tangent_basis, source.space.tangent_basis);
-    assert_eq!(
-        actual.space.tangent_handedness_encoding,
-        source.space.tangent_handedness_encoding
-    );
     assert_eq!(
         plan.validate_correspondence(&actual, &mut Control::default()),
         Ok(true)
     );
-    assert_eq!(actual.validate(&mut Control::default(), 3, 5, 19), Ok(true));
+    assert_eq!(actual.validate(&mut Control::default(), 3, 5), Ok(true));
 }
 
 #[test]
@@ -514,7 +500,7 @@ fn light_range_failures_are_numeric_and_do_not_scale_photometric_intensity_or_co
 }
 
 #[test]
-fn preflight_counts_two_capacities_inline_names_and_every_row_without_allocating() {
+fn preflight_counts_two_capacities_inline_space_and_every_row_without_allocating() {
     let source = fixture();
     let mut control = Control::default();
     let mut result = None;
@@ -523,22 +509,21 @@ fn preflight_counts_two_capacities_inline_names_and_every_row_without_allocating
     });
     assert_eq!(allocations.count_total, 0);
     assert_eq!(allocations.bytes_total, 0);
-    assert_eq!(control.completed, 28);
-    assert_eq!(control.attempted, 28);
-    assert_eq!(control.strings, 19);
+    assert_eq!(control.completed, 9);
+    assert_eq!(control.attempted, 9);
+    assert_eq!(control.strings, 0);
     let plan = result.unwrap();
     assert_eq!(
         plan.capacities()
             .map(|capacity| capacity.desired_capacity()),
         [3, 5]
     );
-    assert_eq!(plan.work(), 28);
-    assert_eq!(plan.correspondence_work(), 28);
-    assert_eq!(plan.name_bytes(), 19);
+    assert_eq!(plan.work(), 9);
+    assert_eq!(plan.correspondence_work(), 9);
     let mut control = Control::default();
     let actual = plan.materialize(&mut control).unwrap();
-    assert_eq!(control.completed, 28);
-    assert_eq!(control.strings, 19);
+    assert_eq!(control.completed, 9);
+    assert_eq!(control.strings, 0);
     let mut control = Control::default();
     let allocations = allocation_counter::measure(|| {
         assert_eq!(
@@ -548,8 +533,8 @@ fn preflight_counts_two_capacities_inline_names_and_every_row_without_allocating
     });
     assert_eq!(allocations.count_total, 0);
     assert_eq!(allocations.bytes_total, 0);
-    assert_eq!(control.completed, 28);
-    assert_eq!(control.attempted, 28);
+    assert_eq!(control.completed, 9);
+    assert_eq!(control.attempted, 9);
 }
 
 #[test]
@@ -558,7 +543,7 @@ fn every_preflight_and_correspondence_action_preserves_control_failures() {
     let conversion = reflected();
     let plan = SpatialSpacePlan::try_new(&source, conversion, &mut Control::default()).unwrap();
     let actual = plan.materialize(&mut Control::default()).unwrap();
-    for stop in 0..28 {
+    for stop in 0..9 {
         let mut control = Control {
             stop: Some(stop),
             ..Control::default()
@@ -602,7 +587,7 @@ fn every_materialization_action_releases_both_buffers_on_interruption_and_unwind
     let original_lights = source.lights.clone();
     let original_space = source.space.clone();
     let plan = SpatialSpacePlan::try_new(&source, reflected(), &mut Control::default()).unwrap();
-    for stop in 0..28 {
+    for stop in 0..9 {
         let mut control = Control {
             stop: Some(stop),
             ..Control::default()
@@ -871,10 +856,10 @@ fn correspondence_rejects_light_kind_axes_ranges_cones_emission_bits_and_order()
 }
 
 #[test]
-fn correspondence_checks_all_space_facts_uv_schema_versions_and_names() {
+fn correspondence_checks_all_space_facts_and_uv_origin() {
     let source = fixture();
     let plan = SpatialSpacePlan::try_new(&source, reflected(), &mut Control::default()).unwrap();
-    for fault in 0..11 {
+    for fault in 0..7 {
         let mut actual = plan.materialize(&mut Control::default()).unwrap();
         match fault {
             0 => actual.space.handedness = Handedness::Right,
@@ -883,26 +868,6 @@ fn correspondence_checks_all_space_facts_uv_schema_versions_and_names() {
             3 => actual.space.unit_scale_to_meters = Some(1.0),
             4 => actual.space.front_face_winding = FrontFaceWinding::Clockwise,
             5 => actual.space.uv_origin = UvOrigin::LowerLeft,
-            6 => {
-                actual.space.tangent_basis = TangentBasisConvention::Namespaced {
-                    schema_id: ExtensionSchemaId::new("test:basis", 18).unwrap(),
-                }
-            }
-            7 => {
-                actual.space.tangent_handedness_encoding = TangentHandednessEncoding::Namespaced {
-                    schema_id: ExtensionSchemaId::new("test:sign", 30).unwrap(),
-                }
-            }
-            8 => {
-                actual.space.tangent_basis = TangentBasisConvention::Namespaced {
-                    schema_id: ExtensionSchemaId::new("test:other", 17).unwrap(),
-                }
-            }
-            9 => {
-                actual.space.tangent_handedness_encoding = TangentHandednessEncoding::Namespaced {
-                    schema_id: ExtensionSchemaId::new("test:else", 29).unwrap(),
-                }
-            }
             _ => actual.space.unit_scale_to_meters = None,
         }
         assert_eq!(
@@ -916,7 +881,7 @@ fn correspondence_checks_all_space_facts_uv_schema_versions_and_names() {
 fn correspondence_rejects_changed_shape_and_same_shape_foreign_source_values() {
     let source = fixture();
     let plan = SpatialSpacePlan::try_new(&source, reflected(), &mut Control::default()).unwrap();
-    for fault in 0..3 {
+    for fault in 0..4 {
         let mut actual = plan.materialize(&mut Control::default()).unwrap();
         match fault {
             0 => {
@@ -925,10 +890,11 @@ fn correspondence_rejects_changed_shape_and_same_shape_foreign_source_values() {
             1 => {
                 actual.lights.pop();
             }
+            2 => {
+                actual.cameras.push(source.cameras[0]);
+            }
             _ => {
-                actual.space.tangent_basis = TangentBasisConvention::Namespaced {
-                    schema_id: ExtensionSchemaId::new("test:x", 17).unwrap(),
-                }
+                actual.lights.push(source.lights[0]);
             }
         }
         let mut control = Control::default();
@@ -984,7 +950,7 @@ fn profile_selection_uses_actual_row_bits_and_needs_no_extra_traversal_or_alloca
 }
 
 #[test]
-fn declaration_only_and_empty_owners_keep_exact_work_and_preserve_uv_and_tangent_facts() {
+fn declaration_only_and_empty_owners_keep_exact_work_and_preserve_uv_origin() {
     let source = SpatialStorage {
         space: SceneSpace {
             uv_origin: UvOrigin::LowerLeft,
@@ -1004,7 +970,6 @@ fn declaration_only_and_empty_owners_keep_exact_work_and_preserve_uv_and_tangent
     assert_eq!(control.completed, 1);
     assert_eq!(plan.work(), 1);
     assert_eq!(plan.correspondence_work(), 1);
-    assert_eq!(plan.name_bytes(), 0);
     assert_eq!(
         plan.capacities()
             .map(|capacity| capacity.desired_capacity()),
@@ -1016,11 +981,6 @@ fn declaration_only_and_empty_owners_keep_exact_work_and_preserve_uv_and_tangent
         assert_eq!(control.completed, 1);
         assert_eq!(control.strings, 0);
         assert_eq!(actual.space.uv_origin, UvOrigin::LowerLeft);
-        assert_eq!(actual.space.tangent_basis, TangentBasisConvention::Unknown);
-        assert_eq!(
-            actual.space.tangent_handedness_encoding,
-            TangentHandednessEncoding::Unknown
-        );
         assert_eq!(
             plan.validate_correspondence(&actual, &mut Control::default()),
             Ok(true)
