@@ -2,7 +2,7 @@
 title: Typed glTF Unlit Materials
 type: feat
 date: 2026-11-01
-status: in_progress
+status: completed
 ---
 
 # Typed glTF Unlit Materials
@@ -55,6 +55,12 @@ bindings, source profile and snapshot framing; do not introduce another material
 Only the main thread runs Cargo using Rust 1.95.0, locked/offline dependencies, one build job and the
 existing target. Native Codex agents own disjoint scanner, importer-test and consumer slices plus
 read-only material/policy review. Existing user notes and unrelated changes remain untouched.
+
+Completed in `ec2958f4fb60577dc4199f378347438f36c634c3`. The
+[execution review](../reviews/2026-11-01-gltf-unlit-materials.md) records exact contracts and
+revision-qualified results: 2,677 passing workspace tests, 43 passing independent consumer tests,
+strict Clippy and formatting for both workspaces, and a compile-only wasm32 glTF library check.
+Candidate 7 is complete; package release and broader extension admission remain separate.
 
 ## References
 

@@ -1,5 +1,5 @@
 ---
-status: in_progress
+status: completed
 date: 2026-11-01
 ---
 
@@ -8,7 +8,10 @@ date: 2026-11-01
 This record covers the [unlit execution plan](../plans/2026-11-01-008-feat-gltf-unlit-materials-plan.md)
 after `1ce311b`. It delivers candidate 7 of the
 [asset workflow plan](../plans/2026-11-01-001-feat-asset-workflow-expansion-plan.md). Implementation
-identity and integrated results are recorded after source freeze below.
+is `ec2958f4fb60577dc4199f378347438f36c634c3`. The tracked tree was clean at source freeze;
+local file hashes and logs are retained under `target/review/gltf-unlit-*`, including a
+`target/review/gltf-unlit-evidence.zip` bundle. Subsequent changes complete this documentation
+separately from the tested implementation.
 
 ## Behavior and decisions
 
@@ -82,9 +85,24 @@ budget and all other importer tests pass without weakening production validation
 | Existing JSON admission and texture transforms | 19/19 pass | `6c523bf0-4c2a-486e-892b-d7fe224e23b4` |
 | New importer tests | 19/19 pass | `f99fe974-a8d2-413c-aaa2-231affe69655` |
 | New independent consumer cases and library units | 11/11 pass (5 integration, 6 units) | `eedcde52-3724-4208-a266-cc5178808b49` |
-| Windows workspace, all features | Pending | Pending |
-| Independent asset consumer, all features | Pending | Pending |
-| Strict Clippy and formatting | Pending | Pending |
+| Windows workspace, all features | 2,677/2,677 pass; 4 existing manual skips | `35781a7b-a145-4cb2-8a44-8fd01e408b3e` |
+| Independent asset consumer, all features | 43/43 pass; 1 existing manual skip | `c4611c6b-130e-43e7-b57a-474ec0486d35` |
+| Workspace strict Clippy | Pass, all targets/features, `-D warnings` | Local log |
+| Independent consumer strict Clippy | Pass, all targets/features, `-D warnings` | Local log |
+| Workspace and independent consumer formatting | Both pass | `cargo fmt ... -- --check` |
+| glTF library, wasm32-unknown-unknown | Compile pass | No browser execution claim |
+
+Executed integrated commands:
+
+```text
+cargo +1.95.0 clippy --locked --offline --workspace --all-targets --all-features --jobs 1 -- -D warnings
+cargo +1.95.0 nextest run --locked --offline --workspace --all-features --build-jobs 1 --test-threads 2 --no-fail-fast --status-level fail --final-status-level none
+cargo +1.95.0 nextest run --locked --offline --manifest-path tools/consumers/assets/Cargo.toml --target-dir target --all-features --build-jobs 1 --test-threads 1 --no-fail-fast --status-level fail --final-status-level none
+cargo +1.95.0 clippy --locked --offline --manifest-path tools/consumers/assets/Cargo.toml --target-dir target --all-targets --all-features --jobs 1 -- -D warnings
+cargo +1.95.0 fmt --all -- --check
+cargo +1.95.0 fmt --manifest-path tools/consumers/assets/Cargo.toml -- --check
+cargo +1.95.0 check --locked --offline -p baozi-format-gltf --lib --target wasm32-unknown-unknown --jobs 1
+```
 
 ## Qualification boundary
 
