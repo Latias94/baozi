@@ -17,10 +17,13 @@ initial tranche and exact local verification; it does not reopen A–H.
 The [first-release usability audit](reviews/2026-11-01-first-release-usability-audit.md) identifies
 the remaining correctness and application-interface gaps. The reviewed
 [first-release maturation refactor](plans/2026-11-02-001-refactor-first-release-maturation-plan.md)
-owns the next eight units: independent integrity repairs, precision-preserving geometry, owned glTF
+completes eight units: independent integrity repairs, precision-preserving geometry, owned glTF
 decoding, selected-geometry transactions, public navigation/material semantics, complete static and
-animated consumption, and qualification of the resulting package graph. These are planned changes,
-not completed release or target claims.
+animated consumption, and local qualification of the resulting package graph. The
+[execution record](reviews/2026-11-02-first-release-maturation.md#u8-immutable-source-portable-qualification)
+binds the corrected source to actual host tests, unchanged archives, WASI runtime/snapshots,
+browser compilation and bounded sanitizer runs. Registry availability and target promotion
+retain their separate release gates.
 
 ## Product Direction
 
@@ -181,8 +184,10 @@ correctness and caller-workflow gaps that must precede publication. The reviewed
 earlier usability implementation plan. It replaces the owning glTF forks with a metered document,
 preserves F64 geometry, consolidates selected edits into one publication and completes static and
 animated application output. The fork cutover reduces the portable closure from twelve packages
-to ten. Execution is tracked in the [maturation review](reviews/2026-11-02-first-release-maturation.md),
-with exact source/target boundaries. Local archives and configured CI do not establish public registry availability
+to ten. All eight local units are complete at source `6fb9112`; the
+[maturation review](reviews/2026-11-02-first-release-maturation.md) and
+[candidate record](release/portable-0.1.0-candidate.md) retain exact verification boundaries.
+Local archives and configured CI do not establish public registry availability
 or target promotion. The first canonical train is verified through a registry-only consumer before
 retiring the placeholder 0.0.1, following [release policy](contributing/release-policy.md).
 Exporters, a renderer, automatic recovery, native registration and a generic asset compiler remain

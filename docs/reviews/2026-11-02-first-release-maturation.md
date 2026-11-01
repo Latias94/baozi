@@ -26,17 +26,18 @@ operation or native promotion was used.
 
 ## Execution status
 
-U1 and U2 implementation/component verification are complete at the revisions below.
-U3 through U7 are integrated with Windows/MSRV workspace and independent-consumer checks complete.
-The all-feature Cargo graph now has ten portable production packages: the owning glTF decoder
-and both maintained forks have been removed. This graph observation is not an archive build or
-registry availability result. U8 target, sanitizer and unchanged-archive qualification remains
-pending until the final source is committed and tested.
+All eight implementation units and their applicable local verification are complete. U1/U2
+component revisions remain recorded below; the final integrated implementation is
+`6fb9112cb75e1dc942f6d7e605aa9e7b23ec1559`. Independent milestone and final qualification
+review have no unresolved findings. The portable release unit has ten Baozi packages: the owning
+glTF decoder and both maintained forks have been removed. This graph observation is not an archive build or
+registry availability result. U8 Windows/Linux unchanged-archive, current-source sanitizer and
+separate WASI canonical-vector checks pass on the committed source as recorded below.
 
 Actual publication, retirement of the existing `0.0.1`, target promotion and
-unexecuted hosted checks remain separate work. A completed implementation unit
-will record its source identity, commands, observed regressions and practical
-evidence limits here before the master plan can be considered complete.
+unexecuted hosted checks remain separate work. Completed units retain their source identity,
+commands, observed regressions and practical evidence limits here; local completion does not
+substitute for those external release gates.
 
 ## U1: ownership and dependent-data integrity
 
@@ -196,10 +197,10 @@ qualify a new target or establish release readiness.
 
 ## U3 through U7: owned decoding and complete application workflows
 
-These units are integrated together because the default-material contract and selected transaction
-change canonical authoring, public reads, snapshot framing and their downstream callers. The
-final combined checks and immutable source identity are recorded below when complete; earlier
-component runs are not presented as final archive qualification.
+These units are committed together at `6fb9112cb75e1dc942f6d7e605aa9e7b23ec1559` because
+the default-material contract and selected transaction change canonical authoring, public reads,
+snapshot framing and their downstream callers. The final combined checks and immutable source
+identity are recorded below; earlier component runs retain their narrower scope.
 
 ### Owned glTF document
 
@@ -301,8 +302,178 @@ run `1ec0b0e6-8421-4f36-9fb1-aaad24e83f90`; all 58 doctests pass. Fuzz seeds pas
 successfully, and the final asset consumer passes 74/74 with one existing manual skip
 (`b472764e-8784-4e4a-93cb-6647cb6fd4cb`). Strict all-target/all-feature Clippy passes for
 the workspace and asset consumer, and library Clippy passes for the fuzz harness. Formatting
-checks pass for the root, both consumers and fuzz workspaces. Archive/target qualification
-remains U8 work. Raw failing and corrected logs and independent receipts remain in
+checks pass for the root, both consumers and fuzz workspaces. U8 qualifies that committed
+source below. Raw failing and corrected logs and independent receipts remain in
 `.git/baozi-review/maturation-plan/`; no failed run is relabeled as a final pass. The finite
 [portable candidate record](../release/portable-0.1.0-candidate.md) keeps publication eligibility
 and actual distribution qualification separate.
+
+## U8: immutable-source portable qualification
+
+### Source and execution environment
+
+The corrected source is `6fb9112cb75e1dc942f6d7e605aa9e7b23ec1559`. Its Git archive,
+`maturation-6fb9112.tar`, has SHA-256
+`bbf62babab0bbd4a61f4966b7095bcff0a2470a007e8ef721de671e1fb200943`.
+The archive contains 1,478 members, including 1,228 regular files. Linux tests use a fresh
+extraction at `/home/frankorz/baozi-maturation-6fb9112`; comparison of every regular file
+with the archive before and after all Linux checks found no changes. Windows runs use the same
+committed source in the working checkout. Later documentation updates do not change this
+implementation qualification.
+
+All Cargo processes are serialized with one build job. Ordinary nextest runs use two test
+threads; independent asset/fuzz-seed runs use one. Dependency-resolving checks use
+`--locked --offline`, except the archive verifier's documented one-time staged-lock transition
+and cargo-fuzz, whose separate lock-preservation checks are recorded with its observations.
+Linux is unprivileged Ubuntu 26.04 under WSL2 on `x86_64-unknown-linux-gnu`; these are local
+execution receipts rather than hosted CI results.
+
+### Executed source and target checks
+
+| Target and toolchain | Scope | Observed result |
+| --- | --- | --- |
+| Windows x86_64 MSVC, Rust 1.95.0 | All-feature workspace, independent assets, doctests and fixed fuzz seeds | 2,855 + 74 + 58 + 12 passed; four workspace and one consumer existing manual skips; final integration run IDs above |
+| Linux x86_64 GNU, Rust 1.95.0 | All-feature workspace | 2,855 passed, four existing manual skips; nextest `e6d30da7-7766-4b81-9d6b-93b662eb8706` |
+| Linux x86_64 GNU, Rust 1.95.0 | Independent all-feature asset consumer | 74 passed, one existing manual skip; nextest `06c61576-de67-479e-a189-56746583f220` |
+| Linux x86_64 GNU, Rust 1.95.0 | Fixed fuzz-library seeds, including selected preparation | 12 passed; nextest `0667baf6-b96a-4f31-bd53-fddc44c895c4` |
+| Browser `wasm32-unknown-unknown`, Rust 1.95.0 | Empty and complete facade feature union | Both compile; no browser runtime execution |
+| WASI `wasm32-wasip1`, Rust 1.95.0/release | Empty and complete facade feature union | Both build and execute on Wasmtime 50.0.0, runtime commit `ebe5e8df1` |
+| WASI `wasm32-wasip1`, Rust 1.95.0/release | Core `snapshot::tests` module, all features | 57/57 execute and pass on the same runtime; 602 unrelated core tests filtered |
+
+The WASI all-feature module has SHA-256
+`f8b1e6df0390aee6bc335354ed181eed11e20337cc858c52eeb685e629e2210e`.
+Its fixed public consumer executes F64 bounds, implicit material/relations and selected-geometry
+cases wherever their features are enabled. Canonical known-vector execution is a separate gate.
+Final review identified that the consumer alone did not cover it, so the complete core snapshot
+test module was subsequently built and executed through the same Wasmtime runner:
+
+```text
+cargo +1.95.0 test --locked --offline -p baozi-core --lib --all-features --target wasm32-wasip1 --release --jobs 1 -- snapshot::tests --test-threads=1
+```
+
+All 57 tests pass, including the frozen TRS/matrix/point/spatial/metadata digest vectors, F64
+eight-byte framing/signed-zero distinctions, material-assignment snapshot presence and public
+dense/sparse/deformation reads. The 11,097,159-byte executed module has SHA-256
+`13cdae574cf96c7bc268421d2fe56bd1364295cee26fc33d0d63706796d563a7`.
+`u8-wasi-snapshot-vectors.log` and `u8-wasi-snapshot-evidence.json` retain the actual test list,
+runner, times, exit status and module identity. CI now invokes the same snapshot-module gate
+after its existing pinned Wasmtime setup. Actionlint passes; no new hosted CI execution is claimed.
+Browser compilation does not establish browser execution. No current Apple ARM64 execution,
+other-host runtime, native filesystem admission or new target registration is inferred.
+
+### Unchanged package rehearsal
+
+Both archive matrices pass all twelve maintained feature cases: empty, default,
+default-formats, OBJ, PLY, STL, glTF, postprocess, all-formats, tracing, mint and all.
+The two independent commands are:
+
+```text
+# Windows x86_64 MSVC, Rust 1.95.0/debug
+python scripts/check_packages.py --toolchain 1.95.0 --offline
+# Linux x86_64 GNU, installed stable Rust 1.97.1/release
+python3 scripts/check_packages.py --toolchain stable --release --offline
+```
+
+The Linux `stable` alias resolves to `rustc 1.97.1 (8bab26f4f 2026-07-14)`, LLVM 22.1.6;
+this records the installed compiler rather than claiming it is the newest public stable.
+Each matrix creates the ten real `.crate` artifacts and compiles their extracted contents in
+a fresh output directory and Cargo home. Consumer roots use version dependencies. Standard
+Cargo directory-source replacement supplies the offline registry rehearsal; there is no root
+`patch`, path/git dependency substitution or rewritten artifact manifest. A separate byte
+comparison confirms every unpacked Cargo manifest equals its archived manifest. Staged locks
+transition to registry identities once; builds and executions then use locked/offline resolution.
+Public registry availability and registry-only installation remain future release gates.
+
+Windows staging is `target/package-check-5ktgayx6`; Linux staging is
+`/home/frankorz/baozi-maturation-6fb9112/target/package-check-_7cbgt21`.
+The two sets of actual artifacts, their digests, root manifests/locks and rehearsal configuration
+are also retained outside disposable build outputs in `.git/baozi-review/maturation-plan/`
+under `u8-artifacts-windows-msrv-debug` and `u8-artifacts-linux-installed-stable-release`.
+Raw results are `u8-windows-archives.log` and `u8-linux-stable-release-archives.log`.
+
+The fixed archive consumer checks adjacent F64 Position coordinates and signed zero with exact
+F64 bounds, authored versus generated default material semantics, detached reverse relations,
+and two-mesh geometry preparation with one publication. These complement ordinary import,
+source semantics and sparse/influence/selection/unlit checks in that consumer; they do not
+substitute for core canonical known-vector tests.
+
+### Current-source sanitizer qualification
+
+Six `backend_malformed` tests execute and pass under AddressSanitizer with
+`RUSTFLAGS=-Zsanitizer=address` and `ASAN_OPTIONS=detect_leaks=1:halt_on_error=1`.
+They exercise invalid and valid JSON/GLB reference, camera and animation metadata paths.
+The actual test binary and both executed fuzz binaries contain `__asan_init` and
+`__asan_report_load1`; `u8-linux-asan-evidence.json` retains their sizes and SHA-256 values.
+
+The installed nightly is `rustc 1.101.0-nightly (92ffebece 2026-10-28)`, full compiler commit
+`92ffebeceaa0a071066f233873c2438e73d70fe7`, LLVM 23.1.4. Cargo-fuzz is 0.13.2.
+The target is Linux x86_64 GNU with address sanitizer and default fuzz debug assertions,
+one build job and one fuzzer process. The original six glTF and fourteen edit-lifecycle seeds
+are copied into a separate campaign directory; checked-in seeds remain unchanged.
+
+| Target and run | Bound | Actual executions | libFuzzer-reported seconds | Exit |
+| --- | --- | ---: | ---: | ---: |
+| glTF smoke | `-runs=256` | 256 | 1 | 0 |
+| glTF campaign | `-max_total_time=120` | 124,068 | 121 | 0 |
+| glTF saved-corpus resume | `-max_total_time=30` | 36,954 | 31 | 0 |
+| Edit-lifecycle smoke | `-runs=256` | 256 | 1 | 0 |
+| Edit-lifecycle campaign | `-max_total_time=120` | 118,807 | 121 | 0 |
+| Edit-lifecycle saved-corpus resume | `-max_total_time=30` | 20,944 | 31 | 0 |
+
+The random seeds are 20261102, 20261103 and 20261104 for smoke, campaign and resume.
+Input backstops are 65,536 bytes for glTF and 8,196 bytes for edits, ten seconds per input
+and 2,048 MiB libFuzzer RSS. GlTF resume loads 844 saved files and ends with 1,134 files /
+363,671 bytes; edit resume loads 911 and ends with 1,062 files / 110,295 bytes. Saved files,
+active coverage entries and successful import/edit outcomes are different measurements.
+The deterministic seed tests separately assert changed/unchanged/cancelled behavior.
+
+No sanitizer failure or failing artifact is observed. Root, fuzz and both consumer lockfiles
+remain byte-identical after every invocation. Cargo-fuzz has no locked-build option; offline
+resolution, a preceding locked metadata check and post-command byte comparisons retain that
+scope explicitly. Final corpus inventories, actual arguments, timestamps and binary identities
+are retained in `u8-linux-asan-evidence.json`; logs use `u8-linux-asan-*`. The saved corpora
+are also retained outside build caches under `u8-sanitizer-corpus/` in the local review directory.
+These short campaigns are bounded exploration, not sustained-fuzz or exhaustive-safety evidence.
+Historical longer campaigns keep their own earlier source identities.
+
+### Requirements and review closure
+
+| Requirements | Implemented ownership or application seam | Evidence owners |
+| --- | --- | --- |
+| R1, R5 | Metered selected-profile document, independent source names, bounded metadata and final opacity authority | U1/U3 reviews, admission/material/metadata regressions, malformed-input ASan |
+| R2 | Declared F32/F64 streams, canonical pools, queries, numerical kernels and explicit application conversion | U2 reviews and precision regressions; fixed F64 archive case |
+| R3, R6-R8 | Central deformation dependency guards, exclusively owned selected plan, one publication and public policies/limits | U1/U4 reviews, core overlapping-plan regression, public batch/failure tests and fixed fuzz seeds |
+| R4 | Opened-reader teardown owned and contained by IO with first-cause precedence | U1 IO review and public callback/destructor fault tests |
+| R9-R10 | Complete owned material/UV output, typed default assignment, detached relations, facade options and bounded host recipe | U5/U6 reviews, 74-test consumer, fixed archive cases and executed host-bundle example |
+| R11 | Application-owned CPU curve/hierarchy/morph/skin reference with certified inverse admission | U7 and inverse follow-up reviews, 21 independent numeric evaluator tests within the full consumer |
+| R12-R14 | Ten-package closure, retired decoder/duplicate-path deletion and scoped source/target qualification | Final composition/qualification reviews, unchanged archive matrices and explicit limits above |
+
+The host-bundle example actually ran on the approved nested OBJ/MTL/image fixture, reporting
+`meshes=1 primitives=1 images=1 diagnostics=0`; `u5-host-bundle-example.log` retains the result.
+Independent final qualification review found no additional implementation or archive-identity
+finding. It identified one missing gate, `U8-WASI-VECTORS-001`: WASI public-consumer execution
+does not execute core canonical known vectors. The subsequent 57-test runner result above
+addresses that gate without changing vectors or weakening assertions. Independent follow-up
+marks it resolved and the final receipt has `findings: []`. Reviewer receipts distinguish source
+inspection and independent arithmetic probes from main-thread Rust test execution.
+
+### Completion boundary and retained evidence
+
+U1-U8 are locally complete for the named source and scopes. All independent review findings
+are resolved, the final reviewer is closed, and the master plan/candidate/roadmap now describe
+the same delivered interfaces and qualification. The final CI/docs update changes no Rust
+implementation, test, manifest or lockfile bytes from the qualified source.
+
+The local `u8-evidence.zip` contains 2,284 members / 5,789,813 bytes, SHA-256
+`e91f18bbe039228ae510834d59ebded97ca3b998ce695af29ce738a93d95834b`.
+It retains scoped review receipts, source/target/command records, raw U8 logs, both sets of ten
+actual package archives, version-only consumer manifests/locks, rehearsal configuration and
+the final sanitizer corpora. `u8-evidence-inventory.json` records payload member sizes and digests;
+the adjacent original source archive retains its separate identity above. Executable bodies
+remain at their recorded build paths; their identities are preserved in the retained records.
+This is local review evidence, not a published registry bundle or hosted CI artifact.
+
+Future publication still requires the explicit release-policy registry gates and a fresh
+registry-only consumer before separately authorized retirement of the `0.0.1` placeholder.
+Current unexecuted hosts, browser runtime, sustained fuzzing and target/format promotion retain
+their stated limits. No upload, yank, push, PR or native registration occurred in this work.

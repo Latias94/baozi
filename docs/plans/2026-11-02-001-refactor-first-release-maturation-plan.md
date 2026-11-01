@@ -2,7 +2,7 @@
 title: First-Release Maturation Through Owned Data and Deep Modules - Plan
 type: refactor
 date: 2026-11-02
-status: reviewed
+status: completed
 artifact_contract: ce-unified-plan/v1
 product_contract_source: repository-audit-and-user-directed-refactor
 execution: code
@@ -179,8 +179,9 @@ Kernel numerical conditioning and actual measured work ratios must be establishe
 
 ### U1. Restore ownership and dependent-data integrity
 
-**Status:** Implemented and Windows/MSRV verified at `55b31c1ed1ee3e8b80d4d631e583e7974338c866`; see the [execution record](../reviews/2026-11-02-first-release-maturation.md#u1-ownership-and-dependent-data-integrity).
-Fresh cross-target/sanitizer and final artifact qualification remain U8 responsibilities.
+**Status:** Completed. Component source is `55b31c1ed1ee3e8b80d4d631e583e7974338c866`; U8
+qualifies the integrated immutable source on the executed targets. See the
+[execution record](../reviews/2026-11-02-first-release-maturation.md#u1-ownership-and-dependent-data-integrity).
 
 **Goal:** Close the independent opacity, IO cleanup, morph dependency, metadata-work and animation extrapolation defects.
 **Requirements:** R3–R5, R14; KTD3 and KTD5.
@@ -205,7 +206,10 @@ These are separate disjoint implementation lanes with main-thread integration.
 
 ### U2. Establish precision-preserving geometry
 
-**Status:** Implemented at `c9182a6d3a2c3608f45707f12b759edc2a4ea569` with Windows/MSRV component checks and independent review complete. The independent application consumer will be rerun after U3 integration; final target/artifact qualification remains U8 work. See the [execution record](../reviews/2026-11-02-first-release-maturation.md#u2-precision-preserving-geometry).
+**Status:** Completed. Component source is `c9182a6d3a2c3608f45707f12b759edc2a4ea569`;
+independent precision reviews, integrated Windows/Linux tests, public consumers and U8 archive/
+WASI snapshot checks pass. See the
+[execution record](../reviews/2026-11-02-first-release-maturation.md#u2-precision-preserving-geometry).
 
 **Goal:** Preserve F64 geometry without forcing unrelated material, animation or transform domains into a universal scalar abstraction.
 **Requirements:** R2, R6–R9, R14; KTD2.
@@ -227,8 +231,9 @@ Use power-of-two-scaled F64 numerical kernels with explicit uncertainty/underflo
 
 ### U3. Own selected-profile glTF decoding
 
-**Status:** Integrated; 332/332 importer package tests and independent ownership/semantics reviews
-pass. Final immutable-source target, sanitizer and archive qualification remains U8 work.
+**Status:** Completed at `6fb9112cb75e1dc942f6d7e605aa9e7b23ec1559`. Importer package tests
+(332/332), independent ownership/semantics reviews, integrated host tests, current-source ASan
+and unchanged-archive qualification pass; U8 records their exact scopes.
 
 **Goal:** Replace the uncontrolled owning backend and its release dependencies.
 **Requirements:** R1, R5, R12–R14; KTD1 and KTD6.
@@ -251,9 +256,9 @@ Delete both glTF forks and their dependency edges after complete migration; pres
 
 ### U4. Publish one selected-geometry transaction
 
-**Status:** Integrated and independently reviewed; the Windows/MSRV complete workspace passes
-2,855/2,855 with four existing manual skips. Immutable-source target/archive qualification
-remains U8 work.
+**Status:** Completed and independently reviewed at the same integrated source. Windows and
+Linux MSRV workspace runs each pass 2,855/2,855 with four existing manual skips. U8 adds
+immutable-source archive execution and bounded edit-lifecycle ASan.
 Shared mutable plan mappings were replaced by an exclusively initialized metered owner and
 immutable sealed views. Mixed selections retain every target's final identity and disposition.
 
@@ -278,9 +283,9 @@ Delete the old consumer loop and any operation implementation duplicated by the 
 
 ### U5. Complete public relations and effective semantics
 
-**Status:** Integrated; public material, reverse-relations and format-option regressions pass in
-the complete workspace and independent feature cases. Immutable archive/target qualification
-remains U8 work.
+**Status:** Completed. Public material, reverse-relations and format-option regressions pass in
+the complete workspace, independent source/archive cases and WASI snapshot module. The bounded
+nested host-bundle example executes successfully; U8 records target limits.
 
 **Goal:** Make common scene navigation and effective materials format-neutral.
 **Requirements:** R5, R9–R10, R14; KTD6–KTD7.
@@ -303,9 +308,9 @@ The example owns filesystem selection and authority; it does not require or prom
 
 ### U6. Close the static application output profile
 
-**Status:** Integrated; independent static-output review has no remaining findings. The independent
-asset consumer passes 74/74 on Windows/MSRV, including U7; strict Clippy and formatting pass.
-Immutable archive/target qualification remains U8 work.
+**Status:** Completed. Independent static-output review has no remaining findings. The independent
+asset consumer passes 74/74 on both Windows and Linux MSRV, including U7. Strict Windows Clippy,
+formatting and U8 representative immutable archive cases pass.
 
 **Goal:** Application-owned output retains every meaning its chosen profile promises.
 **Requirements:** R2, R9–R10; KTD8.
@@ -325,8 +330,9 @@ Avoid adding a renderer or a universal vertex-layout abstraction to core.
 
 ### U7. Prove animation consumption
 
-**Status:** Integrated; 21/21 focused evaluator tests pass and independent inverse review has no
-remaining findings. The complete consumer passes 74/74; immutable-source qualification remains U8.
+**Status:** Completed. All 21 focused evaluator tests pass and independent inverse review has no
+remaining findings. The complete consumer passes 74/74 on both executed MSRV hosts; U8 binds
+those runs to the immutable integrated source.
 
 **Goal:** Demonstrate how an ordinary application combines retained deformation and curves.
 **Requirements:** R11; KTD8.
@@ -342,6 +348,13 @@ Quaternion linear evaluation uses shortest-path normalized slerp; cubic evaluati
 **Verification:** Numeric expected values are independent of importer-generated snapshots and application data remains usable after Scene teardown where copied.
 
 ### U8. Qualify the actual portable release candidate
+
+**Status:** Completed. All applicable local gates pass on `6fb9112cb75e1dc942f6d7e605aa9e7b23ec1559`:
+Windows/Linux MSRV tests, unchanged ten-package archive matrices, WASI runtime plus 57 canonical
+snapshot tests, browser compilation and bounded Linux ASan. Final review/evidence closure is
+recorded in the [execution record](../reviews/2026-11-02-first-release-maturation.md#u8-immutable-source-portable-qualification).
+Current Apple/other-host runs, sustained fuzzing, registry operations and target/maturity
+promotion retain their explicit unqualified scope.
 
 **Goal:** Rehearse distribution and document exactly what the corrected implementation proves.
 **Requirements:** R12–R14.

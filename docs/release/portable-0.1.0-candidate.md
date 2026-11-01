@@ -1,7 +1,7 @@
 # Portable 0.1.0 candidate qualification
 
-This is a finite record for the first canonical portable candidate. Local qualification is in
-progress under the [reviewed maturation plan](../plans/2026-11-02-001-refactor-first-release-maturation-plan.md).
+This is a finite record for the first canonical portable candidate. Local qualification is
+complete for the scopes below under the [reviewed maturation plan](../plans/2026-11-02-001-refactor-first-release-maturation-plan.md).
 The [execution record](../reviews/2026-11-02-first-release-maturation.md) owns source identities,
 commands and observed results. This document does not authorize registry operations.
 
@@ -41,10 +41,23 @@ claim full format conformance or substitute a build flag for executed semantics.
 
 ## Verification scope
 
-The final record must identify the immutable tested source, locked production closure, actual
-Windows/Linux toolchains and profiles, unchanged archive checks, WASI runtime versus browser
-compilation, and the bounded sanitizer runs. Earlier revision evidence and configured hosted
-workflows retain their own scope. Unexecuted hosts remain unqualified by this local record.
+The immutable implementation is `6fb9112cb75e1dc942f6d7e605aa9e7b23ec1559`; the production
+closure is the ten packages above. The execution record retains the source archive digest,
+commands, nextest run IDs, actual artifact digests and practical limits.
+
+| Local gate | Result and scope |
+| --- | --- |
+| Windows x86_64 MSVC, Rust 1.95.0 | 2,855 workspace tests, 74 independent assets, 58 doctests and 12 fuzz seeds pass; strict Clippy and formatting pass |
+| Linux x86_64 GNU under WSL, Rust 1.95.0 | 2,855 workspace tests, 74 independent assets and 12 fuzz seeds pass |
+| Unchanged archives | Ten packages; all 12 feature cases build and execute on Windows 1.95.0/debug and Linux installed stable 1.97.1/release; version-only roots, no root patches or rewritten artifact manifests |
+| Browser wasm32 | Empty/all source consumers compile on Rust 1.95.0; no browser execution |
+| WASI preview 1 | Empty/all source consumers and 57 core snapshot tests execute in release on Wasmtime 50.0.0, including fixed digests, F64 bits and material assignment |
+| Linux AddressSanitizer | Six malformed glTF tests pass; glTF and edit-lifecycle targets each complete 256-run smoke, 120-second exploration and 30-second saved-corpus resume without a failing artifact |
+
+Workspace runs skip four existing manual tests; independent assets skip one. Browser compilation,
+local WSL execution and offline standard Cargo source replacement keep their exact scope.
+Earlier revision evidence and configured hosted workflows retain their own source identities.
+No current Apple ARM64 execution or other unexecuted-host qualification is claimed here.
 
 ## Separate publication work
 

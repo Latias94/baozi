@@ -131,6 +131,11 @@ jobs:
           wasmtime --version
           python3 scripts/check_features.py --toolchain 1.95.0 --release --target wasm32-wasip1 --case empty --case all
 
+      - name: Run WASI canonical snapshot vectors
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime run
+        run: cargo +1.95.0 test --locked -p baozi-core --lib --all-features --target wasm32-wasip1 --release --jobs 1 -- snapshot::tests --test-threads=1
+
       - name: Prove non-candidate native filesystem targets fail closed
         shell: pwsh
         run: |
