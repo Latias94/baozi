@@ -343,7 +343,7 @@ fn plan(source: &GeometryStorage) -> GeometryNormalsPlan<'_> {
     GeometryNormalsPlan::try_new(
         source,
         1,
-        &NORMALS,
+        VectorValues::F32(&NORMALS),
         NormalWritePolicy::Replace,
         TangentPolicy::Remove,
         &mut Control::default(),
@@ -621,7 +621,7 @@ fn replace_and_add_keep_canonical_order_preserve_payloads_and_compact_removed_ra
             let plan = GeometryNormalsPlan::try_new(
                 &source,
                 1,
-                &NORMALS,
+                VectorValues::F32(&NORMALS),
                 write,
                 TangentPolicy::Remove,
                 &mut Control::default(),
@@ -755,12 +755,265 @@ fn replace_and_add_keep_canonical_order_preserve_payloads_and_compact_removed_ra
 }
 
 #[test]
+fn generated_f64_normals_use_the_f64_pool_and_preserve_candidate_bits() {
+    let normals = [
+        [1.0, f64::from_bits(1), -0.0],
+        [f64::from_bits(0x3fef_ffff_ffff_ffff), -0.0, 0.0],
+        [0.0, -0.0, 1.0],
+        [0.0, 1.0, 0.0],
+        [-0.0, 0.0, 1.0],
+        [0.0, 0.0, -1.0],
+    ];
+    for (had_normal, had_tangent) in [(false, false), (true, true)] {
+        let source = geometry(had_normal, had_tangent);
+        let candidate = VectorValues::F64(&normals);
+        assert!(candidate.is_f64());
+        assert!(!candidate.is_empty());
+        let plan = GeometryNormalsPlan::try_new(
+            &source,
+            1,
+            candidate,
+            if had_normal {
+                NormalWritePolicy::Replace
+            } else {
+                NormalWritePolicy::Add
+            },
+            TangentPolicy::Remove,
+            &mut Control::default(),
+        )
+        .unwrap();
+        let expected_f32 =
+            source.f32_values.len() - usize::from(had_normal) * 6 - usize::from(had_tangent) * 12;
+        assert_eq!(plan.capacities()[5].desired_capacity(), expected_f32);
+        assert_eq!(
+            plan.capacities()[6].desired_capacity(),
+            source.f64_values.len() + 18
+        );
+        let mut build = Control::default();
+        let mut output = plan.materialize(&mut build).unwrap();
+        assert_eq!(build.completed, plan.work());
+        assert_eq!(output.f32_values.len(), expected_f32);
+        let mut validation = Control::default();
+        assert_eq!(
+            output.validate(&mut validation, [1, 3, output.attributes.len(), 2], 3, 2),
+            Ok(true)
+        );
+        assert_eq!(validation.completed, plan.validation_work());
+        let row = output.attributes[plan.normal_attribute() as usize];
+        let StoredAttributePayload::DenseF64(range) = row.payload else {
+            panic!("F64 generated normals must retain their selected width");
+        };
+        assert_eq!(
+            range
+                .get(&output.f64_values)
+                .unwrap()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            normals
+                .as_flattened()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>()
+        );
+        let mut correspondence = Control::default();
+        assert_eq!(
+            plan.validate_correspondence(&output, &mut correspondence),
+            Ok(true)
+        );
+        assert_eq!(correspondence.completed, plan.correspondence_work());
+        output.f64_values[range.start() + 2] = 0.0;
+        assert_eq!(
+            plan.validate_correspondence(&output, &mut Control::default()),
+            Ok(false)
+        );
+        assert_eq!(source.primitives[1].corner_count, 6);
+        assert_eq!(
+            source.attributes.len() as u32,
+            plan.source_attribute_count()
+        );
+    }
+}
+
+#[test]
+fn f64_normal_validation_uses_f64_unit_tolerance_and_rejects_nonfinite_candidates() {
+    let source = geometry(true, false);
+    for invalid in [
+        [0.0; 3],
+        [1.0 + 5.0 * f64::EPSILON, 0.0, 0.0],
+        [1.0 + f64::from(f32::EPSILON) / 8.0, 0.0, 0.0],
+        [f64::NAN, 0.0, 1.0],
+        [f64::INFINITY, 0.0, 0.0],
+        [0.0, f64::NEG_INFINITY, 1.0],
+    ] {
+        let mut normals = [[0.0, 0.0, 1.0]; 6];
+        normals[5] = invalid;
+        assert!(matches!(
+            GeometryNormalsPlan::try_new(
+                &source,
+                1,
+                VectorValues::F64(&normals),
+                NormalWritePolicy::Replace,
+                TangentPolicy::Reject,
+                &mut Control::default(),
+            ),
+            Err(TypedStorageBuildError::Invariant)
+        ));
+    }
+    for normal in [
+        [1.0 / 3.0_f64.sqrt(); 3],
+        [1.0 + 3.0 * f64::EPSILON, 0.0, 0.0],
+    ] {
+        let normals = [normal; 6];
+        assert!(
+            GeometryNormalsPlan::try_new(
+                &source,
+                1,
+                VectorValues::F64(&normals),
+                NormalWritePolicy::Replace,
+                TangentPolicy::Reject,
+                &mut Control::default(),
+            )
+            .is_ok()
+        );
+    }
+}
+
+#[test]
+fn sparse_f64_survives_normal_addition_and_replacement_with_exact_work() {
+    let explicit = [
+        -0.0,
+        f64::from_bits(1),
+        f64::from_bits(1.0_f64.to_bits() + 1),
+        1.0e250,
+    ];
+    for (normal, tangent) in [(false, false), (true, true)] {
+        let mut source = geometry(normal, tangent);
+        let source_row = source
+            .attributes
+            .iter()
+            .position(|row| matches!(row.payload, StoredAttributePayload::SparseI32 { .. }))
+            .unwrap();
+        let StoredAttributePayload::SparseI32 {
+            indices,
+            values: old_values,
+            default: old_default,
+        } = source.attributes[source_row].payload
+        else {
+            unreachable!();
+        };
+        let removed = old_values.len() + old_default.len();
+        source.i32_values = source.i32_values[removed..].to_vec();
+        for row in &mut source.attributes {
+            if let StoredAttributePayload::DenseI32(range) = &mut row.payload {
+                *range = TableRange::new(range.start() - removed, range.len());
+            }
+        }
+        source.attributes[source_row].payload = StoredAttributePayload::SparseF64 {
+            indices,
+            values: values(&mut source.f64_values, &explicit),
+            default: values(&mut source.f64_values, &explicit[..2]),
+        };
+        assert_eq!(
+            source.validate(
+                &mut Control::default(),
+                [1, 3, source.attributes.len(), 2],
+                3,
+                2
+            ),
+            Ok(true)
+        );
+        let plan = GeometryNormalsPlan::try_new(
+            &source,
+            1,
+            VectorValues::F32(&NORMALS),
+            if normal {
+                NormalWritePolicy::Replace
+            } else {
+                NormalWritePolicy::Add
+            },
+            TangentPolicy::Remove,
+            &mut Control::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.capacities()[6].desired_capacity(),
+            source.f64_values.len()
+        );
+        let output_row = plan.output_attribute(source_row as u32).unwrap() as usize;
+        assert_eq!(
+            plan.source_attribute(output_row as u32),
+            Some(source_row as u32)
+        );
+        let mut build = Control::default();
+        let output = plan.materialize(&mut build).unwrap();
+        assert_eq!(build.completed, plan.work());
+        let mut validation = Control::default();
+        assert_eq!(
+            output.validate(&mut validation, [1, 3, output.attributes.len(), 2], 3, 2),
+            Ok(true)
+        );
+        assert_eq!(validation.completed, plan.validation_work());
+        let mut correspondence = Control::default();
+        assert_eq!(
+            plan.validate_correspondence(&output, &mut correspondence),
+            Ok(true)
+        );
+        assert_eq!(correspondence.completed, plan.correspondence_work());
+        let StoredAttributePayload::SparseF64 {
+            indices,
+            values,
+            default,
+        } = output.attributes[output_row].payload
+        else {
+            panic!("retained custom data must stay sparse F64");
+        };
+        assert_eq!(indices.get(&output.u32_values), Some(&[0, 4][..]));
+        assert_eq!(values.start() + values.len(), default.start());
+        assert_eq!(
+            values
+                .get(&output.f64_values)
+                .unwrap()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            explicit.map(f64::to_bits)
+        );
+        assert_eq!(
+            default
+                .get(&output.f64_values)
+                .unwrap()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            explicit[..2]
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>()
+        );
+        for corruption in 0..3 {
+            let mut output = plan.materialize(&mut Control::default()).unwrap();
+            match corruption {
+                0 => output.f64_values[values.start()] = 0.0,
+                1 => output.f64_values[default.start()] = 0.0,
+                2 => output.u32_values[indices.start()] = 1,
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                plan.validate_correspondence(&output, &mut Control::default()),
+                Ok(false)
+            );
+        }
+    }
+}
+
+#[test]
 fn add_at_end_of_position_only_range_preserves_later_primitives_and_their_tangents() {
     let source = geometry(true, true);
     let plan = GeometryNormalsPlan::try_new(
         &source,
         0,
-        &NORMALS[..3],
+        VectorValues::F32(&NORMALS[..3]),
         NormalWritePolicy::Add,
         TangentPolicy::Reject,
         &mut Control::default(),
@@ -804,7 +1057,7 @@ fn mapping_is_owned_copy_data_and_does_not_keep_the_source_or_normals_alive() {
         let plan = GeometryNormalsPlan::try_new(
             &source,
             1,
-            &normals,
+            VectorValues::F32(&normals),
             NormalWritePolicy::Add,
             TangentPolicy::Remove,
             &mut Control::default(),
@@ -907,7 +1160,7 @@ fn planning_allocates_nothing_and_rejects_wrong_policy_cardinality_topology_and_
             GeometryNormalsPlan::try_new(
                 &source,
                 1,
-                &NORMALS,
+                VectorValues::F32(&NORMALS),
                 write,
                 tangents,
                 &mut Control::default()
@@ -920,7 +1173,7 @@ fn planning_allocates_nothing_and_rejects_wrong_policy_cardinality_topology_and_
         GeometryNormalsPlan::try_new(
             &no_normal,
             1,
-            &NORMALS,
+            VectorValues::F32(&NORMALS),
             NormalWritePolicy::Replace,
             TangentPolicy::Remove,
             &mut Control::default()
@@ -936,7 +1189,7 @@ fn planning_allocates_nothing_and_rejects_wrong_policy_cardinality_topology_and_
         GeometryNormalsPlan::try_new(
             &empty,
             1,
-            &[],
+            VectorValues::F32(&[]),
             NormalWritePolicy::Add,
             TangentPolicy::Remove,
             &mut Control::default()
@@ -948,7 +1201,7 @@ fn planning_allocates_nothing_and_rejects_wrong_policy_cardinality_topology_and_
             GeometryNormalsPlan::try_new(
                 &source,
                 target,
-                &NORMALS,
+                VectorValues::F32(&NORMALS),
                 NormalWritePolicy::Replace,
                 TangentPolicy::Remove,
                 &mut Control::default()
@@ -961,7 +1214,7 @@ fn planning_allocates_nothing_and_rejects_wrong_policy_cardinality_topology_and_
             GeometryNormalsPlan::try_new(
                 &source,
                 1,
-                normals,
+                VectorValues::F32(normals),
                 NormalWritePolicy::Replace,
                 TangentPolicy::Remove,
                 &mut Control::default()
@@ -984,7 +1237,7 @@ fn planning_allocates_nothing_and_rejects_wrong_policy_cardinality_topology_and_
             GeometryNormalsPlan::try_new(
                 &source,
                 1,
-                &normals,
+                VectorValues::F32(&normals),
                 NormalWritePolicy::Replace,
                 TangentPolicy::Remove,
                 &mut Control::default()
@@ -997,7 +1250,7 @@ fn planning_allocates_nothing_and_rejects_wrong_policy_cardinality_topology_and_
         GeometryNormalsPlan::try_new(
             &source,
             1,
-            &rounded,
+            VectorValues::F32(&rounded),
             NormalWritePolicy::Replace,
             TangentPolicy::Remove,
             &mut Control::default()
@@ -1024,7 +1277,7 @@ fn every_planning_build_and_correspondence_action_is_interruptible() {
         let plan = GeometryNormalsPlan::try_new(
             &source,
             1,
-            &NORMALS,
+            VectorValues::F32(&NORMALS),
             write,
             TangentPolicy::Remove,
             &mut planning,
@@ -1035,9 +1288,11 @@ fn every_planning_build_and_correspondence_action_is_interruptible() {
                 reject_before: Some(completed),
                 ..Control::default()
             };
-            assert!(matches!(GeometryNormalsPlan::try_new(&source, 1, &NORMALS,
+            assert!(
+                matches!(GeometryNormalsPlan::try_new(&source, 1, VectorValues::F32(&NORMALS),
                 write, TangentPolicy::Remove, &mut control),
-                Err(TypedStorageBuildError::Control(at)) if at == completed));
+                Err(TypedStorageBuildError::Control(at)) if at == completed)
+            );
             assert_eq!(control.completed, completed);
         }
         for completed in 0..plan.work() {

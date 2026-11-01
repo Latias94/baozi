@@ -25,11 +25,12 @@ fn work_envelope_covers_kernel_callbacks_and_scratch_initialization() {
                 let smooth = mode == NormalMode::Smooth;
                 let mut output = vec![[0.0; 3]; corners];
                 let mut order = vec![0; if smooth { corners } else { 0 }];
-                let mut crosses = smooth.then(|| vec![[0.0; 3]; faces]);
+                let mut crosses =
+                    smooth.then(|| vec![crate::precision::Estimate3::default(); faces]);
                 let mut callbacks = 0_u64;
                 kernel::generate(
                     kernel::Input {
-                        positions: &positions,
+                        positions: positions.as_slice(),
                         vertex_ids: kernel::VertexIds::Indexed(&indices),
                         smoothing_groups: if smooth { groups } else { None },
                     },
@@ -90,5 +91,85 @@ fn work_envelope_checks_overflow() {
 fn work_envelope_grows_past_the_published_limit() {
     for mode in [NormalMode::Flat, NormalMode::Smooth] {
         assert!(work_bound(3, 99_999_999, 1, mode).unwrap() > crate::operation::runtime::MAX_WORK);
+    }
+}
+
+#[test]
+fn borrowed_dense_reads_add_exactly_one_callback_per_logical_position_read() {
+    let scene = crate::test_fixtures::import_obj(
+        b"v 0 0 0\nv 1 0 0\nv 0 1 0\nv 0 0 1\nv 7 7 7\nf 1 2 3\nf 1 4 2\n",
+    )
+    .into_parts()
+    .0;
+    let primitive = scene.meshes().next().unwrap().primitives().next().unwrap();
+    let positions = primitive.positions().unwrap();
+    let baozi_core::AttributeData::DenseF32 { lanes: 3, values } = positions.data() else {
+        panic!("dense F32 fixture");
+    };
+    let (rows, remainder) = values.as_chunks::<3>();
+    assert!(remainder.is_empty());
+    let corners = primitive.corner_count() as usize;
+    let faces = corners / 3;
+    let reads = (positions.len() + corners) as u64;
+    assert_eq!(
+        super::position_read_work_bound(positions, corners).unwrap(),
+        reads
+    );
+    for mode in [NormalMode::Flat, NormalMode::Smooth] {
+        let smooth = mode == NormalMode::Smooth;
+        let mode_kernel = if smooth {
+            kernel::Mode::Smooth
+        } else {
+            kernel::Mode::Flat
+        };
+        let mut output = vec![[0.0; 3]; corners];
+        let mut order = vec![0; if smooth { corners } else { 0 }];
+        let mut crosses = smooth.then(|| vec![crate::precision::Estimate3::default(); faces]);
+        let mut baseline = 0_u64;
+        kernel::generate(
+            kernel::Input {
+                positions: rows,
+                vertex_ids: kernel::VertexIds::Indexed(primitive.indices().unwrap()),
+                smoothing_groups: None,
+            },
+            mode_kernel,
+            &mut output,
+            kernel::Workspace {
+                corner_order: &mut order,
+                face_crosses: crosses.as_deref_mut(),
+            },
+            || {
+                baseline += 1;
+                Ok::<_, Infallible>(())
+            },
+        )
+        .unwrap();
+        let expected = output.clone();
+        let mut borrowed = 0_u64;
+        kernel::generate_into(
+            kernel::Input {
+                positions,
+                vertex_ids: kernel::VertexIds::Indexed(primitive.indices().unwrap()),
+                smoothing_groups: None,
+            },
+            mode_kernel,
+            kernel::Output::F32(&mut output),
+            kernel::Workspace {
+                corner_order: &mut order,
+                face_crosses: crosses.as_deref_mut(),
+            },
+            || {
+                borrowed += 1;
+                Ok::<_, Infallible>(())
+            },
+        )
+        .unwrap();
+        assert_eq!(output, expected);
+        assert_eq!(borrowed, baseline + reads);
+        let initialization = corners + if smooth { corners + faces } else { 0 };
+        let attributes = primitive.attributes().len();
+        let observed = borrowed + initialization as u64 + attributes as u64 + 4;
+        let bound = work_bound(positions.len(), corners, attributes, mode).unwrap() + reads;
+        assert!(observed <= bound, "{mode:?}: {observed} > {bound}");
     }
 }

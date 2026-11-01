@@ -3,9 +3,10 @@
     reason = "runtime and kernel failures stay inline when allocation or cancellation rejects work"
 )]
 
+use baozi_core::__scene_integration::integration::SceneVectorValues;
 use baozi_core::{
-    AttributeData, AttributeDomain, AttributeSemanticRef, PrimitiveId, SceneLookupError,
-    TopologyKind, ValidatedScene,
+    AttributeData, AttributeDomain, AttributeRef, AttributeSemanticRef, PrimitiveId,
+    SceneLookupError, TopologyKind, ValidatedScene,
 };
 use baozi_operation::StoreRuntimeError;
 
@@ -37,22 +38,31 @@ impl From<StoreRuntimeError> for InputError {
 /// Source payloads remain borrowed until generation finishes; no position projection is retained.
 pub(super) struct NormalInput<'a> {
     corner_count: u32,
-    positions: &'a [[f32; 3]],
+    positions: AttributeRef<'a>,
     indices: Option<&'a [u32]>,
     smoothing_groups: Option<&'a [u32]>,
     mode: NormalMode,
     had_normal: bool,
+    wide_output: bool,
 }
 
 /// Only the generated Corner values and source facts survive into the Scene transaction.
 pub(crate) struct GeneratedNormals {
-    normals: ScratchVec<[f32; 3]>,
+    normals: NormalValues,
     had_normal: bool,
 }
 
+enum NormalValues {
+    F32(ScratchVec<[f32; 3]>),
+    F64(ScratchVec<[f64; 3]>),
+}
+
 impl GeneratedNormals {
-    pub(crate) fn values(&self) -> &[[f32; 3]] {
-        self.normals.values()
+    pub(crate) fn values(&self) -> SceneVectorValues<'_, 3> {
+        match &self.normals {
+            NormalValues::F32(values) => SceneVectorValues::F32(values.values()),
+            NormalValues::F64(values) => SceneVectorValues::F64(values.values()),
+        }
     }
 
     pub(crate) fn had_normal(&self) -> bool {
@@ -91,6 +101,7 @@ pub(super) fn inspect<'a>(
     let mut positions = None;
     let mut smoothing_groups = None;
     let mut normal_fields = 0_usize;
+    let mut replaced_wide = false;
     let mut tangent_fields = 0_usize;
     // Advancing the iterator reads a descriptor. Admit that read as well as its inspection;
     // convenience lookups such as `positions()` would hide a complete descriptor search.
@@ -101,7 +112,10 @@ pub(super) fn inspect<'a>(
             };
             match attribute.semantic() {
                 AttributeSemanticRef::Position => positions = Some(attribute),
-                AttributeSemanticRef::Normal => normal_fields += 1,
+                AttributeSemanticRef::Normal => {
+                    normal_fields += 1;
+                    replaced_wide |= is_f64(attribute);
+                }
                 AttributeSemanticRef::Tangent => tangent_fields += 1,
                 AttributeSemanticRef::SmoothingGroup => smoothing_groups = Some(attribute),
                 _ => {}
@@ -131,11 +145,16 @@ pub(super) fn inspect<'a>(
         if positions.domain() != AttributeDomain::Vertex {
             return Err(InputError::Positions);
         }
-        let AttributeData::DenseF32 { lanes: 3, values } = positions.data() else {
+        if !matches!(
+            positions.data(),
+            AttributeData::DenseF32 { lanes: 3, .. }
+                | AttributeData::DenseF64 { lanes: 3, .. }
+                | AttributeData::SparseF32 { lanes: 3, .. }
+                | AttributeData::SparseF64 { lanes: 3, .. }
+        ) {
             return Err(InputError::Positions);
-        };
-        let (positions, remainder) = values.as_chunks::<3>();
-        if !remainder.is_empty() || positions.len() != vertices as usize {
+        }
+        if positions.len() != vertices as usize {
             return Err(InputError::Positions);
         }
         let actual_corners = indices.map_or(positions.len(), <[u32]>::len);
@@ -170,7 +189,9 @@ pub(super) fn inspect<'a>(
             actual_corners,
             attribute_count,
             options.mode,
-        )?;
+        )?
+        .checked_add(position_read_work_bound(positions, actual_corners)?)
+        .ok_or(InputError::SizeOverflow)?;
         if required > MAX_WORK {
             return Err(InputError::WorkLimit {
                 required,
@@ -184,8 +205,37 @@ pub(super) fn inspect<'a>(
             smoothing_groups,
             mode: options.mode,
             had_normal,
+            wide_output: replaced_wide || is_f64(positions),
         }))
     })?
+}
+
+fn is_f64(attribute: AttributeRef<'_>) -> bool {
+    matches!(
+        attribute.data(),
+        AttributeData::DenseF64 { .. } | AttributeData::SparseF64 { .. }
+    )
+}
+
+/// Generation reads every logical vertex once, then the three rows of every face once.
+/// Sparse searches charge their actual comparisons; this envelope only admits the upper bound.
+fn position_read_work_bound(
+    positions: AttributeRef<'_>,
+    corners: usize,
+) -> Result<u64, InputError> {
+    let comparisons = match positions.data() {
+        AttributeData::SparseF32 { indices, .. } | AttributeData::SparseF64 { indices, .. } => {
+            indices.len().checked_ilog2().map_or(0, |log| log + 1)
+        }
+        _ => 0,
+    };
+    let reads = u64::try_from(positions.len())
+        .ok()
+        .and_then(|vertices| vertices.checked_add(u64::try_from(corners).ok()?))
+        .ok_or(InputError::SizeOverflow)?;
+    reads
+        .checked_mul(1 + u64::from(comparisons))
+        .ok_or(InputError::SizeOverflow)
 }
 
 /// A checked envelope for this module's inspection, initialization, and kernel callbacks.
@@ -233,7 +283,19 @@ pub(super) fn generate(
 ) -> Result<GeneratedNormals, InputError> {
     let corners = source.corner_count;
     let faces = corners / 3;
-    let mut normals = ScratchVec::new(operation, keys, corners as usize)?;
+    let mut normals = if source.wide_output {
+        let mut values = ScratchVec::new(operation, keys, corners as usize)?;
+        for _ in 0..corners {
+            run_unit(operation, keys, || values.values_mut().push([0.0_f64; 3]))?;
+        }
+        NormalValues::F64(values)
+    } else {
+        let mut values = ScratchVec::new(operation, keys, corners as usize)?;
+        for _ in 0..corners {
+            run_unit(operation, keys, || values.values_mut().push([0.0_f32; 3]))?;
+        }
+        NormalValues::F32(values)
+    };
     let mut order = if source.mode == NormalMode::Smooth {
         Some(ScratchVec::new(operation, keys, corners as usize)?)
     } else {
@@ -244,9 +306,6 @@ pub(super) fn generate(
     } else {
         None
     };
-    for _ in 0..corners {
-        run_unit(operation, keys, || normals.values_mut().push([0.0_f32; 3]))?;
-    }
     if let Some(order) = &mut order {
         for _ in 0..corners {
             run_unit(operation, keys, || order.values_mut().push(0_usize))?;
@@ -254,11 +313,16 @@ pub(super) fn generate(
     }
     if let Some(crosses) = &mut crosses {
         for _ in 0..faces {
-            run_unit(operation, keys, || crosses.values_mut().push([0.0_f64; 3]))?;
+            run_unit(operation, keys, || {
+                crosses.values_mut().push(crate::precision::Estimate3 {
+                    value: [0.0; 3],
+                    abs_error: [0.0; 3],
+                });
+            })?;
         }
     }
 
-    kernel::generate(
+    kernel::generate_into(
         kernel::Input {
             positions: source.positions,
             vertex_ids: source
@@ -270,7 +334,10 @@ pub(super) fn generate(
             NormalMode::Flat => kernel::Mode::Flat,
             NormalMode::Smooth => kernel::Mode::Smooth,
         },
-        normals.values_mut(),
+        match &mut normals {
+            NormalValues::F32(values) => kernel::Output::F32(values.values_mut()),
+            NormalValues::F64(values) => kernel::Output::F64(values.values_mut()),
+        },
         kernel::Workspace {
             corner_order: order
                 .as_mut()

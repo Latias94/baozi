@@ -1,6 +1,407 @@
 use super::*;
 use crate::{AttributeData, AttributeSemanticRef, ValidatedScene};
 
+fn f64_builtin_scene(
+    account: &PhysicalStorageAccount,
+    attribute: GeometryAttributeAuthoring<'_>,
+) -> NodeSceneSuccessParts {
+    let positions = [0.0_f32; 12];
+    let is_position = *attribute.semantic() == AttributeSemantic::Position;
+    let attribute = if *attribute.semantic() == AttributeSemantic::Tangent {
+        attribute.with_tangent_conventions(TangentConventions {
+            basis: TangentBasisConvention::TriangleUvDerivative,
+            encoding: TangentHandednessEncoding::SignInW,
+        })
+    } else {
+        attribute
+    };
+    let attributes = [
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Position,
+            AttributeDomain::Vertex,
+            3,
+            &positions,
+            Presence::Absent,
+        ),
+        attribute,
+    ];
+    let attributes = if is_position {
+        &attributes[1..]
+    } else {
+        &attributes[..]
+    };
+    let indices = [0, 1, 2, 0, 2, 3];
+    let primitives = [GeometryPrimitiveAuthoring::new(
+        GeometryTopologyAuthoring::TriangleList,
+        Presence::Present(&indices),
+        Presence::Absent,
+        AuthoringRange::new(0, attributes.len() as u32),
+    )];
+    let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
+    build_scene_with_geometry(
+        account,
+        &[],
+        &[],
+        GeometryAuthoringBatch::new(&meshes, &primitives, attributes, &[]),
+    )
+}
+
+fn assert_dense_f64_builtin_bits(semantic: AttributeSemantic, domain: AttributeDomain, lanes: u8) {
+    let factory = factory();
+    let account = account(&factory);
+    let element_count = if domain == AttributeDomain::Vertex {
+        4
+    } else {
+        6
+    };
+    let scalar_count = element_count * usize::from(lanes);
+    let samples = [
+        16_777_217.0_f64,
+        16_777_216.0,
+        -0.0,
+        f64::from_bits(1),
+        f64::MAX,
+        f64::from_bits(0x3ff0_0000_0000_0001),
+    ];
+    let expected: [f64; 24] = std::array::from_fn(|index| samples[index % samples.len()]);
+    let expected = &expected[..scalar_count];
+    let mut authored = [0.0_f64; 24];
+    authored[..scalar_count].copy_from_slice(expected);
+    let parts = f64_builtin_scene(
+        &account,
+        GeometryAttributeAuthoring::f64(semantic.clone(), domain, lanes, &authored[..scalar_count]),
+    );
+    authored.fill(0.0);
+
+    let full = capture_node_scene(&parts.scene, snapshot_limits(32_768, 128), None)
+        .expect("dense F64 built-in snapshot");
+    let bounded = capture_node_scene(&parts.scene, snapshot_limits(0, 0), None)
+        .expect("dense F64 built-in snapshot without preview");
+    assert_eq!(full.digest, bounded.digest);
+    assert_eq!(full.totals.f64_scalar_count, scalar_count as u64);
+    for value in expected {
+        assert!(
+            full.preview
+                .text
+                .contains(&format!("0x{:016x}", value.to_bits()))
+        );
+    }
+
+    let scene = ValidatedScene::from_node_scene(parts.scene);
+    let allocations = allocation_counter::measure(|| {
+        let primitive = scene.meshes().next().unwrap().primitives().next().unwrap();
+        assert_eq!(primitive.vertex_count(), 4);
+        assert_eq!(primitive.corner_count(), 6);
+        let attribute = match semantic {
+            AttributeSemantic::Position => primitive.positions().unwrap(),
+            AttributeSemantic::Normal => primitive.normals(domain).unwrap(),
+            AttributeSemantic::Tangent => primitive
+                .attribute(AttributeSemanticRef::Tangent, domain)
+                .unwrap(),
+            AttributeSemantic::Texcoord(set) => primitive.texcoords(set, domain).unwrap(),
+            _ => panic!("precision contract requires a floating-point geometry built-in"),
+        };
+        assert_eq!(attribute.domain(), domain);
+        assert_eq!(attribute.lanes(), lanes);
+        assert_eq!(attribute.len(), element_count);
+        let AttributeData::DenseF64 {
+            lanes: stored_lanes,
+            values,
+        } = attribute.data()
+        else {
+            panic!("the authored built-in must retain F64 storage");
+        };
+        assert_eq!(stored_lanes, lanes);
+        assert_eq!(values.len(), expected.len());
+        for (actual, expected) in values.iter().zip(expected) {
+            assert_eq!(actual.to_bits(), expected.to_bits());
+        }
+        for index in 0..element_count {
+            let Some(crate::AttributeElement::F64(tuple)) = attribute.element(index) else {
+                panic!("the logical built-in element must borrow F64 values");
+            };
+            let start = index * usize::from(lanes);
+            assert!(std::ptr::eq(
+                tuple,
+                &values[start..start + usize::from(lanes)]
+            ));
+        }
+        assert_eq!(attribute.element(element_count), None);
+        assert_eq!(attribute.element(usize::MAX), None);
+        if semantic == AttributeSemantic::Tangent {
+            assert_eq!(
+                attribute.tangent_conventions(),
+                Some(crate::TangentConventionsRef {
+                    basis: crate::TangentBasisRef::TriangleUvDerivative,
+                    encoding: crate::TangentEncodingRef::SignInW,
+                })
+            );
+        } else {
+            assert_eq!(attribute.tangent_conventions(), None);
+        }
+    });
+    assert_eq!(allocations.count_total, 0);
+    assert_eq!(allocations.bytes_total, 0);
+    drop(scene);
+    drop(parts.report);
+
+    authored[..scalar_count].copy_from_slice(expected);
+    authored[0] = 16_777_216.0;
+    assert_eq!(expected[0] as f32, authored[0] as f32);
+    let rounded = f64_builtin_scene(
+        &account,
+        GeometryAttributeAuthoring::f64(semantic.clone(), domain, lanes, &authored[..scalar_count]),
+    );
+    assert_ne!(
+        full.digest,
+        capture_node_scene(&rounded.scene, snapshot_limits(0, 0), None)
+            .unwrap()
+            .digest
+    );
+    drop(rounded);
+
+    authored[..scalar_count].copy_from_slice(expected);
+    authored[2] = 0.0;
+    let positive_zero = f64_builtin_scene(
+        &account,
+        GeometryAttributeAuthoring::f64(semantic, domain, lanes, &authored[..scalar_count]),
+    );
+    assert_ne!(
+        full.digest,
+        capture_node_scene(&positive_zero.scene, snapshot_limits(0, 0), None)
+            .unwrap()
+            .digest
+    );
+    drop(positive_zero);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn precision_contract_dense_f64_position_retains_bits_in_public_reads_and_snapshots() {
+    assert_dense_f64_builtin_bits(AttributeSemantic::Position, AttributeDomain::Vertex, 3);
+}
+
+#[test]
+fn precision_contract_dense_f64_normal_retains_bits_in_vertex_and_corner_domains() {
+    for domain in [AttributeDomain::Vertex, AttributeDomain::Corner] {
+        assert_dense_f64_builtin_bits(AttributeSemantic::Normal, domain, 3);
+    }
+}
+
+#[test]
+fn precision_contract_dense_f64_tangent_retains_bits_and_attribute_conventions() {
+    for domain in [AttributeDomain::Vertex, AttributeDomain::Corner] {
+        assert_dense_f64_builtin_bits(AttributeSemantic::Tangent, domain, 4);
+    }
+}
+
+#[test]
+fn precision_contract_dense_f64_texcoord_retains_one_to_three_lanes_in_both_domains() {
+    for domain in [AttributeDomain::Vertex, AttributeDomain::Corner] {
+        for lanes in 1..=3 {
+            assert_dense_f64_builtin_bits(AttributeSemantic::Texcoord(2), domain, lanes);
+        }
+    }
+}
+
+#[test]
+fn precision_contract_sparse_f64_builtins_preserve_bits_defaults_and_public_borrows() {
+    let factory = factory();
+    let account = account(&factory);
+    for (semantic, domain, lanes) in [
+        (AttributeSemantic::Position, AttributeDomain::Vertex, 3),
+        (AttributeSemantic::Normal, AttributeDomain::Vertex, 3),
+        (AttributeSemantic::Normal, AttributeDomain::Corner, 3),
+        (AttributeSemantic::Tangent, AttributeDomain::Vertex, 4),
+        (AttributeSemantic::Tangent, AttributeDomain::Corner, 4),
+        (AttributeSemantic::Texcoord(1), AttributeDomain::Vertex, 1),
+        (AttributeSemantic::Texcoord(1), AttributeDomain::Vertex, 2),
+        (AttributeSemantic::Texcoord(1), AttributeDomain::Vertex, 3),
+        (AttributeSemantic::Texcoord(1), AttributeDomain::Corner, 1),
+        (AttributeSemantic::Texcoord(1), AttributeDomain::Corner, 2),
+        (AttributeSemantic::Texcoord(1), AttributeDomain::Corner, 3),
+        (
+            AttributeSemantic::Custom(CustomAttributeSemantic::new("test:f64").unwrap()),
+            AttributeDomain::Face,
+            2,
+        ),
+    ] {
+        let count = match domain {
+            AttributeDomain::Vertex => 4,
+            AttributeDomain::Corner => 6,
+            AttributeDomain::Face => 2,
+            AttributeDomain::Instance => unreachable!(),
+        };
+        let lanes_usize = usize::from(lanes);
+        let indices = [0, count - 1];
+        let default = [-0.0_f64, f64::from_bits(1), 16_777_217.0, f64::MAX];
+        let second = [16_777_217.0, f64::MAX, f64::from_bits(1), -0.0];
+        let mut values = [0.0_f64; 8];
+        values[..lanes_usize].copy_from_slice(&default[..lanes_usize]);
+        values[lanes_usize..2 * lanes_usize].copy_from_slice(&second[..lanes_usize]);
+        let expected = values;
+        let mut authored_default = default;
+        let parts = f64_builtin_scene(
+            &account,
+            GeometryAttributeAuthoring::sparse_f64(
+                semantic.clone(),
+                domain,
+                lanes,
+                count,
+                &indices,
+                &values[..2 * lanes_usize],
+                &authored_default[..lanes_usize],
+            ),
+        );
+        values.fill(0.0);
+        authored_default.fill(0.0);
+        let snapshot =
+            capture_node_scene(&parts.scene, snapshot_limits(32_768, 128), None).unwrap();
+        assert_eq!(snapshot.totals.f64_scalar_count, u64::from(lanes) * 3);
+        assert!(snapshot.preview.text.contains("scalar=f64"));
+        assert!(snapshot.preview.text.contains("payload=sparse"));
+        assert!(snapshot.preview.text.contains("0x8000000000000000"));
+        assert!(snapshot.preview.text.contains("0x4170000010000000"));
+        assert_eq!(
+            snapshot.digest,
+            capture_node_scene(&parts.scene, snapshot_limits(0, 0), None)
+                .unwrap()
+                .digest
+        );
+        let exact_work =
+            NodeSceneSnapshotLimits::try_new(32_768, 128, snapshot.totals.work_units).unwrap();
+        assert_eq!(
+            capture_node_scene(&parts.scene, exact_work, None)
+                .unwrap()
+                .digest,
+            snapshot.digest
+        );
+        assert!(matches!(
+            capture_node_scene(
+                &parts.scene,
+                NodeSceneSnapshotLimits::try_new(32_768, 128, snapshot.totals.work_units - 1)
+                    .unwrap(),
+                None,
+            ),
+            Err(NodeSceneSnapshotError::WorkBudgetExceeded { .. })
+        ));
+        let scene = ValidatedScene::from_node_scene(parts.scene);
+        let allocations = allocation_counter::measure(|| {
+            let primitive = scene.meshes().next().unwrap().primitives().next().unwrap();
+            let attribute = primitive.attributes().last().unwrap();
+            assert_eq!(attribute.domain(), domain);
+            assert_eq!(attribute.len(), count as usize);
+            let AttributeData::SparseF64 {
+                lanes: stored_lanes,
+                logical_count,
+                indices: stored_indices,
+                values,
+                default: stored_default,
+            } = attribute.data()
+            else {
+                panic!("the authored sparse F64 representation must remain sparse");
+            };
+            assert_eq!(stored_lanes, lanes);
+            assert_eq!(logical_count, count);
+            assert_eq!(stored_indices, indices);
+            for (actual, expected) in values.iter().zip(&expected[..2 * lanes_usize]) {
+                assert_eq!(actual.to_bits(), expected.to_bits());
+            }
+            for (actual, expected) in stored_default.iter().zip(&default[..lanes_usize]) {
+                assert_eq!(actual.to_bits(), expected.to_bits());
+            }
+            for index in 0..count as usize {
+                let Some(crate::AttributeElement::F64(tuple)) = attribute.element(index) else {
+                    panic!("sparse F64 logical tuple");
+                };
+                let expected = if index == 0 {
+                    &values[..lanes_usize]
+                } else if index == count as usize - 1 {
+                    &values[lanes_usize..]
+                } else {
+                    stored_default
+                };
+                assert!(std::ptr::eq(tuple, expected));
+            }
+            assert!(!std::ptr::eq(&values[..lanes_usize], stored_default));
+            assert_eq!(attribute.element(count as usize), None);
+            assert_eq!(attribute.element(usize::MAX), None);
+            if semantic == AttributeSemantic::Tangent {
+                assert_eq!(
+                    attribute.tangent_conventions(),
+                    Some(crate::TangentConventionsRef {
+                        basis: crate::TangentBasisRef::TriangleUvDerivative,
+                        encoding: crate::TangentEncodingRef::SignInW,
+                    })
+                );
+            }
+        });
+        assert_eq!(allocations.count_total, 0);
+        assert_eq!(allocations.bytes_total, 0);
+        drop(scene);
+        drop(parts.report);
+        assert_eq!(account.snapshot().live_retained_bytes(), 0);
+        assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    }
+}
+
+#[test]
+fn precision_contract_sparse_f64_snapshot_commits_defaults_and_explicit_presence() {
+    let factory = factory();
+    let account = account(&factory);
+    let explicit = [-0.0_f64, f64::from_bits(1), 16_777_217.0];
+    let mut digests = Vec::new();
+    for (indices, values, default) in [
+        (&[0][..], &explicit[..], &explicit[..]),
+        (&[][..], &[][..], &explicit[..]),
+        (
+            &[0][..],
+            &explicit[..],
+            &[0.0, f64::from_bits(1), 16_777_217.0][..],
+        ),
+        (
+            &[0][..],
+            &explicit[..],
+            &[-0.0, f64::from_bits(1), 16_777_216.0][..],
+        ),
+        (
+            &[0][..],
+            &[-0.0, f64::from_bits(1), 16_777_216.0][..],
+            &explicit[..],
+        ),
+    ] {
+        let parts = f64_builtin_scene(
+            &account,
+            GeometryAttributeAuthoring::sparse_f64(
+                AttributeSemantic::Position,
+                AttributeDomain::Vertex,
+                3,
+                4,
+                indices,
+                values,
+                default,
+            ),
+        );
+        let (snapshot, transcript) = capture_node_scene_with_test_transcript(
+            &parts.scene,
+            snapshot_limits(32_768, 128),
+            None,
+        )
+        .unwrap();
+        assert!(transcript.complete);
+        assert!(
+            transcript
+                .bytes
+                .windows(9)
+                .any(|bytes| bytes == [14, 0, 0, 0, 0, 0, 0, 0, 128])
+        );
+        assert!(!digests.contains(&snapshot.digest));
+        digests.push(snapshot.digest);
+    }
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+}
+
 #[test]
 fn borrowed_readers_preserve_dense_sparse_and_presence_without_allocation() {
     let factory = factory();

@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-10
-updated: 2026-11-01
+updated: 2026-11-02
 authors:
   - Codex
 decision_type: architecture
@@ -119,10 +119,10 @@ The current built-in schema is normative:
 
 | Semantic | Allowed domain | Allowed format |
 | --- | --- | --- |
-| `POSITION` | Vertex | `F32 x 3`, no normalization |
-| `NORMAL` | Vertex or Corner | `F32 x 3`, no normalization |
-| `TANGENT` | Vertex or Corner | `F32 x 4`, no normalization; lane 4 is handedness |
-| `TEXCOORD_n` | Vertex or Corner | `F32`, `UNorm U8`, or `UNorm U16`, with 1, 2, or 3 lanes |
+| `POSITION` | Vertex | `F32 x 3` or `F64 x 3`, no normalization |
+| `NORMAL` | Vertex or Corner | `F32 x 3` or `F64 x 3`, no normalization |
+| `TANGENT` | Vertex or Corner | `F32 x 4` or `F64 x 4`, no normalization; lane 4 is handedness |
+| `TEXCOORD_n` | Vertex or Corner | evaluated `F32` or `F64`, with 1, 2, or 3 lanes; admitted normalized source encodings retain their adapter-defined evaluation |
 | `COLOR_n` | Vertex, Corner, Face, or Instance | `F32`, `UNorm U8`, or `UNorm U16`, with 3 or 4 lanes |
 | `SMOOTHING_GROUP` | Face | `U32 x 1`, no normalization; zero means off |
 
@@ -203,14 +203,14 @@ A read-only application layout instead borrows existing values and exposes their
 it publishes no Scene or operation report. Canonical storage does not force fixed `Vertex`, fixed
 UV/color channel counts, or `f32` conversion of custom integer data.
 
-The current core authoring rail accepts dense namespaced custom `F64` attributes through
-`GeometryAttributeAuthoring::f64(semantic, domain, lanes, values)`. Primitive-owned Vertex, Corner,
-and Face streams retain `f64` scalar sequences exactly, including signed zero and finite values
-outside the `f32` range. Both authoring validation and central retained-store validation require
-finite values, `1..=16` lanes, and exact owner-domain cardinality. The F64 authoring constructor
-does not admit Instance attributes, sparse payloads, or a replacement for built-in floating-point
-semantics: POSITION, NORMAL, TANGENT, TEXCOORD, and COLOR continue to require their documented F32
-formats. Converting a source built-in to F32 remains an explicit adapter responsibility.
+The core authoring rail accepts dense F64 through `GeometryAttributeAuthoring::f64` and sparse
+F64 through `sparse_f64`. Position, Normal, Tangent and Texcoord follow their built-in domain/lane
+rules above. Namespaced custom Vertex, Corner and Face streams use `1..=16` lanes; Instance and
+Color keep their separately admitted contracts. Producer and central retained validation require
+finite explicit/default values, exact owner-domain cardinality, and sorted unique sparse indices.
+F64 scalar sequences retain their bits, including signed zero and finite values outside the F32
+range. Copy/remap operations retain that width and sparse default/explicit distinction. A narrower
+application output is an explicit conversion choice under ADR 0008.
 
 F64 values count as one semantic cell and one scalar inspection each, with eight canonical payload
 bytes per scalar. Materialization retains typed F64 leaves; validation never lowers them through

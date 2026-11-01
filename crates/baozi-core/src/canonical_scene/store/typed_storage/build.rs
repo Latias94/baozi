@@ -600,6 +600,16 @@ impl GeometryStoragePlan {
                 values: append(&mut storage.f32_values, self.f32_values, values, unit)?,
                 default: append(&mut storage.f32_values, self.f32_values, default, unit)?,
             },
+            GeometryAttributePayloadAuthoring::SparseF64 {
+                indices,
+                values,
+                default,
+                ..
+            } => StoredAttributePayload::SparseF64 {
+                indices: append(&mut storage.u32_values, self.u32_values, indices, unit)?,
+                values: append(&mut storage.f64_values, self.f64_values, values, unit)?,
+                default: append(&mut storage.f64_values, self.f64_values, default, unit)?,
+            },
             GeometryAttributePayloadAuthoring::SparseU32 {
                 indices,
                 values,

@@ -172,7 +172,7 @@ fn normal_deletion_keeps_same_index_source_metadata_and_exact_json_after_source_
     let geometry = GeometryNormalsPlan::try_new(
         source.scene.read_geometry(),
         0,
-        &GENERATED_NORMALS,
+        VectorValues::F32(&GENERATED_NORMALS),
         NormalWritePolicy::Replace,
         TangentPolicy::Remove,
         &mut Control::default(),

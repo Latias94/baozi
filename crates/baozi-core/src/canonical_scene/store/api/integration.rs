@@ -45,6 +45,7 @@ pub use super::super::schema::{
     NodeSceneOutcomeEvidenceSchema as SceneOutcomeEvidenceTag,
     SceneDirectorySchema as SceneCanonicalRootTag,
 };
+pub use super::super::typed_storage::edit::VectorValues as SceneVectorValues;
 pub use super::construction::{SceneConstruction, SceneConstructionStartError};
 use super::scene::ValidatedScene;
 

@@ -162,6 +162,182 @@ fn tangent_geometry() -> GeometryStorage {
     }
 }
 
+fn f64_geometry() -> GeometryStorage {
+    GeometryStorage {
+        logical_meshes: vec![StoredLogicalMesh {
+            primitives: TableRange::new(0, 1),
+            name: None,
+        }],
+        primitives: vec![StoredPrimitive {
+            topology: TopologyKind::TriangleList,
+            vertex_count: 4,
+            corner_count: 6,
+            face_count: 2,
+            polygon_boundaries: None,
+            indices: Some(TableRange::new(3, 6)),
+            material: None,
+            attributes: TableRange::new(0, 4),
+        }],
+        attributes: vec![
+            StoredAttribute {
+                semantic: StoredAttributeSemantic::Position,
+                tangent_conventions: None,
+                domain: AttributeDomain::Vertex,
+                lanes: 3,
+                element_count: 4,
+                payload: StoredAttributePayload::DenseF64(TableRange::new(0, 12)),
+            },
+            StoredAttribute {
+                semantic: StoredAttributeSemantic::Normal,
+                tangent_conventions: None,
+                domain: AttributeDomain::Corner,
+                lanes: 3,
+                element_count: 6,
+                payload: StoredAttributePayload::SparseF64 {
+                    indices: TableRange::new(0, 2),
+                    values: TableRange::new(12, 6),
+                    default: TableRange::new(18, 3),
+                },
+            },
+            StoredAttribute {
+                semantic: StoredAttributeSemantic::Tangent,
+                tangent_conventions: Some(StoredTangentConventions::UNKNOWN),
+                domain: AttributeDomain::Vertex,
+                lanes: 4,
+                element_count: 4,
+                payload: StoredAttributePayload::SparseF64 {
+                    indices: TableRange::new(2, 1),
+                    values: TableRange::new(21, 4),
+                    default: TableRange::new(25, 4),
+                },
+            },
+            StoredAttribute {
+                semantic: StoredAttributeSemantic::Texcoord(0),
+                tangent_conventions: None,
+                domain: AttributeDomain::Corner,
+                lanes: 2,
+                element_count: 6,
+                payload: StoredAttributePayload::DenseF64(TableRange::new(29, 12)),
+            },
+        ],
+        mesh_instances: vec![],
+        names: vec![],
+        f32_values: vec![],
+        f64_values: (0..41)
+            .map(|index| [-0.0, f64::from_bits(1), 16_777_217.0, f64::MAX][index % 4])
+            .collect(),
+        u32_values: vec![0, 3, 1, 0, 1, 2, 0, 2, 3],
+        i32_values: vec![],
+    }
+}
+
+#[test]
+fn precision_contract_central_f64_validation_is_allocation_free_and_interruptible() {
+    let storage = f64_geometry();
+    let mut control = Control::default();
+    let allocations = allocation_counter::measure(|| {
+        assert_eq!(storage.validate(&mut control, [1, 1, 4, 0], 1, 0), Ok(true));
+    });
+    assert_eq!(allocations.count_total, 0);
+    assert_eq!(allocations.bytes_total, 0);
+    assert_eq!(
+        control.completed,
+        storage.validation_work().unwrap() as usize
+    );
+    assert_eq!(storage.f64_values[0].to_bits(), (-0.0_f64).to_bits());
+    assert_eq!(storage.f64_values[1].to_bits(), 1);
+    assert_eq!(storage.f64_values[2].to_bits(), 16_777_217.0_f64.to_bits());
+    for completed in 0..control.completed {
+        let mut control = Control {
+            completed: 0,
+            reject_before: Some(completed),
+        };
+        assert_eq!(storage.validate(&mut control, [1, 1, 4, 0], 1, 0), Err(()));
+        assert_eq!(control.completed, completed);
+    }
+}
+
+#[test]
+fn precision_contract_central_f64_validation_rejects_corrupt_sparse_ranges_and_schema() {
+    let corruptions: [fn(&mut GeometryStorage); 16] = [
+        |s| s.attributes[0].payload = StoredAttributePayload::DenseF64(TableRange::new(1, 12)),
+        |s| s.attributes[0].domain = AttributeDomain::Corner,
+        |s| s.attributes[1].domain = AttributeDomain::Face,
+        |s| s.attributes[1].element_count = 5,
+        |s| {
+            s.attributes[1].payload = StoredAttributePayload::SparseF64 {
+                indices: TableRange::new(0, 2),
+                values: TableRange::new(12, 5),
+                default: TableRange::new(17, 3),
+            }
+        },
+        |s| {
+            s.attributes[1].payload = StoredAttributePayload::SparseF64 {
+                indices: TableRange::new(0, 2),
+                values: TableRange::new(12, 6),
+                default: TableRange::new(18, 2),
+            }
+        },
+        |s| {
+            s.attributes[1].payload = StoredAttributePayload::SparseF64 {
+                indices: TableRange::new(0, 2),
+                values: TableRange::new(12, 6),
+                default: TableRange::new(19, 3),
+            }
+        },
+        |s| s.u32_values[1] = 0,
+        |s| s.u32_values[1] = 6,
+        |s| s.f64_values[12] = f64::NAN,
+        |s| s.f64_values[18] = f64::INFINITY,
+        |s| s.f64_values[25] = f64::NEG_INFINITY,
+        |s| s.attributes[2].tangent_conventions = None,
+        |s| s.attributes[2].lanes = 3,
+        |s| s.attributes[3].semantic = StoredAttributeSemantic::Color(0),
+        |s| s.f64_values.push(1.0),
+    ];
+    for corrupt in corruptions {
+        let mut storage = f64_geometry();
+        corrupt(&mut storage);
+        assert_eq!(
+            storage.validate(&mut Control::default(), [1, 1, 4, 0], 1, 0),
+            Ok(false)
+        );
+    }
+}
+
+#[test]
+fn precision_contract_central_sparse_f64_default_only_validation_does_not_expand_logical_count() {
+    for count in [0, u32::MAX] {
+        let mut storage = f64_geometry();
+        storage.primitives[0] = StoredPrimitive {
+            topology: TopologyKind::Points,
+            vertex_count: count,
+            corner_count: count,
+            face_count: count,
+            polygon_boundaries: None,
+            indices: None,
+            material: None,
+            attributes: TableRange::new(0, 1),
+        };
+        storage.attributes.truncate(1);
+        storage.attributes[0].element_count = count;
+        storage.attributes[0].payload = StoredAttributePayload::SparseF64 {
+            indices: TableRange::new(0, 0),
+            values: TableRange::new(0, 0),
+            default: TableRange::new(0, 3),
+        };
+        storage.f64_values.truncate(3);
+        storage.u32_values.clear();
+        let mut control = Control::default();
+        let allocations = allocation_counter::measure(|| {
+            assert_eq!(storage.validate(&mut control, [1, 1, 1, 0], 1, 0), Ok(true));
+        });
+        assert_eq!(allocations.count_total, 0);
+        assert_eq!(allocations.bytes_total, 0);
+        assert_eq!(control.completed, 7);
+    }
+}
+
 #[test]
 fn tangent_declarations_are_inline_and_central_validation_closes_their_exact_text_ranges() {
     let storage = tangent_geometry();

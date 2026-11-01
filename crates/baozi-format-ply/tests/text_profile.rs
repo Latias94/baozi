@@ -561,10 +561,10 @@ fn ascii_numeric_literals_enforce_the_4096_byte_format_boundary() -> TestResult<
         ResourceLimits::default(),
     )?)?;
     let snapshot = scene_snapshot(&report)?;
-    assert!(
-        snapshot_line(&snapshot, "attribute[0]")
-            .contains("values(present,total=3)=[0x00000000,0x00000000,0x00000000]")
-    );
+    assert!(snapshot_line(&snapshot, "attribute[0]").contains("scalar=f64"));
+    assert!(snapshot_line(&snapshot, "attribute[0]").contains(
+        "values(present,total=3)=[0x0000000000000000,0x0000000000000000,0x0000000000000000]"
+    ));
 
     let over_limit = "0".repeat(MAX_NUMERIC_LITERAL_BYTES + 1);
     let rejected = format!("{HEADER}{over_limit} 0 0\n");

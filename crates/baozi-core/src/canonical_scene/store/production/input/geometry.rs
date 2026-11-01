@@ -78,6 +78,13 @@ pub(in crate::canonical_scene::store) enum GeometryAttributePayloadAuthoring<'a>
         values: &'a [f32],
         default: &'a [f32],
     },
+    SparseF64 {
+        lanes: u8,
+        logical_count: u32,
+        indices: &'a [u32],
+        values: &'a [f64],
+        default: &'a [f64],
+    },
     SparseU32 {
         lanes: u8,
         logical_count: u32,
@@ -127,11 +134,11 @@ impl<'a> GeometryAttributeAuthoring<'a> {
         }
     }
 
-    /// Authors a dense F64 custom attribute without reducing its precision.
+    /// Authors a dense F64 attribute without reducing its precision.
     ///
-    /// Validation requires finite values, 1..=16 lanes, and the owning domain's
-    /// cardinality. Built-in floating-point semantics, including POSITION and
-    /// NORMAL, require F32 and cannot use this payload.
+    /// Position, Normal, Tangent, Texcoord, and custom semantics retain F64 values.
+    /// Validation requires finite values and the semantic's lanes and domain
+    /// cardinality. Color retains its F32 contract.
     pub const fn f64(
         semantic: AttributeSemantic,
         domain: AttributeDomain,
@@ -204,6 +211,37 @@ impl<'a> GeometryAttributeAuthoring<'a> {
             semantic,
             domain,
             payload: GeometryAttributePayloadAuthoring::SparseF32 {
+                lanes,
+                logical_count,
+                indices,
+                values,
+                default,
+            },
+        }
+    }
+
+    /// Authors sparse F64 values and one default tuple without densifying or narrowing.
+    ///
+    /// Explicit indices must be strictly increasing and inside `logical_count`.
+    /// Values and defaults retain their floating-point bits, including signed zero.
+    pub const fn sparse_f64(
+        semantic: AttributeSemantic,
+        domain: AttributeDomain,
+        lanes: u8,
+        logical_count: u32,
+        indices: &'a [u32],
+        values: &'a [f64],
+        default: &'a [f64],
+    ) -> Self {
+        Self {
+            tangent_conventions: if matches!(&semantic, AttributeSemantic::Tangent) {
+                Some(TangentConventions::UNKNOWN)
+            } else {
+                None
+            },
+            semantic,
+            domain,
+            payload: GeometryAttributePayloadAuthoring::SparseF64 {
                 lanes,
                 logical_count,
                 indices,

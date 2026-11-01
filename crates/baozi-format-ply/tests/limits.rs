@@ -24,6 +24,7 @@ const METADATA_SORT_COMPARISON_CHUNK: u64 = 64;
 enum BinaryVertexProfile {
     PositionsOnly,
     BuiltinStreams,
+    BuiltinF64Streams,
     CustomStreams,
     CustomF64Streams,
 }
@@ -230,7 +231,9 @@ fn binary_vertex_document(vertex_count: usize, profile: BinaryVertexProfile) -> 
             // Repeated Position components retain this profile's single output stream.
             ["x", "y", "z", "x", "y", "z", "x", "y"]
         }
-        BinaryVertexProfile::BuiltinStreams => ["nx", "ny", "nz", "s", "t", "red", "green", "blue"],
+        BinaryVertexProfile::BuiltinStreams | BinaryVertexProfile::BuiltinF64Streams => {
+            ["nx", "ny", "nz", "s", "t", "red", "green", "blue"]
+        }
         BinaryVertexProfile::CustomStreams | BinaryVertexProfile::CustomF64Streams => [
             "custom_0", "custom_1", "custom_2", "custom_3", "custom_4", "custom_5", "custom_6",
             "custom_7",
@@ -240,8 +243,15 @@ fn binary_vertex_document(vertex_count: usize, profile: BinaryVertexProfile) -> 
         "ply\nformat binary_little_endian 1.0\nelement vertex {vertex_count}\nproperty float x\nproperty float y\nproperty float z\n"
     )
     .into_bytes();
-    let custom_f64 = matches!(profile, BinaryVertexProfile::CustomF64Streams);
-    let scalar = if custom_f64 { "double" } else { "float" };
+    let wide_extra_scalars = matches!(
+        profile,
+        BinaryVertexProfile::BuiltinF64Streams | BinaryVertexProfile::CustomF64Streams
+    );
+    let scalar = if wide_extra_scalars {
+        "double"
+    } else {
+        "float"
+    };
     for property in extra_properties {
         bytes.extend_from_slice(format!("property {scalar} {property}\n").as_bytes());
     }
@@ -251,7 +261,7 @@ fn binary_vertex_document(vertex_count: usize, profile: BinaryVertexProfile) -> 
             bytes.extend_from_slice(&0.0_f32.to_le_bytes());
         }
         for _ in 0..8 {
-            if custom_f64 {
+            if wide_extra_scalars {
                 bytes.extend_from_slice(&0.0_f64.to_le_bytes());
             } else {
                 bytes.extend_from_slice(&0.0_f32.to_le_bytes());
@@ -326,6 +336,13 @@ fn pre_reserved_vertex_and_face_streams_do_not_add_per_item_polls() -> TestResul
     assert_eq!(positions_delta, ADDITIONAL_ITEMS * 3);
     assert_eq!(
         vertex_poll_delta(BinaryVertexProfile::BuiltinStreams, "builtin-streams")?,
+        positions_delta
+    );
+    assert_eq!(
+        vertex_poll_delta(
+            BinaryVertexProfile::BuiltinF64Streams,
+            "builtin-f64-streams"
+        )?,
         positions_delta
     );
     assert_eq!(

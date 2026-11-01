@@ -38,6 +38,36 @@
   literals, vertex count, custom vertex attribute stream/cell counts, face count, list lengths, mesh
   count, diagnostics, and cooperative cancellation checkpoints.
 
+## Retained Geometry Scalar Precision
+
+Position, Normal, and Texcoord streams select their scalar storage independently from their declared
+component types. The choice is made from the header before allocating the stream, in every encoding:
+
+| Declared component type | Required stream storage |
+| --- | --- |
+| `float` / `float32` | F32 |
+| `char` / `int8`, `uchar` / `uint8`, `short` / `int16`, `ushort` / `uint16` | F32 |
+| `double` / `float64` | F64 |
+| `int` / `int32`, `uint` / `uint32` | F64 |
+
+A mixed-component stream uses F64 if any component requires it. The choice depends on declarations,
+including when every actual I32/U32 value would fit F32 exactly. Smaller components widen exactly
+when they share an F64 stream; an unrelated F32 stream keeps F32 storage. Integer geometry projects
+exactly to the selected floating representation without changing the meaning of its source declaration.
+PLY publishes these streams as dense attributes through the existing typed attribute API.
+
+Finite decoded F64 values retain their bits, including adjacent values such as 16777216 and 16777217,
+subnormals, values outside the finite F32 range, and the sign of zero. Retaining these values requires
+no precision-loss permission and emits no precision-loss evidence. NaN and infinity are rejected.
+ASCII decimals first round to their declared source scalar type; this contract does not promise exact
+decimal arithmetic. Stream reservations account for the selected scalar width through the existing
+metered storage and retain the existing resource-limit and cancellation controls.
+
+`crates/baozi-format-ply/tests/precision.rs` covers these declarations and retained values across ASCII,
+binary little-endian, and binary big-endian inputs. This section describes import and retained scalar
+precision. Derived numerical operations and application output conversions have separate contracts.
+The color profile and custom scalar mappings remain independent of geometry width selection.
+
 ## Accepted Color Profile
 
 Baozi's PLY color profile interprets unsigned `uchar`, `ushort`, and `uint` channels as full-range

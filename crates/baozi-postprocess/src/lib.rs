@@ -6,6 +6,7 @@ mod direct_error;
 mod error;
 mod normals;
 mod operation;
+mod precision;
 mod remap;
 mod report;
 mod scene_edit;
@@ -20,6 +21,7 @@ mod vertices;
 mod test_fixtures;
 
 pub use baozi_core::SceneGenerationId;
+pub use precision::GeometryNumericIssue;
 
 pub use direct_error::{TriangulationCause, TriangulationFailure};
 pub use error::{

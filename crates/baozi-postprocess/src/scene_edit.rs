@@ -120,6 +120,9 @@ pub(crate) enum EditCause {
     },
     FinalControl,
     CoreRejected,
+    PrecisionLoss {
+        semantic: baozi_core::AttributeSemanticKind,
+    },
     MorphDependency {
         semantic: baozi_core::MorphDeltaSemantic,
     },
@@ -418,6 +421,9 @@ fn publish_candidate(candidate: EditCandidate) -> EditResult {
 fn core_requested(cause: &SceneEditRejection) -> EditCause {
     match cause {
         SceneEditRejection::Runtime(cause) => cause.clone().into(),
+        SceneEditRejection::PrecisionLoss { semantic } => EditCause::PrecisionLoss {
+            semantic: *semantic,
+        },
         SceneEditRejection::Space(issue) => EditCause::SpaceIssue { issue: *issue },
         SceneEditRejection::MorphDependency { semantic } => EditCause::MorphDependency {
             semantic: *semantic,

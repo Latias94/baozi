@@ -802,6 +802,20 @@ fn encode_gltf_source(
                 encode_u32_slice(encoder, values);
                 encode_u32_slice(encoder, default);
             }
+            GeometryAttributePayloadAuthoring::SparseF64 {
+                lanes,
+                logical_count,
+                indices,
+                values,
+                default,
+            } => {
+                encoder.u8(7);
+                encoder.u8(lanes);
+                encoder.u32(logical_count);
+                encode_u32_slice(encoder, indices);
+                encode_f64_slice(encoder, values);
+                encode_f64_slice(encoder, default);
+            }
             GeometryAttributePayloadAuthoring::SparseI32 {
                 lanes,
                 logical_count,
@@ -2920,6 +2934,21 @@ fn observe_facade_typed_view(
                     let _ = drain_geometry_u32(values, &mut transcript, "attribute-value-u32")?;
                     let _ = drain_geometry_u32(indices, &mut transcript, "attribute-index")?;
                     let _ = drain_geometry_u32(default, &mut transcript, "attribute-default-u32")?;
+                }
+                NodeSceneGeometryAttributePayload::SparseF64 {
+                    mut values,
+                    indices,
+                    mut default,
+                } => {
+                    while let Some(value) = values.next()? {
+                        transcript.debug("attribute-value-f64", &value.to_bits());
+                    }
+                    values.finish()?;
+                    let _ = drain_geometry_u32(indices, &mut transcript, "attribute-index")?;
+                    while let Some(value) = default.next()? {
+                        transcript.debug("attribute-default-f64", &value.to_bits());
+                    }
+                    default.finish()?;
                 }
                 NodeSceneGeometryAttributePayload::SparseI32 {
                     values,

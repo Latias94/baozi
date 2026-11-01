@@ -13,9 +13,9 @@ use super::super::validation::TypedStorageValidationControl;
 use super::{
     EditResult, GeometryStorage, ScalarCounts, StoredAttribute, StoredAttributePayload,
     StoredLogicalMesh, StoredMeshInstance, StoredPrimitive, TableRange, TypedStorageBuildControl,
-    TypedStorageBuildError, add_count, allocate, append, capacity, compare_tangent_schema_names,
-    copy_attribute_names, copy_optional, overflow, push, same_range, same_tangent_convention_kinds,
-    validate_dense_range,
+    TypedStorageBuildError, VectorValues, add_count, allocate, append, capacity,
+    compare_tangent_schema_names, copy_attribute_names, copy_optional, overflow, push, same_range,
+    same_tangent_convention_kinds, validate_dense_range,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,9 +29,6 @@ pub(in crate::canonical_scene::store) enum TangentPolicy {
     Reject,
     Remove,
 }
-
-/// The squared length of an f32-rounded unit vector can differ from one by a few ulps.
-const UNIT_LENGTH_TOLERANCE: f64 = 4.0 * f32::EPSILON as f64;
 
 /// A closed, allocation-free index relation that can outlive the borrowed geometry plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,7 +109,7 @@ impl NormalAttributeMapping {
 #[derive(Clone, Copy)]
 pub(in crate::canonical_scene::store) struct GeometryNormalsPlan<'a> {
     source: &'a GeometryStorage,
-    normals: &'a [[f32; 3]],
+    normals: VectorValues<'a, 3>,
     target: usize,
     capacities: [CapacityPlan; 9],
     work: u64,
@@ -126,7 +123,7 @@ impl<'a> GeometryNormalsPlan<'a> {
     pub(in crate::canonical_scene::store) fn try_new<C: TypedStorageBuildControl>(
         source: &'a GeometryStorage,
         target: usize,
-        normals: &'a [[f32; 3]],
+        normals: VectorValues<'a, 3>,
         write: NormalWritePolicy,
         tangents: TangentPolicy,
         control: &mut C,
@@ -160,14 +157,16 @@ impl<'a> GeometryNormalsPlan<'a> {
                     .ok_or(TypedStorageBuildError::Invariant)
             })
             .map_err(TypedStorageBuildError::Control)??;
-        for normal in normals {
+        for index in 0..normals.len() {
             let valid = control
                 .run_unit(|| {
-                    let [x, y, z] = normal.map(f64::from);
+                    let Some([x, y, z]) = normals.get(index) else {
+                        return false;
+                    };
                     x.is_finite()
                         && y.is_finite()
                         && z.is_finite()
-                        && (x * x + y * y + z * z - 1.0).abs() <= UNIT_LENGTH_TOLERANCE
+                        && (x * x + y * y + z * z - 1.0).abs() <= normals.unit_length_tolerance()
                 })
                 .map_err(TypedStorageBuildError::Control)?;
             if !valid {
@@ -270,7 +269,11 @@ impl<'a> GeometryNormalsPlan<'a> {
             ))
             .ok_or_else(overflow)?;
         add_count(
-            &mut scalars.f32s,
+            if normals.is_f64() {
+                &mut scalars.f64s
+            } else {
+                &mut scalars.f32s
+            },
             normals.len().checked_mul(3).ok_or_else(overflow)?,
         )?;
 
@@ -515,20 +518,14 @@ impl<'a> GeometryNormalsPlan<'a> {
         for index in 0..self.output_attribute_count() {
             // Add emits Normal at its canonical insertion point; Replace uses the original row.
             let row = if index == self.normal_attribute() {
-                let start = output.f32_values.len();
-                for normal in self.normals {
-                    append(&mut output.f32_values, f32s, normal, control)?;
-                }
+                let payload = self.normals.append(&mut output, self.capacities, control)?;
                 StoredAttribute {
                     semantic: StoredAttributeSemantic::Normal,
                     tangent_conventions: None,
                     domain: AttributeDomain::Corner,
                     lanes: 3,
                     element_count: self.output_corner_count(),
-                    payload: StoredAttributePayload::DenseF32(TableRange::new(
-                        start,
-                        output.f32_values.len() - start,
-                    )),
+                    payload,
                 }
             } else {
                 let source = self
@@ -675,14 +672,7 @@ impl<'a> GeometryNormalsPlan<'a> {
                         && row.lanes == 3
                         && row.element_count == self.output_corner_count()
                 );
-                let StoredAttributePayload::DenseF32(range) = row.payload else {
-                    return Ok(false);
-                };
-                let Some(values) = range.get(&actual.f32_values) else {
-                    return Ok(false);
-                };
-                let expected = self.normals.as_flattened();
-                if !compare_values(expected, values, |a, b| a.to_bits() == b.to_bits(), control)? {
+                if !compare_vector_values(self.normals, row.payload, actual, control)? {
                     return Ok(false);
                 }
             } else {
@@ -840,6 +830,11 @@ pub(super) fn attribute_scalar_counts<E>(
             values,
             default,
         } => sparse!(indices, values, default, f32_values, f32s),
+        SparseF64 {
+            indices,
+            values,
+            default,
+        } => sparse!(indices, values, default, f64_values, f64s),
         SparseU32 {
             indices,
             values,
@@ -918,6 +913,11 @@ pub(super) fn copy_payload<C: TypedStorageBuildControl>(
             values,
             default,
         } => sparse!(indices, values, default, f32_values, f32s, SparseF32),
+        SparseF64 {
+            indices,
+            values,
+            default,
+        } => sparse!(indices, values, default, f64_values, f64s, SparseF64),
         SparseU32 {
             indices,
             values,
@@ -953,6 +953,39 @@ pub(super) fn compare_values<T: Copy, C: TypedStorageValidationControl>(
         }
     }
     Ok(true)
+}
+
+pub(super) fn compare_vector_values<const N: usize, C: TypedStorageValidationControl>(
+    expected: VectorValues<'_, N>,
+    payload: StoredAttributePayload,
+    actual: &GeometryStorage,
+    control: &mut C,
+) -> Result<bool, C::Error> {
+    match (expected, payload) {
+        (VectorValues::F32(expected), StoredAttributePayload::DenseF32(range)) => {
+            let Some(values) = range.get(&actual.f32_values) else {
+                return Ok(false);
+            };
+            compare_values(
+                expected.as_flattened(),
+                values,
+                |a, b| a.to_bits() == b.to_bits(),
+                control,
+            )
+        }
+        (VectorValues::F64(expected), StoredAttributePayload::DenseF64(range)) => {
+            let Some(values) = range.get(&actual.f64_values) else {
+                return Ok(false);
+            };
+            compare_values(
+                expected.as_flattened(),
+                values,
+                |a, b| a.to_bits() == b.to_bits(),
+                control,
+            )
+        }
+        _ => Ok(false),
+    }
 }
 
 fn compare_ranges<T: Copy, C: TypedStorageValidationControl>(
@@ -1035,6 +1068,20 @@ pub(super) fn compare_payload<C: TypedStorageValidationControl>(
                 default: ad,
             },
         ) => sparse!(si, sv, sd, ai, av, ad, f32_values, |a: f32, b: f32| a
+            .to_bits()
+            == b.to_bits()),
+        (
+            SparseF64 {
+                indices: si,
+                values: sv,
+                default: sd,
+            },
+            SparseF64 {
+                indices: ai,
+                values: av,
+                default: ad,
+            },
+        ) => sparse!(si, sv, sd, ai, av, ad, f64_values, |a: f64, b: f64| a
             .to_bits()
             == b.to_bits()),
         (

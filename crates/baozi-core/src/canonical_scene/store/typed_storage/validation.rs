@@ -373,11 +373,12 @@ impl GeometryStorage {
             }
         }
         let lanes = usize::from(attribute.lanes);
-        let Some(dense_count) = (attribute.element_count as usize).checked_mul(lanes) else {
-            return Ok(false);
-        };
         macro_rules! dense {
             ($range:expr, $values:ident, $check:expr) => {{
+                let Some(dense_count) = (attribute.element_count as usize).checked_mul(lanes)
+                else {
+                    return Ok(false);
+                };
                 let Some(values) = consume_range($range, &self.$values, &mut pools.$values) else {
                     return Ok(false);
                 };
@@ -430,6 +431,11 @@ impl GeometryStorage {
                 values,
                 default,
             } => sparse!(indices, values, default, f32_values, f32::is_finite),
+            StoredAttributePayload::SparseF64 {
+                indices,
+                values,
+                default,
+            } => sparse!(indices, values, default, f64_values, f64::is_finite),
             StoredAttributePayload::SparseU32 {
                 indices,
                 values,
@@ -476,6 +482,11 @@ fn attribute_schema(attribute: &StoredAttribute) -> bool {
         attribute.payload,
         StoredAttributePayload::DenseF32(_) | StoredAttributePayload::SparseF32 { .. }
     );
+    let floating_geometry = f32_payload
+        || matches!(
+            attribute.payload,
+            StoredAttributePayload::DenseF64(_) | StoredAttributePayload::SparseF64 { .. }
+        );
     let u32_payload = matches!(
         attribute.payload,
         StoredAttributePayload::DenseU32(_) | StoredAttributePayload::SparseU32 { .. }
@@ -486,12 +497,16 @@ fn attribute_schema(attribute: &StoredAttribute) -> bool {
     );
     match attribute.semantic {
         StoredAttributeSemantic::Position => {
-            attribute.domain == AttributeDomain::Vertex && f32_payload && attribute.lanes == 3
+            attribute.domain == AttributeDomain::Vertex && floating_geometry && attribute.lanes == 3
         }
-        StoredAttributeSemantic::Normal => vertex_or_corner && f32_payload && attribute.lanes == 3,
-        StoredAttributeSemantic::Tangent => vertex_or_corner && f32_payload && attribute.lanes == 4,
+        StoredAttributeSemantic::Normal => {
+            vertex_or_corner && floating_geometry && attribute.lanes == 3
+        }
+        StoredAttributeSemantic::Tangent => {
+            vertex_or_corner && floating_geometry && attribute.lanes == 4
+        }
         StoredAttributeSemantic::Texcoord(_) => {
-            vertex_or_corner && f32_payload && (1..=3).contains(&attribute.lanes)
+            vertex_or_corner && floating_geometry && (1..=3).contains(&attribute.lanes)
         }
         StoredAttributeSemantic::Color(_) => {
             attribute.domain != AttributeDomain::Instance

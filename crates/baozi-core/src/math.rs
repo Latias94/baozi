@@ -40,10 +40,11 @@ pub struct Mat4 {
     pub cols: [[f32; 4]; 4],
 }
 
+/// Bounds of computed world-space F64 points, without an outward-rounding guarantee.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Aabb {
-    pub min: Vec3,
-    pub max: Vec3,
+    pub min: [f64; 3],
+    pub max: [f64; 3],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

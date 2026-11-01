@@ -122,26 +122,40 @@ impl<'a> GeometrySpacePlan<'a> {
                 .map_err(GeometrySpacePlanError::Control)??;
             payload_work = payload_work.checked_add(work).ok_or_else(plan_overflow)?;
             let Some(spatial) = spatial else { continue };
-            let (values, default) = match attribute.payload {
-                StoredAttributePayload::DenseF32(values) => (values, None),
+            macro_rules! check_float {
+                ($values:expr, $default:expr, $pool:ident, $scalar:ty) => {
+                    for range in [Some($values), $default].into_iter().flatten() {
+                        let values = range
+                            .get(&source.$pool)
+                            .ok_or(GeometrySpacePlanError::Invariant)?;
+                        for tuple in values.chunks_exact(usize::from(attribute.lanes)) {
+                            control
+                                .run_unit(|| {
+                                    <$scalar as SpatialFloat>::convert(conversion, spatial, tuple)
+                                })
+                                .map_err(GeometrySpacePlanError::Control)?
+                                .map_err(|source| GeometrySpacePlanError::Numeric {
+                                    attribute: index,
+                                    source,
+                                })?;
+                        }
+                    }
+                };
+            }
+            match attribute.payload {
+                StoredAttributePayload::DenseF32(values) => {
+                    check_float!(values, None, f32_values, f32)
+                }
+                StoredAttributePayload::DenseF64(values) => {
+                    check_float!(values, None, f64_values, f64)
+                }
                 StoredAttributePayload::SparseF32 {
                     values, default, ..
-                } => (values, Some(default)),
+                } => check_float!(values, Some(default), f32_values, f32),
+                StoredAttributePayload::SparseF64 {
+                    values, default, ..
+                } => check_float!(values, Some(default), f64_values, f64),
                 _ => return Err(GeometrySpacePlanError::Invariant),
-            };
-            for range in [Some(values), default].into_iter().flatten() {
-                let values = range
-                    .get(&source.f32_values)
-                    .ok_or(GeometrySpacePlanError::Invariant)?;
-                for tuple in values.chunks_exact(usize::from(attribute.lanes)) {
-                    control
-                        .run_unit(|| convert_tuple(conversion, spatial, tuple))
-                        .map_err(GeometrySpacePlanError::Control)?
-                        .map_err(|source| GeometrySpacePlanError::Numeric {
-                            attribute: index,
-                            source,
-                        })?;
-                }
             }
         }
         let u32_count = source
@@ -383,11 +397,11 @@ impl<'a> GeometrySpacePlan<'a> {
                 }
             }};
         }
-        Ok(match attribute.payload {
-            StoredAttributePayload::DenseF32(range) => {
-                StoredAttributePayload::DenseF32(copy_f32_tuples(
-                    range
-                        .get(&self.source.f32_values)
+        macro_rules! dense_float {
+            ($range:expr, $pool:ident, $cap:expr, $variant:ident) => {
+                StoredAttributePayload::$variant(copy_float_tuples(
+                    $range
+                        .get(&self.source.$pool)
                         .ok_or(TypedStorageBuildError::Invariant)?,
                     TupleMap {
                         indices: None,
@@ -396,20 +410,15 @@ impl<'a> GeometrySpacePlan<'a> {
                     },
                     spatial,
                     self.conversion,
-                    &mut output.f32_values,
-                    self.capacities[5],
+                    &mut output.$pool,
+                    self.capacities[$cap],
                     control,
                 )?)
-            }
-            StoredAttributePayload::DenseF64(range) => dense!(range, f64_values, 6, DenseF64),
-            StoredAttributePayload::DenseU32(range) => dense!(range, u32_values, 7, DenseU32),
-            StoredAttributePayload::DenseI32(range) => dense!(range, i32_values, 8, DenseI32),
-            StoredAttributePayload::SparseF32 {
-                indices,
-                values,
-                default,
-            } => {
-                let ids = indices
+            };
+        }
+        macro_rules! sparse_float {
+            ($indices:expr, $values:expr, $default:expr, $pool:ident, $cap:expr, $variant:ident) => {{
+                let ids = $indices
                     .get(&self.source.u32_values)
                     .ok_or(TypedStorageBuildError::Invariant)?;
                 let indices = copy_sparse_indices(
@@ -419,9 +428,9 @@ impl<'a> GeometrySpacePlan<'a> {
                     self.capacities[7],
                     control,
                 )?;
-                let values = copy_f32_tuples(
-                    values
-                        .get(&self.source.f32_values)
+                let values = copy_float_tuples(
+                    $values
+                        .get(&self.source.$pool)
                         .ok_or(TypedStorageBuildError::Invariant)?,
                     TupleMap {
                         indices: Some(ids),
@@ -430,13 +439,13 @@ impl<'a> GeometrySpacePlan<'a> {
                     },
                     spatial,
                     self.conversion,
-                    &mut output.f32_values,
-                    self.capacities[5],
+                    &mut output.$pool,
+                    self.capacities[$cap],
                     control,
                 )?;
-                let default = copy_f32_tuples(
-                    default
-                        .get(&self.source.f32_values)
+                let default = copy_float_tuples(
+                    $default
+                        .get(&self.source.$pool)
                         .ok_or(TypedStorageBuildError::Invariant)?,
                     TupleMap {
                         indices: None,
@@ -445,16 +454,32 @@ impl<'a> GeometrySpacePlan<'a> {
                     },
                     spatial,
                     self.conversion,
-                    &mut output.f32_values,
-                    self.capacities[5],
+                    &mut output.$pool,
+                    self.capacities[$cap],
                     control,
                 )?;
-                StoredAttributePayload::SparseF32 {
+                StoredAttributePayload::$variant {
                     indices,
                     values,
                     default,
                 }
-            }
+            }};
+        }
+        Ok(match attribute.payload {
+            StoredAttributePayload::DenseF32(range) => dense_float!(range, f32_values, 5, DenseF32),
+            StoredAttributePayload::DenseF64(range) => dense_float!(range, f64_values, 6, DenseF64),
+            StoredAttributePayload::DenseU32(range) => dense!(range, u32_values, 7, DenseU32),
+            StoredAttributePayload::DenseI32(range) => dense!(range, i32_values, 8, DenseI32),
+            StoredAttributePayload::SparseF32 {
+                indices,
+                values,
+                default,
+            } => sparse_float!(indices, values, default, f32_values, 5, SparseF32),
+            StoredAttributePayload::SparseF64 {
+                indices,
+                values,
+                default,
+            } => sparse_float!(indices, values, default, f64_values, 6, SparseF64),
             StoredAttributePayload::SparseU32 {
                 indices,
                 values,
@@ -722,24 +747,20 @@ impl<'a> GeometrySpacePlan<'a> {
                 compare!($sd, $ad, $pool, None, false, $bits);
             }};
         }
-        match (attribute.payload, actual_payload) {
-            (
-                StoredAttributePayload::DenseF32(source),
-                StoredAttributePayload::DenseF32(target),
-            ) => {
-                let (Some(source), Some(target)) = (
-                    source.get(&self.source.f32_values),
-                    target.get(&actual.f32_values),
-                ) else {
+        macro_rules! compare_float {
+            ($source:expr, $actual:expr, $pool:ident, $ids:expr, $remap:expr) => {{
+                let (Some(source), Some(target)) =
+                    ($source.get(&self.source.$pool), $actual.get(&actual.$pool))
+                else {
                     return Ok(false);
                 };
-                if !compare_f32_tuples(
+                if !compare_float_tuples(
                     source,
                     target,
                     TupleMap {
-                        indices: None,
+                        indices: $ids,
                         lanes,
-                        remap,
+                        remap: $remap,
                     },
                     spatial,
                     self.conversion,
@@ -747,11 +768,32 @@ impl<'a> GeometrySpacePlan<'a> {
                 )? {
                     return Ok(false);
                 }
-            }
+            }};
+        }
+        macro_rules! sparse_float {
+            ($si:expr, $sv:expr, $sd:expr, $ai:expr, $av:expr, $ad:expr, $pool:ident) => {{
+                let (Some(ids), Some(output_ids)) = (
+                    $si.get(&self.source.u32_values),
+                    $ai.get(&actual.u32_values),
+                ) else {
+                    return Ok(false);
+                };
+                if !compare_sparse_indices(ids, output_ids, remap, control)? {
+                    return Ok(false);
+                }
+                compare_float!($sv, $av, $pool, Some(ids), remap);
+                compare_float!($sd, $ad, $pool, None, false);
+            }};
+        }
+        match (attribute.payload, actual_payload) {
+            (
+                StoredAttributePayload::DenseF32(source),
+                StoredAttributePayload::DenseF32(target),
+            ) => compare_float!(source, target, f32_values, None, remap),
             (
                 StoredAttributePayload::DenseF64(source),
                 StoredAttributePayload::DenseF64(target),
-            ) => compare!(source, target, f64_values, None, remap, f64::to_bits),
+            ) => compare_float!(source, target, f64_values, None, remap),
             (
                 StoredAttributePayload::DenseU32(source),
                 StoredAttributePayload::DenseU32(target),
@@ -785,54 +827,19 @@ impl<'a> GeometrySpacePlan<'a> {
                     values: av,
                     default: ad,
                 },
-            ) => {
-                let (Some(ids), Some(output_ids)) =
-                    (si.get(&self.source.u32_values), ai.get(&actual.u32_values))
-                else {
-                    return Ok(false);
-                };
-                if !compare_sparse_indices(ids, output_ids, remap, control)? {
-                    return Ok(false);
-                }
-                let (Some(source), Some(target)) =
-                    (sv.get(&self.source.f32_values), av.get(&actual.f32_values))
-                else {
-                    return Ok(false);
-                };
-                if !compare_f32_tuples(
-                    source,
-                    target,
-                    TupleMap {
-                        indices: Some(ids),
-                        lanes,
-                        remap,
-                    },
-                    spatial,
-                    self.conversion,
-                    control,
-                )? {
-                    return Ok(false);
-                }
-                let (Some(source), Some(target)) =
-                    (sd.get(&self.source.f32_values), ad.get(&actual.f32_values))
-                else {
-                    return Ok(false);
-                };
-                if !compare_f32_tuples(
-                    source,
-                    target,
-                    TupleMap {
-                        indices: None,
-                        lanes,
-                        remap: false,
-                    },
-                    spatial,
-                    self.conversion,
-                    control,
-                )? {
-                    return Ok(false);
-                }
-            }
+            ) => sparse_float!(si, sv, sd, ai, av, ad, f32_values),
+            (
+                StoredAttributePayload::SparseF64 {
+                    indices: si,
+                    values: sv,
+                    default: sd,
+                },
+                StoredAttributePayload::SparseF64 {
+                    indices: ai,
+                    values: av,
+                    default: ad,
+                },
+            ) => sparse_float!(si, sv, sd, ai, av, ad, f64_values),
             (
                 StoredAttributePayload::SparseU32 {
                     indices: si,
@@ -951,6 +958,11 @@ fn attribute_work(source: &GeometryStorage, attribute: StoredAttribute) -> Optio
             values,
             default,
         } => sparse!(indices, values, default, f32_values),
+        StoredAttributePayload::SparseF64 {
+            indices,
+            values,
+            default,
+        } => sparse!(indices, values, default, f64_values),
         StoredAttributePayload::SparseU32 {
             indices,
             values,
@@ -964,26 +976,71 @@ fn attribute_work(source: &GeometryStorage, attribute: StoredAttribute) -> Optio
     }
 }
 
-fn convert_tuple(
-    conversion: SpaceConversion,
-    spatial: SpatialTuple,
-    tuple: &[f32],
-) -> Result<[f32; 4], NumericConversionError> {
-    let xyz = [tuple[0], tuple[1], tuple[2]];
-    let xyz = match spatial {
-        SpatialTuple::Point => conversion.point(xyz)?,
-        _ => conversion.direction(xyz)?,
-    };
-    let w = if matches!(spatial, SpatialTuple::Tangent) {
-        if conversion.determinant_sign() < 0 {
-            -tuple[3]
+/// Width dispatch stays private to this conversion; storage and Scene have one scalar family.
+trait SpatialFloat: Copy {
+    type Bits: Eq;
+    fn bits(self) -> Self::Bits;
+    fn convert(
+        conversion: SpaceConversion,
+        spatial: SpatialTuple,
+        tuple: &[Self],
+    ) -> Result<[Self; 4], NumericConversionError>;
+}
+
+impl SpatialFloat for f32 {
+    type Bits = u32;
+    fn bits(self) -> Self::Bits {
+        self.to_bits()
+    }
+    fn convert(
+        conversion: SpaceConversion,
+        spatial: SpatialTuple,
+        tuple: &[f32],
+    ) -> Result<[f32; 4], NumericConversionError> {
+        let xyz = [tuple[0], tuple[1], tuple[2]];
+        let xyz = match spatial {
+            SpatialTuple::Point => conversion.point(xyz)?,
+            _ => conversion.direction(xyz)?,
+        };
+        let w = if matches!(spatial, SpatialTuple::Tangent) {
+            if conversion.determinant_sign() < 0 {
+                -tuple[3]
+            } else {
+                tuple[3]
+            }
         } else {
-            tuple[3]
-        }
-    } else {
-        0.0
-    };
-    Ok([xyz[0], xyz[1], xyz[2], w])
+            0.0
+        };
+        Ok([xyz[0], xyz[1], xyz[2], w])
+    }
+}
+
+impl SpatialFloat for f64 {
+    type Bits = u64;
+    fn bits(self) -> Self::Bits {
+        self.to_bits()
+    }
+    fn convert(
+        conversion: SpaceConversion,
+        spatial: SpatialTuple,
+        tuple: &[f64],
+    ) -> Result<[f64; 4], NumericConversionError> {
+        let xyz = [tuple[0], tuple[1], tuple[2]];
+        let xyz = match spatial {
+            SpatialTuple::Point => conversion.point_f64(xyz)?,
+            _ => conversion.direction_f64(xyz)?,
+        };
+        let w = if matches!(spatial, SpatialTuple::Tangent) {
+            if conversion.determinant_sign() < 0 {
+                -tuple[3]
+            } else {
+                tuple[3]
+            }
+        } else {
+            0.0
+        };
+        Ok([xyz[0], xyz[1], xyz[2], w])
+    }
 }
 
 fn corner_ordinal(corner: usize, remap: bool) -> Option<usize> {
@@ -1072,15 +1129,15 @@ fn copy_tuples<T: Copy, C: TypedStorageBuildControl>(
     Ok(TableRange::new(start, values.len()))
 }
 
-fn copy_f32_tuples<C: TypedStorageBuildControl>(
-    values: &[f32],
+fn copy_float_tuples<T: SpatialFloat, C: TypedStorageBuildControl>(
+    values: &[T],
     map: TupleMap<'_>,
     spatial: Option<SpatialTuple>,
     conversion: SpaceConversion,
-    output: &mut Vec<f32>,
+    output: &mut Vec<T>,
     capacity: CapacityPlan,
     control: &mut C,
-) -> BuildResult<TableRange<f32>, C::Error> {
+) -> BuildResult<TableRange<T>, C::Error> {
     let start = output.len();
     for ordinal in 0..values.len() / map.lanes {
         room(output, capacity, map.lanes)?;
@@ -1091,7 +1148,7 @@ fn copy_f32_tuples<C: TypedStorageBuildControl>(
                     .ok_or(TypedStorageBuildError::Invariant)?;
                 match spatial {
                     Some(spatial) => output.extend_from_slice(
-                        &convert_tuple(conversion, spatial, tuple)
+                        &T::convert(conversion, spatial, tuple)
                             .map_err(|_| TypedStorageBuildError::Invariant)?[..map.lanes],
                     ),
                     None => output.extend_from_slice(tuple),
@@ -1151,9 +1208,9 @@ fn compare_sparse_indices<C: TypedStorageValidationControl>(
     Ok(true)
 }
 
-fn compare_f32_tuples<C: TypedStorageValidationControl>(
-    source: &[f32],
-    actual: &[f32],
+fn compare_float_tuples<T: SpatialFloat, C: TypedStorageValidationControl>(
+    source: &[T],
+    actual: &[T],
     map: TupleMap<'_>,
     spatial: Option<SpatialTuple>,
     conversion: SpaceConversion,
@@ -1165,18 +1222,16 @@ fn compare_f32_tuples<C: TypedStorageValidationControl>(
                 return false;
             };
             match spatial {
-                Some(spatial) => {
-                    convert_tuple(conversion, spatial, expected).is_ok_and(|expected| {
-                        expected[..map.lanes]
-                            .iter()
-                            .map(|value| value.to_bits())
-                            .eq(tuple.iter().map(|value| value.to_bits()))
-                    })
-                }
+                Some(spatial) => T::convert(conversion, spatial, expected).is_ok_and(|expected| {
+                    expected[..map.lanes]
+                        .iter()
+                        .map(|value| value.bits())
+                        .eq(tuple.iter().map(|value| value.bits()))
+                }),
                 None => expected
                     .iter()
-                    .map(|value| value.to_bits())
-                    .eq(tuple.iter().map(|value| value.to_bits())),
+                    .map(|value| value.bits())
+                    .eq(tuple.iter().map(|value| value.bits())),
             }
         })? != Some(true)
         {
@@ -1217,6 +1272,15 @@ fn expected_payload(
             values: take_range(&mut pools[0], values.len())?,
             default: take_range(&mut pools[0], default.len())?,
         },
+        StoredAttributePayload::SparseF64 {
+            indices,
+            values,
+            default,
+        } => StoredAttributePayload::SparseF64 {
+            indices: take_range(&mut pools[2], indices.len())?,
+            values: take_range(&mut pools[1], values.len())?,
+            default: take_range(&mut pools[1], default.len())?,
+        },
         StoredAttributePayload::SparseU32 {
             indices,
             values,
@@ -1250,6 +1314,18 @@ fn same_payload_ranges(left: StoredAttributePayload, right: StoredAttributePaylo
                 default: ad,
             },
             StoredAttributePayload::SparseF32 {
+                indices: bi,
+                values: bv,
+                default: bd,
+            },
+        ) => ai == bi && av == bv && ad == bd,
+        (
+            StoredAttributePayload::SparseF64 {
+                indices: ai,
+                values: av,
+                default: ad,
+            },
+            StoredAttributePayload::SparseF64 {
                 indices: bi,
                 values: bv,
                 default: bd,

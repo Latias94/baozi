@@ -393,6 +393,189 @@ fn assert_valid(storage: &GeometryStorage) -> u64 {
 }
 
 #[test]
+fn precision_contract_space_conversion_transports_f64_builtins_without_narrowing() {
+    let mut source = empty();
+    let next_one = f64::from_bits(1.0_f64.to_bits() + 1);
+    for (semantic, lanes, tuple) in [
+        (
+            StoredAttributeSemantic::Position,
+            3,
+            &[16_777_217.0, -0.0, f64::from_bits(1)][..],
+        ),
+        (
+            StoredAttributeSemantic::Normal,
+            3,
+            &[next_one, -0.0, 2.0][..],
+        ),
+        (
+            StoredAttributeSemantic::Tangent,
+            4,
+            &[-0.0, 1.0, 0.0, -0.0][..],
+        ),
+        (
+            StoredAttributeSemantic::Texcoord(0),
+            2,
+            &[16_777_217.0, f64::from_bits(1)][..],
+        ),
+    ] {
+        let payload = StoredAttributePayload::DenseF64(values(&mut source.f64_values, tuple));
+        attribute(
+            &mut source,
+            semantic,
+            AttributeDomain::Vertex,
+            lanes,
+            1,
+            payload,
+        );
+    }
+    finish_fixture(&mut source, TopologyKind::Points, [1, 1, 1], None, None);
+    let plan = GeometrySpacePlan::try_new(&source, reflected(), &mut Control::default())
+        .expect("F64 built-ins must use their declared-width spatial arithmetic");
+    let mut built = Control::default();
+    let output = plan.materialize(&mut built).unwrap();
+    assert_eq!(built.completed, plan.work());
+    assert_eq!(assert_valid(&output), plan.validation_work());
+    assert!(output.f32_values.is_empty());
+    let expected = [
+        &[-33_554_434.0, -0.0, f64::from_bits(2)][..],
+        &[-next_one, -0.0, 2.0][..],
+        &[0.0, 1.0, 0.0, 0.0][..],
+        &[16_777_217.0, f64::from_bits(1)][..],
+    ];
+    for (attribute, expected) in output.attributes.iter().zip(expected) {
+        let StoredAttributePayload::DenseF64(range) = attribute.payload else {
+            panic!("F64 spatial conversion must retain scalar width");
+        };
+        assert!(
+            range
+                .get(&output.f64_values)
+                .unwrap()
+                .iter()
+                .map(|value| value.to_bits())
+                .eq(expected.iter().map(|value| value.to_bits()))
+        );
+    }
+    let mut compared = Control::default();
+    assert_eq!(
+        plan.validate_correspondence(&output, &mut compared),
+        Ok(true)
+    );
+    assert_eq!(compared.completed, plan.correspondence_work());
+}
+
+#[test]
+fn precision_contract_space_conversion_rejects_true_f64_overflow_and_underflow() {
+    for (point, conversion, expected) in [
+        (
+            [f64::MAX, 0.0, 0.0],
+            reflected(),
+            NumericConversionError::NonFiniteOutput,
+        ),
+        (
+            [f64::from_bits(1), 0.0, 0.0],
+            conversion(Handedness::Right, 2.0, FrontFaceWinding::CounterClockwise),
+            NumericConversionError::UnderflowToZero,
+        ),
+    ] {
+        let mut source = empty();
+        let payload = StoredAttributePayload::DenseF64(values(&mut source.f64_values, &point));
+        attribute(
+            &mut source,
+            StoredAttributeSemantic::Position,
+            AttributeDomain::Vertex,
+            3,
+            1,
+            payload,
+        );
+        finish_fixture(&mut source, TopologyKind::Points, [1, 1, 1], None, None);
+        assert!(matches!(
+            GeometrySpacePlan::try_new(&source, conversion, &mut Control::default()),
+            Err(GeometrySpacePlanError::Numeric { attribute: 0, source }) if source == expected
+        ));
+    }
+}
+
+#[test]
+fn precision_contract_sparse_f64_conversion_remaps_explicit_values_and_transforms_default() {
+    let mut source = empty();
+    let positions = values(
+        &mut source.f64_values,
+        &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+    );
+    attribute(
+        &mut source,
+        StoredAttributeSemantic::Position,
+        AttributeDomain::Vertex,
+        3,
+        3,
+        StoredAttributePayload::DenseF64(positions),
+    );
+    let next_one = f64::from_bits(1.0_f64.to_bits() + 1);
+    let payload = StoredAttributePayload::SparseF64 {
+        indices: values(&mut source.u32_values, &[1, 2]),
+        values: values(
+            &mut source.f64_values,
+            &[next_one, -0.0, 2.0, 3.0, 0.0, f64::from_bits(1)],
+        ),
+        default: values(&mut source.f64_values, &[-0.0, 1.0, f64::from_bits(1)]),
+    };
+    attribute(
+        &mut source,
+        StoredAttributeSemantic::Normal,
+        AttributeDomain::Corner,
+        3,
+        3,
+        payload,
+    );
+    finish_fixture(
+        &mut source,
+        TopologyKind::TriangleList,
+        [3, 3, 1],
+        None,
+        Some(&[0, 1, 2]),
+    );
+    assert_valid(&source);
+    let plan = GeometrySpacePlan::try_new(&source, reflected(), &mut Control::default()).unwrap();
+    let mut built = Control::default();
+    let output = plan.materialize(&mut built).unwrap();
+    assert_eq!(built.completed, plan.work());
+    assert_eq!(assert_valid(&output), plan.validation_work());
+    let StoredAttributePayload::SparseF64 {
+        indices,
+        values,
+        default,
+    } = output.attributes[1].payload
+    else {
+        panic!("sparse F64 representation must remain sparse F64");
+    };
+    assert_eq!(indices.get(&output.u32_values).unwrap(), &[1, 2]);
+    let expected = [-3.0_f64, 0.0, f64::from_bits(1), -next_one, -0.0, 2.0];
+    assert!(
+        values
+            .get(&output.f64_values)
+            .unwrap()
+            .iter()
+            .map(|value| value.to_bits())
+            .eq(expected.map(f64::to_bits))
+    );
+    let expected = [0.0_f64, 1.0, f64::from_bits(1)];
+    assert!(
+        default
+            .get(&output.f64_values)
+            .unwrap()
+            .iter()
+            .map(|value| value.to_bits())
+            .eq(expected.map(f64::to_bits))
+    );
+    let mut compared = Control::default();
+    assert_eq!(
+        plan.validate_correspondence(&output, &mut compared),
+        Ok(true)
+    );
+    assert_eq!(compared.completed, plan.correspondence_work());
+}
+
+#[test]
 fn geometry_conversion_retains_each_tangent_declaration_and_its_schema_ranges() {
     use crate::canonical_scene::store::typed_storage::{
         StoredTangentBasis, StoredTangentConventions, StoredTangentEncoding,

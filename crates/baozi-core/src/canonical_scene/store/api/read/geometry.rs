@@ -91,6 +91,13 @@ pub enum AttributeData<'s> {
         values: &'s [f32],
         default: &'s [f32],
     },
+    SparseF64 {
+        lanes: u8,
+        logical_count: u32,
+        indices: &'s [u32],
+        values: &'s [f64],
+        default: &'s [f64],
+    },
     SparseU32 {
         lanes: u8,
         logical_count: u32,
@@ -203,6 +210,17 @@ impl<'s> AttributeRef<'s> {
                 values: values.into_slice(),
                 default: default.into_slice(),
             },
+            P::SparseF64 {
+                values,
+                indices,
+                default,
+            } => AttributeData::SparseF64 {
+                lanes,
+                logical_count: count,
+                indices: indices.into_slice(),
+                values: values.into_slice(),
+                default: default.into_slice(),
+            },
             P::SparseU32 {
                 values,
                 indices,
@@ -294,6 +312,13 @@ impl<'s> AttributeRef<'s> {
                 default,
                 ..
             } => sparse_element(indices, values, default, lanes, index).map(AttributeElement::F32),
+            AttributeData::SparseF64 {
+                lanes,
+                indices,
+                values,
+                default,
+                ..
+            } => sparse_element(indices, values, default, lanes, index).map(AttributeElement::F64),
             AttributeData::SparseU32 {
                 lanes,
                 indices,

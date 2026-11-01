@@ -5,6 +5,7 @@ pub(crate) mod input;
 pub(crate) mod kernel;
 mod options;
 mod report;
+mod wide;
 
 #[cfg(test)]
 mod runtime_tests;

@@ -231,6 +231,24 @@ impl<'scene> NodeSceneGeometryTables<'scene> {
                     .checked_add(default.len())
                     .ok_or_else(|| invariant("attribute scalar count overflows"))?,
             ),
+            StoredAttributePayload::SparseF64 {
+                indices,
+                values,
+                default,
+            } => (
+                P::SparseF64 {
+                    indices: leaf(indices, &self.storage.u32_values)?,
+                    values: leaf(values, &self.storage.f64_values)?,
+                    default: leaf(default, &self.storage.f64_values)?,
+                },
+                S::F64,
+                true,
+                indices.len(),
+                values
+                    .len()
+                    .checked_add(default.len())
+                    .ok_or_else(|| invariant("attribute scalar count overflows"))?,
+            ),
             StoredAttributePayload::SparseU32 {
                 indices,
                 values,
@@ -694,6 +712,11 @@ pub(in crate::canonical_scene::store) enum NodeSceneGeometryAttributePayload<'sc
         values: NodeSceneGeometryF32Cursor<'scene>,
         indices: NodeSceneGeometryU32Cursor<'scene>,
         default: NodeSceneGeometryF32Cursor<'scene>,
+    },
+    SparseF64 {
+        values: NodeSceneGeometryLeafCursor<'scene, f64>,
+        indices: NodeSceneGeometryU32Cursor<'scene>,
+        default: NodeSceneGeometryLeafCursor<'scene, f64>,
     },
     SparseU32 {
         values: NodeSceneGeometryU32Cursor<'scene>,

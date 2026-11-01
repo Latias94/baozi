@@ -32,6 +32,25 @@ pub enum NormalIssue {
         group: Option<u32>,
         corner: usize,
     },
+    /// Binary64 scaling failed at an original Position component.
+    PositionNumerical {
+        vertex: usize,
+        component: usize,
+        issue: crate::GeometryNumericIssue,
+    },
+    /// Binary64 face estimation, normalization, or output validation failed.
+    Numerical {
+        face: usize,
+        issue: crate::GeometryNumericIssue,
+    },
+    /// Binary64 area accumulation or normalization failed in a smoothing bucket.
+    SmoothNumerical {
+        vertex: usize,
+        group: Option<u32>,
+        /// Lowest original corner in the bucket, before deterministic sorting.
+        corner: usize,
+        issue: crate::GeometryNumericIssue,
+    },
     InvalidKernelShape,
 }
 
@@ -85,6 +104,10 @@ pub enum NormalCause {
     },
     #[error("the core rejected the geometry edit")]
     CoreRejected,
+    #[error("normal generation would narrow its {semantic:?} precision dependency")]
+    PrecisionLoss {
+        semantic: baozi_core::AttributeSemanticKind,
+    },
     #[error("central validation rejected the geometry edit")]
     CentralValidation,
     #[error("the geometry edit could not acquire or bind its final generation")]
@@ -188,6 +211,7 @@ impl From<crate::scene_edit::EditFailure> for NormalFailure {
             EditCause::Control { cause } => NormalCause::Control { cause },
             EditCause::FinalControl => NormalCause::FinalControl,
             EditCause::CoreRejected => NormalCause::CoreRejected,
+            EditCause::PrecisionLoss { semantic } => NormalCause::PrecisionLoss { semantic },
             EditCause::MorphDependency { semantic } => NormalCause::MorphDeltas { semantic },
             EditCause::SpaceIssue { .. } => NormalCause::CoreRejected,
             EditCause::CentralValidation => NormalCause::CentralValidation,
@@ -243,6 +267,27 @@ impl From<super::input::InputError> for NormalCause {
                         vertex,
                         group,
                         corner,
+                    },
+                    Error::PositionNumerical {
+                        vertex,
+                        component,
+                        issue,
+                    } => NormalIssue::PositionNumerical {
+                        vertex,
+                        component,
+                        issue,
+                    },
+                    Error::Numerical { face, issue } => NormalIssue::Numerical { face, issue },
+                    Error::SmoothNumerical {
+                        vertex,
+                        group,
+                        corner,
+                        issue,
+                    } => NormalIssue::SmoothNumerical {
+                        vertex,
+                        group,
+                        corner,
+                        issue,
                     },
                     _ => NormalIssue::InvalidKernelShape,
                 },

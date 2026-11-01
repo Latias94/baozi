@@ -25,6 +25,69 @@ pub(in crate::canonical_scene::store) mod tangents;
 
 type EditResult<T, E> = Result<T, TypedStorageBuildError<E>>;
 
+/// Borrowed generated vectors at their selected output width.
+#[derive(Debug, Clone, Copy)]
+pub enum VectorValues<'a, const N: usize> {
+    F32(&'a [[f32; N]]),
+    F64(&'a [[f64; N]]),
+}
+
+impl<const N: usize> VectorValues<'_, N> {
+    pub const fn len(self) -> usize {
+        match self {
+            Self::F32(values) => values.len(),
+            Self::F64(values) => values.len(),
+        }
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    pub const fn is_f64(self) -> bool {
+        matches!(self, Self::F64(_))
+    }
+
+    fn get(self, index: usize) -> Option<[f64; N]> {
+        match self {
+            Self::F32(values) => values.get(index).map(|value| value.map(f64::from)),
+            Self::F64(values) => values.get(index).copied(),
+        }
+    }
+
+    const fn unit_length_tolerance(self) -> f64 {
+        if self.is_f64() {
+            8.0 * f64::EPSILON
+        } else {
+            4.0 * f32::EPSILON as f64
+        }
+    }
+
+    fn append<C: TypedStorageBuildControl>(
+        self,
+        output: &mut GeometryStorage,
+        capacities: [CapacityPlan; 9],
+        control: &mut C,
+    ) -> EditResult<StoredAttributePayload, C::Error> {
+        match self {
+            Self::F32(values) => append(
+                &mut output.f32_values,
+                capacities[5],
+                values.as_flattened(),
+                control,
+            )
+            .map(StoredAttributePayload::DenseF32),
+            Self::F64(values) => append(
+                &mut output.f64_values,
+                capacities[6],
+                values.as_flattened(),
+                control,
+            )
+            .map(StoredAttributePayload::DenseF64),
+        }
+    }
+}
+
 /// Copies the text owned by exactly one descriptor and updates only its text ranges.
 /// Callers rebuild names in attribute order, followed by logical-mesh names.
 pub(in crate::canonical_scene::store) fn copy_attribute_names<C: TypedStorageBuildControl>(
@@ -222,6 +285,9 @@ impl<'a> GeometryTriangulationPlan<'a> {
                                 .and_then(|work| work.checked_mul(2))
                                 .ok_or_else(overflow)?;
                             add_work(&mut lookup_work, actions)?;
+                            // Correspondence repeats these same source lookups. Central
+                            // validation requires an exact action count, not a worst-case bound.
+                            add_work(&mut correspondence_actions, actions)?;
                             if found.is_some() {
                                 add_count(&mut explicit, 1)?;
                             }
@@ -243,14 +309,6 @@ impl<'a> GeometryTriangulationPlan<'a> {
                     }
                     .and_then(|work| work.checked_add(lanes_u64))
                     .ok_or_else(overflow)?;
-                    if remapped {
-                        let output_u64 = u64::try_from(count).map_err(|_| overflow())?;
-                        let steps = u64::from(usize::BITS - indices.len().leading_zeros());
-                        correspondence_actions = output_u64
-                            .checked_mul(steps.checked_add(1).ok_or_else(overflow)?)
-                            .and_then(|work| work.checked_mul(2))
-                            .ok_or_else(overflow)?;
-                    }
                     add_count(&mut scalars.u32s, explicit)?;
                     let values = explicit.checked_mul(lanes).ok_or_else(overflow)?;
                     add_count(&mut scalars.$count, values)?;
@@ -336,6 +394,13 @@ impl<'a> GeometryTriangulationPlan<'a> {
                     default,
                 } => {
                     sparse_count!(indices, values, default, f32_values, f32s);
+                }
+                StoredAttributePayload::SparseF64 {
+                    indices,
+                    values,
+                    default,
+                } => {
+                    sparse_count!(indices, values, default, f64_values, f64s);
                 }
                 StoredAttributePayload::SparseU32 {
                     indices,
@@ -633,6 +698,13 @@ impl<'a> GeometryTriangulationPlan<'a> {
                     default,
                 } => {
                     sparse!(indices, values, default, f32_values, f32s, SparseF32)
+                }
+                StoredAttributePayload::SparseF64 {
+                    indices,
+                    values,
+                    default,
+                } => {
+                    sparse!(indices, values, default, f64_values, f64s, SparseF64)
                 }
                 StoredAttributePayload::SparseU32 {
                     indices,
@@ -950,6 +1022,20 @@ impl GeometryTriangulationPlan<'_> {
                         default: ad,
                     },
                 ) => sparse!(si, sv, sd, ai, av, ad, f32_values, |a: f32, b: f32| a
+                    .to_bits()
+                    == b.to_bits()),
+                (
+                    SparseF64 {
+                        indices: si,
+                        values: sv,
+                        default: sd,
+                    },
+                    SparseF64 {
+                        indices: ai,
+                        values: av,
+                        default: ad,
+                    },
+                ) => sparse!(si, sv, sd, ai, av, ad, f64_values, |a: f64, b: f64| a
                     .to_bits()
                     == b.to_bits()),
                 (
@@ -1652,6 +1738,147 @@ mod tests {
             source.u32_values,
             [1, 7, 0, 0, 3, 6, 41, 42, 4, 3, 0, 1, 2, 3, 0, 3, 4]
         );
+    }
+
+    #[test]
+    fn sparse_f64_copy_and_remap_preserve_bits_explicit_defaults_and_work_counts() {
+        let tuples = [
+            [-0.0, f64::from_bits(1)],
+            [f64::from_bits(1.0_f64.to_bits() + 1), 1.0e250],
+            [0.0, -f64::from_bits(1)],
+        ];
+        for (domain, row, count, source_indices, expected_indices, expected_tuples) in [
+            (
+                AttributeDomain::Corner,
+                4,
+                7,
+                &[0, 3, 6][..],
+                &[0, 3, 5, 8][..],
+                &[0, 0, 1, 2][..],
+            ),
+            (
+                AttributeDomain::Vertex,
+                4,
+                5,
+                &[0, 3, 4][..],
+                &[0, 3, 4][..],
+                &[0, 1, 2][..],
+            ),
+            (
+                AttributeDomain::Face,
+                5,
+                2,
+                &[0, 1][..],
+                &[0, 1, 2][..],
+                &[0, 0, 1][..],
+            ),
+        ] {
+            let mut source = geometry();
+            let indices = match source.attributes[row].payload {
+                StoredAttributePayload::SparseI32 { indices, .. } => {
+                    source.i32_values.clear();
+                    indices
+                }
+                StoredAttributePayload::DenseU32(indices) => indices,
+                _ => unreachable!(),
+            };
+            let index_range = indices.checked(source.u32_values.len()).unwrap();
+            source.u32_values[index_range].copy_from_slice(source_indices);
+            let value_start = source.f64_values.len();
+            let value_count = source_indices.len() * 2;
+            source
+                .f64_values
+                .extend_from_slice(&tuples.as_flattened()[..value_count]);
+            source.f64_values.extend_from_slice(&tuples[0]);
+            source.attributes[row].domain = domain;
+            source.attributes[row].lanes = 2;
+            source.attributes[row].element_count = count;
+            source.attributes[row].payload = StoredAttributePayload::SparseF64 {
+                indices,
+                values: TableRange::new(value_start, value_count),
+                default: TableRange::new(value_start + value_count, 2),
+            };
+            let source_bits: Vec<_> = source.f64_values.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(
+                source.validate(&mut Control::default(), [1, 2, 7, 1], 2, 1),
+                Ok(true)
+            );
+            let plan =
+                GeometryTriangulationPlan::try_new(&source, 0, origins(), &mut Control::default())
+                    .unwrap();
+            assert_eq!(
+                plan.capacities()[6].desired_capacity(),
+                CORNER_ORIGINS.len() * 2 + expected_tuples.len() * 2 + 2
+            );
+            let mut build = Control::default();
+            let output = plan.materialize(&mut build).unwrap();
+            assert_eq!(build.completed, plan.work());
+            let mut validation = Control::default();
+            assert_eq!(
+                output.validate(&mut validation, [1, 2, 7, 1], 2, 1),
+                Ok(true)
+            );
+            assert_eq!(validation.completed, plan.validation_work());
+            let mut correspondence = Control::default();
+            assert_eq!(
+                plan.validate_correspondence(&output, &mut correspondence),
+                Ok(true)
+            );
+            assert_eq!(correspondence.completed, plan.correspondence_work());
+            assert_eq!(
+                output.attributes[row].semantic,
+                source.attributes[row].semantic
+            );
+            assert_eq!(output.attributes[row].domain, domain);
+            assert_eq!(output.attributes[row].lanes, 2);
+            let StoredAttributePayload::SparseF64 {
+                indices,
+                values,
+                default,
+            } = output.attributes[row].payload
+            else {
+                panic!("sparse F64 must retain its encoding");
+            };
+            assert_eq!(indices.get(&output.u32_values), Some(expected_indices));
+            assert_eq!(values.start() + values.len(), default.start());
+            assert_eq!(
+                values
+                    .get(&output.f64_values)
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
+                expected_tuples
+                    .iter()
+                    .flat_map(|&index| tuples[index].map(f64::to_bits))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                default
+                    .get(&output.f64_values)
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
+                tuples[0].map(f64::to_bits)
+            );
+            for scalar in [values.start(), default.start()] {
+                let mut corrupted = plan.materialize(&mut Control::default()).unwrap();
+                corrupted.f64_values[scalar] = 0.0;
+                assert_eq!(
+                    plan.validate_correspondence(&corrupted, &mut Control::default()),
+                    Ok(false)
+                );
+            }
+            assert_eq!(
+                source
+                    .f64_values
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
+                source_bits
+            );
+        }
     }
 
     #[test]

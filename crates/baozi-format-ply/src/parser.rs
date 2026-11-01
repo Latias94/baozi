@@ -125,14 +125,113 @@ struct Header<'scope> {
 
 struct ParsedPly<'scope> {
     channels: VertexChannels,
-    positions: MeteredVec<'scope, [f32; 3]>,
-    normals: MeteredVec<'scope, [f32; 3]>,
-    texcoords: MeteredVec<'scope, [f32; 2]>,
+    positions: GeometryStream<'scope, 3>,
+    normals: GeometryStream<'scope, 3>,
+    texcoords: GeometryStream<'scope, 2>,
     colors: MeteredVec<'scope, [f32; 4]>,
     indices: MeteredVec<'scope, u32>,
     face_vertex_counts: MeteredVec<'scope, u32>,
     has_polygon: bool,
     custom_attributes: MeteredVec<'scope, CustomAttributeAccumulator<'scope>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum GeometryScalarWidth {
+    F32,
+    F64,
+}
+
+impl GeometryScalarWidth {
+    fn with_component(self, ty: ScalarType) -> Self {
+        match ty {
+            ScalarType::F64 | ScalarType::I32 | ScalarType::U32 => Self::F64,
+            ScalarType::F32
+            | ScalarType::I8
+            | ScalarType::U8
+            | ScalarType::I16
+            | ScalarType::U16 => self,
+        }
+    }
+}
+
+enum GeometryStream<'scope, const LANES: usize> {
+    F32(MeteredVec<'scope, [f32; LANES]>),
+    F64(MeteredVec<'scope, [f64; LANES]>),
+}
+
+impl<'scope, const LANES: usize> GeometryStream<'scope, LANES> {
+    fn new(
+        ctx: &'scope ParseScope<'_>,
+        width: GeometryScalarWidth,
+        capacity: usize,
+        label: &'static str,
+    ) -> ParseResult<Self> {
+        match width {
+            GeometryScalarWidth::F32 => {
+                let mut values = ctx.metered_vec(ImportStorageClass::FormatNormalization, label);
+                values.try_reserve(capacity)?;
+                Ok(Self::F32(values))
+            }
+            GeometryScalarWidth::F64 => {
+                let mut values = ctx.metered_vec(ImportStorageClass::FormatNormalization, label);
+                values.try_reserve(capacity)?;
+                Ok(Self::F64(values))
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::F32(values) => values.len(),
+            Self::F64(values) => values.len(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn try_push_reserved(&mut self, ctx: &ParseScope<'_>, tuple: [f64; LANES]) -> ParseResult<()> {
+        match self {
+            Self::F32(values) => {
+                let output = tuple.map(|value| value as f32);
+                // The declared F32/small-integer components must round-trip exactly, including -0.
+                if tuple
+                    .iter()
+                    .zip(output)
+                    .any(|(source, output)| source.to_bits() != f64::from(output).to_bits())
+                {
+                    return Err(format_failure(
+                        ctx,
+                        PlyFailureCode::InternalInvariant,
+                        "PLY geometry component does not fit its declared storage width exactly",
+                        None,
+                        Some("geometry-scalar-width"),
+                    ));
+                }
+                values.try_push_reserved(output)
+            }
+            Self::F64(values) => values.try_push_reserved(tuple),
+        }
+    }
+
+    fn authoring(&self, semantic: AttributeSemantic) -> GeometryAttributeAuthoring<'_> {
+        match self {
+            Self::F32(values) => GeometryAttributeAuthoring::f32(
+                semantic,
+                AttributeDomain::Vertex,
+                LANES as u8,
+                values.as_slice().as_flattened(),
+                Presence::Absent,
+            ),
+            Self::F64(values) => GeometryAttributeAuthoring::f64(
+                semantic,
+                AttributeDomain::Vertex,
+                LANES as u8,
+                values.as_slice().as_flattened(),
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -240,6 +339,9 @@ struct VertexChannels {
 #[derive(Debug, Clone, Copy)]
 struct VertexPropertyProfile {
     channels: VertexChannels,
+    position_width: GeometryScalarWidth,
+    normal_width: GeometryScalarWidth,
+    texcoord_width: GeometryScalarWidth,
     custom_scalar_count: usize,
     stream_count: usize,
 }
@@ -704,17 +806,25 @@ fn parse_body<'scope, 'session, 'source>(
     let vertex_count = vertex_element.count;
     let vertex_profile = vertex_property_profile(ctx, vertex_element)?;
     validate_vertex_attribute_budget(ctx, vertex_count, vertex_profile.stream_count)?;
-    let mut positions = ctx.metered_vec(ImportStorageClass::FormatNormalization, "ply-positions");
-    positions.try_reserve(vertex_count)?;
-    let mut normals = ctx.metered_vec(ImportStorageClass::FormatNormalization, "ply-normals");
     let channels = vertex_profile.channels;
-    if channels.normals {
-        normals.try_reserve(vertex_count)?;
-    }
-    let mut texcoords = ctx.metered_vec(ImportStorageClass::FormatNormalization, "ply-texcoords");
-    if channels.texcoords {
-        texcoords.try_reserve(vertex_count)?;
-    }
+    let positions = GeometryStream::new(
+        ctx,
+        vertex_profile.position_width,
+        vertex_count,
+        "ply-positions",
+    )?;
+    let normals = GeometryStream::new(
+        ctx,
+        vertex_profile.normal_width,
+        if channels.normals { vertex_count } else { 0 },
+        "ply-normals",
+    )?;
+    let texcoords = GeometryStream::new(
+        ctx,
+        vertex_profile.texcoord_width,
+        if channels.texcoords { vertex_count } else { 0 },
+        "ply-texcoords",
+    )?;
     let mut colors = ctx.metered_vec(ImportStorageClass::FormatNormalization, "ply-colors");
     if channels.colors {
         colors.try_reserve(vertex_count)?;
@@ -1172,18 +1282,30 @@ fn vertex_property_profile(
     let mut has_red = false;
     let mut has_green = false;
     let mut has_blue = false;
+    let mut position_width = GeometryScalarWidth::F32;
+    let mut normal_width = GeometryScalarWidth::F32;
+    let mut texcoord_width = GeometryScalarWidth::F32;
     let mut custom_scalar_count = 0usize;
 
     for (property_index, property) in element.properties.as_slice().iter().enumerate() {
         poll_collection(ctx, property_index)?;
         let Property::Scalar {
             name,
+            ty,
             custom_attribute,
             ..
         } = property
         else {
             continue;
         };
+        match name.as_str() {
+            "x" | "y" | "z" => position_width = position_width.with_component(*ty),
+            "nx" | "ny" | "nz" => normal_width = normal_width.with_component(*ty),
+            "s" | "u" | "texture_u" | "t" | "v" | "texture_v" => {
+                texcoord_width = texcoord_width.with_component(*ty)
+            }
+            _ => {}
+        }
         match name.as_str() {
             "nx" => has_nx = true,
             "ny" => has_ny = true,
@@ -1233,6 +1355,9 @@ fn vertex_property_profile(
         })?;
     Ok(VertexPropertyProfile {
         channels,
+        position_width,
+        normal_width,
+        texcoord_width,
         custom_scalar_count,
         stream_count,
     })
@@ -1302,14 +1427,14 @@ fn parse_vertex_row<'scope>(
             } => {
                 let value = reader.read_scalar(ctx, *ty, work)?;
                 match name.as_str() {
-                    "x" => x = Some(value.to_f32(ctx, "x")?),
-                    "y" => y = Some(value.to_f32(ctx, "y")?),
-                    "z" => z = Some(value.to_f32(ctx, "z")?),
-                    "nx" => nx = Some(value.to_f32(ctx, "nx")?),
-                    "ny" => ny = Some(value.to_f32(ctx, "ny")?),
-                    "nz" => nz = Some(value.to_f32(ctx, "nz")?),
-                    "s" | "u" | "texture_u" => s = Some(value.to_f32(ctx, name.as_str())?),
-                    "t" | "v" | "texture_v" => t = Some(value.to_f32(ctx, name.as_str())?),
+                    "x" => x = Some(value.to_f64(ctx, "x")?),
+                    "y" => y = Some(value.to_f64(ctx, "y")?),
+                    "z" => z = Some(value.to_f64(ctx, "z")?),
+                    "nx" => nx = Some(value.to_f64(ctx, "nx")?),
+                    "ny" => ny = Some(value.to_f64(ctx, "ny")?),
+                    "nz" => nz = Some(value.to_f64(ctx, "nz")?),
+                    "s" | "u" | "texture_u" => s = Some(value.to_f64(ctx, name.as_str())?),
+                    "t" | "v" | "texture_v" => t = Some(value.to_f64(ctx, name.as_str())?),
                     "red" | "r" => {
                         red = Some(value.to_color_component(
                             ctx,
@@ -1381,15 +1506,15 @@ fn parse_vertex_row<'scope>(
             "PLY vertex position contains a non-finite value",
         ));
     }
-    parsed.positions.try_push_reserved(position)?;
+    parsed.positions.try_push_reserved(ctx, position)?;
 
     match (nx, ny, nz) {
-        (Some(nx), Some(ny), Some(nz)) => parsed.normals.try_push_reserved([nx, ny, nz])?,
+        (Some(nx), Some(ny), Some(nz)) => parsed.normals.try_push_reserved(ctx, [nx, ny, nz])?,
         (None, None, None) => {}
         _ => {}
     }
     match (s, t) {
-        (Some(s), Some(t)) => parsed.texcoords.try_push_reserved([s, t])?,
+        (Some(s), Some(t)) => parsed.texcoords.try_push_reserved(ctx, [s, t])?,
         (None, None) => {}
         _ => {}
     }
@@ -1628,8 +1753,6 @@ fn scene_from_parsed<'scope>(
         ctx.limits().max_total_topology_cells,
         ImportWorkClass::TopologyCells,
     )?;
-    let _bounds = compute_bounds(ctx, parsed.positions.as_slice())?;
-
     let canonical_string_bytes = canonical_string_bytes(ctx, &header)?;
     let metadata_count = metadata_entry_count(ctx, &header)?;
     let (mut pending_metadata, mesh_name, node_name) = ctx.with_work_group(
@@ -1732,30 +1855,12 @@ fn scene_from_parsed<'scope>(
         .checked_add(custom_attributes.len())
         .ok_or_else(|| ctx.allocation_failure("ply-authoring-attribute-count"))?;
     attributes.try_reserve(attribute_count)?;
-    attributes.try_push(GeometryAttributeAuthoring::f32(
-        AttributeSemantic::Position,
-        AttributeDomain::Vertex,
-        3,
-        positions.as_slice().as_flattened(),
-        Presence::Absent,
-    ))?;
+    attributes.try_push(positions.authoring(AttributeSemantic::Position))?;
     if !normals.is_empty() {
-        attributes.try_push(GeometryAttributeAuthoring::f32(
-            AttributeSemantic::Normal,
-            AttributeDomain::Vertex,
-            3,
-            normals.as_slice().as_flattened(),
-            Presence::Absent,
-        ))?;
+        attributes.try_push(normals.authoring(AttributeSemantic::Normal))?;
     }
     if !texcoords.is_empty() {
-        attributes.try_push(GeometryAttributeAuthoring::f32(
-            AttributeSemantic::Texcoord(0),
-            AttributeDomain::Vertex,
-            2,
-            texcoords.as_slice().as_flattened(),
-            Presence::Absent,
-        ))?;
+        attributes.try_push(texcoords.authoring(AttributeSemantic::Texcoord(0)))?;
     }
     if !colors.is_empty() {
         attributes.try_push(GeometryAttributeAuthoring::f32(
@@ -2833,35 +2938,6 @@ fn bounded_string<'scope>(
             output.try_push_str(value)?;
             work.complete_all()?;
             Ok(output)
-        },
-    )
-}
-
-fn compute_bounds(
-    ctx: &ParseScope<'_>,
-    positions: &[[f32; 3]],
-) -> ParseResult<Option<([f32; 3], [f32; 3])>> {
-    let Some(first) = positions.first().copied() else {
-        return Ok(None);
-    };
-    ctx.with_work(
-        ImportWorkClass::WorkUnits,
-        usize_amount(ctx, positions.len(), "ply-bounds-work")?,
-        |work| -> ParseResult<_> {
-            let mut min = first;
-            let mut max = first;
-            work.complete([1])?;
-            for (index, position) in positions.iter().copied().enumerate().skip(1) {
-                if index.is_multiple_of(4096) {
-                    work.poll()?;
-                }
-                for component in 0..3 {
-                    min[component] = min[component].min(position[component]);
-                    max[component] = max[component].max(position[component]);
-                }
-                work.complete([1])?;
-            }
-            Ok(Some((min, max)))
         },
     )
 }

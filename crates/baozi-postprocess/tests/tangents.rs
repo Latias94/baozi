@@ -30,9 +30,10 @@ use baozi_import::{
 };
 use baozi_io::{AssetPath, MemoryAssetIo};
 use baozi_postprocess::{
-    ExistingTangents, PostProcessCancellationToken, PostProcessControl, PostProcessControlCause,
-    PostProcessOperation, PostProcessRunDisposition, PostProcessRunError, SpaceConversionOptions,
-    TangentCause, TangentIssue, TangentOptions, convert_scene_space, generate_tangents,
+    ExistingNormals, ExistingTangents, NormalOptions, PostProcessCancellationToken,
+    PostProcessControl, PostProcessControlCause, PostProcessOperation, PostProcessRunDisposition,
+    PostProcessRunError, SpaceConversionOptions, TangentCause, TangentIssue, TangentOptions,
+    convert_scene_space, generate_normals, generate_tangents,
 };
 use std::sync::Arc;
 
@@ -757,6 +758,8 @@ enum Fixture {
     Authored {
         multiple: bool,
     },
+    WideNormal,
+    WideTangent,
     Morph {
         semantic: Option<MorphDeltaSemantic>,
         authored: bool,
@@ -829,13 +832,22 @@ impl FormatImporter for FieldImporter {
                 &POSITIONS,
                 Presence::Absent,
             ),
-            GeometryAttributeAuthoring::f32(
-                AttributeSemantic::Normal,
-                normal,
-                3,
-                &NORMALS,
-                Presence::Absent,
-            ),
+            if matches!(self.0, Fixture::WideNormal) {
+                GeometryAttributeAuthoring::f64(
+                    AttributeSemantic::Normal,
+                    normal,
+                    3,
+                    &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+                )
+            } else {
+                GeometryAttributeAuthoring::f32(
+                    AttributeSemantic::Normal,
+                    normal,
+                    3,
+                    &NORMALS,
+                    Presence::Absent,
+                )
+            },
         ];
         if matches!(self.0, Fixture::DualFields) {
             attributes.push(GeometryAttributeAuthoring::f32(
@@ -848,16 +860,27 @@ impl FormatImporter for FieldImporter {
         }
         if matches!(
             self.0,
-            Fixture::Authored { .. } | Fixture::Morph { authored: true, .. }
+            Fixture::Authored { .. } | Fixture::Morph { authored: true, .. } | Fixture::WideTangent
         ) {
             // Leave this stream's declaration unknown to verify that Preserve never infers one.
-            attributes.push(GeometryAttributeAuthoring::f32(
-                AttributeSemantic::Tangent,
-                AttributeDomain::Vertex,
-                4,
-                &AUTHORED,
-                Presence::Absent,
-            ));
+            attributes.push(if matches!(self.0, Fixture::WideTangent) {
+                GeometryAttributeAuthoring::f64(
+                    AttributeSemantic::Tangent,
+                    AttributeDomain::Vertex,
+                    4,
+                    &[
+                        0.0, 1.0, 0.0, -1.0, 0.0, 1.0, 0.0, -1.0, 0.0, 1.0, 0.0, -1.0,
+                    ],
+                )
+            } else {
+                GeometryAttributeAuthoring::f32(
+                    AttributeSemantic::Tangent,
+                    AttributeDomain::Vertex,
+                    4,
+                    &AUTHORED,
+                    Presence::Absent,
+                )
+            });
         }
         if matches!(self.0, Fixture::Authored { multiple: true }) {
             attributes.push(
@@ -1367,5 +1390,70 @@ fn empty_morph_targets_without_delta_streams_do_not_block_generation() {
     );
     for tangent in generated_tangents(primitive(&scene)) {
         assert_tangent(tangent, [1.0, 0.0, 0.0, 1.0]);
+    }
+}
+
+#[test]
+fn precision_contract_replacing_wide_base_fields_never_projects_to_f32() {
+    for fixture in [Fixture::WideNormal, Fixture::WideTangent] {
+        let scene = import_fixture(fixture).into_parts().0;
+        let target = primitive(&scene).id();
+        let generation = scene.generation();
+        let before = snapshot(&scene);
+        let normal = matches!(fixture, Fixture::WideNormal);
+        let preserved = if normal {
+            generate_normals(
+                scene,
+                target,
+                NormalOptions::default(),
+                PostProcessControl::default(),
+            )
+        } else {
+            generate_tangents(
+                scene,
+                target,
+                vertex_options(),
+                PostProcessControl::default(),
+            )
+        }
+        .unwrap();
+        let (scene, report) = preserved.into_parts();
+        assert_eq!(report.disposition(), PostProcessRunDisposition::Unchanged);
+        assert_eq!(scene.generation(), generation);
+        assert_eq!(snapshot(&scene).digest(), before.digest());
+        let result = if normal {
+            generate_normals(
+                scene,
+                target,
+                NormalOptions {
+                    existing: ExistingNormals::Replace,
+                    ..NormalOptions::default()
+                },
+                PostProcessControl::default(),
+            )
+        } else {
+            generate_tangents(
+                scene,
+                target,
+                replacement(vertex_options()),
+                PostProcessControl::default(),
+            )
+        };
+        let output =
+            result.expect("ordinary F32 dependencies replacing an F64 field must succeed at F64");
+        let (scene, report) = output.into_parts();
+        assert_eq!(report.disposition(), PostProcessRunDisposition::Changed);
+        let semantic = if normal {
+            AttributeSemanticRef::Normal
+        } else {
+            AttributeSemanticRef::Tangent
+        };
+        let field = primitive(&scene)
+            .attribute(semantic, AttributeDomain::Corner)
+            .unwrap();
+        assert!(
+            matches!(field.data(), AttributeData::DenseF64 { .. }),
+            "a replacement must retain the widest dependency/old-field width"
+        );
     }
 }

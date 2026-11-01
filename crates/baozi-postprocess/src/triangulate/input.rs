@@ -4,7 +4,8 @@
 )]
 
 use baozi_core::{
-    AttributeData, AttributeDomain, AttributeSemanticRef, PrimitiveId, TopologyKind, ValidatedScene,
+    AttributeData, AttributeDomain, AttributeRef, AttributeSemanticRef, PrimitiveId, TopologyKind,
+    ValidatedScene,
 };
 
 use crate::TriangulationCause;
@@ -14,7 +15,7 @@ use crate::triangulation::{
 };
 
 pub(super) struct PolygonInput<'a> {
-    positions: &'a [f32],
+    positions: AttributeRef<'a>,
     face_sizes: &'a [u32],
     indices: Option<&'a [u32]>,
     triangles: usize,
@@ -26,6 +27,8 @@ pub(crate) struct Origins {
     pub(crate) face_offsets: ScratchVec<u32>,
 }
 
+const MAX_SPARSE_COMPARISONS: u64 = 33;
+
 pub(super) fn inspect<'a>(
     input: &'a ValidatedScene,
     target: PrimitiveId,
@@ -34,8 +37,12 @@ pub(super) fn inspect<'a>(
 ) -> Result<Option<PolygonInput<'a>>, TriangulationCause> {
     let primitive = run_unit(operation, keys, || input.primitive(target))?
         .map_err(|source| TriangulationCause::Target { source })?;
-    let (topology, faces) = run_unit(operation, keys, || {
-        (primitive.topology(), primitive.face_count())
+    let (topology, faces, mut attributes) = run_unit(operation, keys, || {
+        (
+            primitive.topology(),
+            primitive.face_count(),
+            primitive.attributes(),
+        )
     })?;
     if topology == TopologyKind::TriangleList || (topology == TopologyKind::Polygons && faces == 0)
     {
@@ -45,18 +52,41 @@ pub(super) fn inspect<'a>(
         return Err(TriangulationCause::UnsupportedTopology { topology });
     }
     let mut positions = None;
-    // `positions()` searches all descriptors internally. Meter that traversal explicitly here.
-    for attribute in primitive.attributes() {
-        run_unit(operation, keys, || {
+    // Admit descriptor reads as well as inspection instead of hiding the search in `positions()`.
+    loop {
+        let more = run_unit(operation, keys, || {
+            let Some(attribute) = attributes.next() else {
+                return false;
+            };
             if attribute.semantic() == AttributeSemanticRef::Position
                 && attribute.domain() == AttributeDomain::Vertex
-                && let AttributeData::DenseF32 { lanes: 3, values } = attribute.data()
+                && matches!(
+                    attribute.data(),
+                    AttributeData::DenseF32 { lanes: 3, .. }
+                        | AttributeData::DenseF64 { lanes: 3, .. }
+                        | AttributeData::SparseF32 { lanes: 3, .. }
+                        | AttributeData::SparseF64 { lanes: 3, .. }
+                )
             {
-                positions = Some(values);
+                positions = Some(attribute);
             }
+            true
         })?;
+        if !more {
+            break;
+        }
     }
     let positions = positions.ok_or(TriangulationCause::Positions)?;
+    // The face envelope includes one corner read. Separate index/tuple reads and scratch writes
+    // add two actions; sparse positions also need at most 33 admitted index comparisons.
+    let additional_read_work = 2 + if matches!(
+        positions.data(),
+        AttributeData::SparseF32 { .. } | AttributeData::SparseF64 { .. }
+    ) {
+        MAX_SPARSE_COMPARISONS
+    } else {
+        0
+    };
     let (face_sizes, indices) = run_unit(operation, keys, || {
         (primitive.polygon_face_sizes(), primitive.indices())
     })?;
@@ -81,6 +111,9 @@ pub(super) fn inspect<'a>(
                 .ok_or(TriangulationCause::SizeOverflow)?;
             work_bound = work_bound
                 .checked_add(face_work_bound(count)?)
+                .and_then(|work| {
+                    work.checked_add((count as u64).checked_mul(additional_read_work)?)
+                })
                 .ok_or(TriangulationCause::SizeOverflow)?;
             Ok::<_, TriangulationCause>(())
         })??;
@@ -147,7 +180,7 @@ pub(super) fn build_origins(
         scratch.values_mut().clear();
         output.values_mut().clear();
         for local in 0..count {
-            run_unit(operation, keys, || {
+            let (corner, vertex) = run_unit(operation, keys, || {
                 let corner = first_corner
                     .checked_add(local)
                     .ok_or(TriangulationCause::SizeOverflow)?;
@@ -157,19 +190,14 @@ pub(super) fn build_origins(
                     }
                     None => corner,
                 };
-                let start = vertex
-                    .checked_mul(3)
-                    .ok_or(TriangulationCause::SizeOverflow)?;
-                let value = source
-                    .positions
-                    .get(start..)
-                    .and_then(|tail| tail.get(..3))
-                    .ok_or(TriangulationCause::Positions)?;
-                positions.values_mut().push([
-                    f64::from(value[0]),
-                    f64::from(value[1]),
-                    f64::from(value[2]),
-                ]);
+                if vertex >= source.positions.len() {
+                    return Err(TriangulationCause::Positions);
+                }
+                Ok::<_, TriangulationCause>((corner, vertex))
+            })??;
+            let value = read_position(source.positions, vertex, operation, keys)?;
+            run_unit(operation, keys, || {
+                positions.values_mut().push(value);
                 corners.values_mut().push(corner);
                 scratch.values_mut().push(CornerScratch::default());
                 if local < count - 2 {
@@ -221,6 +249,90 @@ pub(super) fn build_origins(
         triangles,
         face_offsets,
     })
+}
+
+fn read_position(
+    attribute: AttributeRef<'_>,
+    vertex: usize,
+    operation: &mut EditOperation,
+    keys: RuntimeKeys,
+) -> Result<[f64; 3], TriangulationCause> {
+    let data = attribute.data();
+    let index = match data {
+        AttributeData::SparseF32 { indices, .. } | AttributeData::SparseF64 { indices, .. } => {
+            sparse_index(indices, vertex, operation, keys)?
+        }
+        _ => Some(vertex),
+    };
+    run_unit(operation, keys, || match (data, index) {
+        (AttributeData::DenseF32 { lanes: 3, values }, Some(index))
+        | (
+            AttributeData::SparseF32 {
+                lanes: 3, values, ..
+            },
+            Some(index),
+        ) => position_tuple(values, index),
+        (AttributeData::DenseF64 { lanes: 3, values }, Some(index))
+        | (
+            AttributeData::SparseF64 {
+                lanes: 3, values, ..
+            },
+            Some(index),
+        ) => position_tuple(values, index),
+        (
+            AttributeData::SparseF32 {
+                lanes: 3, default, ..
+            },
+            None,
+        ) => position_tuple(default, 0),
+        (
+            AttributeData::SparseF64 {
+                lanes: 3, default, ..
+            },
+            None,
+        ) => position_tuple(default, 0),
+        _ => Err(TriangulationCause::Positions),
+    })?
+}
+
+fn position_tuple<T: Copy + Into<f64>>(
+    values: &[T],
+    index: usize,
+) -> Result<[f64; 3], TriangulationCause> {
+    let start = index
+        .checked_mul(3)
+        .ok_or(TriangulationCause::SizeOverflow)?;
+    let values = values
+        .get(start..)
+        .and_then(|tail| tail.get(..3))
+        .ok_or(TriangulationCause::Positions)?;
+    Ok([values[0].into(), values[1].into(), values[2].into()])
+}
+
+fn sparse_index(
+    indices: &[u32],
+    vertex: usize,
+    operation: &mut EditOperation,
+    keys: RuntimeKeys,
+) -> Result<Option<usize>, TriangulationCause> {
+    let vertex = u32::try_from(vertex).map_err(|_| TriangulationCause::Positions)?;
+    let (mut low, mut high) = (0, indices.len());
+    for _ in 0..MAX_SPARSE_COMPARISONS {
+        if low == high {
+            return Ok(None);
+        }
+        let middle = low + (high - low) / 2;
+        match run_unit(operation, keys, || indices[middle].cmp(&vertex))? {
+            std::cmp::Ordering::Less => low = middle + 1,
+            std::cmp::Ordering::Greater => high = middle,
+            std::cmp::Ordering::Equal => return Ok(Some(middle)),
+        }
+    }
+    if low == high {
+        Ok(None)
+    } else {
+        Err(TriangulationCause::CoreRejected)
+    }
 }
 
 fn polygon_cause(

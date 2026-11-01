@@ -112,6 +112,7 @@ impl From<crate::scene_edit::EditFailure> for SpaceConversionFailure {
             EditCause::Control { cause } => SpaceConversionCause::Control { cause },
             EditCause::FinalControl => SpaceConversionCause::FinalControl,
             EditCause::CoreRejected => SpaceConversionCause::CoreRejected,
+            EditCause::PrecisionLoss { .. } => SpaceConversionCause::CoreRejected,
             EditCause::MorphDependency { .. } => SpaceConversionCause::CoreRejected,
             EditCause::SpaceIssue { issue } => SpaceConversionCause::Issue { issue },
             EditCause::CentralValidation => SpaceConversionCause::CentralValidation,

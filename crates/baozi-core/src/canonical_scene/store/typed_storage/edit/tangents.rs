@@ -16,16 +16,17 @@ use super::super::{
     StoredAttributeSemantic, StoredTangentBasis, StoredTangentConventions, StoredTangentEncoding,
 };
 use super::normals::{
-    attribute_scalar_counts, compare_optional_ranges, compare_payload, compare_values, copy_payload,
+    attribute_scalar_counts, compare_optional_ranges, compare_payload, compare_vector_values,
+    copy_payload,
 };
 use super::{
-    EditResult, GeometryStorage, ScalarCounts, StoredAttribute, StoredAttributePayload,
-    StoredLogicalMesh, StoredMeshInstance, StoredPrimitive, TableRange, TypedStorageBuildControl,
-    TypedStorageBuildError, add_count, allocate, append, capacity, compare_tangent_schema_names,
-    copy_attribute_names, copy_optional, overflow, push, same_range, same_tangent_convention_kinds,
+    EditResult, GeometryStorage, ScalarCounts, StoredAttribute, StoredLogicalMesh,
+    StoredMeshInstance, StoredPrimitive, TableRange, TypedStorageBuildControl,
+    TypedStorageBuildError, VectorValues, add_count, allocate, append, capacity,
+    compare_tangent_schema_names, copy_attribute_names, copy_optional, overflow, push, same_range,
+    same_tangent_convention_kinds,
 };
 
-const UNIT_LENGTH_TOLERANCE: f64 = 4.0 * f32::EPSILON as f64;
 const GENERATED_CONVENTIONS: StoredTangentConventions = StoredTangentConventions {
     basis: StoredTangentBasis::TriangleUvDerivative,
     encoding: StoredTangentEncoding::SignInW,
@@ -89,7 +90,7 @@ impl TangentAttributeMapping {
 #[derive(Clone, Copy)]
 pub(in crate::canonical_scene::store) struct GeometryTangentsPlan<'a> {
     source: &'a GeometryStorage,
-    tangents: &'a [[f32; 4]],
+    tangents: VectorValues<'a, 4>,
     target: usize,
     capacities: [CapacityPlan; 9],
     work: u64,
@@ -104,7 +105,7 @@ impl<'a> GeometryTangentsPlan<'a> {
     pub(in crate::canonical_scene::store) fn try_new<C: TypedStorageBuildControl>(
         source: &'a GeometryStorage,
         target: usize,
-        tangents: &'a [[f32; 4]],
+        tangents: VectorValues<'a, 4>,
         had_tangent: bool,
         normal_domain: AttributeDomain,
         uv_set: u32,
@@ -151,15 +152,17 @@ impl<'a> GeometryTangentsPlan<'a> {
                     .ok_or(TypedStorageBuildError::Invariant)
             })
             .map_err(TypedStorageBuildError::Control)??;
-        for tangent in tangents {
+        for index in 0..tangents.len() {
             let valid = control
                 .run_unit(|| {
-                    let [x, y, z, w] = tangent.map(f64::from);
+                    let Some([x, y, z, w]) = tangents.get(index) else {
+                        return false;
+                    };
                     x.is_finite()
                         && y.is_finite()
                         && z.is_finite()
                         && (w == 1.0 || w == -1.0)
-                        && (x * x + y * y + z * z - 1.0).abs() <= UNIT_LENGTH_TOLERANCE
+                        && (x * x + y * y + z * z - 1.0).abs() <= tangents.unit_length_tolerance()
                 })
                 .map_err(TypedStorageBuildError::Control)?;
             if !valid {
@@ -250,7 +253,11 @@ impl<'a> GeometryTangentsPlan<'a> {
             .checked_add(u32::from(source_tangent.is_none()))
             .ok_or_else(overflow)?;
         add_count(
-            &mut scalars.f32s,
+            if tangents.is_f64() {
+                &mut scalars.f64s
+            } else {
+                &mut scalars.f32s
+            },
             tangents.len().checked_mul(4).ok_or_else(overflow)?,
         )?;
 
@@ -431,19 +438,16 @@ impl<'a> GeometryTangentsPlan<'a> {
         };
         for index in 0..self.output_attribute_count() {
             let row = if index == self.mapping.tangent_attribute {
-                let range = append(
-                    &mut output.f32_values,
-                    f32s,
-                    self.tangents.as_flattened(),
-                    control,
-                )?;
+                let payload = self
+                    .tangents
+                    .append(&mut output, self.capacities, control)?;
                 StoredAttribute {
                     semantic: StoredAttributeSemantic::Tangent,
                     tangent_conventions: Some(GENERATED_CONVENTIONS),
                     domain: AttributeDomain::Corner,
                     lanes: 4,
                     element_count: self.output_corner_count(),
-                    payload: StoredAttributePayload::DenseF32(range),
+                    payload,
                 }
             } else {
                 let source = self
@@ -589,18 +593,7 @@ impl<'a> GeometryTangentsPlan<'a> {
                         && row.lanes == 4
                         && row.element_count == self.output_corner_count()
                 );
-                let StoredAttributePayload::DenseF32(range) = row.payload else {
-                    return Ok(false);
-                };
-                let Some(values) = range.get(&actual.f32_values) else {
-                    return Ok(false);
-                };
-                if !compare_values(
-                    self.tangents.as_flattened(),
-                    values,
-                    |a, b| a.to_bits() == b.to_bits(),
-                    control,
-                )? {
+                if !compare_vector_values(self.tangents, row.payload, actual, control)? {
                     return Ok(false);
                 }
             } else {

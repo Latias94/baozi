@@ -7,6 +7,7 @@ use crate::entity::{AuthoredTransform, AuthoredTransformKind};
 use crate::geometry::TopologyKind;
 
 use super::SceneStorage;
+use super::semantic::geometry::NodeSceneGeometryLeafCursor;
 use super::semantic::{
     NodeSceneGeometryAttributePayload, NodeSceneGeometryAttributeSemantic, NodeSceneGeometryCursor,
     NodeSceneGeometryF32Cursor, NodeSceneGeometryI32Cursor, NodeSceneGeometryNormalization,
@@ -1155,29 +1156,13 @@ fn write_attribute_payload(
             )?;
             values
         }
-        NodeSceneGeometryAttributePayload::DenseF64 { mut values }
+        NodeSceneGeometryAttributePayload::DenseF64 { values }
             if scalar_kind == NodeSceneGeometryScalarKind::F64
                 && payload_kind == NodeSceneGeometryPayloadKind::Dense =>
         {
-            let count = values.declared_count();
-            work.observe()?;
-            transcript.write_tag(TAG_VALUES)?;
-            transcript.tagged_u8(TAG_PRESENCE, PRESENCE_PRESENT)?;
-            preview.begin_geometry_leaf(render, "values", true, count);
-            for ordinal in 0..count {
-                work.observe()?;
-                let value = values.next().map_err(map_snapshot_invariant)?.ok_or(
-                    NodeSceneSnapshotError::InconsistentView {
-                        reason: "f64 payload leaf ended before declared total",
-                    },
-                )?;
-                let bits = value.to_bits();
-                transcript.tagged_u64(TAG_FLOAT_BITS, bits)?;
-                preview.geometry_f64_bits(render, ordinal, bits)?;
-            }
-            values.finish().map_err(map_snapshot_invariant)?;
-            transcript.tagged_usize(TAG_COLLECTION_TOTAL, count)?;
-            preview.end_geometry_leaf(render);
+            let values = write_f64_leaf(
+                transcript, preview, work, TAG_VALUES, "values", values, render,
+            )?;
             write_absent_leaf(
                 transcript,
                 preview,
@@ -1194,7 +1179,7 @@ fn write_attribute_payload(
                 "sparse_default",
                 render,
             )?;
-            count
+            values
         }
         NodeSceneGeometryAttributePayload::DenseU32 { values }
             if scalar_kind == NodeSceneGeometryScalarKind::U32
@@ -1280,6 +1265,42 @@ fn write_attribute_payload(
                 .checked_add(defaults)
                 .ok_or(NodeSceneSnapshotError::SemanticTotalOverflow {
                     total: "observed f32 attribute scalars",
+                })?
+        }
+        NodeSceneGeometryAttributePayload::SparseF64 {
+            values,
+            indices,
+            default,
+        } if scalar_kind == NodeSceneGeometryScalarKind::F64
+            && payload_kind == NodeSceneGeometryPayloadKind::Sparse =>
+        {
+            let values = write_f64_leaf(
+                transcript, preview, work, TAG_VALUES, "values", values, render,
+            )?;
+            let indices = write_u32_leaf(
+                transcript,
+                preview,
+                work,
+                TAG_SPARSE_INDICES,
+                "sparse_indices",
+                indices,
+                render,
+            )?;
+            let defaults = write_f64_leaf(
+                transcript,
+                preview,
+                work,
+                TAG_SPARSE_DEFAULT,
+                "sparse_default",
+                default,
+                render,
+            )?;
+            require_sparse_index_count(indices, explicit_element_count)?;
+            totals.add_sparse_indices(indices)?;
+            values
+                .checked_add(defaults)
+                .ok_or(NodeSceneSnapshotError::SemanticTotalOverflow {
+                    total: "observed f64 attribute scalars",
                 })?
         }
         NodeSceneGeometryAttributePayload::SparseU32 {
@@ -1427,6 +1448,38 @@ fn write_f32_leaf(
         let bits = value.to_bits();
         transcript.tagged_u32(TAG_FLOAT_BITS, bits)?;
         preview.geometry_f32_bits(render, ordinal, bits)?;
+    }
+    cursor.finish().map_err(map_snapshot_invariant)?;
+    transcript.tagged_usize(TAG_COLLECTION_TOTAL, count)?;
+    preview.end_geometry_leaf(render);
+    Ok(count)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_f64_leaf(
+    transcript: &mut CanonicalDigestEncoder,
+    preview: &mut PreviewSink,
+    work: &mut SnapshotWorkMeter<'_>,
+    tag: u8,
+    name: &'static str,
+    mut cursor: NodeSceneGeometryLeafCursor<'_, f64>,
+    render: bool,
+) -> Result<usize, NodeSceneSnapshotError> {
+    let count = cursor.declared_count();
+    work.observe()?;
+    transcript.write_tag(tag)?;
+    transcript.tagged_u8(TAG_PRESENCE, PRESENCE_PRESENT)?;
+    preview.begin_geometry_leaf(render, name, true, count);
+    for ordinal in 0..count {
+        work.observe()?;
+        let value = cursor.next().map_err(map_snapshot_invariant)?.ok_or(
+            NodeSceneSnapshotError::InconsistentView {
+                reason: "f64 payload leaf ended before declared total",
+            },
+        )?;
+        let bits = value.to_bits();
+        transcript.tagged_u64(TAG_FLOAT_BITS, bits)?;
+        preview.geometry_f64_bits(render, ordinal, bits)?;
     }
     cursor.finish().map_err(map_snapshot_invariant)?;
     transcript.tagged_usize(TAG_COLLECTION_TOTAL, count)?;

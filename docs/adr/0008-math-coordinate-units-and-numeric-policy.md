@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-11-01
+updated: 2026-11-02
 authors:
   - Codex
 decision_type: architecture
@@ -48,8 +48,10 @@ Numeric storage is deliberate:
 
 | Value class | Canonical scalar | Rule |
 | --- | --- | --- |
-| positions, normals, tangents, transforms, and material/color factors | `f32` | reject non-finite values; diagnose material narrowing during import |
-| encoded UV, color, and custom attribute storage | ADR 0030 `ComponentType` | preserve admitted width/normalization; built-in evaluated UV/color views use `f32` |
+| positions, normals, tangents, and evaluated UV attributes | per-stream `f32` or `f64` | preserve admitted width and finite values; explicit narrower output owns loss/error policy |
+| authored transforms and material/color factors | `f32` | retain their source-domain contract; reject non-finite values and diagnose admitted narrowing |
+| encoded color and custom attribute storage | ADR 0030 `ComponentType` | preserve admitted width/normalization; evaluated color retains its F32 profile |
+| derived base-pose world matrices and bounds | `f64` arrays | one query/result family; no per-node F32 projection |
 | animation key time and clip duration | `f64` | preserve authored time domain; do not silently resample |
 | animation TRS samples, morph weights, and morph deltas | `f32` | retain renderer-independent values while keeping source time in `f64` |
 | source unit scale and timing rates | `f64` | finite and positive when known |
@@ -112,11 +114,11 @@ authorized representation loss. A derived matrix view never changes which form t
 unchecked math helper it may produce a nonfinite result for an unrepresentable component. The
 read-only `BasePoseWorldTransforms` query checks local derivation and world composition, including
 roots, rather than assuming a valid authored TRS guarantees a representable derived matrix.
-It rounds each local/world component to F32 at the corresponding node boundary and rejects
-nonfinite output or a nonzero F64 value rounding to zero. Matrix and point dot products accumulate
-in increasing column order; points add translation last. This is deterministic floating-point
-evaluation, not exact real arithmetic. Static bounds enclose the resulting rounded F32 world
-vertices, with no stronger interval guarantee. The
+It composes local/world components in F64, without projection at node boundaries, and rejects
+nonfinite F64 output or nonzero products underflowing to zero. Authored Matrix/TRS fields retain
+their F32 representation. Matrix and point dot products accumulate in increasing column order;
+points add translation last. This is deterministic floating-point evaluation. Static bounds use
+F64 min/max arrays over computed F64 world vertices, with no exact-real interval guarantee. The
 [Scene reader contract](../model/reading-scenes.md#base-pose-world-transforms-and-static-bounds)
 specifies the all-Position-vertex scope, pose/deformation limits and query resource boundary.
 
@@ -196,8 +198,10 @@ generating normals from index-order cross products follows that operation's nume
 Unknown source facts require explicit source assumptions. A complete assumption may fill unknown
 fields and repeat matching known fields, but cannot override any known field. The target never
 supplies implicit source facts. A changed conversion reports exactly which fields were assumed.
-Numeric conversion uses F64 intermediates for the uniform scale and one final F32 rounding;
-non-finite output or a nonzero component rounding to zero rejects the transaction.
+Numeric conversion preserves each geometry attribute's retained width. F32 values use F64
+intermediates and one final F32 rounding; F64 values use F64 arithmetic directly. Signed-axis
+permutation and copy/remap paths preserve admitted bits except the requested sign change.
+Non-finite output or a nonzero component underflowing to zero rejects the transaction.
 
 Floating-point snapshots use deterministic ordering and per-field documented absolute/relative or
 angular tolerances. Tolerances are test comparison policy, not permission to clamp imported data.
@@ -210,31 +214,52 @@ decomposition routine or its test epsilon is not normative. A conforming predica
 clamps the authored matrix; an explicit recovery follows the separate loss/provenance rule above.
 ADR 0027 supplies the concrete glTF predicate.
 
-### High-Precision CAD Scope
+### Precision And Geometric Scope
 
-High-precision computer-aided design (CAD) and engineering geometry are explicitly excluded from
-Baozi's long-term product scope under this accepted decision. “Assimp-class format breadth” means
-broad source ingestion for the canonical graphics/asset IR; it does not imply STEP/IGES/B-rep,
-manufacturing tolerance, exact topology, or source-coordinate precision beyond the declared `f32`
-geometry contract. A format path that requires those guarantees must be rejected or report explicit
-policy-governed precision loss; it cannot claim source-preserving support by storing narrowed values.
+The [reviewed maturation plan](../plans/2026-11-02-001-refactor-first-release-maturation-plan.md)
+reopens the earlier F32-only geometry decision for the existing scanning/asset workflow. PLY float
+and up-to-16-bit integer built-ins select F32; double and I32/U32 select F64. Mixed components use
+the wider declared width before allocation, independently of their current values. Position,
+Normal, Tangent and Texcoord share the existing typed attribute/storage family, including sparse
+F64. They do not require a separate Scene or a universal scalar parameter.
 
-That exclusion may change only by reopening this ADR before admitting or implementing a CAD-oriented
-format or workflow. The review must define and provide evidence for all of the following together:
+Preserving finite F64 source data establishes a storage contract. Numerical operations have their
+own bounded arithmetic contract: ordinary F64 geometry must be supported through the maturation
+work, while ill-conditioned or unrepresentable computations reject with an explicit numeric cause.
+An F64 payload does not by itself prove robust orientation, exact topology or a manufacturing error
+budget. Derived fields use the widest dependency or replaced-field width; applications own any
+requested F32 packing and its explicit loss/error policy.
+
+Normal generation uses the declared Position width for its determinant specialization and the
+widest Position/replaced-Normal width for output. Tangent output joins Position, the selected
+Normal/UV fields and a replaced Tangent; each determinant still selects its algorithm from its
+own operand declarations. F32 factors retain the exact-product expansion. Binary64 arithmetic
+uses exact common power-of-two scaling, FMA residual/error bounds and compensated area sums;
+it rejects unresolved directions and frames rather than normalizing a rounding residual.
+
+The F64 path uses one Position scale per selected primitive, and tangent preparation uses a separate common
+scale for its selected UV field. Dense scalar scans and sparse explicit/default scans cover the
+same logical magnitudes without expanding sparse storage. Scaling that loses a nonzero value
+or significand bits is a typed numeric failure. F64-derived directions require a conservative
+32-epsilon relative component-error gate; tangent projection and alignment retain their explicit
+error budgets even when output is widened solely by a replaced F64 field. These policies bound
+this numerical operation graph; they do not provide exact predicates or tolerance-based repair.
+
+STEP/IGES/B-rep, exact surfaces and manufacturing-tolerance workflows require a separate concrete
+producer and an accepted domain contract. Such a proposal must define evidence for:
 
 - target domains and formats, dimensional/unit semantics, model extents, and an explicit absolute,
   relative, and topology-sensitive error budget;
-- one canonical scalar/storage strategy (`f64`, a distinct CAD IR, or another reviewed model) and the
-  compatibility/migration boundary with the graphics IR;
+- how the existing per-attribute storage represents its values and where a different domain model
+  is actually required;
 - robust-predicate and tolerance semantics for validation, topology, triangulation, transforms,
   derived data, snapshot/digest, serialization, and postprocess;
 - measured memory, throughput, and cross-platform determinism costs; and
 - independent precision, round-trip, adversarial, and large-coordinate fixtures proving that values
   which matter to the declared CAD contract do not collapse or change topology.
 
-Adding a generic scalar parameter, silently widening selected fields, or relying on parser-backend
-`f64` values does not satisfy this gate. Until an accepted amendment lands, roadmap, format maturity,
-facade, and release claims must treat high-precision CAD as out of scope.
+Format maturity, facade and release claims must name that concrete profile and its evidence.
+The present four-profile ingestion contract supplies no exact-surface or manufacturing guarantee.
 
 ## Considered Options
 
@@ -259,18 +284,18 @@ Chosen.
 - Importers must populate known space fields and leave unknown fields explicit.
 - Matrix and tangent conventions become normative and tested rather than comments on individual
   importers.
-- High-precision CAD geometry is outside this canonical IR; supporting it requires a separate
-  reopening of this decision and complete precision evidence, not a generic scalar parameter.
+- Source precision belongs to each admitted geometry attribute; source width, computed output
+  width and an application's packed buffer width remain explicit decisions.
 
 ## Risks and Mitigations
 
 | Risk | Severity | Mitigation |
 | --- | --- | --- |
-| `f32` narrows large or precise source geometry | High | Check conversion range/precision, diagnose material loss, and reject non-finite results. |
+| A narrow projection collapses source geometry | High | Preserve declared F32/F64 attribute widths; require explicit loss/error authority for narrower output. |
 | Partial coordinate conversion corrupts animation or skinning | High | Use operation read/write sets and integration fixtures containing all spatial domains. |
 | Unknown source conventions invite caller guesses | Medium | Preserve `Unknown`, allow explicit caller-supplied source overrides, and record them in provenance. |
 | Platform float behavior changes snapshots | Medium | Use scalar reference tests, deterministic ordering, and field-specific tolerances. |
-| Format breadth language silently expands into CAD guarantees | Critical | Keep CAD explicitly excluded from roadmap/maturity/release claims until this ADR is reopened with scalar, tolerance, topology, migration, and conformance evidence. |
+| Format breadth language implies unsupported exact-surface guarantees | Critical | Require a concrete producer, topology/tolerance contract and independent conformance evidence. |
 
 ## Success Metrics
 
@@ -279,7 +304,8 @@ Chosen.
 | Time fidelity | Distinct authored `f64` times never collapse through `f32` conversion | long-time and close-key fixtures |
 | Space completeness | A complete-space claim has no unknown or contradictory convention | exact/excess field validation tests |
 | Conversion completeness | Every declared spatial domain is converted or the transaction fails | all-domain coordinate fixture and invalidation report |
-| Scope truthfulness | No support or release claim implies high-precision CAD under the `f32` canonical geometry contract | roadmap, format-matrix, facade-doc, and release-doc checks |
+| Precision fidelity | Adjacent F64 source values remain distinct through storage, reads and applicable operations | all-encoding PLY, sparse, query and numerical fixtures |
+| Scope truthfulness | Claims distinguish finite F64 retention from exact-surface/manufacturing semantics | roadmap, format-matrix, facade-doc, and release-doc checks |
 
 ## Acceptance Criteria
 

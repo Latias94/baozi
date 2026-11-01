@@ -59,6 +59,10 @@ pub enum TangentCause {
     },
     #[error("the core rejected the geometry edit")]
     CoreRejected,
+    #[error("tangent generation would narrow its {semantic:?} precision dependency")]
+    PrecisionLoss {
+        semantic: baozi_core::AttributeSemanticKind,
+    },
     #[error("central validation rejected the geometry edit")]
     CentralValidation,
     #[error("the geometry edit could not acquire or bind its final generation")]
@@ -162,6 +166,7 @@ impl From<crate::scene_edit::EditFailure> for TangentFailure {
             EditCause::Control { cause } => TangentCause::Control { cause },
             EditCause::FinalControl => TangentCause::FinalControl,
             EditCause::CoreRejected => TangentCause::CoreRejected,
+            EditCause::PrecisionLoss { semantic } => TangentCause::PrecisionLoss { semantic },
             EditCause::MorphDependency { .. } => TangentCause::MorphDeltas,
             EditCause::SpaceIssue { .. } => TangentCause::CoreRejected,
             EditCause::CentralValidation => TangentCause::CentralValidation,

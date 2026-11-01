@@ -17,6 +17,7 @@ use crate::geometry::TopologyKind;
 
 use super::{TestControl, TestControlError, TestReservation};
 
+mod precision;
 mod tangent;
 
 fn expected_geometry_bytes(rows: [usize; 4], scalars: [usize; 4], name_bytes: usize) -> u64 {
@@ -325,7 +326,7 @@ fn f64_custom_attributes_enforce_lanes_shape_and_domain_cardinality() {
 }
 
 #[test]
-fn f64_payloads_cannot_replace_builtin_f32_semantics() {
+fn f64_color_payloads_keep_the_existing_f32_contract() {
     let values = [0.0_f64; 4];
     let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
     let primitives = [GeometryPrimitiveAuthoring::new(
@@ -334,19 +335,25 @@ fn f64_payloads_cannot_replace_builtin_f32_semantics() {
         Presence::Absent,
         AuthoringRange::new(0, 1),
     )];
-    for (semantic, lanes) in [
-        (AttributeSemantic::Position, 3),
-        (AttributeSemantic::Normal, 3),
-        (AttributeSemantic::Tangent, 4),
-        (AttributeSemantic::Texcoord(0), 2),
-        (AttributeSemantic::Color(0), 4),
-    ] {
-        let attributes = [GeometryAttributeAuthoring::f64(
-            semantic,
-            AttributeDomain::Vertex,
-            lanes,
-            &values[..usize::from(lanes)],
-        )];
+    for sparse in [false, true] {
+        let attributes = [if sparse {
+            GeometryAttributeAuthoring::sparse_f64(
+                AttributeSemantic::Color(0),
+                AttributeDomain::Vertex,
+                4,
+                1,
+                &[0],
+                &values,
+                &values,
+            )
+        } else {
+            GeometryAttributeAuthoring::f64(
+                AttributeSemantic::Color(0),
+                AttributeDomain::Vertex,
+                4,
+                &values,
+            )
+        }];
         assert!(matches!(
             reject_geometry(
                 GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &[]),

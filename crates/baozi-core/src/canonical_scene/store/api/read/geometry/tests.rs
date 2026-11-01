@@ -7,6 +7,7 @@ fn attribute(data: AttributeData<'_>, count: u32) -> AttributeRef<'_> {
         | AttributeData::DenseU32 { lanes, .. }
         | AttributeData::DenseI32 { lanes, .. }
         | AttributeData::SparseF32 { lanes, .. }
+        | AttributeData::SparseF64 { lanes, .. }
         | AttributeData::SparseU32 { lanes, .. }
         | AttributeData::SparseI32 { lanes, .. } => lanes,
     };
@@ -106,10 +107,19 @@ fn dense_elements_borrow_all_four_scalar_types_without_changing_bits() {
 }
 
 #[test]
-fn sparse_elements_borrow_explicit_or_default_sources_for_all_three_scalar_types() {
+fn sparse_elements_borrow_explicit_or_default_sources_for_all_four_scalar_types() {
     let indices = [0, 2, 5];
     let floats = [0.0, -0.0, 0.25, -0.5, f32::from_bits(1), 1.0];
     let float_default = [0.0, -0.0];
+    let doubles = [
+        0.0,
+        -0.0,
+        16_777_217.0,
+        f64::from_bits(1),
+        f64::MAX,
+        -f64::MAX,
+    ];
+    let double_default = [0.0, -0.0];
     let unsigned = [0, 9, u32::MAX];
     let unsigned_default = [0];
     let signed = [0, i32::MIN, i32::MAX];
@@ -134,6 +144,16 @@ fn sparse_elements_borrow_explicit_or_default_sources_for_all_three_scalar_types
         },
         7,
     );
+    let f64s = attribute(
+        AttributeData::SparseF64 {
+            lanes: 2,
+            logical_count: 7,
+            indices: &indices,
+            values: &doubles,
+            default: &double_default,
+        },
+        7,
+    );
     let i32s = attribute(
         AttributeData::SparseI32 {
             lanes: 1,
@@ -150,6 +170,9 @@ fn sparse_elements_borrow_explicit_or_default_sources_for_all_three_scalar_types
             matches!(f32s.element(index), Some(AttributeElement::F32(value)) if std::ptr::eq(value, &floats[explicit * 2..explicit * 2 + 2]))
         );
         assert!(
+            matches!(f64s.element(index), Some(AttributeElement::F64(value)) if std::ptr::eq(value, &doubles[explicit * 2..explicit * 2 + 2]))
+        );
+        assert!(
             matches!(u32s.element(index), Some(AttributeElement::U32(value)) if std::ptr::eq(value, &unsigned[explicit..explicit + 1]))
         );
         assert!(
@@ -159,6 +182,9 @@ fn sparse_elements_borrow_explicit_or_default_sources_for_all_three_scalar_types
     for index in [1, 3, 4, 6] {
         assert!(
             matches!(f32s.element(index), Some(AttributeElement::F32(value)) if std::ptr::eq(value, &float_default[..]))
+        );
+        assert!(
+            matches!(f64s.element(index), Some(AttributeElement::F64(value)) if std::ptr::eq(value, &double_default[..]))
         );
         assert!(
             matches!(u32s.element(index), Some(AttributeElement::U32(value)) if std::ptr::eq(value, &unsigned_default[..]))
@@ -189,7 +215,30 @@ fn sparse_elements_borrow_explicit_or_default_sources_for_all_three_scalar_types
     assert!(std::ptr::eq(retained_indices, &indices[..]));
     assert!(std::ptr::eq(values, &floats[..]));
     assert!(std::ptr::eq(default, &float_default[..]));
-    for value in [f32s, u32s, i32s] {
+    let Some(AttributeElement::F64(explicit)) = f64s.element(0) else {
+        panic!("explicit F64 zero")
+    };
+    let Some(AttributeElement::F64(default)) = f64s.element(1) else {
+        panic!("default F64 zero")
+    };
+    assert_eq!(explicit, default);
+    assert!(!std::ptr::eq(explicit, default));
+    assert_eq!(default[1].to_bits(), (-0.0_f64).to_bits());
+    let AttributeData::SparseF64 {
+        indices: retained_indices,
+        values,
+        default,
+        ..
+    } = f64s.data()
+    else {
+        panic!("sparse F64 representation")
+    };
+    assert!(std::ptr::eq(retained_indices, &indices[..]));
+    assert!(std::ptr::eq(values, &doubles[..]));
+    assert!(std::ptr::eq(default, &double_default[..]));
+    assert_eq!(values[2].to_bits(), 16_777_217.0_f64.to_bits());
+    assert_eq!(values[3].to_bits(), 1);
+    for value in [f32s, f64s, u32s, i32s] {
         assert_eq!(value.element(7), None);
         assert_eq!(value.element(usize::MAX), None);
     }
@@ -235,6 +284,7 @@ fn maximum_lane_elements_use_the_complete_tuple_in_dense_and_sparse_data() {
 #[test]
 fn empty_attributes_and_default_only_sparse_data_observe_the_logical_range() {
     let float_default = [-0.0; 3];
+    let double_default = [-0.0_f64, f64::from_bits(1), 16_777_217.0];
     let unsigned_default = [u32::MAX];
     let signed_default = [i32::MIN];
     let empty = [
@@ -260,6 +310,13 @@ fn empty_attributes_and_default_only_sparse_data_observe_the_logical_range() {
             indices: &[],
             values: &[],
             default: &float_default,
+        },
+        AttributeData::SparseF64 {
+            lanes: 3,
+            logical_count: 0,
+            indices: &[],
+            values: &[],
+            default: &double_default,
         },
         AttributeData::SparseU32 {
             lanes: 1,
@@ -294,6 +351,21 @@ fn empty_attributes_and_default_only_sparse_data_observe_the_logical_range() {
     let last = u32::MAX as usize - 1;
     assert!(
         matches!(defaults.element(last), Some(AttributeElement::F32(value)) if std::ptr::eq(value, &float_default[..]))
+    );
+    assert_eq!(defaults.element(u32::MAX as usize), None);
+    assert_eq!(defaults.element(usize::MAX), None);
+    let defaults = attribute(
+        AttributeData::SparseF64 {
+            lanes: 3,
+            logical_count: u32::MAX,
+            indices: &[],
+            values: &[],
+            default: &double_default,
+        },
+        u32::MAX,
+    );
+    assert!(
+        matches!(defaults.element(last), Some(AttributeElement::F64(value)) if std::ptr::eq(value, &double_default[..]))
     );
     assert_eq!(defaults.element(u32::MAX as usize), None);
     assert_eq!(defaults.element(usize::MAX), None);
@@ -367,6 +439,16 @@ fn dense_and_sparse_element_reads_allocate_nothing() {
                 indices: &indices,
                 values: &unsigned[..1],
                 default: &unsigned[1..],
+            },
+            3,
+        ),
+        attribute(
+            AttributeData::SparseF64 {
+                lanes: 1,
+                logical_count: 3,
+                indices: &indices,
+                values: &doubles[..1],
+                default: &doubles[1..],
             },
             3,
         ),

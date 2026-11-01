@@ -1,6 +1,6 @@
 use super::*;
 use crate::canonical_scene::store::typed_storage::{
-    StoredLogicalMeshIndex, StoredNodeIndex, TextRange,
+    StoredAttributePayload, StoredLogicalMeshIndex, StoredNodeIndex, TextRange,
 };
 use std::num::NonZeroU32;
 
@@ -296,7 +296,7 @@ fn plan(source: &GeometryStorage, had_tangent: bool) -> GeometryTangentsPlan<'_>
     GeometryTangentsPlan::try_new(
         source,
         1,
-        &TANGENTS,
+        VectorValues::F32(&TANGENTS),
         had_tangent,
         AttributeDomain::Vertex,
         7,
@@ -406,6 +406,276 @@ fn add_and_replace_preserve_sparse_payloads_and_exact_name_owner_layouts() {
 }
 
 #[test]
+fn generated_f64_tangents_use_the_f64_pool_and_preserve_candidate_bits() {
+    let tangents = [
+        [1.0, f64::from_bits(1), -0.0, 1.0],
+        [f64::from_bits(0x3fef_ffff_ffff_ffff), -0.0, 0.0, -1.0],
+        [0.0, -0.0, 1.0, 1.0],
+        [0.0, 1.0, 0.0, -1.0],
+        [-0.0, 0.0, 1.0, 1.0],
+        [0.0, 0.0, -1.0, -1.0],
+    ];
+    for had_tangent in [false, true] {
+        let source = geometry(had_tangent);
+        let plan = GeometryTangentsPlan::try_new(
+            &source,
+            1,
+            VectorValues::F64(&tangents),
+            had_tangent,
+            AttributeDomain::Vertex,
+            7,
+            AttributeDomain::Corner,
+            &CONVENTIONS,
+            &mut Control::default(),
+        )
+        .unwrap();
+        let expected_f32 = source.f32_values.len() - usize::from(had_tangent) * 12;
+        assert_eq!(plan.capacities()[5].desired_capacity(), expected_f32);
+        assert_eq!(
+            plan.capacities()[6].desired_capacity(),
+            source.f64_values.len() + 24
+        );
+        let mut build = Control::default();
+        let mut output = plan.materialize(&mut build).unwrap();
+        assert_eq!(build.completed, plan.work());
+        assert_eq!(output.f32_values.len(), expected_f32);
+        let mut validation = Control::default();
+        assert_eq!(
+            output.validate(&mut validation, [1, 3, output.attributes.len(), 1], 2, 0),
+            Ok(true)
+        );
+        assert_eq!(validation.completed, plan.validation_work());
+        let row = output.attributes[plan.attribute_mapping().tangent_attribute() as usize];
+        assert_eq!(row.tangent_conventions, Some(GENERATED_CONVENTIONS));
+        let StoredAttributePayload::DenseF64(range) = row.payload else {
+            panic!("F64 generated tangents must retain their selected width");
+        };
+        assert_eq!(
+            range
+                .get(&output.f64_values)
+                .unwrap()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            tangents
+                .as_flattened()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>()
+        );
+        let mut correspondence = Control::default();
+        assert_eq!(
+            plan.validate_correspondence(&output, &mut correspondence),
+            Ok(true)
+        );
+        assert_eq!(correspondence.completed, plan.correspondence_work());
+        output.f64_values[range.start() + 2] = 0.0;
+        assert_eq!(
+            plan.validate_correspondence(&output, &mut Control::default()),
+            Ok(false)
+        );
+        assert_eq!(source.primitives[1].corner_count, 6);
+    }
+}
+
+#[test]
+fn f64_tangent_validation_checks_unit_tolerance_handedness_and_finite_candidates() {
+    let source = geometry(true);
+    for invalid in [
+        [0.0; 4],
+        [1.0 + 5.0 * f64::EPSILON, 0.0, 0.0, 1.0],
+        [1.0 + f64::from(f32::EPSILON) / 8.0, 0.0, 0.0, 1.0],
+        [f64::NAN, 0.0, 0.0, 1.0],
+        [1.0, f64::INFINITY, 0.0, 1.0],
+        [1.0, 0.0, 0.0, -0.0],
+        [1.0, 0.0, 0.0, f64::NAN],
+        [1.0, 0.0, 0.0, f64::INFINITY],
+    ] {
+        let mut tangents = [[1.0, 0.0, 0.0, 1.0]; 6];
+        tangents[5] = invalid;
+        assert!(matches!(
+            GeometryTangentsPlan::try_new(
+                &source,
+                1,
+                VectorValues::F64(&tangents),
+                true,
+                AttributeDomain::Vertex,
+                7,
+                AttributeDomain::Corner,
+                &CONVENTIONS,
+                &mut Control::default(),
+            ),
+            Err(TypedStorageBuildError::Invariant)
+        ));
+    }
+    let tangents = [[1.0 + 3.0 * f64::EPSILON, 0.0, 0.0, 1.0]; 6];
+    assert!(
+        GeometryTangentsPlan::try_new(
+            &source,
+            1,
+            VectorValues::F64(&tangents),
+            true,
+            AttributeDomain::Vertex,
+            7,
+            AttributeDomain::Corner,
+            &CONVENTIONS,
+            &mut Control::default(),
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn sparse_f64_survives_tangent_addition_and_replacement_with_exact_work() {
+    let explicit = [
+        -0.0,
+        f64::from_bits(1),
+        f64::from_bits(1.0_f64.to_bits() + 1),
+        1.0e250,
+    ];
+    for had_tangent in [false, true] {
+        let mut source = geometry(had_tangent);
+        let source_row = source
+            .attributes
+            .iter()
+            .position(|row| matches!(row.payload, StoredAttributePayload::SparseI32 { .. }))
+            .unwrap();
+        let StoredAttributePayload::SparseI32 { indices, .. } =
+            source.attributes[source_row].payload
+        else {
+            unreachable!();
+        };
+        source.i32_values.clear();
+        let dense_values = std::mem::take(&mut source.f64_values);
+        source.attributes[source_row].lanes = 2;
+        source.attributes[source_row].payload = StoredAttributePayload::SparseF64 {
+            indices,
+            values: values(&mut source.f64_values, &explicit),
+            default: values(&mut source.f64_values, &explicit[..2]),
+        };
+        let prefix = source.f64_values.len();
+        for row in &mut source.attributes {
+            if let StoredAttributePayload::DenseF64(range) = &mut row.payload {
+                *range = TableRange::new(range.start() + prefix, range.len());
+            }
+        }
+        source.f64_values.extend_from_slice(&dense_values);
+        assert_eq!(
+            source.validate(
+                &mut Control::default(),
+                [1, 3, source.attributes.len(), 1],
+                2,
+                0
+            ),
+            Ok(true)
+        );
+        let plan = plan(&source, had_tangent);
+        assert_eq!(
+            plan.capacities()[6].desired_capacity(),
+            source.f64_values.len()
+        );
+        let mapping = plan.attribute_mapping();
+        let output_row = mapping.output_attribute(source_row as u32).unwrap() as usize;
+        assert_eq!(
+            mapping.source_attribute(output_row as u32),
+            Some(source_row as u32)
+        );
+        let mut build = Control::default();
+        let mut output = plan.materialize(&mut build).unwrap();
+        assert_eq!(build.completed, plan.work());
+        let mut validation = Control::default();
+        assert_eq!(
+            output.validate(&mut validation, [1, 3, output.attributes.len(), 1], 2, 0),
+            Ok(true)
+        );
+        assert_eq!(validation.completed, plan.validation_work());
+        let mut correspondence = Control::default();
+        assert_eq!(
+            plan.validate_correspondence(&output, &mut correspondence),
+            Ok(true)
+        );
+        assert_eq!(correspondence.completed, plan.correspondence_work());
+        let StoredAttributePayload::SparseF64 {
+            indices,
+            values,
+            default,
+        } = output.attributes[output_row].payload
+        else {
+            panic!("retained custom data must stay sparse F64");
+        };
+        assert_eq!(indices.get(&output.u32_values), Some(&[0, 5][..]));
+        assert_eq!(values.start() + values.len(), default.start());
+        assert_eq!(
+            values
+                .get(&output.f64_values)
+                .unwrap()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            explicit.map(f64::to_bits)
+        );
+        assert_eq!(
+            default
+                .get(&output.f64_values)
+                .unwrap()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            explicit[..2]
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>()
+        );
+        for scalar in [values.start(), default.start()] {
+            let mut corrupted = plan.materialize(&mut Control::default()).unwrap();
+            corrupted.f64_values[scalar] = 0.0;
+            assert_eq!(
+                plan.validate_correspondence(&corrupted, &mut Control::default()),
+                Ok(false)
+            );
+        }
+
+        // Correspondence compares payloads independently of their compacted scalar offsets.
+        let split = values.len();
+        let length = output.f64_values.len();
+        output.f64_values.rotate_left(split);
+        let relocate = |range: TableRange<f64>| {
+            TableRange::new(
+                if range.start() < split {
+                    length - split + range.start()
+                } else {
+                    range.start() - split
+                },
+                range.len(),
+            )
+        };
+        for row in &mut output.attributes {
+            row.payload = match row.payload {
+                StoredAttributePayload::DenseF64(range) => {
+                    StoredAttributePayload::DenseF64(relocate(range))
+                }
+                StoredAttributePayload::SparseF64 {
+                    indices,
+                    values,
+                    default,
+                } => StoredAttributePayload::SparseF64 {
+                    indices,
+                    values: relocate(values),
+                    default: relocate(default),
+                },
+                other => other,
+            };
+        }
+        let mut correspondence = Control::default();
+        assert_eq!(
+            plan.validate_correspondence(&output, &mut correspondence),
+            Ok(true)
+        );
+        assert_eq!(correspondence.completed, plan.correspondence_work());
+    }
+}
+
+#[test]
 fn source_selection_replacement_policy_and_generated_declarations_are_checked() {
     let source = geometry(true);
     let rejected = |had, normal, set, uv, conventions: &TangentConventions| {
@@ -413,7 +683,7 @@ fn source_selection_replacement_policy_and_generated_declarations_are_checked() 
             GeometryTangentsPlan::try_new(
                 &source,
                 1,
-                &TANGENTS,
+                VectorValues::F32(&TANGENTS),
                 had,
                 normal,
                 set,
@@ -494,7 +764,7 @@ fn source_selection_replacement_policy_and_generated_declarations_are_checked() 
         GeometryTangentsPlan::try_new(
             &duplicate,
             1,
-            &TANGENTS,
+            VectorValues::F32(&TANGENTS),
             true,
             AttributeDomain::Vertex,
             7,
@@ -509,7 +779,7 @@ fn source_selection_replacement_policy_and_generated_declarations_are_checked() 
         GeometryTangentsPlan::try_new(
             &without,
             1,
-            &TANGENTS,
+            VectorValues::F32(&TANGENTS),
             true,
             AttributeDomain::Vertex,
             7,
@@ -537,7 +807,7 @@ fn invalid_values_counts_and_candidate_corruption_cannot_be_published() {
             GeometryTangentsPlan::try_new(
                 &source,
                 1,
-                &tangents,
+                VectorValues::F32(&tangents),
                 true,
                 AttributeDomain::Vertex,
                 7,
@@ -552,7 +822,7 @@ fn invalid_values_counts_and_candidate_corruption_cannot_be_published() {
         GeometryTangentsPlan::try_new(
             &source,
             1,
-            &TANGENTS[..5],
+            VectorValues::F32(&TANGENTS[..5]),
             true,
             AttributeDomain::Vertex,
             7,
@@ -593,7 +863,7 @@ fn planning_materialization_and_correspondence_have_interruptible_exact_work() {
     let plan = GeometryTangentsPlan::try_new(
         &source,
         1,
-        &TANGENTS,
+        VectorValues::F32(&TANGENTS),
         true,
         AttributeDomain::Vertex,
         7,
@@ -608,7 +878,7 @@ fn planning_materialization_and_correspondence_have_interruptible_exact_work() {
             ..Control::default()
         };
         assert!(
-            matches!(GeometryTangentsPlan::try_new(&source, 1, &TANGENTS, true, AttributeDomain::Vertex, 7,
+            matches!(GeometryTangentsPlan::try_new(&source, 1, VectorValues::F32(&TANGENTS), true, AttributeDomain::Vertex, 7,
             AttributeDomain::Corner, &CONVENTIONS, &mut control), Err(TypedStorageBuildError::Control(at)) if at == reject_before)
         );
     }

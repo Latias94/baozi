@@ -146,6 +146,115 @@ fn shared_triangle_scene(account: &PhysicalStorageAccount) -> ValidatedScene {
 }
 
 #[test]
+fn precision_contract_public_world_transforms_retain_f64_residual() {
+    let factory = test_factory();
+    let account = test_account(&factory, 1024);
+    let translations = [1.0, 2.0_f32.powi(-30)];
+    let nodes: [_; 2] = std::array::from_fn(|index| {
+        NodeAuthoringNode::new(
+            if index == 0 {
+                Presence::Absent
+            } else {
+                parent(0, 0)
+            },
+            AuthoredTransform::try_trs(
+                Vec3::new(translations[index], 0.0, 0.0),
+                Quat::IDENTITY,
+                Vec3::new(1.0, 1.0, 1.0),
+            )
+            .unwrap(),
+            Presence::Absent,
+            Presence::Absent,
+        )
+    });
+    let scene = publish_static_scene(
+        &account,
+        NodeAuthoringBatch::new(Presence::Present(&SINGLE_TRS_ROOTS), &nodes),
+        GeometryAuthoringBatch::empty(),
+    );
+    let before = snapshot_digest(&scene);
+    let table = scene.base_pose_world_transforms(UNLIMITED, None).unwrap();
+    let child = scene.roots().next().unwrap().children().next().unwrap();
+
+    assert_eq!(
+        table.node_transform(child.id()).unwrap()[3][0],
+        1.0 + 2.0_f64.powi(-30)
+    );
+    assert_eq!(snapshot_digest(&scene), before);
+    drop(scene);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+}
+
+#[test]
+fn precision_contract_public_bounds_retain_f64_derived_values() {
+    let factory = test_factory();
+    let account = test_account(&factory, 1024);
+    for (translation, scale, position, expected) in [
+        (1.0, 1.0, 2.0_f32.powi(-30), 1.0 + 2.0_f64.powi(-30)),
+        (0.0, f32::MAX, 2.0, f64::from(f32::MAX) * 2.0),
+        (
+            0.0,
+            0.5,
+            f32::from_bits(1),
+            f64::from(f32::from_bits(1)) * 0.5,
+        ),
+    ] {
+        let nodes = [NodeAuthoringNode::new(
+            Presence::Absent,
+            AuthoredTransform::try_trs(
+                Vec3::new(translation, 0.0, 0.0),
+                Quat::IDENTITY,
+                Vec3::new(scale, 1.0, 1.0),
+            )
+            .unwrap(),
+            Presence::Absent,
+            Presence::Absent,
+        )];
+        let positions = [position, 0.0, 0.0];
+        let attributes = [GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Position,
+            AttributeDomain::Vertex,
+            3,
+            &positions,
+            Presence::Absent,
+        )];
+        let primitives = [GeometryPrimitiveAuthoring::new(
+            GeometryTopologyAuthoring::Points,
+            Presence::Absent,
+            Presence::Absent,
+            AuthoringRange::new(0, 1),
+        )];
+        let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
+        let instances = [GeometryMeshInstanceAuthoring::new(
+            NodeLocalId::new(0),
+            LogicalMeshLocalId::new(0),
+        )];
+        let scene = publish_static_scene(
+            &account,
+            NodeAuthoringBatch::new(Presence::Present(&SINGLE_TRS_ROOTS), &nodes),
+            GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &instances),
+        );
+        let before = snapshot_digest(&scene);
+        let table = scene.base_pose_world_transforms(UNLIMITED, None).unwrap();
+        let instance = scene.mesh_instances().next().unwrap();
+        let bounds = table
+            .instance_bounds(instance, UNLIMITED, None)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(bounds.min[0], expected);
+        assert_eq!(bounds.max[0], expected);
+        assert_eq!(
+            table.scene_bounds(&scene, UNLIMITED, None).unwrap(),
+            Some(bounds)
+        );
+        assert_eq!(snapshot_digest(&scene), before);
+        drop(scene);
+        assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    }
+}
+
+#[test]
 fn world_transforms_follow_authored_hierarchy_and_bound_each_shared_placement() {
     let factory = test_factory();
     let account = test_account(&factory, 2048);
@@ -224,7 +333,7 @@ fn world_transforms_follow_authored_hierarchy_and_bound_each_shared_placement() 
             assert_eq!(
                 scene
                     .base_pose_world_transforms(
-                        SpatialQueryLimits::new(maximum, 4 * size_of::<Mat4>() as u64),
+                        SpatialQueryLimits::new(maximum, 4 * size_of::<[[f64; 4]; 4]>() as u64),
                         None,
                     )
                     .unwrap_err(),
@@ -240,7 +349,7 @@ fn world_transforms_follow_authored_hierarchy_and_bound_each_shared_placement() 
     }
     let table = scene
         .base_pose_world_transforms(
-            SpatialQueryLimits::new(8, 4 * size_of::<Mat4>() as u64),
+            SpatialQueryLimits::new(8, 4 * size_of::<[[f64; 4]; 4]>() as u64),
             None,
         )
         .unwrap();
@@ -257,14 +366,12 @@ fn world_transforms_follow_authored_hierarchy_and_bound_each_shared_placement() 
             .unwrap();
         assert_eq!(
             table.node_transform(node.id()).unwrap(),
-            Mat4 {
-                cols: [
-                    [0.0, -2.0, 0.0, 0.0],
-                    [-3.0, 0.0, 0.0, 0.0],
-                    [0.0, 0.0, 0.5, 0.0],
-                    translation,
-                ],
-            }
+            [
+                [0.0, -2.0, 0.0, 0.0],
+                [-3.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.5, 0.0],
+                translation,
+            ]
         );
     }
     let leaf = scene.mesh_instances().next().unwrap();
@@ -275,22 +382,22 @@ fn world_transforms_follow_authored_hierarchy_and_bound_each_shared_placement() 
     assert_eq!(
         table.instance_bounds(leaf, UNLIMITED, None).unwrap(),
         Some(Aabb {
-            min: Vec3::new(1.0, -6.0, 2.0),
-            max: Vec3::new(4.0, -2.0, 4.0),
+            min: [1.0, -6.0, 2.0],
+            max: [4.0, -2.0, 4.0],
         })
     );
     assert_eq!(
         table.instance_bounds(other, UNLIMITED, None).unwrap(),
         Some(Aabb {
-            min: Vec3::new(-10.0, 0.0, 0.0),
-            max: Vec3::new(-8.0, 1.0, 4.0),
+            min: [-10.0, 0.0, 0.0],
+            max: [-8.0, 1.0, 4.0],
         })
     );
     assert_eq!(
         table.scene_bounds(&scene, UNLIMITED, None).unwrap(),
         Some(Aabb {
-            min: Vec3::new(-10.0, -6.0, 0.0),
-            max: Vec3::new(4.0, 1.0, 4.0),
+            min: [-10.0, -6.0, 0.0],
+            max: [4.0, 1.0, 4.0],
         })
     );
     assert_eq!(snapshot_digest(&scene), before);
@@ -370,20 +477,18 @@ fn authored_trs_supports_rotation_negative_and_zero_scale_without_sampling_anima
     assert_eq!(node.authored_transform(), transform);
     assert_eq!(
         table.node_transform(node.id()).unwrap(),
-        Mat4 {
-            cols: [
-                [0.0, -2.0, 0.0, 0.0],
-                [0.0, 0.0, 3.0, 0.0],
-                [0.0, 0.0, 0.0, 0.0],
-                [5.0, 6.0, 7.0, 1.0],
-            ],
-        }
+        [
+            [0.0, -2.0, 0.0, 0.0],
+            [0.0, 0.0, 3.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [5.0, 6.0, 7.0, 1.0],
+        ]
     );
     assert_eq!(
         table.scene_bounds(&scene, UNLIMITED, None).unwrap(),
         Some(Aabb {
-            min: Vec3::new(5.0, 4.0, 1.0),
-            max: Vec3::new(5.0, 8.0, 13.0),
+            min: [5.0, 4.0, 1.0],
+            max: [5.0, 8.0, 13.0],
         })
     );
     assert_eq!(snapshot_digest(&scene), before);
@@ -434,13 +539,16 @@ fn shear_bounds_transform_actual_vertices_without_introducing_local_box_corners(
     );
     let table = scene.base_pose_world_transforms(UNLIMITED, None).unwrap();
     let node = scene.nodes().next().unwrap();
-    assert_eq!(table.node_transform(node.id()).unwrap(), shear);
+    assert_eq!(
+        table.node_transform(node.id()).unwrap(),
+        shear.cols.map(|column| column.map(f64::from))
+    );
     assert_eq!(node.authored_transform().authored_matrix(), Some(shear));
     assert_eq!(
         table.scene_bounds(&scene, UNLIMITED, None).unwrap(),
         Some(Aabb {
-            min: Vec3::ZERO,
-            max: Vec3::new(1.0, 1.0, 0.0),
+            min: [0.0; 3],
+            max: [1.0, 1.0, 0.0],
         })
     );
     drop(scene);
@@ -534,19 +642,19 @@ fn sparse_positions_match_dense_vertices_and_ignore_defaults_without_omissions()
     );
     let table = scene.base_pose_world_transforms(UNLIMITED, None).unwrap();
     let dense_and_sparse = Some(Aabb {
-        min: Vec3::new(-3.0, -2.0, -3.5),
-        max: Vec3::new(21.0, 3.0, 0.0),
+        min: [-3.0, -2.0, -3.5],
+        max: [21.0, 3.0, 0.0],
     });
     let expected = [
         dense_and_sparse,
         dense_and_sparse,
         Some(Aabb {
-            min: Vec3::new(-3.0, -2.0, -3.5),
-            max: Vec3::new(7.0, 0.0, -1.0),
+            min: [-3.0, -2.0, -3.5],
+            max: [7.0, 0.0, -1.0],
         }),
         Some(Aabb {
-            min: Vec3::new(21.0, 3.0, 0.0),
-            max: Vec3::new(21.0, 3.0, 0.0),
+            min: [21.0, 3.0, 0.0],
+            max: [21.0, 3.0, 0.0],
         }),
         None,
     ];
@@ -559,6 +667,203 @@ fn sparse_positions_match_dense_vertices_and_ignore_defaults_without_omissions()
     assert_eq!(
         table.scene_bounds(&scene, UNLIMITED, None).unwrap(),
         dense_and_sparse
+    );
+    drop(scene);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+}
+
+#[test]
+fn precision_contract_public_f64_dense_and_sparse_bounds_preserve_logical_values() {
+    let factory = test_factory();
+    let account = test_account(&factory, 2048);
+    let first = [16_777_216.0, -1.0e-100, f64::from_bits(1)];
+    let second = [
+        f64::from_bits(first[0].to_bits() + 1),
+        1.0e-100,
+        -f64::from_bits(1),
+    ];
+    let values = [
+        first[0], first[1], first[2], second[0], second[1], second[2],
+    ];
+    let dense = [
+        first[0], first[1], first[2], second[0], second[1], second[2], first[0], first[1], first[2],
+    ];
+    let attributes = [
+        GeometryAttributeAuthoring::f64(
+            AttributeSemantic::Position,
+            AttributeDomain::Vertex,
+            3,
+            &dense,
+        ),
+        GeometryAttributeAuthoring::sparse_f64(
+            AttributeSemantic::Position,
+            AttributeDomain::Vertex,
+            3,
+            3,
+            &[1],
+            &second,
+            &first,
+        ),
+        GeometryAttributeAuthoring::sparse_f64(
+            AttributeSemantic::Position,
+            AttributeDomain::Vertex,
+            3,
+            2,
+            &[0, 1],
+            &values,
+            &[f64::MAX; 3],
+        ),
+        GeometryAttributeAuthoring::sparse_f64(
+            AttributeSemantic::Position,
+            AttributeDomain::Vertex,
+            3,
+            2,
+            &[],
+            &[],
+            &first,
+        ),
+        GeometryAttributeAuthoring::sparse_f64(
+            AttributeSemantic::Position,
+            AttributeDomain::Vertex,
+            3,
+            0,
+            &[],
+            &[],
+            &[f64::MAX; 3],
+        ),
+    ];
+    let primitives: [_; 5] = std::array::from_fn(|index| {
+        GeometryPrimitiveAuthoring::new(
+            GeometryTopologyAuthoring::Points,
+            Presence::Absent,
+            Presence::Absent,
+            AuthoringRange::new(index as u32, 1),
+        )
+    });
+    let meshes: [_; 5] = std::array::from_fn(|index| {
+        GeometryLogicalMeshAuthoring::new(AuthoringRange::new(index as u32, 1))
+    });
+    let instances: [_; 5] = std::array::from_fn(|index| {
+        GeometryMeshInstanceAuthoring::new(
+            NodeLocalId::new(0),
+            LogicalMeshLocalId::new(index as u32),
+        )
+    });
+    let scene = publish_static_scene(
+        &account,
+        NodeAuthoringBatch::new(Presence::Present(&SINGLE_TRS_ROOTS), &SINGLE_TRS_NODES),
+        GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &instances),
+    );
+    let before = snapshot_digest(&scene);
+    let retained = account.snapshot();
+    let table = scene.base_pose_world_transforms(UNLIMITED, None).unwrap();
+    let extent = Some(Aabb {
+        min: [first[0], first[1], second[2]],
+        max: [second[0], second[1], first[2]],
+    });
+    let expected = [
+        extent,
+        extent,
+        extent,
+        Some(Aabb {
+            min: first,
+            max: first,
+        }),
+        None,
+    ];
+    let allocations = allocation_counter::measure(|| {
+        for ((instance, expected), logical_count) in
+            scene.mesh_instances().zip(expected).zip([3, 3, 2, 2, 0])
+        {
+            let work = 3 + logical_count;
+            assert_eq!(
+                table.instance_bounds(instance, SpatialQueryLimits::new(work, 0), None),
+                Ok(expected)
+            );
+            assert_eq!(
+                table.instance_bounds(instance, SpatialQueryLimits::new(work - 1, 0), None),
+                Err(SpatialQueryError::LimitExceeded {
+                    limit: SpatialQueryLimit::Work,
+                    actual: work,
+                    maximum: work - 1,
+                })
+            );
+        }
+        assert_eq!(
+            table.scene_bounds(&scene, SpatialQueryLimits::new(25, 0), None),
+            Ok(extent)
+        );
+    });
+    assert_eq!(allocations.count_total, 0);
+    assert_eq!(allocations.bytes_total, 0);
+    assert_eq!(snapshot_digest(&scene), before);
+    assert_eq!(account.snapshot(), retained);
+    drop(scene);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+}
+
+#[test]
+fn precision_contract_public_f64_positions_use_composed_f64_world_matrices() {
+    let factory = test_factory();
+    let account = test_account(&factory, 1024);
+    let nodes: [_; 2] = std::array::from_fn(|index| {
+        NodeAuthoringNode::new(
+            if index == 0 {
+                Presence::Absent
+            } else {
+                parent(0, 0)
+            },
+            AuthoredTransform::try_trs(
+                Vec3::new(if index == 0 { 1.0 } else { 2.0_f32.powi(-30) }, 0.0, 0.0),
+                Quat::IDENTITY,
+                Vec3::new(1.0, 1.0, 1.0),
+            )
+            .unwrap(),
+            Presence::Absent,
+            Presence::Absent,
+        )
+    });
+    let positions = [
+        0.0,
+        -1.0e-100,
+        f64::from_bits(1),
+        2.0_f64.powi(-31),
+        1.0e-100,
+        -f64::from_bits(1),
+    ];
+    let attributes = [GeometryAttributeAuthoring::f64(
+        AttributeSemantic::Position,
+        AttributeDomain::Vertex,
+        3,
+        &positions,
+    )];
+    let primitives = [GeometryPrimitiveAuthoring::new(
+        GeometryTopologyAuthoring::Points,
+        Presence::Absent,
+        Presence::Absent,
+        AuthoringRange::new(0, 1),
+    )];
+    let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
+    let instances = [GeometryMeshInstanceAuthoring::new(
+        NodeLocalId::new(1),
+        LogicalMeshLocalId::new(0),
+    )];
+    let scene = publish_static_scene(
+        &account,
+        NodeAuthoringBatch::new(Presence::Present(&SINGLE_TRS_ROOTS), &nodes),
+        GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &instances),
+    );
+    let table = scene.base_pose_world_transforms(UNLIMITED, None).unwrap();
+    assert_eq!(
+        table.scene_bounds(&scene, UNLIMITED, None).unwrap(),
+        Some(Aabb {
+            min: [1.0 + 2.0_f64.powi(-30), -1.0e-100, -f64::from_bits(1)],
+            max: [
+                1.0 + 2.0_f64.powi(-30) + 2.0_f64.powi(-31),
+                1.0e-100,
+                f64::from_bits(1),
+            ],
+        })
     );
     drop(scene);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
@@ -647,17 +952,17 @@ fn bounds_distinguish_empty_points_indices_and_uninstanced_meshes() {
     let table = scene.base_pose_world_transforms(UNLIMITED, None).unwrap();
     let expected = [
         Some(Aabb {
-            min: Vec3::new(0.0, -100.0, 0.0),
-            max: Vec3::new(100.0, 1.0, 50.0),
+            min: [0.0, -100.0, 0.0],
+            max: [100.0, 1.0, 50.0],
         }),
         Some(Aabb {
-            min: Vec3::new(7.0, 8.0, 9.0),
-            max: Vec3::new(7.0, 8.0, 9.0),
+            min: [7.0, 8.0, 9.0],
+            max: [7.0, 8.0, 9.0],
         }),
         None,
         Some(Aabb {
-            min: Vec3::ZERO,
-            max: Vec3::ZERO,
+            min: [0.0; 3],
+            max: [0.0; 3],
         }),
     ];
     for (instance, expected) in scene.mesh_instances().zip(expected) {
@@ -669,8 +974,8 @@ fn bounds_distinguish_empty_points_indices_and_uninstanced_meshes() {
     assert_eq!(
         table.scene_bounds(&scene, UNLIMITED, None).unwrap(),
         Some(Aabb {
-            min: Vec3::new(0.0, -100.0, 0.0),
-            max: Vec3::new(100.0, 8.0, 50.0),
+            min: [0.0, -100.0, 0.0],
+            max: [100.0, 8.0, 50.0],
         })
     );
     let uninstanced = publish_static_scene(
@@ -694,6 +999,7 @@ fn bounds_distinguish_empty_points_indices_and_uninstanced_meshes() {
         .base_pose_world_transforms(SpatialQueryLimits::new(0, 0), None)
         .unwrap();
     assert_eq!(empty_table.node_count(), 0);
+    assert_eq!(empty_table.allocated_bytes(), 0);
     assert_eq!(empty_table.generation(), empty.generation());
     assert_eq!(
         empty_table.scene_bounds(&empty, SpatialQueryLimits::new(0, 0), None),
@@ -785,8 +1091,8 @@ fn morph_overrides_take_precedence_and_nonzero_weights_reject_even_empty_geometr
             let inherited = scene.mesh_instances().nth(1).unwrap();
             let nonzero = scene.mesh_instances().nth(2).unwrap();
             let expected = (!positions.is_empty()).then_some(Aabb {
-                min: Vec3::new(2.0, 3.0, 4.0),
-                max: Vec3::new(2.0, 3.0, 4.0),
+                min: [2.0, 3.0, 4.0],
+                max: [2.0, 3.0, 4.0],
             });
             // Instance + two effective weights + primitive + Position + logical vertices.
             let exact_work = if positions.is_empty() { 5 } else { 6 };
@@ -849,7 +1155,10 @@ fn skinned_animated_scene_allows_base_transforms_but_rejects_static_bounds() {
     assert!(scene.animation_clip_count() > 0);
     let table = scene.base_pose_world_transforms(UNLIMITED, None).unwrap();
     for node in scene.nodes() {
-        assert_eq!(table.node_transform(node.id()).unwrap(), Mat4::IDENTITY);
+        assert_eq!(
+            table.node_transform(node.id()).unwrap(),
+            Mat4::IDENTITY.cols.map(|column| column.map(f64::from))
+        );
     }
     let instance = scene.mesh_instances().next().unwrap();
     assert!(instance.skin().is_some());
@@ -871,7 +1180,7 @@ fn spatial_limits_charge_exact_transform_bytes_and_complete_query_work() {
     let scene = shared_triangle_scene(&account);
     let before = snapshot_digest(&scene);
     let retained = account.snapshot();
-    let bytes = size_of::<Mat4>() as u64;
+    let bytes = size_of::<[[f64; 4]; 4]>() as u64;
     assert_eq!(
         scene
             .base_pose_world_transforms(SpatialQueryLimits::new(2, bytes - 1), None)
@@ -903,10 +1212,11 @@ fn spatial_limits_charge_exact_transform_bytes_and_complete_query_work() {
     assert_eq!(allocations.count_total, 1);
     assert_eq!(allocations.bytes_total, bytes);
     let table = table.unwrap();
+    assert_eq!(table.allocated_bytes() as u64, bytes);
     let instance = scene.mesh_instances().next().unwrap();
     let expected = Some(Aabb {
-        min: Vec3::ZERO,
-        max: Vec3::new(1.0, 1.0, 0.0),
+        min: [0.0; 3],
+        max: [1.0, 1.0, 0.0],
     });
     // One instance, one primitive, the Position descriptor, three vertices.
     let allocations = allocation_counter::measure(|| {
@@ -994,7 +1304,10 @@ fn world_transform_table_checks_generation_range_and_outlives_source_scene() {
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(table.generation(), node.generation());
     assert_eq!(table.node_count(), 1);
-    assert_eq!(table.node_transform(node).unwrap(), Mat4::IDENTITY);
+    assert_eq!(
+        table.node_transform(node).unwrap(),
+        Mat4::IDENTITY.cols.map(|column| column.map(f64::from))
+    );
 }
 
 #[test]
@@ -1046,7 +1359,7 @@ fn precancelled_queries_return_no_result_without_allocation_or_scene_mutation() 
 }
 
 #[test]
-fn numeric_transform_failures_identify_the_root_or_descendant_without_changing_scene() {
+fn derived_transforms_exceeding_f32_range_preserve_the_scene() {
     let factory = test_factory();
     let account = test_account(&factory, 2048);
     let almost_unit = Quat::from_xyzw(0.0, 1.00002, 0.0, 0.0);
@@ -1074,10 +1387,60 @@ fn numeric_transform_failures_identify_the_root_or_descendant_without_changing_s
             Presence::Absent,
         ),
     ];
-    for (nodes, failing_node) in [(&root_overflow[..], 0), (&chain_overflow[..], 1)] {
+    let y = f64::from(almost_unit.y);
+    for (nodes, inspected_node, expected) in [
+        (
+            &root_overflow[..],
+            0,
+            (1.0 - y * (y + y)) * f64::from(f32::MAX),
+        ),
+        (&chain_overflow[..], 1, 2.0 * f64::from(f32::MAX)),
+    ] {
         let scene = publish_static_scene(
             &account,
             NodeAuthoringBatch::new(Presence::Present(&roots), nodes),
+            GeometryAuthoringBatch::empty(),
+        );
+        let before = snapshot_digest(&scene);
+        let table = scene.base_pose_world_transforms(UNLIMITED, None).unwrap();
+        let node = scene.nodes().nth(inspected_node).unwrap();
+        assert_eq!(table.node_transform(node.id()).unwrap()[0][0], expected);
+        assert_eq!(snapshot_digest(&scene), before);
+        drop(scene);
+        assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    }
+}
+
+#[test]
+fn numeric_transform_failures_identify_the_descendant_without_changing_scene() {
+    let factory = test_factory();
+    let account = test_account(&factory, 2048);
+    for (scale, source) in [
+        (2.0_f32.powi(100), NumericConversionError::NonFiniteOutput),
+        (2.0_f32.powi(-100), NumericConversionError::UnderflowToZero),
+    ] {
+        let nodes: Vec<_> = (0..11)
+            .map(|index| {
+                NodeAuthoringNode::new(
+                    if index == 0 {
+                        Presence::Absent
+                    } else {
+                        parent(index - 1, 0)
+                    },
+                    AuthoredTransform::try_trs(
+                        Vec3::ZERO,
+                        Quat::IDENTITY,
+                        Vec3::new(scale, 1.0, 1.0),
+                    )
+                    .unwrap(),
+                    Presence::Absent,
+                    Presence::Absent,
+                )
+            })
+            .collect();
+        let scene = publish_static_scene(
+            &account,
+            NodeAuthoringBatch::new(Presence::Present(&SINGLE_TRS_ROOTS), &nodes),
             GeometryAuthoringBatch::empty(),
         );
         let before = snapshot_digest(&scene);
@@ -1086,8 +1449,8 @@ fn numeric_transform_failures_identify_the_root_or_descendant_without_changing_s
                 .base_pose_world_transforms(UNLIMITED, None)
                 .unwrap_err(),
             SpatialQueryError::TransformNumeric {
-                node: scene.nodes().nth(failing_node).unwrap().id(),
-                source: NumericConversionError::NonFiniteOutput,
+                node: scene.nodes().nth(10).unwrap().id(),
+                source,
             }
         );
         assert_eq!(snapshot_digest(&scene), before);
@@ -1101,10 +1464,10 @@ fn numeric_position_failures_identify_instance_primitive_and_logical_vertex() {
     let factory = test_factory();
     let account = test_account(&factory, 2048);
     for (scale, position, source) in [
-        (f32::MAX, 2.0, NumericConversionError::NonFiniteOutput),
+        (2.0, f64::MAX, NumericConversionError::NonFiniteOutput),
         (
             0.5,
-            f32::from_bits(1),
+            f64::from_bits(1),
             NumericConversionError::UnderflowToZero,
         ),
     ] {
@@ -1120,53 +1483,75 @@ fn numeric_position_failures_identify_instance_primitive_and_logical_vertex() {
             ),
         ];
         let positions = [0.0, 0.0, 0.0, position, 0.0, 0.0];
-        let attributes = [
-            GeometryAttributeAuthoring::f32(
-                AttributeSemantic::Position,
-                AttributeDomain::Vertex,
-                3,
-                &[0.0; 3],
-                Presence::Absent,
-            ),
-            GeometryAttributeAuthoring::f32(
+        let failing_position = [position, 0.0, 0.0];
+        for failing_attribute in [
+            GeometryAttributeAuthoring::f64(
                 AttributeSemantic::Position,
                 AttributeDomain::Vertex,
                 3,
                 &positions,
-                Presence::Absent,
             ),
-        ];
-        let primitives: [_; 2] = std::array::from_fn(|index| {
-            GeometryPrimitiveAuthoring::new(
-                GeometryTopologyAuthoring::Points,
-                Presence::Absent,
-                Presence::Absent,
-                AuthoringRange::new(index as u32, 1),
-            )
-        });
-        let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 2))];
-        let instances = [
-            GeometryMeshInstanceAuthoring::new(NodeLocalId::new(0), LogicalMeshLocalId::new(0)),
-            GeometryMeshInstanceAuthoring::new(NodeLocalId::new(1), LogicalMeshLocalId::new(0)),
-        ];
-        let scene = publish_static_scene(
-            &account,
-            NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
-            GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &instances),
-        );
-        let before = snapshot_digest(&scene);
-        let table = scene.base_pose_world_transforms(UNLIMITED, None).unwrap();
-        let instance = scene.mesh_instances().nth(1).unwrap();
-        let expected = Err(SpatialQueryError::PositionNumeric {
-            instance: instance.id(),
-            primitive: instance.mesh().primitives().nth(1).unwrap().id(),
-            vertex: 1,
-            source,
-        });
-        assert_eq!(table.instance_bounds(instance, UNLIMITED, None), expected);
-        assert_eq!(table.scene_bounds(&scene, UNLIMITED, None), expected);
-        assert_eq!(snapshot_digest(&scene), before);
-        drop(scene);
-        assert_eq!(account.snapshot().live_retained_bytes(), 0);
+            GeometryAttributeAuthoring::sparse_f64(
+                AttributeSemantic::Position,
+                AttributeDomain::Vertex,
+                3,
+                2,
+                &[1],
+                &failing_position,
+                &[0.0; 3],
+            ),
+            GeometryAttributeAuthoring::sparse_f64(
+                AttributeSemantic::Position,
+                AttributeDomain::Vertex,
+                3,
+                2,
+                &[0],
+                &[0.0; 3],
+                &failing_position,
+            ),
+        ] {
+            let attributes = [
+                GeometryAttributeAuthoring::f32(
+                    AttributeSemantic::Position,
+                    AttributeDomain::Vertex,
+                    3,
+                    &[0.0; 3],
+                    Presence::Absent,
+                ),
+                failing_attribute,
+            ];
+            let primitives: [_; 2] = std::array::from_fn(|index| {
+                GeometryPrimitiveAuthoring::new(
+                    GeometryTopologyAuthoring::Points,
+                    Presence::Absent,
+                    Presence::Absent,
+                    AuthoringRange::new(index as u32, 1),
+                )
+            });
+            let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 2))];
+            let instances = [
+                GeometryMeshInstanceAuthoring::new(NodeLocalId::new(0), LogicalMeshLocalId::new(0)),
+                GeometryMeshInstanceAuthoring::new(NodeLocalId::new(1), LogicalMeshLocalId::new(0)),
+            ];
+            let scene = publish_static_scene(
+                &account,
+                NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
+                GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &instances),
+            );
+            let before = snapshot_digest(&scene);
+            let table = scene.base_pose_world_transforms(UNLIMITED, None).unwrap();
+            let instance = scene.mesh_instances().nth(1).unwrap();
+            let expected = Err(SpatialQueryError::PositionNumeric {
+                instance: instance.id(),
+                primitive: instance.mesh().primitives().nth(1).unwrap().id(),
+                vertex: 1,
+                source,
+            });
+            assert_eq!(table.instance_bounds(instance, UNLIMITED, None), expected);
+            assert_eq!(table.scene_bounds(&scene, UNLIMITED, None), expected);
+            assert_eq!(snapshot_digest(&scene), before);
+            drop(scene);
+            assert_eq!(account.snapshot().live_retained_bytes(), 0);
+        }
     }
 }

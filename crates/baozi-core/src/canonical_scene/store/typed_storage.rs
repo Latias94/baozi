@@ -221,6 +221,11 @@ pub(super) enum StoredAttributePayload {
         values: TableRange<f32>,
         default: TableRange<f32>,
     },
+    SparseF64 {
+        indices: TableRange<u32>,
+        values: TableRange<f64>,
+        default: TableRange<f64>,
+    },
     SparseU32 {
         indices: TableRange<u32>,
         values: TableRange<u32>,

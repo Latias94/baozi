@@ -53,6 +53,7 @@ use crate::canonical_scene::store::schema::{
 };
 use crate::canonical_scene::store::typed_storage::SceneTables;
 use crate::canonical_scene::store::typed_storage::build::TypedStorageBuildControl;
+use crate::canonical_scene::store::typed_storage::edit::VectorValues;
 use crate::canonical_scene::store::typed_storage::edit::normals::{
     GeometryNormalsPlan, NormalWritePolicy, TangentPolicy,
 };
@@ -656,7 +657,7 @@ fn smooth_replacement_retains_distinct_parent_sets_and_compacts_removed_tangent_
     let geometry = GeometryNormalsPlan::try_new(
         source.scene.read_geometry(),
         0,
-        &GENERATED_NORMALS,
+        VectorValues::F32(&GENERATED_NORMALS),
         NormalWritePolicy::Replace,
         TangentPolicy::Remove,
         &mut Control::default(),
@@ -750,7 +751,7 @@ fn adding_smooth_normals_reindexes_following_owners_without_copying_metadata_pay
     let geometry = GeometryNormalsPlan::try_new(
         source.scene.read_geometry(),
         0,
-        &GENERATED_NORMALS,
+        VectorValues::F32(&GENERATED_NORMALS),
         NormalWritePolicy::Add,
         TangentPolicy::Reject,
         &mut Control::default(),
@@ -838,7 +839,7 @@ fn flat_replacement_excludes_smoothing_group_and_unrelated_attribute_provenance(
     let geometry = GeometryNormalsPlan::try_new(
         source.scene.read_geometry(),
         0,
-        &GENERATED_NORMALS,
+        VectorValues::F32(&GENERATED_NORMALS),
         NormalWritePolicy::Replace,
         TangentPolicy::Reject,
         &mut Control::default(),

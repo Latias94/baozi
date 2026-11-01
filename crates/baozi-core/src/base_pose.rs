@@ -6,17 +6,26 @@ use baozi_operation::CancellationToken;
 use thiserror::Error;
 
 use crate::{
-    Aabb, AttributeData, AttributeSemanticRef, AuthoredTransform, Mat4, MeshInstanceId,
-    MeshInstanceRef, NodeId, NumericConversionError, PrimitiveId, SceneEntityKind,
-    SceneGenerationId, SceneLookupError, ValidatedScene, Vec3,
+    Aabb, AttributeData, AttributeSemanticRef, AuthoredTransform, MeshInstanceId, MeshInstanceRef,
+    NodeId, NumericConversionError, PrimitiveId, SceneEntityKind, SceneGenerationId,
+    SceneLookupError, ValidatedScene,
 };
+
+const IDENTITY: [[f64; 4]; 4] = [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+];
 
 /// Explicit bounds for a derived spatial query, independent of Scene storage accounting.
 ///
 /// Work counts initialized transform slots, evaluated nodes, visited instances, effective morph
 /// weights, primitives, inspected attribute descriptors, and transformed logical Position elements.
-/// Each unit includes its fixed-size arithmetic. Bytes bound the capacity of the owned transform
-/// table. Traversal needs no separate queue; bounds queries allocate no heap storage.
+/// Each unit includes its fixed-size F64 arithmetic. Bytes bound the actual capacity of the owned
+/// transform table at `size_of::<[[f64; 4]; 4]>()` bytes per slot, excluding its inline owner.
+/// Traversal needs no separate queue; bounds queries allocate no heap storage or dense copies of
+/// sparse attributes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpatialQueryLimits {
     max_work: u64,
@@ -96,12 +105,14 @@ pub enum SpatialQueryError {
 /// existing node forest once; lookup is O(1). This table may outlive the Scene. After any Scene edit
 /// publishes a new generation, derive a new table for queries on that output.
 ///
-/// Matrix/TRS arithmetic uses F64 intermediates, with a single F32 rounding per local-matrix
-/// component and then per world-matrix component at each node. A nonfinite result or a nonzero
-/// F64 component rounding to zero is rejected. F64 arithmetic is not exact real arithmetic.
+/// Authored matrix/TRS components remain F32 and widen exactly on read. Local-matrix derivation,
+/// parent composition and point transformation all compute and retain F64, with no F32 rounding.
+/// Nonfinite arithmetic and multiplication of nonzero operands rounding to zero are rejected;
+/// finite F64 subnormals and exact cancellation to zero are accepted. F64 arithmetic is not exact
+/// real arithmetic and does not preserve every residual smaller than an F64 result's precision.
 pub struct BasePoseWorldTransforms {
     generation: SceneGenerationId,
-    transforms: Vec<Mat4>,
+    transforms: Vec<[[f64; 4]; 4]>,
 }
 
 impl fmt::Debug for BasePoseWorldTransforms {
@@ -122,8 +133,15 @@ impl BasePoseWorldTransforms {
         self.transforms.len()
     }
 
+    /// Actual owned transform capacity in bytes, excluding this table's inline fields.
+    pub fn allocated_bytes(&self) -> usize {
+        self.transforms.capacity() * size_of::<[[f64; 4]; 4]>()
+    }
+
     /// Returns a node's local-to-world matrix in O(1), checking generation and range.
-    pub fn node_transform(&self, node: NodeId) -> Result<Mat4, SceneLookupError> {
+    ///
+    /// The array is column-major with column-vector semantics: `p_world = matrix * p_local`.
+    pub fn node_transform(&self, node: NodeId) -> Result<[[f64; 4]; 4], SceneLookupError> {
         self.check_generation(SceneEntityKind::Node, node.generation())?;
         self.transforms
             .get(node.index() as usize)
@@ -139,8 +157,9 @@ impl BasePoseWorldTransforms {
     /// Includes unreferenced vertices and implicit sparse defaults, independently of topology or
     /// index-stream emptiness. Transforms actual positions, so shear does not inflate the result
     /// by introducing nonexistent local-box corners. Empty geometry returns `None`; a point has
-    /// a zero-size `Some(Aabb)`. The AABB encloses the F32-rounded world vertices defined by this
-    /// query, without an additional real-arithmetic interval or rasterization guarantee.
+    /// a zero-size `Some(Aabb)`. F32 Position widens exactly; F64 Position retains its width.
+    /// The AABB encloses computed F64 world vertices, without an additional real-arithmetic
+    /// interval, outward rounding or rasterization guarantee.
     ///
     /// Any skin or nonzero effective morph weight is rejected, including on empty geometry.
     /// Instance morph overrides take precedence over mesh defaults. Clips may be present; only
@@ -239,7 +258,7 @@ impl BasePoseWorldTransforms {
                 // Central validation permits missing Position only for zero vertices.
                 continue;
             };
-            let mut include = |vertex: usize, position: &[f32]| {
+            let mut include = |vertex: usize, position: [f64; 3]| {
                 query.step()?;
                 let point = transform_point(world, position).map_err(|source| {
                     SpatialQueryError::PositionNumeric {
@@ -255,7 +274,15 @@ impl BasePoseWorldTransforms {
             match positions.data() {
                 AttributeData::DenseF32 { values, .. } => {
                     for (vertex, position) in values.chunks_exact(3).enumerate() {
-                        include(vertex, position)?;
+                        include(
+                            vertex,
+                            [position[0], position[1], position[2]].map(f64::from),
+                        )?;
+                    }
+                }
+                AttributeData::DenseF64 { values, .. } => {
+                    for (vertex, position) in values.chunks_exact(3).enumerate() {
+                        include(vertex, [position[0], position[1], position[2]])?;
                     }
                 }
                 AttributeData::SparseF32 {
@@ -274,10 +301,32 @@ impl BasePoseWorldTransforms {
                         } else {
                             default
                         };
-                        include(vertex as usize, position)?;
+                        include(
+                            vertex as usize,
+                            [position[0], position[1], position[2]].map(f64::from),
+                        )?;
                     }
                 }
-                _ => unreachable!("validated Position has F32x3 storage"),
+                AttributeData::SparseF64 {
+                    logical_count,
+                    indices,
+                    values,
+                    default,
+                    ..
+                } => {
+                    let mut explicit = 0;
+                    for vertex in 0..logical_count {
+                        let position = if indices.get(explicit) == Some(&vertex) {
+                            let start = explicit * 3;
+                            explicit += 1;
+                            &values[start..start + 3]
+                        } else {
+                            default
+                        };
+                        include(vertex as usize, [position[0], position[1], position[2]])?;
+                    }
+                }
+                _ => unreachable!("validated Position has F32x3 or F64x3 storage"),
             }
         }
         Ok(bounds)
@@ -291,6 +340,10 @@ impl ValidatedScene {
     /// source node order. The internal synthetic root contributes identity. The query preserves
     /// the Scene and its generation. Cancellation is checked before allocation, once per work
     /// unit, and before returning; the complete table is discarded on any failure.
+    ///
+    /// Construction charges two work units per node and the actual F64 transform capacity in
+    /// bytes. The requested capacity is checked before allocation and the allocator's returned
+    /// capacity before initialization. No traversal stack or attribute copies are allocated.
     pub fn base_pose_world_transforms(
         &self,
         limits: SpatialQueryLimits,
@@ -311,7 +364,7 @@ impl ValidatedScene {
         query.bytes(table_bytes(transforms.capacity())?)?;
         for _ in 0..count {
             query.step()?;
-            transforms.push(Mat4::IDENTITY);
+            transforms.push(IDENTITY);
         }
         for root in self.roots() {
             query.step()?;
@@ -347,7 +400,7 @@ impl ValidatedScene {
 
 fn table_bytes(transforms: usize) -> Result<u64, SpatialQueryError> {
     let bytes = transforms
-        .checked_mul(size_of::<Mat4>())
+        .checked_mul(size_of::<[[f64; 4]; 4]>())
         .ok_or(SpatialQueryError::SizeOverflow)?;
     u64::try_from(bytes).map_err(|_| SpatialQueryError::SizeOverflow)
 }
@@ -412,72 +465,75 @@ fn check_limit(
     Ok(())
 }
 
-fn round(value: f64) -> Result<f32, NumericConversionError> {
-    let result = value as f32;
-    if !result.is_finite() {
+fn checked_finite(value: f64) -> Result<f64, NumericConversionError> {
+    if !value.is_finite() {
         return Err(NumericConversionError::NonFiniteOutput);
     }
-    if value != 0.0 && result == 0.0 {
-        return Err(NumericConversionError::UnderflowToZero);
-    }
-    Ok(result)
+    Ok(value)
 }
 
-fn checked_local(transform: AuthoredTransform) -> Result<Mat4, NumericConversionError> {
+fn checked_product(left: f64, right: f64) -> Result<f64, NumericConversionError> {
+    let product = checked_finite(left * right)?;
+    if left != 0.0 && right != 0.0 && product == 0.0 {
+        return Err(NumericConversionError::UnderflowToZero);
+    }
+    Ok(product)
+}
+
+fn checked_local(transform: AuthoredTransform) -> Result<[[f64; 4]; 4], NumericConversionError> {
     if let Some(matrix) = transform.authored_matrix() {
-        return Ok(matrix);
+        return Ok(matrix.cols.map(|column| column.map(f64::from)));
     }
     let trs = transform
         .authored_trs()
         .expect("authored transform is matrix or TRS");
     let columns = crate::math::trs_columns_f64(trs.translation(), trs.rotation(), trs.scale());
-    let mut matrix = Mat4::IDENTITY;
-    for (output, input) in matrix
-        .cols
-        .iter_mut()
-        .flatten()
-        .zip(columns.iter().flatten())
-    {
-        *output = round(*input)?;
+    // Every factor is authored F32, so this fixed TRS expression cannot underflow F64.
+    for &component in columns.iter().flatten() {
+        checked_finite(component)?;
     }
-    Ok(matrix)
+    Ok(columns)
 }
 
-fn compose(parent: Mat4, local: Mat4) -> Result<Mat4, NumericConversionError> {
-    let mut world = Mat4::IDENTITY;
-    for (column, output) in world.cols.iter_mut().enumerate() {
+fn compose(
+    parent: [[f64; 4]; 4],
+    local: [[f64; 4]; 4],
+) -> Result<[[f64; 4]; 4], NumericConversionError> {
+    let mut world = IDENTITY;
+    for (column, output) in world.iter_mut().enumerate() {
         for (row, cell) in output.iter_mut().take(3).enumerate() {
             let mut sum = 0.0;
             for inner in 0..4 {
-                sum += f64::from(parent.cols[inner][row]) * f64::from(local.cols[column][inner]);
+                let product = checked_product(parent[inner][row], local[column][inner])?;
+                sum = checked_finite(sum + product)?;
             }
-            *cell = round(sum)?;
+            *cell = sum;
         }
     }
     Ok(world)
 }
 
-fn transform_point(matrix: Mat4, position: &[f32]) -> Result<Vec3, NumericConversionError> {
+fn transform_point(
+    matrix: [[f64; 4]; 4],
+    position: [f64; 3],
+) -> Result<[f64; 3], NumericConversionError> {
     let mut output = [0.0; 3];
     for (row, cell) in output.iter_mut().enumerate() {
         let mut sum = 0.0;
         for (column, &value) in position.iter().enumerate() {
-            sum += f64::from(matrix.cols[column][row]) * f64::from(value);
+            sum = checked_finite(sum + checked_product(matrix[column][row], value)?)?;
         }
-        sum += f64::from(matrix.cols[3][row]);
-        *cell = round(sum)?;
+        *cell = checked_finite(sum + matrix[3][row])?;
     }
-    Ok(Vec3::new(output[0], output[1], output[2]))
+    Ok(output)
 }
 
-fn include_point(bounds: &mut Option<Aabb>, point: Vec3) {
+fn include_point(bounds: &mut Option<Aabb>, point: [f64; 3]) {
     if let Some(bounds) = bounds {
-        bounds.min.x = bounds.min.x.min(point.x);
-        bounds.min.y = bounds.min.y.min(point.y);
-        bounds.min.z = bounds.min.z.min(point.z);
-        bounds.max.x = bounds.max.x.max(point.x);
-        bounds.max.y = bounds.max.y.max(point.y);
-        bounds.max.z = bounds.max.z.max(point.z);
+        for (axis, value) in point.into_iter().enumerate() {
+            bounds.min[axis] = bounds.min[axis].min(value);
+            bounds.max[axis] = bounds.max[axis].max(value);
+        }
     } else {
         *bounds = Some(Aabb {
             min: point,

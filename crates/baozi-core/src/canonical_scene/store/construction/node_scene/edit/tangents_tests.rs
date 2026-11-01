@@ -12,6 +12,7 @@ use crate::canonical_scene::store::construction::node_scene::{
     NodeSceneSuccessParts, NodeSceneTestTransaction,
 };
 use crate::canonical_scene::store::production::*;
+use crate::canonical_scene::store::typed_storage::edit::VectorValues;
 use crate::canonical_scene::store::typed_storage::edit::tangents::GeometryTangentsPlan;
 use crate::extension::ExtensionValueRef;
 use crate::identity::SceneGenerationId;
@@ -215,7 +216,7 @@ fn retained_tangent_ancestry_uses_only_the_selected_domains_and_maps_all_owners(
         let geometry = GeometryTangentsPlan::try_new(
             source.scene.read_geometry(),
             0,
-            &TANGENTS,
+            VectorValues::F32(&TANGENTS),
             had_tangent,
             AttributeDomain::Vertex,
             7,

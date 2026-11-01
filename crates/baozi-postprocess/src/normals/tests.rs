@@ -1,6 +1,14 @@
 use std::convert::Infallible;
 
 use super::{Buffer, Error, Input, Mode, VertexIds, Workspace, face_cross, generate, unit};
+use crate::precision::Estimate3;
+
+fn cross_slot(value: f64) -> Estimate3 {
+    Estimate3 {
+        value: [value; 3],
+        abs_error: [0.0; 3],
+    }
+}
 
 const POSITIONS: [[f32; 3]; 4] = [
     [0.0, 0.0, 0.0],
@@ -29,7 +37,7 @@ fn run(input: Input<'_>, mode: Mode, cached: bool) -> Result<Vec<[f32; 3]>, Erro
     let corners = input.corner_count();
     let mut output = vec![[f32::NAN; 3]; corners];
     let mut order = vec![usize::MAX; if mode == Mode::Smooth { corners } else { 0 }];
-    let mut crosses = cached.then(|| vec![[f64::NAN; 3]; corners / 3]);
+    let mut crosses = cached.then(|| vec![cross_slot(f64::NAN); corners / 3]);
     generate(
         input,
         mode,
@@ -236,7 +244,7 @@ fn nonindexed_corners_have_distinct_vertex_identity() {
     ];
     for groups in [None, Some([7, 7].as_slice())] {
         let input = Input {
-            positions: &positions,
+            positions: positions.as_slice(),
             vertex_ids: VertexIds::NonIndexed,
             smoothing_groups: groups,
         };
@@ -395,7 +403,7 @@ fn cancelling_face_sums_are_errors_without_a_fallback_normal() {
         for cached in [false, true] {
             let mut output = [[73.0; 3]; 6];
             let mut order = [usize::MAX; 6];
-            let mut crosses = [[f64::NAN; 3]; 2];
+            let mut crosses = [cross_slot(f64::NAN); 2];
             assert_eq!(
                 generate(
                     indexed(&POSITIONS, &ids, groups),
@@ -480,7 +488,7 @@ fn output_and_workspace_shapes_are_exact() {
             };
             let mut output = vec![[73.0; 3]; output_count];
             let mut order = vec![usize::MAX; order_count];
-            let mut crosses = vec![[73.0; 3]; cross_count];
+            let mut crosses = vec![cross_slot(73.0); cross_count];
             assert_eq!(
                 generate(
                     indexed(&POSITIONS, &IDS, None),
@@ -504,7 +512,11 @@ fn output_and_workspace_shapes_are_exact() {
             );
             assert_eq!(output, vec![[73.0; 3]; output_count]);
             assert_eq!(order, vec![usize::MAX; order_count]);
-            assert_eq!(crosses, vec![[73.0; 3]; cross_count]);
+            assert!(
+                crosses
+                    .iter()
+                    .all(|cross| { cross.value == [73.0; 3] && cross.abs_error == [0.0; 3] })
+            );
         }
     }
 }
@@ -710,7 +722,7 @@ fn every_control_threshold_stops_immediately_in_all_paths() {
         indexed(&POSITIONS, &IDS, Some(&[0, 7])),
         indexed(&POSITIONS, &IDS, Some(&[7, 9])),
         Input {
-            positions: &nonindexed,
+            positions: nonindexed.as_slice(),
             vertex_ids: VertexIds::NonIndexed,
             smoothing_groups: Some(&[7, 7]),
         },
@@ -721,7 +733,7 @@ fn every_control_threshold_stops_immediately_in_all_paths() {
                 let corners = input.corner_count();
                 let mut output = vec![[73.0; 3]; corners];
                 let mut order = vec![usize::MAX; if mode == Mode::Smooth { corners } else { 0 }];
-                let mut crosses = vec![[73.0; 3]; corners / 3];
+                let mut crosses = vec![cross_slot(73.0); corners / 3];
                 let mut total = 0;
                 generate(
                     input,
@@ -742,7 +754,7 @@ fn every_control_threshold_stops_immediately_in_all_paths() {
                 for fail_at in 1..=total + 1 {
                     output.fill([73.0; 3]);
                     order.fill(usize::MAX);
-                    crosses.fill([73.0; 3]);
+                    crosses.fill(cross_slot(73.0));
                     let mut calls = 0;
                     let result = generate(
                         input,
@@ -784,4 +796,163 @@ fn every_control_threshold_stops_immediately_in_all_paths() {
             }
         }
     }
+}
+
+fn run_f64(
+    positions: &[[f64; 3]],
+    ids: &[u32],
+    mode: Mode,
+    cached: bool,
+) -> Result<Vec<[f64; 3]>, Error<Infallible>> {
+    let mut output = vec![[73.0; 3]; ids.len()];
+    let mut order = vec![usize::MAX; if mode == Mode::Smooth { ids.len() } else { 0 }];
+    let mut crosses = cached.then(|| vec![cross_slot(f64::NAN); ids.len() / 3]);
+    super::generate_into(
+        Input {
+            positions,
+            vertex_ids: VertexIds::Indexed(ids),
+            smoothing_groups: None,
+        },
+        mode,
+        super::Output::F64(&mut output),
+        Workspace {
+            corner_order: &mut order,
+            face_crosses: crosses.as_deref_mut(),
+        },
+        || Ok::<_, Infallible>(()),
+    )?;
+    Ok(output)
+}
+
+#[test]
+fn f64_finite_validation_includes_unused_logical_vertices() {
+    let base = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [7.0; 3]];
+    for component in 0..3 {
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut positions = base;
+            positions[3][component] = invalid;
+            for mode in [Mode::Flat, Mode::Smooth] {
+                for cached in [false, true] {
+                    assert_eq!(
+                        run_f64(&positions, &[0, 1, 2], mode, cached),
+                        Err(Error::NonFinitePosition {
+                            vertex: 3,
+                            component
+                        })
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn f64_cached_and_recomputed_cross_bounds_reject_the_same_smooth_cancellation() {
+    let positions = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+    for cached in [false, true] {
+        assert_eq!(
+            run_f64(&positions, &[1, 2, 0, 0, 2, 1], Mode::Smooth, cached),
+            Err(Error::SmoothNumerical {
+                vertex: 0,
+                group: None,
+                corner: 2,
+                issue: crate::GeometryNumericIssue::UncertainDirection,
+            })
+        );
+    }
+}
+
+#[test]
+fn f64_cache_and_recomputation_keep_area_weights_and_stop_at_every_callback() {
+    let positions = [
+        [0.0; 3],
+        [0.5, 0.0, 0.0],
+        [0.0, 0.5, 0.0],
+        [0.0, 0.0, 0.25],
+        [0.25, 0.0, 0.0],
+    ];
+    let ids = [0, 1, 2, 0, 3, 4];
+    let expected = run_f64(&positions, &ids, Mode::Smooth, true).unwrap();
+    assert_eq!(
+        run_f64(&positions, &ids, Mode::Smooth, false).unwrap(),
+        expected
+    );
+    assert!((expected[0][1] - 1.0 / 17.0_f64.sqrt()).abs() <= 8.0 * f64::EPSILON);
+    assert!((expected[0][2] - 4.0 / 17.0_f64.sqrt()).abs() <= 8.0 * f64::EPSILON);
+    for mode in [Mode::Flat, Mode::Smooth] {
+        for cached in [false, true] {
+            let run_at = |fail_at| {
+                let mut output = [[73.0; 3]; 6];
+                let mut order = [usize::MAX; 6];
+                let mut crosses = [cross_slot(f64::NAN); 2];
+                let mut calls = 0;
+                let result = super::generate_into(
+                    Input {
+                        positions: positions.as_slice(),
+                        vertex_ids: VertexIds::Indexed(&ids),
+                        smoothing_groups: None,
+                    },
+                    mode,
+                    super::Output::F64(&mut output),
+                    Workspace {
+                        corner_order: if mode == Mode::Smooth {
+                            &mut order
+                        } else {
+                            &mut []
+                        },
+                        face_crosses: cached.then_some(&mut crosses),
+                    },
+                    || {
+                        calls += 1;
+                        if calls == fail_at { Err(calls) } else { Ok(()) }
+                    },
+                );
+                (result, calls)
+            };
+            let (baseline, total) = run_at(usize::MAX);
+            baseline.unwrap();
+            for fail_at in 1..=total {
+                let (result, calls) = run_at(fail_at);
+                assert_eq!(calls, fail_at);
+                assert_eq!(result, Err(Error::Control(fail_at)));
+            }
+        }
+    }
+}
+
+#[test]
+fn sparse_position_search_charges_exact_comparisons_and_cancels_before_reading() {
+    let indices = [1, 3, 5, 7, 9, 11, 13];
+    for (vertex, expected, comparisons) in [
+        (7, Some(3), 1),
+        (3, Some(1), 2),
+        (1, Some(0), 3),
+        (13, Some(6), 3),
+        (0, None, 3),
+        (14, None, 3),
+    ] {
+        let mut calls = 0;
+        let actual = super::sparse_index(&indices, vertex, &mut || {
+            calls += 1;
+            Ok::<_, usize>(())
+        })
+        .unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(calls, comparisons);
+        for stop in 1..=comparisons {
+            let mut calls = 0;
+            assert_eq!(
+                super::sparse_index(&indices, vertex, &mut || {
+                    calls += 1;
+                    if calls == stop { Err(stop) } else { Ok(()) }
+                }),
+                Err(Error::Control(stop))
+            );
+            assert_eq!(calls, stop);
+        }
+    }
+    let actual = super::sparse_index::<Infallible>(&[], 0, &mut || {
+        panic!("empty lookup has no comparisons")
+    });
+    assert_eq!(actual, Ok(None));
 }

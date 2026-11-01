@@ -77,7 +77,7 @@ use crate::canonical_scene::store::typed_storage::edit::space_nodes::NodeSpacePl
 use crate::canonical_scene::store::typed_storage::edit::space_spatial::SpatialSpacePlanError;
 use crate::canonical_scene::store::typed_storage::edit::tangents::GeometryTangentsPlan;
 use crate::canonical_scene::store::typed_storage::edit::{
-    GeometryTriangulationPlan, TriangulationOrigins,
+    GeometryTriangulationPlan, TriangulationOrigins, VectorValues,
 };
 use crate::geometry::TopologyKind;
 use crate::identity::{PrimitiveId, SceneGenerationId};
@@ -333,7 +333,7 @@ where
 #[derive(Clone, Copy)]
 pub struct SceneNormalReplacement<'a> {
     target: PrimitiveId,
-    normals: &'a [[f32; 3]],
+    normals: VectorValues<'a, 3>,
     replace_existing: bool,
     remove_tangents: bool,
     smooth: bool,
@@ -343,7 +343,7 @@ pub struct SceneNormalReplacement<'a> {
 impl<'a> SceneNormalReplacement<'a> {
     pub const fn new(
         target: PrimitiveId,
-        normals: &'a [[f32; 3]],
+        normals: VectorValues<'a, 3>,
         replace_existing: bool,
         remove_tangents: bool,
         smooth: bool,
@@ -367,7 +367,7 @@ impl<'a> SceneNormalReplacement<'a> {
 #[derive(Clone, Copy)]
 pub struct SceneTangentReplacement<'a> {
     target: PrimitiveId,
-    values: &'a [[f32; 4]],
+    values: VectorValues<'a, 4>,
     had_tangent: bool,
     normal_domain: AttributeDomain,
     uv_set: u32,
@@ -380,7 +380,7 @@ impl<'a> SceneTangentReplacement<'a> {
     #[allow(clippy::too_many_arguments)]
     pub const fn new(
         target: PrimitiveId,
-        values: &'a [[f32; 4]],
+        values: VectorValues<'a, 4>,
         had_tangent: bool,
         normal_domain: AttributeDomain,
         uv_set: u32,
@@ -635,6 +635,10 @@ fn map_animation_space(error: AnimationSpacePlanError<StoreRuntimeError>) -> Sce
 
 #[derive(Debug, Error)]
 pub enum SceneEditRejection {
+    #[error("the generated field would narrow its {semantic:?} precision dependency")]
+    PrecisionLoss {
+        semantic: crate::attribute::AttributeSemanticKind,
+    },
     #[error("the geometry edit invalidates authored {semantic:?} morph deltas")]
     MorphDependency {
         semantic: crate::deform::MorphDeltaSemantic,
@@ -842,6 +846,12 @@ impl<'a> SceneEditTransaction<'a> {
                     },
                     semantic,
                 )?;
+                check_derivation_width(
+                    input.as_node_scene().read_geometry(),
+                    target,
+                    EditRequest::Normals(replacement),
+                    semantic,
+                )?;
                 let plan = GeometryNormalsPlan::try_new(
                     input.as_node_scene().read_geometry(),
                     target,
@@ -879,6 +889,12 @@ impl<'a> SceneEditTransaction<'a> {
                     input.as_node_scene().read_deformation(),
                     target,
                     |_| true,
+                    semantic,
+                )?;
+                check_derivation_width(
+                    input.as_node_scene().read_geometry(),
+                    target,
+                    EditRequest::Tangents(replacement),
                     semantic,
                 )?;
                 let plan = GeometryTangentsPlan::try_new(
@@ -1172,6 +1188,61 @@ fn check_morph_dependencies<C: TypedStorageBuildControl<Error = StoreRuntimeErro
                     semantic: delta.semantic,
                 });
             }
+        }
+    }
+    Ok(())
+}
+
+/// Candidate output must retain the widest dependency or replaced field's precision.
+fn check_derivation_width<C: TypedStorageBuildControl<Error = StoreRuntimeError>>(
+    geometry: &crate::canonical_scene::store::typed_storage::GeometryStorage,
+    target: usize,
+    replacement: EditRequest<'_>,
+    control: &mut C,
+) -> Result<(), SceneEditRejection> {
+    let output_is_f64 = match replacement {
+        EditRequest::Normals(replacement) => replacement.normals.is_f64(),
+        EditRequest::Tangents(replacement) => replacement.values.is_f64(),
+        _ => return Ok(()),
+    };
+    let attributes = control.run_unit(|| {
+        geometry
+            .primitives
+            .get(target)
+            .and_then(|primitive| primitive.attributes.get(&geometry.attributes))
+            .ok_or(SceneEditCompileError::InvalidSource)
+    })??;
+    for attribute in attributes {
+        let narrowed = control.run_unit(|| {
+            use crate::attribute::AttributeSemanticKind as K;
+            use crate::canonical_scene::store::typed_storage::StoredAttributePayload as P;
+            use crate::canonical_scene::store::typed_storage::StoredAttributeSemantic as S;
+            let dependency = match replacement {
+                EditRequest::Normals(replacement) => match attribute.semantic {
+                    S::Position => Some(K::Position),
+                    S::Normal if replacement.replace_existing => Some(K::Normal),
+                    _ => None,
+                },
+                EditRequest::Tangents(replacement) => match attribute.semantic {
+                    S::Position => Some(K::Position),
+                    S::Normal if attribute.domain == replacement.normal_domain => Some(K::Normal),
+                    S::Texcoord(set)
+                        if set == replacement.uv_set
+                            && attribute.domain == replacement.uv_domain =>
+                    {
+                        Some(K::Texcoord)
+                    }
+                    S::Tangent if replacement.had_tangent => Some(K::Tangent),
+                    _ => None,
+                },
+                _ => None,
+            };
+            dependency.filter(|_| {
+                !output_is_f64 && matches!(attribute.payload, P::DenseF64(_) | P::SparseF64 { .. })
+            })
+        })?;
+        if let Some(semantic) = narrowed {
+            return Err(SceneEditRejection::PrecisionLoss { semantic });
         }
     }
     Ok(())

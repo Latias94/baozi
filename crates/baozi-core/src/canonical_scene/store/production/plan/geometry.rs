@@ -432,6 +432,7 @@ impl<'input> ValidatedGeometryAttributeView<'_, 'input> {
             | GeometryAttributePayloadAuthoring::DenseU32 { lanes, .. }
             | GeometryAttributePayloadAuthoring::DenseI32 { lanes, .. }
             | GeometryAttributePayloadAuthoring::SparseF32 { lanes, .. }
+            | GeometryAttributePayloadAuthoring::SparseF64 { lanes, .. }
             | GeometryAttributePayloadAuthoring::SparseU32 { lanes, .. }
             | GeometryAttributePayloadAuthoring::SparseI32 { lanes, .. } => lanes,
         }
@@ -1937,6 +1938,23 @@ where
             expected_cardinality,
             context,
         ),
+        GeometryAttributePayloadAuthoring::SparseF64 {
+            lanes,
+            logical_count,
+            indices,
+            values,
+            default,
+        } => validate_sparse_attribute(
+            attribute_index,
+            attribute,
+            lanes,
+            logical_count,
+            indices,
+            values,
+            default,
+            expected_cardinality,
+            context,
+        ),
         GeometryAttributePayloadAuthoring::SparseU32 {
             lanes,
             logical_count,
@@ -1995,6 +2013,19 @@ impl GeometryScalar for f32 {
         context: &mut GeometryValidationContext<'_, C>,
     ) -> GeometryValidationResult<(), C> {
         inspect_f32_values_from(attribute_index, values, scalar_offset, context)
+    }
+}
+
+impl GeometryScalar for f64 {
+    const KIND: GeometryAttributeScalarKind = GeometryAttributeScalarKind::F64;
+
+    fn inspect<C: CanonicalAuthoringControl>(
+        attribute_index: usize,
+        values: &[Self],
+        scalar_offset: usize,
+        context: &mut GeometryValidationContext<'_, C>,
+    ) -> GeometryValidationResult<(), C> {
+        inspect_f64_values_from(attribute_index, values, scalar_offset, context)
     }
 }
 
@@ -2117,10 +2148,13 @@ where
             )?;
         }
         GeometryAttributeScalarKind::F64 => {
-            return Err(GeometryAuthoringSemanticError::AttributeSchema {
-                attribute: attribute_index,
-            }
-            .into());
+            context.add_payload(
+                0,
+                canonical_scalar_count,
+                index_scalar_count,
+                0,
+                payload_block_count,
+            )?;
         }
     }
 
@@ -2206,6 +2240,7 @@ fn attribute_element_count(
             "i32 attribute elements",
         ),
         GeometryAttributePayloadAuthoring::SparseF32 { logical_count, .. }
+        | GeometryAttributePayloadAuthoring::SparseF64 { logical_count, .. }
         | GeometryAttributePayloadAuthoring::SparseU32 { logical_count, .. }
         | GeometryAttributePayloadAuthoring::SparseI32 { logical_count, .. } => Ok(logical_count),
     }
@@ -2308,6 +2343,21 @@ fn validate_attribute_authored_shape(
             attribute_index,
             attribute,
             GeometryAttributeScalarKind::F32,
+            lanes,
+            indices,
+            values.len(),
+            default.len(),
+        )?,
+        GeometryAttributePayloadAuthoring::SparseF64 {
+            lanes,
+            indices,
+            values,
+            default,
+            ..
+        } => validate_sparse_attribute_authored_shape(
+            attribute_index,
+            attribute,
+            GeometryAttributeScalarKind::F64,
             lanes,
             indices,
             values.len(),
@@ -2442,31 +2492,33 @@ fn validate_attribute_schema(
         });
     }
 
+    let floating_geometry = matches!(
+        scalar_kind,
+        GeometryAttributeScalarKind::F32 | GeometryAttributeScalarKind::F64
+    );
     let valid = match kind {
         AttributeSemanticKind::Position => {
-            attribute.domain() == AttributeDomain::Vertex
-                && scalar_kind == GeometryAttributeScalarKind::F32
-                && lanes == 3
+            attribute.domain() == AttributeDomain::Vertex && floating_geometry && lanes == 3
         }
         AttributeSemanticKind::Normal => {
             matches!(
                 attribute.domain(),
                 AttributeDomain::Vertex | AttributeDomain::Corner
-            ) && scalar_kind == GeometryAttributeScalarKind::F32
+            ) && floating_geometry
                 && lanes == 3
         }
         AttributeSemanticKind::Tangent => {
             matches!(
                 attribute.domain(),
                 AttributeDomain::Vertex | AttributeDomain::Corner
-            ) && scalar_kind == GeometryAttributeScalarKind::F32
+            ) && floating_geometry
                 && lanes == 4
         }
         AttributeSemanticKind::Texcoord => {
             matches!(
                 attribute.domain(),
                 AttributeDomain::Vertex | AttributeDomain::Corner
-            ) && scalar_kind == GeometryAttributeScalarKind::F32
+            ) && floating_geometry
                 && (1..=3).contains(&lanes)
         }
         AttributeSemanticKind::Color => {
@@ -2547,11 +2599,28 @@ fn inspect_f64_values<C>(
 where
     C: CanonicalAuthoringControl,
 {
-    for (scalar, value) in values.iter().enumerate() {
+    inspect_f64_values_from(attribute_index, values, 0, context)
+}
+
+fn inspect_f64_values_from<C>(
+    attribute_index: usize,
+    values: &[f64],
+    scalar_offset: usize,
+    context: &mut GeometryValidationContext<'_, C>,
+) -> GeometryValidationResult<(), C>
+where
+    C: CanonicalAuthoringControl,
+{
+    for (relative_scalar, value) in values.iter().enumerate() {
         context.run_unit(SceneValidationWork::PayloadCell, || {
             if value.is_finite() {
                 Ok(())
             } else {
+                let scalar = scalar_offset.checked_add(relative_scalar).ok_or(
+                    GeometryAuthoringSemanticError::AccountingOverflow {
+                        dimension: "attribute scalar index",
+                    },
+                )?;
                 Err(GeometryAuthoringSemanticError::NonFiniteAttributeValue {
                     attribute: attribute_index,
                     scalar,

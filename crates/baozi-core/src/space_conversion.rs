@@ -342,6 +342,40 @@ impl SpaceConversion {
         round_component(f64::from(value) * self.unit_ratio, value != 0.0)
     }
 
+    /// Applies sQ at the retained F64 width, without projecting through F32.
+    pub(crate) fn point_f64(&self, value: [f64; 3]) -> Result<[f64; 3], NumericConversionError> {
+        let mut output = self.direction_f64(value)?;
+        for component in &mut output {
+            let scaled = *component * self.unit_ratio;
+            if !scaled.is_finite() {
+                return Err(NumericConversionError::NonFiniteOutput);
+            }
+            if *component != 0.0 && scaled == 0.0 {
+                return Err(NumericConversionError::UnderflowToZero);
+            }
+            *component = scaled;
+        }
+        Ok(output)
+    }
+
+    /// A signed axis permutation preserves every finite F64 bit except the requested zero sign.
+    pub(crate) fn direction_f64(
+        &self,
+        value: [f64; 3],
+    ) -> Result<[f64; 3], NumericConversionError> {
+        if !value.into_iter().all(f64::is_finite) {
+            return Err(NumericConversionError::NonFiniteOutput);
+        }
+        Ok(std::array::from_fn(|axis| {
+            let component = value[self.source_axes[axis]];
+            if self.negative[axis] {
+                -component
+            } else {
+                component
+            }
+        }))
+    }
+
     /// Composes the intrinsic reference map on the left: B' = Q B.
     /// Reflected frames keep all three axes rather than reconstructing one by cross product.
     pub(crate) fn local_axes(&self, value: crate::LocalAxes) -> Option<crate::LocalAxes> {

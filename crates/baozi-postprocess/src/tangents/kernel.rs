@@ -28,6 +28,18 @@ pub enum TangentIssue {
     NonFiniteInput { corner: usize },
     /// Calculation or final F32 rounding cannot supply a valid unit tangent.
     InvalidOutput { corner: usize },
+    /// A retained source component cannot use the primitive's common binary scale.
+    /// `element == None` identifies the implicit sparse default tuple.
+    Scaling {
+        semantic: baozi_core::AttributeSemanticKind,
+        element: Option<usize>,
+        issue: crate::GeometryNumericIssue,
+    },
+    /// F64 conditioning could not certify a finite frame.
+    Numerical {
+        corner: usize,
+        issue: crate::GeometryNumericIssue,
+    },
 }
 
 /// Returns one dense F32x4 tangent for each original corner of a triangle.
@@ -163,7 +175,7 @@ fn position_less(left: [f32; 3], right: [f32; 3]) -> bool {
 }
 
 /// Evaluates (x1 - x0)(y2 - y0) - (y1 - y0)(x2 - x0).
-fn determinant(x: [f32; 3], y: [f32; 3]) -> f64 {
+pub(super) fn determinant(x: [f32; 3], y: [f32; 3]) -> f64 {
     let x = x.map(f64::from);
     let y = y.map(f64::from);
     // A product of two finite F32 values is exact and in range in F64.
