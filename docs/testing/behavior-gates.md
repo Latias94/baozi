@@ -7,6 +7,8 @@ AST spellings, and repository-conformance receipts do not.
 | --- | --- |
 | Real-asset application workflow | [`assets/tests/workflow.rs`](../../tools/consumers/assets/tests/workflow.rs) consumes unchanged pinned models through native capability IO, verifies independent source facts and retained application buffers, exercises consecutive edit generations, and checks explicit profile/numeric rejections. The three existing native-candidate CI hosts execute the standalone locked package; [`run_asset_profile.py`](../../scripts/run_asset_profile.py) records separate normal/instrumented Linux release observations without timing thresholds. |
 | Public report and loss consumption | The independent [`loss_reports.rs`](../../tools/consumers/scene/src/loss_reports.rs) uses facade-only evidence types, requires strict partial-UV rejection, and verifies the explicitly authorized loss plus retained typed normals and report reads after Scene destruction. [`gltf_scene.rs`](../../tools/consumers/scene/src/gltf_scene.rs) checks selected source identity and selected/omitted node counts. The existing fixed source/package/WASI consumer matrix executes these assertions for its corresponding enabled formats. |
+| Archived dependency resolution | [`check_packages.py`](../../scripts/check_packages.py) creates actual `.crate` artifacts, preserves their normalized manifests, and resolves independent consumers with exact version-only roots against a standard Cargo directory-source snapshot of the artifacts and registry dependencies. It rejects consumer-root patches and checkout substitutions, transitions only staging locks to registry identities, and builds/runs with `--locked --offline`. The scene cases retain their handwritten assertions. |
+| Native archive feature scopes | The same driver's `--native` baseline reads scoped file bytes and imports an STL through the candidate. `--features repository-capture` adds compilation of the optional maintained extension package; it does not execute capture. `--native` also checks a separate compile-only helper consumer with every maintained dependency feature, covering upstream `arbitrary`/derive, `fs_utf8`, and `arf_strings` helpers and their registry closure. These are distinct from candidate runtime/repository profiles; candidate `--all-features` does not enable every dependency feature. See [package checks](../contributing/package-consumer-checks.md). |
 | Work admission before opaque open | [`open_work_contract.rs`](../../crates/baozi-import/tests/open_work_contract.rs) exercises primary and dependency paths: positive declared weights, no backend call after work rejection or bound-query cancellation, full completion for returned open errors, attempted-only panic, terminal bound errors, identity checks, and no repeated planning/open on cache hits. Memory tests cover positive bounds across mutable namespace growth; the candidate's `open_work_bound_does_not_observe_namespace_mutations` preserves its bound through missing/file/directory states. The vendored backend tests check checked envelopes and malformed/aligned/limit-boundary native reparse records. |
 | Runtime dependency policy | [`runtime_admission.rs`](../../crates/baozi-xtask/tests/runtime_admission.rs) checks normal/build reachability, target conditions, renamed/transitive dependencies, dev-only exclusions, cycles, and malformed metadata. [`cli.rs`](../../crates/baozi-xtask/tests/cli.rs) checks the real repository command and rejects retired commands and receipt options. |
 | Host-owned admission | [`host_admission.rs`](../../crates/baozi/tests/host_admission.rs): `external_host_gate_is_the_only_concurrent_session_admission_authority` measures parser overlap at host capacities one and two and checks that all permits return. |
@@ -62,14 +64,33 @@ the behavior tests above.
 `native-fs-check` makes eleven serial `cargo metadata --locked` queries: four candidate targets
 in default/runtime and repository-capture configurations, plus root-workspace Linux/WASM/WASI
 all-feature graphs. The root Linux query also supplies the featureless xtask closure. It compares
-resolved normal/build closures, registry sources/checksums, the unique local bounded backend
-path/version with separate upstream provenance, feature sets, and the reviewed dependency
+resolved normal/build closures, registry sources/checksums, the three unique maintained package
+paths and exact 0.1.0 identities (`baozi-cap-primitives`, `baozi-cap-std`, and `baozi-cap-fs-ext`),
+their separate upstream 4.0.3 archive provenance, feature sets, and the reviewed dependency
 basis against the existing snapshots. FreeBSD remains a dependency-audit profile, not a runtime
 candidate. Runtime candidates remain exactly `x86_64-unknown-linux-gnu`,
 `x86_64-pc-windows-msvc`, and `aarch64-apple-darwin`. Repository capture is operational only on the
 Linux and macOS candidates; Windows remains fail-closed. Release registration remains empty, also
 checked by `native_fs_status_tests::candidate_targets_are_distinct_from_empty_release_registration`
 in the [candidate](../../candidates/baozi-native-io/src/lib.rs).
+
+The runtime/default closure excludes `baozi-cap-fs-ext`; repository capture adds it with the
+explicit `std` feature. Upstream helper all-feature checks do not change either admitted profile.
+All three maintained dependencies and `baozi-native-io-candidate` set `publish = false`. Their
+original source, build scripts and complete license choices remain in the vendor directories,
+with package ownership and changes recorded in `PATCHES.md` and
+[third-party notices](../../THIRD_PARTY_NOTICES.md#cap-std-project). Original source
+`Cargo.toml.orig` and `.cargo_vcs_info.json` files are historical and excluded from package inputs;
+Cargo generates the archive `.orig` from the maintained active manifest and normalizes the
+archive `Cargo.toml`.
+
+The `package-consumers` CI matrix configures the complete scene feature matrix, native baseline,
+optional repository compilation, and separate helper all-feature checks on Linux x86_64,
+Windows x86_64, and Apple ARM64. Each host has MSRV/debug and current-stable/release jobs and an
+exact compiler-host check. The added Linux
+jobs are configured coverage, not recorded passes. Results for the maintained dependency cutover
+must be attached to the actual executed source revision once the implementation is frozen;
+this index supplies no new execution receipt, publication authorization, or target promotion.
 
 The [`CI workflow`](../../.github/workflows/ci.yml) step
 `Prove non-candidate native filesystem targets fail closed` requires installed targets and a failed

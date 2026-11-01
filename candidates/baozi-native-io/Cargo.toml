@@ -13,26 +13,23 @@ readme = "README.md"
 
 [workspace]
 resolver = "3"
-exclude = ["vendor/cap-primitives"]
-
-[patch.crates-io]
-cap-primitives = { path = "vendor/cap-primitives" }
+exclude = ["vendor/cap-primitives", "vendor/cap-std", "vendor/cap-fs-ext"]
 
 [features]
 default = []
 repository-capture = ["dep:cap-fs-ext"]
 
 [dependencies]
-baozi-io = { path = "../../crates/baozi-io", version = "0.1.0", default-features = false }
+baozi-io = { path = "../../crates/baozi-io", version = "=0.1.0", default-features = false }
 thiserror = "2"
 
 [target.'cfg(any(all(target_arch = "x86_64", target_vendor = "unknown", target_os = "linux", target_env = "gnu", target_abi = ""), all(target_arch = "x86_64", target_vendor = "pc", target_os = "windows", target_env = "msvc", target_abi = ""), all(target_arch = "aarch64", target_vendor = "apple", target_os = "macos", target_env = "", target_abi = ""), all(target_arch = "x86_64", target_vendor = "unknown", target_os = "freebsd", target_env = "", target_abi = "")))'.dependencies]
-cap-std = { version = "=4.0.3", default-features = false }
-cap-primitives = { path = "vendor/cap-primitives", version = "=4.0.3", default-features = false }
-cap-fs-ext = { version = "=4.0.3", default-features = false, optional = true, features = ["std"] }
+cap-std = { package = "baozi-cap-std", path = "vendor/cap-std", version = "=0.1.0", default-features = false }
+cap-primitives = { package = "baozi-cap-primitives", path = "vendor/cap-primitives", version = "=0.1.0", default-features = false }
+cap-fs-ext = { package = "baozi-cap-fs-ext", path = "vendor/cap-fs-ext", version = "=0.1.0", default-features = false, optional = true, features = ["std"] }
 
 [target.'cfg(any(all(target_arch = "x86_64", target_vendor = "unknown", target_os = "linux", target_env = "gnu", target_abi = ""), all(target_arch = "aarch64", target_vendor = "apple", target_os = "macos", target_env = "", target_abi = ""), all(target_arch = "x86_64", target_vendor = "unknown", target_os = "freebsd", target_env = "", target_abi = "")))'.dependencies]
 rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs"] }
 
 [dev-dependencies]
-baozi = { path = "../../crates/baozi", version = "0.1.0", default-features = false, features = ["format-stl", "format-obj"] }
+baozi = { path = "../../crates/baozi", version = "=0.1.0", default-features = false, features = ["format-stl", "format-obj"] }

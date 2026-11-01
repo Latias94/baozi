@@ -30,24 +30,40 @@ The complete changes are recorded
 in [reader maintenance](vendor/gltf/BAOZI_PATCHES.md) and
 [JSON maintenance](vendor/gltf-json/BAOZI_PATCHES.md).
 
-## cap-primitives
+## cap-std project
 
-`candidates/baozi-native-io/vendor/cap-primitives` retains the complete upstream
-4.0.3 package from the cap-std project, revision
-`b7acf8e8807fe3fab991884d2208b7e03d35a409`, authored by Dan Gohman,
-Jakub Konka and the cap-std contributors.
+Baozi maintains three packages from the complete upstream 4.0.3 archives of the
+cap-std project, revision `b7acf8e8807fe3fab991884d2208b7e03d35a409`, authored by
+Dan Gohman, Jakub Konka and the cap-std contributors.
 Upstream: <https://github.com/bytecodealliance/cap-std>.
 
-The source is licensed `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT`.
-The original [copyright](candidates/baozi-native-io/vendor/cap-primitives/COPYRIGHT),
-[MIT](candidates/baozi-native-io/vendor/cap-primitives/LICENSE-MIT),
-[Apache-2.0](candidates/baozi-native-io/vendor/cap-primitives/LICENSE-APACHE), and
-[Apache-2.0 with LLVM exception](candidates/baozi-native-io/vendor/cap-primitives/LICENSE-Apache-2.0_WITH_LLVM-exception)
-texts are retained. The unpublished native candidate applies a bounded-link
-patch and test-only packaging repairs, documented in
-[PATCHES.md](candidates/baozi-native-io/vendor/cap-primitives/PATCHES.md).
-Its original archive checksum records upstream provenance, not the modified
-directory's identity. Portable Baozi production packages do not depend on it.
+| Maintained package | Upstream package | Retained source and change record |
+| --- | --- | --- |
+| `baozi-cap-primitives` 0.1.0 | `cap-primitives` 4.0.3 | [Source](candidates/baozi-native-io/vendor/cap-primitives), [PATCHES.md](candidates/baozi-native-io/vendor/cap-primitives/PATCHES.md) |
+| `baozi-cap-std` 0.1.0 | `cap-std` 4.0.3 | [Source](candidates/baozi-native-io/vendor/cap-std), [PATCHES.md](candidates/baozi-native-io/vendor/cap-std/PATCHES.md) |
+| `baozi-cap-fs-ext` 0.1.0 | `cap-fs-ext` 4.0.3 | [Source](candidates/baozi-native-io/vendor/cap-fs-ext), [PATCHES.md](candidates/baozi-native-io/vendor/cap-fs-ext/PATCHES.md) |
+
+Each package retains the original authorship, source, build scripts, `COPYRIGHT`,
+`LICENSE-MIT`, `LICENSE-APACHE`, and `LICENSE-Apache-2.0_WITH_LLVM-exception`.
+The license remains `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT`.
+The Rust library names remain `cap_primitives`, `cap_std`, and `cap_fs_ext`.
+Baozi owns maintenance of the distinct package identities and their relative
+path-plus-exact-version dependency edges. The primitives package carries the
+bounded-link patch and test-only packaging repairs; the upper two packages
+retain their upstream production Rust source. Each change record identifies
+manifest changes and the original archive checksum separately from the
+maintained directory or a newly generated Baozi archive.
+
+The copied upstream `Cargo.toml.orig`, `.cargo_vcs_info.json`, and bundled
+lockfile remain historical material in the source directories. The two reserved
+filenames are excluded from package inputs. Cargo generates a new archive
+`Cargo.toml.orig` from the maintained active manifest and normalizes the archive
+`Cargo.toml`; that generated `.orig` is not the historical upstream manifest.
+
+The three maintained packages and `baozi-native-io-candidate` all set
+`publish = false`. Portable Baozi production packages do not depend on this
+native chain. Preparing or checking its archives does not publish packages or
+register a native target.
 
 ## Khronos glTF Sample Assets
 

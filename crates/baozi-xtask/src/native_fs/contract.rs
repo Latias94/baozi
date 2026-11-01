@@ -9,17 +9,44 @@ pub(super) const CANDIDATE_LOCK_PATH: &str = "candidates/baozi-native-io/Cargo.l
 pub(super) const CANDIDATE_PACKAGE: &str = "baozi-native-io-candidate";
 pub(super) const XTASK_PACKAGE: &str = "baozi-xtask";
 pub(super) const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
-pub(super) const RUNTIME_BASELINE_SCHEMA: u64 = 5;
-pub(super) const REPOSITORY_BASELINE_SCHEMA: u64 = 4;
+pub(super) const RUNTIME_BASELINE_SCHEMA: u64 = 6;
+pub(super) const REPOSITORY_BASELINE_SCHEMA: u64 = 5;
 pub(super) const CAP_PRIMITIVES_PATH: &str = "candidates/baozi-native-io/vendor/cap-primitives";
 pub(super) const CAP_PRIMITIVES_SOURCE: &str =
     "path+candidates/baozi-native-io/vendor/cap-primitives";
-pub(super) const CAP_PRIMITIVES_VERSION: &str = "4.0.3";
-// Upstream archive provenance only; this is not a checksum of the patched local source.
-pub(super) const CAP_PRIMITIVES_UPSTREAM_CHECKSUM: &str =
-    "8b5f74729fd2f44701d1a8eb47e906cdb3ccd9ec0f02baad85a744b791940b18";
 pub(super) const CAP_PRIMITIVES_PATCHES_PATH: &str =
     "candidates/baozi-native-io/vendor/cap-primitives/PATCHES.md";
+pub(super) const MAINTAINED_CAP_VERSION: &str = "0.1.0";
+pub(super) const CAP_UPSTREAM_VERSION: &str = "4.0.3";
+
+pub(super) struct MaintainedCapPackage {
+    pub(super) name: &'static str,
+    pub(super) alias: &'static str,
+    pub(super) path: &'static str,
+    // Upstream archive provenance only, not a checksum of the maintained source.
+    pub(super) upstream_checksum: &'static str,
+}
+
+pub(super) const MAINTAINED_CAP_PACKAGES: &[MaintainedCapPackage] = &[
+    MaintainedCapPackage {
+        name: "baozi-cap-primitives",
+        alias: "cap-primitives",
+        path: CAP_PRIMITIVES_PATH,
+        upstream_checksum: "8b5f74729fd2f44701d1a8eb47e906cdb3ccd9ec0f02baad85a744b791940b18",
+    },
+    MaintainedCapPackage {
+        name: "baozi-cap-std",
+        alias: "cap-std",
+        path: "candidates/baozi-native-io/vendor/cap-std",
+        upstream_checksum: "c1ec78e242cfa2cfe276807ac2ecc00315a6c97786977414bcd1c3963b6c91b8",
+    },
+    MaintainedCapPackage {
+        name: "baozi-cap-fs-ext",
+        alias: "cap-fs-ext",
+        path: "candidates/baozi-native-io/vendor/cap-fs-ext",
+        upstream_checksum: "56ff379b70af8e08307a8f65e7040c7301cb4a572538ade16b4984f0da77847f",
+    },
+];
 pub(super) const CAP_STD_TARGET: &str = concat!(
     "cfg(any(",
     "all(target_arch = \"x86_64\", target_vendor = \"unknown\", target_os = \"linux\", target_env = \"gnu\", target_abi = \"\"), ",
@@ -33,8 +60,15 @@ pub(super) const RUSTIX_TARGET: &str = concat!(
     "all(target_arch = \"aarch64\", target_vendor = \"apple\", target_os = \"macos\", target_env = \"\", target_abi = \"\"), ",
     "all(target_arch = \"x86_64\", target_vendor = \"unknown\", target_os = \"freebsd\", target_env = \"\", target_abi = \"\")))"
 );
-pub(super) const NATIVE_FILESYSTEM_PACKAGES: &[&str] =
-    &["cap-std", "cap-primitives", "rustix", "cap-fs-ext"];
+pub(super) const NATIVE_FILESYSTEM_PACKAGES: &[&str] = &[
+    "baozi-cap-primitives",
+    "baozi-cap-std",
+    "baozi-cap-fs-ext",
+    "cap-std",
+    "cap-primitives",
+    "cap-fs-ext",
+    "rustix",
+];
 pub(super) const MAX_BASELINE_DIFFERENCES: usize = 64;
 pub(super) const RUNTIME_CANDIDATE_TARGETS: &[&str] = &[
     "x86_64-unknown-linux-gnu",
@@ -96,23 +130,11 @@ pub(super) struct CriticalPackage {
     pub(super) checksum: &'static str,
 }
 
-pub(super) const CRITICAL_PACKAGES: &[CriticalPackage] = &[
-    CriticalPackage {
-        name: "cap-fs-ext",
-        version: "4.0.3",
-        checksum: "56ff379b70af8e08307a8f65e7040c7301cb4a572538ade16b4984f0da77847f",
-    },
-    CriticalPackage {
-        name: "cap-std",
-        version: "4.0.3",
-        checksum: "c1ec78e242cfa2cfe276807ac2ecc00315a6c97786977414bcd1c3963b6c91b8",
-    },
-    CriticalPackage {
-        name: "rustix",
-        version: "1.1.4",
-        checksum: "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190",
-    },
-];
+pub(super) const CRITICAL_PACKAGES: &[CriticalPackage] = &[CriticalPackage {
+    name: "rustix",
+    version: "1.1.4",
+    checksum: "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190",
+}];
 
 /// The result of checking the native-filesystem dependency admission contract.
 #[derive(Debug, Clone, PartialEq, Eq)]

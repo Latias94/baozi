@@ -41,6 +41,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "baozi-cap-primitives"
+version = "0.1.0"
+dependencies = [
+ "ambient-authority",
+ "fs-set-times",
+ "io-extras",
+ "io-lifetimes 3.0.1",
+ "ipnet",
+ "maybe-owned",
+ "rustix",
+ "rustix-linux-procfs",
+ "windows-sys 0.61.2",
+ "winx",
+]
+
+[[package]]
+name = "baozi-cap-std"
+version = "0.1.0"
+dependencies = [
+ "baozi-cap-primitives",
+ "io-extras",
+ "io-lifetimes 3.0.1",
+ "rustix",
+]
+
+[[package]]
 name = "baozi-core"
 version = "0.1.0"
 dependencies = [
@@ -125,9 +151,9 @@ dependencies = [
 name = "baozi-native-io-candidate"
 version = "0.1.0"
 dependencies = [
+ "baozi-cap-primitives",
+ "baozi-cap-std",
  "baozi-io",
- "cap-primitives",
- "cap-std",
  "rustix",
  "thiserror",
 ]
@@ -176,34 +202,6 @@ name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
-
-[[package]]
-name = "cap-primitives"
-version = "4.0.3"
-dependencies = [
- "ambient-authority",
- "fs-set-times",
- "io-extras",
- "io-lifetimes 3.0.1",
- "ipnet",
- "maybe-owned",
- "rustix",
- "rustix-linux-procfs",
- "windows-sys 0.61.2",
- "winx",
-]
-
-[[package]]
-name = "cap-std"
-version = "4.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1ec78e242cfa2cfe276807ac2ecc00315a6c97786977414bcd1c3963b6c91b8"
-dependencies = [
- "cap-primitives",
- "io-extras",
- "io-lifetimes 3.0.1",
- "rustix",
-]
 
 [[package]]
 name = "cfg-if"

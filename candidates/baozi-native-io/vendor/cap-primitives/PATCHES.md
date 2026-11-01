@@ -1,4 +1,13 @@
-# Baozi bounded manual-link patch
+# Baozi-maintained capability primitives
+
+The maintained package identity is `baozi-cap-primitives` 0.1.0; its library name
+remains `cap_primitives`. `Cargo.toml` is the active maintained manifest.
+`Cargo.toml.orig` and the bundled upstream lockfile are retained historical
+package material, not build configuration. Dependent maintained packages use
+path-plus-exact-version edges, so independent consumers require no root patch.
+The package remains `publish = false`. Historical `Cargo.toml.orig` and
+`.cargo_vcs_info.json` are excluded from archive input because Cargo reserves
+those names and generates current package metadata itself.
 
 ## Provenance
 
@@ -11,7 +20,7 @@ cache markers `.cargo-ok` and `.cargo-checksum.json` are omitted.
 - Upstream: https://github.com/bytecodealliance/cap-std
 - Upstream commit: `b7acf8e8807fe3fab991884d2208b7e03d35a409`
 - Upstream package path: `cap-primitives`
-- Original package version: `4.0.3` (unchanged)
+- Original package version: `4.0.3`
 - Original registry source: `registry+https://github.com/rust-lang/crates.io-index`
 - Original package SHA-256:
   `8b5f74729fd2f44701d1a8eb47e906cdb3ccd9ec0f02baad85a744b791940b18`
@@ -46,8 +55,11 @@ directory. Local changes use the crate's existing license options.
   the upstream `windows-sys` requirement from `>=0.60, <0.62` to `=0.61.2`.
   This preserves the existing reviewed binding version: offline resolution of
   the local patch otherwise selected 0.60.2. It is not an upstream-version
-  upgrade. The `cap-primitives` package version and other requirements are
-  unchanged.
+  upgrade. Other dependency requirements are unchanged.
+- The maintained package has its own `baozi-cap-primitives` 0.1.0 identity and
+  Baozi repository URL. Its original upstream authors, library name, source and
+  license terms remain retained. This identity change does not alter resolver
+  behavior or expand target qualification.
 - Unit tests cover checked work envelopes and malformed/exact/excess native
   reparse records. No new resolver or ambient reopen fallback is introduced.
 - `src/fs/manually/open.rs` drops upstream's unused `std::borrow::Cow` import.

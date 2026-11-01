@@ -105,7 +105,8 @@ Hard rules:
 - `baozi-xtask` is a non-production checker with no `baozi-io` edge or native filesystem backend
   dependency. Its dependency checks inspect Cargo metadata, lockfile data, and reviewed dependency
   baselines. Its single, featureless normal/build dependency closure must exclude `baozi-io`,
-  `cap-std`, `cap-primitives`, `cap-fs-ext`, and `rustix`. Declaration checks reject every package's
+  `baozi-cap-std`, `baozi-cap-primitives`, `baozi-cap-fs-ext`, their upstream `cap-*`
+  counterparts, and `rustix`. Declaration checks reject every package's
   candidate dependency or forwarding of retired native features, including renamed, development,
   and build dependencies. xtask does not capture repository source trees or own source-hashing policy.
 - the unpublished `baozi-native-io-candidate` is an explicitly excluded standalone workspace under

@@ -27,16 +27,21 @@ audits also resolve `x86_64-unknown-freebsd`; that profile does not enable a
 runtime adapter. Browser WASM and WASI consumers use memory or custom IO through
 `baozi-io`.
 
-The native dependency baseline retains `cap-std` and optional `cap-fs-ext` at
-`4.0.3`, and `rustix` at `1.1.4`. A local `cap-primitives` 4.0.3 patch supplies
-fixed-buffer manual link reads and the checked work envelope. Its
-[patch record](vendor/cap-primitives/PATCHES.md) preserves the original archive
-provenance and identifies the actual modified sources; the upstream checksum
-does not identify the patched directory.
+The native dependency baseline uses `baozi-cap-std`, `baozi-cap-primitives` and
+optional `baozi-cap-fs-ext`, each at `0.1.0`, with `rustix` at `1.1.4`. These are
+Baozi-maintained packages from upstream 4.0.3. Their ordinary path-plus-exact-version
+edges retain one backend identity without any consumer-root `[patch]` section.
+The primitives package supplies fixed-buffer manual link reads and the checked
+work envelope; the upper packages retain their upstream production Rust source.
+Each package's `PATCHES.md` preserves its original archive provenance and changes
+([primitives](vendor/cap-primitives/PATCHES.md),
+[standard library](vendor/cap-std/PATCHES.md),
+[filesystem extensions](vendor/cap-fs-ext/PATCHES.md)). Upstream checksums do not
+identify the maintained directories or Baozi archives.
 Direct dependency default features remain disabled. `cap-fs-ext` explicitly
 selects `std`; the Unix `rustix` edge selects `std` and `fs`. Native admission
 checks compare the reviewed target-specific closures, registry checksums, and
-the unique local backend path/version. Preserve those versions when generating
+the three unique maintained package paths/versions. Preserve those versions when generating
 this workspace's lockfile.
 
 ## Opening assets
@@ -87,7 +92,7 @@ opened handle, including unknown tags that otherwise look like regular files.
 
 The default feature set exposes filesystem IO only. Enabling
 `repository-capture` adds the repository capture API and the optional
-`cap-fs-ext` dependency. Capture retains its existing explicit roots, bounded
+`baozi-cap-fs-ext` dependency (aliased as `cap-fs-ext`). Capture retains its existing explicit roots, bounded
 resource policy, same-object verification, and fail-closed behavior. On
 `x86_64-pc-windows-msvc`, capture returns `UnsupportedIdentityBackend` before
 traversal; enabling the feature does not claim an operational Windows capture

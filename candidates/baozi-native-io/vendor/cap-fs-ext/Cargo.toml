@@ -1,0 +1,72 @@
+# Maintained package manifest. See PATCHES.md for upstream provenance and changes.
+
+[package]
+edition = "2021"
+name = "baozi-cap-fs-ext"
+version = "0.1.0"
+publish = false
+exclude = ["Cargo.toml.orig", ".cargo_vcs_info.json"]
+authors = [
+    "Dan Gohman <dev@sunfishcode.online>",
+    "Jakub Konka <kubkon@jakubkonka.com>",
+]
+build = "build.rs"
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "Baozi-maintained capability filesystem extensions bound to its reviewed backend"
+readme = "README.md"
+keywords = ["filesystem"]
+categories = ["filesystem"]
+license = "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT"
+repository = "https://github.com/Latias94/baozi"
+
+[features]
+arf_strings = [
+    "cap-std/arf_strings",
+    "fs_utf8",
+    "arf-strings",
+]
+default = ["std"]
+fs_utf8 = [
+    "cap-std/fs_utf8",
+    "camino",
+]
+std = ["cap-std"]
+
+[lib]
+name = "cap_fs_ext"
+path = "src/lib.rs"
+
+[dependencies.arf-strings]
+version = "0.7.0"
+optional = true
+
+[dependencies.camino]
+version = "1.0.5"
+optional = true
+
+[dependencies.cap-primitives]
+package = "baozi-cap-primitives"
+path = "../cap-primitives"
+version = "=0.1.0"
+default-features = false
+
+[dependencies.cap-std]
+package = "baozi-cap-std"
+path = "../cap-std"
+version = "=0.1.0"
+default-features = false
+optional = true
+
+[dependencies.io-lifetimes]
+version = "3.0.1"
+default-features = false
+
+[dev-dependencies]
+
+[target."cfg(windows)".dependencies.windows-sys]
+version = "=0.61.2"
+features = ["Win32_Storage_FileSystem"]

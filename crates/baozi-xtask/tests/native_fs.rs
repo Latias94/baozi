@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
-const CAP_STD_ID: &str = "registry+https://github.com/rust-lang/crates.io-index#cap-std@4.0.3";
+const CAP_STD_ID: &str =
+    "path+file:///fixture/candidates/baozi-native-io/vendor/cap-std#baozi-cap-std@0.1.0";
 const CAP_FS_EXT_ID: &str =
-    "registry+https://github.com/rust-lang/crates.io-index#cap-fs-ext@4.0.3";
-const CAP_PRIMITIVES_ID: &str =
-    "path+file:///fixture/candidates/baozi-native-io/vendor/cap-primitives#4.0.3";
+    "path+file:///fixture/candidates/baozi-native-io/vendor/cap-fs-ext#baozi-cap-fs-ext@0.1.0";
+const CAP_PRIMITIVES_ID: &str = "path+file:///fixture/candidates/baozi-native-io/vendor/cap-primitives#baozi-cap-primitives@0.1.0";
 const CAP_PRIMITIVES_PATH: &str = "/fixture/candidates/baozi-native-io/vendor/cap-primitives";
 const CAP_PRIMITIVES_SOURCE: &str = "path+candidates/baozi-native-io/vendor/cap-primitives";
 const CAP_PRIMITIVES_UPSTREAM_CHECKSUM: &str =
@@ -37,20 +37,16 @@ const LOCKFILE: &str = r#"
 version = 4
 
 [[package]]
-name = "cap-fs-ext"
-version = "4.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56ff379b70af8e08307a8f65e7040c7301cb4a572538ade16b4984f0da77847f"
+name = "baozi-cap-fs-ext"
+version = "0.1.0"
 
 [[package]]
-name = "cap-primitives"
-version = "4.0.3"
+name = "baozi-cap-primitives"
+version = "0.1.0"
 
 [[package]]
-name = "cap-std"
-version = "4.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1ec78e242cfa2cfe276807ac2ecc00315a6c97786977414bcd1c3963b6c91b8"
+name = "baozi-cap-std"
+version = "0.1.0"
 
 [[package]]
 name = "rustix"
@@ -66,11 +62,11 @@ fn canonical_target_filtered_fixture_passes() {
 
     assert!(report.violations.is_empty(), "{:#?}", report.violations);
     assert_eq!(report.profiles_checked, 11);
-    assert_eq!(fixture.baseline["schema"], json!(5));
-    assert_eq!(fixture.repository_baseline["schema"], json!(4));
+    assert_eq!(fixture.baseline["schema"], json!(6));
+    assert_eq!(fixture.repository_baseline["schema"], json!(5));
     assert_eq!(
         fixture.repository_baseline["runtime_baseline_schema"],
-        json!(5)
+        json!(6)
     );
     assert_eq!(
         fixture.baseline["runtime_candidate_targets"],
@@ -100,11 +96,12 @@ fn canonical_target_filtered_fixture_passes() {
 #[test]
 fn local_backend_identity_records_upstream_provenance_without_a_patched_source_checksum() {
     let fixture = Fixture::canonical();
-    let identity = &fixture.baseline["package_identities"]["cap-primitives@4.0.3"];
+    let identity = &fixture.baseline["package_identities"]["baozi-cap-primitives@0.1.0"];
     assert_eq!(
         identity,
         &json!({
             "source": CAP_PRIMITIVES_SOURCE,
+            "upstream_name": "cap-primitives",
             "upstream_source": SOURCE,
             "upstream_version": "4.0.3",
             "upstream_checksum": CAP_PRIMITIVES_UPSTREAM_CHECKSUM,
@@ -112,10 +109,38 @@ fn local_backend_identity_records_upstream_provenance_without_a_patched_source_c
         })
     );
     assert!(identity.get("checksum").is_none());
+    let std_identity = &fixture.baseline["package_identities"]["baozi-cap-std@0.1.0"];
+    let extension_identity =
+        &fixture.repository_baseline["package_identities"]["added"]["baozi-cap-fs-ext@0.1.0"];
+    for (identity, alias, checksum) in [
+        (
+            std_identity,
+            "cap-std",
+            "c1ec78e242cfa2cfe276807ac2ecc00315a6c97786977414bcd1c3963b6c91b8",
+        ),
+        (
+            extension_identity,
+            "cap-fs-ext",
+            "56ff379b70af8e08307a8f65e7040c7301cb4a572538ade16b4984f0da77847f",
+        ),
+    ] {
+        assert_eq!(
+            identity,
+            &json!({
+                "source": format!("path+candidates/baozi-native-io/vendor/{alias}"),
+                "upstream_name": alias,
+                "upstream_source": SOURCE,
+                "upstream_version": "4.0.3",
+                "upstream_checksum": checksum,
+                "patches": format!("candidates/baozi-native-io/vendor/{alias}/PATCHES.md"),
+            })
+        );
+        assert!(identity.get("checksum").is_none());
+    }
     for change in ["added", "changed"] {
         assert!(
             fixture.repository_baseline["package_identities"][change]
-                .get("cap-primitives@4.0.3")
+                .get("baozi-cap-primitives@0.1.0")
                 .is_none()
         );
     }
@@ -124,7 +149,7 @@ fn local_backend_identity_records_upstream_provenance_without_a_patched_source_c
     assert_eq!(share_mode["patches"], json!(CAP_PRIMITIVES_PATCHES_PATH));
     assert_eq!(
         share_mode["identity_binding"],
-        json!("package_identities.cap-primitives@4.0.3")
+        json!("package_identities.baozi-cap-primitives@0.1.0")
     );
     assert_eq!(
         share_mode["reviewed_path"],
@@ -142,6 +167,7 @@ fn local_backend_identity_records_upstream_provenance_without_a_patched_source_c
 fn local_backend_provenance_and_review_identity_cannot_drift() {
     for (field, value) in [
         ("source", json!(SOURCE)),
+        ("upstream_name", json!("foreign-cap-primitives")),
         (
             "upstream_source",
             json!("git+https://example.invalid/cap-primitives"),
@@ -152,10 +178,10 @@ fn local_backend_provenance_and_review_identity_cannot_drift() {
         ("checksum", json!(CAP_PRIMITIVES_UPSTREAM_CHECKSUM)),
     ] {
         let mut fixture = Fixture::canonical();
-        fixture.baseline["package_identities"]["cap-primitives@4.0.3"][field] = value;
+        fixture.baseline["package_identities"]["baozi-cap-primitives@0.1.0"][field] = value;
         assert_violation(
             &fixture,
-            &format!("baseline.package_identities.cap-primitives@4.0.3.{field}"),
+            &format!("baseline.package_identities.baozi-cap-primitives@0.1.0.{field}"),
         );
     }
     for field in ["source", "patches", "reviewed_path"] {
@@ -170,10 +196,10 @@ fn local_backend_provenance_and_review_identity_cannot_drift() {
 }
 
 #[test]
-fn repository_delta_requires_runtime_schema_five() {
+fn repository_delta_requires_runtime_schema_six() {
     let mut fixture = Fixture::canonical();
-    fixture.baseline["schema"] = json!(4);
-    assert_violation(&fixture, "native-fs baseline: schema must be 5");
+    fixture.baseline["schema"] = json!(5);
+    assert_violation(&fixture, "native-fs baseline: schema must be 6");
     let violations = baozi_xtask::native_fs::repository_resolved_closure_snapshot(
         &fixture.baseline,
         &fixture.repository,
@@ -183,15 +209,15 @@ fn repository_delta_requires_runtime_schema_five() {
     assert!(
         violations
             .iter()
-            .any(|violation| violation.contains("runtime baseline schema must be 5")),
+            .any(|violation| violation.contains("runtime baseline schema must be 6")),
         "{violations:#?}"
     );
 
     let mut fixture = Fixture::canonical();
-    fixture.repository_baseline["schema"] = json!(3);
-    fixture.repository_baseline["runtime_baseline_schema"] = json!(4);
-    assert_violation(&fixture, "native-fs repository baseline: schema must be 4");
-    assert_violation(&fixture, "runtime_baseline_schema must be 5");
+    fixture.repository_baseline["schema"] = json!(4);
+    fixture.repository_baseline["runtime_baseline_schema"] = json!(5);
+    assert_violation(&fixture, "native-fs repository baseline: schema must be 5");
+    assert_violation(&fixture, "runtime_baseline_schema must be 6");
 }
 
 #[test]
@@ -303,7 +329,12 @@ fn dependency_target_predicates_must_bind_empty_target_abi() {
 
     let report = fixture.check();
 
-    for dependency in ["cap-std", "cap-primitives", "cap-fs-ext", "rustix"] {
+    for dependency in [
+        "baozi-cap-std",
+        "baozi-cap-primitives",
+        "baozi-cap-fs-ext",
+        "rustix",
+    ] {
         assert!(
             report
                 .violations
@@ -370,7 +401,7 @@ fn runtime_candidate_closure_must_not_reach_cap_fs_ext() {
 
     assert!(
         report.violations.iter().any(|violation| violation
-            == "native-fs profile linux: cap-fs-ext is forbidden in the resolved closure"),
+            == "native-fs profile linux: baozi-cap-fs-ext is forbidden in the resolved closure"),
         "{:#?}",
         report.violations
     );
@@ -380,7 +411,7 @@ fn runtime_candidate_closure_must_not_reach_cap_fs_ext() {
 fn native_packages_cannot_hide_behind_a_sibling_helper_dependency() {
     const HELPER_ID: &str = "path+file:///fixture/native-helper#0.1.0";
     const SECOND_CAP_STD_ID: &str =
-        "registry+https://github.com/rust-lang/crates.io-index#cap-std@4.0.1";
+        "registry+https://github.com/rust-lang/crates.io-index#baozi-cap-std@0.1.1";
     let mut fixture = Fixture::canonical();
     let linux = fixture
         .runtime
@@ -391,7 +422,7 @@ fn native_packages_cannot_hide_behind_a_sibling_helper_dependency() {
         .expect("fixture packages")
         .extend([
             package(HELPER_ID, "native-helper", "0.1.0"),
-            package(SECOND_CAP_STD_ID, "cap-std", "4.0.1"),
+            package(SECOND_CAP_STD_ID, "baozi-cap-std", "0.1.1"),
         ]);
     let nodes = linux["resolve"]["nodes"]
         .as_array_mut()
@@ -416,7 +447,7 @@ fn native_packages_cannot_hide_behind_a_sibling_helper_dependency() {
 
     assert!(
         report.violations.iter().any(|violation| violation.contains(
-            "native package cap-std is reachable outside the admitted direct native dependency subgraph"
+            "native package baozi-cap-std is reachable outside the admitted direct native dependency subgraph"
         )),
         "{:#?}",
         report.violations
@@ -425,14 +456,15 @@ fn native_packages_cannot_hide_behind_a_sibling_helper_dependency() {
         report
             .violations
             .iter()
-            .any(|violation| violation.contains("expected exactly one cap-std package, found 2")),
+            .any(|violation| violation
+                .contains("expected exactly one baozi-cap-std package, found 2")),
         "{:#?}",
         report.violations
     );
 }
 
 #[test]
-fn repository_closure_feature_checksum_and_baseline_drift_are_rejected() {
+fn repository_closure_feature_provenance_and_baseline_drift_are_rejected() {
     let mut missing_dependency = Fixture::canonical();
     let missing_linux = missing_dependency
         .repository
@@ -468,34 +500,26 @@ fn repository_closure_feature_checksum_and_baseline_drift_are_rejected() {
     let feature_report = feature_drift.check();
     assert!(
         feature_report.violations.iter().any(|violation| violation
-            == "native-fs repository profile linux: cap-fs-ext resolved features must be exactly {\"cap-std\", \"std\"}, found {}"),
+            == "native-fs repository profile linux: baozi-cap-fs-ext resolved features must be exactly {\"cap-std\", \"std\"}, found {}"),
         "{:#?}",
         feature_report.violations
     );
 
-    let mut checksum_drift = Fixture::canonical();
-    checksum_drift.lockfile = checksum_drift.lockfile.replace(
-        "56ff379b70af8e08307a8f65e7040c7301cb4a572538ade16b4984f0da77847f",
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    );
-    let checksum_report = checksum_drift.check();
-    assert!(
-        checksum_report
-            .violations
-            .iter()
-            .any(|violation| violation.contains("repository profile")
-                && violation.contains("cap-fs-ext must resolve to 4.0.3")),
-        "{:#?}",
-        checksum_report.violations
+    let mut provenance_drift = Fixture::canonical();
+    provenance_drift.repository_baseline["package_identities"]["added"]["baozi-cap-fs-ext@0.1.0"]
+        ["upstream_checksum"] = json!("unreviewed-upstream");
+    assert_violation(
+        &provenance_drift,
+        "repository baseline.package_identities.added.baozi-cap-fs-ext@0.1.0.upstream_checksum",
     );
 
     let mut baseline_drift = Fixture::canonical();
-    baseline_drift.repository_baseline["dependency_audit_profiles"]["linux"]["nodes"]["added"]["cap-fs-ext@4.0.3"]
+    baseline_drift.repository_baseline["dependency_audit_profiles"]["linux"]["nodes"]["added"]["baozi-cap-fs-ext@0.1.0"]
         ["dependencies"] = json!([]);
     let baseline_report = baseline_drift.check();
     assert!(
         baseline_report.violations.iter().any(|violation| violation.contains(
-            "repository baseline.dependency_audit_profiles.linux.nodes.added.cap-fs-ext@4.0.3.dependencies"
+            "repository baseline.dependency_audit_profiles.linux.nodes.added.baozi-cap-fs-ext@0.1.0.dependencies"
         )),
         "{:#?}",
         baseline_report.violations
@@ -534,10 +558,8 @@ fn source_and_target_root_drift_are_rejected() {
         Value::String("git+https://example.invalid/cap-std".to_owned());
     let source_report = source_drift.check();
     assert!(
-        source_report
-            .violations
-            .iter()
-            .any(|violation| violation.contains("missing checksum for cap-std@4.0.3")),
+        source_report.violations.iter().any(|violation| violation
+            .contains("baozi-cap-std must resolve to local baozi-cap-std@0.1.0")),
         "{:#?}",
         source_report.violations
     );
@@ -679,6 +701,21 @@ fn checked_in_manifests_keep_the_candidate_in_an_excluded_unpublished_workspace(
     );
     assert_eq!(candidate["package"]["publish"].as_bool(), Some(false));
     assert_eq!(candidate["workspace"]["resolver"].as_str(), Some("3"));
+    let excluded: std::collections::BTreeSet<_> = candidate["workspace"]["exclude"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        excluded,
+        std::collections::BTreeSet::from([
+            "vendor/cap-primitives",
+            "vendor/cap-std",
+            "vendor/cap-fs-ext",
+        ])
+    );
+    assert!(candidate.get("patch").is_none());
     assert!(
         !candidate["dependencies"]
             .as_table()
@@ -718,22 +755,22 @@ fn candidate_features_and_direct_backend_edges_are_exact() {
     assert_violation(&feature, "features must be exactly");
 
     for (name, field, value) in [
-        ("cap-std", "optional", json!(true)),
+        ("baozi-cap-std", "optional", json!(true)),
         ("rustix", "uses_default_features", json!(true)),
-        ("cap-fs-ext", "optional", json!(false)),
-        ("cap-std", "req", json!("^4")),
-        ("cap-std", "path", json!("/fixture/vendor/cap-std")),
-        ("cap-primitives", "req", json!("^4.0.3")),
-        ("cap-primitives", "source", json!(SOURCE)),
-        ("cap-primitives", "optional", json!(true)),
-        ("cap-primitives", "uses_default_features", json!(true)),
-        ("cap-primitives", "features", json!(["fs_utf8"])),
-        ("cap-primitives", "kind", json!("build")),
-        ("cap-primitives", "rename", json!("backend")),
-        ("cap-primitives", "target", Value::Null),
+        ("baozi-cap-fs-ext", "optional", json!(false)),
+        ("baozi-cap-std", "req", json!("^0.1.0")),
+        ("baozi-cap-std", "path", json!("/fixture/vendor/cap-std")),
+        ("baozi-cap-primitives", "req", json!("^0.1.0")),
+        ("baozi-cap-primitives", "source", json!(SOURCE)),
+        ("baozi-cap-primitives", "optional", json!(true)),
+        ("baozi-cap-primitives", "uses_default_features", json!(true)),
+        ("baozi-cap-primitives", "features", json!(["fs_utf8"])),
+        ("baozi-cap-primitives", "kind", json!("build")),
+        ("baozi-cap-primitives", "rename", json!("backend")),
+        ("baozi-cap-primitives", "target", Value::Null),
         ("rustix", "features", json!(["fs", "std", "net"])),
         (
-            "cap-fs-ext",
+            "baozi-cap-fs-ext",
             "source",
             json!("git+https://example.invalid/cap-fs-ext"),
         ),
@@ -749,7 +786,7 @@ fn candidate_features_and_direct_backend_edges_are_exact() {
     let mut extra = Fixture::canonical();
     extra
         .manifest_dependencies_mut()
-        .push(json!({"name": "cap-primitives", "kind": null}));
+        .push(json!({"name": "baozi-cap-primitives", "kind": null}));
     assert_violation(&extra, "production dependencies must be exactly");
 }
 
@@ -767,81 +804,130 @@ fn local_backend_declaration_requires_the_reviewed_absolute_directory() {
         fixture
             .manifest_dependencies_mut()
             .iter_mut()
-            .find(|dependency| dependency["name"] == "cap-primitives")
+            .find(|dependency| dependency["name"] == "baozi-cap-primitives")
             .expect("local backend declaration")["path"] = path;
-        assert_violation(&fixture, "direct cap-primitives edge drifted");
+        assert_violation(&fixture, "direct baozi-cap-primitives edge drifted");
     }
     let mut fixture = Fixture::canonical();
     fixture
         .manifest_dependencies_mut()
-        .retain(|dependency| dependency["name"] != "cap-primitives");
+        .retain(|dependency| dependency["name"] != "baozi-cap-primitives");
     assert_violation(
         &fixture,
-        "expected exactly one direct cap-primitives edge, found 0",
+        "expected exactly one direct baozi-cap-primitives edge, found 0",
     );
 }
 
 #[test]
-fn local_backend_declaration_path_is_checked_in_every_dependency_profile() {
+fn local_declaration_paths_are_checked_in_every_dependency_profile() {
     for repository in [false, true] {
         for (target, _) in DEPENDENCY_AUDIT_TARGETS {
-            let mut fixture = Fixture::canonical();
-            let profiles = if repository {
-                &mut fixture.repository
-            } else {
-                &mut fixture.runtime
-            };
-            let candidate = local_package_mut(
-                profiles.get_mut(*target).unwrap(),
-                "baozi-native-io-candidate",
-            );
-            candidate["dependencies"]
-                .as_array_mut()
-                .unwrap()
-                .iter_mut()
-                .find(|dependency| dependency["name"] == "cap-primitives")
-                .expect("local backend declaration")["path"] = json!("/fixture/unreviewed-backend");
-            assert_violation(&fixture, "direct cap-primitives edge drifted");
-        }
-    }
-}
-
-#[test]
-fn resolved_local_backend_path_source_and_version_are_exact_in_every_profile() {
-    for repository in [false, true] {
-        for (target, _) in DEPENDENCY_AUDIT_TARGETS {
-            for (field, value) in [
-                ("version", json!("4.0.4")),
-                ("source", json!(SOURCE)),
-                (
-                    "source",
-                    json!("git+https://example.invalid/cap-primitives"),
-                ),
-                ("manifest_path", Value::Null),
-                (
-                    "manifest_path",
-                    json!("/fixture/vendor/cap-primitives/Cargo.toml"),
-                ),
-                (
-                    "manifest_path",
-                    json!(format!("{CAP_PRIMITIVES_PATH}-copy/Cargo.toml")),
-                ),
-                (
-                    "manifest_path",
-                    json!(format!("{CAP_PRIMITIVES_PATH}/../replacement/Cargo.toml")),
-                ),
-            ] {
+            for name in ["baozi-cap-primitives", "baozi-cap-std", "baozi-cap-fs-ext"] {
                 let mut fixture = Fixture::canonical();
                 let profiles = if repository {
                     &mut fixture.repository
                 } else {
                     &mut fixture.runtime
                 };
-                local_package_mut(profiles.get_mut(*target).unwrap(), "cap-primitives")[field] =
-                    value;
+                let candidate = local_package_mut(
+                    profiles.get_mut(*target).unwrap(),
+                    "baozi-native-io-candidate",
+                );
+                candidate["dependencies"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|dependency| dependency["name"] == name)
+                    .expect("local declaration")["path"] = json!("/fixture/unreviewed-backend");
+                assert_violation(&fixture, &format!("direct {name} edge drifted"));
+            }
+        }
+    }
+}
+
+#[test]
+fn resolved_local_paths_sources_and_versions_are_exact_in_every_profile() {
+    for repository in [false, true] {
+        for (target, _) in DEPENDENCY_AUDIT_TARGETS {
+            for name in ["baozi-cap-primitives", "baozi-cap-std", "baozi-cap-fs-ext"] {
+                if name == "baozi-cap-fs-ext" && !repository {
+                    continue;
+                }
+                let alias = name.strip_prefix("baozi-").unwrap();
+                let path = format!("/fixture/candidates/baozi-native-io/vendor/{alias}");
+                for (field, value) in [
+                    ("version", json!("0.1.1")),
+                    ("publish", Value::Null),
+                    ("publish", json!(["crates-io"])),
+                    ("source", json!(SOURCE)),
+                    ("source", json!("git+https://example.invalid/cap-std")),
+                    ("manifest_path", Value::Null),
+                    (
+                        "manifest_path",
+                        json!(format!("/fixture/vendor/{alias}/Cargo.toml")),
+                    ),
+                    ("manifest_path", json!(format!("{path}-copy/Cargo.toml"))),
+                    (
+                        "manifest_path",
+                        json!(format!("{path}/../replacement/Cargo.toml")),
+                    ),
+                ] {
+                    let mut fixture = Fixture::canonical();
+                    let profiles = if repository {
+                        &mut fixture.repository
+                    } else {
+                        &mut fixture.runtime
+                    };
+                    local_package_mut(profiles.get_mut(*target).unwrap(), name)[field] = value;
+                    assert_violation(
+                        &fixture,
+                        &format!("{name} must resolve to local {name}@0.1.0"),
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn local_packages_must_also_be_direct_normal_resolved_dependencies() {
+    for repository in [false, true] {
+        for (name, id) in [
+            ("baozi-cap-primitives", CAP_PRIMITIVES_ID),
+            ("baozi-cap-std", CAP_STD_ID),
+            ("baozi-cap-fs-ext", CAP_FS_EXT_ID),
+        ] {
+            if name == "baozi-cap-fs-ext" && !repository {
+                continue;
+            }
+            for change in ["missing", "renamed", "build", "dev"] {
+                let mut fixture = Fixture::canonical();
+                let profiles = if repository {
+                    &mut fixture.repository
+                } else {
+                    &mut fixture.runtime
+                };
+                let root = resolved_node_mut(
+                    profiles.get_mut("x86_64-unknown-linux-gnu").unwrap(),
+                    FIXTURE_CANDIDATE_ID,
+                );
+                let dependencies = root["deps"].as_array_mut().unwrap();
+                if change == "missing" {
+                    dependencies.retain(|dependency| dependency["pkg"] != id);
+                } else {
+                    let dependency = dependencies
+                        .iter_mut()
+                        .find(|dependency| dependency["pkg"] == id)
+                        .expect("direct local package edge");
+                    if change == "renamed" {
+                        dependency["name"] = json!("backend");
+                    } else {
+                        dependency["dep_kinds"][0]["kind"] = json!(change);
+                    }
+                }
                 assert_violation(
                     &fixture,
-                    "cap-primitives must resolve to local cap-primitives@4.0.3",
+                    &format!("candidate must depend directly on local {name}"),
                 );
             }
         }
@@ -849,63 +935,20 @@ fn resolved_local_backend_path_source_and_version_are_exact_in_every_profile() {
 }
 
 #[test]
-fn local_backend_must_also_be_a_direct_normal_resolved_dependency() {
-    for repository in [false, true] {
-        for change in ["missing", "renamed", "build", "dev"] {
-            let mut fixture = Fixture::canonical();
-            let profiles = if repository {
-                &mut fixture.repository
-            } else {
-                &mut fixture.runtime
-            };
-            let root = resolved_node_mut(
-                profiles.get_mut("x86_64-unknown-linux-gnu").unwrap(),
-                FIXTURE_CANDIDATE_ID,
-            );
-            let dependencies = root["deps"].as_array_mut().unwrap();
-            if change == "missing" {
-                dependencies.retain(|dependency| dependency["pkg"] != CAP_PRIMITIVES_ID);
-            } else {
-                let dependency = dependencies
-                    .iter_mut()
-                    .find(|dependency| dependency["pkg"] == CAP_PRIMITIVES_ID)
-                    .expect("direct local backend edge");
-                if change == "renamed" {
-                    dependency["name"] = json!("backend");
-                } else {
-                    dependency["dep_kinds"][0]["kind"] = json!(change);
-                }
-            }
-            assert_violation(
-                &fixture,
-                "candidate must depend directly on local cap-primitives",
-            );
-        }
-    }
-}
-
-#[test]
-fn registry_backends_cannot_be_replaced_by_additional_local_packages() {
-    for (name, version) in [
-        ("cap-std", "4.0.3"),
-        ("cap-fs-ext", "4.0.3"),
-        ("rustix", "1.1.4"),
-    ] {
-        let mut fixture = Fixture::canonical();
-        let metadata = fixture
-            .repository
-            .get_mut("x86_64-unknown-linux-gnu")
-            .unwrap();
-        let package = local_package_mut(metadata, name);
-        package["source"] = Value::Null;
-        package["manifest_path"] = json!(format!(
-            "/fixture/candidates/baozi-native-io/vendor/{name}/Cargo.toml"
-        ));
-        assert_violation(
-            &fixture,
-            &format!("full-closure package {name}@{version} must come from {SOURCE}"),
-        );
-    }
+fn rustix_must_remain_a_registry_dependency() {
+    let mut fixture = Fixture::canonical();
+    let metadata = fixture
+        .repository
+        .get_mut("x86_64-unknown-linux-gnu")
+        .unwrap();
+    let package = local_package_mut(metadata, "rustix");
+    package["source"] = Value::Null;
+    package["manifest_path"] =
+        json!("/fixture/candidates/baozi-native-io/vendor/rustix/Cargo.toml");
+    assert_violation(
+        &fixture,
+        &format!("full-closure package rustix@1.1.4 must come from {SOURCE}"),
+    );
 }
 
 #[test]
@@ -934,41 +977,175 @@ fn local_helpers_inside_the_reviewed_backend_directory_are_not_admitted() {
 }
 
 #[test]
-fn cap_std_and_cap_fs_ext_cannot_resolve_a_second_backend_provider() {
-    const REGISTRY_CAP_PRIMITIVES_ID: &str =
-        "registry+https://github.com/rust-lang/crates.io-index#cap-primitives@4.0.3";
-    for owner in [CAP_STD_ID, CAP_FS_EXT_ID] {
+fn maintained_owners_cannot_resolve_an_upstream_backend_provider() {
+    for (owner, alias, foreign_name) in [
+        (CAP_STD_ID, "cap_primitives", "cap-primitives"),
+        (CAP_FS_EXT_ID, "cap_primitives", "cap-primitives"),
+        (CAP_FS_EXT_ID, "cap_std", "cap-std"),
+    ] {
         let mut fixture = Fixture::canonical();
         let metadata = fixture
             .repository
             .get_mut("x86_64-unknown-linux-gnu")
             .unwrap();
+        let foreign_id = format!("{SOURCE}#{foreign_name}@4.0.3");
         metadata["packages"].as_array_mut().unwrap().push(package(
-            REGISTRY_CAP_PRIMITIVES_ID,
-            "cap-primitives",
+            &foreign_id,
+            foreign_name,
             "4.0.3",
         ));
         metadata["resolve"]["nodes"]
             .as_array_mut()
             .unwrap()
-            .push(node(REGISTRY_CAP_PRIMITIVES_ID, vec![], vec![]));
+            .push(node(&foreign_id, vec![], vec![]));
         resolved_node_mut(metadata, owner)["deps"]
             .as_array_mut()
             .unwrap()
             .iter_mut()
-            .find(|dependency| dependency["name"] == "cap_primitives")
-            .expect("transitive backend edge")["pkg"] = json!(REGISTRY_CAP_PRIMITIVES_ID);
+            .find(|dependency| dependency["name"] == alias)
+            .expect("transitive backend edge")["pkg"] = json!(foreign_id);
         assert_violation(
             &fixture,
-            "duplicate full-closure package key cap-primitives@4.0.3",
+            &format!("upstream native package {foreign_name} is forbidden"),
         );
     }
+}
+
+#[test]
+fn duplicate_maintained_backend_identities_are_rejected() {
+    let mut fixture = Fixture::canonical();
+    let metadata = fixture
+        .repository
+        .get_mut("x86_64-unknown-linux-gnu")
+        .unwrap();
+    let foreign_id = format!("{SOURCE}#baozi-cap-primitives@0.1.0");
+    metadata["packages"].as_array_mut().unwrap().push(package(
+        &foreign_id,
+        "baozi-cap-primitives",
+        "0.1.0",
+    ));
+    metadata["resolve"]["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(node(&foreign_id, vec![], vec![]));
+    resolved_node_mut(metadata, CAP_STD_ID)["deps"][0]["pkg"] = json!(foreign_id);
+    assert_violation(
+        &fixture,
+        "duplicate full-closure package key baozi-cap-primitives@0.1.0",
+    );
+}
+
+#[test]
+fn maintained_child_declarations_bind_exact_paths_versions_and_aliases() {
+    for (owner, child) in [
+        ("baozi-cap-std", "baozi-cap-primitives"),
+        ("baozi-cap-fs-ext", "baozi-cap-primitives"),
+        ("baozi-cap-fs-ext", "baozi-cap-std"),
+    ] {
+        for (target, _) in DEPENDENCY_AUDIT_TARGETS {
+            for (field, value) in [
+                ("source", json!(SOURCE)),
+                ("path", json!("/fixture/unreviewed-backend")),
+                ("req", json!("^0.1.0")),
+                ("rename", json!("backend")),
+                ("kind", json!("build")),
+                ("uses_default_features", json!(true)),
+                ("features", json!(["fs_utf8"])),
+                ("target", json!("cfg(unix)")),
+                ("optional", json!(child != "baozi-cap-std")),
+            ] {
+                let mut fixture = Fixture::canonical();
+                let package =
+                    local_package_mut(fixture.repository.get_mut(*target).unwrap(), owner);
+                package["dependencies"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|dependency| dependency["name"] == child)
+                    .expect("maintained child declaration")[field] = value;
+                assert_violation(&fixture, &format!("{owner}: direct {child} edge drifted"));
+            }
+        }
+    }
+}
+
+#[test]
+fn maintained_child_resolved_edges_must_be_normal_and_keep_the_alias() {
+    for (owner, child, alias) in [
+        (CAP_STD_ID, CAP_PRIMITIVES_ID, "cap_primitives"),
+        (CAP_FS_EXT_ID, CAP_PRIMITIVES_ID, "cap_primitives"),
+        (CAP_FS_EXT_ID, CAP_STD_ID, "cap_std"),
+    ] {
+        for change in ["missing", "renamed", "build", "dev"] {
+            let mut fixture = Fixture::canonical();
+            let metadata = fixture
+                .repository
+                .get_mut("x86_64-unknown-linux-gnu")
+                .unwrap();
+            let dependencies = resolved_node_mut(metadata, owner)["deps"]
+                .as_array_mut()
+                .unwrap();
+            if change == "missing" {
+                dependencies.retain(|dependency| dependency["pkg"] != child);
+            } else {
+                let dependency = dependencies
+                    .iter_mut()
+                    .find(|dependency| dependency["pkg"] == child)
+                    .unwrap();
+                if change == "renamed" {
+                    dependency["name"] = json!("backend");
+                } else {
+                    dependency["dep_kinds"][0]["kind"] = json!(change);
+                }
+            }
+            assert_violation(&fixture, &format!("through a normal {alias} edge"));
+        }
+    }
+}
+
+#[test]
+fn maintained_packages_reject_inactive_upstream_and_unreviewed_child_declarations() {
+    for owner in ["baozi-cap-primitives", "baozi-cap-std", "baozi-cap-fs-ext"] {
+        let mut fixture = Fixture::canonical();
+        let metadata = fixture
+            .repository
+            .get_mut("x86_64-unknown-linux-gnu")
+            .unwrap();
+        local_package_mut(metadata, owner)["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(backend_declaration(
+                "cap-primitives",
+                "=4.0.3",
+                "cfg(any())",
+                true,
+                vec![],
+            ));
+        assert_violation(
+            &fixture,
+            &format!("{owner} must not declare upstream native package cap-primitives"),
+        );
+    }
+    let mut fixture = Fixture::canonical();
+    let metadata = fixture
+        .repository
+        .get_mut("x86_64-unknown-linux-gnu")
+        .unwrap();
+    local_package_mut(metadata, "baozi-cap-primitives")["dependencies"] =
+        json!([maintained_child_declaration("baozi-cap-std", true)]);
+    assert_violation(
+        &fixture,
+        "baozi-cap-primitives must not declare a baozi-cap-std dependency",
+    );
 }
 
 #[test]
 fn root_declarations_reject_native_edges_of_every_kind_even_when_renamed_or_inactive() {
     for owner in ["baozi", "baozi-io", "baozi-xtask", "dev-helper"] {
         for name in [
+            "baozi-cap-std",
+            "baozi-cap-primitives",
+            "baozi-cap-fs-ext",
             "cap-std",
             "cap-primitives",
             "cap-fs-ext",
@@ -1147,41 +1324,77 @@ fn candidate_runtime_and_repository_features_cannot_unify() {
 }
 
 #[test]
-fn portable_audit_starts_at_all_workspace_members_and_rejects_native_normal_and_build_edges() {
-    for kind in ["normal", "build", "dev"] {
-        let mut fixture = Fixture::canonical();
-        let wasm = fixture.portable.get_mut("wasm32-unknown-unknown").unwrap();
-        wasm["packages"]
-            .as_array_mut()
-            .unwrap()
-            .push(package(CAP_STD_ID, "cap-std", "4.0.3"));
-        wasm["resolve"]["nodes"]
-            .as_array_mut()
-            .unwrap()
-            .push(node(CAP_STD_ID, vec![], vec![]));
-        // IO is a workspace member even when the facade does not reach it.
-        resolved_node_mut(wasm, FIXTURE_FACADE_ID)["deps"] = json!([]);
-        resolved_node_mut(wasm, FIXTURE_IO_ID)["deps"] =
-            json!([dependency_with_kind("cap_std", CAP_STD_ID, kind)]);
-        let report = fixture.check();
-        if kind == "dev" {
-            assert!(report.violations.is_empty(), "{:#?}", report.violations);
-        } else {
-            assert!(
-                report
-                    .violations
-                    .iter()
-                    .any(|v| v
-                        .contains("portable workspace contains forbidden packages {\"cap-std\"}")),
-                "{:#?}",
-                report.violations
-            );
+fn portable_audit_starts_at_all_workspace_members_and_rejects_both_native_identities() {
+    for name in [
+        "baozi-cap-std",
+        "baozi-cap-primitives",
+        "baozi-cap-fs-ext",
+        "cap-std",
+        "cap-primitives",
+        "cap-fs-ext",
+    ] {
+        for kind in ["normal", "build", "dev"] {
+            let mut fixture = Fixture::canonical();
+            let wasm = fixture.portable.get_mut("wasm32-unknown-unknown").unwrap();
+            let native_id = format!("{SOURCE}#{name}@0.1.0");
+            wasm["packages"]
+                .as_array_mut()
+                .unwrap()
+                .push(package(&native_id, name, "0.1.0"));
+            wasm["resolve"]["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .push(node(&native_id, vec![], vec![]));
+            // IO is a workspace member even when the facade does not reach it.
+            resolved_node_mut(wasm, FIXTURE_FACADE_ID)["deps"] = json!([]);
+            resolved_node_mut(wasm, FIXTURE_IO_ID)["deps"] =
+                json!([dependency_with_kind("hidden_backend", &native_id, kind)]);
+            let report = fixture.check();
+            if kind == "dev" {
+                assert!(report.violations.is_empty(), "{:#?}", report.violations);
+            } else {
+                let expected =
+                    format!("portable workspace contains forbidden packages {{\"{name}\"}}");
+                assert!(
+                    report.violations.iter().any(|v| v.contains(&expected)),
+                    "{:#?}",
+                    report.violations
+                );
+            }
         }
     }
     let mut fixture = Fixture::canonical();
     let wasi = fixture.portable.get_mut("wasm32-wasip1").unwrap();
     resolved_node_mut(wasi, FIXTURE_IO_ID)["features"] = json!(["repository-fs-candidate"]);
     assert_violation(&fixture, "baozi-io/repository-fs-candidate");
+}
+
+#[test]
+fn xtask_rejects_both_native_identities_through_normal_and_build_edges() {
+    for name in [
+        "baozi-cap-std",
+        "baozi-cap-primitives",
+        "baozi-cap-fs-ext",
+        "cap-std",
+        "cap-primitives",
+        "cap-fs-ext",
+    ] {
+        for kind in ["normal", "build"] {
+            let mut fixture = Fixture::canonical();
+            let native_id = format!("{SOURCE}#{name}@0.1.0");
+            fixture.root["packages"]
+                .as_array_mut()
+                .unwrap()
+                .push(package(&native_id, name, "0.1.0"));
+            fixture.root["resolve"]["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .push(node(&native_id, vec![], vec![]));
+            resolved_node_mut(&mut fixture.root, FIXTURE_XTASK_ID)["deps"] =
+                json!([dependency_with_kind("hidden_backend", &native_id, kind)]);
+            assert_violation(&fixture, &format!("xtask must not reach {name}"));
+        }
+    }
 }
 
 #[test]
@@ -1200,7 +1413,7 @@ fn missing_targets_and_lock_checksums_fail_closed() {
     let mut fixture = Fixture::canonical();
     fixture.lockfile =
         "version = 4\n[[package]]\nname = 'unrelated'\nversion = '1.0.0'\n".to_owned();
-    assert_violation(&fixture, "missing checksum for cap-");
+    assert_violation(&fixture, "missing checksum for rustix@");
 }
 
 struct Fixture {
@@ -1346,29 +1559,21 @@ fn native_metadata(direct_rustix: bool) -> Value {
     candidate["manifest_path"] = json!("/fixture/candidates/baozi-native-io/Cargo.toml");
     candidate["publish"] = json!([]);
     candidate["features"] = json!({"default": [], "repository-capture": ["dep:cap-fs-ext"]});
-    let mut cap_primitives =
-        backend_declaration("cap-primitives", "=4.0.3", cap_target, false, vec![]);
-    cap_primitives["source"] = Value::Null;
-    cap_primitives["path"] = json!(CAP_PRIMITIVES_PATH);
     candidate["dependencies"] = json!([
         {"name": "baozi-io", "path": "/fixture/crates/baozi-io", "source": null,
             "kind": null, "rename": null, "target": null, "optional": false,
             "uses_default_features": false, "features": []},
         {"name": "thiserror", "kind": null},
-        backend_declaration("cap-std", "=4.0.3", cap_target, false, vec![]),
-        cap_primitives,
-        backend_declaration("cap-fs-ext", "=4.0.3", cap_target, true, vec!["std"]),
+        backend_declaration("baozi-cap-std", "=0.1.0", cap_target, false, vec![]),
+        backend_declaration("baozi-cap-primitives", "=0.1.0", cap_target, false, vec![]),
+        backend_declaration("baozi-cap-fs-ext", "=0.1.0", cap_target, true, vec!["std"]),
         backend_declaration("rustix", "=1.1.4", rustix_target, false, vec!["fs", "std"])
     ]);
     let io = root_metadata()["packages"][0].clone();
-    let mut local_backend = package(CAP_PRIMITIVES_ID, "cap-primitives", "4.0.3");
-    local_backend["manifest_path"] = json!(format!("{CAP_PRIMITIVES_PATH}/Cargo.toml"));
-    let mut packages = vec![
-        candidate,
-        io,
-        package(CAP_STD_ID, "cap-std", "4.0.3"),
-        local_backend,
-    ];
+    let local_backend = maintained_package(CAP_PRIMITIVES_ID, "baozi-cap-primitives");
+    let mut cap_std = maintained_package(CAP_STD_ID, "baozi-cap-std");
+    cap_std["dependencies"] = json!([maintained_child_declaration("baozi-cap-primitives", false)]);
+    let mut packages = vec![candidate, io, cap_std, local_backend];
     let mut root_deps = vec![
         dependency("baozi_io", FIXTURE_IO_ID),
         dependency("cap_std", CAP_STD_ID),
@@ -1401,17 +1606,47 @@ fn backend_declaration(
     optional: bool,
     features: Vec<&str>,
 ) -> Value {
-    json!({"name": name, "source": SOURCE, "req": req, "target": target,
+    let mut declaration = json!({"name": name, "source": SOURCE, "req": req, "target": target,
         "optional": optional, "features": features, "uses_default_features": false,
-        "kind": null, "rename": null})
+        "kind": null, "rename": null});
+    if let Some(alias) = name.strip_prefix("baozi-") {
+        declaration["source"] = Value::Null;
+        declaration["path"] = json!(format!(
+            "/fixture/candidates/baozi-native-io/vendor/{alias}"
+        ));
+        declaration["rename"] = json!(alias);
+    }
+    declaration
+}
+
+fn maintained_child_declaration(name: &str, optional: bool) -> Value {
+    let mut declaration = backend_declaration(name, "=0.1.0", "", optional, vec![]);
+    declaration["target"] = Value::Null;
+    declaration
+}
+
+fn maintained_package(id: &str, name: &str) -> Value {
+    let mut value = package(id, name, "0.1.0");
+    value["publish"] = json!([]);
+    let alias = name
+        .strip_prefix("baozi-")
+        .expect("maintained package name");
+    value["manifest_path"] = json!(format!(
+        "/fixture/candidates/baozi-native-io/vendor/{alias}/Cargo.toml"
+    ));
+    value
 }
 
 fn add_cap_fs_ext(metadata: &mut Value, repository_feature: bool) {
-    metadata["packages"].as_array_mut().unwrap().push(package(
-        CAP_FS_EXT_ID,
-        "cap-fs-ext",
-        "4.0.3",
-    ));
+    let mut cap_fs_ext = maintained_package(CAP_FS_EXT_ID, "baozi-cap-fs-ext");
+    cap_fs_ext["dependencies"] = json!([
+        maintained_child_declaration("baozi-cap-primitives", false),
+        maintained_child_declaration("baozi-cap-std", true),
+    ]);
+    metadata["packages"]
+        .as_array_mut()
+        .unwrap()
+        .push(cap_fs_ext);
     let root = resolved_node_mut(metadata, FIXTURE_CANDIDATE_ID);
     root["deps"]
         .as_array_mut()
@@ -1420,7 +1655,6 @@ fn add_cap_fs_ext(metadata: &mut Value, repository_feature: bool) {
     if repository_feature {
         root["features"] = json!(["repository-capture"]);
     }
-    resolved_node_mut(metadata, CAP_STD_ID)["features"] = json!(["default"]);
     metadata["resolve"]["nodes"]
         .as_array_mut()
         .unwrap()

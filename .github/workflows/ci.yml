@@ -36,6 +36,9 @@ jobs:
           python3 scripts/run_scale_profile.py --help
           python3 scripts/run_asset_profile.py --help
 
+      - name: Check archive rehearsal boundaries
+        run: python3 -m unittest discover -s scripts -p test_check_packages.py
+
       - name: Install Go
         uses: actions/setup-go@v6
         with:
@@ -230,13 +233,23 @@ jobs:
         run: cargo test --locked --doc --workspace --all-features
 
   package-consumers:
-    name: ${{ matrix.target }} packaged consumers (${{ matrix.toolchain }}, ${{ matrix.profile }})
+    name: ${{ matrix.target }} offline registry rehearsal (${{ matrix.toolchain }}, ${{ matrix.profile }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            toolchain: "1.95.0"
+            profile: debug
+            profile_args: ""
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            toolchain: stable
+            profile: release
+            profile_args: --release
           - runner: windows-2025
             target: x86_64-pc-windows-msvc
             toolchain: "1.95.0"
@@ -268,6 +281,9 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Test registry rehearsal boundaries without Cargo
+        run: python -m unittest discover -s scripts -p test_check_packages.py
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
@@ -291,8 +307,8 @@ jobs:
             throw "runner host $rustcHostTriple does not match matrix target ${{ matrix.target }}"
           }
 
-      - name: Build and execute all fixed packaged-consumer cases
-        run: python scripts/check_packages.py --toolchain "${{ matrix.toolchain }}" ${{ matrix.profile_args }}
+      - name: Rehearse packaged scenes, native candidate, and all helper features offline
+        run: python scripts/check_packages.py --toolchain "${{ matrix.toolchain }}" --target "${{ matrix.target }}" --native --features repository-capture ${{ matrix.profile_args }}
 
   native-fs-candidate:
     name: Native filesystem candidate (${{ matrix.target }})
@@ -365,7 +381,7 @@ jobs:
         run: cargo nextest run --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target "${{ matrix.target }}"
 
       - name: Test bounded native backend and reparse decoding
-        run: cargo nextest run --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target "${{ matrix.target }}" -p cap-primitives --lib
+        run: cargo nextest run --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target "${{ matrix.target }}" -p baozi-cap-primitives --lib
 
       - name: Test repository filesystem candidate operational and fail-closed contracts
         run: cargo nextest run --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target "${{ matrix.target }}" --features repository-capture

@@ -24,6 +24,10 @@ This is the source audit at the baseline below. Subsequent fixes and newly execu
 to the [asset workflow expansion review](../reviews/2026-11-01-asset-workflow-expansion.md) and the
 [follow-on plans and reviews](../plans/2026-11-01-001-feat-asset-workflow-expansion-plan.md#ordered-follow-on-candidates); the
 historical observations here are not current unresolved-defect or verification claims.
+The later [native dependency closure slice](../plans/2026-11-01-009-refactor-native-dependency-closure-plan.md)
+addresses the root-patch and archived-consumer findings through distinct maintained package
+identities and a local version-only registry rehearsal. Actual publication and target registration
+remain separate; this baseline audit is preserved rather than rewritten as later evidence.
 
 | Baseline | Exact identity and use |
 | --- | --- |

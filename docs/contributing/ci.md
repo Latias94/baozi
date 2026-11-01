@@ -38,7 +38,7 @@ Review these pins when changing CI, investigating tooling failures, or promoting
 
 The dated fuzz nightly intentionally uses `dtolnay/rust-toolchain@master` with a `toolchain` input.
 The workspace job tests MSRV through `dtolnay/rust-toolchain@1.95.0`. A separate current-stable
-job runs strict workspace Clippy, all-feature tests, and doctests. The Windows and Apple ARM64
+job runs strict workspace Clippy, all-feature tests, and doctests. The Linux, Windows and Apple ARM64
 packaged-consumer matrix additionally tests current stable in release mode. Stable jobs record `rustc -Vv`,
 so a rolling stable result has an exact compiler identity.
 
@@ -72,6 +72,7 @@ cargo nextest run --locked -p baozi-xtask
 cargo run --locked -p baozi-xtask -- runtime-admission-check
 python scripts/check_features.py --toolchain 1.95.0
 python scripts/check_packages.py --toolchain 1.95.0
+python scripts/check_packages.py --toolchain 1.95.0 --native --features repository-capture
 python scripts/check_packages.py --toolchain stable --release
 ```
 
@@ -79,13 +80,21 @@ Use cargo-deny 0.20.2 for the dependency checks above. Its `--config` option bel
 `check` subcommand; the standalone candidate and real-asset consumer use the root policy explicitly.
 
 The package matrix creates fresh archives for the complete production dependency closure, checks
-each package's normalized metadata, README and licenses, and resolves local dependencies only from
-their extracted contents. It builds and executes all twelve fixed consumer cases in a fresh
+each package's normalized metadata, README and licenses, and supplies the extracted archives through
+a standard Cargo directory source. Independent roots use exact registry versions without path or
+patch tables. A staging lock transitions once from checkout to registry identities; subsequent
+builds use `--locked --offline` and every maintained dependency must resolve to its exact extracted
+directory. This is a local unpublished-registry rehearsal, not proof of crates.io availability.
+It builds and executes all twelve fixed consumer cases in a fresh
 artifact build directory: no features, curated defaults, each format independently, postprocessing,
-all formats, tracing, mint, and all features. The MSRV/debug and current-stable/release Windows
+all formats, tracing, mint, and all features. The MSRV/debug and current-stable/release Linux, Windows
 and Apple ARM64 jobs execute the same maintained semantic consumer, including the ordinary
 main-stack import and application-buffer workflow. Each checks the actual compiler host against
 its exact target before building; the artifact matrix is not a cross-compile substitute.
+The same jobs execute a separate unregistered native candidate consumer through scoped IO and a
+semantic STL import, compile its optional repository-capture closure, and separately check the
+maintained helper packages with their optional features. These helper checks do not widen the
+reviewed runtime profiles or exercise repository capture.
 
 There is currently no release-registered `native-fs` or low-level `fs` feature. The unpublished
 `baozi-native-io-candidate` package has its own workspace/lockfile and an optional
@@ -125,15 +134,16 @@ requires the candidate package to fail with the same explicit Baozi diagnostic o
 `wasm32-unknown-unknown`, `wasm32-wasip1`, Build Monitored `x86_64-apple-darwin`, and audit-only
 `x86_64-unknown-freebsd`, plus ABI-distinct `x86_64-unknown-linux-gnux32`, after first proving each
 target is installed. The `native-fs-check` command separately compares normal/build dependency
-closures for the three runtime candidates plus the FreeBSD audit profile against schema 5 of
+closures for the three runtime candidates plus the FreeBSD audit profile against schema 6 of
 [`native-filesystem-resolved-closure.json`](../research/native-filesystem-resolved-closure.json),
 whose `runtime_candidate_targets`, `dependency_audit_profiles`, and
 `release_registered_targets` fields keep those universes distinct. It also checks package sources,
-lockfile checksums, resolved features, direct target edges, the unique local bounded backend
-path/version with distinct upstream archive provenance, and the version-bound review basis for
+lockfile checksums, resolved features, direct target edges, the three unique maintained backend
+paths/versions with distinct upstream archive provenance, and the version-bound review basis for
 the Windows directory share-mode boundary. Native filesystem
-dependencies remain private to the standalone candidate workspace. The checker also rejects `cap-std`, `cap-primitives`,
-`rustix`, or `cap-fs-ext`, and rejects activation of either registered or candidate native filesystem
+dependencies remain private to the standalone candidate workspace. The checker also rejects
+`baozi-cap-std`, `baozi-cap-primitives`, `baozi-cap-fs-ext`, their upstream `cap-*` counterparts,
+and `rustix`, and rejects activation of either registered or candidate native filesystem
 features in byte-only WebAssembly graphs. The separate `crate-graph-check` traverses every workspace
 normal/build dependency edge, including optional, renamed, and target-conditional declarations. It
 enforces the complete ADR 0007 production direction table, rejects unclassified production crates,

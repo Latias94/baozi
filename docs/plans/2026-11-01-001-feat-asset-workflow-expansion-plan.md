@@ -293,7 +293,10 @@ unsupported optional-extension policy, complete retained fallback semantics and 
 application consumption. Integrated qualification is recorded in its
 [execution review](../reviews/2026-11-01-gltf-unlit-materials.md). Candidates 1–7 are complete;
 the table retains their original ordering and acceptance boundaries. The separate release track
-requires its own selected execution unit.
+is now selected through the
+[maintained native dependency closure slice](2026-11-01-009-refactor-native-dependency-closure-plan.md).
+That slice removes root patch requirements and rehearses independent archived consumers; it does
+not select a first registry release, publish packages or promote native targets.
 
 | Order | Candidate and prerequisite | Required boundary and acceptance when selected |
 | --- | --- | --- |

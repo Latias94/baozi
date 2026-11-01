@@ -90,6 +90,16 @@ The following packages currently set `publish = false`:
 - `baozi-format-gltf`: the selected profile is source-admitted after the `2dc2fc8` Linux ASan and
   independent consumer gates; publication remains disabled pending package/release evidence
 - `baozi-fuzz`: cargo-fuzz workspace
+- `baozi-native-io-candidate`: standalone, unregistered native adapter and optional repository capture
+- `baozi-cap-primitives`, `baozi-cap-std`, and `baozi-cap-fs-ext`: maintained native dependency
+  packages, each version 0.1.0, based on the complete upstream 4.0.3 source and license choices
+
+The four native packages remain outside the canonical facade release unit and publish order.
+Baozi owns maintenance of their distinct identities and exact dependency edges; the Rust library
+aliases remain `cap_primitives`, `cap_std`, and `cap_fs_ext`. The
+[third-party notices](../../THIRD_PARTY_NOTICES.md#cap-std-project) and per-package `PATCHES.md`
+records preserve upstream authorship, copyrights, licenses and archive provenance. Local native
+archive checks do not add those packages to a release train or register a supported target.
 
 Manifest eligibility, local artifact qualification, and actual registry publication are distinct.
 Local archives and their consumer checks do not change these flags or authorize publication.
@@ -137,20 +147,43 @@ first-release path is to complete PLY's publication evidence and publish it befo
 CI packages both release-unit leaves, `baozi-operation` and `baozi-io`, before the canonical registry
 train. Registry-based verification of dependent crates follows publish order after their internal
 dependencies exist on crates.io at the matching version. The existing
-[`check_packages.py`](../../scripts/check_packages.py) additionally validates the complete local
-production closure before registry publication: it creates `.crate` archives, unpacks them into a
-fresh directory, checks that Cargo resolves local dependencies only from those extracted artifacts,
-and builds and executes the maintained public consumer. It uses the unchanged consumer lockfile and
-fixed feature cases without generating Rust or substituting checkout sources.
+[`check_packages.py`](../../scripts/check_packages.py) additionally rehearses the complete local
+production closure before registry publication. It creates actual `.crate` archives and retains
+their normalized manifests unchanged. Independent consumers declare exact version-only roots and
+resolve against a standard Cargo directory-source snapshot containing those archives' extracted
+contents and the required registry dependencies. No consumer-root patches, rewritten artifact
+dependency paths, or checkout sources satisfy this rehearsal. The supplied snapshot does not
+establish that unpublished versions exist on crates.io or that their names are available.
 
 Run `python scripts/check_packages.py --toolchain 1.95.0` for all maintained cases, and use
 `--toolchain stable --release` for the current-stable release matrix. Local archive creation uses
-`--locked --allow-dirty --no-verify --exclude-lockfile`, omitting generated package lockfiles.
-Extracted consumers resolve, build, and run with their unchanged maintained `Cargo.lock` and
-`--locked`; the checker does not retry unlocked or refresh a lockfile. The fresh consumer build
-and execution qualify the local artifacts. That simulation does not replace exact-tag packaging,
-registry ownership/authentication checks, or the real release commands above. Record the executed cases and
-targets rather than treating two selected cases as the entire publication matrix.
+`--locked --offline --allow-dirty --no-verify --exclude-lockfile`, omitting generated package
+lockfiles. The scene consumer keeps its handwritten source and fixed feature cases. Its checked-in
+lockfile is staging input; the initial offline resolution regenerates or transitions only the
+staging consumer locks to registry identities. Subsequent checks, builds and runs use
+`--locked --offline`, without an unlocked retry. Source manifests and lockfiles remain unchanged.
+
+Add `--native --features repository-capture` to rehearse the unpublished native chain. In runtime
+mode the native baseline executes file import; the repository feature is an additional compile
+check, not an executed capture result. `--native` also runs a separate compile-only all-feature
+helper consumer covering retained upstream helpers such as `arbitrary`, `fs_utf8`, and
+`arf_strings`; candidate `--all-features` does not enable all dependency features. Neither helper
+coverage nor repository compilation expands the admitted runtime feature set. CI configures the
+scene matrix, native baseline, optional repository compilation and helper all-feature checks on
+Linux x86_64, Windows x86_64, and Apple ARM64, with MSRV/debug and current-stable/release jobs on
+each host.
+
+For the copied native packages, the historical upstream `Cargo.toml.orig` and `.cargo_vcs_info.json`
+remain in the checkout but are excluded from package inputs. Cargo generates a new archive
+`Cargo.toml.orig` from the maintained active manifest and a normalized archive `Cargo.toml`.
+Upstream checksums identify original archives; new maintained archive digests identify the actual
+rehearsal artifacts. See [the package procedure](package-consumer-checks.md) for these boundaries.
+
+Workflow configuration and archive creation are not execution receipts. Record the actual source
+revision, cases, targets, toolchains and results once executed; an in-progress implementation has
+no frozen qualification revision. The rehearsal does not replace exact-tag packaging, registry
+ownership/authentication checks, or the real release commands above, and it does not authorize
+publication or native target promotion.
 
 ## Release Checklist
 

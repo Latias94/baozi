@@ -1,1 +1,4 @@
 * text=auto eol=lf
+
+# Preserve the final blank line in the upstream native dependency license text.
+candidates/baozi-native-io/vendor/cap-*/LICENSE-Apache-2.0_WITH_LLVM-exception whitespace=-blank-at-eof

@@ -147,7 +147,7 @@ admission before merge.
 
 An explicitly patched native dependency records its actual unique local path/version and reviewed
 patch surface separately from the original registry archive's checksum provenance. The standalone
-native candidate's bounded-link `cap-primitives` patch follows ADR 0010: its synchronous Windows
+native candidate's bounded-link `baozi-cap-primitives` maintained package follows ADR 0010: its synchronous Windows
 reparse query retains adjacent safety invariants, safe bounded byte decoding, malformed/native
 tests and independent review. It remains outside portable production graphs and release
 registration. The original upstream checksum must never be presented as the modified source's hash;

@@ -1,3 +1,10 @@
+# Baozi-maintained package
+
+This is `baozi-cap-primitives` 0.1.0, maintained from upstream `cap-primitives`
+4.0.3. See [PATCHES.md](PATCHES.md) for the original archive identity, licenses,
+bounded manual-link changes and guarantee limits. The library name remains
+`cap_primitives`. Upstream project documentation follows.
+
 <div align="center">
   <h1><code>cap-primitives</code></h1>
 

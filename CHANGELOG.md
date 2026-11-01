@@ -6,6 +6,21 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Replaced the native candidate and asset consumer's root patches with maintained
+  `baozi-cap-primitives`, `baozi-cap-std`, and `baozi-cap-fs-ext` 0.1.0 packages based on
+  upstream 4.0.3. Exact dependency edges retain the library aliases, original source, build
+  scripts, copyrights, licenses and upstream provenance. All three dependencies and the
+  unregistered native candidate set `publish = false`.
+- Reworked packaged-consumer checks to resolve unchanged normalized `.crate` manifests through
+  exact version-only roots and a standard Cargo directory-source snapshot, without root patches
+  or checkout substitutions. Only staging locks transition to registry identities; subsequent
+  builds and runs stay `--locked --offline`. Historical upstream `Cargo.toml.orig` files remain
+  in source but are excluded from package inputs; Cargo generates archive `.orig` files from
+  the maintained active manifests.
+- Added Linux MSRV/debug and current-stable/release hosts to the configured scene package matrix
+  and native checks. Native default execution, optional repository compilation, and upstream
+  helper all-feature checks have separate scopes. Workflow wiring does not record a test pass,
+  publish a package, or promote a native target.
 - Added source-object metadata ownership independently of canonical entities, with allocation-free
   borrowed metadata/source/resource readers. Selected glTF extras preserve their exact JSON value
   bytes and survive Scene edits; the offline consumer copies them into application-owned storage.

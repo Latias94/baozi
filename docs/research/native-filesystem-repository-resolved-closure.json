@@ -3,16 +3,16 @@
     "freebsd": {
       "full_package_keys": {
         "added": [
-          "cap-fs-ext@4.0.3"
+          "baozi-cap-fs-ext@0.1.0"
         ],
         "removed": []
       },
       "nodes": {
         "added": {
-          "cap-fs-ext@4.0.3": {
+          "baozi-cap-fs-ext@0.1.0": {
             "dependencies": [
-              "normal:cap_primitives=cap-primitives@4.0.3",
-              "normal:cap_std=cap-std@4.0.3",
+              "normal:cap_primitives=baozi-cap-primitives@0.1.0",
+              "normal:cap_std=baozi-cap-std@0.1.0",
               "normal:io_lifetimes=io-lifetimes@3.0.1"
             ],
             "features": [
@@ -21,24 +21,12 @@
             ]
           }
         },
-        "changed": {
-          "cap-std@4.0.3": {
-            "dependencies": [
-              "normal:cap_primitives=cap-primitives@4.0.3",
-              "normal:io_extras=io-extras@0.19.0",
-              "normal:io_lifetimes=io-lifetimes@3.0.1",
-              "normal:rustix=rustix@1.1.4"
-            ],
-            "features": [
-              "default"
-            ]
-          }
-        },
+        "changed": {},
         "removed": []
       },
       "roots": {
         "added": [
-          "cap-fs-ext@4.0.3"
+          "baozi-cap-fs-ext@0.1.0"
         ],
         "removed": []
       },
@@ -47,16 +35,16 @@
     "linux": {
       "full_package_keys": {
         "added": [
-          "cap-fs-ext@4.0.3"
+          "baozi-cap-fs-ext@0.1.0"
         ],
         "removed": []
       },
       "nodes": {
         "added": {
-          "cap-fs-ext@4.0.3": {
+          "baozi-cap-fs-ext@0.1.0": {
             "dependencies": [
-              "normal:cap_primitives=cap-primitives@4.0.3",
-              "normal:cap_std=cap-std@4.0.3",
+              "normal:cap_primitives=baozi-cap-primitives@0.1.0",
+              "normal:cap_std=baozi-cap-std@0.1.0",
               "normal:io_lifetimes=io-lifetimes@3.0.1"
             ],
             "features": [
@@ -65,24 +53,12 @@
             ]
           }
         },
-        "changed": {
-          "cap-std@4.0.3": {
-            "dependencies": [
-              "normal:cap_primitives=cap-primitives@4.0.3",
-              "normal:io_extras=io-extras@0.19.0",
-              "normal:io_lifetimes=io-lifetimes@3.0.1",
-              "normal:rustix=rustix@1.1.4"
-            ],
-            "features": [
-              "default"
-            ]
-          }
-        },
+        "changed": {},
         "removed": []
       },
       "roots": {
         "added": [
-          "cap-fs-ext@4.0.3"
+          "baozi-cap-fs-ext@0.1.0"
         ],
         "removed": []
       },
@@ -91,16 +67,16 @@
     "macos": {
       "full_package_keys": {
         "added": [
-          "cap-fs-ext@4.0.3"
+          "baozi-cap-fs-ext@0.1.0"
         ],
         "removed": []
       },
       "nodes": {
         "added": {
-          "cap-fs-ext@4.0.3": {
+          "baozi-cap-fs-ext@0.1.0": {
             "dependencies": [
-              "normal:cap_primitives=cap-primitives@4.0.3",
-              "normal:cap_std=cap-std@4.0.3",
+              "normal:cap_primitives=baozi-cap-primitives@0.1.0",
+              "normal:cap_std=baozi-cap-std@0.1.0",
               "normal:io_lifetimes=io-lifetimes@3.0.1"
             ],
             "features": [
@@ -109,24 +85,12 @@
             ]
           }
         },
-        "changed": {
-          "cap-std@4.0.3": {
-            "dependencies": [
-              "normal:cap_primitives=cap-primitives@4.0.3",
-              "normal:io_extras=io-extras@0.19.0",
-              "normal:io_lifetimes=io-lifetimes@3.0.1",
-              "normal:rustix=rustix@1.1.4"
-            ],
-            "features": [
-              "default"
-            ]
-          }
-        },
+        "changed": {},
         "removed": []
       },
       "roots": {
         "added": [
-          "cap-fs-ext@4.0.3"
+          "baozi-cap-fs-ext@0.1.0"
         ],
         "removed": []
       },
@@ -135,16 +99,16 @@
     "windows-msvc": {
       "full_package_keys": {
         "added": [
-          "cap-fs-ext@4.0.3"
+          "baozi-cap-fs-ext@0.1.0"
         ],
         "removed": []
       },
       "nodes": {
         "added": {
-          "cap-fs-ext@4.0.3": {
+          "baozi-cap-fs-ext@0.1.0": {
             "dependencies": [
-              "normal:cap_primitives=cap-primitives@4.0.3",
-              "normal:cap_std=cap-std@4.0.3",
+              "normal:cap_primitives=baozi-cap-primitives@0.1.0",
+              "normal:cap_std=baozi-cap-std@0.1.0",
               "normal:io_lifetimes=io-lifetimes@3.0.1",
               "normal:windows_sys=windows-sys@0.61.2"
             ],
@@ -154,23 +118,12 @@
             ]
           }
         },
-        "changed": {
-          "cap-std@4.0.3": {
-            "dependencies": [
-              "normal:cap_primitives=cap-primitives@4.0.3",
-              "normal:io_extras=io-extras@0.19.0",
-              "normal:io_lifetimes=io-lifetimes@3.0.1"
-            ],
-            "features": [
-              "default"
-            ]
-          }
-        },
+        "changed": {},
         "removed": []
       },
       "roots": {
         "added": [
-          "cap-fs-ext@4.0.3"
+          "baozi-cap-fs-ext@0.1.0"
         ],
         "removed": []
       },
@@ -180,9 +133,13 @@
   "metadata_semantics": "cargo metadata --locked --filter-platform; repository-capture normal/build closure delta from the frozen runtime baseline",
   "package_identities": {
     "added": {
-      "cap-fs-ext@4.0.3": {
-        "checksum": "56ff379b70af8e08307a8f65e7040c7301cb4a572538ade16b4984f0da77847f",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      "baozi-cap-fs-ext@0.1.0": {
+        "patches": "candidates/baozi-native-io/vendor/cap-fs-ext/PATCHES.md",
+        "source": "path+candidates/baozi-native-io/vendor/cap-fs-ext",
+        "upstream_checksum": "56ff379b70af8e08307a8f65e7040c7301cb4a572538ade16b4984f0da77847f",
+        "upstream_name": "cap-fs-ext",
+        "upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
+        "upstream_version": "4.0.3"
       }
     },
     "changed": {},
@@ -199,6 +156,6 @@
     "authority": "docs/research/u4c-repository-input-capability.md"
   },
   "runtime_baseline": "docs/research/native-filesystem-resolved-closure.json",
-  "runtime_baseline_schema": 5,
-  "schema": 4
+  "runtime_baseline_schema": 6,
+  "schema": 5
 }

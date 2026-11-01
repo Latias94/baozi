@@ -17,7 +17,7 @@ pub use contract::{NativeFsMetadataProfiles, NativeFsReport};
 /// Compiler target checks and native behavior tests cover adapter availability and behavior;
 /// this check does not inspect Rust sources or promote candidate targets to release support.
 /// Every Cargo query is locked. Registry checksums come from the candidate's own lockfile;
-/// the reviewed local backend records its upstream archive checksum only as provenance.
+/// the maintained local packages record their upstream archive checksums only as provenance.
 pub fn check_repository(repository_root: &Path) -> NativeFsReport {
     let result = (|| {
         let baseline = read_json(&repository_root.join(BASELINE_PATH), "native-fs baseline")?;
@@ -461,42 +461,28 @@ fn check_candidate_manifest(root: &Value, metadata: &Value, violations: &mut Vec
     let expected = BTreeSet::from([
         "baozi-io",
         "thiserror",
-        "cap-std",
-        "cap-primitives",
+        "baozi-cap-std",
+        "baozi-cap-primitives",
         "rustix",
-        "cap-fs-ext",
+        "baozi-cap-fs-ext",
     ]);
     if actual_set != expected || actual.len() != expected.len() {
         violations.push(format!("native-fs manifest: {CANDIDATE_PACKAGE} production dependencies must be exactly {expected:?} without duplicates, found {actual:?}"));
     }
-    for expected in [
-        ManifestDependency {
-            name: "cap-std",
-            requirement: "=4.0.3",
-            path: None,
-            target: CAP_STD_TARGET,
-            optional: false,
-            features: &[],
-        },
+    check_manifest_dependency(
+        CANDIDATE_PACKAGE,
+        dependencies,
         ManifestDependency {
             name: "rustix",
             requirement: "=1.1.4",
             path: None,
-            target: RUSTIX_TARGET,
+            rename: None,
+            target: Some(RUSTIX_TARGET),
             optional: false,
             features: &["fs", "std"],
         },
-        ManifestDependency {
-            name: "cap-fs-ext",
-            requirement: "=4.0.3",
-            path: None,
-            target: CAP_STD_TARGET,
-            optional: true,
-            features: &["std"],
-        },
-    ] {
-        check_manifest_dependency(dependencies, expected, violations);
-    }
+        violations,
+    );
     let io = dependencies
         .iter()
         .find(|dependency| string_field(dependency, "name") == Some("baozi-io"));
@@ -656,12 +642,14 @@ struct ManifestDependency<'a> {
     name: &'a str,
     requirement: &'a str,
     path: Option<&'a Path>,
-    target: &'a str,
+    rename: Option<&'a str>,
+    target: Option<&'a str>,
     features: &'a [&'a str],
     optional: bool,
 }
 
 fn check_manifest_dependency(
+    owner: &str,
     dependencies: &[Value],
     expected: ManifestDependency<'_>,
     violations: &mut Vec<String>,
@@ -674,7 +662,7 @@ fn check_manifest_dependency(
         [dependency] => *dependency,
         _ => {
             violations.push(format!(
-                "native-fs manifest: expected exactly one direct {} edge, found {}",
+                "native-fs manifest: {owner}: expected exactly one direct {} edge, found {}",
                 expected.name,
                 matching.len()
             ));
@@ -707,18 +695,28 @@ fn check_manifest_dependency(
     let exact = source_matches
         && string_field(dependency, "req") == Some(expected.requirement)
         && dependency.get("kind") == Some(&Value::Null)
-        && dependency.get("rename") == Some(&Value::Null)
+        && dependency.get("rename")
+            == Some(
+                &expected
+                    .rename
+                    .map_or(Value::Null, |alias| Value::String(alias.to_owned())),
+            )
         && dependency.get("optional").and_then(Value::as_bool) == Some(expected.optional)
         && dependency
             .get("uses_default_features")
             .and_then(Value::as_bool)
             == Some(false)
-        && string_field(dependency, "target") == Some(expected.target)
+        && dependency.get("target")
+            == Some(
+                &expected
+                    .target
+                    .map_or(Value::Null, |target| Value::String(target.to_owned())),
+            )
         && actual_features.as_ref() == Some(&expected_features);
     if !exact {
         violations.push(format!(
-            "native-fs manifest: direct {} edge drifted from {location}, req={}, optional={}, default-features=false, features={expected_features:?}, target={}",
-            expected.name, expected.requirement, expected.optional, expected.target
+            "native-fs manifest: {owner}: direct {} edge drifted from {location}, req={}, rename={:?}, optional={}, default-features=false, features={expected_features:?}, target={:?}",
+            expected.name, expected.requirement, expected.rename, expected.optional, expected.target
         ));
     }
 }
@@ -1090,12 +1088,12 @@ fn review_basis() -> Value {
             Value::Object(Map::from_iter([
                 (
                     "package".to_owned(),
-                    Value::String("cap-primitives@4.0.3".to_owned()),
+                    Value::String("baozi-cap-primitives@0.1.0".to_owned()),
                 ),
                 (
                     "identity_binding".to_owned(),
                     Value::String(
-                        "package_identities.cap-primitives@4.0.3".to_owned(),
+                        "package_identities.baozi-cap-primitives@0.1.0".to_owned(),
                     ),
                 ),
                 (
@@ -1143,24 +1141,29 @@ fn build_dependency_audit_profile(
         .parent()
         .and_then(Path::parent)
         .ok_or_else(|| format!("{profile_label}: candidate workspace omitted repository parent"))?;
-    let cap_primitives_path = repository_root.join(CAP_PRIMITIVES_PATH);
     let declarations = document
         .package(root)?
         .get("dependencies")
         .and_then(Value::as_array)
         .ok_or_else(|| format!("{profile_label}: {CANDIDATE_PACKAGE} omitted dependencies"))?;
-    check_manifest_dependency(
-        declarations,
-        ManifestDependency {
-            name: "cap-primitives",
-            requirement: "=4.0.3",
-            path: Some(&cap_primitives_path),
-            target: CAP_STD_TARGET,
-            optional: false,
-            features: &[],
-        },
-        violations,
-    );
+    for expected in MAINTAINED_CAP_PACKAGES {
+        let path = repository_root.join(expected.path);
+        let repository_only = expected.name == "baozi-cap-fs-ext";
+        check_manifest_dependency(
+            CANDIDATE_PACKAGE,
+            declarations,
+            ManifestDependency {
+                name: expected.name,
+                requirement: "=0.1.0",
+                path: Some(&path),
+                rename: Some(expected.alias),
+                target: Some(CAP_STD_TARGET),
+                optional: repository_only,
+                features: if repository_only { &["std"] } else { &[] },
+            },
+            violations,
+        );
+    }
     let expected_io_manifest = repository_root.join("crates/baozi-io/Cargo.toml");
     let io_id = document.unique_package_id("baozi-io")?;
     let io_package = document.package(io_id)?;
@@ -1194,16 +1197,23 @@ fn build_dependency_audit_profile(
             "{profile_label}: candidate must depend directly on portable baozi-io"
         ));
     }
-    if !root_dependencies.iter().any(|dependency| {
-        dependency.name == "cap_primitives"
-            && dependency.kinds == ["normal"]
-            && document
-                .package(&dependency.package)
-                .is_ok_and(|package| string_field(package, "name") == Some("cap-primitives"))
-    }) {
-        violations.push(format!(
-            "{profile_label}: candidate must depend directly on local cap-primitives through a normal cap_primitives edge"
-        ));
+    for expected in MAINTAINED_CAP_PACKAGES {
+        if expected.name == "baozi-cap-fs-ext" && kind == DependencyAuditKind::Runtime {
+            continue;
+        }
+        let alias = expected.alias.replace('-', "_");
+        if !root_dependencies.iter().any(|dependency| {
+            dependency.name == alias
+                && dependency.kinds == ["normal"]
+                && document
+                    .package(&dependency.package)
+                    .is_ok_and(|package| string_field(package, "name") == Some(expected.name))
+        }) {
+            violations.push(format!(
+                "{profile_label}: candidate must depend directly on local {} through a normal {alias} edge",
+                expected.name
+            ));
+        }
     }
     let mut full_package_keys = BTreeSet::new();
     for id in &full_reachable {
@@ -1217,8 +1227,19 @@ fn build_dependency_audit_profile(
                 "{profile_label}: duplicate full-closure package key {key}"
             ));
         }
+        let name = required_string(package, "name", "package")?;
+        if MAINTAINED_CAP_PACKAGES
+            .iter()
+            .any(|expected| expected.alias == name)
+        {
+            violations.push(format!(
+                "{profile_label}: upstream native package {name} is forbidden; use the maintained Baozi dependency chain"
+            ));
+        }
         if id != io_id
-            && string_field(package, "name") != Some("cap-primitives")
+            && !MAINTAINED_CAP_PACKAGES
+                .iter()
+                .any(|expected| expected.name == name)
             && string_field(package, "source") != Some(CRATES_IO_SOURCE)
         {
             violations.push(format!(
@@ -1252,22 +1273,16 @@ fn build_dependency_audit_profile(
     roots.sort_unstable();
     roots.dedup();
 
-    let expected_names: BTreeSet<_> = match (kind, profile.direct_rustix) {
-        (DependencyAuditKind::Runtime, true) => ["cap-primitives", "cap-std", "rustix"]
-            .into_iter()
-            .collect(),
-        (DependencyAuditKind::Runtime, false) => {
-            ["cap-primitives", "cap-std"].into_iter().collect()
-        }
-        (DependencyAuditKind::Repository, true) => {
-            ["cap-fs-ext", "cap-primitives", "cap-std", "rustix"]
-                .into_iter()
-                .collect()
-        }
-        (DependencyAuditKind::Repository, false) => ["cap-fs-ext", "cap-primitives", "cap-std"]
-            .into_iter()
-            .collect(),
-    };
+    let mut expected_names: BTreeSet<_> = MAINTAINED_CAP_PACKAGES
+        .iter()
+        .filter(|expected| {
+            expected.name != "baozi-cap-fs-ext" || kind == DependencyAuditKind::Repository
+        })
+        .map(|expected| expected.name)
+        .collect();
+    if profile.direct_rustix {
+        expected_names.insert("rustix");
+    }
     let actual_names = roots
         .iter()
         .map(|id| {
@@ -1300,8 +1315,11 @@ fn build_dependency_audit_profile(
         if !profile_keys.insert(key.clone()) {
             return Err(format!("{profile_label}: duplicate package key {key}"));
         }
-        let identity = package_identity(package, checksums, &cap_primitives_path)?;
-        if string_field(package, "name") != Some("cap-primitives") {
+        let identity = package_identity(package, checksums, repository_root)?;
+        if !MAINTAINED_CAP_PACKAGES
+            .iter()
+            .any(|expected| string_field(package, "name") == Some(expected.name))
+        {
             if string_field(&identity, "source") != Some(CRATES_IO_SOURCE) {
                 violations.push(format!(
                     "{profile_label}: {key} must come from {CRATES_IO_SOURCE}"
@@ -1364,6 +1382,7 @@ fn build_dependency_audit_profile(
         &full_reachable,
         &document,
         checksums,
+        repository_root,
         violations,
     )?;
 
@@ -1402,6 +1421,7 @@ fn check_critical_packages(
     reachable: &BTreeSet<String>,
     document: &MetadataDocument<'_>,
     checksums: &BTreeMap<ChecksumKey, String>,
+    repository_root: &Path,
     violations: &mut Vec<String>,
 ) -> Result<(), String> {
     let profile_label = dependency_audit_profile_label(kind, profile.name);
@@ -1410,25 +1430,56 @@ fn check_critical_packages(
         .map(|id| document.package(id))
         .collect::<Result<Vec<_>, _>>()?;
 
-    // The sole local backend's version and manifest path are checked by package_identity.
-    let local_count = packages
-        .iter()
-        .filter(|package| string_field(package, "name") == Some("cap-primitives"))
-        .count();
-    if local_count != 1 {
-        violations.push(format!(
-            "{profile_label}: expected exactly one cap-primitives package, found {local_count}"
-        ));
-    }
-
-    if kind == DependencyAuditKind::Runtime
-        && packages
+    for expected in MAINTAINED_CAP_PACKAGES {
+        let matching: Vec<_> = packages
             .iter()
-            .any(|package| string_field(package, "name") == Some("cap-fs-ext"))
-    {
-        violations.push(format!(
-            "{profile_label}: cap-fs-ext is forbidden in the resolved closure"
-        ));
+            .filter(|package| string_field(package, "name") == Some(expected.name))
+            .collect();
+        if expected.name == "baozi-cap-fs-ext" && kind == DependencyAuditKind::Runtime {
+            if !matching.is_empty() {
+                violations.push(format!(
+                    "{profile_label}: baozi-cap-fs-ext is forbidden in the resolved closure"
+                ));
+            }
+            continue;
+        }
+        let package = match matching.as_slice() {
+            [package] => **package,
+            _ => {
+                violations.push(format!(
+                    "{profile_label}: expected exactly one {} package, found {}",
+                    expected.name,
+                    matching.len()
+                ));
+                continue;
+            }
+        };
+        package_identity(package, checksums, repository_root)?;
+        check_maintained_child_chain(
+            expected,
+            package,
+            document,
+            repository_root,
+            &profile_label,
+            violations,
+        )?;
+        if expected.name == "baozi-cap-fs-ext" {
+            let id = required_string(package, "id", "package")?;
+            let node = document.node(id)?;
+            let features = node
+                .get("features")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    format!("{profile_label}: baozi-cap-fs-ext omitted resolved features")
+                })?;
+            let actual: BTreeSet<_> = sorted_strings(features)?.into_iter().collect();
+            let expected = BTreeSet::from(["cap-std".to_owned(), "std".to_owned()]);
+            if actual != expected {
+                violations.push(format!(
+                    "{profile_label}: baozi-cap-fs-ext resolved features must be exactly {expected:?}, found {actual:?}"
+                ));
+            }
+        }
     }
 
     for expected in CRITICAL_PACKAGES {
@@ -1436,11 +1487,7 @@ fn check_critical_packages(
             .iter()
             .filter(|package| string_field(package, "name") == Some(expected.name))
             .collect();
-        let required = match expected.name {
-            "cap-fs-ext" => kind == DependencyAuditKind::Repository,
-            "rustix" => profile.direct_rustix,
-            _ => true,
-        };
+        let required = profile.direct_rustix;
         if matching.is_empty() && !required {
             continue;
         }
@@ -1465,20 +1512,82 @@ fn check_critical_packages(
                 expected.name, expected.version, expected.checksum
             ));
         }
-        if expected.name == "cap-fs-ext" && kind == DependencyAuditKind::Repository {
-            let id = required_string(package, "id", "package")?;
-            let node = document.node(id)?;
-            let features = node
-                .get("features")
-                .and_then(Value::as_array)
-                .ok_or_else(|| format!("{profile_label}: cap-fs-ext omitted resolved features"))?;
-            let actual: BTreeSet<_> = sorted_strings(features)?.into_iter().collect();
-            let expected = BTreeSet::from(["cap-std".to_owned(), "std".to_owned()]);
-            if actual != expected {
+    }
+    Ok(())
+}
+
+fn check_maintained_child_chain(
+    owner: &MaintainedCapPackage,
+    package: &Value,
+    document: &MetadataDocument<'_>,
+    repository_root: &Path,
+    profile_label: &str,
+    violations: &mut Vec<String>,
+) -> Result<(), String> {
+    let declarations = package
+        .get("dependencies")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{profile_label}: {} omitted dependencies", owner.name))?;
+    for declaration in declarations {
+        let name = required_string(declaration, "name", "dependency")?;
+        if string_field(declaration, "kind") != Some("dev")
+            && MAINTAINED_CAP_PACKAGES
+                .iter()
+                .any(|expected| expected.alias == name)
+        {
+            violations.push(format!(
+                "{profile_label}: {} must not declare upstream native package {name}",
+                owner.name
+            ));
+        }
+    }
+    let expected_children: &[&str] = match owner.name {
+        "baozi-cap-std" => &["baozi-cap-primitives"],
+        "baozi-cap-fs-ext" => &["baozi-cap-primitives", "baozi-cap-std"],
+        _ => &[],
+    };
+    let id = required_string(package, "id", "package")?;
+    let resolved = production_dependencies(document.node(id)?, document.target)?;
+    for child in MAINTAINED_CAP_PACKAGES {
+        if !expected_children.contains(&child.name) {
+            if declarations.iter().any(|declaration| {
+                string_field(declaration, "name") == Some(child.name)
+                    && string_field(declaration, "kind") != Some("dev")
+            }) {
                 violations.push(format!(
-                    "{profile_label}: cap-fs-ext resolved features must be exactly {expected:?}, found {actual:?}"
+                    "{profile_label}: {} must not declare a {} dependency",
+                    owner.name, child.name
                 ));
             }
+            continue;
+        }
+        let path = repository_root.join(child.path);
+        check_manifest_dependency(
+            owner.name,
+            declarations,
+            ManifestDependency {
+                name: child.name,
+                requirement: "=0.1.0",
+                path: Some(&path),
+                rename: Some(child.alias),
+                target: None,
+                optional: child.name == "baozi-cap-std",
+                features: &[],
+            },
+            violations,
+        );
+        let alias = child.alias.replace('-', "_");
+        if !resolved.iter().any(|dependency| {
+            dependency.name == alias
+                && dependency.kinds == ["normal"]
+                && document
+                    .package(&dependency.package)
+                    .is_ok_and(|package| string_field(package, "name") == Some(child.name))
+        }) {
+            violations.push(format!(
+                "{profile_label}: {} must depend on local {} through a normal {alias} edge",
+                owner.name, child.name
+            ));
         }
     }
     Ok(())
@@ -1696,26 +1805,33 @@ fn package_key(package: &Value) -> Result<String, String> {
 fn package_identity(
     package: &Value,
     checksums: &BTreeMap<ChecksumKey, String>,
-    cap_primitives_path: &Path,
+    repository_root: &Path,
 ) -> Result<Value, String> {
-    if string_field(package, "name") == Some("cap-primitives") {
-        let expected_manifest = cap_primitives_path.join("Cargo.toml");
+    if let Some(expected) = MAINTAINED_CAP_PACKAGES
+        .iter()
+        .find(|expected| string_field(package, "name") == Some(expected.name))
+    {
+        let expected_manifest = repository_root.join(expected.path).join("Cargo.toml");
         if package.get("source") != Some(&Value::Null)
-            || string_field(package, "version") != Some(CAP_PRIMITIVES_VERSION)
+            || string_field(package, "version") != Some(MAINTAINED_CAP_VERSION)
+            || package.get("publish") != Some(&Value::Array(Vec::new()))
             || string_field(package, "manifest_path")
                 .is_none_or(|path| Path::new(path) != expected_manifest)
         {
             return Err(format!(
-                "native-fs package: cap-primitives must resolve to local cap-primitives@{CAP_PRIMITIVES_VERSION} with source=null and manifest_path={}",
+                "native-fs package: {} must resolve to local {}@{MAINTAINED_CAP_VERSION} with source=null, publish=false, and manifest_path={}",
+                expected.name,
+                expected.name,
                 expected_manifest.display()
             ));
         }
         return Ok(serde_json::json!({
-            "source": CAP_PRIMITIVES_SOURCE,
+            "source": format!("path+{}", expected.path),
+            "upstream_name": expected.alias,
             "upstream_source": CRATES_IO_SOURCE,
-            "upstream_version": CAP_PRIMITIVES_VERSION,
-            "upstream_checksum": CAP_PRIMITIVES_UPSTREAM_CHECKSUM,
-            "patches": CAP_PRIMITIVES_PATCHES_PATH,
+            "upstream_version": CAP_UPSTREAM_VERSION,
+            "upstream_checksum": expected.upstream_checksum,
+            "patches": format!("{}/PATCHES.md", expected.path),
         }));
     }
     let source = required_string(package, "source", "package")?;

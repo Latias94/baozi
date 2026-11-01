@@ -334,20 +334,28 @@ into an unproven successful omission.
 
 ## Native Filesystem Admission
 
-The admitted runtime-asset implementation direction is `cap-std` 4.0.3 inside the unpublished
+The admitted runtime-asset implementation direction is `baozi-cap-std` 0.1.0, maintained from
+upstream `cap-std` 4.0.3 and aliased as `cap-std`, inside the unpublished
 standalone `baozi-native-io-candidate` workspace, with an exact direct `rustix` 1.1.4 dependency used only for the portable
 `OFlags::NONBLOCK` value on Unix-like targets. The runtime adapter passes that value through
 `cap_std::fs::OpenOptionsExt`; it does not use a numeric flag, a documentation-hidden dependency
 API, or an additional filesystem extension crate. The detailed blocking review is recorded in
 [`native-filesystem-bound-handle-admission.md`](../research/native-filesystem-bound-handle-admission.md).
 The native candidate also directly calls the public work-envelope helper in its explicit local
-`cap-primitives` 4.0.3 patch. That dependency retains the upstream source and licenses, adds bounded
+`baozi-cap-primitives` 0.1.0 package (aliased as `cap-primitives`, based on upstream 4.0.3).
+That dependency retains the upstream source and licenses, adds bounded
 link reads, and isolates the Windows synchronous reparse-query FFI and checked byte parsing in
 the existing low-level crate. Baozi's own adapter and portable crates continue to forbid unsafe
 code. The patch is part of the security review surface; its original archive checksum is upstream
-provenance, not the modified source identity.
+provenance, not the modified source identity. `baozi-cap-std` and optional `baozi-cap-fs-ext`
+are maintained upper packages from the same upstream release; their production Rust source is
+unchanged. Every maintained edge has a relative development path and exact `=0.1.0` package
+version. Independent consumers require no root patch; Cargo archives normalize these edges
+to the distinct maintained registry identities. Each package retains its own `PATCHES.md`,
+upstream authors, original archive provenance and complete license choices. Distribution
+preparation does not register a native target or authorize publication.
 The adapter's conformance gate must machine-lock the reviewed registry releases/checksums,
-unique local backend path/version/provenance, features, and complete target-specific resolved
+unique maintained package paths/versions/provenance, features, and complete target-specific resolved
 dependency closure before the adapter can claim conformance. A path-resolution, open-flag, special-file, unsafe-scope,
 or target-relevant closure change reopens dependency admission.
 
@@ -415,7 +423,8 @@ feature requests and forwarding, including renamed, development, and build depen
 import, core, postprocess, facade, and xtask dependency edges must not activate the repository
 candidate.
 
-The repository candidate uses exact `cap-std` 4.0.3 plus exact `cap-fs-ext` 4.0.3 with its explicit
+The repository candidate uses exact `baozi-cap-std` 0.1.0 plus exact `baozi-cap-fs-ext` 0.1.0,
+aliased as `cap-std` and `cap-fs-ext`, with the extension package's explicit
 `std` feature. It uses only the extension crate's public no-follow, directory, metadata, and
 nonblocking interfaces. Repository capture does not call low-level `cap-primitives` APIs or
 documentation-hidden hooks; the runtime's public bound helper is its only direct use. The adapter
@@ -630,7 +639,7 @@ contract. Reconsider only after a measured blocker and a separate unsafe/depende
 | Platform path safety | escape, symlink, junction, reparse, namespace, and device cases fail | per-target adversarial suites |
 | Special-file availability | directory, FIFO, socket, and device inputs fail by deadline without a blocking pathname preflight | same-handle type and deadline tests |
 | Root capability integrity | only Baozi-constructed, directory-validated roots enter the adapter; Windows roots exclude `FILE_SHARE_DELETE` | API-shape, root-type, and replacement tests |
-| Dependency identity | the native closure matches admitted registry versions/checksums/features and the unique local patched backend identity with separate upstream provenance | target-filtered lockfile admission checker |
+| Dependency identity | the native closure matches admitted registry versions/checksums/features and all three unique maintained package paths/versions with separate upstream provenance | target-filtered lockfile admission checker |
 | Repository mechanism ownership | only the standalone candidate directly depends on native filesystem backends; xtask reaches neither IO nor native backends; root packages cannot depend on the candidate or request/forward retired native features | manifest and resolved metadata negative fixtures |
 | Repository closure completeness | additions, deletions, same-content replacements, raw-byte changes, hard-link aliases, overlapping roots, and every symlink/reparse component fail the before/after closure gate | Linux/macOS platform-local no-skip capture and recapture matrix; Windows typed pre-traversal fail-closed test |
 | Repository resource bounds | exact limit succeeds and one-over root/file/directory/depth/path/single-file/total-byte/work cases fail before excess retention or read | boundary, allocation-failure, and hostile-size fixtures |
@@ -731,7 +740,7 @@ contract. Reconsider only after a measured blocker and a separate unsafe/depende
   dependency opens. Normal `Ok`/`Err` returns complete the weight; unwind does not. Bound errors
   are terminal extension failures. Cache hits and direct-byte primaries do not query or open again.
 - Bound manual link target reads before expansion. The standalone candidate's explicit local
-  `cap-primitives` 4.0.3 patch uses fixed buffers, at most 40/63 expansions, and 4096 Unix-byte or
+  `baozi-cap-primitives` 0.1.0 maintained backend uses fixed buffers, at most 40/63 expansions, and 4096 Unix-byte or
   Windows-UTF-16-unit targets. Include all four Linux fast attempts plus manual fallback. Record
   patched source identity separately from upstream archive provenance; no RSS, syscall-latency,
   kernel-iteration or exact-syscall-count claim follows from the billing envelope.
@@ -750,7 +759,7 @@ contract. Reconsider only after a measured blocker and a separate unsafe/depende
   against the admitted versions, features, sources, and checksums; any
   path-resolution-, open-flag-, special-file-, or target-relevant change reopens admission.
 - Retain the candidate's `repository-capture` as a separately audited capability using exact
-  `cap-fs-ext` 4.0.3 with `default-features = false, features = ["std"]`; preserve the existing
+  `baozi-cap-fs-ext` 0.1.0 with `default-features = false, features = ["std"]`; preserve the existing
   independently reviewed default runtime closure.
 - Implement strict repository paths, component-wise public no-follow traversal, bounded iterative
   enumeration, same-handle regular-file reads, opaque alias identity, and full-root recapture in

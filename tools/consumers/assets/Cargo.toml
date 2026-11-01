@@ -12,13 +12,10 @@ readme = "README.md"
 resolver = "3"
 
 [dependencies]
-baozi = { path = "../../../crates/baozi", default-features = false, features = ["all-formats", "postprocess"] }
-baozi-native-io-candidate = { path = "../../../candidates/baozi-native-io" }
+baozi = { path = "../../../crates/baozi", version = "=0.1.0", default-features = false, features = ["all-formats", "postprocess"] }
+baozi-native-io-candidate = { path = "../../../candidates/baozi-native-io", version = "=0.1.0" }
 serde_json = "1"
 allocation-counter = { version = "=0.8.1", optional = true }
 
 [features]
 allocation-metrics = ["dep:allocation-counter"]
-
-[patch.crates-io]
-cap-primitives = { path = "../../../candidates/baozi-native-io/vendor/cap-primitives" }
