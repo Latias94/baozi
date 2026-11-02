@@ -7,7 +7,7 @@ use super::{
     NormalOrientation, PreparationCause, TangentPolicy, TriangleLowering,
     TrianglePreparationOptions,
 };
-use crate::operation::runtime::{EditOperation, RuntimeKeys, ScratchVec, run_unit};
+use crate::operation::runtime::{ActiveRuntime, RuntimeKeys, ScratchVec, run_unit};
 use crate::{ExistingNormals, ExistingTangents, NormalCause, NormalMode, TangentCause};
 use baozi_core::{
     AttributeData, AttributeDomain, AttributeRef, AttributeSemanticRef, FrontFaceWinding,
@@ -53,7 +53,7 @@ pub(super) fn prepare(
     scene: &ValidatedScene,
     targets: &[PrimitiveId],
     options: TrianglePreparationOptions,
-    operation: &mut EditOperation,
+    operation: &mut ActiveRuntime<'_>,
     keys: RuntimeKeys,
 ) -> Result<ScratchVec<PreparedPrimitive>, PreparationCause> {
     if targets.is_empty() {
@@ -61,32 +61,32 @@ pub(super) fn prepare(
     }
     let mut sorted = ScratchVec::new(operation, keys, targets.len())?;
     for &target in targets {
-        run_unit(operation, keys, || sorted.values_mut().push(target))?;
+        run_unit(operation, || sorted.values_mut().push(target))?;
     }
-    sort_targets(sorted.values_mut(), operation, keys)?;
+    sort_targets(sorted.values_mut(), operation)?;
     let mut selected = ScratchVec::new(operation, keys, targets.len())?;
     // Public handles stay opaque. Resolve their source ordering in one borrowed scene walk.
     for &target in sorted.values() {
-        run_unit(operation, keys, || scene.primitive(target))?.map_err(PreparationCause::Target)?;
+        run_unit(operation, || scene.primitive(target))?.map_err(PreparationCause::Target)?;
     }
-    let mut meshes = run_unit(operation, keys, || scene.meshes())?;
+    let mut meshes = run_unit(operation, || scene.meshes())?;
     loop {
-        let mesh = run_unit(operation, keys, || meshes.next())?;
+        let mesh = run_unit(operation, || meshes.next())?;
         let Some(mesh) = mesh else {
             break;
         };
-        let mut primitives = run_unit(operation, keys, || mesh.primitives())?;
+        let mut primitives = run_unit(operation, || mesh.primitives())?;
         loop {
-            let primitive = run_unit(operation, keys, || primitives.next())?;
+            let primitive = run_unit(operation, || primitives.next())?;
             let Some(primitive) = primitive else {
                 break;
             };
-            let id = run_unit(operation, keys, || primitive.id())?;
+            let id = run_unit(operation, || primitive.id())?;
             let (mut first, mut last) = (0, sorted.values().len());
             let mut found = false;
             while first < last {
                 let middle = first + (last - first) / 2;
-                match run_unit(operation, keys, || sorted.values()[middle].cmp(&id))? {
+                match run_unit(operation, || sorted.values()[middle].cmp(&id))? {
                     std::cmp::Ordering::Less => first = middle + 1,
                     std::cmp::Ordering::Greater => last = middle,
                     std::cmp::Ordering::Equal => {
@@ -96,20 +96,20 @@ pub(super) fn prepare(
                 }
             }
             if found {
-                run_unit(operation, keys, || selected.values_mut().push(primitive))?;
+                run_unit(operation, || selected.values_mut().push(primitive))?;
             }
         }
     }
     let mut output = ScratchVec::new(operation, keys, targets.len())?;
     for pair in sorted.values().windows(2) {
-        if run_unit(operation, keys, || pair[0] == pair[1])? {
+        if run_unit(operation, || pair[0] == pair[1])? {
             return Err(PreparationCause::DuplicateTarget);
         }
     }
     for &primitive in selected.values() {
-        let target = run_unit(operation, keys, || primitive.id())?;
+        let target = run_unit(operation, || primitive.id())?;
         let (topology, corners, faces, indices, sizes, mut attributes) =
-            run_unit(operation, keys, || {
+            run_unit(operation, || {
                 (
                     primitive.topology(),
                     primitive.corner_count(),
@@ -131,7 +131,7 @@ pub(super) fn prepare(
             return Err(PreparationCause::UnsupportedTopology(topology));
         }
         if faces == 0 {
-            run_unit(operation, keys, || {
+            run_unit(operation, || {
                 output
                     .values_mut()
                     .push(PreparedPrimitive::unchanged(target))
@@ -147,7 +147,7 @@ pub(super) fn prepare(
             _ => None,
         };
         loop {
-            if !run_unit(operation, keys, || {
+            if !run_unit(operation, || {
                 let Some(a) = attributes.next() else {
                     return false;
                 };
@@ -212,7 +212,6 @@ pub(super) fn prepare(
                 ))?,
                 indices,
                 operation,
-                keys,
             )
             .map_err(PreparationCause::Triangulation)?;
             Some(
@@ -223,7 +222,7 @@ pub(super) fn prepare(
             let mut triangles = ScratchVec::new(operation, keys, faces as usize)?;
             let mut face_offsets = ScratchVec::new(operation, keys, faces as usize + 1)?;
             for f in 0..faces {
-                run_unit(operation, keys, || {
+                run_unit(operation, || {
                     triangles.values_mut().push(match topology {
                         TopologyKind::TriangleFan => [f + 1, f + 2, 0],
                         _ if f % 2 == 0 => [f, f + 1, f + 2],
@@ -232,14 +231,14 @@ pub(super) fn prepare(
                     face_offsets.values_mut().push(f);
                 })?;
             }
-            run_unit(operation, keys, || face_offsets.values_mut().push(faces))?;
+            run_unit(operation, || face_offsets.values_mut().push(faces))?;
             Some(crate::triangulate::input::Origins {
                 triangles,
                 face_offsets,
             })
         };
         if origins.is_none() && !generate_normal && !generate_tangent && !remove_tangents {
-            run_unit(operation, keys, || {
+            run_unit(operation, || {
                 output
                     .values_mut()
                     .push(PreparedPrimitive::unchanged(target))
@@ -256,10 +255,10 @@ pub(super) fn prepare(
             let mut projected = ScratchVec::new(operation, keys, count)?;
             for triangle in origins.triangles.values() {
                 for &corner in triangle {
-                    let vertex = run_unit(operation, keys, || {
+                    let vertex = run_unit(operation, || {
                         indices.map_or(corner, |ids| ids[corner as usize])
                     })?;
-                    run_unit(operation, keys, || projected.values_mut().push(vertex))?;
+                    run_unit(operation, || projected.values_mut().push(vertex))?;
                 }
             }
             Some(projected)
@@ -289,9 +288,7 @@ pub(super) fn prepare(
                         for (face, interval) in origins.face_offsets.values().windows(2).enumerate()
                         {
                             for _ in interval[0]..interval[1] {
-                                run_unit(operation, keys, || {
-                                    projected.values_mut().push(values[face])
-                                })?;
+                                run_unit(operation, || projected.values_mut().push(values[face]))?;
                             }
                         }
                         projected_groups = Some(projected);
@@ -326,7 +323,7 @@ pub(super) fn prepare(
             let reverse = match options.orientation {
                 NormalOrientation::StoredOrder => false,
                 NormalOrientation::SceneFrontFace { assume_unknown } => {
-                    let winding = run_unit(operation, keys, || scene.space().front_face_winding)?;
+                    let winding = run_unit(operation, || scene.space().front_face_winding)?;
                     let winding = if winding == FrontFaceWinding::Unknown {
                         assume_unknown.unwrap_or(FrontFaceWinding::Unknown)
                     } else {
@@ -340,7 +337,7 @@ pub(super) fn prepare(
                 }
             };
             normals
-                .orient(reverse, operation, keys)
+                .orient(reverse, operation)
                 .map_err(|e| PreparationCause::Normal(e.into()))?;
         }
         let mut normal_domain =
@@ -379,7 +376,6 @@ pub(super) fn prepare(
                 origins.as_ref().map(|o| o.triangles.values().as_slice()),
                 tangent_wide,
                 operation,
-                keys,
             )
             .map_err(|e| PreparationCause::Tangent(e.into()))?;
             Some(
@@ -401,7 +397,7 @@ pub(super) fn prepare(
             uv_set: tangent_options.map_or(0, |t| t.uv_set),
             uv_domain: tangent_options.map_or(AttributeDomain::Vertex, |t| t.uv_domain),
         };
-        run_unit(operation, keys, || output.values_mut().push(prepared))?;
+        run_unit(operation, || output.values_mut().push(prepared))?;
     }
     Ok(output)
 }
@@ -423,42 +419,39 @@ fn is_wide(a: AttributeRef<'_>) -> bool {
 }
 fn sort_targets(
     values: &mut [PrimitiveId],
-    operation: &mut EditOperation,
-    keys: RuntimeKeys,
+    operation: &mut ActiveRuntime<'_>,
 ) -> Result<(), PreparationCause> {
     fn sift(
         values: &mut [PrimitiveId],
         mut root: usize,
         end: usize,
-        operation: &mut EditOperation,
-        keys: RuntimeKeys,
+        operation: &mut ActiveRuntime<'_>,
     ) -> Result<(), PreparationCause> {
         while let Some(left) = root
             .checked_mul(2)
             .and_then(|n| n.checked_add(1))
             .filter(|&n| n < end)
         {
-            let child = if left + 1 < end
-                && run_unit(operation, keys, || values[left] < values[left + 1])?
-            {
-                left + 1
-            } else {
-                left
-            };
-            if !run_unit(operation, keys, || values[root] < values[child])? {
+            let child =
+                if left + 1 < end && run_unit(operation, || values[left] < values[left + 1])? {
+                    left + 1
+                } else {
+                    left
+                };
+            if !run_unit(operation, || values[root] < values[child])? {
                 break;
             }
-            run_unit(operation, keys, || values.swap(root, child))?;
+            run_unit(operation, || values.swap(root, child))?;
             root = child;
         }
         Ok(())
     }
     for root in (0..values.len() / 2).rev() {
-        sift(values, root, values.len(), operation, keys)?;
+        sift(values, root, values.len(), operation)?;
     }
     for end in (1..values.len()).rev() {
-        run_unit(operation, keys, || values.swap(0, end))?;
-        sift(values, 0, end, operation, keys)?;
+        run_unit(operation, || values.swap(0, end))?;
+        sift(values, 0, end, operation)?;
     }
     Ok(())
 }

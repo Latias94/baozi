@@ -1,4 +1,4 @@
-use std::cell::{RefCell, RefMut};
+use std::cell::RefCell;
 
 use crate::SceneDraft;
 use baozi_core::__scene_integration::integration::{
@@ -12,7 +12,8 @@ use baozi_operation::__retained_store_integration::activation::{
     CanonicalValidationProgress, CentrallyRejectedCanonicalStoreSession, FailureEvidenceOutcome,
     FrozenFailureState, InterruptedCanonicalStoreSession, NeverActivatedStoreSession,
     PendingMinimalFallback, RejectedCanonicalStoreSession, RootedFailureValidation,
-    StoreCanonicalRejection, StoreNeverActivatedCause, VerifiedMinimalFallback,
+    StoreActivationContainmentAnchor, StoreCanonicalRejection, StoreNeverActivatedCause,
+    VerifiedMinimalFallback,
 };
 use baozi_operation::__retained_store_integration::authority::{
     PreparedStoreFailure, PreparedStoreFailureOutcome, PreparedStoreFallback, PreparedStoreSuccess,
@@ -29,6 +30,9 @@ use super::{
     ImportStoreSuccessReport, ImportStoreTerminalCause, ImportStoreTerminalClass,
     ImportStoreTerminalEvidence, ImportStoreTerminalOutcome, ImportStoreTerminalProjectionError,
 };
+
+#[cfg(test)]
+mod transition_tests;
 
 pub(super) const IMPORT_SCENE_NOT_SUBMITTED_CODE: u32 = 0x494d_0002;
 
@@ -504,44 +508,80 @@ pub(crate) enum ImportStoreSceneBoundary {
 
 #[must_use = "the Scene activation transition must install a pending owner or become contained"]
 pub(super) struct ImportStoreActivationTransition<'session> {
-    state: RefMut<'session, ImportStoreSessionState>,
+    state: &'session RefCell<ImportStoreSessionState>,
+    containment: StoreActivationContainmentAnchor,
     armed: bool,
 }
 
+#[allow(
+    clippy::result_large_err,
+    reason = "installation failures retain the complete inline pending owner in containment"
+)]
 impl<'session> ImportStoreActivationTransition<'session> {
     pub(super) fn begin(
         state: &'session RefCell<ImportStoreSessionState>,
     ) -> Result<(ImportStoreOutcomeOwner, Self), ImportStoreHostError> {
-        let mut state = state
+        let mut slot = state
             .try_borrow_mut()
             .map_err(|_| ImportStoreHostError::ReentrantBorrow)?;
-        let previous = std::mem::replace(&mut *state, ImportStoreSessionState::Transitioning);
-        let owner = match previous {
-            ImportStoreSessionState::Dormant(owner) => owner.into_activation_transition(),
+        let containment = match &*slot {
+            ImportStoreSessionState::Dormant(owner) => owner.activation_containment_anchor(),
             ImportStoreSessionState::Contained => {
-                *state = ImportStoreSessionState::Contained;
                 return Err(ImportStoreHostError::OperationContained);
             }
-            previous @ (ImportStoreSessionState::Transitioning
-            | ImportStoreSessionState::Pending(_)) => {
-                *state = previous;
+            ImportStoreSessionState::Transitioning | ImportStoreSessionState::Pending(_) => {
                 return Err(ImportStoreHostError::OperationConsumed);
             }
         };
-        Ok((owner, Self { state, armed: true }))
+        // Arm before extracting the owner; no state-slot borrow reaches owner code or Drop.
+        let transition = Self {
+            state,
+            containment,
+            armed: true,
+        };
+        let previous = std::mem::replace(&mut *slot, ImportStoreSessionState::Transitioning);
+        drop(slot);
+        match previous {
+            ImportStoreSessionState::Dormant(owner) => {
+                Ok((owner.into_activation_transition(), transition))
+            }
+            unexpected => {
+                let _ = transition.containment.retain(unexpected);
+                Err(ImportStoreHostError::OperationContained)
+            }
+        }
     }
 
-    fn install(mut self, pending: ImportPendingScene) {
-        debug_assert!(matches!(
-            *self.state,
-            ImportStoreSessionState::Transitioning
-        ));
-        *self.state = ImportStoreSessionState::Pending(pending);
-        self.armed = false;
+    fn install(mut self, pending: ImportPendingScene) -> Result<(), ImportStoreActivationError> {
+        if let Some(cause) = self.containment.existing_containment() {
+            let _ = self.containment.retain(pending);
+            self.contain();
+            return Err(ImportStoreActivationError::Containment(cause));
+        }
+        if let Ok(mut slot) = self.state.try_borrow_mut()
+            && matches!(*slot, ImportStoreSessionState::Transitioning)
+        {
+            *slot = ImportStoreSessionState::Pending(pending);
+            self.armed = false;
+            return Ok(());
+        }
+        // Neither a conflicting borrow nor an unexpected slot proves payload cleanup is safe.
+        let cause = self.containment.retain(pending);
+        self.contain();
+        Err(ImportStoreActivationError::Containment(cause))
     }
 
     fn contain(mut self) {
-        *self.state = ImportStoreSessionState::Contained;
+        self.contain_in_place();
+    }
+
+    fn contain_in_place(&mut self) {
+        let _ = self.containment.contain();
+        if let Ok(mut slot) = self.state.try_borrow_mut()
+            && matches!(*slot, ImportStoreSessionState::Transitioning)
+        {
+            *slot = ImportStoreSessionState::Contained;
+        }
         self.armed = false;
     }
 }
@@ -549,7 +589,7 @@ impl<'session> ImportStoreActivationTransition<'session> {
 impl Drop for ImportStoreActivationTransition<'_> {
     fn drop(&mut self) {
         if self.armed {
-            *self.state = ImportStoreSessionState::Contained;
+            self.contain_in_place();
         }
     }
 }
@@ -933,18 +973,18 @@ fn install_central_scene(
     match central {
         CanonicalCentralValidationOutcome::Candidate(owner) => {
             let draft = owner.output().draft();
-            transition.install(ImportPendingScene::Candidate { owner, evidence });
+            transition.install(ImportPendingScene::Candidate { owner, evidence })?;
             Ok(draft)
         }
         CanonicalCentralValidationOutcome::Rejected(owner) => {
             let control_cause = scene_rejection_control(owner.cause());
             let detail = canonical_rejection_validation(owner.cause());
-            transition.install(ImportPendingScene::CentralRejected { owner, evidence });
+            transition.install(ImportPendingScene::CentralRejected { owner, evidence })?;
             activation_failure_result(false, detail, control_cause)
         }
         CanonicalCentralValidationOutcome::Interrupted(owner) => {
             let control_cause = owner.cause().control_cause().cloned();
-            transition.install(ImportPendingScene::CentralInterrupted { owner, evidence });
+            transition.install(ImportPendingScene::CentralInterrupted { owner, evidence })?;
             activation_failure_result(false, None, control_cause)
         }
         CanonicalCentralValidationOutcome::Fallback(owner) => {
@@ -952,7 +992,7 @@ fn install_central_scene(
             transition.install(ImportPendingScene::DeferredFallback {
                 owner,
                 completed_boundary: Some(ImportStoreSceneBoundary::DraftBuilt),
-            });
+            })?;
             activation_failure_result(false, None, control_cause)
         }
     }
@@ -975,7 +1015,7 @@ fn validate_scene_activation(
             transition.install(ImportPendingScene::ActivationRejected {
                 owner,
                 evidence: postflight.failure_evidence(),
-            });
+            })?;
             activation_failure_result(authoring_rejected, detail, control_cause)
         }
         CanonicalActivationOutcome::NeverActivated(owner) => {
@@ -985,7 +1025,7 @@ fn validate_scene_activation(
             transition.install(ImportPendingScene::NeverActivated {
                 owner,
                 evidence: postflight.failure_evidence(),
-            });
+            })?;
             activation_failure_result(authoring_rejected, detail, control_cause)
         }
         CanonicalActivationOutcome::Fallback(owner) => {
@@ -993,7 +1033,7 @@ fn validate_scene_activation(
             transition.install(ImportPendingScene::PreparedFallback {
                 owner,
                 completed_boundary: None,
-            });
+            })?;
             activation_failure_result(false, None, control_cause)
         }
     }

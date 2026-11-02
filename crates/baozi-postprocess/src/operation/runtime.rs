@@ -5,7 +5,8 @@ use std::num::{NonZeroU32, NonZeroU64};
 use baozi_core::__scene_integration::integration::SceneEditBootstrap;
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalActivationSessionPolicy, CanonicalMaterializationRole, CanonicalValidationRole,
-    RetainedStoreWriterRole,
+    RetainedStoreWriterRole, StoreBoundWorkGroup, StoreExecutionControl, StoreExecutionPermit,
+    StoreExecutionStorage, StoreExecutionWork,
 };
 use baozi_operation::__retained_store_integration::authority::{
     CanonicalInheritanceSource, RetainedStoreOperation, RetainedStoreReservation,
@@ -196,24 +197,94 @@ pub(crate) const fn final_progress()
     )
 }
 
-/// Executes one bounded action after admission and records completion only on normal return.
-#[allow(
-    clippy::result_large_err,
-    reason = "propagating a runtime failure must not allocate after admission or cancellation fails"
-)]
-pub(crate) fn run_unit<R>(
+/// One concrete execution region; all borrowed roles end before consuming the edit owner.
+pub(crate) struct ActiveRuntime<'op> {
+    work: StoreExecutionWork<'op, PostProcessOwner>,
+    group: StoreBoundWorkGroup<'op, 1>,
+    storage: StoreExecutionStorage<'op, PostProcessOwner>,
+    control: StoreExecutionControl<
+        'op,
+        PostProcessOwner,
+        PostProcessProgressPhase,
+        PostProcessProgressUnit,
+    >,
+    pending: Option<StoreExecutionPermit<'op, 1>>,
+}
+
+pub(crate) fn with_execution<R, E: From<StoreRuntimeError>>(
     operation: &mut EditOperation,
     keys: RuntimeKeys,
+    action: impl FnOnce(&mut ActiveRuntime<'_>) -> Result<R, E>,
+) -> Result<R, E> {
+    let (work, storage, control) = operation.execution()?;
+    let group = work.bind_group([keys.work])?;
+    let mut runtime = ActiveRuntime {
+        work,
+        group,
+        storage,
+        control,
+        pending: None,
+    };
+    let result = action(&mut runtime);
+    if let Some(pending) = runtime.pending.take() {
+        pending.finish_partial()?;
+        return Err(StoreRuntimeError::ObservedWorkIncomplete.into());
+    }
+    runtime.work.finish_region()?;
+    match result {
+        Ok(value) => {
+            runtime.control.checkpoint()?;
+            Ok(value)
+        }
+        Err(cause) => Err(cause),
+    }
+}
+
+#[allow(
+    clippy::result_large_err,
+    reason = "action failures retain exact inline accounting and control causes"
+)]
+impl ActiveRuntime<'_> {
+    pub(crate) fn checkpoint(&mut self) -> Result<(), StoreRuntimeError> {
+        self.control.checkpoint()
+    }
+
+    pub(crate) fn begin_action(&mut self) -> Result<(), StoreRuntimeError> {
+        if self.pending.is_some() {
+            return Err(StoreRuntimeError::ObservedWorkOutstanding);
+        }
+        self.control.before_action()?;
+        self.pending = Some(self.group.admit_observed([1])?);
+        Ok(())
+    }
+
+    pub(crate) fn complete_action(&mut self) -> Result<(), StoreRuntimeError> {
+        let mut work = self
+            .pending
+            .take()
+            .ok_or(StoreRuntimeError::ObservedWorkIncomplete)?;
+        if let Err(cause) = work.complete([1]) {
+            work.finish_partial()?;
+            return Err(cause);
+        }
+        work.finish()?;
+        self.control.completed_action();
+        Ok(())
+    }
+}
+
+/// Accounts the actual bounded leaf; control cadence is independent from numeric admission.
+#[allow(
+    clippy::result_large_err,
+    reason = "action failures retain exact inline accounting and control causes"
+)]
+pub(crate) fn run_unit<R>(
+    operation: &mut ActiveRuntime<'_>,
     action: impl FnOnce() -> R,
 ) -> Result<R, StoreRuntimeError> {
-    let mut host = operation.producer_host();
-    let mut work = host.try_begin_observed_work([(keys.work, 1)])?;
+    operation.begin_action()?;
     let value = action();
-    if let Err(cause) = work.complete([1]) {
-        work.finish_partial();
-        return Err(cause);
-    }
-    work.finish()?;
+    operation.complete_action()?;
     Ok(value)
 }
 
@@ -229,7 +300,7 @@ impl<T> ScratchVec<T> {
         reason = "allocation failure propagates inline without a second allocation"
     )]
     pub(crate) fn new(
-        operation: &mut EditOperation,
+        operation: &mut ActiveRuntime<'_>,
         keys: RuntimeKeys,
         count: usize,
     ) -> Result<Self, StoreRuntimeError> {
@@ -238,7 +309,8 @@ impl<T> ScratchVec<T> {
         let bytes = plan
             .envelope_delta_bytes()
             .map_err(|cause| StoreRuntimeError::Plan(cause.into()))?;
-        let mut reservation = operation.reserve_retained_storage(
+        let mut reservation = operation.storage.reserve_retained(
+            &mut operation.control,
             keys.planning,
             keys.scratch,
             bytes,
@@ -259,10 +331,7 @@ impl<T> ScratchVec<T> {
                 return Err(StoreRuntimeError::Plan(cause.into()));
             }
         };
-        if let Err(cause) = operation
-            .control_checkpoint()
-            .resize(&mut reservation, actual)
-        {
+        if let Err(cause) = operation.storage.resize(&mut reservation, actual) {
             reservation.release_storage(values);
             return Err(cause);
         }

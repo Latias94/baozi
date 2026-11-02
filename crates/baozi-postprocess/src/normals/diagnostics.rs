@@ -2,7 +2,7 @@
 
 use std::{convert::Infallible, hint::black_box, time::Instant};
 
-use super::{Input, Mode, Output, PositionSource, VertexIds, Workspace, generate_into};
+use super::{Input, Mode, Output, PositionSource, VertexIds, WorkEvent, Workspace, generate_into};
 use crate::precision::Estimate3;
 
 #[test]
@@ -46,9 +46,11 @@ fn sample<P: PositionSource>(label: &str, positions: P, indices: &[u32], groups:
         groups.len()
     ];
     let mut samples = Vec::with_capacity(20);
-    let mut calls = 0_u64;
+    let mut work_units = 0_u64;
+    let mut checkpoints = 0_u64;
     for iteration in 0..23 {
-        calls = 0;
+        work_units = 0;
+        checkpoints = 0;
         let start = Instant::now();
         generate_into(
             black_box(Input {
@@ -62,8 +64,12 @@ fn sample<P: PositionSource>(label: &str, positions: P, indices: &[u32], groups:
                 corner_order: &mut order,
                 face_crosses: Some(&mut crosses),
             },
-            || {
-                calls += 1;
+            |event| {
+                match event {
+                    WorkEvent::Begin => work_units += 1,
+                    WorkEvent::Complete => {}
+                    WorkEvent::Checkpoint => checkpoints += 1,
+                }
                 Ok::<(), Infallible>(())
             },
         )
@@ -76,7 +82,7 @@ fn sample<P: PositionSource>(label: &str, positions: P, indices: &[u32], groups:
         }
     }
     println!(
-        "{{\"schema\":\"baozi-normal-kernel-diagnostic/v1\",\"position_source\":\"{label}\",\"faces\":{},\"control_calls\":{calls},\"warmups\":3,\"samples_ns\":{samples:?},\"scope\":\"kernel only, preallocated workspace, local counting observer, no operation accounting or publication\"}}",
+        "{{\"schema\":\"baozi-normal-kernel-diagnostic/v2\",\"position_source\":\"{label}\",\"faces\":{},\"work_units\":{work_units},\"checkpoints\":{checkpoints},\"work_unit_contract\":\"bounded-leaf-begin/v1\",\"warmups\":3,\"samples_ns\":{samples:?},\"scope\":\"kernel only, preallocated workspace, local counting observer, no operation accounting or publication\"}}",
         groups.len()
     );
 }
@@ -91,6 +97,7 @@ fn observed_unit_protocol_with_empty_actions_preserves_exact_work_evidence() {
 
     use crate::operation::{PostProcessOwner, runtime};
 
+    // Fixed historical pre-P3 control-site workload, not the new normal leaf-action count.
     const ACTIONS: u64 = 982_943;
     let (scene, source_evidence) = crate::test_fixtures::canonical_triangle_import().into_parts();
     let mut samples = Vec::with_capacity(20);
@@ -112,12 +119,32 @@ fn observed_unit_protocol_with_empty_actions_preserves_exact_work_evidence() {
             .producer_host()
             .dimension_state(keys.work)
             .expect("initial work state");
-        let start = Instant::now();
-        for _ in 0..ACTIONS {
-            runtime::run_unit(&mut operation, keys, || black_box(()))
-                .expect("one physically completed empty action");
-        }
-        let elapsed = start.elapsed().as_nanos();
+        let elapsed = {
+            let (work, _storage, mut control) = operation
+                .execution()
+                .expect("borrow the scene edit execution region");
+            let group = work
+                .bind_group([keys.work])
+                .expect("bind one ordinary work role");
+            let start = Instant::now();
+            for _ in 0..ACTIONS {
+                control.before_action().expect("admit bounded control debt");
+                let mut permit = group.admit_observed([1]).expect("admit one empty action");
+                black_box(());
+                permit
+                    .complete([1])
+                    .expect("record the physically completed empty action");
+                permit.finish().expect("resolve the completed envelope");
+                control.completed_action();
+            }
+            let elapsed = start.elapsed().as_nanos();
+            control
+                .checkpoint()
+                .expect("final empty-action control checkpoint");
+            work.finish_region()
+                .expect("every borrowed action resolved");
+            elapsed
+        };
         let state = operation
             .producer_host()
             .dimension_state(keys.work)
@@ -143,6 +170,6 @@ fn observed_unit_protocol_with_empty_actions_preserves_exact_work_evidence() {
     drop(source_evidence);
     drop(scene);
     println!(
-        "{{\"schema\":\"baozi-observed-unit-diagnostic/v1\",\"actions\":{ACTIONS},\"warmups\":3,\"samples_ns\":{samples:?},\"scope\":\"actual scene edit operation run_unit with empty actions; setup and final publication outside timer; not geometric work or a replacement benchmark\"}}"
+        "{{\"schema\":\"baozi-observed-unit-diagnostic/v2\",\"actions\":{ACTIONS},\"action_count_basis\":\"historical-pre-P3-control-sites\",\"warmups\":3,\"samples_ns\":{samples:?},\"scope\":\"actual scene edit operation borrowed unit group with empty actions; binding, setup, final checkpoint and publication outside timer; not geometric work or a replacement benchmark\"}}"
     );
 }

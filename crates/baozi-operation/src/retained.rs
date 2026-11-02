@@ -166,11 +166,13 @@ use triomphe::{Arc, UniqueArc};
 #[cfg(test)]
 pub(crate) use operation::panic_next_publication_account_open;
 pub(crate) use operation::{
-    BorrowedRetainedWorkPermit, RetainedFailureWorkConsumeError, RetainedFailureWorkFinishError,
-    RetainedFailureWorkPermit, RetainedFailureWorkStartError, RetainedPlanningBaseline,
-    RetainedPlanningContainmentAnchor, RetainedProducerHost, RetainedProducerWorkFinishError,
-    RetainedProducerWorkPermit, RetainedProducerWorkStartError, RetainedWorkConsumeError,
-    RetainedWorkFinishError, RetainedWorkPermit, RetainedWorkStartError,
+    BorrowedRetainedWorkPermit, ExecutionControl, ExecutionError, ExecutionGroup,
+    ExecutionParserScope, ExecutionPermit, ExecutionStorage, ExecutionWork,
+    RetainedFailureWorkConsumeError, RetainedFailureWorkFinishError, RetainedFailureWorkPermit,
+    RetainedFailureWorkStartError, RetainedPlanningBaseline, RetainedPlanningContainmentAnchor,
+    RetainedProducerHost, RetainedProducerWorkFinishError, RetainedProducerWorkPermit,
+    RetainedProducerWorkStartError, RetainedWorkConsumeError, RetainedWorkFinishError,
+    RetainedWorkPermit, RetainedWorkStartError,
 };
 pub(crate) use operation::{
     RetainedControlCheckpoint, RetainedFailureWorkControl, RetainedOperation, RetainedWorkControl,

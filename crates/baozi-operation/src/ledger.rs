@@ -14,7 +14,9 @@ mod snapshot;
 mod startup;
 mod work;
 
-pub(crate) use work::{BoundWorkGroup, LinearWorkBatchPermit, WorkLane};
+pub(crate) use work::{
+    BoundWorkGroup, LinearWorkBatchPermit, ParserWorkError, ParserWorkScope, WorkLane,
+};
 use work::{LocalWork, WorkDimensionState, WorkEntry, WorkGrant, WorkMode, WorkPolicy, WorkState};
 
 use commitment::{
@@ -1312,6 +1314,10 @@ where
         self.work
             .borrow_state()
             .map_or(true, |work| work.mode != WorkMode::Ordinary)
+    }
+
+    pub(crate) fn check_work_quiescent(&self) -> Result<(), LedgerCause<D>> {
+        self.work.check_quiescent()
     }
 
     /// Irreversibly revokes ordinary work before any terminal callback is delivered.

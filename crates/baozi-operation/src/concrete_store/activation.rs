@@ -1226,6 +1226,36 @@ where
     failure_work: FailureEvidenceWorkBudget,
 }
 
+/// Poison-only physical anchor while a host replaces its stable session representation.
+///
+/// This capability owns no work counters, storage admission or publication authority.
+pub struct StoreActivationContainmentAnchor {
+    raw: RetainedPlanningContainmentAnchor,
+}
+
+impl StoreActivationContainmentAnchor {
+    /// Observes the account's first recorded containment without adding a new event.
+    pub fn existing_containment(&self) -> Option<StoreActivationContainment> {
+        self.raw
+            .existing_containment()
+            .map(|cause| StoreActivationContainment { cause })
+    }
+
+    /// Reuses the first poison or records an unverified ownership transition.
+    pub fn contain(&self) -> StoreActivationContainment {
+        StoreActivationContainment {
+            cause: self.raw.contain(),
+        }
+    }
+
+    /// Preserves an uncertain complete owner without invoking its destructors or refunding it.
+    pub fn retain<T>(&self, owner: T) -> StoreActivationContainment {
+        let cause = self.contain();
+        std::mem::forget(owner);
+        cause
+    }
+}
+
 fn finish_rejected_session<O, PP, U, E, L>(
     assembly: RetainedStorePublicationAssembly<O, PP, U, L>,
     failure_work: FailureEvidenceWorkBudget,

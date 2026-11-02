@@ -6,7 +6,7 @@
 use baozi_core::{AttributeData, AttributeRef};
 
 use crate::TriangulationCause;
-use crate::operation::runtime::{EditOperation, RuntimeKeys, ScratchVec, run_unit};
+use crate::operation::runtime::{ActiveRuntime, RuntimeKeys, ScratchVec, run_unit};
 use crate::triangulation::{
     CornerScratch, TriangulationError, triangulate_polygon, validate_polygon_triangulation,
 };
@@ -30,13 +30,12 @@ pub(crate) fn projected<'a>(
     positions: AttributeRef<'a>,
     face_sizes: &'a [u32],
     indices: Option<&'a [u32]>,
-    operation: &mut EditOperation,
-    keys: RuntimeKeys,
+    operation: &mut ActiveRuntime<'_>,
 ) -> Result<PolygonInput<'a>, TriangulationCause> {
     let mut triangles = 0_usize;
     let mut max_corners = 0_usize;
     for &size in face_sizes {
-        run_unit(operation, keys, || {
+        run_unit(operation, || {
             let size = size as usize;
             triangles = triangles
                 .checked_add(
@@ -59,7 +58,7 @@ pub(crate) fn projected<'a>(
 
 pub(crate) fn build_origins(
     source: PolygonInput<'_>,
-    operation: &mut EditOperation,
+    operation: &mut ActiveRuntime<'_>,
     keys: RuntimeKeys,
 ) -> Result<Origins, TriangulationCause> {
     let mut triangles = ScratchVec::new(operation, keys, source.triangles)?;
@@ -73,7 +72,7 @@ pub(crate) fn build_origins(
     let mut corners = ScratchVec::new(operation, keys, source.max_corners)?;
     let mut scratch = ScratchVec::new(operation, keys, source.max_corners)?;
     let mut output = ScratchVec::new(operation, keys, source.max_corners - 2)?;
-    run_unit(operation, keys, || face_offsets.values_mut().push(0))?;
+    run_unit(operation, || face_offsets.values_mut().push(0))?;
 
     let mut first_corner = 0_usize;
     for (face, &count) in source.face_sizes.iter().enumerate() {
@@ -83,7 +82,7 @@ pub(crate) fn build_origins(
         scratch.values_mut().clear();
         output.values_mut().clear();
         for local in 0..count {
-            let (corner, vertex) = run_unit(operation, keys, || {
+            let (corner, vertex) = run_unit(operation, || {
                 let corner = first_corner
                     .checked_add(local)
                     .ok_or(TriangulationCause::SizeOverflow)?;
@@ -98,8 +97,8 @@ pub(crate) fn build_origins(
                 }
                 Ok::<_, TriangulationCause>((corner, vertex))
             })??;
-            let value = read_position(source.positions, vertex, operation, keys)?;
-            run_unit(operation, keys, || {
+            let value = read_position(source.positions, vertex, operation)?;
+            run_unit(operation, || {
                 positions.values_mut().push(value);
                 corners.values_mut().push(corner);
                 scratch.values_mut().push(CornerScratch::default());
@@ -109,7 +108,7 @@ pub(crate) fn build_origins(
                 Ok::<_, TriangulationCause>(())
             })??;
         }
-        let mut control = || run_unit(operation, keys, || ());
+        let mut control = || run_unit(operation, || ());
         triangulate_polygon(
             positions.values(),
             corners.values(),
@@ -127,7 +126,7 @@ pub(crate) fn build_origins(
         )
         .map_err(|cause| polygon_cause(face as u32, cause))?;
         for triple in output.values() {
-            run_unit(operation, keys, || {
+            run_unit(operation, || {
                 let mut checked = [0; 3];
                 for lane in 0..3 {
                     checked[lane] = u32::try_from(triple[lane])
@@ -137,7 +136,7 @@ pub(crate) fn build_origins(
                 Ok::<_, TriangulationCause>(())
             })??;
         }
-        run_unit(operation, keys, || {
+        run_unit(operation, || {
             let end = u32::try_from(triangles.values().len())
                 .map_err(|_| TriangulationCause::SizeOverflow)?;
             face_offsets.values_mut().push(end);
@@ -147,7 +146,7 @@ pub(crate) fn build_origins(
             Ok::<_, TriangulationCause>(())
         })??;
     }
-    operation.control_checkpoint().poll()?;
+    operation.checkpoint()?;
     Ok(Origins {
         triangles,
         face_offsets,
@@ -157,17 +156,16 @@ pub(crate) fn build_origins(
 fn read_position(
     attribute: AttributeRef<'_>,
     vertex: usize,
-    operation: &mut EditOperation,
-    keys: RuntimeKeys,
+    operation: &mut ActiveRuntime<'_>,
 ) -> Result<[f64; 3], TriangulationCause> {
     let data = attribute.data();
     let index = match data {
         AttributeData::SparseF32 { indices, .. } | AttributeData::SparseF64 { indices, .. } => {
-            sparse_index(indices, vertex, operation, keys)?
+            sparse_index(indices, vertex, operation)?
         }
         _ => Some(vertex),
     };
-    run_unit(operation, keys, || match (data, index) {
+    run_unit(operation, || match (data, index) {
         (AttributeData::DenseF32 { lanes: 3, values }, Some(index))
         | (
             AttributeData::SparseF32 {
@@ -215,8 +213,7 @@ fn position_tuple<T: Copy + Into<f64>>(
 fn sparse_index(
     indices: &[u32],
     vertex: usize,
-    operation: &mut EditOperation,
-    keys: RuntimeKeys,
+    operation: &mut ActiveRuntime<'_>,
 ) -> Result<Option<usize>, TriangulationCause> {
     let vertex = u32::try_from(vertex).map_err(|_| TriangulationCause::Positions)?;
     let (mut low, mut high) = (0, indices.len());
@@ -225,7 +222,7 @@ fn sparse_index(
             return Ok(None);
         }
         let middle = low + (high - low) / 2;
-        match run_unit(operation, keys, || indices[middle].cmp(&vertex))? {
+        match run_unit(operation, || indices[middle].cmp(&vertex))? {
             std::cmp::Ordering::Less => low = middle + 1,
             std::cmp::Ordering::Greater => high = middle,
             std::cmp::Ordering::Equal => return Ok(Some(middle)),

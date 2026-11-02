@@ -36,8 +36,6 @@ pub enum TangentCause {
     MorphDeltas,
     #[error("tangent generation failed: {issue:?}")]
     Issue { issue: TangentIssue },
-    #[error("tangent generation size or work bound overflowed")]
-    SizeOverflow,
     #[error("tangent generation stopped: {cause}")]
     Control {
         #[source]
@@ -188,7 +186,6 @@ impl From<super::input::InputError> for TangentCause {
             InputError::NormalField => Self::NormalField,
             InputError::UvField => Self::UvField,
             InputError::UnsupportedDomain => Self::UnsupportedDomain,
-            InputError::SizeOverflow => Self::SizeOverflow,
             InputError::Runtime(source) => source.into(),
             InputError::Issue(issue) => Self::Issue { issue },
         }

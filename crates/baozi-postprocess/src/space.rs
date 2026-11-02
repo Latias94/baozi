@@ -93,18 +93,21 @@ pub fn convert_scene_space(
             ));
         }
     };
-    let resolved = match run_unit(&mut operation, keys, || {
-        resolve_scene_space_conversion(&input, options.target, options.source_assumptions)
-    }) {
-        Ok(Ok(resolved)) => resolved,
-        Ok(Err(source)) => {
-            return Err(failure(
-                input,
-                reject(operation, SpaceConversionCause::Source { source }),
-            ));
-        }
-        Err(source) => return Err(failure(input, reject(operation, source.into()))),
-    };
+    let resolved =
+        match crate::operation::runtime::with_execution(&mut operation, keys, |runtime| {
+            run_unit(runtime, || {
+                resolve_scene_space_conversion(&input, options.target, options.source_assumptions)
+            })
+        }) {
+            Ok(Ok(resolved)) => resolved,
+            Ok(Err(source)) => {
+                return Err(failure(
+                    input,
+                    reject(operation, SpaceConversionCause::Source { source }),
+                ));
+            }
+            Err(source) => return Err(failure(input, reject(operation, source.into()))),
+        };
     if resolved.is_unchanged() {
         return match operation.prepare_evidence_only_success(final_progress()) {
             Ok(PreparedStoreEvidenceOnlyOutcome::Success(prepared)) => {

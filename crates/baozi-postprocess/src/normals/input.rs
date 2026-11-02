@@ -9,7 +9,7 @@ use baozi_operation::StoreRuntimeError;
 
 use super::kernel;
 use super::options::NormalMode;
-use crate::operation::runtime::{EditOperation, RuntimeKeys, ScratchVec, run_unit};
+use crate::operation::runtime::{ActiveRuntime, RuntimeKeys, ScratchVec, run_unit};
 
 #[derive(Debug)]
 pub(crate) enum InputError {
@@ -54,21 +54,20 @@ impl GeneratedNormals {
     pub(crate) fn orient(
         &mut self,
         reverse: bool,
-        operation: &mut EditOperation,
-        keys: RuntimeKeys,
+        operation: &mut ActiveRuntime<'_>,
     ) -> Result<(), InputError> {
         if reverse {
             match &mut self.normals {
                 NormalValues::F32(values) => {
                     for value in values.values_mut() {
-                        run_unit(operation, keys, || {
+                        run_unit(operation, || {
                             *value = value.map(|v| if v == 0.0 { v } else { -v })
                         })?;
                     }
                 }
                 NormalValues::F64(values) => {
                     for value in values.values_mut() {
-                        run_unit(operation, keys, || {
+                        run_unit(operation, || {
                             *value = value.map(|v| if v == 0.0 { v } else { -v })
                         })?;
                     }
@@ -81,7 +80,7 @@ impl GeneratedNormals {
 
 pub(crate) fn generate(
     source: NormalInput<'_>,
-    operation: &mut EditOperation,
+    operation: &mut ActiveRuntime<'_>,
     keys: RuntimeKeys,
 ) -> Result<GeneratedNormals, InputError> {
     let corners = source.corner_count;
@@ -89,13 +88,13 @@ pub(crate) fn generate(
     let mut normals = if source.wide_output {
         let mut values = ScratchVec::new(operation, keys, corners as usize)?;
         for _ in 0..corners {
-            run_unit(operation, keys, || values.values_mut().push([0.0_f64; 3]))?;
+            run_unit(operation, || values.values_mut().push([0.0_f64; 3]))?;
         }
         NormalValues::F64(values)
     } else {
         let mut values = ScratchVec::new(operation, keys, corners as usize)?;
         for _ in 0..corners {
-            run_unit(operation, keys, || values.values_mut().push([0.0_f32; 3]))?;
+            run_unit(operation, || values.values_mut().push([0.0_f32; 3]))?;
         }
         NormalValues::F32(values)
     };
@@ -111,12 +110,12 @@ pub(crate) fn generate(
     };
     if let Some(order) = &mut order {
         for _ in 0..corners {
-            run_unit(operation, keys, || order.values_mut().push(0_usize))?;
+            run_unit(operation, || order.values_mut().push(0_usize))?;
         }
     }
     if let Some(crosses) = &mut crosses {
         for _ in 0..faces {
-            run_unit(operation, keys, || {
+            run_unit(operation, || {
                 crosses.values_mut().push(crate::precision::Estimate3 {
                     value: [0.0; 3],
                     abs_error: [0.0; 3],
@@ -149,7 +148,11 @@ pub(crate) fn generate(
                 .as_mut()
                 .map(|crosses| crosses.values_mut().as_mut_slice()),
         },
-        || run_unit(operation, keys, || ()),
+        |event| match event {
+            kernel::WorkEvent::Begin => operation.begin_action(),
+            kernel::WorkEvent::Complete => operation.complete_action(),
+            kernel::WorkEvent::Checkpoint => operation.checkpoint(),
+        },
     )
     .map_err(InputError::Kernel)?;
     drop(crosses);

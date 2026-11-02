@@ -288,11 +288,13 @@ pub mod __retained_store_integration {
             InterruptedCanonicalStoreSession, NeverActivatedStoreSession, OutcomeEvidenceDecision,
             OutcomeEvidenceValidationMember, PendingMinimalFallback, PreparedFailureEvidence,
             RejectedCanonicalStoreSession, RetainedStoreSessionOutcomeOwner,
-            RootedFailureValidation, StoreActivationContainment, StoreCanonicalRejection,
-            StoreNeverActivatedCause, VerifiedMinimalFallback,
+            RootedFailureValidation, StoreActivationContainment, StoreActivationContainmentAnchor,
+            StoreCanonicalRejection, StoreNeverActivatedCause, VerifiedMinimalFallback,
         };
         pub use crate::concrete_store::{
             RetainedStoreDimensionState, RetainedStoreObservedWork, RetainedStoreWriterRole,
+            StoreBoundWorkGroup, StoreExecutionControl, StoreExecutionPermit,
+            StoreExecutionStorage, StoreExecutionWork, StoreParserWorkError, StoreParserWorkScope,
         };
     }
 

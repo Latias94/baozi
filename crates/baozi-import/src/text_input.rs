@@ -331,26 +331,32 @@ impl<'scope, 'session, 'source> TextInputRecordCursor<'scope, 'session, 'source>
                 ImportWorkClass::DecodeWork,
                 admitted_work,
                 |work| -> Result<(), TextInputRecordScanExit> {
+                    let mut scan_start = chunk_start;
                     if semantic_scan_end.is_none() {
                         let has_bom = bom_probe_len == 3
                             && bytes
                                 .get(..3)
                                 .is_some_and(|prefix| prefix == [0xef, 0xbb, 0xbf]);
-                        if has_bom && self.facts.bom_policy == TextBomPolicy::Forbidden {
+                        if has_bom {
                             work.complete([3])?;
-                            let raw_end = self.absolute_record_end(3)?;
-                            let raw_range = DiagnosticByteRange::new(self.raw_offset, raw_end)
-                                .map_err(|_| {
-                                    self.scope.descriptor_contract_failure(
-                                        "text-input-record-bom-range-invalid",
-                                    )
-                                })?;
-                            return Err(TextInputRecordScanExit::Boundary(
-                                TextInputRecordBoundary::Violation(TextConformanceViolation::at(
-                                    TextConformanceViolationKind::ForbiddenBom,
-                                    raw_range,
-                                )),
-                            ));
+                            if self.facts.bom_policy == TextBomPolicy::Forbidden {
+                                let raw_end = self.absolute_record_end(3)?;
+                                let raw_range = DiagnosticByteRange::new(self.raw_offset, raw_end)
+                                    .map_err(|_| {
+                                        self.scope.descriptor_contract_failure(
+                                            "text-input-record-bom-range-invalid",
+                                        )
+                                    })?;
+                                return Err(TextInputRecordScanExit::Boundary(
+                                    TextInputRecordBoundary::Violation(
+                                        TextConformanceViolation::at(
+                                            TextConformanceViolationKind::ForbiddenBom,
+                                            raw_range,
+                                        ),
+                                    ),
+                                ));
+                            }
+                            scan_start = 3;
                         }
                         let input_start = usize::from(has_bom) * 3;
                         semantic_scan_end = Some(scan_limit.map_or(bytes.len(), |limit| {
@@ -365,68 +371,42 @@ impl<'scope, 'session, 'source> TextInputRecordCursor<'scope, 'session, 'source>
                     }
 
                     let scanned_end = chunk_end.min(semantic_scan_end.unwrap_or(bytes.len()));
-                    let chunk = bytes.get(chunk_start..scanned_end).ok_or_else(|| {
+                    let chunk = bytes.get(scan_start..scanned_end).ok_or_else(|| {
                         self.scope
                             .descriptor_contract_failure("text-input-record-scan-range-invalid")
                     })?;
-                    if let Some(relative) =
-                        chunk.iter().position(|byte| matches!(*byte, b'\r' | b'\n'))
-                    {
-                        let newline = chunk_start.checked_add(relative).ok_or_else(|| {
+                    for (relative, byte) in chunk.iter().copied().enumerate() {
+                        let is_newline = matches!(byte, b'\r' | b'\n');
+                        work.complete([1])?;
+                        if !is_newline {
+                            continue;
+                        }
+                        let newline = scan_start.checked_add(relative).ok_or_else(|| {
                             self.scope
                                 .resource_limit_exceeded(self.options.resource, u64::MAX)
                         })?;
-                        let byte = bytes.get(newline).copied().ok_or_else(|| {
-                            self.scope.descriptor_contract_failure(
-                                "text-input-record-newline-out-of-bounds",
-                            )
-                        })?;
                         if byte == b'\r' && newline.checked_add(1) == Some(scanned_end) {
-                            let observed =
-                                scanned_end.checked_sub(chunk_start).ok_or_else(|| {
-                                    self.scope.descriptor_contract_failure(
-                                        "text-input-record-scan-range-invalid",
-                                    )
-                                })?;
-                            work.complete([usize_to_u64(
-                                self.scope,
-                                observed,
-                                self.options.resource,
-                            )?])?;
                             return Err(TextInputRecordScanExit::PendingCr { newline });
                         }
 
-                        let has_lookahead =
-                            byte == b'\r' && bytes.get(newline.saturating_add(1)).is_some();
-                        let newline_len = usize::from(
-                            has_lookahead && bytes.get(newline.saturating_add(1)) == Some(&b'\n'),
-                        ) + 1;
+                        let mut newline_len = 1;
+                        if byte == b'\r'
+                            && let Some(next) = bytes.get(newline.saturating_add(1))
+                        {
+                            let is_lf = *next == b'\n';
+                            work.complete([1])?;
+                            newline_len += usize::from(is_lf);
+                        }
                         let record_len = newline.checked_add(newline_len).ok_or_else(|| {
                             self.scope
                                 .resource_limit_exceeded(self.options.resource, u64::MAX)
                         })?;
-                        let observed = relative
-                            .checked_add(1 + usize::from(has_lookahead))
-                            .ok_or_else(|| {
-                                self.scope
-                                    .resource_limit_exceeded(self.options.resource, u64::MAX)
-                            })?;
-                        work.complete([usize_to_u64(
-                            self.scope,
-                            observed,
-                            self.options.resource,
-                        )?])?;
                         let raw_end = self.absolute_record_end(record_len)?;
                         return Err(TextInputRecordScanExit::Boundary(
                             TextInputRecordBoundary::Complete(raw_end),
                         ));
                     }
 
-                    let observed = scanned_end.checked_sub(chunk_start).ok_or_else(|| {
-                        self.scope
-                            .descriptor_contract_failure("text-input-record-scan-range-invalid")
-                    })?;
-                    work.complete([usize_to_u64(self.scope, observed, self.options.resource)?])?;
                     if (scanned_end < chunk_end || scanned_end == semantic_scan_end.unwrap_or(0))
                         && line_limit_reached
                     {
@@ -495,7 +475,7 @@ impl<'scope, 'session, 'source> TextInputRecordCursor<'scope, 'session, 'source>
             self.scope
                 .with_work(ImportWorkClass::DecodeWork, 1, |work| {
                     let newline_len = if *byte == b'\n' { 2 } else { 1 };
-                    work.complete_all()?;
+                    work.complete([1])?;
                     Ok(newline_len)
                 })?
         } else {
@@ -1200,10 +1180,6 @@ struct InitialMeteredVecPlan {
 }
 
 impl InitialMeteredVecPlan {
-    const fn will_grow(&self) -> bool {
-        self.len == self.capacity
-    }
-
     fn add<T>(&mut self, scope: &ParseScope<'_>, resource: &'static str) -> ParseResult<bool> {
         let len = checked_add_usize(scope, self.len, 1, resource)?;
         if len <= self.capacity {
@@ -1248,151 +1224,94 @@ fn plan_text_input(
         line_index_limit_dirty: false,
         bom: None,
     };
-    if options.raw_base == 0 && bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
-        let raw_range = raw_range(scope, options, 0, 3)?;
-        match facts.bom_policy {
-            TextBomPolicy::Forbidden => {
-                let violation = TextConformanceViolation::at(
-                    TextConformanceViolationKind::ForbiddenBom,
-                    raw_range,
-                );
-                let work_amount = usize_to_u64(scope, bytes.len(), options.resource)?;
-                return scope.with_work(ImportWorkClass::DecodeWork, work_amount, |work| {
-                    let mut cursor = WorkCursor::new();
-                    cursor.process_to(3);
-                    cursor.flush(scope, work, options.resource)?;
-                    Err(TextInputScanError::Violation(violation))
-                });
-            }
-            TextBomPolicy::Accepted => {
-                plan.input_start = 3;
-                plan.bom = Some(TextInputBom::new(raw_range, false));
-            }
-            TextBomPolicy::AcceptedWithDiagnostic => {
-                plan.input_start = 3;
-                plan.bom = Some(TextInputBom::new(raw_range, true));
-            }
-        }
-    }
-
-    if plan.input_start < bytes.len() {
-        plan.line_index_limit_dirty = plan
-            .line_starts
-            .add::<TextInputLineStart>(scope, options.line_index_resource)?;
-    }
-
     let work_amount = usize_to_u64(scope, bytes.len(), options.resource)?;
     scope.with_work(ImportWorkClass::DecodeWork, work_amount, |work| {
         let mut cursor = WorkCursor::new();
+        if options.raw_base == 0 && bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+            work.complete([3])?;
+            let raw_range = raw_range(scope, options, 0, 3)?;
+            match facts.bom_policy {
+                TextBomPolicy::Forbidden => {
+                    return Err(TextInputScanError::Violation(TextConformanceViolation::at(
+                        TextConformanceViolationKind::ForbiddenBom,
+                        raw_range,
+                    )));
+                }
+                TextBomPolicy::Accepted => {
+                    plan.input_start = 3;
+                    plan.bom = Some(TextInputBom::new(raw_range, false));
+                }
+                TextBomPolicy::AcceptedWithDiagnostic => {
+                    plan.input_start = 3;
+                    plan.bom = Some(TextInputBom::new(raw_range, true));
+                }
+            }
+        }
+        if plan.input_start < bytes.len() {
+            plan.line_index_limit_dirty = plan
+                .line_starts
+                .add::<TextInputLineStart>(scope, options.line_index_resource)?;
+        }
         let mut offset = plan.input_start;
         let mut line_len = 0usize;
         while offset < bytes.len() {
+            cursor.poll_before_unit(work, facts, bytes, offset)?;
             let unit = classify_text_unit(facts, options.decoding_mode, bytes, offset);
+            work.complete([unit.raw_len() as u64])?;
+            let unit_end = checked_add_usize(scope, offset, unit.raw_len(), options.resource)?;
             match unit {
                 TextUnit::Valid { raw_len, newline } => {
-                    let unit_end = checked_add_usize(scope, offset, raw_len, options.resource)?;
-                    cursor.poll_before_crossing(scope, work, unit_end, options.resource)?;
-                    cursor.process_to(unit_end);
-                    plan.decoded_len = cursor.checked_add_after_processing(
+                    plan.decoded_len =
+                        checked_add_usize(scope, plan.decoded_len, raw_len, options.resource)?;
+                    enforce_usize_limit(
                         scope,
-                        work,
                         plan.decoded_len,
-                        raw_len,
-                        options.resource,
-                    )?;
-                    enforce_processed_usize_limit(
-                        scope,
-                        &mut cursor,
-                        work,
-                        plan.decoded_len,
-                        options.resource,
                         options.decoded_resource,
                         scope.limits().max_decoded_utf8_bytes,
                     )?;
                     if newline.is_some() {
-                        enforce_processed_usize_limit(
+                        enforce_usize_limit(
                             scope,
-                            &mut cursor,
-                            work,
                             line_len,
-                            options.resource,
                             options.line_resource,
                             scope.limits().max_line_bytes as u64,
                         )?;
                         if unit_end < bytes.len() {
-                            if plan.line_starts.will_grow() {
-                                cursor.flush(scope, work, options.resource)?;
-                            }
                             plan.line_index_limit_dirty |= plan
                                 .line_starts
                                 .add::<TextInputLineStart>(scope, options.line_index_resource)?;
                         }
-                        enforce_line_index_limit_after_processing(
-                            scope,
-                            &mut cursor,
-                            work,
-                            &mut plan,
-                            options,
-                        )?;
+                        enforce_line_index_limit(scope, &mut plan, options)?;
                         line_len = 0;
                     } else {
-                        line_len = cursor.checked_add_after_processing(
-                            scope,
-                            work,
-                            line_len,
-                            raw_len,
-                            options.resource,
-                        )?;
+                        line_len = checked_add_usize(scope, line_len, raw_len, options.resource)?;
                     }
-                    offset = unit_end;
                 }
-                TextUnit::Replacement { raw_len } => {
-                    let unit_end = checked_add_usize(scope, offset, raw_len, options.resource)?;
-                    cursor.poll_before_crossing(scope, work, unit_end, options.resource)?;
-                    cursor.process_to(unit_end);
-                    plan.decoded_len = cursor.checked_add_after_processing(
+                TextUnit::Replacement { .. } => {
+                    plan.decoded_len = checked_add_usize(
                         scope,
-                        work,
                         plan.decoded_len,
                         '\u{fffd}'.len_utf8(),
                         options.resource,
                     )?;
-                    enforce_processed_usize_limit(
+                    enforce_usize_limit(
                         scope,
-                        &mut cursor,
-                        work,
                         plan.decoded_len,
-                        options.resource,
                         options.decoded_resource,
                         scope.limits().max_decoded_utf8_bytes,
                     )?;
-                    if plan.replacements.will_grow() {
-                        cursor.flush(scope, work, options.resource)?;
-                    }
                     plan.line_index_limit_dirty |= plan
                         .replacements
                         .add::<TextInputReplacement>(scope, options.line_index_resource)?;
-                    line_len = cursor.checked_add_after_processing(
+                    line_len = checked_add_usize(
                         scope,
-                        work,
                         line_len,
                         '\u{fffd}'.len_utf8(),
                         options.resource,
                     )?;
-                    enforce_line_index_limit_after_processing(
-                        scope,
-                        &mut cursor,
-                        work,
-                        &mut plan,
-                        options,
-                    )?;
-                    offset = unit_end;
+                    enforce_line_index_limit(scope, &mut plan, options)?;
                 }
-                TextUnit::Violation { kind, raw_len } => {
-                    let unit_end = checked_add_usize(scope, offset, raw_len, options.resource)?;
-                    cursor.poll_before_crossing(scope, work, unit_end, options.resource)?;
-                    cursor.process_to(unit_end);
-                    cursor.flush(scope, work, options.resource)?;
+                TextUnit::Violation { kind, .. } => {
                     let violation = TextConformanceViolation::at(
                         kind,
                         raw_range(scope, options, offset, unit_end)?,
@@ -1400,20 +1319,16 @@ fn plan_text_input(
                     return Err(TextInputScanError::Violation(violation));
                 }
             }
-            cursor.flush_and_poll_if_chunk_complete(scope, work, options.resource)?;
+            offset = unit_end;
+            cursor.poll_if_chunk_complete(work, offset)?;
         }
-        cursor.process_to(bytes.len());
-        cursor.flush(scope, work, options.resource)?;
-        enforce_processed_usize_limit(
+        enforce_usize_limit(
             scope,
-            &mut cursor,
-            work,
             line_len,
-            options.resource,
             options.line_resource,
             scope.limits().max_line_bytes as u64,
         )?;
-        enforce_line_index_limit_after_processing(scope, &mut cursor, work, &mut plan, options)?;
+        enforce_line_index_limit(scope, &mut plan, options)?;
         Ok(plan)
     })
 }
@@ -1442,6 +1357,18 @@ fn build_text_input<'scope>(
         work_amount,
         |work| -> ParseResult<()> {
             let mut cursor = WorkCursor::new();
+            if plan.input_start != 0 {
+                let prefix = bytes.get(..3).ok_or_else(|| {
+                    scope.descriptor_contract_failure("text-input-plan-revalidation-failed")
+                })?;
+                let has_bom = prefix == [0xef, 0xbb, 0xbf];
+                work.complete([3])?;
+                if !has_bom || plan.input_start != 3 {
+                    return Err(
+                        scope.descriptor_contract_failure("text-input-plan-revalidation-failed")
+                    );
+                }
+            }
             if plan.line_starts.len != 0 {
                 line_starts.try_push_reserved(TextInputLineStart {
                     raw_offset: raw_start,
@@ -1452,10 +1379,12 @@ fn build_text_input<'scope>(
             let mut offset = plan.input_start;
             let mut valid_run_start = offset;
             while offset < bytes.len() {
-                match classify_text_unit(facts, options.decoding_mode, bytes, offset) {
-                    TextUnit::Valid { raw_len, newline } => {
-                        let unit_end = checked_add_usize(scope, offset, raw_len, options.resource)?;
-                        cursor.poll_before_crossing(scope, work, unit_end, options.resource)?;
+                cursor.poll_before_unit(work, facts, bytes, offset)?;
+                let unit = classify_text_unit(facts, options.decoding_mode, bytes, offset);
+                work.complete([unit.raw_len() as u64])?;
+                let unit_end = checked_add_usize(scope, offset, unit.raw_len(), options.resource)?;
+                match unit {
+                    TextUnit::Valid { newline, .. } => {
                         if unit_end.saturating_sub(valid_run_start) > TEXT_INPUT_WORK_CHUNK_BYTES {
                             append_valid_run(scope, &mut text, bytes, valid_run_start, offset)?;
                             valid_run_start = offset;
@@ -1476,12 +1405,8 @@ fn build_text_input<'scope>(
                             append_valid_run(scope, &mut text, bytes, valid_run_start, unit_end)?;
                             valid_run_start = unit_end;
                         }
-                        offset = unit_end;
-                        cursor.process_to(offset);
                     }
-                    TextUnit::Replacement { raw_len } => {
-                        let unit_end = checked_add_usize(scope, offset, raw_len, options.resource)?;
-                        cursor.poll_before_crossing(scope, work, unit_end, options.resource)?;
+                    TextUnit::Replacement { .. } => {
                         append_valid_run(scope, &mut text, bytes, valid_run_start, offset)?;
                         let raw_range = raw_range_parse(scope, options, offset, unit_end)?;
                         let decoded_start = text.len();
@@ -1492,20 +1417,17 @@ fn build_text_input<'scope>(
                             decoded_start,
                             decoded_end,
                         ))?;
-                        offset = unit_end;
                         valid_run_start = unit_end;
-                        cursor.process_to(offset);
                     }
                     TextUnit::Violation { .. } => {
                         return Err(scope
                             .descriptor_contract_failure("text-input-plan-revalidation-failed"));
                     }
                 }
-                cursor.flush_and_poll_if_chunk_complete(scope, work, options.resource)?;
+                offset = unit_end;
+                cursor.poll_if_chunk_complete(work, offset)?;
             }
             append_valid_run(scope, &mut text, bytes, valid_run_start, bytes.len())?;
-            cursor.process_to(bytes.len());
-            cursor.flush(scope, work, options.resource)?;
             Ok(())
         },
     )?;
@@ -1557,6 +1479,16 @@ enum TextUnit {
         kind: TextConformanceViolationKind,
         raw_len: usize,
     },
+}
+
+impl TextUnit {
+    const fn raw_len(self) -> usize {
+        match self {
+            Self::Valid { raw_len, .. }
+            | Self::Replacement { raw_len }
+            | Self::Violation { raw_len, .. } => raw_len,
+        }
+    }
 }
 
 fn classify_text_unit(
@@ -1716,115 +1648,77 @@ const fn is_utf8_continuation(byte: u8) -> bool {
     byte & 0xc0 == 0x80
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct WorkCursor {
-    processed_to: usize,
-    completed_to: usize,
     next_poll_at: usize,
 }
 
 impl WorkCursor {
     const fn new() -> Self {
         Self {
-            processed_to: 0,
-            completed_to: 0,
             next_poll_at: TEXT_INPUT_WORK_CHUNK_BYTES,
         }
     }
 
-    fn process_to(&mut self, offset: usize) {
-        debug_assert!(offset >= self.processed_to);
-        self.processed_to = offset;
+    fn poll_before_unit(
+        &mut self,
+        work: &mut crate::scope::ImportWorkScope<'_, '_, 1>,
+        facts: &TextProfileFacts,
+        bytes: &[u8],
+        offset: usize,
+    ) -> ParseResult<()> {
+        if offset.saturating_add(4) <= self.next_poll_at {
+            return Ok(());
+        }
+        // Only bounded width lookahead precedes the poll; semantic classification follows it.
+        let raw_len = text_unit_raw_len(facts, bytes, offset);
+        if offset.saturating_add(raw_len) > self.next_poll_at {
+            work.poll()?;
+            self.next_poll_at = offset.saturating_add(TEXT_INPUT_WORK_CHUNK_BYTES);
+        }
+        Ok(())
     }
 
-    fn poll_before_crossing(
+    fn poll_if_chunk_complete(
         &mut self,
-        scope: &ParseScope<'_>,
         work: &mut crate::scope::ImportWorkScope<'_, '_, 1>,
         offset: usize,
-        resource: &'static str,
     ) -> ParseResult<()> {
-        if offset <= self.next_poll_at {
-            return Ok(());
-        }
-        self.flush(scope, work, resource)?;
-        work.poll()?;
-        self.next_poll_at = self
-            .processed_to
-            .saturating_add(TEXT_INPUT_WORK_CHUNK_BYTES);
-        Ok(())
-    }
-
-    fn flush(
-        &mut self,
-        scope: &ParseScope<'_>,
-        work: &mut crate::scope::ImportWorkScope<'_, '_, 1>,
-        resource: &'static str,
-    ) -> ParseResult<()> {
-        if self.processed_to <= self.completed_to {
-            return Ok(());
-        }
-        let amount = self
-            .processed_to
-            .checked_sub(self.completed_to)
-            .ok_or_else(|| scope.resource_limit_exceeded(resource, u64::MAX))?;
-        work.complete([usize_to_u64(scope, amount, resource)?])?;
-        self.completed_to = self.processed_to;
-        Ok(())
-    }
-
-    fn checked_add_after_processing(
-        &mut self,
-        scope: &ParseScope<'_>,
-        work: &mut crate::scope::ImportWorkScope<'_, '_, 1>,
-        left: usize,
-        right: usize,
-        resource: &'static str,
-    ) -> ParseResult<usize> {
-        if let Some(value) = left.checked_add(right) {
-            return Ok(value);
-        }
-        self.flush(scope, work, resource)?;
-        Err(scope.resource_limit_exceeded(resource, u64::MAX))
-    }
-
-    fn flush_and_poll_if_chunk_complete(
-        &mut self,
-        scope: &ParseScope<'_>,
-        work: &mut crate::scope::ImportWorkScope<'_, '_, 1>,
-        resource: &'static str,
-    ) -> ParseResult<()> {
-        if self.processed_to >= self.next_poll_at {
-            self.flush(scope, work, resource)?;
+        if offset >= self.next_poll_at {
             work.poll()?;
-            self.next_poll_at = self
-                .processed_to
-                .saturating_add(TEXT_INPUT_WORK_CHUNK_BYTES);
+            self.next_poll_at = offset.saturating_add(TEXT_INPUT_WORK_CHUNK_BYTES);
         }
         Ok(())
     }
 }
 
-fn enforce_processed_usize_limit(
+fn text_unit_raw_len(facts: &TextProfileFacts, bytes: &[u8], offset: usize) -> usize {
+    if let Some((_, raw_len)) = newline_at(bytes, offset) {
+        return raw_len;
+    }
+    if bytes.get(offset).is_none_or(u8::is_ascii) {
+        return 1;
+    }
+    match classify_utf8_unit(bytes, offset) {
+        Utf8Unit::Valid(_) if facts.lexical_mode == TextLexicalMode::AsciiOnly => 1,
+        Utf8Unit::Valid(raw_len) | Utf8Unit::Invalid(raw_len) => raw_len,
+    }
+}
+
+fn enforce_usize_limit(
     scope: &ParseScope<'_>,
-    cursor: &mut WorkCursor,
-    work: &mut crate::scope::ImportWorkScope<'_, '_, 1>,
     value: usize,
-    work_resource: &'static str,
     resource: &'static str,
     limit: u64,
 ) -> ParseResult<()> {
     if u64::try_from(value).is_ok_and(|attempted| attempted <= limit) {
         return Ok(());
     }
-    cursor.flush(scope, work, work_resource)?;
     Err(scope.resource_limit_exceeded(resource, limit))
 }
 
-fn enforce_line_index_limit_after_processing(
+fn enforce_line_index_limit(
     scope: &ParseScope<'_>,
-    cursor: &mut WorkCursor,
-    work: &mut crate::scope::ImportWorkScope<'_, '_, 1>,
     plan: &mut TextInputPlan,
     options: TextInputOptions,
 ) -> ParseResult<()> {
@@ -1836,12 +1730,10 @@ fn enforce_line_index_limit_after_processing(
         .envelope_bytes
         .checked_add(plan.replacements.envelope_bytes)
     else {
-        cursor.flush(scope, work, options.resource)?;
         return Err(scope.resource_limit_exceeded(options.line_index_resource, u64::MAX));
     };
     let limit = scope.limits().max_line_index_bytes;
     if bytes > limit {
-        cursor.flush(scope, work, options.resource)?;
         return Err(scope.resource_limit_exceeded(options.line_index_resource, limit));
     }
     plan.line_index_limit_dirty = false;
@@ -1957,6 +1849,121 @@ mod tests {
                 )?
                 .expect("the allocation fixture must otherwise conform");
             panic!("injected allocation failure must stop text construction")
+        }
+    }
+
+    struct CopyFailureImporter;
+
+    impl FormatImporter for CopyFailureImporter {
+        fn descriptor(&self) -> FormatDescriptor {
+            AllocationFailureImporter.descriptor()
+        }
+
+        fn detect(
+            &self,
+            probe: &crate::Probe<'_>,
+            hint: &ReadHint,
+            scope: &DetectionScope<'_>,
+        ) -> DetectionResult<DetectionOutcome> {
+            AllocationFailureImporter.detect(probe, hint, scope)
+        }
+
+        fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+            let descriptor = self.descriptor();
+            let facts = TextProfileFacts::new(descriptor.text_profile().unwrap());
+            let options = TextInputOptions::new(TextDecodingMode::RejectInvalid, "test-text");
+            let source = scope.diagnostic_source();
+            let bytes = source.bytes();
+            let mut plan = match plan_text_input(scope, &facts, bytes, options) {
+                Ok(plan) => plan,
+                Err(TextInputScanError::Scope(failure)) => return Err(failure),
+                Err(TextInputScanError::Violation(_)) => panic!("copy fixture must conform"),
+            };
+            // Fault the copy capacity after a valid plan so classification precedes rejection.
+            plan.decoded_len = 0;
+            let _ = build_text_input(scope, &facts, bytes, options, plan, true)?;
+            panic!("the shortened decoded capacity must reject the first copy")
+        }
+    }
+
+    #[test]
+    fn raw_unit_frontier_lookahead_keeps_utf8_and_malformed_prefix_widths() {
+        let descriptor = AllocationFailureImporter.descriptor();
+        let mut facts = TextProfileFacts::new(descriptor.text_profile().unwrap());
+        for (bytes, expected) in [
+            (b"a".as_slice(), 1),
+            (b"\r\n".as_slice(), 2),
+            (b"\xc3\xa9".as_slice(), 2),
+            (b"\xe2\x82\xac".as_slice(), 3),
+            (b"\xf0\x9f\x92\xa9".as_slice(), 4),
+            (b"\xff".as_slice(), 1),
+            (b"\xe2\x82x".as_slice(), 2),
+            (b"\xf0\x9f\x92x".as_slice(), 3),
+            (b"\xf0\x9f\x92".as_slice(), 3),
+        ] {
+            assert_eq!(text_unit_raw_len(&facts, bytes, 0), expected);
+            for mode in [
+                TextDecodingMode::RejectInvalid,
+                TextDecodingMode::ReplaceInvalidUtf8,
+            ] {
+                assert_eq!(
+                    classify_text_unit(&facts, mode, bytes, 0).raw_len(),
+                    expected
+                );
+            }
+        }
+        facts.lexical_mode = TextLexicalMode::AsciiOnly;
+        assert_eq!(text_unit_raw_len(&facts, b"\xc3\xa9", 0), 1);
+        assert_eq!(
+            classify_text_unit(&facts, TextDecodingMode::RejectInvalid, b"\xc3\xa9", 0).raw_len(),
+            1
+        );
+    }
+
+    #[test]
+    fn copy_failure_keeps_classified_raw_units_without_a_final_completion_replay() {
+        for (bytes, attempted, consumed) in [
+            (b"a".as_slice(), 2, 2),
+            (b"a\n".as_slice(), 4, 4),
+            (b"a\nb".as_slice(), 6, 5),
+            (b"\xc3\xa9".as_slice(), 4, 4),
+        ] {
+            let mut registry = RegistryBuilder::new();
+            registry.register(CopyFailureImporter).unwrap();
+            let request = registry
+                .freeze(RegistryBuildLimits::default())
+                .unwrap()
+                .compile_request(&ImportRequest::new(), OptionCompileLimits::default())
+                .unwrap();
+            let error = crate::import_bytes(
+                &request,
+                AssetPath::new("copy.txt").unwrap(),
+                bytes,
+                ImportOperationControl::default(),
+            )
+            .expect_err("the first reserved decoded copy must fail");
+            let failure = error
+                .into_operation_failure()
+                .unwrap_or_else(|source| panic!("test session must initialize: {source}"));
+            assert!(matches!(
+                failure.cause(),
+                ImportCause::Scope(abort)
+                    if matches!(
+                        abort.cause(),
+                        ScopeAbortCause::DescriptorContract {
+                            code: "decoded-text-length-exhausted",
+                        }
+                    )
+            ));
+            let decode = failure
+                .ledger()
+                .dimension(ImportDimension::DecodeWork)
+                .unwrap();
+            assert_eq!(
+                (decode.attempted(), decode.consumed()),
+                (attempted, consumed)
+            );
+            assert_eq!(failure.ledger().current_live_bytes(), 0);
         }
     }
 

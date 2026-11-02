@@ -229,24 +229,28 @@ pub(crate) fn run(
             ));
         }
     };
-    let prepared = match input::prepare(&input, targets, options, &mut operation, keys) {
-        Ok(p) => p,
-        Err(e) => return Err(failure(input, reject(operation, e), invocation)),
-    };
-    let mut any_changed = false;
-    for primitive in prepared.values() {
-        match crate::operation::runtime::run_unit(&mut operation, keys, || primitive.changed()) {
-            Ok(true) => {
-                any_changed = true;
-                break;
+    let prepared =
+        match crate::operation::runtime::with_execution(&mut operation, keys, |runtime| {
+            input::prepare(&input, targets, options, runtime, keys)
+        }) {
+            Ok(p) => p,
+            Err(e) => return Err(failure(input, reject(operation, e), invocation)),
+        };
+    let any_changed =
+        match crate::operation::runtime::with_execution(&mut operation, keys, |runtime| {
+            for primitive in prepared.values() {
+                if crate::operation::runtime::run_unit(runtime, || primitive.changed())? {
+                    return Ok::<_, baozi_operation::StoreRuntimeError>(true);
+                }
             }
-            Ok(false) => {}
+            Ok(false)
+        }) {
+            Ok(changed) => changed,
             Err(error) => {
                 drop(prepared);
                 return Err(failure(input, reject(operation, error.into()), invocation));
             }
-        }
-    }
+        };
     if !any_changed {
         drop(prepared);
         return match operation.prepare_evidence_only_success(final_progress()) {
@@ -275,42 +279,52 @@ pub(crate) fn run(
             )),
         };
     }
-    let mut replacements = match ScratchVec::new(&mut operation, keys, prepared.values().len()) {
-        Ok(v) => v,
-        Err(e) => {
-            drop(prepared);
-            return Err(failure(input, reject(operation, e.into()), invocation));
-        }
-    };
-    let mut evidence_work = SelectionEvidenceWork::default();
-    for p in prepared.values() {
-        let mut edit = SceneGeometryReplacement::new(p.target);
-        edit.origins = p.origins.as_ref().map(|o| SceneTriangleOrigins {
-            triangles: o.triangles.values(),
-            face_offsets: o.face_offsets.values(),
-        });
-        edit.normals = p.normals.as_ref().map(|n| n.values());
-        edit.tangents = p.tangents.as_ref().map(|t| t.values());
-        edit.remove_tangents = p.remove_tangents;
-        edit.smooth = p.smooth;
-        edit.normal_domain = p.normal_domain;
-        edit.uv_set = p.uv_set;
-        edit.uv_domain = p.uv_domain;
-        let appended = crate::operation::runtime::run_unit(&mut operation, keys, || {
-            let (triangles, face_offsets) = edit
-                .origins
-                .map_or((0, 0), |o| (o.triangles.len(), o.face_offsets.len()));
-            evidence_work.include(triangles, face_offsets)?;
-            replacements.values_mut().push(edit);
-            Some(())
-        });
-        let cause = match appended {
-            Ok(Some(())) => continue,
-            Ok(None) => baozi_operation::StoreRuntimeError::Plan(
-                baozi_operation::StorePlanError::SizeOverflow,
-            ),
-            Err(e) => e,
+    let mut replacements =
+        match crate::operation::runtime::with_execution(&mut operation, keys, |runtime| {
+            ScratchVec::new(runtime, keys, prepared.values().len())
+        }) {
+            Ok(v) => v,
+            Err(e) => {
+                drop(prepared);
+                return Err(failure(input, reject(operation, e.into()), invocation));
+            }
         };
+    let mut evidence_work = SelectionEvidenceWork::default();
+    let append_result =
+        crate::operation::runtime::with_execution(&mut operation, keys, |runtime| {
+            for p in prepared.values() {
+                let mut edit = SceneGeometryReplacement::new(p.target);
+                edit.origins = p.origins.as_ref().map(|o| SceneTriangleOrigins {
+                    triangles: o.triangles.values(),
+                    face_offsets: o.face_offsets.values(),
+                });
+                edit.normals = p.normals.as_ref().map(|n| n.values());
+                edit.tangents = p.tangents.as_ref().map(|t| t.values());
+                edit.remove_tangents = p.remove_tangents;
+                edit.smooth = p.smooth;
+                edit.normal_domain = p.normal_domain;
+                edit.uv_set = p.uv_set;
+                edit.uv_domain = p.uv_domain;
+                let appended = crate::operation::runtime::run_unit(runtime, || {
+                    let (triangles, face_offsets) = edit
+                        .origins
+                        .map_or((0, 0), |o| (o.triangles.len(), o.face_offsets.len()));
+                    evidence_work.include(triangles, face_offsets)?;
+                    replacements.values_mut().push(edit);
+                    Some(())
+                });
+                let cause = match appended {
+                    Ok(Some(())) => continue,
+                    Ok(None) => baozi_operation::StoreRuntimeError::Plan(
+                        baozi_operation::StorePlanError::SizeOverflow,
+                    ),
+                    Err(e) => e,
+                };
+                return Err(cause);
+            }
+            Ok(())
+        });
+    if let Err(cause) = append_result {
         drop(replacements);
         drop(prepared);
         return Err(failure(input, reject(operation, cause.into()), invocation));

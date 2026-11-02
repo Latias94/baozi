@@ -45,9 +45,16 @@ use crate::{
     ControlCause, FinalProgress, OperationControl, OperationOwner, ProgressPhase, ProgressUnit,
     PublicationCause,
 };
+use std::cell::Cell;
 use std::fmt;
 use std::num::NonZeroU64;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+
+mod execution;
+pub(crate) use execution::{
+    ExecutionControl, ExecutionError, ExecutionGroup, ExecutionParserScope, ExecutionPermit,
+    ExecutionStorage, ExecutionWork,
+};
 
 const FAILURE_WORK_PERMIT_ABANDONED_CODE: u32 = 0x4657_5041;
 const FAILURE_WORK_PERMIT_OVERRUN_CODE: u32 = 0x4657_504f;
@@ -98,7 +105,8 @@ where
     failure_work_permit_outstanding: bool,
     ordinary_work_permit_outstanding: bool,
     ordinary_work_permit_partially_resolved: bool,
-    sticky_terminal_cause: Option<PreparationFailureCode>,
+    sticky_terminal_cause: Cell<Option<PreparationFailureCode>>,
+    control_action_debt: Cell<u16>,
     canonical_lineage: CanonicalLineageAuthority,
 }
 
@@ -162,6 +170,9 @@ pub(crate) struct RetainedPlanningContainmentAnchor {
 }
 
 impl RetainedPlanningContainmentAnchor {
+    pub(crate) fn existing_containment(&self) -> Option<FinalizationContainmentError> {
+        self.account.snapshot().poisoned().then(|| self.contain())
+    }
     pub(crate) fn share(&self) -> Self {
         Self {
             account: PhysicalStorageAccount {
@@ -205,16 +216,16 @@ struct FailureTerminalWorkCapability<D> {
 /// trusted runtime failure. Once Control, ProductGraph, or Ledger is recorded, later causes cannot
 /// replace it.
 fn record_terminal_cause_with_precedence(
-    slot: &mut Option<PreparationFailureCode>,
+    slot: &Cell<Option<PreparationFailureCode>>,
     cause: PreparationFailureCode,
 ) {
-    match *slot {
-        None => *slot = Some(cause),
+    match slot.get() {
+        None => slot.set(Some(cause)),
         Some(existing)
             if existing.class() == PreparationFailureClass::Requested
                 && cause.class() != PreparationFailureClass::Requested =>
         {
-            *slot = Some(cause);
+            slot.set(Some(cause));
         }
         Some(_) => {}
     }
@@ -235,7 +246,7 @@ fn apply_linear_work_completion<D>(
 fn finish_dropped_work<D: Copy, const N: usize>(
     work: &mut Option<LinearWorkBatchPermit<'_, D, N>>,
     outstanding: &mut bool,
-    sticky_terminal_cause: &mut Option<PreparationFailureCode>,
+    sticky_terminal_cause: &Cell<Option<PreparationFailureCode>>,
     abandoned_code: u32,
 ) {
     record_terminal_cause_with_precedence(
@@ -277,7 +288,7 @@ where
     F: Send + Sync + 'static,
 {
     pub(crate) fn record_terminal_cause(&mut self, cause: PreparationFailureCode) {
-        record_terminal_cause_with_precedence(&mut self.sticky_terminal_cause, cause);
+        record_terminal_cause_with_precedence(&self.sticky_terminal_cause, cause);
     }
 
     pub(crate) fn poll_terminal_control(&mut self) {
@@ -307,8 +318,14 @@ where
         }
     }
 
-    const fn planning_has_outstanding_work_permit(&self) -> bool {
-        self.failure_work_permit_outstanding || self.ordinary_work_permit_outstanding
+    fn planning_has_outstanding_work_permit(&self) -> bool {
+        self.failure_work_permit_outstanding
+            || self.ordinary_work_permit_outstanding
+            || self
+                .coordinator
+                .retained_ledger()
+                .check_work_quiescent()
+                .is_err()
     }
 
     pub(crate) fn planning_matches_baseline(&self, baseline: RetainedPlanningBaseline) -> bool {
@@ -376,7 +393,7 @@ where
     poll: OperationPollCheckpoint<'a, PP, U>,
     ledger: &'a crate::ledger::Ledger<O, P, D>,
     failure_terminal_work_dimension: Option<D>,
-    sticky_terminal_cause: &'a mut Option<PreparationFailureCode>,
+    sticky_terminal_cause: &'a Cell<Option<PreparationFailureCode>>,
 }
 
 /// Borrowed host authority for producer work before publication begins.
@@ -395,7 +412,7 @@ where
     coordinator: &'a mut OperationCoordinator<O, P, PP, U, D>,
     failure_terminal_work_dimension: Option<D>,
     permit_outstanding: &'a mut bool,
-    sticky_terminal_cause: &'a mut Option<PreparationFailureCode>,
+    sticky_terminal_cause: &'a Cell<Option<PreparationFailureCode>>,
 }
 
 pub(crate) enum RetainedProducerWorkStartError<D> {
@@ -425,7 +442,7 @@ where
 {
     progress: OperationProgressCheckpoint<'a, O, P, PP, U, D>,
     permit_outstanding: &'a mut bool,
-    sticky_terminal_cause: &'a mut Option<PreparationFailureCode>,
+    sticky_terminal_cause: &'a Cell<Option<PreparationFailureCode>>,
     work: Option<LinearWorkBatchPermit<'a, D, N>>,
     remaining: [u64; N],
     resolved: bool,
@@ -455,7 +472,7 @@ where
     )]
     ordinary_work_permit_outstanding: &'a mut bool,
     ordinary_work_permit_partially_resolved: &'a mut bool,
-    sticky_terminal_cause: &'a mut Option<PreparationFailureCode>,
+    sticky_terminal_cause: &'a Cell<Option<PreparationFailureCode>>,
 }
 
 pub(crate) enum RetainedWorkStartError<D> {
@@ -528,7 +545,7 @@ where
     ledger: &'a crate::ledger::Ledger<O, P, D>,
     dimension: D,
     permit_outstanding: &'a mut bool,
-    sticky_terminal_cause: &'a mut Option<PreparationFailureCode>,
+    sticky_terminal_cause: &'a Cell<Option<PreparationFailureCode>>,
 }
 
 pub(crate) enum RetainedFailureWorkStartError<D> {
@@ -742,7 +759,7 @@ where
         Ok(RetainedProducerWorkPermit {
             progress,
             permit_outstanding: &mut *self.permit_outstanding,
-            sticky_terminal_cause: &mut *self.sticky_terminal_cause,
+            sticky_terminal_cause: self.sticky_terminal_cause,
             work: Some(work),
             remaining: charges.map(|(_, amount)| amount),
             resolved: false,
@@ -2134,7 +2151,8 @@ where
             failure_work_permit_outstanding: false,
             ordinary_work_permit_outstanding: false,
             ordinary_work_permit_partially_resolved: false,
-            sticky_terminal_cause: None,
+            sticky_terminal_cause: Cell::new(None),
+            control_action_debt: Cell::new(0),
             canonical_lineage,
         })
     }
@@ -2152,50 +2170,8 @@ where
         allocations: u64,
     ) -> Result<(LiveReservation<O, P, D>, super::RetainedStorageLease), RetainedWriterError<D>>
     {
-        let result = (|| {
-            let account = self.account();
-            let preflight = account
-                .try_begin_account_preflight()
-                .map_err(RetainedWriterError::AccountPoisoned)?;
-            let ledger = self.coordinator.retained_ledger();
-            let raw = ledger
-                .reserve(phase, dimension, bytes)
-                .map_err(RetainedWriterError::Ledger)?;
-            let action = preflight
-                .admit_action()
-                .map_err(super::map_account_action_admission_error)?;
-            let share = super::try_admit_retained_share_work_before_physical(
-                ledger,
-                account,
-                self.terminal_account_share_work,
-            )?;
-            let mut admission = account
-                .try_admit_retained_after_action(
-                    action,
-                    super::AdmissionCharge::new(bytes, allocations),
-                    share,
-                )
-                .map_err(|cause| match cause {
-                    super::RetainedShareAdmissionError::Physical(cause) => {
-                        RetainedWriterError::Physical(cause)
-                    }
-                    super::RetainedShareAdmissionError::Ledger(cause) => {
-                        RetainedWriterError::Ledger(cause)
-                    }
-                })?;
-            Ok((
-                raw,
-                super::RetainedStorageLease::from_admission(&mut admission),
-            ))
-        })();
-        if let Err(cause) = &result {
-            let failure = match cause {
-                RetainedWriterError::Ledger(_) => PreparationFailureCode::ledger(),
-                _ => PreparationFailureCode::product_graph(0x5354_4f52),
-            };
-            self.record_terminal_cause(failure);
-        }
-        result
+        let (_, storage, _) = self.execution();
+        storage.reserve_retained(phase, dimension, bytes, allocations)
     }
 
     pub(super) fn activate_failure_terminal_work(
@@ -2392,15 +2368,14 @@ where
         )
     }
 
-    pub(crate) const fn sticky_terminal_cause(&self) -> Option<PreparationFailureCode> {
-        let permit_outstanding =
-            self.failure_work_permit_outstanding || self.ordinary_work_permit_outstanding;
+    pub(crate) fn sticky_terminal_cause(&self) -> Option<PreparationFailureCode> {
+        let permit_outstanding = self.planning_has_outstanding_work_permit();
         let abandoned_code = if self.failure_work_permit_outstanding {
             FAILURE_WORK_PERMIT_ABANDONED_CODE
         } else {
             ORDINARY_WORK_PERMIT_ABANDONED_CODE
         };
-        match (self.sticky_terminal_cause, permit_outstanding) {
+        match (self.sticky_terminal_cause.get(), permit_outstanding) {
             (Some(cause), true) if matches!(cause.class(), PreparationFailureClass::Requested) => {
                 Some(PreparationFailureCode::product_graph(abandoned_code))
             }
@@ -2409,8 +2384,8 @@ where
         }
     }
 
-    pub(super) const fn has_outstanding_work_permit(&self) -> bool {
-        self.failure_work_permit_outstanding || self.ordinary_work_permit_outstanding
+    pub(super) fn has_outstanding_work_permit(&self) -> bool {
+        self.planning_has_outstanding_work_permit()
     }
 
     pub(super) const fn has_partially_resolved_work_permit(&self) -> bool {

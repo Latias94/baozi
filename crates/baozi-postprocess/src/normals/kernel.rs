@@ -19,6 +19,28 @@ pub(crate) enum VertexIds<'a> {
     NonIndexed,
 }
 
+/// One physical bounded action, or an explicit full control checkpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkEvent {
+    /// Admit exactly one bounded leaf before physical work. An error prevents that work.
+    Begin,
+    /// Resolve that leaf immediately after normal return, including a semantic error.
+    Complete,
+    /// Full poll outside every leaf; never counted as physical work.
+    Checkpoint,
+}
+
+fn run_action<E, T>(
+    control: &mut impl FnMut(WorkEvent) -> Result<(), E>,
+    action: impl FnOnce() -> Result<T, Error<E>>,
+) -> Result<T, Error<E>> {
+    control(WorkEvent::Begin).map_err(Error::Control)?;
+    let result = action();
+    // A semantic error still completed the action. Unwinding must not emit completion.
+    control(WorkEvent::Complete).map_err(Error::Control)?;
+    result
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Input<'a, P = &'a [[f32; 3]]> {
     pub positions: P,
@@ -44,13 +66,14 @@ impl<P: PositionSource> Input<'_, P> {
 }
 
 /// Only the normal kernel's logical Position read seam; arithmetic dispatch follows storage.
+/// Reads emit their own leaf events. Callers must not enclose a read in another action.
 pub(crate) trait PositionSource: Copy {
     fn len(self) -> usize;
     fn is_f64(self) -> bool;
     fn read<E>(
         self,
         vertex: usize,
-        control: &mut impl FnMut() -> Result<(), E>,
+        control: &mut impl FnMut(WorkEvent) -> Result<(), E>,
     ) -> Result<[f64; 3], Error<E>>;
 }
 
@@ -67,12 +90,14 @@ impl PositionSource for &[[f32; 3]] {
     fn read<E>(
         self,
         vertex: usize,
-        _: &mut impl FnMut() -> Result<(), E>,
+        control: &mut impl FnMut(WorkEvent) -> Result<(), E>,
     ) -> Result<[f64; 3], Error<E>> {
-        self.get(vertex)
-            .copied()
-            .map(|value| value.map(f64::from))
-            .ok_or(Error::InvalidPositionStorage { vertex })
+        run_action(control, || {
+            self.get(vertex)
+                .copied()
+                .map(|value| value.map(f64::from))
+                .ok_or(Error::InvalidPositionStorage { vertex })
+        })
     }
 }
 
@@ -89,11 +114,13 @@ impl PositionSource for &[[f64; 3]] {
     fn read<E>(
         self,
         vertex: usize,
-        _: &mut impl FnMut() -> Result<(), E>,
+        control: &mut impl FnMut(WorkEvent) -> Result<(), E>,
     ) -> Result<[f64; 3], Error<E>> {
-        self.get(vertex)
-            .copied()
-            .ok_or(Error::InvalidPositionStorage { vertex })
+        run_action(control, || {
+            self.get(vertex)
+                .copied()
+                .ok_or(Error::InvalidPositionStorage { vertex })
+        })
     }
 }
 
@@ -112,46 +139,52 @@ impl PositionSource for AttributeRef<'_> {
     fn read<E>(
         self,
         vertex: usize,
-        control: &mut impl FnMut() -> Result<(), E>,
+        control: &mut impl FnMut(WorkEvent) -> Result<(), E>,
     ) -> Result<[f64; 3], Error<E>> {
-        let data = self.data();
-        let index = match data {
-            AttributeData::SparseF32 { indices, .. } | AttributeData::SparseF64 { indices, .. } => {
-                sparse_index(indices, vertex, control)?
-            }
-            _ => Some(vertex),
-        };
-        control().map_err(Error::Control)?;
-        match (data, index) {
-            (AttributeData::DenseF32 { lanes: 3, values }, Some(index))
-            | (
-                AttributeData::SparseF32 {
-                    lanes: 3, values, ..
-                },
-                Some(index),
-            ) => position_tuple(values, index, vertex),
-            (AttributeData::DenseF64 { lanes: 3, values }, Some(index))
-            | (
-                AttributeData::SparseF64 {
-                    lanes: 3, values, ..
-                },
-                Some(index),
-            ) => position_tuple(values, index, vertex),
-            (
-                AttributeData::SparseF32 {
-                    lanes: 3, default, ..
-                },
-                None,
-            ) => position_tuple(default, 0, vertex),
-            (
-                AttributeData::SparseF64 {
-                    lanes: 3, default, ..
-                },
-                None,
-            ) => position_tuple(default, 0, vertex),
-            _ => Err(Error::InvalidPositionStorage { vertex }),
-        }
+        read_position_data(self.data(), vertex, control)
     }
+}
+
+fn read_position_data<E>(
+    data: AttributeData<'_>,
+    vertex: usize,
+    control: &mut impl FnMut(WorkEvent) -> Result<(), E>,
+) -> Result<[f64; 3], Error<E>> {
+    let index = match data {
+        AttributeData::SparseF32 { indices, .. } | AttributeData::SparseF64 { indices, .. } => {
+            sparse_index(indices, vertex, control)?
+        }
+        _ => Some(vertex),
+    };
+    run_action(control, || match (data, index) {
+        (AttributeData::DenseF32 { lanes: 3, values }, Some(index))
+        | (
+            AttributeData::SparseF32 {
+                lanes: 3, values, ..
+            },
+            Some(index),
+        ) => position_tuple(values, index, vertex),
+        (AttributeData::DenseF64 { lanes: 3, values }, Some(index))
+        | (
+            AttributeData::SparseF64 {
+                lanes: 3, values, ..
+            },
+            Some(index),
+        ) => position_tuple(values, index, vertex),
+        (
+            AttributeData::SparseF32 {
+                lanes: 3, default, ..
+            },
+            None,
+        ) => position_tuple(default, 0, vertex),
+        (
+            AttributeData::SparseF64 {
+                lanes: 3, default, ..
+            },
+            None,
+        ) => position_tuple(default, 0, vertex),
+        _ => Err(Error::InvalidPositionStorage { vertex }),
+    })
 }
 
 fn position_tuple<T: Copy + Into<f64>, E>(
@@ -170,7 +203,7 @@ fn position_tuple<T: Copy + Into<f64>, E>(
 fn sparse_index<E>(
     indices: &[u32],
     vertex: usize,
-    control: &mut impl FnMut() -> Result<(), E>,
+    control: &mut impl FnMut(WorkEvent) -> Result<(), E>,
 ) -> Result<Option<usize>, Error<E>> {
     let logical = u32::try_from(vertex).map_err(|_| Error::InvalidPositionStorage { vertex })?;
     let (mut low, mut high) = (0, indices.len());
@@ -180,8 +213,8 @@ fn sparse_index<E>(
             return Ok(None);
         }
         let middle = low + (high - low) / 2;
-        control().map_err(Error::Control)?;
-        match indices[middle].cmp(&logical) {
+        let ordering = run_action(control, || Ok(indices[middle].cmp(&logical)))?;
+        match ordering {
             std::cmp::Ordering::Less => low = middle + 1,
             std::cmp::Ordering::Greater => high = middle,
             std::cmp::Ordering::Equal => return Ok(Some(middle)),
@@ -317,28 +350,32 @@ pub(crate) enum Error<E> {
 ///
 /// Work is O(V + C log C) for Smooth and O(V + C) for Flat. Smooth uses C caller-owned usize
 /// entries, an optional C / 3 cross cache, and constant stack space; Flat needs no corner scratch.
-/// Every input-sized loop polls control, including heap construction, sift-down, and output.
-/// Polling also occurs at entry and completion. The callback's error is returned unchanged.
+/// Every input-sized loop exposes bounded leaf actions, including sift-down and output.
+/// Begin admits one action; Complete follows its normal return, including a semantic error.
+/// No action encloses another action or a checkpoint. The callback owns polling cadence;
+/// Checkpoint requests a full poll at entry, phase boundaries and successful completion.
+/// A callback error stops immediately and is returned unchanged, ahead of an action error
+/// if its Complete callback fails. Panics do not emit Complete during unwinding.
 #[cfg(test)]
 pub(crate) fn generate<E>(
     input: Input<'_>,
     mode: Mode,
     output: &mut [[f32; 3]],
     workspace: Workspace<'_>,
-    control: impl FnMut() -> Result<(), E>,
+    control: impl FnMut(WorkEvent) -> Result<(), E>,
 ) -> Result<(), Error<E>> {
     generate_into(input, mode, Output::F32(output), workspace, control)
 }
 
-/// Reads only selected logical Position rows; source width chooses determinant arithmetic.
+/// Validates all logical Position rows; source width chooses determinant arithmetic.
 pub(crate) fn generate_into<E, P: PositionSource>(
     input: Input<'_, P>,
     mode: Mode,
     mut output: Output<'_>,
     mut workspace: Workspace<'_>,
-    mut control: impl FnMut() -> Result<(), E>,
+    mut control: impl FnMut(WorkEvent) -> Result<(), E>,
 ) -> Result<(), Error<E>> {
-    control().map_err(Error::Control)?;
+    control(WorkEvent::Checkpoint).map_err(Error::Control)?;
     let corners = input.corner_count();
     if !corners.is_multiple_of(3) {
         return Err(Error::CornerCount { actual: corners });
@@ -365,65 +402,85 @@ pub(crate) fn generate_into<E, P: PositionSource>(
     let wide = input.positions.is_f64();
     let mut maximum = 0.0_f64;
     for vertex in 0..input.positions.len() {
-        control().map_err(Error::Control)?;
         let position = input.positions.read(vertex, &mut control)?;
-        for (component, value) in position.into_iter().enumerate() {
-            if !value.is_finite() {
-                return Err(Error::NonFinitePosition { vertex, component });
+        run_action(&mut control, || {
+            for (component, value) in position.into_iter().enumerate() {
+                if !value.is_finite() {
+                    return Err(Error::NonFinitePosition { vertex, component });
+                }
+                if wide {
+                    precision::observe_magnitude(&mut maximum, value).map_err(|issue| {
+                        Error::PositionNumerical {
+                            vertex,
+                            component,
+                            issue,
+                        }
+                    })?;
+                }
             }
-            if wide {
-                precision::observe_magnitude(&mut maximum, value).map_err(|issue| {
-                    Error::PositionNumerical {
-                        vertex,
-                        component,
-                        issue,
-                    }
-                })?;
-            }
-        }
+            Ok(())
+        })?;
     }
     // Every face and smoothing bucket uses this single scale, retaining relative areas.
-    let scale = wide.then(|| precision::common_scale(maximum));
+    let scale = if wide {
+        Some(run_action(&mut control, || {
+            Ok(precision::common_scale(maximum))
+        })?)
+    } else {
+        None
+    };
 
+    control(WorkEvent::Checkpoint).map_err(Error::Control)?;
     for face in 0..faces {
-        control().map_err(Error::Control)?;
         let cross = read_face_cross(input, face, scale, &mut control)?;
         let wide_normal = if wide {
-            Some(
-                precision::unit_estimate(cross)
+            Some(run_action(&mut control, || {
+                Ok(precision::unit_estimate(cross)
                     .map_err(|issue| Error::Numerical { face, issue })?
-                    .value,
-            )
+                    .value)
+            })?)
         } else {
             None
         };
         if let Some(crosses) = workspace.face_crosses.as_deref_mut() {
-            crosses[face] = cross;
+            run_action(&mut control, || {
+                crosses[face] = cross;
+                Ok(())
+            })?;
         }
         if mode == Mode::Flat {
             let normal = match wide_normal {
                 Some(normal) => normal,
-                None => unit_exact_source(cross.value).ok_or(Error::InvalidFaceCross { face })?,
+                None => run_action(&mut control, || {
+                    unit_exact_source(cross.value).ok_or(Error::InvalidFaceCross { face })
+                })?,
             };
             for corner in 3 * face..3 * face + 3 {
-                output
-                    .publish(corner, normal)
-                    .map_err(|issue| Error::Numerical { face, issue })?;
+                run_action(&mut control, || {
+                    output
+                        .publish(corner, normal)
+                        .map_err(|issue| Error::Numerical { face, issue })
+                })?;
             }
         }
     }
 
     if mode == Mode::Smooth {
+        control(WorkEvent::Checkpoint).map_err(Error::Control)?;
         for (corner, slot) in workspace.corner_order.iter_mut().enumerate() {
-            control().map_err(Error::Control)?;
-            *slot = corner;
+            run_action(&mut control, || {
+                *slot = corner;
+                Ok(())
+            })?;
         }
         heapsort(input, workspace.corner_order, &mut control)?;
+        control(WorkEvent::Checkpoint).map_err(Error::Control)?;
         let mut start = 0;
         while start < corners {
-            control().map_err(Error::Control)?;
-            let first = workspace.corner_order[start];
-            let key = smoothing_key(input, first);
+            let (first, key) = run_action(&mut control, || {
+                let first = workspace.corner_order[start];
+                Ok((first, smoothing_key(input, first)))
+            })?;
             let mut end = start;
             let mut sum = [0.0_f64; 3];
             let mut correction = [0.0_f64; 3];
@@ -435,54 +492,62 @@ pub(crate) fn generate_into<E, P: PositionSource>(
                 issue,
             };
             while end < corners {
-                control().map_err(Error::Control)?;
-                let corner = workspace.corner_order[end];
-                if smoothing_key(input, corner) != key {
+                let (corner, same_bucket) = run_action(&mut control, || {
+                    let corner = workspace.corner_order[end];
+                    Ok((corner, smoothing_key(input, corner) == key))
+                })?;
+                if !same_bucket {
                     break;
                 }
                 let cross = match workspace.face_crosses.as_deref() {
-                    Some(crosses) => crosses[corner / 3],
+                    Some(crosses) => run_action(&mut control, || Ok(crosses[corner / 3]))?,
                     None => read_face_cross(input, corner / 3, scale, &mut control)?,
                 };
-                if wide {
-                    precision::area_add(&mut area, cross).map_err(numeric_error)?;
-                } else {
-                    accumulate(&mut sum, &mut correction, cross.value);
-                }
+                run_action(&mut control, || {
+                    if wide {
+                        precision::area_add(&mut area, cross).map_err(numeric_error)?;
+                    } else {
+                        accumulate(&mut sum, &mut correction, cross.value);
+                    }
+                    Ok(())
+                })?;
                 end += 1;
             }
-            let normal = if wide {
-                let estimate = precision::area_finish(&area).map_err(numeric_error)?;
-                precision::unit_estimate(estimate)
-                    .map_err(|issue| {
-                        numeric_error(match issue {
-                            GeometryNumericIssue::ZeroVector => {
-                                GeometryNumericIssue::UncertainDirection
-                            }
-                            issue => issue,
-                        })
-                    })?
-                    .value
-            } else {
-                let sum = [
-                    sum[0] + correction[0],
-                    sum[1] + correction[1],
-                    sum[2] + correction[2],
-                ];
-                unit_exact_source(sum).ok_or(Error::InvalidSmoothSum {
-                    vertex: key.0,
-                    group: input.smoothing_groups.map(|groups| groups[first / 3]),
-                    corner: first,
-                })?
-            };
+            let normal = run_action(&mut control, || {
+                if wide {
+                    let estimate = precision::area_finish(&area).map_err(numeric_error)?;
+                    Ok(precision::unit_estimate(estimate)
+                        .map_err(|issue| {
+                            numeric_error(match issue {
+                                GeometryNumericIssue::ZeroVector => {
+                                    GeometryNumericIssue::UncertainDirection
+                                }
+                                issue => issue,
+                            })
+                        })?
+                        .value)
+                } else {
+                    let sum = [
+                        sum[0] + correction[0],
+                        sum[1] + correction[1],
+                        sum[2] + correction[2],
+                    ];
+                    unit_exact_source(sum).ok_or(Error::InvalidSmoothSum {
+                        vertex: key.0,
+                        group: input.smoothing_groups.map(|groups| groups[first / 3]),
+                        corner: first,
+                    })
+                }
+            })?;
             for &corner in &workspace.corner_order[start..end] {
-                control().map_err(Error::Control)?;
-                output.publish(corner, normal).map_err(numeric_error)?;
+                run_action(&mut control, || {
+                    output.publish(corner, normal).map_err(numeric_error)
+                })?;
             }
             start = end;
         }
     }
-    control().map_err(Error::Control)
+    control(WorkEvent::Checkpoint).map_err(Error::Control)
 }
 
 fn check_length<E>(buffer: Buffer, expected: usize, actual: usize) -> Result<(), Error<E>> {
@@ -498,81 +563,93 @@ fn check_length<E>(buffer: Buffer, expected: usize, actual: usize) -> Result<(),
 
 #[cfg(test)]
 fn face_cross<E>(input: Input<'_>, face: usize) -> Result<[f64; 3], Error<E>> {
-    read_face_cross(input, face, None, &mut || Ok(())).map(|cross| cross.value)
+    read_face_cross(input, face, None, &mut |_| Ok(())).map(|cross| cross.value)
 }
 
 fn read_face_cross<E, P: PositionSource>(
     input: Input<'_, P>,
     face: usize,
     scale: Option<Pow2Scale>,
-    control: &mut impl FnMut() -> Result<(), E>,
+    control: &mut impl FnMut(WorkEvent) -> Result<(), E>,
 ) -> Result<Estimate3, Error<E>> {
     let first = 3 * face;
-    let mut vertices = [
-        input.vertex(first),
-        input.vertex(first + 1),
-        input.vertex(first + 2),
-    ];
-    for (offset, &vertex) in vertices.iter().enumerate() {
-        if vertex >= input.positions.len() {
-            return Err(Error::VertexOutOfBounds {
-                corner: first + offset,
-                vertex,
-                vertex_count: input.positions.len(),
-            });
+    let mut vertices = run_action(control, || {
+        let vertices = [
+            input.vertex(first),
+            input.vertex(first + 1),
+            input.vertex(first + 2),
+        ];
+        for (offset, &vertex) in vertices.iter().enumerate() {
+            if vertex >= input.positions.len() {
+                return Err(Error::VertexOutOfBounds {
+                    corner: first + offset,
+                    vertex,
+                    vertex_count: input.positions.len(),
+                });
+            }
         }
-    }
+        Ok(vertices)
+    })?;
     // One exact determinant can have different floating expansion estimates under permutation.
     // Fix the product order by Vertex identity, then restore winding with an exact sign change.
     // Opposite faces must cancel bit-for-bit instead of normalizing a rounding residual.
     let mut reversed = false;
     for (left, right) in [(0, 1), (1, 2), (0, 1)] {
-        if vertices[left] > vertices[right] {
-            vertices.swap(left, right);
-            reversed = !reversed;
-        }
+        run_action(control, || {
+            if vertices[left] > vertices[right] {
+                vertices.swap(left, right);
+                reversed = !reversed;
+            }
+            Ok(())
+        })?;
     }
     let mut positions = [[0.0; 3]; 3];
     for (row, vertex) in positions.iter_mut().zip(vertices) {
         *row = input.positions.read(vertex, control)?;
         if let Some(scale) = scale {
             for (component, value) in row.iter_mut().enumerate() {
-                *value = precision::scale_exact(*value, scale).map_err(|issue| {
-                    Error::PositionNumerical {
-                        vertex,
-                        component,
-                        issue,
-                    }
+                run_action(control, || {
+                    *value = precision::scale_exact(*value, scale).map_err(|issue| {
+                        Error::PositionNumerical {
+                            vertex,
+                            component,
+                            issue,
+                        }
+                    })?;
+                    Ok(())
                 })?;
             }
         }
     }
-    let mut cross = if scale.is_some() {
-        precision::face_cross_f64(positions).map_err(|issue| Error::Numerical { face, issue })?
-    } else {
-        // Two finite F32 coordinate factors multiply exactly in F64 at every exponent.
-        // Preserve the original six-product expansion, including its operation order.
-        let [a, b, c] = positions;
-        let value = [
-            determinant(a, b, c, 1, 2),
-            determinant(a, b, c, 2, 0),
-            determinant(a, b, c, 0, 1),
-        ];
-        if value.iter().any(|value| !value.is_finite()) {
-            return Err(Error::InvalidFaceCross { face });
+    run_action(control, || {
+        let mut cross = if scale.is_some() {
+            precision::face_cross_f64(positions)
+                .map_err(|issue| Error::Numerical { face, issue })?
+        } else {
+            // Two finite F32 coordinate factors multiply exactly in F64 at every exponent.
+            // Preserve the original six-product expansion, including its operation order.
+            let [a, b, c] = positions;
+            let value = [
+                determinant(a, b, c, 1, 2),
+                determinant(a, b, c, 2, 0),
+                determinant(a, b, c, 0, 1),
+            ];
+            if value.iter().any(|value| !value.is_finite()) {
+                return Err(Error::InvalidFaceCross { face });
+            }
+            if value == [0.0; 3] {
+                return Err(Error::DegenerateFace { face });
+            }
+            Estimate3 {
+                value,
+                abs_error: [0.0; 3],
+            }
+        };
+        if reversed {
+            cross.value = cross.value.map(|value| -value);
         }
-        if value == [0.0; 3] {
-            return Err(Error::DegenerateFace { face });
-        }
-        Estimate3 {
-            value,
-            abs_error: [0.0; 3],
-        }
-    };
-    if reversed {
-        cross.value = cross.value.map(|value| -value);
-    }
-    Ok(cross)
+        Ok(cross)
+    })
 }
 
 fn determinant(a: [f64; 3], b: [f64; 3], c: [f64; 3], i: usize, j: usize) -> f64 {
@@ -660,15 +737,16 @@ fn less(input: Input<'_, impl PositionSource>, left: usize, right: usize) -> boo
 fn heapsort<E>(
     input: Input<'_, impl PositionSource>,
     order: &mut [usize],
-    control: &mut impl FnMut() -> Result<(), E>,
+    control: &mut impl FnMut(WorkEvent) -> Result<(), E>,
 ) -> Result<(), Error<E>> {
     for root in (0..order.len() / 2).rev() {
-        control().map_err(Error::Control)?;
         sift_down(input, order, root, order.len(), control)?;
     }
     for end in (1..order.len()).rev() {
-        control().map_err(Error::Control)?;
-        order.swap(0, end);
+        run_action(control, || {
+            order.swap(0, end);
+            Ok(())
+        })?;
         sift_down(input, order, 0, end, control)?;
     }
     Ok(())
@@ -679,19 +757,23 @@ fn sift_down<E>(
     order: &mut [usize],
     mut root: usize,
     end: usize,
-    control: &mut impl FnMut() -> Result<(), E>,
+    control: &mut impl FnMut(WorkEvent) -> Result<(), E>,
 ) -> Result<(), Error<E>> {
     // This bound also keeps 2 * root + 1 in range without overflowing.
     while root < end / 2 {
-        control().map_err(Error::Control)?;
         let mut child = 2 * root + 1;
-        if child + 1 < end && less(input, order[child], order[child + 1]) {
+        if child + 1 < end
+            && run_action(control, || Ok(less(input, order[child], order[child + 1])))?
+        {
             child += 1;
         }
-        if !less(input, order[root], order[child]) {
+        if !run_action(control, || Ok(less(input, order[root], order[child])))? {
             break;
         }
-        order.swap(root, child);
+        run_action(control, || {
+            order.swap(root, child);
+            Ok(())
+        })?;
         root = child;
     }
     Ok(())

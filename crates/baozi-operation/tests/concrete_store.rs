@@ -711,6 +711,8 @@ mod construction;
 mod domain;
 #[path = "concrete_store/evidence.rs"]
 mod evidence;
+#[path = "concrete_store/execution.rs"]
+mod execution;
 #[path = "concrete_store/failure.rs"]
 mod failure;
 #[path = "concrete_store/producer_host.rs"]

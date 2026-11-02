@@ -4,13 +4,11 @@
 )]
 
 use baozi_core::__scene_integration::integration::SceneVectorValues;
-use baozi_core::{
-    AttributeData, AttributeDomain, AttributeElement, AttributeRef, AttributeSemanticRef,
-};
+use baozi_core::{AttributeData, AttributeDomain, AttributeRef, AttributeSemanticRef};
 use baozi_operation::StoreRuntimeError;
 
 use super::{TangentIssue, kernel};
-use crate::operation::runtime::{EditOperation, RuntimeKeys, ScratchVec, run_unit};
+use crate::operation::runtime::{ActiveRuntime, RuntimeKeys, ScratchVec, run_unit};
 
 #[derive(Debug)]
 pub(crate) enum InputError {
@@ -18,7 +16,6 @@ pub(crate) enum InputError {
     NormalField,
     UvField,
     UnsupportedDomain,
-    SizeOverflow,
     Issue(TangentIssue),
     Runtime(StoreRuntimeError),
 }
@@ -60,19 +57,19 @@ impl GeneratedTangents {
 
 pub(crate) fn generate(
     source: TangentInput<'_>,
-    operation: &mut EditOperation,
+    operation: &mut ActiveRuntime<'_>,
     keys: RuntimeKeys,
 ) -> Result<GeneratedTangents, InputError> {
     let mut values = if source.wide_output {
         let mut values = ScratchVec::new(operation, keys, source.corners as usize)?;
         for _ in 0..source.corners {
-            run_unit(operation, keys, || values.values_mut().push([0.0_f64; 4]))?;
+            run_unit(operation, || values.values_mut().push([0.0_f64; 4]))?;
         }
         TangentValues::F64(values)
     } else {
         let mut values = ScratchVec::new(operation, keys, source.corners as usize)?;
         for _ in 0..source.corners {
-            run_unit(operation, keys, || values.values_mut().push([0.0_f32; 4]))?;
+            run_unit(operation, || values.values_mut().push([0.0_f32; 4]))?;
         }
         TangentValues::F32(values)
     };
@@ -82,29 +79,29 @@ pub(crate) fn generate(
         let mut uvs = [[0.0; 2]; 3];
         for local in 0..3 {
             let corner = 3 * face + local;
-            let vertex = run_unit(operation, keys, || {
+            let vertex = run_unit(operation, || {
                 source.indices.map_or(corner, |ids| ids[corner] as usize)
             })?;
-            positions[local] = read(source.positions, vertex, corner, operation, keys)?;
+            positions[local] = read(source.positions, vertex, corner, operation)?;
             let original_corner = source.origins.map_or(corner, |o| o[face][local] as usize);
             normals[local] = match source.normals {
                 ProjectedNormals::Authored(attribute) => {
-                    read(attribute, vertex, original_corner, operation, keys)?
+                    read(attribute, vertex, original_corner, operation)?
                 }
                 ProjectedNormals::Generated(SceneVectorValues::F32(values)) => {
-                    run_unit(operation, keys, || values[corner].map(f64::from))?
+                    run_unit(operation, || values[corner].map(f64::from))?
                 }
                 ProjectedNormals::Generated(SceneVectorValues::F64(values)) => {
-                    run_unit(operation, keys, || values[corner])?
+                    run_unit(operation, || values[corner])?
                 }
             };
-            uvs[local] = read(source.uvs, vertex, original_corner, operation, keys)?;
+            uvs[local] = read(source.uvs, vertex, original_corner, operation)?;
         }
         match &mut values {
             TangentValues::F32(values) => {
                 // All declared inputs are F32 in this branch. These are exact reversals of
                 // the logical-read widening, preserving the F32 exact-product kernel.
-                let generated = run_unit(operation, keys, || {
+                let generated = run_unit(operation, || {
                     kernel::triangle(
                         face,
                         positions.map(|p| p.map(|v| v as f32)),
@@ -114,13 +111,13 @@ pub(crate) fn generate(
                 })?
                 .map_err(InputError::Issue)?;
                 for (local, tangent) in generated.into_iter().enumerate() {
-                    run_unit(operation, keys, || {
+                    run_unit(operation, || {
                         values.values_mut()[3 * face + local] = tangent
                     })?;
                 }
             }
             TangentValues::F64(values) => {
-                let generated = run_unit(operation, keys, || {
+                let generated = run_unit(operation, || {
                     super::wide::triangle_with_sources(
                         face,
                         positions,
@@ -131,7 +128,7 @@ pub(crate) fn generate(
                 })?
                 .map_err(InputError::Issue)?;
                 for (local, tangent) in generated.into_iter().enumerate() {
-                    run_unit(operation, keys, || {
+                    run_unit(operation, || {
                         values.values_mut()[3 * face + local] = tangent
                     })?;
                 }
@@ -152,8 +149,7 @@ pub(crate) fn is_f64(attribute: AttributeRef<'_>) -> bool {
 /// the logical domain is large. Each retained scalar read is admitted; no dense copy is built.
 fn visit_scalars(
     attribute: AttributeRef<'_>,
-    operation: &mut EditOperation,
-    keys: RuntimeKeys,
+    operation: &mut ActiveRuntime<'_>,
     mut visit: impl FnMut(f64) -> Result<(), crate::GeometryNumericIssue>,
 ) -> Result<(), InputError> {
     fn run<T: Copy + Into<f64>>(
@@ -161,12 +157,11 @@ fn visit_scalars(
         values: &[T],
         default: &[T],
         indices: Option<&[u32]>,
-        operation: &mut EditOperation,
-        keys: RuntimeKeys,
+        operation: &mut ActiveRuntime<'_>,
         visit: &mut impl FnMut(f64) -> Result<(), crate::GeometryNumericIssue>,
     ) -> Result<(), InputError> {
         for (index, value) in values.iter().chain(default).enumerate() {
-            run_unit(operation, keys, || visit((*value).into()))?.map_err(|issue| {
+            run_unit(operation, || visit((*value).into()))?.map_err(|issue| {
                 let element = if index >= values.len() {
                     None
                 } else {
@@ -188,10 +183,10 @@ fn visit_scalars(
     }
     match attribute.data() {
         AttributeData::DenseF32 { values, .. } => {
-            run(attribute, values, &[], None, operation, keys, &mut visit)
+            run(attribute, values, &[], None, operation, &mut visit)
         }
         AttributeData::DenseF64 { values, .. } => {
-            run(attribute, values, &[], None, operation, keys, &mut visit)
+            run(attribute, values, &[], None, operation, &mut visit)
         }
         AttributeData::SparseF32 {
             values,
@@ -209,7 +204,6 @@ fn visit_scalars(
             },
             Some(indices),
             operation,
-            keys,
             &mut visit,
         ),
         AttributeData::SparseF64 {
@@ -228,7 +222,6 @@ fn visit_scalars(
             },
             Some(indices),
             operation,
-            keys,
             &mut visit,
         ),
         _ => Err(InputError::Positions),
@@ -237,15 +230,14 @@ fn visit_scalars(
 
 pub(crate) fn admit_scale(
     attribute: AttributeRef<'_>,
-    operation: &mut EditOperation,
-    keys: RuntimeKeys,
+    operation: &mut ActiveRuntime<'_>,
 ) -> Result<crate::precision::Pow2Scale, InputError> {
     let mut maximum = 0.0;
-    visit_scalars(attribute, operation, keys, |value| {
+    visit_scalars(attribute, operation, |value| {
         crate::precision::observe_magnitude(&mut maximum, value)
     })?;
     let scale = crate::precision::common_scale(maximum);
-    visit_scalars(attribute, operation, keys, |value| {
+    visit_scalars(attribute, operation, |value| {
         crate::precision::scale_exact(value, scale).map(|_| ())
     })?;
     Ok(scale)
@@ -255,8 +247,7 @@ pub(crate) fn read<const N: usize>(
     attribute: AttributeRef<'_>,
     vertex: usize,
     corner: usize,
-    operation: &mut EditOperation,
-    keys: RuntimeKeys,
+    operation: &mut ActiveRuntime<'_>,
 ) -> Result<[f64; N], InputError> {
     let index = match attribute.domain() {
         AttributeDomain::Vertex => vertex,
@@ -265,34 +256,68 @@ pub(crate) fn read<const N: usize>(
             return Err(InputError::UnsupportedDomain);
         }
     };
-    // Conservatively charge the bounded sparse lookup rather than hiding its comparisons in
-    // one scalar-read action. Dense reads need one action, sparse reads at most 34.
-    let steps = match attribute.data() {
-        AttributeData::SparseF32 { indices, .. } | AttributeData::SparseF64 { indices, .. } => {
-            indices
-                .len()
-                .checked_ilog2()
-                .map_or(1, |log| log as usize + 2)
-        }
-        _ => 1,
+    let invalid = || match attribute.semantic() {
+        AttributeSemanticRef::Position => InputError::Positions,
+        AttributeSemanticRef::Normal => InputError::NormalField,
+        _ => InputError::UvField,
     };
-    for _ in 1..steps {
-        run_unit(operation, keys, || ())?;
-    }
-    run_unit(operation, keys, || match attribute.element(index) {
-        Some(AttributeElement::F32(lanes)) => {
-            let tuple: &[f32; N] = lanes.try_into().map_err(|_| InputError::SizeOverflow)?;
-            Ok(tuple.map(f64::from))
+    let data = attribute.data();
+    let sparse = match data {
+        AttributeData::SparseF32 { indices, .. } | AttributeData::SparseF64 { indices, .. } => {
+            Some(indices)
         }
-        Some(AttributeElement::F64(lanes)) => {
-            let tuple: &[f64; N] = lanes.try_into().map_err(|_| InputError::SizeOverflow)?;
-            Ok(*tuple)
+        _ => None,
+    };
+    let found = if let Some(indices) = sparse {
+        let logical = u32::try_from(index).map_err(|_| invalid())?;
+        let (mut low, mut high) = (0, indices.len());
+        let mut found = None;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            match run_unit(operation, || indices[middle].cmp(&logical))? {
+                std::cmp::Ordering::Less => low = middle + 1,
+                std::cmp::Ordering::Greater => high = middle,
+                std::cmp::Ordering::Equal => {
+                    found = Some(middle);
+                    break;
+                }
+            }
         }
-        _ => Err(match attribute.semantic() {
-            AttributeSemanticRef::Position => InputError::Positions,
-            AttributeSemanticRef::Normal => InputError::NormalField,
-            _ => InputError::UvField,
-        }),
+        found
+    } else {
+        Some(index)
+    };
+    run_unit(operation, || {
+        if index >= attribute.len() {
+            return Err(invalid());
+        }
+        fn tuple<T: Copy + Into<f64>, const N: usize>(
+            values: &[T],
+            index: usize,
+            lanes: u8,
+        ) -> Option<[f64; N]> {
+            let lanes = usize::from(lanes);
+            if lanes != N {
+                return None;
+            }
+            let start = index.checked_mul(N)?;
+            let values = values.get(start..)?.get(..N)?;
+            Some(std::array::from_fn(|lane| values[lane].into()))
+        }
+        let value = match (data, found) {
+            (AttributeData::DenseF32 { values, lanes }, Some(index))
+            | (AttributeData::SparseF32 { values, lanes, .. }, Some(index)) => {
+                tuple(values, index, lanes)
+            }
+            (AttributeData::DenseF64 { values, lanes }, Some(index))
+            | (AttributeData::SparseF64 { values, lanes, .. }, Some(index)) => {
+                tuple(values, index, lanes)
+            }
+            (AttributeData::SparseF32 { default, lanes, .. }, None) => tuple(default, 0, lanes),
+            (AttributeData::SparseF64 { default, lanes, .. }, None) => tuple(default, 0, lanes),
+            _ => None,
+        };
+        value.ok_or_else(invalid)
     })?
 }
 
@@ -311,8 +336,7 @@ impl<'a> TangentInput<'a> {
         uvs: AttributeRef<'a>,
         origins: Option<&'a [[u32; 3]]>,
         replaced_wide: bool,
-        operation: &mut EditOperation,
-        keys: RuntimeKeys,
+        operation: &mut ActiveRuntime<'_>,
     ) -> Result<Self, InputError> {
         let normal_wide = match normals {
             ProjectedNormals::Authored(a) => is_f64(a),
@@ -323,12 +347,12 @@ impl<'a> TangentInput<'a> {
             position_f64: is_f64(positions),
             uv_f64: is_f64(uvs),
             position_scale: if wide_output {
-                admit_scale(positions, operation, keys)?
+                admit_scale(positions, operation)?
             } else {
                 crate::precision::common_scale(0.0)
             },
             uv_scale: if wide_output {
-                admit_scale(uvs, operation, keys)?
+                admit_scale(uvs, operation)?
             } else {
                 crate::precision::common_scale(0.0)
             },

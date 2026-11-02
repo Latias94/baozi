@@ -1,6 +1,9 @@
 use std::convert::Infallible;
 
-use super::{Buffer, Error, Input, Mode, VertexIds, Workspace, face_cross, generate, unit};
+use super::{
+    Buffer, Error, Input, Mode, PositionSource, VertexIds, WorkEvent, Workspace, face_cross,
+    generate, unit,
+};
 use crate::precision::Estimate3;
 
 fn cross_slot(value: f64) -> Estimate3 {
@@ -8,6 +11,18 @@ fn cross_slot(value: f64) -> Estimate3 {
         value: [value; 3],
         abs_error: [0.0; 3],
     }
+}
+
+fn record_event(events: &mut Vec<WorkEvent>, event: WorkEvent) {
+    match event {
+        WorkEvent::Begin | WorkEvent::Checkpoint => {
+            assert_ne!(events.last(), Some(&WorkEvent::Begin), "nested work event");
+        }
+        WorkEvent::Complete => {
+            assert_eq!(events.last(), Some(&WorkEvent::Begin), "no active action");
+        }
+    }
+    events.push(event);
 }
 
 const POSITIONS: [[f32; 3]; 4] = [
@@ -46,7 +61,7 @@ fn run(input: Input<'_>, mode: Mode, cached: bool) -> Result<Vec<[f32; 3]>, Erro
             corner_order: &mut order,
             face_crosses: crosses.as_deref_mut(),
         },
-        || Ok::<(), Infallible>(()),
+        |_| Ok::<(), Infallible>(()),
     )?;
     Ok(output)
 }
@@ -413,7 +428,7 @@ fn cancelling_face_sums_are_errors_without_a_fallback_normal() {
                         corner_order: &mut order,
                         face_crosses: cached.then_some(&mut crosses[..]),
                     },
-                    || Ok::<(), Infallible>(()),
+                    |_| Ok::<(), Infallible>(()),
                 ),
                 Err(Error::InvalidSmoothSum {
                     vertex: 0,
@@ -498,7 +513,7 @@ fn output_and_workspace_shapes_are_exact() {
                         corner_order: &mut order,
                         face_crosses: Some(&mut crosses),
                     },
-                    || Ok::<(), Infallible>(()),
+                    |_| Ok::<(), Infallible>(()),
                 ),
                 Err(Error::BufferLength {
                     buffer,
@@ -707,7 +722,7 @@ struct Stop {
 }
 
 #[test]
-fn every_control_threshold_stops_immediately_in_all_paths() {
+fn every_work_event_error_stops_immediately_in_all_paths_without_nesting() {
     let nonindexed = [
         POSITIONS[0],
         POSITIONS[1],
@@ -734,7 +749,7 @@ fn every_control_threshold_stops_immediately_in_all_paths() {
                 let mut output = vec![[73.0; 3]; corners];
                 let mut order = vec![usize::MAX; if mode == Mode::Smooth { corners } else { 0 }];
                 let mut crosses = vec![cross_slot(73.0); corners / 3];
-                let mut total = 0;
+                let mut events = Vec::new();
                 generate(
                     input,
                     mode,
@@ -743,19 +758,23 @@ fn every_control_threshold_stops_immediately_in_all_paths() {
                         corner_order: &mut order,
                         face_crosses: cached.then_some(&mut crosses[..]),
                     },
-                    || {
-                        total += 1;
+                    |event| {
+                        record_event(&mut events, event);
                         Ok::<(), Stop>(())
                     },
                 )
                 .unwrap();
                 let expected = output.clone();
+                let total = events.len();
                 assert!(total >= 2);
+                assert_eq!(events.first(), Some(&WorkEvent::Checkpoint));
+                assert_eq!(events.last(), Some(&WorkEvent::Checkpoint));
                 for fail_at in 1..=total + 1 {
                     output.fill([73.0; 3]);
                     order.fill(usize::MAX);
                     crosses.fill(cross_slot(73.0));
                     let mut calls = 0;
+                    let mut observed = Vec::new();
                     let result = generate(
                         input,
                         mode,
@@ -764,7 +783,8 @@ fn every_control_threshold_stops_immediately_in_all_paths() {
                             corner_order: &mut order,
                             face_crosses: cached.then_some(&mut crosses[..]),
                         },
-                        || {
+                        |event| {
+                            record_event(&mut observed, event);
                             calls += 1;
                             if calls == fail_at {
                                 Err(Stop {
@@ -787,11 +807,20 @@ fn every_control_threshold_stops_immediately_in_all_paths() {
                         );
                         assert_eq!(calls, fail_at);
                         assert!(output.iter().flatten().all(|v| v.is_finite()));
+                        if fail_at == 1 {
+                            assert_eq!(output, vec![[73.0; 3]; corners]);
+                            assert!(order.iter().all(|&corner| corner == usize::MAX));
+                            assert!(crosses.iter().all(|cross| cross.value == [73.0; 3]));
+                        }
+                        if fail_at == total {
+                            assert_eq!(output, expected);
+                        }
                     } else {
                         assert_eq!(result, Ok(()));
                         assert_eq!(calls, total);
                         assert_eq!(output, expected);
                     }
+                    assert_eq!(observed, events[..fail_at.min(total)]);
                 }
             }
         }
@@ -819,7 +848,7 @@ fn run_f64(
             corner_order: &mut order,
             face_crosses: crosses.as_deref_mut(),
         },
-        || Ok::<_, Infallible>(()),
+        |_| Ok::<_, Infallible>(()),
     )?;
     Ok(output)
 }
@@ -886,6 +915,7 @@ fn f64_cache_and_recomputation_keep_area_weights_and_stop_at_every_callback() {
                 let mut order = [usize::MAX; 6];
                 let mut crosses = [cross_slot(f64::NAN); 2];
                 let mut calls = 0;
+                let mut events = Vec::new();
                 let result = super::generate_into(
                     Input {
                         positions: positions.as_slice(),
@@ -902,7 +932,8 @@ fn f64_cache_and_recomputation_keep_area_weights_and_stop_at_every_callback() {
                         },
                         face_crosses: cached.then_some(&mut crosses),
                     },
-                    || {
+                    |event| {
+                        record_event(&mut events, event);
                         calls += 1;
                         if calls == fail_at { Err(calls) } else { Ok(()) }
                     },
@@ -931,28 +962,269 @@ fn sparse_position_search_charges_exact_comparisons_and_cancels_before_reading()
         (0, None, 3),
         (14, None, 3),
     ] {
-        let mut calls = 0;
-        let actual = super::sparse_index(&indices, vertex, &mut || {
-            calls += 1;
+        let mut events = Vec::new();
+        let actual = super::sparse_index(&indices, vertex, &mut |event| {
+            record_event(&mut events, event);
             Ok::<_, usize>(())
         })
         .unwrap();
         assert_eq!(actual, expected);
-        assert_eq!(calls, comparisons);
+        assert_eq!(
+            events,
+            [WorkEvent::Begin, WorkEvent::Complete].repeat(comparisons)
+        );
         for stop in 1..=comparisons {
-            let mut calls = 0;
+            let mut begins = 0;
+            let mut events = Vec::new();
             assert_eq!(
-                super::sparse_index(&indices, vertex, &mut || {
-                    calls += 1;
-                    if calls == stop { Err(stop) } else { Ok(()) }
+                super::sparse_index(&indices, vertex, &mut |event| {
+                    record_event(&mut events, event);
+                    if event == WorkEvent::Begin {
+                        begins += 1;
+                        if begins == stop {
+                            return Err(stop);
+                        }
+                    }
+                    Ok(())
                 }),
                 Err(Error::Control(stop))
             );
-            assert_eq!(calls, stop);
+            assert_eq!(begins, stop);
+            let mut expected = [WorkEvent::Begin, WorkEvent::Complete].repeat(stop - 1);
+            expected.push(WorkEvent::Begin);
+            assert_eq!(events, expected);
         }
     }
-    let actual = super::sparse_index::<Infallible>(&[], 0, &mut || {
+    let actual = super::sparse_index::<Infallible>(&[], 0, &mut |_| {
         panic!("empty lookup has no comparisons")
     });
     assert_eq!(actual, Ok(None));
+}
+
+#[test]
+fn rejected_begin_prevents_the_physical_action_and_has_no_completion() {
+    let physical_actions = std::cell::Cell::new(0);
+    let mut events = Vec::new();
+    let result = super::run_action(
+        &mut |event| {
+            record_event(&mut events, event);
+            assert_eq!(physical_actions.get(), 0);
+            Err("admission rejected")
+        },
+        || {
+            physical_actions.set(physical_actions.get() + 1);
+            Ok(())
+        },
+    );
+    assert_eq!(result, Err(Error::Control("admission rejected")));
+    assert_eq!(physical_actions.get(), 0);
+    assert_eq!(events, [WorkEvent::Begin]);
+}
+
+#[test]
+fn invalid_output_store_completes_before_its_semantic_error_is_returned() {
+    for reject_completion in [false, true] {
+        let mut values = [[73.0_f32; 3]];
+        let mut output = super::Output::F32(&mut values);
+        let stored = std::cell::Cell::new(false);
+        let mut events = Vec::new();
+        let result = super::run_action(
+            &mut |event| {
+                record_event(&mut events, event);
+                assert_eq!(stored.get(), event == WorkEvent::Complete);
+                if reject_completion && event == WorkEvent::Complete {
+                    Err("completion rejected")
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                let result = output
+                    .publish(0, [2.0, 0.0, 0.0])
+                    .map_err(|issue| Error::Numerical { face: 0, issue });
+                stored.set(true);
+                result
+            },
+        );
+        let expected = if reject_completion {
+            Error::Control("completion rejected")
+        } else {
+            Error::Numerical {
+                face: 0,
+                issue: crate::GeometryNumericIssue::InvalidOutput,
+            }
+        };
+        assert_eq!(result, Err(expected));
+        assert_eq!(values, [[2.0, 0.0, 0.0]]);
+        assert_eq!(events, [WorkEvent::Begin, WorkEvent::Complete]);
+    }
+}
+
+#[test]
+fn panicking_action_does_not_emit_completion_during_unwind() {
+    let physical_actions = std::cell::Cell::new(0);
+    let mut events = Vec::new();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        super::run_action(
+            &mut |event| {
+                record_event(&mut events, event);
+                Ok::<_, Infallible>(())
+            },
+            || -> Result<(), Error<Infallible>> {
+                physical_actions.set(1);
+                panic!("injected physical action panic");
+            },
+        )
+    }));
+    assert!(result.is_err());
+    assert_eq!(physical_actions.get(), 1);
+    assert_eq!(events, [WorkEvent::Begin]);
+}
+
+#[test]
+fn position_read_rejection_and_storage_error_have_distinct_completions() {
+    let positions = POSITIONS.as_slice();
+    for reject_begin in [false, true] {
+        let mut events = Vec::new();
+        let result = positions.read(positions.len(), &mut |event| {
+            record_event(&mut events, event);
+            if reject_begin && event == WorkEvent::Begin {
+                Err("read rejected")
+            } else {
+                Ok(())
+            }
+        });
+        if reject_begin {
+            assert_eq!(result, Err(Error::Control("read rejected")));
+            assert_eq!(events, [WorkEvent::Begin]);
+        } else {
+            assert_eq!(result, Err(Error::InvalidPositionStorage { vertex: 4 }));
+            assert_eq!(events, [WorkEvent::Begin, WorkEvent::Complete]);
+        }
+    }
+}
+
+#[test]
+fn sparse_search_completes_before_tuple_access_without_an_outer_action() {
+    let indices = [1, 3, 5];
+    let values = [1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+    let default = [10.0, 11.0, 12.0];
+    for (vertex, expected, comparisons) in [(3, [4.0, 5.0, 6.0], 1), (0, default, 2)] {
+        for invalid_tuple in [false, true] {
+            let data = baozi_core::AttributeData::SparseF64 {
+                lanes: 3,
+                logical_count: 6,
+                indices: &indices,
+                values: if invalid_tuple { &[] } else { &values },
+                default: if invalid_tuple { &[] } else { &default },
+            };
+            let mut events = Vec::new();
+            let result = super::read_position_data(data, vertex, &mut |event| {
+                record_event(&mut events, event);
+                Ok::<_, Infallible>(())
+            });
+            if invalid_tuple {
+                assert_eq!(result, Err(Error::InvalidPositionStorage { vertex }));
+            } else {
+                assert_eq!(result, Ok(expected));
+            }
+            assert_eq!(
+                events,
+                [WorkEvent::Begin, WorkEvent::Complete].repeat(comparisons + 1)
+            );
+            let mut events = Vec::new();
+            let mut begins = 0;
+            let result = super::read_position_data(data, vertex, &mut |event| {
+                record_event(&mut events, event);
+                begins += usize::from(event == WorkEvent::Begin);
+                if event == WorkEvent::Begin && begins == comparisons + 1 {
+                    Err("tuple rejected")
+                } else {
+                    Ok(())
+                }
+            });
+            assert_eq!(result, Err(Error::Control("tuple rejected")));
+            let mut expected = [WorkEvent::Begin, WorkEvent::Complete].repeat(comparisons);
+            expected.push(WorkEvent::Begin);
+            assert_eq!(events, expected);
+        }
+    }
+}
+
+#[test]
+fn degenerate_face_completes_its_arithmetic_after_all_position_leaves() {
+    let mut events = Vec::new();
+    let result = super::read_face_cross(
+        indexed(&POSITIONS, &[0, 0, 1], None),
+        0,
+        None,
+        &mut |event| {
+            record_event(&mut events, event);
+            Ok::<_, Infallible>(())
+        },
+    );
+    assert!(matches!(result, Err(Error::DegenerateFace { face: 0 })));
+    // Vertex/range access, three identity compare/swap steps, three reads, determinant.
+    assert_eq!(events, [WorkEvent::Begin, WorkEvent::Complete].repeat(8));
+}
+
+#[test]
+fn flat_output_admission_and_completion_failures_keep_the_physical_prefix() {
+    let input = indexed(&POSITIONS[..3], &[0, 1, 2], None);
+    let mut output = [[73.0; 3]; 3];
+    let mut actions = 0;
+    generate(
+        input,
+        Mode::Flat,
+        &mut output,
+        Workspace {
+            corner_order: &mut [],
+            face_crosses: None,
+        },
+        |event| {
+            actions += usize::from(event == WorkEvent::Begin);
+            Ok::<_, Infallible>(())
+        },
+    )
+    .unwrap();
+    let before_output = actions - 3;
+    for fail_event in [WorkEvent::Begin, WorkEvent::Complete] {
+        output.fill([73.0; 3]);
+        let mut begins = 0;
+        let mut completes = 0;
+        let mut events = Vec::new();
+        let result = generate(
+            input,
+            Mode::Flat,
+            &mut output,
+            Workspace {
+                corner_order: &mut [],
+                face_crosses: None,
+            },
+            |event| {
+                record_event(&mut events, event);
+                begins += usize::from(event == WorkEvent::Begin);
+                completes += usize::from(event == WorkEvent::Complete);
+                if (fail_event == WorkEvent::Begin
+                    && event == WorkEvent::Begin
+                    && begins == before_output + 2)
+                    || (fail_event == WorkEvent::Complete
+                        && event == WorkEvent::Complete
+                        && completes == before_output + 1)
+                {
+                    Err("output boundary rejected")
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(result, Err(Error::Control("output boundary rejected")));
+        assert_eq!(output, [Z, [73.0; 3], [73.0; 3]]);
+        assert_eq!(completes, before_output + 1);
+        assert_eq!(
+            begins,
+            completes + usize::from(fail_event == WorkEvent::Begin)
+        );
+        assert_eq!(events.last(), Some(&fail_event));
+    }
 }

@@ -8,6 +8,10 @@ use std::num::NonZeroU64;
 
 use super::{CounterClass, DimensionPolicy, LedgerCause, LinearWorkCompletion};
 
+mod parser;
+
+pub(crate) use parser::{ParserWorkError, ParserWorkScope};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct WorkPolicy {
     pub attempted_limit: u64,
@@ -529,7 +533,6 @@ pub(crate) struct LinearWorkBatchPermit<'op, D: Copy, const N: usize> {
 }
 
 impl<D: Copy, const N: usize> LinearWorkBatchPermit<'_, D, N> {
-    #[cfg(test)]
     pub(crate) fn remaining(&self) -> [u64; N] {
         self.remaining
     }

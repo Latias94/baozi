@@ -8,6 +8,8 @@ use crate::PostProcessRunError;
 
 use crate::test_fixtures as common;
 
+mod qualification;
+
 #[derive(Clone)]
 struct StopAtPoll {
     polls: Arc<AtomicUsize>,
@@ -102,12 +104,26 @@ fn cancellation_at_every_poll_keeps_ordinary_failure_evidence() {
 #[test]
 fn success_cancellation_and_callback_panics_release_every_owner() {
     let polls = run(usize::MAX, false);
-    assert!(polls > 16);
+    // Sample the observed started-operation checkpoints without requiring historical cadence.
+    let mut stops = vec![3, polls / 4, polls / 2, polls * 3 / 4, polls - 1];
+    stops.retain(|stop| (3..polls).contains(stop));
+    stops.sort_unstable();
+    stops.dedup();
+    assert_eq!(
+        stops.first(),
+        Some(&3),
+        "success must reach the started operation"
+    );
+    assert_eq!(
+        stops.last(),
+        Some(&(polls - 1)),
+        "the final poll must be cancellable"
+    );
     // Warm up the caught-panic machinery before measuring invocation-owned allocations.
     run(3, true);
     for panic in [false, true] {
         // Initial inspection, scratch/kernel work, activation, validation, and publication.
-        for stop in [3, polls / 4, polls / 2, polls * 3 / 4, polls - 1] {
+        for &stop in &stops {
             let allocations = allocation_counter::measure(|| {
                 run(stop, panic);
             });
