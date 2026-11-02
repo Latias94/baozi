@@ -595,11 +595,87 @@ vectors and bounded reviews; SHA-256 is
 The focused correction does not relabel the earlier 2,074-test run as a full passing rerun.
 Fresh integrated host/portable/package execution remains U14.
 
+## U13: Measured Changes and the Architecture Decision
+
+The scanner scratch owner moved from every line scan to one bounded initialized document-local
+buffer in `dbbd92c50f479b92e4a2a399f37a7b590bf4edc3`. OBJ validation passed **154/154**, nextest
+`a621c3c0-c62b-454f-a48c-5c9b237f5c0b`, with strict Clippy/fmt and independent review. Six native
+Linux lanes, three warmups/twenty pairs each, preserve work/semantics and show modest import
+improvement. Static prologues confirm the scratch moves into the parse frame; this is not
+runtime stack high-water proof. Ordinary RSS and the static frame observations remain separate.
+
+Commit `4455d03db190c6bef05ff5a1de024d2aac461465` binds direct producer charges under one ledger
+guard without changing the observed-work/normal algorithm. Operation validation passed
+**739/739**, nextest `06ba74b8-605d-438a-8bc3-ec6b1a6c7b8a`, plus strict Clippy/fmt and independent
+adversarial review. The six native Linux lanes reduce grid import from 520.1448 to 379.5184 ms
+and repeated import from 147.7535 to 102.6568 ms. Repeated prepare stays about 190 ms. Input,
+precision, allocator/build policy and exact import work remain unchanged. Raw per-pair data,
+dispersion/control drift and ordinary RSS are retained under `U13-{scanner,ledger}/` and
+`target/review/u13-{scanner,ledger}-disposition.json`. These are incremental six-lane results,
+not full B1.
+
+An initial control accidentally executed the same binary from the Windows-mounted filesystem
+instead of B0's ext4 placement. It produced a 6.9 ms no-op preparation versus B0's 0.082 ms.
+The identical SHA on ext4 gives 0.081 ms, restoring the proper control. Both runs and failed
+function-toggle profiling remain retained; only `U13-control-ext4` qualifies source comparison.
+The method receipt is `target/review/u13-control-method.json`.
+
+The user's Windows request is now executed: **110/110 lanes, 2,200 retained successful pairs**,
+with all 5,060 warmup/retained children preserved. F32/F64 Assimp semantic tests passed 10/10
+and 7/7. Commit `993c80c0c0adccfcf0cf3f87ee331345be48ac49` adds verified lifetime peak working
+set/commit collection, without relabelling either as Linux RSS. The collector suite passes
+17 tests plus one host-specific skip on each host. Independent memory-query review has no
+findings. The complete [Windows report](2026-11-02-windows-native-performance.md) binds actual
+ordinary binaries and every raw sample; report SHA-256 is
+`9fea43624c49c8d97450327866c52cc17f641b9201bc23c88da41a14ab9f6ca6`.
+
+The result does not meet a useful throughput expectation merely by preserving correctness:
+repeated OBJ pipeline is 296.9121 versus Assimp 9.6916 ms. Its import is 100.2815 versus
+7.6323 ms, and prepare is 190.1163 versus 1.0507 ms. A separate Windows manual diagnostic of
+the unchanged kernel with a local counting observer takes 6.7044 ms using public attributes,
+with 982,943 callbacks. The same count of empty actions through the real scene-edit observed
+protocol takes 127.0353 ms and preserves exact work/terminal evidence. These lower-scope
+diagnostics are not summed/subtracted to manufacture a whole-operation attribution.
+
+The user requested root-cause-led fearless redesign, including parser interfaces. The
+[diagnosis](../research/2026-11-02-parser-operation-cost-diagnosis.md) and reviewed
+[architecture continuation](../plans/2026-11-02-1700-perf-import-operation-architecture-plan.md)
+replace a micro-optimization-only ending: investigate a concrete local-work/shared-storage
+ownership split and bounded control cadence, then replace the justified interfaces and measure
+again before final qualification. The first independent feasibility review approves P1, with
+mixed-policy, internal-share lending, forgotten-permit and snapshot/sealing constraints.
+It does not approve implementing an unresolved ownership sketch. Evidence review's instruction
+sum precision finding is corrected using complete exclusive function totals; no CPU-time
+percentage is inferred. Both manual diagnostics pass in one retained optimized Windows binary;
+strict Clippy/fmt pass. Their source, raw samples and binary are retained under
+`target/review/parser-cost-diagnosis/`.
+The local `target/review/parser-cost-diagnosis-evidence.zip` retains the Windows campaign,
+ordinary build identities, Linux Candidate 2 observations, diagnostic source/binary/logs and
+bounded independent reviews: 11,050 files, SHA-256
+`c19ce41b37f7258e9ca1b43460013b56ba76cab89e9230d6864a742b72de4888`.
+It precedes the separate concrete P1 ownership/control design and does not certify that design.
+
+## U14 Preparation and Independent Integration Review
+
+Four original glTF feature-reaching seeds and their deterministic public-import observations
+are committed in `c105723102bdaf17ad996545432eaf66c0e52abf`. The fuzz library passes **16/16**,
+nextest `25311248-3605-4648-88d6-533ba567d397`, with strict Clippy/fmt and independent review.
+The six earlier glTF seeds remain byte-identical. This is neither a fresh ASan campaign nor
+proof of exhaustive extension coverage.
+
+Current format/reference/direct-consumer claims are aligned in `35fb6aa`, closing three
+independent documentation findings. A bounded final static integration review at `4455d03`
+finds no actionable seam mismatch across materials, lights, quantization, detached evaluation/
+rendering and v1 contracts. Fresh runtime qualification remains separate. Prepared host,
+package, portable, GPU and ASan command inventories are not passing results; final execution
+follows the architecture continuation. No obsolete-source qualification is relabelled.
+
 ## Remaining Verification
 
 Timing/RSS B0, the separate heap observations and the regression policy are now recorded above. Production semantics remained unchanged throughout these campaigns.
 The finite render/device/quantization, clearcoat/sheen and owned-glTF assurance slices are now
-recorded above. The canonical v1 cutover is complete; measured optimization/B1 comparisons and
-final integrated package/portable qualification remain ahead.
+recorded above. The canonical v1 cutover and two measured optimization candidates are complete;
+the reviewed operation/import architecture continuation, full B1 and final integrated
+package/portable qualification remain ahead.
 Historical qualification stays bound to the source in its original record.
 No registry publication/yank, push/PR or native target promotion has occurred in this work.

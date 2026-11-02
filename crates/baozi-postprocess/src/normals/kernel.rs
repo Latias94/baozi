@@ -700,3 +700,7 @@ fn sift_down<E>(
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "diagnostics.rs"]
+mod diagnostics;

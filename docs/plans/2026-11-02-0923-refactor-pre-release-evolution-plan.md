@@ -472,6 +472,21 @@ literal/analytic expectations and valid negative controls follow the updated fix
 
 ## Definition of Done
 
+### U13/U14 architecture continuation (2026-11-02)
+
+The complete Windows comparison at production source
+`4455d03db190c6bef05ff5a1de024d2aac461465` exposes large import/preparation gaps. The user
+explicitly requested causal diagnosis and permits replacement of parser traits, cross-format
+interfaces, ownership and data structures. The
+[operation architecture continuation](2026-11-02-1700-perf-import-operation-architecture-plan.md)
+now governs remaining U13 work before full B1 and final U14 execution. It preserves this goal
+and the already source-qualified product units; no passing final qualification is implied.
+Its first gate is a reviewed concrete ownership/control design, not an immediate blind rewrite.
+The [cost diagnosis](../research/2026-11-02-parser-operation-cost-diagnosis.md) and
+[Windows native report](../reviews/2026-11-02-windows-native-performance.md) distinguish measured
+causes from remaining hypotheses. Historical B0, unsuccessful attribution experiments and all
+raw samples remain intact.
+
 | Area | Required observable result |
 | --- | --- |
 | Product | R5–R11 and R17 have their finite documented success/reject profiles through public APIs and actual consumer use |
