@@ -82,6 +82,12 @@ The manual test
 lives in `crates/baozi-postprocess/src/normals/diagnostics.rs`; both diagnostics are ignored by
 normal test runs. The second diagnostic initially failed compilation because it used the wrong
 evidence getter; the corrected run queries the existing header and retains the failed log.
+The test executable links the existing `allocation-counter` 0.8.1 dev dependency's global
+`CountingAllocator`, which delegates to System. These diagnostic timings are therefore not
+ordinary uninstrumented comparison-worker results. An initial receipt incorrectly said
+"no allocation interception"; `allocator-correction.json` records the correction and exact
+dependency source. Raw measurements and binary hashes are unchanged. The ordinary Windows/
+Linux asset comparison binaries do not enable `allocation-metrics`; their policy is unchanged.
 
 ## Source-Backed Causal Chain
 

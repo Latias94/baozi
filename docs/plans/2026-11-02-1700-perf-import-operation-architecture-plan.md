@@ -1,7 +1,7 @@
 ---
 title: Replace hot-path operation accounting and simplify format construction
 type: perf
-status: ready-for-ownership-design
+status: ready-for-implementation
 date: 2026-11-02
 ---
 
@@ -117,7 +117,12 @@ The [reviewed bounded-control contract](../research/2026-11-02-bounded-operation
 specifies 256 bounded library geometry actions, the existing 4,096-byte text frontier, mandatory
 external/parent/final checkpoints and exact failure reconciliation. It explicitly replaces
 deferred text completion with truthful local completion and does not promise elapsed-time
-cancellation for blocking operations. Its review is closed; ownership integration remains P1.
+cancellation for blocking operations. Its review is closed. The
+[concrete work/storage ownership design](../research/2026-11-02-operation-work-storage-ownership-design.md)
+now supplies field ownership, mixed-policy transactions, actual share/builder and parent/child
+sequences, coherent snapshots, protected work and detach. Independent review approves P1 for
+implementation; compilation, owned snapshot rollback and reported control-disposal failure
+remain explicit P2 acceptance obligations.
 
 Scope: `baozi-operation` ledger/coordinator/retained/concrete-store owners and relevant ADRs;
 `baozi-import` callback/session ownership; postprocess runtime. Review correctness and

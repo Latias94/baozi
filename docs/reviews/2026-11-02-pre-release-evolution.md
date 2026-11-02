@@ -654,6 +654,23 @@ ordinary build identities, Linux Candidate 2 observations, diagnostic source/bin
 bounded independent reviews: 11,050 files, SHA-256
 `c19ce41b37f7258e9ca1b43460013b56ba76cab89e9230d6864a742b72de4888`.
 It precedes the separate concrete P1 ownership/control design and does not certify that design.
+The subsequent `target/review/parser-cost-diagnosis-addendum.zip` corrects the diagnostic
+test allocator label and retains the concrete P1 design/reviews, without changing any timing
+sample or ordinary comparison binary. SHA-256:
+`b2591fa09c41a676aa473811edade992e8e48dfffbe8ac14b23f3d5beb895fe2`.
+Manual unit-test diagnostics link the existing System-backed allocation-counter dev dependency;
+they are separate controlled tasks, not ordinary uninstrumented worker results.
+
+P1 is now independently approved for implementation. The
+[work/storage ownership design](../research/2026-11-02-operation-work-storage-ownership-design.md)
+and [bounded control contract](../research/2026-11-02-bounded-operation-control-design.md)
+specify actual state/field ownership, mixed policy tightening, retained-share builder lending,
+forgotten work, coherent snapshots, protected failure work and detach. No production replacement
+is claimed yet. P2 must compile the real disjoint lending interfaces, release only each failed
+snapshot's own admission against current counters, and report contained control-disposal
+failure before closing the owner. These are explicit acceptance obligations, not a new proof
+framework. Ordinary work cannot resume after its final seal; independent storage destruction
+retains its synchronization and output lifetime contracts.
 
 ## U14 Preparation and Independent Integration Review
 
