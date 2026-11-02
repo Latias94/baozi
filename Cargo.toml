@@ -6,6 +6,7 @@ exclude = [
     "tools/consumers/scene",
     "tools/consumers/assets",
     "tools/consumers/gltf-conformance",
+    "tools/consumers/render-wgpu",
 ]
 
 [workspace.package]
