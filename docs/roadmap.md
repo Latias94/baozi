@@ -34,6 +34,13 @@ This changes the release sequence without invalidating the prior candidate's sco
 Completed precision, navigation, batch preparation and consumption work must not be inferred missing
 from the historical audits above.
 
+The [November 3 comparison and next steps](research/2026-11-03-baozi-assimp-next-steps.md)
+updates the delivered feature/interface baseline and actual Windows/Linux Assimp measurements.
+The [final qualification](reviews/2026-11-03-final-pre-release-qualification.md) owns current
+execution status. Subsequent work starts with an ordinary external caller, remaining measured
+import costs and one demonstrated workflow blocker; new producer/export profiles follow their
+named use cases. This tranche does not make every Assimp capability a release requirement.
+
 ## Product Direction
 
 Baozi is trusted, fidelity-preserving, engine-neutral 3D asset ingestion and offline compilation

@@ -1,6 +1,7 @@
 ---
 title: Pre-release Evolution, Cleanup and Assimp Benchmarks - Plan
 type: refactor
+status: completed
 date: 2026-11-02
 artifact_contract: ce-unified-plan/v1
 product_contract_source: ce-plan-bootstrap
@@ -8,6 +9,30 @@ execution: code
 ---
 
 # Pre-release Evolution, Cleanup and Assimp Benchmarks - Plan
+
+## Completion (2026-11-03)
+
+All fifteen required units and the reviewed operation/import architecture continuation are
+complete. The [execution record](../reviews/2026-11-02-pre-release-evolution.md) preserves
+milestone identities. The [final qualification](../reviews/2026-11-03-final-pre-release-qualification.md)
+binds integrated execution to `088d7176d5982d1ae9e5045c0250dc6f608f66c1`, with production
+runtime `52446ec8511b7dfba2e5352ce6941558d85e0ae2`.
+
+The finite product/profile, canonical-v1 cleanup, measured redesign, both ordinary 110-lane
+Assimp comparisons and separate Linux heap/Ir observations are delivered. Final Windows/Linux
+host and unchanged-package consumers, actual named Vulkan and WASI execution, browser
+compilation, scoped ASan/fuzz, strict quality gates and independent final evidence review
+complete the required local qualification. Exact manual exclusions and compile/runtime
+boundaries remain in the receipt. Fifty-seven original RSS budget breaches receive explicit
+reviewed cost acceptance; their limits/values are not rewritten as passing.
+
+The final evidence ZIP has 1,763 verified members, SHA-256
+`95acd86abc07579528474dfc03b09dc5ec53bf42d7eb87525266e000e1819ade`.
+The [dated candidate](../release/portable-0.1.0-candidate.md#2026-11-03-evolution-qualification)
+and [updated development route](../research/2026-11-03-baozi-assimp-next-steps.md) provide the
+handoff. Follow-up rows below remain proposed future work. Publication/yank, push/PR and native
+promotion are outside this completed development tranche. Documentation/ignore-only closure
+changes do not relabel the executed runtime source.
 
 ## Goal Capsule
 
@@ -500,7 +525,8 @@ raw samples remain intact.
 | Review and handoff | Independent milestone/final findings are resolved or explicitly retained with consequence; local commits and the execution record identify tested source and artifacts |
 
 This plan is complete only for its required tranche; the follow-up map remains future work.
-Its planning deliverable contains no new benchmark results, runtime qualification or implementation completion claim.
+The original planning deliverable established no benchmark result or runtime qualification;
+the dated completion above points to the later source-qualified execution evidence.
 
 ---
 

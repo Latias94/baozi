@@ -1,11 +1,28 @@
 ---
 title: Replace hot-path operation accounting and simplify format construction
 type: perf
-status: in-progress
+status: completed
 date: 2026-11-02
 ---
 
 # Operation and Import Architecture Continuation
+
+## Completion (2026-11-03)
+
+P1-P6 and original U14 are complete for this finite tranche. The
+[final qualification](../reviews/2026-11-03-final-pre-release-qualification.md) records actual
+execution at `088d7176d5982d1ae9e5045c0250dc6f608f66c1`, with production runtime
+`52446ec8511b7dfba2e5352ce6941558d85e0ae2`. Typed contexts, local work/shared storage ownership,
+physical completion, bounded control and measured remap/normal algorithms replace their
+retired paths. Both ordinary performance matrices and separate Linux heap/Ir evidence retain
+their source identities and explicit budget dispositions.
+
+Final host/package/portable/sanitizer/device execution and independent evidence review close
+the remaining qualification. The evidence ZIP has 1,763 individually verified members,
+SHA-256 `95acd86abc07579528474dfc03b09dc5ec53bf42d7eb87525266e000e1819ade`.
+The original failed attempts, 57 accepted RSS breaches, compile-only scopes and publication/native
+boundaries remain explicit. The sections below preserve design and chronological milestone
+observations; their earlier open-work statements are superseded by this dated completion.
 
 ## Authority and Goal
 
@@ -13,9 +30,9 @@ The user explicitly requested root-cause analysis before more optimization, and 
 breaking replacement of parser traits, registration, ownership and core representations.
 This amends U13/U14 of the active
 [pre-release evolution plan](2026-11-02-0923-refactor-pre-release-evolution-plan.md). Its already
-completed product units remain valid at their recorded sources. Full B1 and final U14 execute
-after this continuation; this document does not mark the original goal complete or authorize
-publishing, push/PR or native-target promotion.
+completed product units remain valid at their recorded sources. The original sequence placed
+full B1 and final U14 after this redesign; the dated completion above records their results.
+This document does not authorize publishing, push/PR or native-target promotion.
 
 Goal: remove repeated interpretation/synchronization of pure work authority from tight loops,
 use one authoritative operation owner, and expose a smaller coherent format construction
@@ -227,6 +244,22 @@ Windows comparison against the separately qualified numeric-only source reduces 
 preparation/pipeline to 36.786/48.732/90.847 ms and grid import/pipeline to 178.630/194.523 ms,
 with stable substantial Assimp controls. Grid whole-child working-set/commit medians also fall.
 Retain the bounded algorithms; full Windows, Linux B1/heap and final U14 remain open.
+
+The subsequent [complete Windows result](../reviews/2026-11-03-windows-final-comparison.md)
+and [corrected Linux B1/heap result](../reviews/2026-11-03-linux-b1-and-heap-comparison.md)
+complete both 110-lane ordinary matrices with all retained/warmup observations. Linux also
+retains twelve separate heap observations and six final Ir profiles. The initial Linux series
+used overwritten symbolized Assimp control paths and is explicitly disqualified; the corrected
+series uses archived ordinary B0 hashes, now verified against build metadata before launch.
+No worker protocol or baseline is changed. P5's finite measured tranche is complete.
+
+The unchanged Linux budget records 57 RSS and six parent-elapsed breaches, with zero stage-time
+breaches. All six same-lane elapsed repeats return within their original limits. The 57 actual
+RSS increases are explicitly accepted as the observed cost of retaining the current semantic
+and control closure; their original limits/values remain recorded. Small-worker exit mappings
+support a resident-image contribution without proving all-lane peak causality. Independent
+ordinary/disposition reviews close after two wording corrections. No all-budget-pass claim is
+made. Original U14 is now executing on the final integrated source; the goal remains active.
 
 ### P6. Complete native comparison and the original final qualification
 

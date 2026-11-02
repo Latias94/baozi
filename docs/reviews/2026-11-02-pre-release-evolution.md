@@ -7,6 +7,12 @@ Execution began from `4ff688d` after the user authorized Goal-backed fearless re
 The first work establishes comparable probes and an immutable performance baseline before production semantics change.
 No benchmark result, new renderer capability or final package qualification follows merely from these tool checks.
 
+Status update, 2026-11-03: all fifteen required units and the operation/import continuation are
+complete. The [final qualification](2026-11-03-final-pre-release-qualification.md) and dated
+completion below own the integrated source, actual execution, independent final review and
+remaining publication/profile boundaries. Earlier open-work statements retain their historical
+milestone context.
+
 ## Reproducible Cases
 
 Commit `bed89fb` adds fourteen original single-file cases with exact source hashes and analytic expectations.
@@ -687,12 +693,74 @@ rendering and v1 contracts. Fresh runtime qualification remains separate. Prepar
 package, portable, GPU and ASan command inventories are not passing results; final execution
 follows the architecture continuation. No obsolete-source qualification is relabelled.
 
-## Remaining Verification
+## Historical Remaining Verification at the Product Cutover
 
-Timing/RSS B0, the separate heap observations and the regression policy are now recorded above. Production semantics remained unchanged throughout these campaigns.
+Timing/RSS B0, the initial separate heap observations and the frozen regression policy are
+recorded above; production semantics were unchanged during those baseline campaigns.
 The finite render/device/quantization, clearcoat/sheen and owned-glTF assurance slices are now
 recorded above. The canonical v1 cutover and two measured optimization candidates are complete;
 the reviewed operation/import architecture continuation, full B1 and final integrated
 package/portable qualification remain ahead.
 Historical qualification stays bound to the source in its original record.
 No registry publication/yank, push/PR or native target promotion has occurred in this work.
+
+### 2026-11-03: Measured Architecture Continuation Complete; Final Qualification Active
+
+The typed-context, physical-prefix/control and bounded remap/normal-ordering implementation
+milestones have their separate source-qualified receipts. The complete
+[Windows matrix](2026-11-03-windows-final-comparison.md) and corrected
+[Linux B1/heap matrix](2026-11-03-linux-b1-and-heap-comparison.md) each finish 110 lanes,
+2,200 retained pairs and 330 warmup pairs. Linux separately retains twelve heap observations,
+six final Ir profiles and bounded exit-map diagnostics. Ordinary/heap controls remain distinct.
+An initial Linux control-identity mistake is preserved and disqualified, then prevented by the
+collector's small prelaunch `binary.sha256` guard and a complete new ordinary series.
+
+The large repeated/grid pipelines improve materially against B0/control, while substantial
+Assimp gaps and small-worker costs remain. All Linux stage-time medians meet the unchanged
+frozen limits. Six parent-elapsed breaches do not recur in identical-lane repeats. Fifty-seven
+RSS breaches remain above their original limits and receive explicit reviewed cost acceptance;
+limited exit-map evidence supports a resident-image contribution, not a universal peak cause.
+Neither this disposition nor heap observations relabel all budgets as passing.
+
+U13/P5's finite measured tranche is complete. Final integrated U14 is executing at
+`088d7176d5982d1ae9e5045c0250dc6f608f66c1` (runtime `52446ec...`); prepared commands and
+scoped prior tests are not a fresh U14 pass. Host/portable/package/sanitizer/device results
+will retain their own exact source, target and artifact identities. The overall goal remains
+active until that qualification and its final documentation/review complete.
+
+### 2026-11-03: Final Integrated Qualification Complete
+
+The [final qualification](2026-11-03-final-pre-release-qualification.md) records completed
+execution at `088d7176d5982d1ae9e5045c0250dc6f608f66c1`, with runtime
+`52446ec8511b7dfba2e5352ce6941558d85e0ae2`. Windows and Linux each pass 3,278 workspace,
+120 assets, eight direct glTF, 37 renderer CPU, sixteen deterministic seeds and 63 doctests.
+Strict Windows workspace/independent Clippy, formatting and public docs pass. Twenty-five
+named RTX 4090/Vulkan readbacks execute. Browser empty/all compile only; actual WASI consumers,
+58 snapshot tests and three glTF issue tests pass under Wasmtime 50.0.0.
+
+Scoped ASan passes 242 tests, with two existing manual diagnostics excluded. Both fuzz targets
+complete 256-run smoke and configured 120-/30-second exploration/resume stages without a
+failing artifact. The two initial normal allocation-counter failures are retained and isolated
+by a bare-std captured/uncaptured control on both Rust 1.95 and ASan nightly; the unchanged full
+normal selection passes with only `--nocapture`. Independent disposition review closes after
+one causal-wording correction, without skipping a panic case or weakening an allocation assertion.
+
+Fresh archive consumers execute all twelve facade feature cases, direct glTF and native baseline
+on Windows Rust 1.95/debug and Linux installed stable 1.97.1/release. Optional capture/helper
+profiles compile only. Each retains fourteen maintained archives with unchanged normalized
+manifests, exact version-only roots, standard source replacement and no root patch or checkout
+substitution. The portable release unit remains ten packages. A first successful Windows command
+failed its outer guard on one generated Rust cache file; the omitted two consumer target-ignore
+entries are repaired and a fresh complete Windows phase passes. Original failed receipts remain.
+
+The final source/log/artifact ZIP retains 1,763 individually verified members, SHA-256
+`95acd86abc07579528474dfc03b09dc5ec53bf42d7eb87525266e000e1819ade`. The historical source
+archive, source-qualified milestone/performance records, invalid initial Linux controls and
+explicit 57-RSS-breach cost acceptance retain their own identities and limitations.
+The [dated candidate](../release/portable-0.1.0-candidate.md#2026-11-03-evolution-qualification)
+and [next development route](../research/2026-11-03-baozi-assimp-next-steps.md) reflect this baseline.
+Independent final evidence review verifies both package phases, version-only registry identities,
+source/lock/log closure and the full ZIP, with no P1/P2 finding or remaining runtime/archive
+obligation. This closes U14/P6 and the required tranche. The scoped local documentation/ignore
+commit records the handoff separately from the executed source. Publication, placeholder yank,
+push/PR and native promotion remain outside the completed work.

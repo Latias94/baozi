@@ -8,6 +8,11 @@ supersedes this report's release-first recommendation and defines the new finite
 Assimp comparison protocol. The capability observations and source-qualified historical evidence
 below remain their recorded baseline; planned work is not delivered functionality.
 
+The [November 3 update](2026-11-03-baozi-assimp-next-steps.md) records the delivered material,
+light, device, control and architecture work, actual Windows/Linux comparison results and the
+next bounded development choices. Use it with the final qualification receipt for current state;
+the tables below retain their original source baseline.
+
 ## Decision and scope
 
 Assimp has substantially broader format, processing, export and integration reach. Baozi now has a

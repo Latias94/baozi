@@ -4,5 +4,7 @@
 /fuzz/artifacts
 /tools/consumers/assets/target
 /tools/consumers/scene/target
+/tools/consumers/gltf-conformance/target
+/tools/consumers/render-wgpu/target
 /candidates/baozi-native-io/target
 __pycache__/

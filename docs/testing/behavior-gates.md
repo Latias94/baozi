@@ -3,6 +3,15 @@
 This index maps contracts to executable checks. Test results establish behavior; source digests,
 AST spellings, and repository-conformance receipts do not.
 
+Allocation-balance tests that catch panics run with nextest, or with `cargo test -- --nocapture`.
+Libtest's in-process output capture can grow a retained buffer during the measured closure;
+an allocator counter then includes that runtime buffer in `bytes_current`. A bare-standard-library
+control reproduces this on Rust 1.95 and ASan nightly, while uncaptured execution and ordinary
+grow/drop controls balance. The [final qualification](../reviews/2026-11-03-final-pre-release-qualification.md)
+retains the original failures and diagnostic matrix. Keep the original owner/allocation assertions;
+do not opt product allocations out of measurement or skip panic cleanup cases. These counters
+measure a current-thread window, not whole-process leak freedom.
+
 | Contract | Executable evidence |
 | --- | --- |
 | U12 current draft-v1 targets (2026-11-02) | Independent [Scene](../../crates/baozi-core/src/canonical_scene/store/construction/node_scene/snapshot/tests.rs), [OBJ](../../crates/baozi-core/src/canonical_scene/store/construction/node_scene/tests/obj_capability.rs) and owned [glTF source](../../crates/baozi-core/src/canonical_scene/store/construction/node_scene/tests/gltf_capability.rs) vectors; [directory/evidence](../../crates/baozi-core/src/canonical_scene/store/construction/node_scene/tests.rs) and [changed/failed edit-root](../../crates/baozi-core/src/canonical_scene/store/construction/node_scene/edit/transaction/validation.rs) wrong-revision lifecycle cases; [source-scope](../../crates/baozi-import/tests/source_scope_outcome.rs), [projection](../../crates/baozi-format-gltf/tests/scene_selection.rs), [normal-options](../../crates/baozi-postprocess/src/normals/options.rs) and [composed preparation](../../crates/baozi-postprocess/src/prepare/options.rs) vectors; real [capacity plans](../../crates/baozi-operation/tests/capacity.rs) and [storage-before-owner cleanup](../../crates/baozi-operation/src/capacity.rs). These are the [U12](../plans/2026-11-02-0923-refactor-pre-release-evolution-plan.md#u12-rebase-canonical-v1-and-remove-proven-obsolete-paths) verification targets, not recorded passes. Results must identify the complete integrated source closure and vector set. |
