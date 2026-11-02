@@ -1,15 +1,16 @@
 # Operation Work and Storage Ownership Design
 
-Status: independently reviewed P1 ownership design, ready for implementation; no production replacement is claimed.
+Status: independently reviewed P1 design; P2 engine/retained/snapshot/terminal foundation implemented and verified. Parser channels and once-bound execution remain P3.
 Date: 2026-11-02. Production control: `4455d03db190c6bef05ff5a1de024d2aac461465`.
 
 This is the concrete ownership half of the
 [operation architecture continuation](../plans/2026-11-02-1700-perf-import-operation-architecture-plan.md),
 paired with the [reviewed bounded control contract](2026-11-02-bounded-operation-control-design.md).
 The [cost diagnosis](2026-11-02-parser-operation-cost-diagnosis.md) supplies measured motivation.
-Rust type sketches below describe responsibilities and lifetimes; they have not been compiled
-as the replacement engine. Actual code, behavioral tests and native measurements remain required.
-ADRs 0033 and 0047 retain current authority until an implementation amendment lands.
+Rust type sketches below describe responsibilities and lifetimes rather than exact declarations.
+The [P2 foundation receipt](../reviews/2026-11-02-local-operation-work-ownership.md) identifies the
+implemented source and Windows checks; it does not qualify the remaining P3 callers or native
+performance. ADRs 0033 and 0047 now include the implementation's ownership/control amendment.
 
 ## Chosen representation
 

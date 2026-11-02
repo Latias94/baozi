@@ -1,7 +1,7 @@
 ---
 title: Replace hot-path operation accounting and simplify format construction
 type: perf
-status: ready-for-implementation
+status: in-progress
 date: 2026-11-02
 ---
 
@@ -215,6 +215,21 @@ the original goal. No publishing, push or target promotion follows.
 - A smaller safe implementation that meets these criteria wins over a generalized framework.
   Necessary breaking changes and rewrites are explicitly authorized; arbitrary scope expansion
   and claims of full Assimp/glTF parity are not.
+
+## P2 Foundation Receipt (2026-11-02)
+
+Implementation `19eb1e014c059b4fa9bb62edf3da102954ca6b3b` replaces the shared work route with the
+local numeric owner and borrowed envelopes, splits mixed policies by field, implements coherent
+snapshot/evidence ownership, and wires retained control disposal and irreversible terminal modes.
+ADRs 0033 and 0047 are amended. The
+[implementation receipt](../reviews/2026-11-02-local-operation-work-ownership.md) records final
+Windows workspace 3,128/3,128 and independent assets 120/120 passing tests, strict Clippy/fmt,
+doctests/docs and bounded independent review. No timing improvement is claimed.
+
+P2's parser channel/bound-caller acceptance continues with P3. Repeated import/preparation adapters
+still bind per call, parser parent/child authority is not yet migrated, and the reviewed new cadence
+and immediate text completion remain unimplemented. P4-P6 and original full B1/U14 are still required;
+this receipt does not mark the architecture continuation or active goal complete.
 
 ## Initial Independent Review (2026-11-02)
 
