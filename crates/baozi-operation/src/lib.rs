@@ -314,9 +314,10 @@ pub mod __retained_store_integration {
     }
 }
 pub use control::{
-    CancellationOrigin, CancellationSignal, CancellationToken, ControlCause, OperationControl,
-    OperationPoll, ProgressDecision, ProgressDeliveryLimits, ProgressEvent, ProgressObserver,
-    ProgressPhase, ProgressStorageError, ProgressUnit, ProgressViolation,
+    CancellationOrigin, CancellationSignal, CancellationToken, ControlCause,
+    MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS, OperationControl, OperationPoll, ProgressDecision,
+    ProgressDeliveryLimits, ProgressEvent, ProgressObserver, ProgressPhase, ProgressStorageError,
+    ProgressUnit, ProgressViolation,
 };
 pub use coordinator::{
     FinalProgress, OperationCheckpoint, OperationCoordinator, OperationFinishError,

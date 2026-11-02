@@ -8,6 +8,9 @@ mod obj;
 mod options;
 mod parser;
 
+#[cfg(test)]
+mod control_tests;
+
 pub(crate) use error::ObjFailure;
 pub use error::ObjFailureCode;
 pub use options::{ObjImportOptions, ObjTextDecodingMode};

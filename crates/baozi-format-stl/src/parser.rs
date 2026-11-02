@@ -16,8 +16,8 @@ use baozi_import::authoring::{
     SourceObjectKind, SourceObjectLocator, SpatialAuthoringBatch,
 };
 use baozi_import::{
-    ImportStorageClass, ImportWorkClass, MeteredString, MeteredVec, ParseContext, ParseExecution,
-    ParseFailure, ParseResult,
+    ImportStorageClass, ImportWorkClass, ImportWorkScope, MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS,
+    MeteredString, MeteredVec, ParseContext, ParseExecution, ParseFailure, ParseResult,
 };
 
 const MATERIAL_NAME: &str = "STL Default Material";
@@ -93,7 +93,7 @@ fn authoring_tables<'session, 'input>(
     let mut remaining_topology_cells = 0usize;
     let mut has_vertex_colors = false;
     for (index, mesh) in parsed.meshes.as_slice().iter().enumerate() {
-        if index % 4096 == 0 {
+        if index % MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS == 0 {
             exec.poll()?;
         }
         validate_mesh_shape(exec, mesh)?;
@@ -102,6 +102,7 @@ fn authoring_tables<'session, 'input>(
             .checked_add(mesh.positions.len())
             .ok_or_else(|| exec.allocation_failure("stl-topology-cell-counter"))?;
     }
+    exec.poll()?;
     let mut remaining_canonical_string_bytes = canonical_string_bytes(exec, parsed)?;
 
     let shading_model = ShadingModel::Unspecified;
@@ -230,9 +231,12 @@ fn authoring_tables<'session, 'input>(
                 1,
             ],
             |exec, work| -> ParseResult<()> {
-                let index_range = work.run([topology_cells, 0, 0, 0, 0, 0], || {
-                    append_sequential_indices(exec, &mut indices, parsed_mesh.positions.len())
-                })?;
+                let index_range = append_sequential_indices(
+                    exec,
+                    work,
+                    &mut indices,
+                    parsed_mesh.positions.len(),
+                )?;
 
                 work.run([0, mesh_name_bytes, 0, 0, 0, 0], || Ok(()))?;
 
@@ -434,11 +438,15 @@ fn scene_from_parsed<'session>(
     // Move the buffers apart before descriptors borrow the sealed index storage.
     let mut primitives: MeteredVec<'_, GeometryPrimitiveAuthoring<'_>> = primitives;
     context.with_execution(|exec| -> ParseResult<()> {
-        for (primitive, patch) in primitives
+        for (index, (primitive, patch)) in primitives
             .as_mut_slice()
             .iter_mut()
             .zip(primitive_patches.as_slice())
+            .enumerate()
         {
+            if index % MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS == 0 {
+                exec.poll()?;
+            }
             let end = patch
                 .indices
                 .offset
@@ -528,24 +536,28 @@ fn validate_mesh_shape(
     Ok(())
 }
 
-fn append_sequential_indices<'session>(
-    exec: &mut ParseExecution<'_, 'session>,
+fn append_sequential_indices<'region, 'session>(
+    exec: &mut ParseExecution<'region, 'session>,
+    work: &mut ImportWorkScope<'region, 6>,
     indices: &mut MeteredVec<'session, u32>,
     vertex_count: usize,
 ) -> ParseResult<IndexRange> {
     let offset = indices.len();
     indices.try_reserve(exec, vertex_count)?;
-    let mut start = 0usize;
-    while start < vertex_count {
-        exec.poll()?;
-        let end = start.saturating_add(4096).min(vertex_count);
-        for index in start..end {
+    for index in 0..vertex_count {
+        if index % MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS == 0 {
+            exec.poll()?;
+        }
+        // The mesh scope admits the full stream; consume only indices actually appended.
+        work.run([1, 0, 0, 0, 0, 0], || {
             indices.try_push_reserved(
                 u32::try_from(index).map_err(|_| exec.allocation_failure("stl-index-space"))?,
-            )?;
-        }
-        start = end;
+            )
+        })?;
+        #[cfg(test)]
+        crate::control_tests::index_completed(&indices.as_slice()[offset..]);
     }
+    exec.poll()?;
     Ok(IndexRange {
         offset,
         count: vertex_count,
@@ -558,7 +570,7 @@ fn canonical_string_bytes(
 ) -> ParseResult<usize> {
     let mut bytes = MATERIAL_NAME.len();
     for (index, mesh) in parsed.meshes.as_slice().iter().enumerate() {
-        if index % 4096 == 0 {
+        if index % MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS == 0 {
             exec.poll()?;
         }
         if let Some(name) = &mesh.name {
@@ -566,6 +578,7 @@ fn canonical_string_bytes(
             checked_add(exec, &mut bytes, name.len(), "stl-string-byte-counter")?;
         }
     }
+    exec.poll()?;
     Ok(bytes)
 }
 

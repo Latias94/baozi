@@ -125,13 +125,15 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         let bytes = &self.bytes[start..end];
         let mut escaped = false;
         let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
-        for chunk in bytes.chunks(4096) {
+        for chunk in bytes.chunks(crate::parser::BYTE_POLL_INTERVAL) {
             ctx.with_work(
                 &work_group,
                 [chunk.len() as u64],
-                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+                |_ctx, work| -> ParseResult<()> {
+                    escaped |= chunk.contains(&b'\\');
+                    work.complete_all()
+                },
             )?;
-            escaped |= chunk.contains(&b'\\');
         }
         if !escaped {
             return Ok(Text::Borrowed(
@@ -141,25 +143,34 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         }
         let mut scalars = DecodedScalars::new(self.bytes, start, end);
         let mut decoded_len = 0usize;
-        let mut count = 0usize;
-        while let Some(scalar) = scalars
-            .next_scalar()
-            .map_err(|()| self.invalid("invalid admitted escape", ctx))?
-        {
-            if count.is_multiple_of(256) {
-                ctx.with_work(
-                    &work_group,
-                    [1],
-                    |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-                )?;
-            }
-            let scalar = char::from_u32(scalar)
-                .ok_or_else(|| self.invalid("invalid admitted scalar", ctx))?;
-            decoded_len = decoded_len
-                .checked_add(scalar.len_utf8())
-                .ok_or_else(|| ctx.allocation_failure("gltf-document-escaped-string"))?;
-            count += 1;
-        }
+        ctx.with_work(
+            &work_group,
+            [(end - start) as u64],
+            |ctx, work| -> ParseResult<()> {
+                let mut polled = start;
+                loop {
+                    // A surrogate escape pair is indivisible and at most 12 raw bytes.
+                    if scalars.position() - polled + 12 > crate::parser::BYTE_POLL_INTERVAL {
+                        ctx.poll()?;
+                        polled = scalars.position();
+                    }
+                    let before = scalars.position();
+                    let Some(scalar) = scalars
+                        .next_scalar()
+                        .map_err(|()| self.invalid("invalid admitted escape", ctx))?
+                    else {
+                        break;
+                    };
+                    let scalar = char::from_u32(scalar)
+                        .ok_or_else(|| self.invalid("invalid admitted scalar", ctx))?;
+                    decoded_len = decoded_len
+                        .checked_add(scalar.len_utf8())
+                        .ok_or_else(|| ctx.allocation_failure("gltf-document-escaped-string"))?;
+                    work.complete([(scalars.position() - before) as u64])?;
+                }
+                Ok(())
+            },
+        )?;
         // Admit the decoded length before the first owned byte, including empty strings.
         let mut decoded = ctx.metered_string(
             ImportStorageClass::BackendDecode,
@@ -167,23 +178,31 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         );
         decoded.try_reserve(ctx, decoded_len)?;
         let mut scalars = DecodedScalars::new(self.bytes, start, end);
-        let mut count = 0usize;
-        while let Some(scalar) = scalars
-            .next_scalar()
-            .map_err(|()| self.invalid("invalid admitted escape", ctx))?
-        {
-            if count.is_multiple_of(256) {
-                ctx.with_work(
-                    &work_group,
-                    [1],
-                    |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-                )?;
-            }
-            let scalar = char::from_u32(scalar)
-                .ok_or_else(|| self.invalid("invalid admitted scalar", ctx))?;
-            decoded.try_push_str(ctx, scalar.encode_utf8(&mut [0; 4]))?;
-            count += 1;
-        }
+        ctx.with_work(
+            &work_group,
+            [(end - start) as u64],
+            |ctx, work| -> ParseResult<()> {
+                let mut polled = start;
+                loop {
+                    if scalars.position() - polled + 12 > crate::parser::BYTE_POLL_INTERVAL {
+                        ctx.poll()?;
+                        polled = scalars.position();
+                    }
+                    let before = scalars.position();
+                    let Some(scalar) = scalars
+                        .next_scalar()
+                        .map_err(|()| self.invalid("invalid admitted escape", ctx))?
+                    else {
+                        break;
+                    };
+                    let scalar = char::from_u32(scalar)
+                        .ok_or_else(|| self.invalid("invalid admitted scalar", ctx))?;
+                    decoded.try_push_str(ctx, scalar.encode_utf8(&mut [0; 4]))?;
+                    work.complete([(scalars.position() - before) as u64])?;
+                }
+                Ok(())
+            },
+        )?;
         Ok(Text::Decoded(decoded))
     }
 
@@ -619,25 +638,45 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         attributes.try_reserve(ctx, self.value(attributes_id).child_count)?;
         let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
         for (ordinal, child) in self.children(attributes_id).enumerate() {
-            ctx.with_work(
-                &work_group,
-                [1],
-                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-            )?;
-            attributes
-                .try_push_reserved((self.semantic(child, ordinal, ctx)?, self.id(child, ctx)?))?;
+            let semantic = self.semantic(child, ordinal, ctx)?;
+            let accessor = self.id(child, ctx)?;
+            ctx.with_work(&work_group, [1], |_exec, work| -> ParseResult<()> {
+                attributes.try_push_reserved((semantic, accessor))?;
+                work.complete_all()
+            })?;
         }
-        attributes.try_sort_unstable_by(|a, b| -> ParseResult<_> {
-            ctx.charge_work(1)?;
-            Ok(a.0.cmp(&b.0))
+        ctx.with_work(&work_group, [0], |ctx, work| -> ParseResult<()> {
+            let mut comparisons = 0usize;
+            attributes.try_sort_unstable_by(|a, b| -> ParseResult<_> {
+                if comparisons.is_multiple_of(baozi_import::MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS) {
+                    ctx.poll()?;
+                }
+                work.replenish(1)?;
+                let ordering = a.0.cmp(&b.0);
+                work.complete([1])?;
+                comparisons += 1;
+                Ok(ordering)
+            })
         })?;
-        if attributes
-            .as_slice()
-            .windows(2)
-            .any(|pair| pair[0].0 == pair[1].0)
-        {
-            return Err(self.invalid("duplicate glTF attribute semantic", ctx));
-        }
+        ctx.with_work(
+            &work_group,
+            [attributes.len().saturating_sub(1) as u64],
+            |ctx, work| -> ParseResult<()> {
+                for (ordinal, pair) in attributes.as_slice().windows(2).enumerate() {
+                    if ordinal.is_multiple_of(baozi_import::MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS) {
+                        ctx.poll()?;
+                    }
+                    let duplicate = pair[0].0 == pair[1].0;
+                    work.complete([1])?;
+                    #[cfg(test)]
+                    crate::control_tests::semantic_pair_completed(ordinal + 1);
+                    if duplicate {
+                        return Err(self.invalid("duplicate glTF attribute semantic", ctx));
+                    }
+                }
+                Ok(())
+            },
+        )?;
         Ok(mesh::Primitive {
             attributes: mesh::Attributes(List(attributes)),
             indices: self.optional_id(id, "indices", ctx)?,
@@ -924,23 +963,24 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
             let token = self.value(id);
             let mut mantissa = true;
             let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
-            for chunk in self.bytes[token.start..token.end].chunks(4096) {
-                ctx.with_work(
-                    &work_group,
-                    [chunk.len() as u64],
-                    |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-                )?;
-                for &byte in chunk {
-                    if matches!(byte, b'e' | b'E') {
-                        mantissa = false;
+            for chunk in
+                self.bytes[token.start..token.end].chunks(crate::parser::BYTE_POLL_INTERVAL)
+            {
+                ctx.with_work(&work_group, [chunk.len() as u64], |ctx, work| -> ParseResult<()> {
+                    for &byte in chunk {
+                        if matches!(byte, b'e' | b'E') {
+                            mantissa = false;
+                        }
+                        let underflows = mantissa && matches!(byte, b'1'..=b'9');
+                        work.complete([1])?;
+                        if underflows {
+                            return Err(self.invalid(
+                                "glTF material extension number underflows the canonical F32 domain", ctx,
+                            ));
+                        }
                     }
-                    if mantissa && matches!(byte, b'1'..=b'9') {
-                        return Err(self.invalid(
-                            "glTF material extension number underflows the canonical F32 domain",
-                            ctx,
-                        ));
-                    }
-                }
+                    Ok(())
+                })?;
             }
         }
         Ok(narrowed)

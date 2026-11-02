@@ -9,6 +9,9 @@ mod options;
 mod parser;
 mod source_map;
 
+#[cfg(test)]
+mod control_tests;
+
 pub(crate) use error::GltfFailure;
 pub use error::GltfFailureCode;
 pub use options::{GltfImportOptions, GltfSceneSelection};

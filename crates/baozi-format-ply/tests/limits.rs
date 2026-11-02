@@ -2,8 +2,9 @@ mod common;
 
 use baozi_import::{
     ImportCause, ImportDimension, ImportFailure, ImportOperationControl, ImportProgressPhase,
-    ImportProgressUnit, ImportReport, ImportTerminalFailureClass, LedgerCause, MetadataOwnerRef,
-    MetadataValueRef, ResourceLimits, ScopeAbortCause,
+    ImportProgressUnit, ImportReport, ImportTerminalFailureClass, LedgerCause,
+    MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS, MetadataOwnerRef, MetadataValueRef, ResourceLimits,
+    ScopeAbortCause,
 };
 use baozi_operation::{
     CancellationOrigin, CancellationSignal, ControlCause, ProgressDecision, ProgressEvent,
@@ -18,7 +19,6 @@ use std::sync::{
 };
 
 const SCAN_CHUNK_BYTES: usize = 4 * 1024;
-const METADATA_SORT_COMPARISON_CHUNK: u64 = 64;
 
 #[derive(Clone, Copy)]
 enum BinaryVertexProfile {
@@ -333,8 +333,8 @@ fn pre_reserved_vertex_and_face_streams_do_not_add_per_item_polls() -> TestResul
     };
 
     let positions_delta = vertex_poll_delta(BinaryVertexProfile::PositionsOnly, "positions-only")?;
-    // Region-bound admission no longer polls a third time per record. The contract is a
-    // bounded baseline and no additional checks for extra pre-reserved attribute streams.
+    // Planning and decoding poll at bounded property frontiers, including row entry.
+    // Extra pre-reserved attribute streams must not add per-scalar control calls.
     assert!(positions_delta > 0);
     assert!(positions_delta <= ADDITIONAL_ITEMS * 3);
     assert_eq!(
@@ -501,7 +501,7 @@ fn metadata_obeys_the_exact_work_budget() -> TestResult<()> {
 }
 
 #[test]
-fn metadata_ordering_cancellation_is_bounded_by_comparison_chunks() -> TestResult<()> {
+fn metadata_ordering_cancellation_retains_completed_comparisons() -> TestResult<()> {
     const SOURCE: &str = "metadata-sort.ply";
     let document = short_metadata_document(256, 256);
 
@@ -570,22 +570,24 @@ fn metadata_ordering_cancellation_is_bounded_by_comparison_chunks() -> TestResul
     let (comparison_poll, failure) = first_cancelled_dimension_prefix_at_least(
         total_polls,
         ImportDimension::WorkUnits,
-        work_before_sort + METADATA_SORT_COMPARISON_CHUNK,
+        work_before_sort + 1,
         &mut run_cancelled,
     )?;
     assert!(comparison_poll > prepared_poll);
-    for (failure, chunks) in [(failure, 1), (run_cancelled(comparison_poll + 1)?, 2)] {
+    // Each comparison now completes immediately; 64-item envelopes no longer replay
+    // an unperformed suffix. Only control polling uses the shared geometry frontier.
+    for (failure, frontiers) in [(failure, 1), (run_cancelled(comparison_poll + 1)?, 2)] {
         let work = failure
             .ledger()
             .dimension(ImportDimension::WorkUnits)
             .expect("metadata work remains observable");
         assert_eq!(
             work.attempted() - work_before_sort,
-            chunks * METADATA_SORT_COMPARISON_CHUNK
+            frontiers * MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS as u64
         );
         assert_eq!(
             work.consumed() - work_before_sort,
-            chunks * METADATA_SORT_COMPARISON_CHUNK
+            frontiers * MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS as u64
         );
         assert_eq!(
             dimension_consumed(&failure, ImportDimension::CanonicalStringBytes),

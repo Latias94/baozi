@@ -15,7 +15,9 @@
 //! use baozi_import::SameAuthorityResolver;
 //! ```
 
-pub use baozi_operation::{CapacityPlan, CapacityPlanError, LedgerCause};
+pub use baozi_operation::{
+    CapacityPlan, CapacityPlanError, LedgerCause, MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS,
+};
 
 mod asset_open;
 pub mod authoring;

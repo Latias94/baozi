@@ -130,6 +130,6 @@ pub use baozi_io::{
 };
 pub use baozi_operation::{
     CancellationOrigin, CancellationSignal, CancellationToken, ControlCause, LedgerLimitsError,
-    ProgressDecision, ProgressDeliveryLimits, ProgressEvent, ProgressObserver,
-    ProgressStorageError, ProgressViolation,
+    MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS, ProgressDecision, ProgressDeliveryLimits, ProgressEvent,
+    ProgressObserver, ProgressStorageError, ProgressViolation,
 };

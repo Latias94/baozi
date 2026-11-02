@@ -1340,6 +1340,8 @@ fn plan_text_input(
                 }
             }
             offset = unit_end;
+            #[cfg(test)]
+            tests::classified_unit(tests::ScanPass::Planning, offset);
             cursor.poll_if_chunk_complete(scope, offset)?;
         }
         enforce_usize_limit(
@@ -1444,6 +1446,8 @@ fn build_text_input<'session>(
                 }
             }
             offset = unit_end;
+            #[cfg(test)]
+            tests::classified_unit(tests::ScanPass::Building, offset);
             cursor.poll_if_chunk_complete(scope, offset)?;
         }
         append_valid_run(scope, &mut text, bytes, valid_run_start, bytes.len())?;
@@ -1820,6 +1824,212 @@ mod tests {
     };
     use baozi_core::FormatId;
     use baozi_io::AssetPath;
+    use baozi_operation::{CancellationOrigin, CancellationToken, ControlCause};
+    use std::{cell::RefCell, marker::PhantomData, rc::Rc};
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum ScanPass {
+        Planning,
+        Building,
+    }
+
+    struct FrontierProbe {
+        pass: ScanPass,
+        trigger_offset: usize,
+        completed: usize,
+        raised_at: Option<usize>,
+        token: Option<CancellationToken>,
+    }
+
+    thread_local! {
+        static FRONTIER_PROBE: RefCell<Option<FrontierProbe>> = const { RefCell::new(None) };
+    }
+
+    struct FrontierProbeGuard(PhantomData<Rc<()>>);
+
+    impl FrontierProbeGuard {
+        fn install(pass: ScanPass, trigger_offset: usize, token: CancellationToken) -> Self {
+            FRONTIER_PROBE.with(|slot| {
+                let mut slot = slot.borrow_mut();
+                assert!(slot.is_none());
+                *slot = Some(FrontierProbe {
+                    pass,
+                    trigger_offset,
+                    completed: 0,
+                    raised_at: None,
+                    token: Some(token),
+                });
+            });
+            Self(PhantomData)
+        }
+
+        fn finish(self) -> FrontierProbe {
+            FRONTIER_PROBE.with(|slot| {
+                slot.borrow_mut()
+                    .take()
+                    .expect("active text frontier probe")
+            })
+        }
+    }
+
+    impl Drop for FrontierProbeGuard {
+        fn drop(&mut self) {
+            let probe = FRONTIER_PROBE.with(|slot| slot.borrow_mut().take());
+            drop(probe);
+        }
+    }
+
+    pub(super) fn classified_unit(pass: ScanPass, completed: usize) {
+        let token = FRONTIER_PROBE.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let probe = slot.as_mut()?;
+            if probe.pass != pass {
+                return None;
+            }
+            probe.completed = completed;
+            if completed == probe.trigger_offset && probe.raised_at.is_none() {
+                probe.raised_at = Some(completed);
+                probe.token.take()
+            } else {
+                None
+            }
+        });
+        if let Some(token) = token {
+            token.cancel();
+        }
+    }
+
+    struct FrontierImporter;
+
+    impl Format for FrontierImporter {
+        type Options = crate::NoFormatOptions;
+
+        fn compile_defaults(
+            &self,
+            scope: &mut crate::RegistryBuildScope<'_>,
+        ) -> Result<crate::CompiledOptions<Self::Options>, crate::OptionCompileError> {
+            crate::NoFormatOptions::compile_defaults(scope)
+        }
+
+        fn descriptor(&self) -> FormatDescriptor {
+            FormatDescriptor::builder(
+                FormatId::new("dev.baozi.test.text-frontier").unwrap(),
+                "Text Frontier Probe",
+            )
+            .extensions(["txt"])
+            .encoding(FormatEncoding::Text)
+            .text_profile(
+                TextProfile::builder(
+                    TextHardCaps::new(65_536, 65_536, 65_536, 65_536, 65_536).unwrap(),
+                )
+                .source_encodings([TextSourceEncoding::Utf8])
+                .bom_policy(TextBomPolicy::Forbidden)
+                .newlines([TextNewline::Lf])
+                .lexical_mode(TextLexicalMode::Utf8Document)
+                .decoding_modes([
+                    TextDecodingMode::RejectInvalid,
+                    TextDecodingMode::ReplaceInvalidUtf8,
+                ])
+                .control_policy(TextControlPolicy::RejectAll)
+                .build()
+                .unwrap(),
+            )
+            .capabilities([(FormatCapability::Geometry, CapabilityStatus::Supported)])
+            .build()
+            .unwrap()
+        }
+
+        fn detect(
+            &self,
+            _probe: &crate::Probe<'_>,
+            _hint: &ReadHint,
+            _scope: &DetectionScope<'_>,
+        ) -> DetectionResult<DetectionOutcome> {
+            Ok(DetectionOutcome::Match(ReadConfidence::Certain))
+        }
+
+        fn parse(
+            &self,
+            _options: &Self::Options,
+            context: &mut crate::ParseContext<'_>,
+        ) -> ParseResult<()> {
+            context.with_execution(|exec| -> ParseResult<()> {
+                exec.with_conformed_text_input(
+                    exec.diagnostic_source(),
+                    TextInputOptions::new(TextDecodingMode::ReplaceInvalidUtf8, "frontier-text"),
+                    |_exec, _input, _recoveries| -> ParseResult<()> {
+                        panic!("the text frontier must observe cancellation")
+                    },
+                )?
+                .expect("the text profile must permit the cancellation fixture");
+                unreachable!("the text scan must stop before returning a conformed input")
+            })
+        }
+    }
+
+    #[test]
+    fn real_text_passes_observe_physical_byte_frontiers_without_splitting_utf8() {
+        let mut registry = RegistryBuilder::new();
+        registry.register(FrontierImporter).unwrap();
+        let plan = registry
+            .freeze(RegistryBuildLimits::default())
+            .unwrap()
+            .plan(&ImportRequest::new(), OptionCompileLimits::default())
+            .unwrap();
+        for pass in [ScanPass::Planning, ScanPass::Building] {
+            for shape in 0..3 {
+                let mut bytes = vec![b'a'; 3 * TEXT_INPUT_WORK_CHUNK_BYTES + 8];
+                let (trigger, expected_prefix) = if shape == 1 {
+                    bytes[4095..4099].copy_from_slice(b"\xf0\x9f\x92\xa9");
+                    (4095, 4095)
+                } else {
+                    if shape == 2 {
+                        // Replacement is legal in the planning pass; the selected pass must
+                        // still stop before this later invalid unit is classified.
+                        bytes[8192] = 0xff;
+                    }
+                    (1, TEXT_INPUT_WORK_CHUNK_BYTES)
+                };
+                let token = CancellationToken::new();
+                let probe = FrontierProbeGuard::install(pass, trigger, token.clone());
+                let failure = plan
+                    .read_bytes(
+                        AssetPath::new("frontier.txt").unwrap(),
+                        &bytes,
+                        ImportOperationControl::default().with_cancellation(token),
+                    )
+                    .expect_err("a classified unit raises cancellation in the selected text pass")
+                    .into_operation_failure()
+                    .expect("ordinary cancellation failure");
+                let probe = probe.finish();
+                assert_eq!(probe.raised_at, Some(trigger), "{pass:?}, shape {shape}");
+                assert_eq!(probe.completed, expected_prefix, "{pass:?}, shape {shape}");
+                assert!(probe.completed - trigger < TEXT_INPUT_WORK_CHUNK_BYTES);
+                assert!(matches!(
+                    failure.cause(),
+                    ImportCause::Scope(abort) if matches!(
+                        abort.cause(),
+                        ScopeAbortCause::Control(ControlCause::Cancelled { origin: CancellationOrigin::Signal })
+                    )
+                ));
+                let prior_pass_bytes = if pass == ScanPass::Building {
+                    bytes.len() as u64
+                } else {
+                    0
+                };
+                let decode = failure
+                    .ledger()
+                    .dimension(ImportDimension::DecodeWork)
+                    .unwrap();
+                assert_eq!(decode.attempted(), prior_pass_bytes + bytes.len() as u64);
+                assert_eq!(decode.consumed(), prior_pass_bytes + expected_prefix as u64);
+                assert_eq!(failure.ledger().current_live_bytes(), 0);
+                assert_eq!(failure.ledger().active_reservations(), 0);
+                assert_eq!(failure.ledger().committed_canonical_members(), 0);
+                assert!(failure.diagnostics().is_empty());
+            }
+        }
+    }
 
     struct AllocationFailureImporter;
 

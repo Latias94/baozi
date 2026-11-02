@@ -135,9 +135,15 @@ impl<'session, T> BuiltCornerProjection<'session, T> {
             exec.metered_vec(ImportStorageClass::FormatNormalization, indices_resource);
         source_values.try_reserve(exec, source_value_count)?;
         source_indices.try_reserve(exec, corner_count)?;
-        mtl::for_work_chunks(exec, corner_count, indices_work_resource, |exec, range| {
-            source_indices.try_resize(exec, range.end, 0)
-        })?;
+        mtl::for_work_chunks(
+            exec,
+            corner_count,
+            indices_work_resource,
+            |exec, work, range| {
+                source_indices.try_resize(exec, range.end, 0)?;
+                work.complete_all()
+            },
+        )?;
         Ok(Self {
             source_values,
             source_indices,
@@ -503,7 +509,7 @@ impl<'session> SegmentBuilder<'session> {
             exec,
             corner_count,
             "obj-corner-reference-copy-work",
-            |exec, range| {
+            |exec, work, range| {
                 for occurrence in range {
                     let corner = self.corner_references.as_slice()[occurrence];
                     sorted_positions.try_push_reserved(IndexedPosition {
@@ -544,6 +550,7 @@ impl<'session> SegmentBuilder<'session> {
                             occurrence,
                         })?;
                     }
+                    work.complete([1])?;
                 }
                 Ok(())
             },
@@ -563,11 +570,13 @@ impl<'session> SegmentBuilder<'session> {
         } else {
             None
         };
-        mtl::interruptible_sort_by(exec, &mut sorted_positions, |_exec, _work, left, right| {
-            Ok((left.source_index, left.occurrence).cmp(&(right.source_index, right.occurrence)))
+        mtl::interruptible_sort_by(exec, &mut sorted_positions, |exec, work, left, right| {
+            work.run_leaf(exec, || {
+                (left.source_index, left.occurrence).cmp(&(right.source_index, right.occurrence))
+            })
         })?;
-        mtl::interruptible_sort_by(exec, &mut sorted_channels, |_exec, _work, left, right| {
-            Ok(left.cmp(right))
+        mtl::interruptible_sort_by(exec, &mut sorted_channels, |exec, work, left, right| {
+            work.run_leaf(exec, || left.cmp(right))
         })?;
 
         let mut first_position_occurrences = exec.metered_vec(
@@ -579,9 +588,9 @@ impl<'session> SegmentBuilder<'session> {
             exec,
             corner_count,
             "obj-first-position-occurrence-init-work",
-            |exec, range| {
+            |exec, work, range| {
                 first_position_occurrences.try_resize(exec, range.end, false)?;
-                Ok(())
+                work.complete_all()
             },
         )?;
 
@@ -591,17 +600,18 @@ impl<'session> SegmentBuilder<'session> {
             exec,
             sorted_positions.len(),
             "obj-position-grouping-work",
-            |exec, range| {
+            |exec, work, range| {
                 for cursor in range {
                     let indexed = sorted_positions.as_slice()[cursor];
-                    if previous_position == Some(indexed.source_index) {
-                        continue;
+                    if previous_position != Some(indexed.source_index) {
+                        let next_count = unique_position_count
+                            .checked_add(1)
+                            .ok_or_else(|| exec.allocation_failure("obj-unique-position-count"))?;
+                        previous_position = Some(indexed.source_index);
+                        first_position_occurrences.as_mut_slice()[indexed.occurrence] = true;
+                        unique_position_count = next_count;
                     }
-                    previous_position = Some(indexed.source_index);
-                    first_position_occurrences.as_mut_slice()[indexed.occurrence] = true;
-                    unique_position_count = unique_position_count
-                        .checked_add(1)
-                        .ok_or_else(|| exec.allocation_failure("obj-unique-position-count"))?;
+                    work.complete([1])?;
                 }
                 Ok(())
             },
@@ -624,9 +634,9 @@ impl<'session> SegmentBuilder<'session> {
             exec,
             corner_count,
             "obj-position-index-init-work",
-            |exec, range| {
+            |exec, work, range| {
                 indices.try_resize(exec, range.end, 0)?;
-                Ok(())
+                work.complete_all()
             },
         )?;
 
@@ -637,7 +647,7 @@ impl<'session> SegmentBuilder<'session> {
             exec,
             sorted_channels.len(),
             "obj-corner-source-projection-work",
-            |exec, range| {
+            |exec, work, range| {
                 for cursor in range {
                     let reference = sorted_channels.as_slice()[cursor];
                     let is_new_source = previous_channel != Some(reference.channel)
@@ -718,6 +728,7 @@ impl<'session> SegmentBuilder<'session> {
                     }
                     previous_channel = Some(reference.channel);
                     previous_source_index = Some(reference.source_index);
+                    work.complete([1])?;
                 }
                 Ok(())
             },
@@ -773,7 +784,7 @@ impl<'session> SegmentBuilder<'session> {
             exec,
             sorted_positions.len(),
             "obj-position-remap-work",
-            |_exec, range| {
+            |_exec, work, range| {
                 for cursor in range {
                     let indexed = sorted_positions.as_slice()[cursor];
                     if current_position != Some(indexed.source_index) {
@@ -782,6 +793,7 @@ impl<'session> SegmentBuilder<'session> {
                     } else {
                         indices.as_mut_slice()[indexed.occurrence] = canonical_index;
                     }
+                    work.complete([1])?;
                 }
                 Ok(())
             },
@@ -1025,35 +1037,38 @@ fn prepare_material_bindings<'session, 'input>(
         exec,
         faces.len(),
         "obj-material-binding-scan-work",
-        |exec, range| {
+        |exec, work, range| {
             for first_use in range {
-                let Some(id) = faces[first_use].material else {
-                    continue;
-                };
-                let name = state_name(exec, parsed, id)?;
-                values.try_push(
-                    exec,
-                    MaterialBinding {
-                        name,
-                        first_use,
-                        id: None,
-                    },
-                )?;
+                if let Some(id) = faces[first_use].material {
+                    let name = state_name(exec, parsed, id)?;
+                    values.try_push(
+                        exec,
+                        MaterialBinding {
+                            name,
+                            first_use,
+                            id: None,
+                        },
+                    )?;
+                }
+                work.complete([1])?;
             }
             Ok(())
         },
     )?;
 
     mtl::interruptible_sort_by(exec, &mut values, |exec, work, left, right| {
-        Ok(work
-            .compare_str(exec, left.name, right.name)?
-            .then_with(|| left.first_use.cmp(&right.first_use)))
+        match work.compare_str(exec, left.name, right.name)? {
+            std::cmp::Ordering::Equal => {
+                work.run_leaf(exec, || left.first_use.cmp(&right.first_use))
+            }
+            ordering => Ok(ordering),
+        }
     })?;
     mtl::interruptible_dedup_by(exec, &mut values, |exec, work, previous, current| {
         Ok(work.compare_str(exec, previous.name, current.name)? == std::cmp::Ordering::Equal)
     })?;
-    mtl::interruptible_sort_by(exec, &mut values, |_exec, _work, left, right| {
-        Ok(left.first_use.cmp(&right.first_use))
+    mtl::interruptible_sort_by(exec, &mut values, |exec, work, left, right| {
+        work.run_leaf(exec, || left.first_use.cmp(&right.first_use))
     })?;
 
     let mut materials = exec.metered_vec(

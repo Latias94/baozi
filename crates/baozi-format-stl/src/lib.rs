@@ -2,6 +2,8 @@
 
 mod ascii;
 mod binary;
+#[cfg(test)]
+mod control_tests;
 mod detect;
 mod error;
 mod parser;

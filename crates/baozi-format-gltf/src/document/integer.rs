@@ -81,8 +81,9 @@ pub(super) fn unsigned(ctx: &mut ParseExecution<'_, '_>, bytes: &[u8]) -> ParseR
                         )));
                     }
                 }
+                work.complete([1])?;
             }
-            work.complete_all()
+            Ok(())
         })?;
         chunk_start += chunk.len();
     }
@@ -147,11 +148,12 @@ pub(super) fn unsigned(ctx: &mut ParseExecution<'_, '_>, bytes: &[u8]) -> ParseR
                         .and_then(|value| value.checked_add(u64::from(byte - b'0')))
                         .ok_or_else(|| out_of_range(ctx))?;
                 }
+                work.complete([1])?;
             }
             for _ in 0..shift {
                 value = value.checked_mul(10).ok_or_else(|| out_of_range(ctx))?;
+                work.complete([1])?;
             }
-            work.complete_all()?;
             Ok(value)
         },
     )

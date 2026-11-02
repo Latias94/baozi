@@ -5,6 +5,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+/// Maximum fixed-cost library geometry actions between required control polls.
+///
+/// A vector row, scalar, comparison or index step must have a bounded amount of work.
+/// Text scanners use a separate byte frontier. This is not an elapsed-time guarantee
+/// for IO, allocation, extension callbacks or other blocking operations.
+pub const MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS: usize = 256;
+
 /// Supplies a monotonic cooperative-cancellation signal.
 pub trait CancellationSignal: Send + Sync + RefUnwindSafe + 'static {
     /// Returns whether cancellation has been requested.

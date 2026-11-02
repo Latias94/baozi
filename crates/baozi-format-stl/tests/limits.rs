@@ -2,7 +2,8 @@ mod common;
 
 use baozi_import::{
     ImportCause, ImportDimension, ImportFailure, ImportOperationControl, ImportProgressPhase,
-    ImportProgressUnit, LedgerCause, ResourceLimits, ScopeAbortCause,
+    ImportProgressUnit, LedgerCause, MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS, ResourceLimits,
+    ScopeAbortCause,
 };
 use baozi_operation::{
     CancellationOrigin, CancellationSignal, ControlCause, ProgressDecision, ProgressEvent,
@@ -554,8 +555,8 @@ fn binary_facet_cancellation_is_bounded_to_one_record() {
 }
 
 #[test]
-fn binary_color_expansion_cancellation_is_bounded_by_scan_chunks() {
-    const FACET_COUNT: usize = 2 * SCAN_CHUNK_BYTES + 1;
+fn binary_color_expansion_cancellation_is_bounded_by_geometry_actions() {
+    const FACET_COUNT: usize = 8193;
     const SOURCE: &str = "color-expansion.stl";
 
     let mut colored = BinaryFacet::unit_triangle();
@@ -612,11 +613,11 @@ fn binary_color_expansion_cancellation_is_bounded_by_scan_chunks() {
     );
     assert_eq!(
         consumed(&failure, ImportDimension::WorkUnits) - work_before_expansion,
-        SCAN_CHUNK_BYTES as u64
+        MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS as u64
     );
     assert_eq!(
         consumed(&failure, ImportDimension::AttributeCells) - decoded_cells,
-        3 * SCAN_CHUNK_BYTES as u64
+        3 * MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS as u64
     );
     assert_eq!(
         consumed(&failure, ImportDimension::Records),
@@ -632,11 +633,11 @@ fn binary_color_expansion_cancellation_is_bounded_by_scan_chunks() {
     );
     assert_eq!(
         consumed(&next, ImportDimension::WorkUnits) - work_before_expansion,
-        2 * SCAN_CHUNK_BYTES as u64
+        2 * MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS as u64
     );
     assert_eq!(
         consumed(&next, ImportDimension::AttributeCells) - decoded_cells,
-        6 * SCAN_CHUNK_BYTES as u64
+        6 * MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS as u64
     );
     assert_eq!(attempted(&next, ImportDimension::Meshes), 0);
     assert_eq!(next.ledger().current_live_bytes(), 0);

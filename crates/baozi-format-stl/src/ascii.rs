@@ -439,16 +439,38 @@ impl<'region, 'session> AsciiParser<'region, 'session> {
                 work.run([0, 3, 3], || {
                     current.positions.try_extend_from_slice(exec, &positions)
                 })?;
+                #[cfg(test)]
+                crate::control_tests::facet_completed(
+                    crate::control_tests::CompletionSite::AsciiFacet,
+                    current.face_count,
+                    current.positions.as_slice(),
+                    current.normals.as_slice(),
+                );
                 work.run([0, 0, 3], || {
                     current.normals.try_extend_from_slice(exec, &normals)
                 })?;
-                work.run([1, 0, 0], || {
+                #[cfg(test)]
+                crate::control_tests::facet_completed(
+                    crate::control_tests::CompletionSite::AsciiFacet,
+                    current.face_count,
+                    current.positions.as_slice(),
+                    current.normals.as_slice(),
+                );
+                work.run([1, 0, 0], || -> ParseResult<()> {
                     current.face_count = current
                         .face_count
                         .checked_add(1)
                         .ok_or_else(|| exec.allocation_failure("stl-face-counter"))?;
                     Ok(())
-                })
+                })?;
+                #[cfg(test)]
+                crate::control_tests::facet_completed(
+                    crate::control_tests::CompletionSite::AsciiFacet,
+                    current.face_count,
+                    current.positions.as_slice(),
+                    current.normals.as_slice(),
+                );
+                Ok(())
             },
         )
     }

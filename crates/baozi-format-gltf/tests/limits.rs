@@ -9,7 +9,7 @@ use baozi_operation::{CancellationOrigin, ControlCause};
 use common::{
     GltfTestOptions, TestResult, append_glb_chunk, assert_gltf_failure, controlled_import,
     expected_error, glb_with_json, import_assets_result_with_control, sidecar_options,
-    triangle_gltf_with_buffer_uri,
+    triangle_bin, triangle_gltf_with_buffer_uri,
 };
 use std::sync::atomic::Ordering;
 
@@ -647,5 +647,56 @@ fn external_buffer_snapshot_size_does_not_add_copy_decode_work() -> TestResult<(
             .byte_length(),
         LARGE_BUFFER_BYTES as u64
     );
+    Ok(())
+}
+
+#[test]
+fn malformed_attribute_and_index_values_keep_the_completed_geometry_leaves() -> TestResult<()> {
+    for invalid_position in [true, false] {
+        let mut binary = triangle_bin();
+        if invalid_position {
+            binary[24..28].copy_from_slice(&f32::NAN.to_le_bytes());
+        } else {
+            binary[100..102].copy_from_slice(&u16::MAX.to_le_bytes());
+        }
+        let document = triangle_gltf_with_buffer_uri("prefix.bin", binary.len());
+        let (result, diagnostics) = import_assets_result_with_control(
+            "geometry-prefix.gltf",
+            [("geometry-prefix.gltf", document), ("prefix.bin", binary)],
+            sidecar_options(),
+            ImportOperationControl::default(),
+        )?;
+        assert!(diagnostics.is_empty());
+        let failure = expected_error(result)?;
+        if invalid_position {
+            assert_gltf_failure(&failure, GltfFailureCode::InvalidAccessor, Some("finite"))?;
+            assert_eq!(dimension_consumed(&failure, ImportDimension::Vertices), 2);
+            assert_eq!(
+                dimension_consumed(&failure, ImportDimension::AttributeCells),
+                2
+            );
+            assert_eq!(
+                dimension_consumed(&failure, ImportDimension::AttributeStreams),
+                0
+            );
+        } else {
+            assert_gltf_failure(
+                &failure,
+                GltfFailureCode::InvalidDocument,
+                Some("invalid vertex index"),
+            )?;
+            assert_eq!(dimension_consumed(&failure, ImportDimension::Vertices), 3);
+            assert_eq!(
+                dimension_consumed(&failure, ImportDimension::TopologyCells),
+                2
+            );
+        }
+        assert_eq!(dimension_consumed(&failure, ImportDimension::Primitives), 0);
+        assert_eq!(dimension_consumed(&failure, ImportDimension::Faces), 0);
+        assert_eq!(failure.ledger().committed_canonical_members(), 0);
+        assert_eq!(failure.ledger().current_live_bytes(), 0);
+        assert_eq!(failure.ledger().active_reservations(), 0);
+        assert_eq!(failure.ledger().current_evidence_bytes(), 0);
+    }
     Ok(())
 }

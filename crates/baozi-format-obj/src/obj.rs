@@ -117,6 +117,8 @@ pub(crate) fn parse<'region, 'session>(
             Ok(line)
         })?;
         parser.parse_line(exec, &mut scan_scratch, recoveries, &line, line_number)?;
+        #[cfg(test)]
+        crate::control_tests::face_completed(parser.parsed.faces.len());
     }
 
     Ok(parser.parsed)

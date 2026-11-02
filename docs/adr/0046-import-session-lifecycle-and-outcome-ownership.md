@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-08-19
-updated: 2026-11-02
+updated: 2026-11-03
 authors:
   - Codex
 decision_type: architecture
@@ -133,6 +133,12 @@ driver remains an ownership fault and invokes containment; a panic flag alone do
 fault.
 
 ### Capability-Limited Stages
+
+First-party parser loops apply ADR 0033's shared geometry-action policy and separate text-byte
+frontier through these capabilities. Progress delivery is independent: a phase event does not
+establish completion of internal parser work, and suppressing transient events cannot suppress
+the final publication control check. A cancelled invocation leaves immutable plan health and
+previously returned scenes intact; a cancelled token remains monotonic.
 
 ```mermaid
 sequenceDiagram

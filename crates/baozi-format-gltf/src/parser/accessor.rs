@@ -278,51 +278,80 @@ pub(super) fn collect_mesh_attribute<'scope, const N: usize>(
     expected: usize,
     allocation: &'static str,
 ) -> Result<MeteredVec<'scope, f32>> {
-    let invalid = |reason| GltfFailure::invalid_accessor(Some(accessor.index()), reason);
-    let mut bounds = MeshAccessorBounds::<N>::new(
-        accessor.row(),
-        accessor.index(),
-        semantic == Semantic::Positions,
-    )?;
-    let values = bind(ctx, accessor, buffers)?
-        .samples::<N>()
-        .ok_or_else(|| invalid("mesh accessor shape differs from its checked contract"))?;
-    let pad_alpha = matches!(semantic, Semantic::Colors(_)) && N == 3;
-    let scalar_count = expected
-        .checked_mul(N + usize::from(pad_alpha))
-        .ok_or_else(|| ctx.allocation_failure(allocation))?;
-    let mut output = try_vec_capacity(
-        ctx,
-        ImportStorageClass::SceneConstruction,
-        scalar_count,
-        allocation,
-    )?;
-    let mut count = 0;
-    for sample in values {
-        poll_parser_loop(ctx, count)?;
-        if count == expected {
-            return Err(invalid("mesh accessor exceeds its admitted count").into());
-        }
-        bounds.observe(&sample)?;
-        if semantic == Semantic::Tangents
-            && sample
-                .decoded
-                .get(3)
-                .is_none_or(|&sign| sign != -1.0 && sign != 1.0)
-        {
-            return Err(invalid("TANGENT W must be -1 or +1").into());
-        }
-        output.try_extend_from_slice_reserved(&sample.decoded)?;
-        if pad_alpha {
-            output.try_push_reserved(1.0)?;
-        }
-        count += 1;
-    }
-    if count != expected {
-        return Err(invalid("mesh accessor differs from its admitted count").into());
-    }
-    bounds.finish()?;
-    Ok(output)
+    let sample_work = to_u64(expected)
+        .checked_mul(4 * MESH_SAMPLE_WORK_PER_LANE)
+        .and_then(|work| work.checked_add(9))
+        .ok_or_else(|| ctx.allocation_failure("gltf-mesh-sample-work"))?;
+    ctx.with_work_group(
+        [
+            (
+                ImportWorkClass::Vertices,
+                if semantic == Semantic::Positions {
+                    to_u64(expected)
+                } else {
+                    0
+                },
+            ),
+            (ImportWorkClass::AttributeCells, to_u64(expected)),
+            (ImportWorkClass::AttributeStreams, 1),
+            (ImportWorkClass::WorkUnits, sample_work),
+        ],
+        |ctx, work| -> Result<_> {
+            let invalid = |reason| GltfFailure::invalid_accessor(Some(accessor.index()), reason);
+            let mut bounds = MeshAccessorBounds::<N>::new(
+                accessor.row(),
+                accessor.index(),
+                semantic == Semantic::Positions,
+            )?;
+            let values = bind(ctx, accessor, buffers)?
+                .samples::<N>()
+                .ok_or_else(|| invalid("mesh accessor shape differs from its checked contract"))?;
+            let pad_alpha = matches!(semantic, Semantic::Colors(_)) && N == 3;
+            let scalar_count = expected
+                .checked_mul(N + usize::from(pad_alpha))
+                .ok_or_else(|| ctx.allocation_failure(allocation))?;
+            let mut output = try_vec_capacity(
+                ctx,
+                ImportStorageClass::SceneConstruction,
+                scalar_count,
+                allocation,
+            )?;
+            let mut count = 0;
+            for sample in values {
+                poll_parser_loop(ctx, count)?;
+                if count == expected {
+                    return Err(invalid("mesh accessor exceeds its admitted count").into());
+                }
+                bounds.observe(&sample)?;
+                if semantic == Semantic::Tangents
+                    && sample
+                        .decoded
+                        .get(3)
+                        .is_none_or(|&sign| sign != -1.0 && sign != 1.0)
+                {
+                    return Err(invalid("TANGENT W must be -1 or +1").into());
+                }
+                output.try_extend_from_slice_reserved(&sample.decoded)?;
+                if pad_alpha {
+                    output.try_push_reserved(1.0)?;
+                }
+                work.complete([
+                    u64::from(semantic == Semantic::Positions),
+                    1,
+                    0,
+                    4 * MESH_SAMPLE_WORK_PER_LANE,
+                ])?;
+                count += 1;
+            }
+            if count != expected {
+                return Err(invalid("mesh accessor differs from its admitted count").into());
+            }
+            bounds.finish()?;
+            ctx.poll()?;
+            work.complete([0, 0, 1, 9])?;
+            Ok(output)
+        },
+    )
 }
 
 /// Track distinct selected vertex accessors per view without comparing accessor pairs.
@@ -702,26 +731,24 @@ pub(super) fn validate_sparse_indices(
             [to_u64(sparse.count())],
             |ctx, work| -> Result<()> {
                 let mut previous = None;
-                for chunk in bytes.chunks(PARSER_POLL_INTERVAL * index_size) {
-                    ctx.poll()?;
-                    for value in chunk.chunks_exact(index_size) {
-                        let index = match (indices.index_type(), value) {
-                            (IndexType::U8, &[x]) => u32::from(x),
-                            (IndexType::U16, &[x, y]) => u32::from(u16::from_le_bytes([x, y])),
-                            (IndexType::U32, &[x, y, z, w]) => u32::from_le_bytes([x, y, z, w]),
-                            _ => return Err(invalid("sparse index encoding is invalid").into()),
-                        };
-                        if index as usize >= accessor.count()
-                            || previous.is_some_and(|previous| index <= previous)
-                        {
-                            return Err(invalid(
-                                "sparse indices must strictly increase within accessor count",
-                            )
-                            .into());
-                        }
-                        previous = Some(index);
+                for (ordinal, value) in bytes.chunks_exact(index_size).enumerate() {
+                    poll_parser_loop(ctx, ordinal)?;
+                    let index = match (indices.index_type(), value) {
+                        (IndexType::U8, &[x]) => u32::from(x),
+                        (IndexType::U16, &[x, y]) => u32::from(u16::from_le_bytes([x, y])),
+                        (IndexType::U32, &[x, y, z, w]) => u32::from_le_bytes([x, y, z, w]),
+                        _ => return Err(invalid("sparse index encoding is invalid").into()),
+                    };
+                    if index as usize >= accessor.count()
+                        || previous.is_some_and(|previous| index <= previous)
+                    {
+                        return Err(invalid(
+                            "sparse indices must strictly increase within accessor count",
+                        )
+                        .into());
                     }
-                    work.complete([to_u64(chunk.len() / index_size)])?;
+                    previous = Some(index);
+                    work.complete([1])?;
                 }
                 Ok(())
             },

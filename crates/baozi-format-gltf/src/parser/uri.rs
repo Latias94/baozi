@@ -39,20 +39,23 @@ pub(super) fn profile_identity<'scope>(
             for (offset, character) in path.char_indices() {
                 if offset >= next_poll {
                     ctx.poll()?;
-                    next_poll = offset.saturating_add(super::PARSER_POLL_INTERVAL);
+                    next_poll = offset.saturating_add(super::BYTE_POLL_INTERVAL);
                 }
                 let escape = match character {
                     '%' => "%25",
                     '#' => "%23",
                     '?' => "%3F",
-                    _ => continue,
+                    _ => {
+                        work.complete([character.len_utf8() as u64])?;
+                        continue;
+                    }
                 };
                 label.try_push_str(ctx, &path[start..offset])?;
                 label.try_push_str(ctx, escape)?;
+                work.complete([character.len_utf8() as u64])?;
                 start = offset + character.len_utf8();
             }
             label.try_push_str(ctx, &path[start..])?;
-            work.complete_all()?;
             Ok(())
         },
     )?;
@@ -218,9 +221,10 @@ pub(super) fn relative_path<'scope, 'uri>(
             let mut component_start = 0;
             let mut component_escaped = false;
             while cursor < encoded.len() {
+                let before = cursor;
                 if cursor >= next_poll {
                     ctx.poll()?;
-                    next_poll = cursor.saturating_add(super::PARSER_POLL_INTERVAL);
+                    next_poll = cursor.saturating_add(super::BYTE_POLL_INTERVAL);
                 }
                 let byte = encoded[cursor];
                 if matches!(byte, b'?' | b'#' | b'\\') {
@@ -270,6 +274,7 @@ pub(super) fn relative_path<'scope, 'uri>(
                     }
                     cursor += 1;
                 }
+                work.complete([(cursor - before) as u64])?;
             }
             if component_escaped && is_dot_segment(&decoded.as_slice()[component_start..]) {
                 return Err(
@@ -283,7 +288,6 @@ pub(super) fn relative_path<'scope, 'uri>(
             } else {
                 reject_controls(value, resource)?;
             }
-            work.complete_all()?;
             if has_escape {
                 Ok(RelativePath::Decoded(decoded))
             } else {

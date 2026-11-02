@@ -77,6 +77,7 @@ Run the facade examples:
 ```powershell
 cargo run --locked -p baozi --example import_bytes
 cargo run --locked -p baozi --example import_memory_sidecars
+cargo run --locked -p baozi --example import_control
 cargo run --locked -p baozi --example diagnostics
 cargo run --locked -p baozi --example wasm_memory
 ```
@@ -86,6 +87,14 @@ snapshots an explicit approved OBJ/MTL/image list into `MemoryAssetIo`, with per
 limits. Run `cargo run --locked -p baozi --example import_host_bundle -- <bundle-directory>` with
 the three relative paths listed in the example. The application chooses filesystem authority and
 link policy; the importer receives immutable memory assets.
+
+The [controlled import example](crates/baozi/examples/import_control.rs) combines a host-owned
+`CancellationToken`, a deadline and a progress observer on an immutable import plan. Polling is
+cooperative and occurs independently of progress delivery. Current import progress covers input
+acquisition, detection, validation and final publication; fine-grained parser events are not
+uniformly emitted. Unknown totals remain `None`. Returning `ProgressDecision::Cancel` or raising
+the token prevents successful publication when observed, including at the mandatory final gate.
+An opaque backend call must return before its surrounding checks can observe cancellation.
 
 Baozi requires the Rust standard library; `default-features = false` selects no built-in formats.
 The curated `default-formats` set contains STL and OBJ/MTL, while `all-formats` also enables PLY and glTF/GLB.

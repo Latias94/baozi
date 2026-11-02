@@ -13,7 +13,7 @@ use common::{
 };
 use std::sync::atomic::Ordering;
 
-const GRAPH_POLL_INTERVAL: usize = 4_096;
+const GRAPH_POLL_INTERVAL: usize = baozi_import::MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS;
 const CANONICAL_IMPORT_STACK_BUDGET: usize = 2 * 1024 * 1024;
 
 fn graph_document(scene_fields: &str, nodes: &str) -> Vec<u8> {

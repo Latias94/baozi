@@ -89,19 +89,22 @@ fn validate_weights(
         )));
     }
     let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
-    for chunk in weights.chunks(PARSER_POLL_INTERVAL) {
-        ctx.with_work(
-            &work_group,
-            [to_u64(chunk.len())],
-            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-        )?;
-        if chunk.iter().any(|value| !value.is_finite()) {
-            return Err(gltf_parse_error(format_args!(
-                "{owner} morph weights must be finite"
-            )));
-        }
-    }
-    Ok(())
+    ctx.with_work(
+        &work_group,
+        [to_u64(weights.len())],
+        |ctx, work| -> Result<()> {
+            for (index, value) in weights.iter().enumerate() {
+                poll_parser_loop(ctx, index)?;
+                if !value.is_finite() {
+                    return Err(gltf_parse_error(format_args!(
+                        "{owner} morph weights must be finite"
+                    )));
+                }
+                work.complete([1])?;
+            }
+            Ok(())
+        },
+    )
 }
 
 type MorphAccessor = (Semantic, MorphDeltaSemantic, Option<json::Index>);
@@ -344,7 +347,7 @@ pub(super) fn build_storage<'scope>(
                 let mut weights =
                     try_vec_capacity(ctx, class, width, "gltf-morph-default-weights")?;
                 for index in 0..width {
-                    if index.is_multiple_of(PARSER_POLL_INTERVAL) {
+                    if index.is_multiple_of(GEOMETRY_POLL_INTERVAL) {
                         ctx.poll()?;
                     }
                     storage
@@ -385,7 +388,7 @@ pub(super) fn build_storage<'scope>(
                     let vertices =
                         mesh_geometry.primitives.as_slice()[primitive.index()].position_count;
                     for target_index in 0..width {
-                        if target_index.is_multiple_of(PARSER_POLL_INTERVAL) {
+                        if target_index.is_multiple_of(GEOMETRY_POLL_INTERVAL) {
                             ctx.poll()?;
                         }
                         let delta_start = storage.deltas.len();
@@ -416,10 +419,8 @@ pub(super) fn build_storage<'scope>(
                                 })?;
                                 let mut output =
                                     try_vec_capacity(ctx, class, count, "gltf-morph-delta-values")?;
-                                for sample in values {
-                                    if output.len().is_multiple_of(PARSER_POLL_INTERVAL) {
-                                        ctx.poll()?;
-                                    }
+                                for (row, sample) in values.enumerate() {
+                                    poll_parser_loop(ctx, row)?;
                                     if output.len() >= count {
                                         return Err(GltfFailure::invalid_accessor(
                                             Some(accessor.index()),
@@ -433,6 +434,11 @@ pub(super) fn build_storage<'scope>(
                                         3 * (1 + accessor::MESH_SAMPLE_WORK_PER_LANE),
                                         3,
                                     ])?;
+                                    #[cfg(test)]
+                                    crate::control_tests::morph_vec3_completed(
+                                        output.len() / 3,
+                                        sample.decoded,
+                                    );
                                 }
                                 if output.len() != count {
                                     return Err(gltf_parse_error(
@@ -448,6 +454,7 @@ pub(super) fn build_storage<'scope>(
                                 work.complete([1, 0])?;
                             }
                         }
+                        ctx.poll()?;
                         storage.targets.try_push_reserved(MorphTargetStorage {
                             deltas: delta_start..storage.deltas.len(),
                         })?;

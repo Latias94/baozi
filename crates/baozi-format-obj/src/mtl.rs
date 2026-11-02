@@ -19,31 +19,33 @@ const MAX_NUMERIC_LITERAL_BYTES: usize = 128;
 
 pub(crate) struct ComparisonWork<'meter, 'region> {
     work: &'meter mut ImportWorkScope<'region, 1>,
-    admitted: bool,
-    remaining: u64,
+    leaves_until_poll: u64,
 }
 
 impl<'meter, 'region> ComparisonWork<'meter, 'region> {
     fn new(work: &'meter mut ImportWorkScope<'region, 1>) -> Self {
         Self {
             work,
-            admitted: false,
-            remaining: 0,
+            leaves_until_poll: INTERRUPTIBLE_WORK_CHUNK,
         }
     }
 
-    fn step(&mut self, exec: &mut ParseExecution<'region, '_>) -> ParseResult<()> {
-        if self.remaining == 0 {
-            if self.admitted {
-                self.work.complete_all()?;
-            }
+    pub(crate) fn run_leaf<T>(
+        &mut self,
+        exec: &mut ParseExecution<'region, '_>,
+        compare: impl FnOnce() -> T,
+    ) -> ParseResult<T> {
+        // Admit only the next bounded comparison, then publish its actual completion.
+        // Polling is batched independently so a short tail never consumes unused work.
+        self.work.replenish(1)?;
+        let value = compare();
+        self.work.complete([1])?;
+        self.leaves_until_poll -= 1;
+        if self.leaves_until_poll == 0 {
             exec.poll()?;
-            self.work.replenish(INTERRUPTIBLE_WORK_CHUNK)?;
-            self.admitted = true;
-            self.remaining = INTERRUPTIBLE_WORK_CHUNK;
+            self.leaves_until_poll = INTERRUPTIBLE_WORK_CHUNK;
         }
-        self.remaining -= 1;
-        Ok(())
+        Ok(value)
     }
 
     pub(crate) fn compare_str(
@@ -53,21 +55,12 @@ impl<'meter, 'region> ComparisonWork<'meter, 'region> {
         right: &str,
     ) -> ParseResult<Ordering> {
         for (left, right) in left.as_bytes().iter().zip(right.as_bytes()) {
-            self.step(exec)?;
-            match left.cmp(right) {
+            match self.run_leaf(exec, || left.cmp(right))? {
                 Ordering::Equal => {}
                 ordering => return Ok(ordering),
             }
         }
-        self.step(exec)?;
-        Ok(left.len().cmp(&right.len()))
-    }
-
-    fn finish(self) -> ParseResult<()> {
-        if self.admitted {
-            self.work.complete_all()?;
-        }
-        Ok(())
+        self.run_leaf(exec, || left.len().cmp(&right.len()))
     }
 }
 
@@ -87,11 +80,7 @@ pub(crate) fn interruptible_sort_by<'region, 'session, T>(
     let comparison_work = exec.bind_work_group([ImportWorkClass::WorkUnits])?;
     exec.with_work(&comparison_work, [0], |exec, ledger_work| {
         let mut work = ComparisonWork::new(ledger_work);
-        values.try_sort_unstable_by(|left, right| {
-            work.step(exec)?;
-            compare(exec, &mut work, left, right)
-        })?;
-        work.finish()
+        values.try_sort_unstable_by(|left, right| compare(exec, &mut work, left, right))
     })
 }
 
@@ -113,19 +102,17 @@ pub(crate) fn interruptible_dedup_by<'region, 'session, T>(
     let retained_len = exec.with_work(&comparison_work, [0], |exec, ledger_work| {
         let mut work = ComparisonWork::new(ledger_work);
         let retained_len = values.try_partition_dedup_by(|previous, current| {
-            work.step(exec)?;
             equivalent(exec, &mut work, previous, current)
         })?;
-        work.finish()?;
         Ok::<_, ParseFailure>(retained_len)
     })?;
     for_work_chunks(
         exec,
         previous_len - retained_len,
         "obj-dedup-drop-work",
-        |_exec, range| {
+        |_exec, work, range| {
             values.truncate(values.len() - range.len());
-            Ok(())
+            work.complete_all()
         },
     )
 }
@@ -150,7 +137,6 @@ pub(crate) fn interruptible_binary_search_by<'region, 'session, T>(
         let mut found = None;
         while left < right {
             let middle = left + (right - left) / 2;
-            work.step(exec)?;
             match compare(exec, &mut work, &values[middle])? {
                 Ordering::Less => left = middle + 1,
                 Ordering::Greater => right = middle,
@@ -160,17 +146,18 @@ pub(crate) fn interruptible_binary_search_by<'region, 'session, T>(
                 }
             }
         }
-        work.finish()?;
         Ok(found)
     })
 }
 
+// Visitors publish completed items or atomic ranges before any later fallible work.
 pub(crate) fn for_work_chunks<'region, 'session>(
     exec: &mut ParseExecution<'region, 'session>,
     len: usize,
     resource: &'static str,
     mut visit: impl FnMut(
         &mut ParseExecution<'region, 'session>,
+        &mut ImportWorkScope<'region, 1>,
         std::ops::Range<usize>,
     ) -> ParseResult<()>,
 ) -> ParseResult<()> {
@@ -183,10 +170,7 @@ pub(crate) fn for_work_chunks<'region, 'session>(
         exec.with_work(
             &work_group,
             [usize_amount(exec, end - start, resource)?],
-            |exec, work| {
-                visit(exec, start..end)?;
-                work.complete_all()
-            },
+            |exec, work| visit(exec, work, start..end),
         )?;
         start = end;
     }
@@ -205,11 +189,11 @@ pub(crate) fn interruptible_str_eq(
     let left = left.as_bytes();
     let right = right.as_bytes();
     let mut equal = true;
-    for_work_chunks(exec, left.len(), resource, |_exec, range| {
+    for_work_chunks(exec, left.len(), resource, |_exec, work, range| {
         if left[range.clone()] != right[range] {
             equal = false;
         }
-        Ok(())
+        work.complete_all()
     })?;
     Ok(equal)
 }
@@ -607,11 +591,18 @@ fn finalize_materials(
         return Ok(());
     }
 
-    interruptible_sort_by(exec, &mut library.materials, |exec, work, left, right| {
-        Ok(work
-            .compare_str(exec, left.name.as_str(), right.name.as_str())?
-            .then_with(|| right.order.cmp(&left.order)))
-    })?;
+    interruptible_sort_by(
+        exec,
+        &mut library.materials,
+        |exec, work, left, right| match work.compare_str(
+            exec,
+            left.name.as_str(),
+            right.name.as_str(),
+        )? {
+            Ordering::Equal => work.run_leaf(exec, || right.order.cmp(&left.order)),
+            ordering => Ok(ordering),
+        },
+    )?;
     interruptible_dedup_by(
         exec,
         &mut library.materials,
@@ -1429,3 +1420,7 @@ fn push_dependency_warning(
         ),
     }
 }
+
+#[cfg(test)]
+#[path = "comparison_tests.rs"]
+mod comparison_tests;

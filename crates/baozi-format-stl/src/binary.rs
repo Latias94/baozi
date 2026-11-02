@@ -3,7 +3,8 @@ use crate::error::{StlFailure, StlFailureCode};
 use crate::parser::{ParsedMesh, ParsedStl};
 use baozi_import::authoring::{Color, Vec3};
 use baozi_import::{
-    ImportStorageClass, ImportWorkClass, MeteredVec, ParseExecution, ParseFailure, ParseResult,
+    ImportStorageClass, ImportWorkClass, MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS, MeteredVec,
+    ParseExecution, ParseFailure, ParseResult,
 };
 
 const MATERIALISE_COLOR_TOKEN: &[u8] = b"COLOR=";
@@ -157,6 +158,13 @@ pub(crate) fn parse<'session>(
                     facet_colors.try_push_reserved(color)?;
                     Ok(())
                 })?;
+                #[cfg(test)]
+                crate::control_tests::facet_completed(
+                    crate::control_tests::CompletionSite::BinaryFacet,
+                    facet_colors.len(),
+                    positions.as_slice(),
+                    normals.as_slice(),
+                );
             }
             Ok((positions, normals, facet_colors))
         },
@@ -180,7 +188,7 @@ pub(crate) fn parse<'session>(
                     "stl-binary-colors",
                 )?;
                 for (index, color) in facet_colors.as_slice().iter().copied().enumerate() {
-                    if index % 4096 == 0 {
+                    if index % MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS == 0 {
                         exec.poll()?;
                     }
                     work.run([3, 1], || {
@@ -188,6 +196,8 @@ pub(crate) fn parse<'session>(
                             &[color_components(color.unwrap_or(fallback)); 3],
                         )
                     })?;
+                    #[cfg(test)]
+                    crate::control_tests::color_row_completed(colors.as_slice());
                 }
                 Ok(colors)
             },

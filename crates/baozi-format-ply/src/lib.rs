@@ -4,6 +4,9 @@ mod detect;
 mod error;
 mod parser;
 
+#[cfg(test)]
+mod control_tests;
+
 pub(crate) use error::PlyFailure;
 pub use error::PlyFailureCode;
 

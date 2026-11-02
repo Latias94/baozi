@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-08-19
-updated: 2026-11-02
+updated: 2026-11-03
 authors:
   - Codex
 decision_type: architecture
@@ -119,6 +119,12 @@ region returns success. Callback errors, incomplete returns, and cancellation re
 cause precedence; cleanup may resolve only a verified suffix. Work groups, scopes, and control
 cannot escape the region or cross threads. A forgotten scope remains outstanding in the same owner,
 including a zero-sized or fully completed scope, and prevents region success and terminal freeze.
+
+Numeric/string comparison leaves admit only their next actual work, complete it immediately,
+and advance an independent control cadence. A chunked source visitor records each completed
+item before a later fallible lookup, push or poll. Neither a normal short tail nor an interrupted
+chunk may fabricate completion or lose its already completed prefix. ADR 0033 owns the shared
+geometry-action bound and separate text-byte frontier.
 
 `MeteredVec`, `MeteredString`, `MeteredOrderedMap`, and `MeteredDecodedText` own their values and
 capacity reservations together. Their independent identity uses the session's existing issuer and

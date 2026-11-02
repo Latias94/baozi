@@ -5,7 +5,7 @@ use std::cmp::Ordering;
 #[cfg(test)]
 use std::ops::Range;
 
-const SORT_POLL_COMPARISONS: u64 = 4 * 1024;
+const SORT_POLL_COMPARISONS: u64 = baozi_import::MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS as u64;
 
 /// Format-owned identities refer to source array ordinals, including unselected entities.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -263,19 +263,18 @@ fn sort_entries<T>(
     if count <= 1 {
         return Ok(());
     }
-    let levels = u64::from(usize::BITS - (count - 1).leading_zeros());
-    let sort_work = u64::try_from(count)
-        .unwrap_or(u64::MAX)
-        .saturating_mul(levels.saturating_mul(4).saturating_add(4));
-    ctx.with_work_group([(ImportWorkClass::WorkUnits, sort_work)], |ctx, work| {
+    ctx.with_work_group([(ImportWorkClass::WorkUnits, 0)], |ctx, work| {
         let mut comparisons = 0_u64;
         entries.try_sort_unstable_by(|left, right| -> Result<Ordering, ParseFailure> {
-            comparisons = comparisons.saturating_add(1);
             if comparisons.is_multiple_of(SORT_POLL_COMPARISONS) {
                 ctx.poll()?;
             }
-            Ok(compare(left, right))
+            work.replenish(1)?;
+            let ordering = compare(left, right);
+            work.complete([1])?;
+            comparisons += 1;
+            Ok(ordering)
         })?;
-        work.complete_all()
+        Ok(())
     })
 }

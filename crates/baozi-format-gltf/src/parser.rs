@@ -44,7 +44,8 @@ mod uri;
 
 type Result<T> = std::result::Result<T, ContentError>;
 
-const PARSER_POLL_INTERVAL: usize = 4_096;
+pub(crate) const BYTE_POLL_INTERVAL: usize = 4_096;
+const GEOMETRY_POLL_INTERVAL: usize = baozi_import::MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS;
 
 use crate::document::is_supported_extension;
 
@@ -128,21 +129,22 @@ fn enforce_usize_limit(
 }
 
 fn selected_count(ctx: &mut ParseExecution<'_, '_>, values: &[bool]) -> Result<usize> {
-    let mut count = 0usize;
     let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
-    for chunk in values.chunks(PARSER_POLL_INTERVAL) {
-        ctx.with_work(
-            &work_group,
-            [to_u64(chunk.len())],
-            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-        )?;
-        for selected in chunk {
-            count = count.checked_add(usize::from(*selected)).ok_or_else(|| {
-                ContentError::from(GltfFailure::internal("selection count overflow"))
-            })?;
-        }
-    }
-    Ok(count)
+    ctx.with_work(
+        &work_group,
+        [to_u64(values.len())],
+        |ctx, work| -> Result<_> {
+            let mut count = 0usize;
+            for (index, selected) in values.iter().enumerate() {
+                poll_parser_loop(ctx, index)?;
+                count = count.checked_add(usize::from(*selected)).ok_or_else(|| {
+                    ContentError::from(GltfFailure::internal("selection count overflow"))
+                })?;
+                work.complete([1])?;
+            }
+            Ok(count)
+        },
+    )
 }
 
 fn checked_add_with_limit(
@@ -273,7 +275,7 @@ fn owned_name<'scope>(
             let mut remaining = value;
             let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
             while !remaining.is_empty() {
-                let mut end = remaining.len().min(PARSER_POLL_INTERVAL);
+                let mut end = remaining.len().min(BYTE_POLL_INTERVAL);
                 while !remaining.is_char_boundary(end) {
                     end -= 1;
                 }
@@ -281,9 +283,11 @@ fn owned_name<'scope>(
                 ctx.with_work(
                     &work_group,
                     [to_u64(chunk.len())],
-                    |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+                    |ctx, work| -> baozi_import::ParseResult<()> {
+                        output.try_push_str(ctx, chunk)?;
+                        work.complete_all()
+                    },
                 )?;
-                output.try_push_str(ctx, chunk)?;
                 remaining = rest;
             }
             Ok(output)
@@ -733,48 +737,45 @@ fn accessor_provenance(
     Ok(AccessorSources::new(sources))
 }
 
-/// Conservative work for collecting R references, heap sorting, deduplicating, and copying them.
-/// Heap construction takes at most 2R comparisons; extraction at most 2R * bit_length(R).
-/// The remaining 3R covers collection, adjacent comparisons, and the retained copy.
-fn provenance_work_bound(ctx: &mut ParseExecution<'_, '_>, references: usize) -> Result<u64> {
-    let levels = u64::from(usize::BITS - references.leading_zeros());
-    to_u64(references)
-        .checked_mul(2 * levels + 5)
-        .ok_or_else(|| ctx.allocation_failure("gltf-provenance-work").into())
-}
-
 /// Appends one owner's sorted unique sources, preserving every earlier owner's range.
-/// Callers prepay provenance_work_bound before entering their non-nestable decode work scope.
-/// Pending storage is reused between owners; the retained table only needs unique-source capacity.
+/// Pending storage is reused; every compare/copy records only its completed leaf.
 fn try_extend_provenance_unique<'session>(
     ctx: &mut ParseExecution<'_, 'session>,
     values: &mut MeteredVec<'session, u32>,
     pending: &mut MeteredVec<'session, u32>,
 ) -> Result<()> {
-    let mut until_poll = 0;
-    let mut control = || -> Result<()> {
-        if until_poll == 0 {
-            ctx.poll()?;
-            until_poll = PARSER_POLL_INTERVAL;
-        }
-        until_poll -= 1;
-        Ok(())
-    };
-    pending.try_sort_unstable_by(|left, right| -> Result<_> {
-        control()?;
-        Ok(left.cmp(right))
-    })?;
-    let retained = pending.try_partition_dedup_by(|left, right| -> Result<_> {
-        control()?;
-        Ok(left == right)
-    })?;
-    pending.truncate(retained);
-    for &source in pending.as_slice() {
-        control()?;
-        values.try_push_reserved(source)?;
-    }
-    pending.truncate(0);
-    Ok(())
+    ctx.with_work_group(
+        [(ImportWorkClass::WorkUnits, 0)],
+        |ctx, work| -> Result<()> {
+            let mut actions = 0usize;
+            pending.try_sort_unstable_by(|left, right| -> Result<_> {
+                poll_parser_loop(ctx, actions)?;
+                work.replenish(1)?;
+                let ordering = left.cmp(right);
+                work.complete([1])?;
+                actions += 1;
+                Ok(ordering)
+            })?;
+            let retained = pending.try_partition_dedup_by(|left, right| -> Result<_> {
+                poll_parser_loop(ctx, actions)?;
+                work.replenish(1)?;
+                let equal = left == right;
+                work.complete([1])?;
+                actions += 1;
+                Ok(equal)
+            })?;
+            pending.truncate(retained);
+            for &source in pending.as_slice() {
+                poll_parser_loop(ctx, actions)?;
+                work.replenish(1)?;
+                values.try_push_reserved(source)?;
+                work.complete([1])?;
+                actions += 1;
+            }
+            pending.truncate(0);
+            Ok(())
+        },
+    )
 }
 
 fn load_buffers<'scope>(
@@ -924,11 +925,11 @@ fn decode_data_uri_payload<'scope, 'uri>(
             let mut decoded = ctx.metered_vec(ImportStorageClass::BackendDecode, allocation);
             decoded.try_reserve(ctx, stored_length)?;
             let mut decoded_length = 0usize;
-            let mut chunk_output = [0_u8; PARSER_POLL_INTERVAL];
-            for (chunk_index, chunk) in encoded.as_bytes().chunks(PARSER_POLL_INTERVAL).enumerate()
+            let mut chunk_output = [0_u8; BYTE_POLL_INTERVAL];
+            for (chunk_index, chunk) in encoded.as_bytes().chunks(BYTE_POLL_INTERVAL).enumerate()
             {
                 ctx.poll()?;
-                let chunk_start = chunk_index * PARSER_POLL_INTERVAL;
+                let chunk_start = chunk_index * BYTE_POLL_INTERVAL;
                 let chunk_capacity = base64::decoded_len_estimate(chunk.len());
                 let output = chunk_output.get_mut(..chunk_capacity).ok_or_else(|| {
                     ContentError::from(GltfFailure::internal(
@@ -952,7 +953,7 @@ fn decode_data_uri_payload<'scope, 'uri>(
                 let retained_chunk = stored_length
                     .saturating_sub(decoded_length)
                     .min(chunk_written);
-                decoded.try_extend_from_slice(ctx, &output[..retained_chunk])?;
+                decoded.try_extend_from_slice_reserved(&output[..retained_chunk])?;
                 decoded_length = decoded_length
                     .checked_add(chunk_written)
                     .ok_or_else(|| ctx.allocation_failure("gltf-data-uri-buffer"))?;
@@ -997,7 +998,7 @@ fn base64_decoded_len(
     let mut padding = 0usize;
     let mut padding_started = false;
     let mut invalid_padding = false;
-    for chunk in encoded.as_bytes().chunks(PARSER_POLL_INTERVAL) {
+    for chunk in encoded.as_bytes().chunks(BYTE_POLL_INTERVAL) {
         ctx.poll()?;
         for &byte in chunk {
             if byte == b'%' {
@@ -1123,9 +1124,9 @@ fn copy_buffer_bytes<'scope>(
         |ctx, work| -> Result<_> {
             let mut copied = ctx.metered_vec(ImportStorageClass::BackendDecode, allocation);
             copied.try_reserve(ctx, source.len())?;
-            for chunk in source.chunks(PARSER_POLL_INTERVAL) {
+            for chunk in source.chunks(BYTE_POLL_INTERVAL) {
                 ctx.poll()?;
-                copied.try_extend_from_slice(ctx, chunk)?;
+                copied.try_extend_from_slice_reserved(chunk)?;
                 work.complete([to_u64(chunk.len())])?;
             }
             Ok(copied)
@@ -2126,7 +2127,7 @@ fn with_poll<'region, 'session, T>(
 }
 
 fn poll_parser_loop(ctx: &mut ParseExecution<'_, '_>, completed: usize) -> Result<()> {
-    if completed.is_multiple_of(PARSER_POLL_INTERVAL) {
+    if completed.is_multiple_of(GEOMETRY_POLL_INTERVAL) {
         ctx.poll()?;
     }
     Ok(())
@@ -2171,7 +2172,7 @@ fn collect_exact_with_work<'scope, T, const N: usize>(
     let mut collected = ctx.metered_vec(ImportStorageClass::FormatNormalization, allocation);
     collected.try_reserve(ctx, expected)?;
     loop {
-        if collected.len().is_multiple_of(PARSER_POLL_INTERVAL) {
+        if collected.len().is_multiple_of(GEOMETRY_POLL_INTERVAL) {
             ctx.poll()?;
         }
         let next = values.next();
@@ -2214,7 +2215,10 @@ fn try_vec_filled<'scope, T: Copy>(
     allocation: &'static str,
 ) -> Result<MeteredVec<'scope, T>> {
     let mut values = try_vec_capacity(ctx, class, length, allocation)?;
-    values.try_resize(ctx, length, value)?;
+    for index in 0..length {
+        poll_parser_loop(ctx, index)?;
+        values.try_push_reserved(value)?;
+    }
     Ok(values)
 }
 
@@ -2235,12 +2239,11 @@ fn build_geometry_storage<'region, 'scope>(
         ImportStorageClass::SceneConstruction,
         "gltf-authoring-logical-meshes",
     );
-    let selected_mesh_count = contracts
-        .meshes
-        .as_slice()
-        .iter()
-        .filter(|mesh| mesh.is_some())
-        .count();
+    let mut selected_mesh_count = 0;
+    for (index, mesh) in contracts.meshes.as_slice().iter().enumerate() {
+        poll_parser_loop(ctx, index)?;
+        selected_mesh_count += usize::from(mesh.is_some());
+    }
     logical_meshes.try_reserve(ctx, selected_mesh_count)?;
     let mut logical_mesh_ids = try_vec_filled(
         ctx,
@@ -2249,26 +2252,34 @@ fn build_geometry_storage<'region, 'scope>(
         None,
         "gltf-logical-mesh-id-map",
     )?;
-    ctx.charge_work(to_u64(buffers.len()))?;
-    let available_provenance_count = buffers
-        .iter()
-        .filter(|buffer| buffer.is_some())
-        .count()
-        .max(1);
-    let primitive_provenance_capacity = contracts
-        .meshes
-        .as_slice()
-        .iter()
-        .filter_map(Option::as_ref)
-        .flat_map(|mesh| mesh.primitives.as_slice())
-        .try_fold(0usize, |count, primitive| {
+    let available_provenance_count = ctx.with_work_group(
+        [(ImportWorkClass::WorkUnits, to_u64(buffers.len()))],
+        |ctx, work| -> Result<_> {
+            let mut count = 0usize;
+            for (index, buffer) in buffers.iter().enumerate() {
+                poll_parser_loop(ctx, index)?;
+                count += usize::from(buffer.is_some());
+                work.complete([1])?;
+            }
+            Ok(count.max(1))
+        },
+    )?;
+    let mut primitive_provenance_capacity = 0usize;
+    for (mesh_index, mesh) in contracts.meshes.as_slice().iter().enumerate() {
+        poll_parser_loop(ctx, mesh_index)?;
+        let Some(mesh) = mesh else { continue };
+        for (index, primitive) in mesh.primitives.as_slice().iter().enumerate() {
+            poll_parser_loop(ctx, index)?;
             let reference_count = primitive
                 .attribute_stream_count
-                .checked_add(1)?
-                .checked_mul(AccessorSources::MAX_SOURCES)?;
-            count.checked_add(reference_count.min(available_provenance_count))
-        })
-        .ok_or_else(|| ctx.allocation_failure("gltf-primitive-buffer-provenance-count"))?;
+                .checked_add(1)
+                .and_then(|count| count.checked_mul(AccessorSources::MAX_SOURCES))
+                .ok_or_else(|| ctx.allocation_failure("gltf-primitive-buffer-provenance-count"))?;
+            primitive_provenance_capacity = primitive_provenance_capacity
+                .checked_add(reference_count.min(available_provenance_count))
+                .ok_or_else(|| ctx.allocation_failure("gltf-primitive-buffer-provenance-count"))?;
+        }
+    }
     let mut primitive_provenance = try_vec_capacity(
         ctx,
         ImportStorageClass::FormatNormalization,
@@ -2279,16 +2290,8 @@ fn build_geometry_storage<'region, 'scope>(
         ImportStorageClass::FormatNormalization,
         "gltf-primitive-pending-provenance",
     );
-    let primitive_work = ctx.bind_work_group([
-        ImportWorkClass::Primitives,
-        ImportWorkClass::Vertices,
-        ImportWorkClass::Faces,
-        ImportWorkClass::TopologyCells,
-        ImportWorkClass::AttributeStreams,
-        ImportWorkClass::AttributeCells,
-        ImportWorkClass::InfluenceCells,
-        ImportWorkClass::WorkUnits,
-    ])?;
+    let primitive_work =
+        ctx.bind_work_group([ImportWorkClass::Primitives, ImportWorkClass::Faces])?;
     let mesh_work = ctx.bind_work_group([
         ImportWorkClass::Meshes,
         ImportWorkClass::CanonicalStringBytes,
@@ -2371,7 +2374,7 @@ fn build_geometry_storage<'region, 'scope>(
 )]
 fn build_primitive_authoring<'region, 'scope>(
     ctx: &mut ParseExecution<'region, 'scope>,
-    primitive_work: &ImportWorkGroup<'region, 8>,
+    primitive_work: &ImportWorkGroup<'region, 2>,
     buffers: &[Option<BufferData<'_>>],
     mesh: &crate::document::Mesh<'_>,
     primitive: crate::document::Primitive<'_>,
@@ -2380,10 +2383,6 @@ fn build_primitive_authoring<'region, 'scope>(
     provenance: &mut MeteredVec<'scope, u32>,
     pending_provenance: &mut MeteredVec<'scope, u32>,
 ) -> Result<PrimitiveStorage<'scope>> {
-    let attribute_cell_count = contract
-        .position_count
-        .checked_mul(contract.attribute_stream_count)
-        .ok_or_else(|| ctx.allocation_failure("gltf-attribute-cell-counter"))?;
     let accessor_count = contract
         .attribute_stream_count
         .checked_add(1)
@@ -2391,33 +2390,16 @@ fn build_primitive_authoring<'region, 'scope>(
     let provenance_references = accessor_count
         .checked_mul(AccessorSources::MAX_SOURCES)
         .ok_or_else(|| ctx.allocation_failure("gltf-primitive-provenance-references"))?;
-    let merge_work = provenance_work_bound(ctx, provenance_references)?;
     // Each accessor contributes to the primitive and, for attributes, its own retained row.
     let collection_work = to_u64(accessor_count)
         .checked_mul(2 * AccessorSources::COLLECTION_WORK_BOUND)
-        .and_then(|work| work.checked_add(merge_work))
         .ok_or_else(|| ctx.allocation_failure("gltf-primitive-provenance-work"))?;
     ctx.charge_work(collection_work)?;
     pending_provenance.try_reserve(ctx, provenance_references)?;
-    // Four lanes bound every admitted stream; source bounds and decoding share one traversal.
-    let mesh_sample_work = to_u64(attribute_cell_count)
-        .checked_mul(4 * accessor::MESH_SAMPLE_WORK_PER_LANE)
-        .and_then(|work| work.checked_add(to_u64(contract.attribute_stream_count).checked_mul(9)?))
-        .and_then(|work| work.checked_add(contract.influences.work))
-        .ok_or_else(|| ctx.allocation_failure("gltf-mesh-sample-work"))?;
-    let (output, non_unit_rows) = ctx.with_work(
+    let (output, non_unit_rows) = ctx.with_parent_work(
         primitive_work,
-        [
-            1,
-            to_u64(contract.position_count),
-            to_u64(contract.face_count),
-            to_u64(contract.index_count),
-            to_u64(contract.attribute_stream_count),
-            to_u64(attribute_cell_count),
-            to_u64(contract.influences.cell_count),
-            mesh_sample_work,
-        ],
-        |ctx, work| -> Result<_> {
+        [1, to_u64(contract.face_count)],
+        |ctx, _parent| -> Result<_> {
             let provenance_offset = provenance.len();
             for (ordinal, (_, accessor)) in primitive.attributes().enumerate() {
                 poll_parser_loop(ctx, ordinal)?;
@@ -2579,7 +2561,6 @@ fn build_primitive_authoring<'region, 'scope>(
             }
             let influences = with_poll(ctx, |ctx| influences::build_rows(ctx, buffers, &primitive, contract.influences),
             )??;
-            work.complete_all()?;
             Ok((PrimitiveStorage {
                 topology: contract.topology,
                 has_indices: primitive.indices().is_some(),
@@ -2632,31 +2613,38 @@ fn collect_indices<'scope>(
     contract: PrimitiveContract,
     indices: crate::document::read::Indices<'_>,
 ) -> Result<MeteredVec<'scope, u32>> {
-    let restart = indices.restart;
-    let mut collected = ctx.metered_vec(ImportStorageClass::SceneConstruction, "gltf-index-values");
-    collected.try_reserve(ctx, contract.index_count)?;
-    for index in indices {
-        poll_parser_loop(ctx, collected.len())?;
-        if collected.len() == contract.index_count {
-            return Err(gltf_parse_error(
-                "glTF index stream exceeds its admitted count",
-            ));
-        }
-        // Reject the source-width restart sentinel before its original component type is lost.
-        if index == restart || index as usize >= contract.position_count {
-            return Err(gltf_parse_error(format_args!(
-                "glTF index {} contains invalid vertex index {index}",
-                collected.len()
-            )));
-        }
-        collected.try_push_reserved(index)?;
-    }
-    if collected.len() != contract.index_count {
-        return Err(gltf_parse_error(
-            "glTF index stream differs from its admitted count",
-        ));
-    }
-    Ok(collected)
+    ctx.with_work_group(
+        [(ImportWorkClass::TopologyCells, to_u64(contract.index_count))],
+        |ctx, work| -> Result<_> {
+            let restart = indices.restart;
+            let mut collected =
+                ctx.metered_vec(ImportStorageClass::SceneConstruction, "gltf-index-values");
+            collected.try_reserve(ctx, contract.index_count)?;
+            for (ordinal, index) in indices.enumerate() {
+                poll_parser_loop(ctx, ordinal)?;
+                if collected.len() == contract.index_count {
+                    return Err(gltf_parse_error(
+                        "glTF index stream exceeds its admitted count",
+                    ));
+                }
+                // Reject restart before the source component type is lost.
+                if index == restart || index as usize >= contract.position_count {
+                    return Err(gltf_parse_error(format_args!(
+                        "glTF index {} contains invalid vertex index {index}",
+                        collected.len()
+                    )));
+                }
+                collected.try_push_reserved(index)?;
+                work.complete([1])?;
+            }
+            if collected.len() != contract.index_count {
+                return Err(gltf_parse_error(
+                    "glTF index stream differs from its admitted count",
+                ));
+            }
+            Ok(collected)
+        },
+    )
 }
 
 fn build_scene_nodes<'scope, 'document>(
@@ -2828,14 +2816,15 @@ fn build_scene_nodes<'scope, 'document>(
                 })?;
         }
 
-        for (child_ordinal, child_index) in graph.children.as_slice()[node_index]
+        for (completed, (child_ordinal, child_index)) in graph.children.as_slice()[node_index]
             .as_slice()
             .iter()
             .copied()
             .enumerate()
             .rev()
+            .enumerate()
         {
-            poll_parser_loop(ctx, child_ordinal)?;
+            poll_parser_loop(ctx, completed)?;
             pending.try_push_reserved((
                 child_index,
                 Presence::Present(NodeParent::new(
@@ -3778,12 +3767,12 @@ fn preflight_node_graph<'document, 'scope>(
             // Borrowing rows removes the handle table, not the observable visit prefixes.
             ctx.poll()?;
             for (ordinal, _) in gltf.nodes().enumerate() {
-                if ordinal.is_multiple_of(PARSER_POLL_INTERVAL) {
+                if ordinal.is_multiple_of(GEOMETRY_POLL_INTERVAL) {
                     ctx.poll()?;
                 }
                 work.complete([1, 1])?;
             }
-            if node_count.is_multiple_of(PARSER_POLL_INTERVAL) {
+            if node_count.is_multiple_of(GEOMETRY_POLL_INTERVAL) {
                 ctx.poll()?;
             }
             Ok(())
@@ -3818,7 +3807,7 @@ fn preflight_node_graph<'document, 'scope>(
                 ctx.poll()?;
                 let mut node_children = node.children();
                 loop {
-                    if child_indices.len().is_multiple_of(PARSER_POLL_INTERVAL) {
+                    if child_indices.len().is_multiple_of(GEOMETRY_POLL_INTERVAL) {
                         ctx.poll()?;
                     }
                     let next = node_children.next();
@@ -3988,6 +3977,7 @@ fn validate_graph_depth_and_cycles(
         "gltf-node-depth-queue",
     )?;
     for (node_index, parent) in parents.iter().enumerate() {
+        poll_parser_loop(ctx, node_index)?;
         if parent.is_none() {
             depths.as_mut_slice()[node_index] = 1;
             queue.try_push_reserved(node_index)?;
@@ -4138,7 +4128,7 @@ fn select_and_validate_scene_roots<'scope>(
                     "gltf-derived-scene-roots",
                 );
                 work.complete_all()?;
-                for (chunk_index, chunk) in parents.chunks(PARSER_POLL_INTERVAL).enumerate() {
+                for (chunk_index, chunk) in parents.chunks(GEOMETRY_POLL_INTERVAL).enumerate() {
                     ctx.poll()?;
                     let root_count = chunk.iter().filter(|parent| parent.is_none()).count();
                     if root_count == 0 {
@@ -4147,7 +4137,7 @@ fn select_and_validate_scene_roots<'scope>(
                     work.replenish(to_u64(root_count))?;
                     roots.try_reserve(ctx, root_count)?;
                     let base = chunk_index
-                        .checked_mul(PARSER_POLL_INTERVAL)
+                        .checked_mul(GEOMETRY_POLL_INTERVAL)
                         .ok_or_else(|| ctx.allocation_failure("gltf-derived-root-index"))?;
                     for (offset, parent) in chunk.iter().enumerate() {
                         if parent.is_some() {
@@ -4323,10 +4313,8 @@ fn collect_inverse_bind_matrices<'region, 'scope>(
                     )
                 })?;
             with_poll(ctx, |ctx| -> Result<()> {
-                for cols in matrices {
-                    if collected.len().is_multiple_of(PARSER_POLL_INTERVAL) {
-                        ctx.poll()?;
-                    }
+                for (row, cols) in matrices.enumerate() {
+                    poll_parser_loop(ctx, row)?;
                     if collected.len() == joint_count {
                         return Err(gltf_parse_error(
                             "glTF inverse bind matrix reader exceeded the joint count",
@@ -4347,7 +4335,7 @@ fn collect_inverse_bind_matrices<'region, 'scope>(
             })??;
         } else {
             for joint in 0..joint_count {
-                if joint.is_multiple_of(PARSER_POLL_INTERVAL) {
+                if joint.is_multiple_of(GEOMETRY_POLL_INTERVAL) {
                     ctx.poll()?;
                 }
                 collected.try_push_reserved(Mat4::IDENTITY)?;
@@ -4409,10 +4397,10 @@ fn build_mesh_instance_deformations<'scope>(
                             weights.len(),
                             "gltf-normalized-instance-weights",
                         )?;
-                        for chunk in weights.chunks(PARSER_POLL_INTERVAL) {
-                            ctx.poll()?;
-                            owned.try_extend_from_slice_reserved(chunk)?;
-                            work.complete([to_u64(chunk.len()), to_u64(chunk.len())])?;
+                        for (index, &weight) in weights.iter().enumerate() {
+                            poll_parser_loop(ctx, index)?;
+                            owned.try_push_reserved(weight)?;
+                            work.complete([1, 1])?;
                         }
                         Ok(owned)
                     },
@@ -4844,21 +4832,10 @@ mod provenance_work_tests {
         }
         let capacity = pending.capacity();
         if exercise {
-            // Match production's prepaid work and non-nestable sample decode boundary.
-            let work_bound = provenance_work_bound(scope, pending.len())?;
-            let charged = scope.charge_work(work_bound);
-            if let Err(failure) = charged {
+            if let Err(failure) = try_extend_provenance_unique(scope, &mut values, &mut pending) {
                 assert_eq!(values.as_slice(), &[91, 72]);
-                return Err(failure.into());
+                return Err(failure);
             }
-            scope.with_work_group(
-                [(ImportWorkClass::AnimationCells, 1)],
-                |scope, work| -> Result<()> {
-                    try_extend_provenance_unique(scope, &mut values, &mut pending)?;
-                    work.complete_all()?;
-                    Ok(())
-                },
-            )?;
             assert_eq!(&values.as_slice()[..2], &[91, 72]);
             assert_eq!(values.len(), count + 2);
             for (index, &source) in values.as_slice()[2..].iter().enumerate() {
@@ -4869,8 +4846,6 @@ mod provenance_work_tests {
             // Reusing the scratch must append another owner without merging with the prefix.
             values.try_reserve(scope, 2)?;
             pending.try_extend_from_slice(scope, &[7, 2, 7])?;
-            let work_bound = provenance_work_bound(scope, pending.len())?;
-            scope.charge_work(work_bound)?;
             try_extend_provenance_unique(scope, &mut values, &mut pending)?;
             assert_eq!(&values.as_slice()[count + 2..], &[2, 7]);
         }
@@ -4914,7 +4889,7 @@ mod provenance_work_tests {
     }
 
     #[test]
-    fn provenance_work_admission_aborts_before_appending_an_owner() -> TestResult<()> {
+    fn provenance_work_limit_preserves_the_unmodified_owner_prefix() -> TestResult<()> {
         let (baseline, completed) = inspect_work(inspect_unique_sources, 64, false, None)?;
         assert!(completed);
         let baseline_work = consumed_work(&baseline);
@@ -4930,7 +4905,7 @@ mod provenance_work_tests {
                     }
                 ))
         ));
-        assert!(consumed_work(&failure) <= baseline_work);
+        assert_eq!(consumed_work(&failure), baseline_work + 1);
         Ok(())
     }
 }

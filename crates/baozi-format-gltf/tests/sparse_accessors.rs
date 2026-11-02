@@ -1052,6 +1052,47 @@ fn sparse_index_scan_decode_work_is_admitted_once_for_a_shared_accessor() -> Tes
 }
 
 #[test]
+fn sparse_index_rejection_retains_the_validated_index_prefix() -> TestResult<()> {
+    for component in [5121, 5123, 5125] {
+        let (document, [base, mut indices, values]) = sparse_triangle(component, false)?;
+        let size = match component {
+            5121 => 1,
+            5123 => 2,
+            5125 => 4,
+            _ => unreachable!(),
+        };
+        let first = indices[8..8 + size].to_vec();
+        indices[8 + size..8 + 2 * size].copy_from_slice(&first);
+        let primary = serde_json::to_vec(&document)?;
+        let primary_decode = primary.len() as u64;
+        let (result, diagnostics) = import_assets_result(
+            SOURCE,
+            [
+                (SOURCE, primary),
+                (BASE, base),
+                (INDICES, indices),
+                (VALUES, values),
+            ],
+            sidecar_options(),
+        )?;
+        assert!(diagnostics.is_empty());
+        let failure = expected_error(result)?;
+        assert_accessor_failure(&failure, 0)?;
+        assert!(gltf_failure_reason(&failure)?.contains("strictly increase"));
+        let decode = failure
+            .ledger()
+            .dimension(ImportDimension::DecodeWork)
+            .unwrap();
+        assert_eq!(decode.attempted(), primary_decode + 2);
+        assert_eq!(decode.consumed(), primary_decode + 1);
+        assert_eq!(failure.ledger().committed_canonical_members(), 0);
+        assert_eq!(failure.ledger().current_live_bytes(), 0);
+        assert_eq!(failure.ledger().active_reservations(), 0);
+    }
+    Ok(())
+}
+
+#[test]
 fn dense_and_sparse_topology_index_accessors_must_not_be_normalized() -> TestResult<()> {
     for component in [5123, 5125] {
         for sparse in [false, true] {

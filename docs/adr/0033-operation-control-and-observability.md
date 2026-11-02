@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-10
-updated: 2026-11-02
+updated: 2026-11-03
 authors:
   - Codex
 decision_type: architecture
@@ -120,6 +120,13 @@ entry, explicit checkpoints, allocation, IO, external callbacks, semantic-parent
 success retain their full checks outside work/storage guards. This replaces historical per-action
 callback counts with a bounded cadence without promising elapsed-time interruption of blocking work.
 
+`MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS` supplies the shared 256-action policy to the operation
+engine and first-party numeric collection loops. A text byte quantum is a separate policy:
+4,096 bytes do not mean 4,096 vector rows, indices, matrix appends or comparisons. Numeric
+loops count actual fixed-cost leaves, including inner steps of input-sized rows, and retain
+immediate completed work before a due poll. The morph VEC3 path uses vector-row ordinals,
+rather than a scalar-buffer length whose stride can skip the intended frontier.
+
 On cancellation, the coordinator stops work and returns a typed control cause. The owning operation
 discards unpublished staging, releases live reservations, and finalizes its own failure retaining
 prior diagnostics and ledger evidence. Post-process cancellation leaves the input `ValidatedScene`
@@ -135,6 +142,14 @@ is required for hard termination of hostile or non-cooperative code.
 Each progress event contains a stable owner-defined operation phase, unit kind, monotonically
 increasing completed work, optional nondecreasing total, and operation-local sequence number.
 Percentages are a presentation concern and are not emitted when total work is unknown.
+
+The current first-party import session emits acquisition, detection, validation and final
+publication events. The existence of Decode/Normalize vocabulary does not promise delivery
+inside every parser loop. Signal/deadline polling is independent of progress delivery; zero
+transient delivery limits still preserve the mandatory final event and cancellation gate.
+Primary Exact lengths can supply known byte totals; primary Hint/absent lengths and aggregate
+dependency acquisition retain unknown totals. A completed callback count is not a percentage
+of semantic parsing, and validation need not emit a completed-equals-total event.
 
 `ImportProgressPhase` is transient observer vocabulary owned by `baozi-import`. It is distinct from
 ADR 0046's sealed `ImportPhaseEvidence` and ADR 0047's `ImportLedgerPhase`. Progress events may be
@@ -289,3 +304,17 @@ Negative:
 | Dependency direction | Workspace graph checks prove `baozi-operation` is a leaf, core does not depend on import, and postprocess does not depend on import. |
 | Phase separation | Dropped/coalesced progress and arbitrary legal ledger-phase transitions never mutate lifecycle evidence. |
 | Host admission | An instrumented host gate alone controls concurrent operation entry; changing its capacity changes concurrency without any Baozi-global queue or semaphore. |
+
+## Amendment History
+
+### 2026-11-03: Share parser cadence and qualify observable progress
+
+The operation engine and first-party numeric loops use one geometry-action policy, separate
+from text byte frontiers. Actual parser/index/vector/comparison completion precedes due polls;
+comparison envelopes do not consume unperformed tails. Cancellation can therefore be observed
+earlier and WorkUnits evidence changes deliberately. Scene values and malformed-input policy
+remain required. Current progress is phase-oriented, with honest unknown totals and the
+mandatory final gate; it does not promise a progress event for every parser action.
+
+Review basis: the [bounded-control design](../research/2026-11-02-bounded-operation-control-design.md)
+and the operation architecture continuation's P6 real-format and source-review obligations.

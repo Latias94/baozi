@@ -10,7 +10,7 @@ pub(super) struct InfluenceContract {
     vertex_count: usize,
     pub(super) offset_count: usize,
     pub(super) cell_count: usize,
-    pub(super) work: u64,
+    setup_work: u64,
 }
 
 pub(super) struct InfluenceRows<'scope> {
@@ -82,24 +82,16 @@ pub(super) fn preflight(
             .checked_add(1)
             .ok_or_else(|| ctx.allocation_failure("gltf-influence-offset-count"))?
     };
-    // Two accessor lookups per set, bounded construction, decoding/writing every lane,
-    // and one stored offset per row. The row scratch heap sort takes at most 2R comparisons
-    // per level; the remaining 16R covers collection, adjacent checks, conversion and
-    // stored-domain extrema. Fixed per-set work also admits optional bounds setup/finalization.
-    // Ordinary work scopes cannot nest during decoding.
     let lookup_levels = u64::from(usize::BITS - primitive.attributes.len().leading_zeros());
-    let row_levels = u64::from(u32::BITS - row_width.leading_zeros());
-    let work = u64::from(joints)
-        .checked_mul(2 * lookup_levels + 48)
-        .and_then(|work| work.checked_add(to_u64(cell_count).checked_mul(2 * row_levels + 16)?))
-        .and_then(|work| work.checked_add(to_u64(offset_count)))
+    let setup_work = u64::from(joints)
+        .checked_mul(2 * lookup_levels + 48 + 18)
         .ok_or_else(|| ctx.allocation_failure("gltf-influence-work"))?;
     Ok(InfluenceContract {
         set_count: joints,
         vertex_count,
         offset_count,
         cell_count,
-        work,
+        setup_work,
     })
 }
 
@@ -132,34 +124,53 @@ pub(super) fn build_rows<'scope>(
     );
     sets.try_reserve(ctx, contract.set_count as usize)?;
     let mut quantized = true;
-    for set in 0..contract.set_count {
-        poll_parser_loop(ctx, set as usize)?;
-        let joint_source = primitive
-            .get(&Semantic::Joints(set))
-            .ok_or_else(|| gltf_parse_error("glTF joint accessor disappeared"))?;
-        let weight_source = primitive
-            .get(&Semantic::Weights(set))
-            .ok_or_else(|| gltf_parse_error("glTF weight accessor disappeared"))?;
-        let joints = accessor::bind(ctx, joint_source, buffers)?
-            .joints()
-            .ok_or_else(|| gltf_parse_error("glTF joint accessor encoding is invalid"))?;
-        let weights = accessor::bind(ctx, weight_source, buffers)?
-            .weights()
-            .ok_or_else(|| gltf_parse_error("glTF weight accessor encoding is invalid"))?;
-        let joint_bounds =
-            accessor::MeshAccessorBounds::new(joint_source.row(), joint_source.index(), false)?;
-        let weight_bounds =
-            accessor::MeshAccessorBounds::new(weight_source.row(), weight_source.index(), false)?;
-        quantized &= !matches!(&weights, ReadWeights::F32(_));
-        // MeteredVec restricts mutable slices to Copy elements. Each inline cell holds only
-        // borrowed iterator state; interior mutation cannot replace or grow the metered table.
-        sets.try_push_reserved(RefCell::new(InfluenceSet {
-            joints,
-            weights,
-            joint_bounds,
-            weight_bounds,
-        }))?;
-    }
+    ctx.with_work_group(
+        [
+            (
+                ImportWorkClass::AttributeStreams,
+                2 * u64::from(contract.set_count),
+            ),
+            (ImportWorkClass::WorkUnits, contract.setup_work),
+        ],
+        |ctx, work| -> Result<()> {
+            let per_set = contract.setup_work / u64::from(contract.set_count);
+            for set in 0..contract.set_count {
+                poll_parser_loop(ctx, set as usize)?;
+                let joint_source = primitive
+                    .get(&Semantic::Joints(set))
+                    .ok_or_else(|| gltf_parse_error("glTF joint accessor disappeared"))?;
+                let weight_source = primitive
+                    .get(&Semantic::Weights(set))
+                    .ok_or_else(|| gltf_parse_error("glTF weight accessor disappeared"))?;
+                let joints = accessor::bind(ctx, joint_source, buffers)?
+                    .joints()
+                    .ok_or_else(|| gltf_parse_error("glTF joint accessor encoding is invalid"))?;
+                let weights = accessor::bind(ctx, weight_source, buffers)?
+                    .weights()
+                    .ok_or_else(|| gltf_parse_error("glTF weight accessor encoding is invalid"))?;
+                let joint_bounds = accessor::MeshAccessorBounds::new(
+                    joint_source.row(),
+                    joint_source.index(),
+                    false,
+                )?;
+                let weight_bounds = accessor::MeshAccessorBounds::new(
+                    weight_source.row(),
+                    weight_source.index(),
+                    false,
+                )?;
+                quantized &= !matches!(&weights, ReadWeights::F32(_));
+                // Inline cells retain only borrowed iterator state, never growing the table.
+                sets.try_push_reserved(RefCell::new(InfluenceSet {
+                    joints,
+                    weights,
+                    joint_bounds,
+                    weight_bounds,
+                }))?;
+                work.complete([2, per_set])?;
+            }
+            Ok(())
+        },
+    )?;
 
     let mut nonzero_joints = try_vec_capacity(
         ctx,
@@ -167,53 +178,82 @@ pub(super) fn build_rows<'scope>(
         (contract.set_count as usize) * 4,
         "gltf-influence-unique-joints",
     )?;
+    ctx.with_work_group(
+        [(ImportWorkClass::WorkUnits, 1)],
+        |_ctx, work| -> Result<()> {
+            offsets.try_push_reserved(0)?;
+            work.complete([1])?;
+            Ok(())
+        },
+    )?;
+    let row_width = u64::from(contract.set_count) * 4;
+    let sample_work = 8 * accessor::MESH_SAMPLE_WORK_PER_LANE;
+    let row_work = u64::from(contract.set_count) * sample_work + row_width;
     let mut non_unit_rows = 0;
-    offsets.try_push_reserved(0)?;
-    for vertex in 0..contract.vertex_count {
-        poll_parser_loop(ctx, vertex)?;
+    for _vertex in 0..contract.vertex_count {
         nonzero_joints.truncate(0);
         let mut integer_sum = 0u64;
         let mut float_sum = 0f64;
-        for (set, readers) in sets.as_slice().iter().enumerate() {
-            poll_parser_loop(ctx, influences.len())?;
-            let (joints, weights, raw_sum) = {
-                let mut readers = readers.borrow_mut();
-                let joints = readers.joints.next().ok_or_else(|| {
-                    gltf_parse_error("glTF joint stream is shorter than its admitted count")
-                })?;
-                let weights = next_weights(&mut readers.weights).ok_or_else(|| {
-                    gltf_parse_error("glTF weight stream is shorter than its admitted count")
-                })?;
-                if weights
-                    .decoded
-                    .iter()
-                    .any(|weight| !weight.is_finite() || *weight < 0.0)
-                {
-                    return Err(gltf_parse_error(
-                        "glTF influence weights must be finite and non-negative",
-                    ));
+        ctx.with_work_group(
+            [
+                (
+                    ImportWorkClass::AttributeCells,
+                    2 * u64::from(contract.set_count),
+                ),
+                (ImportWorkClass::InfluenceCells, row_width),
+                (ImportWorkClass::WorkUnits, row_work),
+            ],
+            |ctx, work| -> Result<()> {
+                // A vertex can contain arbitrarily many sets. Count each fixed decode/lane.
+                let mut actions = 0usize;
+                for (set, readers) in sets.as_slice().iter().enumerate() {
+                    poll_parser_loop(ctx, actions)?;
+                    let (joints, weights, raw_sum) = {
+                        let mut readers = readers.borrow_mut();
+                        let joints = readers.joints.next().ok_or_else(|| {
+                            gltf_parse_error("glTF joint stream is shorter than its admitted count")
+                        })?;
+                        let weights = next_weights(&mut readers.weights).ok_or_else(|| {
+                            gltf_parse_error(
+                                "glTF weight stream is shorter than its admitted count",
+                            )
+                        })?;
+                        if weights
+                            .decoded
+                            .iter()
+                            .any(|weight| !weight.is_finite() || *weight < 0.0)
+                        {
+                            return Err(gltf_parse_error(
+                                "glTF influence weights must be finite and non-negative",
+                            ));
+                        }
+                        readers.joint_bounds.observe_stored(joints.map(f32::from))?;
+                        readers.weight_bounds.observe_stored(weights.stored)?;
+                        (joints, weights.decoded, weights.unit_sum)
+                    };
+                    work.complete([2, 0, sample_work])?;
+                    actions += 1;
+                    integer_sum += raw_sum;
+                    let source_base = (set as u32) * 4;
+                    for lane in 0..4 {
+                        poll_parser_loop(ctx, actions)?;
+                        let weight = weights[lane];
+                        float_sum += f64::from(weight);
+                        if weight > 0.0 {
+                            nonzero_joints.try_push_reserved(joints[lane])?;
+                        }
+                        influences.try_push_reserved(InfluenceAuthoring::new(
+                            u32::from(joints[lane]),
+                            weight,
+                            source_base + lane as u32,
+                        ))?;
+                        work.complete([0, 1, 1])?;
+                        actions += 1;
+                    }
                 }
-                readers.joint_bounds.observe_stored(joints.map(f32::from))?;
-                readers.weight_bounds.observe_stored(weights.stored)?;
-                (joints, weights.decoded, weights.unit_sum)
-            };
-            // The row width is in the u32 domain; summing u16 lanes cannot overflow u64.
-            integer_sum += raw_sum;
-            // Preflight checked the complete width, endpoint and output capacity.
-            let source_base = (set as u32) * 4;
-            for lane in 0..4 {
-                let weight = weights[lane];
-                float_sum += f64::from(weight);
-                if weight > 0.0 {
-                    nonzero_joints.try_push_reserved(joints[lane])?;
-                }
-                influences.try_push_reserved(InfluenceAuthoring::new(
-                    u32::from(joints[lane]),
-                    weight,
-                    source_base + lane as u32,
-                ))?;
-            }
-        }
+                Ok(())
+            },
+        )?;
         if quantized && integer_sum != 65_535 {
             return Err(gltf_parse_error(
                 "glTF quantized influence weights must sum to one across all sets",
@@ -222,40 +262,60 @@ pub(super) fn build_rows<'scope>(
         if !quantized && (float_sum - 1.0).abs() > 2e-7 * nonzero_joints.len() as f64 {
             non_unit_rows += 1;
         }
-        let mut until_poll = 0;
-        nonzero_joints.try_sort_unstable_by(|left, right| -> Result<_> {
-            if until_poll == 0 {
-                ctx.poll()?;
-                until_poll = PARSER_POLL_INTERVAL;
-            }
-            until_poll -= 1;
-            Ok(left.cmp(right))
-        })?;
-        for (index, pair) in nonzero_joints.as_slice().windows(2).enumerate() {
-            poll_parser_loop(ctx, index)?;
-            if pair[0] == pair[1] {
-                return Err(gltf_parse_error(
-                    "glTF nonzero influence joint indices must be unique per vertex",
-                ));
-            }
-        }
-        offsets.try_push_reserved(authoring_u32(
-            ctx,
-            influences.len(),
-            "gltf-influence-offset",
-        )?)?;
+        ctx.with_work_group(
+            [(ImportWorkClass::WorkUnits, 0)],
+            |ctx, work| -> Result<()> {
+                let mut actions = 0usize;
+                nonzero_joints.try_sort_unstable_by(|left, right| -> Result<_> {
+                    poll_parser_loop(ctx, actions)?;
+                    work.replenish(1)?;
+                    let ordering = left.cmp(right);
+                    work.complete([1])?;
+                    actions += 1;
+                    Ok(ordering)
+                })?;
+                for pair in nonzero_joints.as_slice().windows(2) {
+                    poll_parser_loop(ctx, actions)?;
+                    work.replenish(1)?;
+                    let duplicate = pair[0] == pair[1];
+                    work.complete([1])?;
+                    actions += 1;
+                    if duplicate {
+                        return Err(gltf_parse_error(
+                            "glTF nonzero influence joint indices must be unique per vertex",
+                        ));
+                    }
+                }
+                poll_parser_loop(ctx, actions)?;
+                work.replenish(1)?;
+                offsets.try_push_reserved(authoring_u32(
+                    ctx,
+                    influences.len(),
+                    "gltf-influence-offset",
+                )?)?;
+                work.complete([1])?;
+                Ok(())
+            },
+        )?;
     }
-    for (set, readers) in sets.as_slice().iter().enumerate() {
-        poll_parser_loop(ctx, set)?;
-        let mut readers = readers.borrow_mut();
-        if readers.joints.next().is_some() || next_weights(&mut readers.weights).is_some() {
-            return Err(gltf_parse_error(
-                "glTF influence stream exceeds its admitted count",
-            ));
-        }
-        readers.joint_bounds.finish()?;
-        readers.weight_bounds.finish()?;
-    }
+    ctx.with_work_group(
+        [(ImportWorkClass::WorkUnits, u64::from(contract.set_count))],
+        |ctx, work| -> Result<()> {
+            for (set, readers) in sets.as_slice().iter().enumerate() {
+                poll_parser_loop(ctx, set)?;
+                let mut readers = readers.borrow_mut();
+                if readers.joints.next().is_some() || next_weights(&mut readers.weights).is_some() {
+                    return Err(gltf_parse_error(
+                        "glTF influence stream exceeds its admitted count",
+                    ));
+                }
+                readers.joint_bounds.finish()?;
+                readers.weight_bounds.finish()?;
+                work.complete([1])?;
+            }
+            Ok(())
+        },
+    )?;
     if influences.len() != contract.cell_count || offsets.len() != contract.offset_count {
         return Err(GltfFailure::internal("glTF influence output differs from preflight").into());
     }

@@ -777,6 +777,15 @@ fn later_set_negative_and_nonfinite_weights_are_invalid_documents() -> TestResul
         assert!(diagnostics.is_empty());
         let failure = expected_error(result)?;
         assert_gltf_failure(&failure, GltfFailureCode::InvalidDocument, None)?;
+        let cells = failure
+            .ledger()
+            .dimension(ImportDimension::InfluenceCells)
+            .unwrap();
+        // Two complete eight-lane rows and the third row's first set were appended.
+        assert_eq!(cells.consumed(), 20);
+        assert_eq!(failure.ledger().committed_canonical_members(), 0);
+        assert_eq!(failure.ledger().current_live_bytes(), 0);
+        assert_eq!(failure.ledger().active_reservations(), 0);
     }
     Ok(())
 }

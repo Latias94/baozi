@@ -10,9 +10,13 @@ use baozi_import::{
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 
+#[cfg(test)]
+#[path = "json_syntax/control_tests.rs"]
+mod control_tests;
+
 const UTF8_BOM: &[u8; 3] = &[0xef, 0xbb, 0xbf];
 const SCAN_CHUNK_BYTES: usize = 4 * 1024;
-const DUPLICATE_POLL_COMPARISONS: u64 = 4 * 1024;
+const DUPLICATE_POLL_COMPARISONS: u64 = baozi_import::MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS as u64;
 const MAX_JSON_NESTING_DEPTH: usize = 256;
 
 type ScanResult<T> = Result<T, ScanAbort>;
@@ -291,7 +295,7 @@ struct JsonScanner<'scope, 'bytes> {
     raw_base: u64,
     is_glb: bool,
     cursor: usize,
-    accounted_cursor: usize,
+    polled_cursor: usize,
     root_started: bool,
     root_end: Option<usize>,
     frames: MeteredVec<'scope, JsonFrame>,
@@ -313,7 +317,7 @@ impl<'scope, 'bytes> JsonScanner<'scope, 'bytes> {
             raw_base,
             is_glb,
             cursor: 0,
-            accounted_cursor: 0,
+            polled_cursor: 0,
             root_started: false,
             root_end: None,
             frames: ctx.metered_vec(
@@ -1241,6 +1245,8 @@ impl<'scope, 'bytes> JsonScanner<'scope, 'bytes> {
                     self.consume_string_bytes(work, content_start, 1, ctx)?;
                     if let Some(hasher) = hasher.as_mut() {
                         hasher.update([byte]);
+                        #[cfg(test)]
+                        control_tests::key_bytes_hashed(self.cursor, hasher);
                     }
                 }
                 _ => {
@@ -1248,6 +1254,8 @@ impl<'scope, 'bytes> JsonScanner<'scope, 'bytes> {
                     self.enforce_string_bytes(work, content_start, width, ctx)?;
                     if let Some(hasher) = hasher.as_mut() {
                         hasher.update(&self.bytes[self.cursor..self.cursor + width]);
+                        #[cfg(test)]
+                        control_tests::key_bytes_hashed(self.cursor + width, hasher);
                     }
                     self.consume(work, width, ctx)?;
                 }
@@ -1636,6 +1644,10 @@ impl<'scope, 'bytes> JsonScanner<'scope, 'bytes> {
             0xf0..=0xf4 => 4,
             _ => 1,
         };
+        // Poll before classifying or hashing this indivisible raw unit.
+        if self.cursor - self.polled_cursor + width > SCAN_CHUNK_BYTES {
+            self.flush(work, ctx)?;
+        }
         let end = self.cursor.saturating_add(width).min(self.bytes.len());
         let encoded = &self.bytes[self.cursor..end];
         match std::str::from_utf8(encoded) {
@@ -1755,12 +1767,16 @@ impl<'scope, 'bytes> JsonScanner<'scope, 'bytes> {
         amount: usize,
         ctx: &mut ParseExecution<'_, 'scope>,
     ) -> ScanResult<()> {
+        if self.cursor - self.polled_cursor + amount > SCAN_CHUNK_BYTES {
+            self.flush(work, ctx)?;
+        }
         self.cursor = self
             .cursor
             .checked_add(amount)
             .filter(|end| *end <= self.bytes.len())
             .ok_or_else(|| ctx.allocation_failure("gltf-json-scan-offset"))?;
-        if self.cursor - self.accounted_cursor >= SCAN_CHUNK_BYTES {
+        work.complete([to_u64(amount)])?;
+        if self.cursor - self.polled_cursor >= SCAN_CHUNK_BYTES {
             self.flush(work, ctx)?;
         }
         Ok(())
@@ -1768,15 +1784,12 @@ impl<'scope, 'bytes> JsonScanner<'scope, 'bytes> {
 
     fn flush(
         &mut self,
-        work: &mut ImportWorkScope<'_, 1>,
+        _work: &mut ImportWorkScope<'_, 1>,
         ctx: &mut ParseExecution<'_, 'scope>,
     ) -> ScanResult<()> {
-        let completed = self.cursor - self.accounted_cursor;
-        if completed != 0 {
-            work.complete([to_u64(completed)])?;
-            self.accounted_cursor = self.cursor;
-        }
-        Ok(ctx.poll()?)
+        ctx.poll()?;
+        self.polled_cursor = self.cursor;
+        Ok(())
     }
 
     fn absolute_offset(
@@ -1997,24 +2010,26 @@ fn validate_duplicate_keys<'region>(
     raw_base: u64,
     keys: &mut MeteredVec<'_, JsonKey>,
 ) -> ParseResult<()> {
-    let sort_work = duplicate_sort_work(keys.len());
-    if sort_work != 0 {
+    if keys.len() > 1 {
         ctx.with_work_group(
-            [(ImportWorkClass::WorkUnits, sort_work)],
+            [(ImportWorkClass::WorkUnits, 0)],
             |ctx, work| -> ParseResult<()> {
                 let mut comparisons = 0_u64;
                 keys.try_sort_unstable_by(|left, right| -> Result<Ordering, ParseFailure> {
-                    comparisons = comparisons.saturating_add(1);
                     if comparisons.is_multiple_of(DUPLICATE_POLL_COMPARISONS) {
                         ctx.poll()?;
                     }
-                    Ok(left
+                    work.replenish(1)?;
+                    let ordering = left
                         .object_id
                         .cmp(&right.object_id)
                         .then_with(|| left.digest.cmp(&right.digest))
-                        .then_with(|| left.raw_start.cmp(&right.raw_start)))
+                        .then_with(|| left.raw_start.cmp(&right.raw_start));
+                    work.complete([1])?;
+                    comparisons += 1;
+                    Ok(ordering)
                 })?;
-                work.complete_all()
+                Ok(())
             },
         )?;
     }
@@ -2024,13 +2039,25 @@ fn validate_duplicate_keys<'region>(
     let mut group_start = 0usize;
     while group_start < keys.len() {
         ctx.poll()?;
-        let mut group_end = group_start + 1;
-        while group_end < keys.len()
-            && keys[group_end].object_id == keys[group_start].object_id
-            && keys[group_end].digest == keys[group_start].digest
-        {
-            group_end += 1;
-        }
+        let group_end = ctx.with_work(&comparison_work, [0], |ctx, work| -> ParseResult<_> {
+            let mut end = group_start + 1;
+            while end < keys.len() {
+                if (end - group_start - 1)
+                    .is_multiple_of(baozi_import::MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS)
+                {
+                    ctx.poll()?;
+                }
+                work.replenish(1)?;
+                let same = keys[end].object_id == keys[group_start].object_id
+                    && keys[end].digest == keys[group_start].digest;
+                work.complete([1])?;
+                if !same {
+                    break;
+                }
+                end += 1;
+            }
+            Ok(end)
+        })?;
 
         for left in group_start..group_end {
             for right in left + 1..group_end {
@@ -2059,15 +2086,6 @@ fn validate_duplicate_keys<'region>(
     Ok(())
 }
 
-fn duplicate_sort_work(key_count: usize) -> u64 {
-    if key_count <= 1 {
-        return 0;
-    }
-    let count = to_u64(key_count);
-    let levels = u64::from(usize::BITS - (key_count - 1).leading_zeros());
-    count.saturating_mul(levels.saturating_mul(4).saturating_add(4))
-}
-
 fn decoded_keys_equal<'region>(
     ctx: &mut ParseExecution<'region, '_>,
     comparison_work: &ImportWorkGroup<'region, 1>,
@@ -2075,49 +2093,37 @@ fn decoded_keys_equal<'region>(
     left: &JsonKey,
     right: &JsonKey,
 ) -> ParseResult<bool> {
-    let work_amount = left
-        .content_end
-        .checked_sub(left.content_start)
-        .and_then(|left_len| {
-            right
-                .content_end
-                .checked_sub(right.content_start)
-                .and_then(|right_len| left_len.checked_add(right_len))
-        })
-        .map(to_u64)
-        .filter(|amount| *amount != 0)
-        .unwrap_or(1);
-    ctx.with_work(
-        comparison_work,
-        [work_amount],
-        |ctx, work| -> ParseResult<bool> {
-            let mut left = DecodedScalars::new(bytes, left.content_start, left.content_end);
-            let mut right = DecodedScalars::new(bytes, right.content_start, right.content_end);
-            let mut scalars = 0usize;
-            let equal = loop {
-                if scalars.is_multiple_of(SCAN_CHUNK_BYTES) {
-                    ctx.poll()?;
+    ctx.with_work(comparison_work, [0], |ctx, work| -> ParseResult<bool> {
+        let mut left = DecodedScalars::new(bytes, left.content_start, left.content_end);
+        let mut right = DecodedScalars::new(bytes, right.content_start, right.content_end);
+        let mut raw_since_poll = SCAN_CHUNK_BYTES;
+        let equal = loop {
+            // Two escaped surrogate pairs consume at most 24 raw bytes.
+            if raw_since_poll + 24 > SCAN_CHUNK_BYTES {
+                ctx.poll()?;
+                raw_since_poll = 0;
+            }
+            work.replenish(1)?;
+            let before = (left.cursor, right.cursor);
+            let compared = (left.next_scalar(), right.next_scalar());
+            work.complete([1])?;
+            raw_since_poll += left.cursor - before.0 + right.cursor - before.1;
+            match compared {
+                (Ok(Some(left)), Ok(Some(right))) if left == right => {}
+                (Ok(None), Ok(None)) => break true,
+                (Ok(_), Ok(_)) => break false,
+                _ => {
+                    return Err(ctx.format_failure(GltfFailure::invalid_json(
+                        "json-syntax-map",
+                        0,
+                        0,
+                        "validated JSON key could not be decoded during comparison",
+                    )));
                 }
-                match (left.next_scalar(), right.next_scalar()) {
-                    (Ok(Some(left)), Ok(Some(right))) if left == right => {
-                        scalars = scalars.saturating_add(1);
-                    }
-                    (Ok(None), Ok(None)) => break true,
-                    (Ok(_), Ok(_)) => break false,
-                    _ => {
-                        return Err(ctx.format_failure(GltfFailure::invalid_json(
-                            "json-syntax-map",
-                            0,
-                            0,
-                            "validated JSON key could not be decoded during comparison",
-                        )));
-                    }
-                }
-            };
-            work.complete_all()?;
-            Ok(equal)
-        },
-    )
+            }
+        };
+        Ok(equal)
+    })
 }
 
 pub(crate) struct DecodedScalars<'bytes> {
@@ -2129,6 +2135,10 @@ pub(crate) struct DecodedScalars<'bytes> {
 impl<'bytes> DecodedScalars<'bytes> {
     pub(crate) const fn new(bytes: &'bytes [u8], cursor: usize, end: usize) -> Self {
         Self { bytes, cursor, end }
+    }
+
+    pub(crate) const fn position(&self) -> usize {
+        self.cursor
     }
 
     pub(crate) fn next_scalar(&mut self) -> Result<Option<u32>, ()> {
@@ -2299,13 +2309,12 @@ mod tests {
         }
     }
 
-    fn inspect_admission(bytes: &[u8], inspect: Inspect) -> TestResult {
-        let inspected = Arc::new(AtomicBool::new(false));
+    pub(super) fn admission_plan(
+        inspect: Inspect,
+        inspected: Arc<AtomicBool>,
+    ) -> Result<baozi_import::ImportPlan, Box<dyn Error>> {
         let mut registry = RegistryBuilder::new();
-        registry.register(InspectAdmission {
-            inspect,
-            inspected: Arc::clone(&inspected),
-        })?;
+        registry.register(InspectAdmission { inspect, inspected })?;
         let request = registry.freeze(RegistryBuildLimits::default())?.plan(
             &ImportRequest::from_layers(
                 ImportRequestLayer::default(),
@@ -2317,6 +2326,12 @@ mod tests {
             ),
             OptionCompileLimits::default(),
         )?;
+        Ok(request)
+    }
+
+    fn inspect_admission(bytes: &[u8], inspect: Inspect) -> TestResult {
+        let inspected = Arc::new(AtomicBool::new(false));
+        let request = admission_plan(inspect, Arc::clone(&inspected))?;
         let result = request.read_bytes(
             AssetPath::new("mapping.gltf")?,
             bytes,
@@ -2355,7 +2370,7 @@ mod tests {
         );
     }
 
-    fn glb(json: &[u8]) -> Vec<u8> {
+    pub(super) fn glb(json: &[u8]) -> Vec<u8> {
         let json_length = (json.len() + 3) & !3;
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"glTF");

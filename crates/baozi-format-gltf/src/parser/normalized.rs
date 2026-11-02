@@ -1,10 +1,9 @@
 //! Canonical authoring from the owned, backend-independent glTF model.
 
 use super::{
-    ContentError, GltfFailure, PARSER_POLL_INTERVAL, Result, animation, authoring_u32,
-    gltf_parse_error,
+    ContentError, GltfFailure, Result, animation, authoring_u32, gltf_parse_error,
     model::*,
-    morph,
+    morph, poll_parser_loop,
     source_profile::{self, SelectedSourceProfile},
     to_u64, uri,
 };
@@ -565,43 +564,57 @@ pub(super) fn submit_parts<'session>(
                     .ok_or_else(|| ctx.allocation_failure("gltf-profile-provenance-count"))?;
                 provenance_nodes.try_reserve(ctx, value)
             }?;
-            for index in 0..resource_count {
-                let local = authoring_u32(ctx, index, "gltf-profile-source-identity")?;
-                let locator = if index == 0 {
-                    &selected_sources
-                        .required(ctx, source_profile::DOCUMENT)?
-                        .locator
-                } else {
-                    locators.as_slice().get(index - 1).ok_or_else(|| {
-                        gltf_parse_error("glTF profile source locator table is incomplete")
-                    })?
-                };
-                source_identities.try_push_reserved(SourceIdentityAuthoring::new(
-                    ResourceIdentityLocalId::new(local),
-                    &format,
-                    locator,
-                ))?;
-                provenance_nodes.try_push_reserved(ProvenanceNodeAuthoring::source(
-                    SourceIdentityLocalId::new(local),
-                ))?;
-            }
+            let document_locator = &selected_sources
+                .required(ctx, source_profile::DOCUMENT)?
+                .locator;
             let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
+            ctx.with_work(
+                &work_group,
+                [to_u64(resource_count)],
+                |ctx, work| -> Result<()> {
+                    for index in 0..resource_count {
+                        poll_parser_loop(ctx, index)?;
+                        let local = authoring_u32(ctx, index, "gltf-profile-source-identity")?;
+                        let locator = if index == 0 {
+                            document_locator
+                        } else {
+                            locators.as_slice().get(index - 1).ok_or_else(|| {
+                                gltf_parse_error("glTF profile source locator table is incomplete")
+                            })?
+                        };
+                        source_identities.try_push_reserved(SourceIdentityAuthoring::new(
+                            ResourceIdentityLocalId::new(local),
+                            &format,
+                            locator,
+                        ))?;
+                        provenance_nodes.try_push_reserved(ProvenanceNodeAuthoring::source(
+                            SourceIdentityLocalId::new(local),
+                        ))?;
+                        work.complete([1])?;
+                        #[cfg(test)]
+                        crate::control_tests::resource_source_completed(index + 1);
+                    }
+                    Ok(())
+                },
+            )?;
             for source in selected_sources.entries().iter().skip(1) {
-                ctx.with_work(
-                    &work_group,
-                    [1],
-                    |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-                )?;
-                let local =
-                    authoring_u32(ctx, source_identities.len(), "gltf-profile-source-identity")?;
-                source_identities.try_push_reserved(SourceIdentityAuthoring::new(
-                    ResourceIdentityLocalId::new(0),
-                    &format,
-                    &source.locator,
-                ))?;
-                provenance_nodes.try_push_reserved(ProvenanceNodeAuthoring::source(
-                    SourceIdentityLocalId::new(local),
-                ))?;
+                ctx.with_work(&work_group, [1], |ctx, work| -> Result<()> {
+                    let local = authoring_u32(
+                        ctx,
+                        source_identities.len(),
+                        "gltf-profile-source-identity",
+                    )?;
+                    source_identities.try_push_reserved(SourceIdentityAuthoring::new(
+                        ResourceIdentityLocalId::new(0),
+                        &format,
+                        &source.locator,
+                    ))?;
+                    provenance_nodes.try_push_reserved(ProvenanceNodeAuthoring::source(
+                        SourceIdentityLocalId::new(local),
+                    ))?;
+                    work.complete_all()?;
+                    Ok(())
+                })?;
             }
 
             let owner_count = [
@@ -628,30 +641,30 @@ pub(super) fn submit_parts<'session>(
             .try_fold(0usize, |count, value| count.checked_add(value))
             .ok_or_else(|| ctx.allocation_failure("gltf-profile-owner-count"))?;
             let additional_owner_source_count = [
-                appearance_storage
-                    .images
-                    .as_slice()
-                    .iter()
-                    .filter(|image| image.provenance != 0)
-                    .count(),
-                appearance_storage
-                    .sampler_provenance
-                    .as_slice()
-                    .iter()
-                    .filter(|&&source| source != 0)
-                    .count(),
-                appearance_storage
-                    .texture_provenance
-                    .as_slice()
-                    .iter()
-                    .filter(|&&source| source != 0)
-                    .count(),
-                appearance_storage
-                    .bindings
-                    .as_slice()
-                    .iter()
-                    .filter(|binding| binding.provenance != 0)
-                    .count(),
+                non_primary_provenance_count(
+                    ctx,
+                    appearance_storage
+                        .images
+                        .as_slice()
+                        .iter()
+                        .map(|image| std::slice::from_ref(&image.provenance)),
+                )?,
+                non_primary_provenance_count(
+                    ctx,
+                    std::iter::once(appearance_storage.sampler_provenance.as_slice()),
+                )?,
+                non_primary_provenance_count(
+                    ctx,
+                    std::iter::once(appearance_storage.texture_provenance.as_slice()),
+                )?,
+                non_primary_provenance_count(
+                    ctx,
+                    appearance_storage
+                        .bindings
+                        .as_slice()
+                        .iter()
+                        .map(|binding| std::slice::from_ref(&binding.provenance)),
+                )?,
                 non_primary_provenance_count(
                     ctx,
                     std::iter::once(geometry_storage.primitive_provenance.as_slice()),
@@ -1340,16 +1353,20 @@ fn non_primary_provenance_count<'a>(
         .try_fold(0usize, |mut count, sources| {
             ctx.charge_work(1)?;
             let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
-            for chunk in sources.chunks(PARSER_POLL_INTERVAL) {
-                ctx.with_work(
-                    &work_group,
-                    [to_u64(chunk.len())],
-                    |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-                )?;
-                count = count
-                    .checked_add(chunk.iter().filter(|&&source| source != 0).count())
-                    .ok_or_else(|| ctx.allocation_failure("gltf-profile-owner-source-count"))?;
-            }
+            ctx.with_work(
+                &work_group,
+                [to_u64(sources.len())],
+                |ctx, work| -> Result<()> {
+                    for (index, &source) in sources.iter().enumerate() {
+                        poll_parser_loop(ctx, index)?;
+                        count = count.checked_add(usize::from(source != 0)).ok_or_else(|| {
+                            ctx.allocation_failure("gltf-profile-owner-source-count")
+                        })?;
+                        work.complete([1])?;
+                    }
+                    Ok(())
+                },
+            )?;
             Ok(count)
         })
 }

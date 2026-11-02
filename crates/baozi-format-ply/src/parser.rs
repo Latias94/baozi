@@ -15,17 +15,17 @@ use baozi_import::authoring::{
 };
 use baozi_import::{
     DiagnosticByteRange, DiagnosticCode, DiagnosticSeverity, ImportProgressPhase,
-    ImportStorageClass, ImportWorkClass, ImportWorkGroup, ImportWorkScope, MeteredString,
-    MeteredVec, ParseContext, ParseExecution, ParseFailure, ParseResult, SourceScopeEntityKind,
-    TextConformanceViolation, TextConformanceViolationKind, TextDecodingMode,
-    TextDiagnosticLocation, TextInputOptions, TextInputRecordCursor,
+    ImportStorageClass, ImportWorkClass, ImportWorkGroup, ImportWorkScope,
+    MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS, MeteredString, MeteredVec, ParseContext, ParseExecution,
+    ParseFailure, ParseResult, SourceScopeEntityKind, TextConformanceViolation,
+    TextConformanceViolationKind, TextDecodingMode, TextDiagnosticLocation, TextInputOptions,
+    TextInputRecordCursor,
 };
 use std::cell::RefCell;
 use std::fmt;
 
-const SCAN_QUANTUM: usize = 4 * 1024;
-const METADATA_SORT_COMPARISON_CHUNK: u64 = 64;
-const MAX_NUMERIC_LITERAL_BYTES: usize = SCAN_QUANTUM;
+const TEXT_SCAN_QUANTUM: usize = 4 * 1024;
+const MAX_NUMERIC_LITERAL_BYTES: usize = TEXT_SCAN_QUANTUM;
 const BODY_WORK_ENTRIES: usize = 8;
 const BODY_RECORDS: usize = 0;
 const BODY_VERTICES: usize = 1;
@@ -882,7 +882,7 @@ fn parse_ascii_body<'session, 'source>(
                     text,
                     AsciiTextSurface::Body,
                     |ctx, line, line_offset, _line_location| {
-                        let plan = plan_ascii_row(ctx, line, element, parsed);
+                        let plan = plan_ascii_row(ctx, line, element, parsed)?;
                         ctx.with_work(&body_group, plan.amounts, |ctx, work| -> ParseResult<()> {
                             let mut cursor = AsciiRow::new(line, line_offset);
                             parse_row(ctx, element, &mut cursor, parsed, plan, work)?;
@@ -900,6 +900,10 @@ fn parse_ascii_body<'session, 'source>(
                     )
                 })
             })?;
+            #[cfg(test)]
+            if element.name.as_str() == "face" {
+                crate::control_tests::face_row_completed(parsed.face_vertex_counts.len());
+            }
         }
     }
     Ok(())
@@ -919,61 +923,67 @@ fn parse_binary_body<'session>(
         warn_for_element_schema(ctx, element)?;
         for record_index in 0..element.count {
             poll_collection(ctx, record_index)?;
-            let plan = plan_binary_row(ctx, &cursor, element, parsed);
+            let plan = plan_binary_row(ctx, &cursor, element, parsed)?;
             ctx.with_work(&body_group, plan.amounts, |ctx, work| -> ParseResult<()> {
                 parse_row(ctx, element, &mut cursor, parsed, plan, work)
             })?;
+            #[cfg(test)]
+            if element.name.as_str() == "face" {
+                crate::control_tests::face_row_completed(parsed.face_vertex_counts.len());
+            }
         }
     }
     Ok(())
 }
 
 fn plan_ascii_row(
-    ctx: &ParseExecution<'_, '_>,
+    ctx: &mut ParseExecution<'_, '_>,
     line: &str,
     element: &Element<'_>,
     parsed: &ParsedPly<'_>,
-) -> BodyWorkPlan {
+) -> ParseResult<BodyWorkPlan> {
     let mut plan = BodyWorkPlan::for_ascii_element(element);
-    let mut tokens = line.split_ascii_whitespace();
-    for property in element.properties.as_slice() {
+    let mut byte_index = 0;
+    for (property_index, property) in element.properties.as_slice().iter().enumerate() {
+        poll_collection(ctx, property_index)?;
         match property {
             Property::Scalar { .. } => {
-                let Some(token) = tokens.next() else {
-                    return plan;
+                let Some(token) = next_ascii_token(ctx, line, &mut byte_index)? else {
+                    return Ok(plan);
                 };
                 if !plan.add_token(token) {
-                    return plan;
+                    return Ok(plan);
                 }
             }
             Property::List { name, count_ty, .. } => {
-                let Some(count_token) = tokens.next() else {
-                    return plan;
+                let Some(count_token) = next_ascii_token(ctx, line, &mut byte_index)? else {
+                    return Ok(plan);
                 };
                 if !plan.add_token(count_token) {
-                    return plan;
+                    return Ok(plan);
                 }
                 let Some(count) = planned_ascii_list_count(count_token, *count_ty) else {
-                    return plan;
+                    return Ok(plan);
                 };
                 if !plan_list_work(ctx, &mut plan, element, name.as_str(), count, parsed) {
-                    return plan;
+                    return Ok(plan);
                 }
-                for _ in 0..count {
-                    let Some(token) = tokens.next() else {
-                        return plan;
+                for index in 0..count {
+                    poll_collection(ctx, index)?;
+                    let Some(token) = next_ascii_token(ctx, line, &mut byte_index)? else {
+                        return Ok(plan);
                     };
                     if !plan.add_token(token) {
-                        return plan;
+                        return Ok(plan);
                     }
                 }
             }
         }
     }
-    if let Some(trailing) = tokens.next() {
+    if let Some(trailing) = next_ascii_token(ctx, line, &mut byte_index)? {
         let _ = plan.add_token(trailing);
     }
-    plan
+    Ok(plan)
 }
 
 fn planned_ascii_list_count(token: &str, ty: ScalarType) -> Option<usize> {
@@ -992,21 +1002,22 @@ fn planned_ascii_list_count(token: &str, ty: ScalarType) -> Option<usize> {
 }
 
 fn plan_binary_row(
-    ctx: &ParseExecution<'_, '_>,
+    ctx: &mut ParseExecution<'_, '_>,
     cursor: &BinaryCursor<'_>,
     element: &Element<'_>,
     parsed: &ParsedPly<'_>,
-) -> BodyWorkPlan {
+) -> ParseResult<BodyWorkPlan> {
     let mut plan = BodyWorkPlan::for_element(element);
     let mut offset = cursor.offset;
-    for property in element.properties.as_slice() {
+    for (property_index, property) in element.properties.as_slice().iter().enumerate() {
+        poll_collection(ctx, property_index)?;
         match property {
             Property::Scalar { ty, .. } => {
                 let Some(end) = offset.checked_add(scalar_width(*ty)) else {
-                    return plan;
+                    return Ok(plan);
                 };
                 if end > cursor.bytes.len() {
-                    return plan;
+                    return Ok(plan);
                 }
                 offset = end;
             }
@@ -1019,26 +1030,26 @@ fn plan_binary_row(
                 let Some((count, after_count)) =
                     planned_binary_list_count(cursor.bytes, offset, *count_ty, cursor.big_endian)
                 else {
-                    return plan;
+                    return Ok(plan);
                 };
                 offset = after_count;
                 if !plan_list_work(ctx, &mut plan, element, name.as_str(), count, parsed) {
-                    return plan;
+                    return Ok(plan);
                 }
                 let Some(item_bytes) = scalar_width(*item_ty).checked_mul(count) else {
-                    return plan;
+                    return Ok(plan);
                 };
                 let Some(end) = offset.checked_add(item_bytes) else {
-                    return plan;
+                    return Ok(plan);
                 };
                 if end > cursor.bytes.len() {
-                    return plan;
+                    return Ok(plan);
                 }
                 offset = end;
             }
         }
     }
-    plan
+    Ok(plan)
 }
 
 fn planned_binary_list_count(
@@ -1619,14 +1630,14 @@ fn parse_face_row<'session>(
                 })?;
                 parsed.face_vertex_counts.try_push_reserved(count as u32)?;
                 for position in 0..count {
-                    if position.is_multiple_of(4096) {
-                        ctx.poll()?;
-                    }
+                    poll_collection(ctx, position)?;
                     let index = reader
                         .read_scalar(ctx, *item_ty, work)?
                         .to_u32(ctx, name.as_str())?;
                     parsed.indices.try_push_reserved(index)?;
                     work.complete(body_completion(BODY_TOPOLOGY_CELLS, 1))?;
+                    #[cfg(test)]
+                    crate::control_tests::face_index_completed(parsed.indices.len(), index);
                 }
                 parsed.has_polygon = has_polygon;
                 work.complete(body_completion(
@@ -1724,9 +1735,7 @@ fn scene_from_parsed<'session>(
                 )?],
                 |ctx, work| -> ParseResult<()> {
                     for (position, index) in indices.as_slice().iter().enumerate() {
-                        if position.is_multiple_of(4096) {
-                            ctx.poll()?;
-                        }
+                        poll_collection(ctx, position)?;
                         if *index as usize >= positions.len() {
                             return Err(ply_parse_error(
                                 ctx,
@@ -1838,7 +1847,7 @@ fn scene_from_parsed<'session>(
             order_metadata(ctx, &mut pending_metadata)?;
 
             let mut custom_attributes = finish_custom_attributes(ctx, custom_attributes)?;
-            custom_attributes.sort_unstable_by(|left, right| left.semantic.cmp(&right.semantic));
+            order_custom_attributes(ctx, &mut custom_attributes)?;
 
             Ok((pending_metadata, mesh_name, node_name, custom_attributes))
         })?;
@@ -1877,8 +1886,9 @@ fn scene_from_parsed<'session>(
                     ),
                 )?;
             }
-            for custom in custom_attributes.as_slice() {
-                attributes.try_push(ctx, custom.authoring())?;
+            for (index, custom) in custom_attributes.as_slice().iter().enumerate() {
+                poll_collection(ctx, index)?;
+                attributes.try_push_reserved(custom.authoring())?;
             }
 
             let attribute_count =
@@ -1961,11 +1971,13 @@ fn scene_from_parsed<'session>(
                 "ply-complete-batch-metadata-authoring",
             );
             metadata_entries.try_reserve(ctx, pending_metadata.len())?;
-            for (metadata, key) in pending_metadata
+            for (index, (metadata, key)) in pending_metadata
                 .as_slice()
                 .iter()
                 .zip(metadata_keys.as_slice())
+                .enumerate()
             {
+                poll_collection(ctx, index)?;
                 metadata_entries.try_push_reserved(MetadataAuthoringEntry::new(
                     ProfileOwner::LogicalMesh(0),
                     key,
@@ -2027,6 +2039,7 @@ fn scene_from_parsed<'session>(
                 ))?;
             }
             for index in 0..attributes.len() {
+                poll_collection(ctx, index)?;
                 owner_provenance.try_push_reserved(OwnerProvenanceAuthoring::new(
                     ProfileOwner::Attribute(canonical_u32(
                         ctx,
@@ -2430,9 +2443,7 @@ fn skip_list(
 ) -> ParseResult<()> {
     let count = read_list_count(ctx, reader, count_ty, work)?;
     for index in 0..count {
-        if index.is_multiple_of(4096) {
-            ctx.poll()?;
-        }
+        poll_collection(ctx, index)?;
         let _ = reader.read_scalar(ctx, item_ty, work)?;
         work.complete(body_completion(BODY_WORK_UNITS, 1))?;
     }
@@ -2563,7 +2574,9 @@ fn finish_custom_attributes<'session>(
         "ply-complete-batch-custom-attributes",
     );
     canonical.try_reserve(ctx, attributes.len())?;
+    let mut attribute_index = 0;
     attributes.try_for_each_owned(|attribute| {
+        poll_collection(ctx, attribute_index)?;
         let semantic = CustomAttributeSemantic::new(attribute.semantic.as_str()).map_err(|_| {
             canonical_contract_failure(ctx, "ply-complete-batch-custom-attribute-semantic")
         })?;
@@ -2573,13 +2586,12 @@ fn finish_custom_attributes<'session>(
                 "ply-complete-batch-custom-attribute-name",
             ));
         }
-        canonical.try_push(
-            ctx,
-            CustomAttributeStorage {
-                semantic,
-                data: attribute.data.into_inner(),
-            },
-        )
+        canonical.try_push_reserved(CustomAttributeStorage {
+            semantic,
+            data: attribute.data.into_inner(),
+        })?;
+        attribute_index += 1;
+        Ok(())
     })?;
     Ok(canonical)
 }
@@ -2870,47 +2882,13 @@ fn next_checked_token<'line, 'region, 'session: 'region>(
     line: &'line str,
     byte_index: &mut usize,
 ) -> ParseResult<Option<&'line str>> {
-    let bytes = line.as_bytes();
-    if *byte_index == 0 {
-        ctx.poll()?;
-    }
-    while bytes
-        .get(*byte_index)
-        .is_some_and(|byte| byte.is_ascii_whitespace())
-    {
-        *byte_index += 1;
-        if (*byte_index).is_multiple_of(SCAN_QUANTUM) {
-            ctx.poll()?;
-        }
-    }
-    if *byte_index == bytes.len() {
+    let Some(token) = next_ascii_token(ctx, line, byte_index)? else {
         return Ok(None);
-    }
-
-    let token_start = *byte_index;
-    while bytes
-        .get(*byte_index)
-        .is_some_and(|byte| !byte.is_ascii_whitespace())
-    {
-        *byte_index += 1;
-        if (*byte_index).is_multiple_of(SCAN_QUANTUM) {
-            ctx.poll()?;
-        }
-    }
-    let token_bytes = byte_index.saturating_sub(token_start);
+    };
     ctx.with_work(
         group,
-        [1, usize_amount(ctx, token_bytes, "ply-token-bytes")?],
+        [1, usize_amount(ctx, token.len(), "ply-token-bytes")?],
         |ctx, work| -> ParseResult<_> {
-            let token = line.get(token_start..*byte_index).ok_or_else(|| {
-                format_failure(
-                    ctx,
-                    PlyFailureCode::InternalInvariant,
-                    "PLY token range is not a valid ASCII boundary",
-                    None,
-                    Some("ascii-token-range"),
-                )
-            })?;
             work.complete([1, usize_amount(ctx, token.len(), "ply-token-bytes")?])?;
             Ok(Some(token))
         },
@@ -2923,6 +2901,22 @@ fn next_body_token<'line>(
     byte_index: &mut usize,
     work: &mut ImportWorkScope<'_, BODY_WORK_ENTRIES>,
 ) -> ParseResult<Option<&'line str>> {
+    let Some(token) = next_ascii_token(ctx, line, byte_index)? else {
+        return Ok(None);
+    };
+    let mut completed = [0; BODY_WORK_ENTRIES];
+    completed[BODY_TOKENS] = 1;
+    completed[BODY_TOKEN_BYTES] = usize_amount(ctx, token.len(), "ply-token-bytes")?;
+    work.complete(completed)?;
+    Ok(Some(token))
+}
+
+fn next_ascii_token<'line>(
+    ctx: &mut ParseExecution<'_, '_>,
+    line: &'line str,
+    byte_index: &mut usize,
+) -> ParseResult<Option<&'line str>> {
+    // Planning shares the decode byte frontier without admitting or completing token work.
     let bytes = line.as_bytes();
     if *byte_index == 0 {
         ctx.poll()?;
@@ -2932,7 +2926,7 @@ fn next_body_token<'line>(
         .is_some_and(|byte| byte.is_ascii_whitespace())
     {
         *byte_index += 1;
-        if (*byte_index).is_multiple_of(SCAN_QUANTUM) {
+        if (*byte_index).is_multiple_of(TEXT_SCAN_QUANTUM) {
             ctx.poll()?;
         }
     }
@@ -2946,7 +2940,7 @@ fn next_body_token<'line>(
         .is_some_and(|byte| !byte.is_ascii_whitespace())
     {
         *byte_index += 1;
-        if (*byte_index).is_multiple_of(SCAN_QUANTUM) {
+        if (*byte_index).is_multiple_of(TEXT_SCAN_QUANTUM) {
             ctx.poll()?;
         }
     }
@@ -2959,10 +2953,6 @@ fn next_body_token<'line>(
             Some("ascii-token-range"),
         )
     })?;
-    let mut completed = [0; BODY_WORK_ENTRIES];
-    completed[BODY_TOKENS] = 1;
-    completed[BODY_TOKEN_BYTES] = usize_amount(ctx, token.len(), "ply-token-bytes")?;
-    work.complete(completed)?;
     Ok(Some(token))
 }
 
@@ -3360,19 +3350,35 @@ fn order_metadata(
 ) -> ParseResult<()> {
     let group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
     ctx.with_work(&group, [0], |ctx, work| {
-        let mut comparisons_left = 0;
+        let mut comparison_index = 0;
         metadata.try_sort_unstable_by(|left, right| -> ParseResult<_> {
-            if comparisons_left == 0 {
-                work.complete_all()?;
-                ctx.poll()?;
-                work.replenish(METADATA_SORT_COMPARISON_CHUNK)?;
-                comparisons_left = METADATA_SORT_COMPARISON_CHUNK;
-            }
-            comparisons_left -= 1;
+            poll_collection(ctx, comparison_index)?;
+            work.replenish(1)?;
             // Generated keys have fixed prefixes and at most usize::MAX's decimal digits.
-            Ok(left.key.as_str().cmp(right.key.as_str()))
-        })?;
-        work.complete_all()
+            let ordering = left.key.as_str().cmp(right.key.as_str());
+            work.complete([1])?;
+            comparison_index = (comparison_index + 1) % MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS;
+            Ok(ordering)
+        })
+    })
+}
+
+fn order_custom_attributes(
+    ctx: &mut ParseExecution<'_, '_>,
+    attributes: &mut MeteredVec<'_, CustomAttributeStorage<'_>>,
+) -> ParseResult<()> {
+    let group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
+    ctx.with_work(&group, [0], |ctx, work| {
+        let mut comparison_index = 0;
+        attributes.try_sort_unstable_by(|left, right| -> ParseResult<_> {
+            poll_collection(ctx, comparison_index)?;
+            work.replenish(1)?;
+            // Validated custom semantics contain at most 64 ASCII bytes.
+            let ordering = left.semantic.cmp(&right.semantic);
+            work.complete([1])?;
+            comparison_index = (comparison_index + 1) % MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS;
+            Ok(ordering)
+        })
     })
 }
 
@@ -3450,7 +3456,7 @@ fn canonical_string_bytes(
 }
 
 fn poll_collection(ctx: &mut ParseExecution<'_, '_>, index: usize) -> ParseResult<()> {
-    if index.is_multiple_of(SCAN_QUANTUM) {
+    if index.is_multiple_of(MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS) {
         ctx.poll()?;
     }
     Ok(())

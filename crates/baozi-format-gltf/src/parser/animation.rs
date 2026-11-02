@@ -1,8 +1,8 @@
 use super::{
     AccessorContract, AccessorOwner, AccessorSources, BufferData, ContentError,
-    MeshInstanceStorage, PARSER_POLL_INTERVAL, Result, accessor_provenance, authoring_u32,
-    gltf_parse_error, provenance_work_bound, to_u64, try_extend_provenance_unique,
-    try_vec_capacity, try_vec_filled, validate_accessor, with_poll,
+    GEOMETRY_POLL_INTERVAL, MeshInstanceStorage, Result, accessor_provenance, authoring_u32,
+    gltf_parse_error, to_u64, try_extend_provenance_unique, try_vec_capacity, try_vec_filled,
+    validate_accessor, with_poll,
 };
 use crate::document::schema as json;
 use baozi_import::authoring::{
@@ -147,13 +147,13 @@ fn preflight_inner<'scope, 'document>(
     selected_nodes: &[bool],
 ) -> Result<AnimationContracts<'scope, 'document>> {
     let source_animations = &gltf.tables().animations;
-    let source_channel_count = source_animations
-        .iter()
-        .try_fold(0usize, |total, animation| {
-            total.checked_add(animation.channels.len()).ok_or_else(|| {
-                ContentError::from(ctx.allocation_failure("gltf-animation-channel-count"))
-            })
-        })?;
+    let mut source_channel_count = 0usize;
+    for (index, animation) in source_animations.iter().enumerate() {
+        super::poll_parser_loop(ctx, index)?;
+        source_channel_count = source_channel_count
+            .checked_add(animation.channels.len())
+            .ok_or_else(|| ctx.allocation_failure("gltf-animation-channel-count"))?;
+    }
     let node_target_count = selected_nodes
         .len()
         .checked_mul(4)
@@ -223,7 +223,7 @@ fn preflight_inner<'scope, 'document>(
                 [1],
                 |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
             )?;
-            if visited_channels.is_multiple_of(PARSER_POLL_INTERVAL) {
+            if visited_channels.is_multiple_of(GEOMETRY_POLL_INTERVAL) {
                 ctx.poll()?;
             }
             visited_channels = visited_channels
@@ -516,7 +516,7 @@ fn record_channel_losses(
     );
     object_path.try_reserve(ctx, 48)?;
     for (channel_index, disposition) in dispositions.iter().copied().enumerate() {
-        if channel_index.is_multiple_of(super::PARSER_POLL_INTERVAL) {
+        if channel_index.is_multiple_of(super::GEOMETRY_POLL_INTERVAL) {
             ctx.poll()?;
         }
         let (code, reason) = match disposition {
@@ -638,28 +638,27 @@ pub(super) fn build_storage<'scope>(
             "gltf-animation-mesh-instance-index",
         )?);
     }
-    // Work scopes cannot nest. Prepay accessor collection and the bounded channel merge
-    // before sample decoding, then budget each clip's variable-size source union.
+    // Fixed accessor source collection stays separate from the later variable-size unions.
     let accessor_count = contracts
         .materialization_channels
         .len()
         .checked_add(contracts.retained_channel_count)
         .ok_or_else(|| ctx.allocation_failure("gltf-animation-provenance-count"))?;
-    let channel_merge_work = provenance_work_bound(ctx, MAX_CHANNEL_PROVENANCE_SOURCES)?;
-    let mut provenance_work = to_u64(accessor_count)
+    let provenance_work = to_u64(accessor_count)
         .checked_mul(AccessorSources::COLLECTION_WORK_BOUND)
-        .and_then(|work| {
-            work.checked_add(
-                to_u64(contracts.retained_channel_count).checked_mul(channel_merge_work)?,
-            )
-        })
         .ok_or_else(|| ctx.allocation_failure("gltf-animation-provenance-work"))?;
-    ctx.charge_work(to_u64(buffers.len()))?;
-    let available_provenance_count = buffers
-        .iter()
-        .filter(|buffer| buffer.is_some())
-        .count()
-        .max(1);
+    let available_provenance_count = ctx.with_work_group(
+        [(ImportWorkClass::WorkUnits, to_u64(buffers.len()))],
+        |ctx, work| -> Result<_> {
+            let mut count = 0usize;
+            for (index, buffer) in buffers.iter().enumerate() {
+                super::poll_parser_loop(ctx, index)?;
+                count += usize::from(buffer.is_some());
+                work.complete([1])?;
+            }
+            Ok(count.max(1))
+        },
+    )?;
     let maximum_channel_provenance = contracts
         .retained_channel_count
         .checked_mul(available_provenance_count.min(MAX_CHANNEL_PROVENANCE_SOURCES))
@@ -681,12 +680,47 @@ pub(super) fn build_storage<'scope>(
         maximum_clip_provenance = maximum_clip_provenance
             .checked_add(references.min(available_provenance_count))
             .ok_or_else(|| ctx.allocation_failure("gltf-animation-clip-provenance-count"))?;
-        provenance_work = provenance_work
-            .checked_add(provenance_work_bound(ctx, references)?)
-            .ok_or_else(|| ctx.allocation_failure("gltf-animation-provenance-work"))?;
     }
     ctx.charge_work(provenance_work)?;
-    ctx.with_work_group(
+    let mut clip_provenance = try_vec_capacity(
+        ctx,
+        ImportStorageClass::FormatNormalization,
+        maximum_clip_provenance,
+        "gltf-animation-clip-provenance",
+    )?;
+    let mut clip_ranges = try_vec_capacity(
+        ctx,
+        ImportStorageClass::FormatNormalization,
+        contracts.clips.len(),
+        "gltf-animation-clip-source-ranges",
+    )?;
+    let mut pending = try_vec_capacity(
+        ctx,
+        ImportStorageClass::FormatNormalization,
+        maximum_pending_provenance,
+        "gltf-animation-pending-provenance",
+    )?;
+    for contract in contracts.clips.as_slice() {
+        ctx.poll()?;
+        let start = clip_provenance.len();
+        for channel in checked_contract_range(ctx, contracts, *contract)? {
+            ctx.poll()?;
+            let sampler = match channel {
+                AnimationMaterializationContract::Retained(channel) => channel.source.sampler(),
+                AnimationMaterializationContract::DurationOnly(channel) => channel.source.sampler(),
+            };
+            let input = accessor_provenance(ctx, buffers, sampler.input())?;
+            pending.try_extend_from_slice_reserved(input.as_slice())?;
+            if matches!(channel, AnimationMaterializationContract::Retained(_)) {
+                let output = accessor_provenance(ctx, buffers, sampler.output())?;
+                pending.try_extend_from_slice_reserved(output.as_slice())?;
+            }
+        }
+        try_extend_provenance_unique(ctx, &mut clip_provenance, &mut pending)?;
+        clip_ranges.try_push_reserved((start, clip_provenance.len() - start))?;
+    }
+    drop(pending);
+    let storage = ctx.with_work_group(
         [
             (ImportWorkClass::WorkUnits, to_u64(contracts.total_cells)),
             (
@@ -698,7 +732,7 @@ pub(super) fn build_storage<'scope>(
                 to_u64(contracts.total_name_bytes),
             ),
         ],
-        |ctx, work| {
+        |ctx, work| -> Result<_> {
             let mut clips = try_vec_capacity(
                 ctx,
                 ImportStorageClass::SceneConstruction,
@@ -711,30 +745,18 @@ pub(super) fn build_storage<'scope>(
                 contracts.retained_channel_count,
                 "gltf-animation-storage-channels",
             )?;
-            let mut clip_provenance = try_vec_capacity(
-                ctx,
-                ImportStorageClass::FormatNormalization,
-                maximum_clip_provenance,
-                "gltf-animation-clip-provenance",
-            )?;
             let mut channel_provenance = try_vec_capacity(
                 ctx,
                 ImportStorageClass::FormatNormalization,
                 maximum_channel_provenance,
                 "gltf-animation-channel-provenance",
             )?;
-            let mut pending_provenance = try_vec_capacity(
-                ctx,
-                ImportStorageClass::FormatNormalization,
-                maximum_pending_provenance,
-                "gltf-animation-pending-provenance",
-            )?;
 
-            for clip in contracts.clips.as_slice() {
+            for (clip_index, clip) in contracts.clips.as_slice().iter().enumerate() {
                 ctx.poll()?;
                 let materialization_channels = checked_contract_range(ctx, contracts, *clip)?;
                 let channel_offset = channels.len();
-                let provenance_offset = clip_provenance.len();
+                let (provenance_offset, provenance_count) = clip_ranges.as_slice()[clip_index];
                 let mut duration = 0.0_f64;
                 for contract in materialization_channels {
                     match contract {
@@ -749,38 +771,15 @@ pub(super) fn build_storage<'scope>(
                                 &mut channel_provenance,
                             )?;
                             duration = duration.max(channel_duration);
-                            let channel_end = channel
-                                .provenance_offset
-                                .checked_add(channel.provenance_count)
-                                .ok_or_else(|| {
-                                    ctx.allocation_failure(
-                                        "gltf-animation-channel-provenance-range",
-                                    )
-                                })?;
-                            let channel_sources = channel_provenance
-                                .as_slice()
-                                .get(channel.provenance_offset..channel_end)
-                                .ok_or_else(|| {
-                                    gltf_parse_error(
-                                        "glTF animation channel provenance is incomplete",
-                                    )
-                                })?;
-                            for &source in channel_sources {
-                                pending_provenance.try_push_reserved(source)?;
-                            }
                             channels.try_push_reserved(channel)?;
                         }
                         AnimationMaterializationContract::DurationOnly(contract) => {
-                            let (channel_duration, sources) =
+                            let (channel_duration, _sources) =
                                 read_duration_channel(ctx, buffers, contract, work)?;
                             duration = duration.max(channel_duration);
-                            for &source in sources.as_slice() {
-                                pending_provenance.try_push_reserved(source)?;
-                            }
                         }
                     }
                 }
-                try_extend_provenance_unique(ctx, &mut clip_provenance, &mut pending_provenance)?;
                 let name = clip
                     .name
                     .map(|name| -> Result<_> {
@@ -792,18 +791,18 @@ pub(super) fn build_storage<'scope>(
                         let mut rest = name;
                         while !rest.is_empty() {
                             ctx.poll()?;
-                            let mut end = rest.len().min(PARSER_POLL_INTERVAL);
+                            let mut end = rest.len().min(super::BYTE_POLL_INTERVAL);
                             while !rest.is_char_boundary(end) {
                                 end -= 1;
                             }
                             let (chunk, tail) = rest.split_at(end);
                             owned.try_push_str(ctx, chunk)?;
+                            work.complete([0, 0, to_u64(chunk.len())])?;
                             rest = tail;
                         }
                         Ok(owned)
                     })
                     .transpose()?;
-                work.complete([0, 0, to_u64(clip.name.map_or(0, str::len))])?;
                 clips.try_push_reserved(AnimationClipStorage {
                     source_index: clip.source_index,
                     name,
@@ -811,7 +810,7 @@ pub(super) fn build_storage<'scope>(
                     channel_offset,
                     channel_count: clip.retained_channel_count,
                     provenance_offset,
-                    provenance_count: clip_provenance.len() - provenance_offset,
+                    provenance_count,
                 })?;
             }
             if channels.len() != contracts.retained_channel_count {
@@ -826,7 +825,8 @@ pub(super) fn build_storage<'scope>(
                 channel_provenance,
             })
         },
-    )
+    )?;
+    Ok(storage)
 }
 
 fn checked_contract_range<'a>(
@@ -869,7 +869,7 @@ fn read_duration_channel(
         })?;
     let mut previous = None;
     for key in 0..contract.key_count {
-        if key.is_multiple_of(PARSER_POLL_INTERVAL) {
+        if key.is_multiple_of(GEOMETRY_POLL_INTERVAL) {
             ctx.poll()?;
         }
         let time = next_gltf_value("glTF animation duration input iteration", &mut input)?
@@ -1075,7 +1075,7 @@ fn read_times<'scope>(
     )?;
     let mut previous = None;
     for key in 0..contract.key_count {
-        if key.is_multiple_of(PARSER_POLL_INTERVAL) {
+        if key.is_multiple_of(GEOMETRY_POLL_INTERVAL) {
             ctx.poll()?;
         }
         let time = next_gltf_value("glTF animation input iteration", &mut input)?
@@ -1140,7 +1140,7 @@ fn read_output_weights(
     work: &mut ImportWorkScope<'_, 3>,
 ) -> Result<()> {
     for ordinal in 0..contract.output_count {
-        if ordinal.is_multiple_of(PARSER_POLL_INTERVAL) {
+        if ordinal.is_multiple_of(GEOMETRY_POLL_INTERVAL) {
             ctx.poll()?;
         }
         let weight = next_gltf_value("glTF animation weight output iteration", &mut output)?
@@ -1182,7 +1182,7 @@ fn read_output_vectors<const N: usize>(
         )));
     }
     for ordinal in 0..contract.output_count {
-        if ordinal.is_multiple_of(PARSER_POLL_INTERVAL) {
+        if ordinal.is_multiple_of(GEOMETRY_POLL_INTERVAL) {
             ctx.poll()?;
         }
         let sample = next_gltf_value("glTF animation output iteration", &mut output)?
@@ -1315,16 +1315,20 @@ impl<'scope> AnimationStorage<'scope> {
             self.clip_provenance.as_slice(),
             self.channel_provenance.as_slice(),
         ] {
-            for chunk in sources.chunks(PARSER_POLL_INTERVAL) {
-                ctx.with_work(
-                    &work_group,
-                    [to_u64(chunk.len())],
-                    |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-                )?;
-                count = count
-                    .checked_add(chunk.iter().filter(|&&source| source != 0).count())
-                    .ok_or_else(|| ctx.allocation_failure("gltf-animation-provenance-count"))?;
-            }
+            ctx.with_work(
+                &work_group,
+                [to_u64(sources.len())],
+                |ctx, work| -> Result<()> {
+                    for (index, &source) in sources.iter().enumerate() {
+                        super::poll_parser_loop(ctx, index)?;
+                        count = count.checked_add(usize::from(source != 0)).ok_or_else(|| {
+                            ctx.allocation_failure("gltf-animation-provenance-count")
+                        })?;
+                        work.complete([1])?;
+                    }
+                    Ok(())
+                },
+            )?;
         }
         Ok(count)
     }

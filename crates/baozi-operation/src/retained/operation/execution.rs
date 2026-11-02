@@ -3,8 +3,6 @@
 use super::*;
 use crate::ledger::{BoundWorkGroup, Ledger, ParserWorkError, ParserWorkScope, WorkLane};
 
-const MAX_ACTIONS_BETWEEN_POLLS: u16 = 256;
-
 pub(crate) enum ExecutionError<D> {
     Control(ControlCause),
     Ledger(LedgerCause<D>),
@@ -299,7 +297,7 @@ where
                 .map_or(ExecutionError::Stopped, ExecutionError::Control));
         }
         ensure_running(self.failure)?;
-        if self.actions_since_poll.get() >= MAX_ACTIONS_BETWEEN_POLLS {
+        if usize::from(self.actions_since_poll.get()) >= crate::MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS {
             self.checkpoint()?;
         }
         Ok(())

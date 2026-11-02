@@ -5,7 +5,10 @@ use super::mesh_encoding::{
 };
 use super::schema::{self as s};
 use crate::GltfFailure;
-use baozi_import::{ImportStorageClass, ImportWorkClass, MeteredVec, ParseExecution, ParseResult};
+use baozi_import::{
+    ImportStorageClass, ImportWorkClass, ImportWorkScope, MeteredVec, ParseExecution, ParseResult,
+};
+use std::cmp::Ordering;
 
 pub(super) fn validate(
     ctx: &mut ParseExecution<'_, '_>,
@@ -267,14 +270,8 @@ fn require_quantization(
 fn extensions(ctx: &mut ParseExecution<'_, '_>, root: &s::Tables<'_>) -> ParseResult<bool> {
     let used = sorted_names(ctx, &root.extensions_used, "extensionsUsed")?;
     let required = sorted_names(ctx, &root.extensions_required, "extensionsRequired")?;
-    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
     for &name in required.as_slice() {
-        ctx.with_work(
-            &work_group,
-            [1],
-            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-        )?;
-        if used.as_slice().binary_search(&name).is_err() {
+        if !contains_name(ctx, used.as_slice(), name)? {
             return Err(
                 ctx.format_failure(GltfFailure::invalid_document(format_args!(
                     "required extension {name:?} missing from extensionsUsed"
@@ -306,6 +303,26 @@ fn extensions(ctx: &mut ParseExecution<'_, '_>, root: &s::Tables<'_>) -> ParseRe
     Ok(has_quantization)
 }
 
+fn contains_name(
+    ctx: &mut ParseExecution<'_, '_>,
+    names: &[&str],
+    name: &str,
+) -> ParseResult<bool> {
+    ctx.with_work_group([(ImportWorkClass::WorkUnits, 0)], |ctx, work| {
+        let mut left = 0;
+        let mut right = names.len();
+        while left < right {
+            let middle = left + (right - left) / 2;
+            match compare_names(ctx, work, names[middle], name)? {
+                Ordering::Less => left = middle + 1,
+                Ordering::Greater => right = middle,
+                Ordering::Equal => return Ok(true),
+            }
+        }
+        Ok(false)
+    })
+}
+
 fn sorted_names<'scope, 'document>(
     ctx: &mut ParseExecution<'_, 'scope>,
     names: &'document [s::Text<'_>],
@@ -333,31 +350,28 @@ fn sorted_names<'scope, 'document>(
         sorted.try_push_reserved(name.as_str())?;
     }
     if sorted.len() > 1 {
-        let levels = u64::from(usize::BITS - (sorted.len() - 1).leading_zeros());
-        let bound =
-            (sorted.len() as u64).saturating_mul(levels.saturating_mul(4).saturating_add(4));
         ctx.with_work_group(
-            [(ImportWorkClass::WorkUnits, bound)],
+            [(ImportWorkClass::WorkUnits, 0)],
             |ctx, work| -> ParseResult<()> {
                 let mut comparisons = 0usize;
                 sorted.try_sort_unstable_by(|a, b| -> ParseResult<_> {
-                    if comparisons.is_multiple_of(4096) {
+                    if comparisons.is_multiple_of(baozi_import::MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS)
+                    {
                         ctx.poll()?;
                     }
+                    let ordering = compare_names(ctx, work, a, b)?;
                     comparisons += 1;
-                    Ok(a.cmp(b))
+                    Ok(ordering)
                 })?;
-                work.complete_all()
+                Ok(())
             },
         )?;
     }
     for pair in sorted.as_slice().windows(2) {
-        ctx.with_work(
-            &work_group,
-            [1],
-            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-        )?;
-        if pair[0] == pair[1] {
+        let ordering = ctx.with_work(&work_group, [0], |ctx, work| {
+            compare_names(ctx, work, pair[0], pair[1])
+        })?;
+        if ordering == Ordering::Equal {
             return Err(
                 ctx.format_failure(GltfFailure::invalid_document(format_args!(
                     "glTF {field} contains duplicate extension {:?}",
@@ -367,4 +381,30 @@ fn sorted_names<'scope, 'document>(
         }
     }
     Ok(sorted)
+}
+
+fn compare_names(
+    ctx: &mut ParseExecution<'_, '_>,
+    work: &mut ImportWorkScope<'_, 1>,
+    left: &str,
+    right: &str,
+) -> ParseResult<Ordering> {
+    for (index, (left, right)) in left.bytes().zip(right.bytes()).enumerate() {
+        // Each comparison visits two raw bytes, independently of the sort's action cadence.
+        if index.is_multiple_of(crate::parser::BYTE_POLL_INTERVAL / 2) {
+            ctx.poll()?;
+        }
+        work.replenish(1)?;
+        let ordering = left.cmp(&right);
+        work.complete([1])?;
+        #[cfg(test)]
+        crate::control_tests::extension_pair_completed(index + 1);
+        if ordering != Ordering::Equal {
+            return Ok(ordering);
+        }
+    }
+    work.replenish(1)?;
+    let ordering = left.len().cmp(&right.len());
+    work.complete([1])?;
+    Ok(ordering)
 }

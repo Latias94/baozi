@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-08
-updated: 2026-11-02
+updated: 2026-11-03
 authors:
   - Codex
 decision_type: architecture
@@ -40,6 +40,8 @@ geometry kernels poll after at most 256 fixed library actions, text traversal re
 frontier, and external/IO/allocation/parent/final checkpoints remain mandatory. These algorithmic
 bounds do not interrupt a blocking backend call or impose a wall-clock deadline on arbitrary code.
 ADRs 0033, 0046 and 0047 own the detailed control, lifecycle and accounting contracts.
+`MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS` is the shared policy consumed by the operation engine and
+first-party numeric loops; it does not reinterpret text bytes as geometry actions.
 
 Accepted means this contract is authoritative. It does not claim that every adapter or optimization
 described here is implemented.
