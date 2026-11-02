@@ -26,11 +26,13 @@ browser compilation and bounded sanitizer runs. Registry availability and target
 retain their separate release gates.
 
 The [current Assimp comparison and recommended route](research/2026-11-02-baozi-assimp-comparison-and-roadmap.md)
-uses the completed U1-U8 baseline. It recommends current-profile distribution, common glTF mappings
-with a thin renderer integration, concrete device-output limits and then one demanded new format.
-These are follow-on priorities, not extra blockers for the finite portable candidate or a new
-implementation mandate. Completed precision, navigation, batch preparation and consumption work
-must not be inferred missing from the historical audits above.
+uses the completed U1-U8 baseline. The user subsequently chose further development before publication.
+The [pre-release evolution plan](plans/2026-11-02-0923-refactor-pre-release-evolution-plan.md)
+now owns that finite development tranche, including equivalent-task Assimp time/memory benchmarks,
+typed material cleanup, selected glTF mappings and concrete rendered/device output.
+This changes the release sequence without invalidating the prior candidate's scoped evidence.
+Completed precision, navigation, batch preparation and consumption work must not be inferred missing
+from the historical audits above.
 
 ## Product Direction
 
@@ -197,8 +199,36 @@ to ten. All eight local units are complete at source `6fb9112`; the
 Local archives and configured CI do not establish public registry availability
 or target promotion. The first canonical train is verified through a registry-only consumer before
 retiring the placeholder 0.0.1, following [release policy](contributing/release-policy.md).
-Exporters, a renderer, automatic recovery, native registration and a generic asset compiler remain
-separate work.
+The planned concrete renderer belongs to the pre-release evolution tranche below. Exporters,
+automatic recovery, native registration and a generic asset compiler remain separate work.
+
+## Pre-release Evolution Before Distribution
+
+The [reviewed development plan](plans/2026-11-02-0923-refactor-pre-release-evolution-plan.md)
+replaces the earlier release-first recommendation with five bounded milestones.
+It permits breaking changes and deletion of replaced paths while preserving the existing correct
+ownership, precision and resource contracts.
+The [plan review](reviews/2026-11-02-pre-release-evolution-plan-review.md) records its independent
+design review; implementation and comparative measurements have not run yet.
+
+| Milestone | Deliverable | Boundary |
+| --- | --- | --- |
+| Baseline | Fixed Baozi/Assimp probes, semantic equivalence checks and actual B0 timing/Linux peak RSS | Establish before production changes; keep stage time, process memory, heap profiling and Baozi ledgers distinct. |
+| Semantics | Numeric-policy adjudication, typed factor groups, emissive strength, clearcoat/sheen and punctual lights | One material authority; complete selected resource/source closure and public consumer behavior. |
+| Application | A concrete wgpu example, device limits/remaps and explicit supported deformed shading | Graphics/pixel codecs remain application dependencies; real backend readback is separate from compilation. |
+| Canonical cutover | Quantized glTF attributes, owned draft revisions rebased to v1 and obsolete paths removed | Keep crate `0.1.0`, external standards/dependencies, runtime identities and historical evidence accurate. |
+| Measurement and qualification | Profile demonstrated hotspots, compare unchanged B0/B1 tasks and refresh final source/package evidence | No invented performance-win target, implicit native promotion or publication. |
+
+MikkTSpace is the first gated algorithm follow-up: select a reference-compatible backend only after
+its precision, workspace, work, cancellation and full-feature portability can be established.
+Further material lobes, a demanded compression codec, one FBX or VRM producer profile, GLB export
+and native distribution retain the separate entry conditions in the plan.
+They are not all mandatory before the first canonical release.
+
+The comparison report must show per-case success/rejection, precision and requested work alongside
+raw time and memory samples. No comparative performance results exist for this new plan yet.
+Actual publication returns to the existing release policy after this development tranche and remains
+a separately authorized action.
 
 ## Format Priorities
 

@@ -2,6 +2,12 @@
 
 Date: 2026-11-02, Asia/Shanghai.
 
+Sequencing update, 2026-11-02: the user chose further development before publication.
+The [pre-release evolution plan](../plans/2026-11-02-0923-refactor-pre-release-evolution-plan.md)
+supersedes this report's release-first recommendation and defines the new finite tranche and
+Assimp comparison protocol. The capability observations and source-qualified historical evidence
+below remain their recorded baseline; planned work is not delivered functionality.
+
 ## Decision and scope
 
 Assimp has substantially broader format, processing, export and integration reach. Baozi now has a
