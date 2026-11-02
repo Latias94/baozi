@@ -144,5 +144,10 @@ Unverified/unavailable heap metrics are null with a reason.
 Baozi ledgers, Rust-only allocation-counter requests and Assimp Scene-size estimates remain differently scoped diagnostics.
 
 Capture B0 before any production semantics change and B1 using the same case/protocol/build policy after the cutover.
-Choose and record regression budgets from actual B0 variance before optimizing; no budget or performance result exists yet.
+The first B0 and its source-qualified observations are recorded in the [execution record](../reviews/2026-11-02-pre-release-evolution.md).
+The [frozen per-lane budget](assimp-b0-budget.json) uses each Baozi B0 median plus the larger of three B0 interquartile ranges and the measurement floor: 1 microsecond for time, 4 KiB for GNU time RSS.
+Its stored `b1_median_limit` is the integer ceiling of that result in nanoseconds or bytes; this rounding can add less than one nanosecond to a time limit.
+Compare the B1 median for the unchanged lane and build policy to this limit; Assimp supplies the external comparison and host control, rather than the regression target.
+Retain every observation, including outliers. A baseline time IQR greater than 25% of its median makes that lane descriptive: repeat the same lane before attributing a breach, and retain the original B0.
+A breach requires investigation and an explicit semantic-cost disposition; the budget does not authorize deleting data, weakening correctness or requiring Baozi to beat Assimp.
 Report individual case/capability results instead of an aggregate winner or assumed superiority.
