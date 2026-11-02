@@ -224,7 +224,13 @@ is qualified at `0936bd83d4eacf688491196022313f94dc3a87bc`: Windows and Linux ea
 75 records, observing 40 ignored false returns, 14 missing interior triggers, 18 baselines and
 three adapter checks. This confirms the selected release paths, not a general Assimp guarantee.
 It changes no ordinary worker or timing protocol. Baozi's corresponding real-format matrix
-and geometry-loop cadence corrections remain required before P6 can close.
+and geometry-loop cadence corrections are now qualified separately at
+`98abe39680cc339b92460c46c21de98d51a5b4eb`. The
+[parser-control receipt](../reviews/2026-11-03-parser-control-assurance.md) records actual red
+geometry/JSON observations, immediate physical-prefix corrections, closed independent findings,
+508/508 final glTF tests, the 9/9 eight-encoding facade matrix, and strict Clippy/doctest/fmt
+results. This closes the bounded control-assurance slice. P5 attribution, complete final-source
+Windows and Linux B1/heap observations, and original U14 remain required before P6 can close.
 
 ## Review and Acceptance
 
@@ -272,7 +278,9 @@ resolves the grid regression: repeated/grid import medians are 42.075/203.288 ms
 retained/warmup pairs pass the unchanged semantic checks. This meets the bounded integrated
 P3 performance gate, while P5/P6, full Linux B1/heap observations and original U14 remain open.
 The separate P6 source audit identifies parser loops still polling at 4,096 items rather than
-the reviewed geometry bound; prove and correct those actual paths before final qualification.
+the reviewed geometry bound. The parser-control implementation above proves and corrects the
+selected actual paths, with exact completed prefixes and distinct text/geometry frontiers.
+Final integrated performance and qualification follow that source change.
 
 The P3 [bound-execution foundation receipt](../reviews/2026-11-02-bound-execution-and-physical-prefixes.md)
 qualifies implementation `46eb6c27b4f272d956eb5ae4889a0470eec3a26c`: disjoint views, raw parser
