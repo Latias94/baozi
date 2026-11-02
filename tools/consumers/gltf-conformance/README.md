@@ -138,11 +138,13 @@ this source against version-only direct format/import/IO archive roots, with the
 reference features. `--check` proves compilation only. Neither path-based execution nor
 the offline archive rehearsal proves live registry availability or authorizes release.
 
-This implementation lane ran direct `rustfmt` and static fixture/manifest checks only.
-Cargo compilation, nextest, Clippy, the official Validator, archive execution and
-portable qualification are pending with the main thread. Root or U7 results do not
-qualify this excluded workspace. Keep actual outcomes and final source/lock/toolchain
-identities in the execution record before closing R18/R19 or U14.
+On the source states recorded in the
+[evolution execution record](../../../docs/reviews/2026-11-02-pre-release-evolution.md),
+this excluded workspace passed 8/8 source tests and strict Clippy. Four exported documents
+separately passed Validator 2.0.0-dev.3.10 with zero errors; the GLB retained one warning.
+A focused version-only archive consumer also passed 8/8. These receipts retain their own
+source, lockfile and toolchain identities. Fresh integrated U14 qualification of the final
+source remains open; root workspace or U7 results do not qualify this excluded workspace.
 
 ## Separate official Validator invocation
 

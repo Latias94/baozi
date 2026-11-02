@@ -29,7 +29,10 @@ The audit found meaningful existing coverage, rather than a suite of load-only s
 
 These observations do not establish complete extension coverage, low-level document API parity, deformed shading or successful independent use on an unexecuted target.
 
-## Bounded Gaps and Planned Checks
+## Initial Assurance Gaps and Check Owners
+
+These are the initially identified gaps; subsequent source-qualified outcomes and remaining
+final-source checks are recorded in the evolution execution record.
 
 | Gap within the current or already planned profile | Independent observation | Existing owner / unit |
 | --- | --- | --- |
@@ -82,9 +85,9 @@ is separately identified; it is not substituted for the executed artifact.
 | Extension family | Published gltf-rs 1.4.1 versus current source | Baozi route |
 | --- | --- | --- |
 | Texture transform, Unlit, emissive strength, punctual lights | Typed feature flags in both | Existing typed mappings, including completed U6/U7; source builds and scoped evidence, without maturity promotion |
-| Clearcoat and sheen | Typed flags absent from the published archive, present at HEAD | U15 typed producer, complete bindings/closure/provenance and source regressions are implemented; actual U8 rendering remains separately qualified |
+| Clearcoat and sheen | Typed flags absent from the published archive, present at HEAD | U15 typed producer, complete bindings/closure/provenance and source regressions are implemented; finite Vulkan lobe-use acceptance is recorded under U8/U9/U10/U15, with final U14 qualification open |
 | Animation pointer | Unreleased source support; not in published 1.4.1 | Ratified optional 2.0 extension; needs a separately designed typed animation-target/evaluator slice |
-| Mesh quantization | No dedicated typed feature in the inspected reference manifests | Required U11 finite accessor matrix and consumer/render evidence |
+| Mesh quantization | No dedicated typed feature in the inspected reference manifests | U11's finite accessor matrix, detached-consumer observations and two actual Vulkan quantized/FLOAT controls are implemented and source-qualified; fresh integrated U14 qualification remains open |
 | Transmission/IOR/specular/volume/variants | Typed flags in both reference manifests | Deliberate consumer-driven follow-ups; retained factor groups alone do not establish producer support |
 | Splats, interactivity and node visibility/selectability/hoverability | New ratified 2.0 extensions; not advertised as typed reference features | Explicit future domains; reject unsupported required use and state selected optional-payload policy |
 | Diffuse transmission and accessor F64 | Release Candidate and Review Draft respectively | Track exact draft revisions; no mandatory support or invented core numeric rule |
@@ -137,7 +140,7 @@ locked Validator archive and every extracted regular file are checked before exe
 archive consumer uses the existing package rehearsal's new fixed `--gltf-conformance` stage;
 its actual execution is recorded separately from source tests and Validator acceptance.
 
-The final merged core regression run executes 447 tests across 40 binaries on Rust 1.95 / Windows
+The pre-U11 merged core regression run executed 447 tests across 40 binaries on Rust 1.95 / Windows
 x86_64 MSVC, all passing (nextest `f06cbcca-48f7-4d1b-a6b5-75939b22acb1`). This includes strict
 known-field null handling, globally rejected matrix-authored TRS animation targets, bounded
 integer byte-entry interpretation and exact-rational nearest-F32 normalized conversion. Public
@@ -154,6 +157,8 @@ to the [evolution execution record](../reviews/2026-11-02-pre-release-evolution.
 - [Pinned Assimp glTF tests](https://github.com/assimp/assimp/blob/a2a586d9370a493651256ec5d03524710ce37a5f/test/unit/utglTF2ImportExport.cpp) and the same pin's OBJ/PLY/STL, material, scene and postprocess unit tests supply scenario research. No upstream test code or model bytes are copied.
 - [Khronos glTF specification](https://github.com/KhronosGroup/glTF/tree/main/specification/2.0), [extension registry](https://github.com/KhronosGroup/glTF/blob/main/extensions/README.md), [Validator](https://github.com/KhronosGroup/glTF-Validator), [gltf-rs source](https://github.com/gltf-rs/gltf) and [issues](https://github.com/gltf-rs/gltf/issues). Moving links identify the projects; current-source conclusions require the retrieved exact revisions recorded by the ecosystem audit.
 
-Integrated portable/package qualification, deformed shading and the remaining planned feature
-slices stay open. Finite issue regressions and direct consumer success do not establish complete
+Finite U8/U9/U10 renderer and U15 lobe-use acceptance are recorded in the
+[evolution execution record](../reviews/2026-11-02-pre-release-evolution.md). Fresh integrated
+U14 source, sanitizer, portable and package qualification remains open, along with any remaining
+named execution units. Finite issue regressions and direct consumer success do not establish complete
 extension coverage, a raw-document API, Beta/Stable maturity or publication authority.

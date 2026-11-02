@@ -450,9 +450,8 @@ and import-contract tests.
 ## Explicit Restrictions
 
 - Embedded image buffer views and image data URIs are materialized as encoded image payloads without
-  pixel decoding. Typed extension payloads beyond
-  `KHR_texture_transform`, material-level `KHR_materials_unlit` /
-  `KHR_materials_emissive_strength`, and the punctual-light sites above are rejected explicitly.
+  pixel decoding. Only extension payloads at the owner/sites listed in Supported Profile above
+  are admitted; other typed extension payloads are rejected explicitly.
 - Unsupported selected extension payloads are explicitly rejected with original raw byte
   ranges. A supported extension at an unsupported owner/site is rejected as well. Unselected entity
   payloads remain scope omissions. Declaring an unsupported optional extension without a selected
@@ -484,14 +483,18 @@ under `org.baozi.gltf:`:
 
 | Source owner | Nested-site key suffix |
 | --- | --- |
-| Material | `pbr-metallic-roughness-extras`, `unlit-extras` |
-| Material, for each of base-color, metallic-roughness, normal, occlusion, emissive | `<binding>-texture-extras`, `<binding>-texture-transform-extras` |
+| Material | `pbr-metallic-roughness-extras`, `unlit-extras`, `emissive-strength-extras`, `clearcoat-extras`, `sheen-extras` |
+| Material, for each admitted binding prefix below | `<binding>-texture-extras`, `<binding>-texture-transform-extras` |
+| Document punctual-light inventory | `punctual-lights-extras` |
+| Node punctual-light attachment | `punctual-light-extras` |
+| Light spot payload | `spot-extras` |
 | Accessor | `sparse-extras`, `sparse-indices-extras`, `sparse-values-extras` |
 | Animation channel | `target-extras` |
 | Camera | `orthographic-extras`, `perspective-extras` |
 
-Nested extras in a supported texture transform require that transform's supported parent binding;
-unlit extras require the admitted material-level unlit object.
+Binding prefixes are `base-color`, `metallic-roughness`, `normal`, `occlusion`, `emissive`,
+`clearcoat`, `clearcoat-roughness`, `clearcoat-normal`, `sheen-color` and `sheen-roughness`.
+Extension-specific nested extras require their admitted parent owner/site.
 Unknown extension objects remain subject to the explicit extension rejection policy; data nested
 inside extras, including a property named `extensions`, is inert JSON. Extras do not create
 canonical material, animation, or reference behavior.
