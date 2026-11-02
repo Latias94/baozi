@@ -171,6 +171,114 @@ def positive_int(value: str) -> int:
     return result
 
 
+def write_comparison(root: Path) -> dict:
+    """Original finite source-space corpus, independent of both measured importers."""
+    specification = Path(__file__).resolve().parents[1] / "tools/consumers/assets/fixtures/comparison-cases.json"
+    spec = json.loads(specification.read_text(encoding="utf-8"))
+    cases = []
+    for family in spec["families"]:
+        for size in family["sizes"]:
+            kind = family["family"]
+            case_id = f"{kind}-{size}"
+            points = [[0, 0, 0], [1, 0, 0], [0, 1, 0]]
+            triangles = size
+            draws, placements = 1, 1
+            bounds = [[0, 0, 0], [1, 1, 0]]
+            area = size / 2
+            uv_bounds = None
+            if kind == "obj-repeated":
+                suffix = "obj"
+                data = ("o repeated\ns 1\nv 0 0 0\nv 1 0 0\nv 0 1 0\n" + "f 1 2 3\n" * size).encode()
+            elif kind == "obj-grid":
+                suffix = "obj"
+                lines = ["o grid", "s 1"]
+                lines += [f"v {x} {y} 0" for y in range(size + 1) for x in range(size + 1)]
+                lines += [f"vt {x / size:.17g} {y / size:.17g}" for y in range(size + 1) for x in range(size + 1)]
+                lines.append("vn 0 0 1")
+                for y in range(size):
+                    for x in range(size):
+                        first = y * (size + 1) + x + 1
+                        a, b, c, d = first, first + 1, first + size + 2, first + size + 1
+                        lines += [f"f {a}/{a}/1 {b}/{b}/1 {c}/{c}/1", f"f {a}/{a}/1 {c}/{c}/1 {d}/{d}/1"]
+                data = ("\n".join(lines) + "\n").encode()
+                triangles = 2 * size * size
+                bounds, area, uv_bounds = [[0, 0, 0], [size, size, 0]], size * size, [[0, 0], [1, 1]]
+            elif kind == "gltf-shared":
+                suffix = "glb"
+                payload = struct.pack("<9f9f6f3H", *(v for p in points for v in p), *([0, 0, 1] * 3), 0, 0, 1, 0, 0, 1, 0, 1, 2)
+                doc = {
+                    "asset": {"version": "2.0", "generator": "Baozi comparison corpus v1"},
+                    "scene": 0, "scenes": [{"nodes": [0, 1]}],
+                    "nodes": [{"mesh": 0}, {"mesh": 0, "translation": [2, 0, 0]}],
+                    "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2}, "indices": 3} for _ in range(size)]}],
+                    "buffers": [{"byteLength": len(payload)}],
+                    "bufferViews": [{"buffer": 0, "byteOffset": offset, "byteLength": length} for offset, length in [(0, 36), (36, 36), (72, 24), (96, 6)]],
+                    "accessors": [
+                        {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0]},
+                        {"bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3"},
+                        {"bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC2"},
+                        {"bufferView": 3, "componentType": 5123, "count": 3, "type": "SCALAR"},
+                    ],
+                }
+                document = json.dumps(doc, sort_keys=True, separators=(",", ":")).encode()
+                document += b" " * (-len(document) % 4)
+                binary = payload + b"\0" * (-len(payload) % 4)
+                data = (struct.pack("<5I", 0x46546C67, 2, 28 + len(document) + len(binary), len(document), 0x4E4F534A)
+                        + document + struct.pack("<2I", len(binary), 0x004E4942) + binary)
+                draws, placements, uv_bounds = size, 2 * size, [[0, 0], [1, 1]]
+            elif kind == "stl-repeated":
+                suffix = "stl"
+                record = struct.pack("<12fH", 0, 0, 1, *(v for p in points for v in p), 0)
+                data = b"Baozi original comparison triangles".ljust(80, b"\0") + struct.pack("<I", size) + record * size
+            elif kind.startswith("ply-"):
+                suffix = "ply"
+                scalar = "double" if family["precision"] == "f64" else "float"
+                code = "d" if scalar == "double" else "f"
+                if kind == "ply-neighbors":
+                    case_id = "ply-f64-neighbors"
+                    points = [[1, -0.0, 0], [1 + 2 ** -30, 0, 0], [1, 1, 0]]
+                    bounds, area = [[1, 0, 0], [1 + 2 ** -30, 1, 0]], 2 ** -31
+                elif kind == "ply-points":
+                    points = [[index, 0, 0] for index in range(size)]
+                    bounds, triangles, area = [[0, 0, 0], [size - 1, 0, 0]], 0, 0
+                header = (f"ply\nformat binary_little_endian 1.0\nelement vertex {len(points)}\n"
+                          f"property {scalar} x\nproperty {scalar} y\nproperty {scalar} z\n"
+                          f"element face {int(triangles != 0)}\nproperty list uchar uint vertex_indices\nend_header\n")
+                data = header.encode() + struct.pack(f"<{len(points) * 3}{code}", *(v for p in points for v in p))
+                if triangles:
+                    data += struct.pack("<B3I", 3, 0, 1, 2)
+            else:
+                raise ValueError(f"unknown fixed comparison family: {kind}")
+            relative = f"{case_id}.{suffix}"
+            with (root / relative).open("xb") as stream:
+                stream.write(data)
+            cases.append({
+                "id": case_id, "family": kind, "size": size, "path": relative,
+                "precision": family["precision"], "fields": family["fields"],
+                "topology": "triangles" if triangles else "points",
+                "io_modes": ["file", "memory"],
+                "stages": ["import", "prepare", "extract", "pipeline"] if triangles else ["import", "extract", "pipeline"],
+                "normal_policy": "missing" if kind == "obj-repeated" else "preserve",
+                "max_work_units": 200_000_000,
+                "expected": {"draws": draws, "placements": placements,
+                             "tuples": 3 * triangles if triangles else len(points),
+                             "bounds": bounds, "area": area,
+                             "normal_bounds": [[0, 0, 1], [0, 0, 1]] if "normal" in family["fields"] else None,
+                             "uv0_bounds": uv_bounds,
+                             "translation_x_sum": 2 * size if kind == "gltf-shared" else 0},
+                "files": [{"path": relative, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}],
+            })
+    manifest = {
+        "schema": "baozi-assimp-cases/v1", "protocol": "baozi-assimp-observation/v1",
+        "license": spec["license"], "expectation_basis": spec["expectation_basis"],
+        "spec_sha256": hashlib.sha256(specification.read_bytes()).hexdigest(),
+        "generator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "cases": cases,
+    }
+    write_json(root / "comparison-cases.json", manifest)
+    return manifest
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", required=True, type=Path,
@@ -179,6 +287,8 @@ def main() -> int:
                         help="quad cells per side; repeatable (default: 128 and 256)")
     parser.add_argument("--primitive-count", action="append", type=positive_int,
                         help="fixed-geometry draws per mesh; repeatable (default: 8 and 32)")
+    parser.add_argument("--comparison", action="store_true",
+                        help="generate the fixed Baozi/Assimp comparison corpus instead of asset workloads")
     arguments = parser.parse_args()
     grids = arguments.grid_size or [128, 256]
     primitives = arguments.primitive_count or [8, 32]
@@ -189,6 +299,12 @@ def main() -> int:
         root.mkdir(parents=True, exist_ok=True)
         if any(root.iterdir()):
             parser.error(f"output directory must be empty: {root}")
+        if arguments.comparison:
+            if arguments.grid_size or arguments.primitive_count:
+                parser.error("--comparison uses its fixed case specification")
+            manifest = write_comparison(root)
+            print(f"Generated {len(manifest['cases'])} comparison cases: {root / 'comparison-cases.json'}")
+            return 0
         workloads = [write_grid(root, size) for size in grids]
         workloads.extend(write_shared_primitives(root, count) for count in primitives)
         files = []

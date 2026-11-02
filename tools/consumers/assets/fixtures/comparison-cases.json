@@ -1,0 +1,18 @@
+{
+  "schema": "baozi-assimp-case-spec/v1",
+  "license": "MIT OR Apache-2.0",
+  "expectation_basis": "Original generated source geometry and analytic construction formulas; neither importer supplies expected results.",
+  "families": [
+    {"family": "obj-repeated", "sizes": [1, 1024, 16384], "precision": "f32", "fields": "position-normal"},
+    {"family": "obj-grid", "sizes": [2, 32, 128], "precision": "f32", "fields": "position-normal-uv0"},
+    {"family": "gltf-shared", "sizes": [1, 8, 32], "precision": "f32", "fields": "position-normal-uv0"},
+    {"family": "stl-repeated", "sizes": [1, 1024], "precision": "f32", "fields": "position"},
+    {"family": "ply-triangle", "sizes": [1], "precision": "f32", "fields": "position"},
+    {"family": "ply-neighbors", "sizes": [1], "precision": "f64", "fields": "position"},
+    {"family": "ply-points", "sizes": [1024], "precision": "f32", "fields": "position"}
+  ],
+  "capability_corpus": {
+    "manifest": "expectations.json",
+    "note": "Retain every real-asset success/rejection separately. Textured, skinned and morph assets have no cross-engine ratios until the same complete task is implemented."
+  }
+}
