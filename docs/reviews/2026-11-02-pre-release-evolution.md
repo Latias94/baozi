@@ -553,11 +553,53 @@ and all fixture migrations. Fresh portable/sanitizer/package qualification remai
 `target/review/quantization-evidence.zip` has SHA-256
 `b08e0dbd91e91ecc041ff20f89a42b41eb280a492ec017f98fad6591a146e5f5`.
 
+## U12: One Current Draft-v1 Contract per Owned Family
+
+Commit `494c8e34494dc2b24185cdafd873a545523f9a7a` rebases only the eight allowlisted
+Baozi-owned draft families. Directory and snapshot revision 8, edit-root revision 4,
+source-scope v3, projection-root/instruction v2, normal-options v2, capacity-policy 2 and the
+owned glTF source-vector v2 become v1. Field/tag IDs, external standards and dependencies,
+Cargo `0.1.0`, arbitrary caller schemas, generations and historical evidence retain their
+existing identities. The observed snapshot-8 baseline is recorded by the dated plan amendment.
+
+The obsolete OBJ migration bridge and unused capacity qualification tuple are removed. Actual
+source/build/allocator evidence replaces that self-referential tuple. There is one current
+snapshot encoder, with five independently derived complete vectors. The replacement complete
+OBJ transcript is 2,185 bytes with SHA-256
+`c2bfea2c49eb0ac6011374b9d618ea2243565e9982b541fdab62da1ea2caa8ce`.
+Independent review corrected the original expected profile Node owner from local 0 to
+canonical 1; the original erroneous derivation is retained in the local evidence. No production
+output was used to manufacture the expectation.
+
+| Check | Actual result | Evidence identity |
+| --- | --- | --- |
+| First operation/core/import/postprocess run | 2,073 passed, one new-test failure, four manual skips | nextest `143acfed-c865-494a-ab96-1c2fdaabd166` |
+| Final targeted vectors, revision matrices, edit lineage and glTF selection | **79/79 pass** | nextest `d65e9240-3211-4182-9dfe-4192b2a4090d` |
+| Strict Clippy | Core, operation, import, postprocess and glTF all targets/features pass with `-D warnings` | `u12-clippy-final.log` |
+| Format and independent review | Workspace format passes; core and domain findings closed; document/CI review has no findings | local review receipts |
+
+The initial new test incorrectly demanded rich failure for corrupt evidence; its intermediate
+blanket fallback expectation was also incorrect. The final matrix distinguishes their owners:
+an invalid directory returns rich failure with separately valid v1 count evidence, whereas
+invalid evidence returns exact ProductGraph/CVCF minimal fallback. Both reject zero, old and
+unknown revisions without generation reservation or canonical commitment and release all
+storage. Production validation was not relaxed. Changed/failed edit-root matrices preserve the
+input generation and digest. The positive changed-root test now uses one production reservation
+lineage and explicitly requires a distinct destination generation. Default/explicit scene
+selection tests also read the literal selected public node beside their independent hashes.
+
+`target/review/u12/verification.json` binds all 35 changed files to the implementation commit.
+The local `target/review/u12-evidence.zip` retains successful and failed logs, independent
+vectors and bounded reviews; SHA-256 is
+`652f970e60605654e63a21b15b01e05be75aaee0c006821ec36fef15acb3bc06`.
+The focused correction does not relabel the earlier 2,074-test run as a full passing rerun.
+Fresh integrated host/portable/package execution remains U14.
+
 ## Remaining Verification
 
 Timing/RSS B0, the separate heap observations and the regression policy are now recorded above. Production semantics remained unchanged throughout these campaigns.
 The finite render/device/quantization, clearcoat/sheen and owned-glTF assurance slices are now
-recorded above. Canonical v1 cutover, measured optimization/B1 comparisons and final integrated
-package/portable qualification remain ahead.
+recorded above. The canonical v1 cutover is complete; measured optimization/B1 comparisons and
+final integrated package/portable qualification remain ahead.
 Historical qualification stays bound to the source in its original record.
 No registry publication/yank, push/PR or native target promotion has occurred in this work.
