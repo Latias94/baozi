@@ -23,6 +23,15 @@ Build Assimp's double-precision variant separately for F64 PLY; record matching 
 The later development reference checkout is not the primary release comparator.
 Do not change its contents to obtain the release source.
 
+Retain ordinary and symbolized workers as distinct immutable files. An external build directory
+can be overwritten by a later diagnostic build. Each supplied `--*-build-manifest` must contain
+`binary.sha256` matching the selected executable; the collector checks this before launching any
+comparison worker and records `build_manifest_binary_verified`. A mismatch or missing identity
+fails collection with the retained report. Metadata without a supplied manifest remains explicitly
+unattested. This binds the stated build to its bytes; compiler/flag/allocator claims still require
+the retained build evidence. A disqualified comparison stays retained under its original name;
+corrected collection uses a new artifact directory and does not overwrite B0 or raw outliers.
+
 ## Fixed Worker Interface
 
 Both executables accept the same comparison arguments, while the Baozi executable keeps its independent full-asset workflow:

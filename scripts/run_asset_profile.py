@@ -310,6 +310,17 @@ def record_binaries(arguments: argparse.Namespace, artifact_root: Path, report: 
             None if supplied_manifest else
             "external build metadata not supplied; source manifests do not attest this binary's flags"
         )
+        identity["build_manifest_binary_verified"] = False
+        if supplied_manifest:
+            metadata = json.loads((artifact_root / identity["build_manifest"]["artifact"])
+                                  .read_text(encoding="utf-8"))
+            binary = metadata.get("binary") if isinstance(metadata, dict) else None
+            expected = binary.get("sha256") if isinstance(binary, dict) else None
+            if not isinstance(expected, str) or len(expected) != 64:
+                raise ValueError(f"{name} build manifest must identify binary.sha256")
+            if expected != identity["sha256"]:
+                raise ValueError(f"{name} executable SHA-256 does not match supplied build manifest")
+            identity["build_manifest_binary_verified"] = True
     return paths
 
 
@@ -647,7 +658,7 @@ def main() -> int:
     parser.add_argument("--io-mode", choices=IO_MODES, action="append", help="comparison IO mode; repeatable (default: both)")
     for engine in ("baozi", "assimp", "assimp-double"):
         parser.add_argument(f"--{engine}-build-manifest", type=Path,
-                            help="retain supplied compiler/flags/link/allocator build metadata verbatim")
+                            help="retain build metadata whose binary.sha256 matches the selected executable")
     arguments = parser.parse_args()
     if not math.isfinite(arguments.timeout) or arguments.timeout <= 0:
         parser.error("--timeout must be finite and positive")

@@ -151,7 +151,10 @@ class AssetProfileCLI(unittest.TestCase):
 
     def test_balanced_fresh_processes_keep_warmups_and_matched_statistics(self):
         build_manifest = self.root / "external-build.json"
-        build_manifest.write_text('{"compiler":"synthetic","precision":"f32"}', encoding="utf-8")
+        build_manifest.write_text(json.dumps({
+            "compiler": "synthetic", "precision": "f32",
+            "binary": {"sha256": hashlib.sha256(Path(sys.executable).read_bytes()).hexdigest()},
+        }), encoding="utf-8")
         result, report, artifacts = self.collect(
             [self.case()], repetitions=4, warmups=1,
             config={"times": {"baozi": [5, 10, 20, 30, 40],
@@ -184,12 +187,36 @@ class AssetProfileCLI(unittest.TestCase):
         self.assertTrue(report["binaries"]["baozi"]["sha256"])
         retained_manifest = report["binaries"]["assimp"]["build_manifest"]
         self.assertEqual((artifacts / retained_manifest["artifact"]).read_bytes(), build_manifest.read_bytes())
+        self.assertTrue(report["binaries"]["assimp"]["build_manifest_binary_verified"])
         self.assertIn("git_dirty", report)
         self.assertTrue(report["source_manifests"])
         if sys.platform != "linux":
             self.assertIsNone(samples[0]["peak_rss_bytes"])
             self.assertTrue(samples[0]["rss_unavailable_reason"])
         self.assertIsNone(report["heap"]["metrics"])
+
+    def test_stale_build_manifest_rejects_before_any_worker_launch(self):
+        manifest = self.root / "stale-build.json"
+        manifest.write_text(json.dumps({"binary": {"sha256": "0" * 64}}), encoding="utf-8")
+        result, report, _ = self.collect(
+            [self.case()], extra=["--assimp-build-manifest", str(manifest)],
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("executable SHA-256 does not match", report["error"])
+        self.assertFalse(any(row["kind"] == "comparison" for row in report["commands"]))
+        self.assertFalse((self.root / "state.json").exists())
+
+    def test_build_metadata_without_binary_identity_cannot_attest_the_worker(self):
+        manifest = self.root / "unbound-build.json"
+        manifest.write_text('{"compiler":"synthetic"}', encoding="utf-8")
+        result, report, _ = self.collect(
+            [self.case()], extra=["--assimp-build-manifest", str(manifest)],
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("build manifest must identify binary.sha256", report["error"])
+        self.assertFalse((self.root / "state.json").exists())
 
     def test_python310_large_input_hash_includes_the_final_partial_chunk(self):
         payload = bytes(range(256)) * (3 * 4096) + b"tail-check"
