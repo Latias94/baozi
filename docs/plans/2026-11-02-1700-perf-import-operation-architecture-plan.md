@@ -219,6 +219,13 @@ separately: callback-return cancellation and actual importer coverage are distin
 These controlled runs do not replace or alter the ordinary comparison protocol, and neither
 library is claimed to interrupt a blocking backend operation at a fixed elapsed-time bound.
 
+The bounded [Assimp control observation slice](../reviews/2026-11-02-assimp-control-observations.md)
+is qualified at `0936bd83d4eacf688491196022313f94dc3a87bc`: Windows and Linux each pass all
+75 records, observing 40 ignored false returns, 14 missing interior triggers, 18 baselines and
+three adapter checks. This confirms the selected release paths, not a general Assimp guarantee.
+It changes no ordinary worker or timing protocol. Baozi's corresponding real-format matrix
+and geometry-loop cadence corrections remain required before P6 can close.
+
 ## Review and Acceptance
 
 - Confirm P1's ownership and control decisions before implementation. Review the replacement,
