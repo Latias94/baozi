@@ -1,6 +1,6 @@
 # Bounded edit lifecycle fuzzing
 
-`edit_lifecycle` imports a real OBJ or PLY payload through the public import session. It edits one
+`edit_lifecycle` imports a real OBJ or PLY payload through a cached public `ImportPlan`. It edits one
 selected primitive in a fixed order: applicable triangulation, applicable normal generation, then
 whole-Scene coordinate conversion. A separate header flag instead prepares all triangle-like
 primitives in one transaction before any conversion. There are at most three operation calls. All successful imports
@@ -80,9 +80,9 @@ target. JSON inputs use embedded data URIs or the target's first-NUL split follo
 | `quantized_attributes.gltfbin` | Three vertices decode signed-byte positions/normals and signed-short UVs, each with explicit four-byte stride; padding bytes are not attribute values. |
 | `implicit_zero_attributes.gltf` | Buffer-free accessors materialize positive-zero positions/UVs/RGB and indices, plus implicit alpha 1, without dependency acquisition. |
 
-Deterministic `gltf_seed_tests` use the same `support::prepared_request(GltfImporter, FORMAT_ID)`
+Deterministic `gltf_seed_tests` use the same `support::import_plan(GltfImporter, FORMAT_ID)`
 and default limits as the target. Each fixture must import successfully through public
-`MemoryAssetIo`/`import_asset`, satisfy literal semantic or numeric expectations, capture the
+`MemoryAssetIo`/`ImportPlan::read_asset`, satisfy literal semantic or numeric expectations, capture the
 existing bounded snapshot, and release all import-ledger reservations. These assertions do not
 depend on mutation finding an accepted document. The library validation command below includes
 these tests; neither their addition nor this description claims an executed fuzz campaign.

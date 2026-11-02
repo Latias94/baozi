@@ -27,7 +27,7 @@ use crate::canonical_scene::store::construction::node_scene::snapshot::{
 };
 use crate::canonical_scene::store::construction::node_scene::{
     NodeSceneConstructionTerminal, NodeSceneDraftBuild, NodeSceneSuccessParts,
-    NodeSceneTestTransaction, SceneStorage,
+    NodeSceneTestTransaction, SceneParseOutcome, SceneStorage,
 };
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AnimationAuthoringFailure, AnimationAuthoringSemanticError,
@@ -3632,8 +3632,8 @@ fn gltf_cancellation_after_validation_publishes_only_rich_failure() {
             .expect("cancellable glTF Scene input admission")
             .finish_draft()
             .expect("glTF input must activate before cancellation");
-            let (draft, owner) = match build {
-                NodeSceneDraftBuild::Draft { draft, owner } => (draft, owner),
+            let owner = match build {
+                NodeSceneDraftBuild::Draft { owner } => owner,
                 NodeSceneDraftBuild::Failure { .. } => {
                     panic!("glTF input must reach central validation before cancellation")
                 }
@@ -3642,7 +3642,10 @@ fn gltf_cancellation_after_validation_publishes_only_rich_failure() {
             cancellation.cancel();
             let failure = rich_failure(
                 owner
-                    .prepare_with_generation_source(draft, SceneGenerationId::reserve)
+                    .prepare_with_generation_source(
+                        SceneParseOutcome::Accepted,
+                        SceneGenerationId::reserve,
+                    )
                     .expect("cancelled glTF construction must prepare rich failure")
                     .handoff(),
             );

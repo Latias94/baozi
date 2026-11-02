@@ -76,7 +76,7 @@ fn fixture(encoding: Encoding, scalar: &str, rows: &[[f64; 4]], aliases: bool) -
 )]
 fn import(bytes: &[u8], loss: LossPolicy) -> Result<ImportReport> {
     let importer = Importer::new()?;
-    let request = importer.prepare_request(
+    let request = importer.plan(
         &ImportRequest::from_layers(
             ImportRequestLayer::default(),
             ImportRequestLayer::new(
@@ -87,12 +87,13 @@ fn import(bytes: &[u8], loss: LossPolicy) -> Result<ImportReport> {
         ),
         OptionCompileLimits::default(),
     )?;
-    importer.read_bytes_with_request(
-        "colors.ply",
-        bytes,
-        &request,
-        ImportOperationControl::default(),
-    )
+    request
+        .read_bytes(
+            baozi::AssetPath::new("colors.ply").expect("valid source path"),
+            bytes,
+            ImportOperationControl::default(),
+        )
+        .map_err(baozi::Error::from)
 }
 
 fn color_bits(report: &ImportReport) -> Vec<u32> {

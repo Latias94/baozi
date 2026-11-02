@@ -412,11 +412,15 @@ fn primary_ascii_decode_adds_only_chunk_bounded_polls() -> TestResult<()> {
 
 #[test]
 fn decode_polls_before_atomic_text_units_cross_the_four_kib_frontier() -> TestResult<()> {
-    let mut utf8 = vec![b'#'; SCAN_CHUNK_BYTES - 1];
+    let mut prefix = String::from("#\u{e9}\u{1f642}");
+    prefix.push_str(&"#".repeat(SCAN_CHUNK_BYTES - 1 - prefix.len()));
+    assert_eq!(prefix.len(), SCAN_CHUNK_BYTES - 1);
+    assert!(prefix.chars().count() < prefix.len());
+    let mut utf8 = prefix.as_bytes().to_vec();
     utf8.extend_from_slice("\u{1f642}".as_bytes());
-    let mut crlf = vec![b'#'; SCAN_CHUNK_BYTES - 1];
+    let mut crlf = prefix.as_bytes().to_vec();
     crlf.extend_from_slice(b"\r\n");
-    let mut replacement = vec![b'#'; SCAN_CHUNK_BYTES - 1];
+    let mut replacement = prefix.as_bytes().to_vec();
     replacement.extend_from_slice(&[0xe2, 0x82, b'A']);
 
     for (label, document, replace_invalid_utf8) in [
@@ -434,35 +438,58 @@ fn decode_polls_before_atomic_text_units_cross_the_four_kib_frontier() -> TestRe
             calibration_control,
         )?);
         assert_ledger_limit(&calibration, ImportDimension::Records);
+        let raw_bytes = u64::try_from(document.len())?;
+        let decode = calibration
+            .ledger()
+            .dimension(ImportDimension::DecodeWork)
+            .unwrap();
+        assert_eq!(decode.attempted(), raw_bytes * 2, "{label}");
+        assert_eq!(decode.consumed(), raw_bytes * 2, "{label}");
         let total_polls = calibration_polls.load(Ordering::SeqCst);
         assert!(total_polls > 0);
 
-        let planning_prefix = (SCAN_CHUNK_BYTES - 1) as u64;
-        let build_prefix = u64::try_from(document.len())? + planning_prefix;
-        for (pass, expected_prefix) in [("planning", planning_prefix), ("build", build_prefix)] {
-            let (_, failure) = first_cancelled_dimension_prefix_at_least(
-                total_polls,
-                ImportDimension::DecodeWork,
-                expected_prefix,
-                |cancel_on| {
-                    let (control, polls) = controlled_import(Some(cancel_on));
-                    let failure = expected_failure(import_atomic_frontier_document(
-                        document.as_slice(),
-                        limits.clone(),
-                        replace_invalid_utf8,
-                        control,
-                    )?);
-                    assert_cancelled(&failure);
-                    assert_eq!(polls.load(Ordering::SeqCst), cancel_on);
-                    Ok(failure)
-                },
-            )?;
+        for (pass, previous_work) in [("planning", 0), ("build", raw_bytes)] {
+            for (checkpoint, expected_prefix) in [
+                ("frontier", previous_work + u64::try_from(prefix.len())?),
+                ("final", previous_work + raw_bytes),
+            ] {
+                // Calibration can include polls after the Records failure is latched. Those
+                // are search sentinels; the selected work boundary must still cancel.
+                let (_, failure) = first_cancelled_dimension_prefix_at_least(
+                    total_polls,
+                    ImportDimension::DecodeWork,
+                    expected_prefix,
+                    |cancel_on| {
+                        let (control, _) = controlled_import(Some(cancel_on));
+                        Ok(expected_failure(import_atomic_frontier_document(
+                            document.as_slice(),
+                            limits.clone(),
+                            replace_invalid_utf8,
+                            control,
+                        )?))
+                    },
+                )?;
 
-            assert_eq!(
-                work_consumed(&failure, ImportDimension::DecodeWork),
-                expected_prefix,
-                "{label} {pass} cancellation must be observed before consuming the atomic text unit"
-            );
+                assert_cancelled(&failure);
+                let decode = failure
+                    .ledger()
+                    .dimension(ImportDimension::DecodeWork)
+                    .unwrap();
+                assert_eq!(decode.attempted(), previous_work + raw_bytes);
+                assert_eq!(
+                    decode.consumed(),
+                    expected_prefix,
+                    "{label} {pass} {checkpoint} must retain the exact classified raw-byte prefix"
+                );
+                for dimension in [ImportDimension::Records, ImportDimension::Tokens] {
+                    let snapshot = failure.ledger().dimension(dimension).unwrap();
+                    assert_eq!(snapshot.attempted(), 0, "{label} {pass} {checkpoint}");
+                    assert_eq!(snapshot.consumed(), 0, "{label} {pass} {checkpoint}");
+                }
+                assert_eq!(failure.ledger().current_live_bytes(), 0);
+                assert_eq!(failure.ledger().active_reservations(), 0);
+                assert_eq!(failure.ledger().committed_canonical_members(), 0);
+            }
         }
     }
     Ok(())
@@ -593,11 +620,40 @@ fn reused_obj_scan_keeps_later_comment_chunk_admission_and_cancellation_prefixes
                 false,
                 control,
             )?);
-            assert_cancelled(&failure);
-            assert_eq!(polls.load(Ordering::SeqCst), cancel_on);
+            if matches!(
+                failure.ledger().terminal_cause(),
+                ImportTerminalCause::Failure(terminal)
+                    if terminal.class() == ImportTerminalFailureClass::Ledger
+            ) {
+                // A late probe can hit the Records hard limit before cancellation is
+                // observed. Its primary ledger cause survives supplemental control.
+                assert_ledger_limit(&failure, ImportDimension::Records);
+                let records = failure
+                    .ledger()
+                    .dimension(ImportDimension::Records)
+                    .unwrap();
+                assert_eq!(records.attempted(), 4);
+                assert_eq!(records.consumed(), 3);
+                let decode = failure
+                    .ledger()
+                    .dimension(ImportDimension::DecodeWork)
+                    .unwrap();
+                assert_eq!(decode.attempted(), 49_226);
+                assert_eq!(decode.consumed(), 49_226);
+                assert!(matches!(
+                    failure.terminal_control_cause(),
+                    None | Some(ControlCause::Cancelled {
+                        origin: CancellationOrigin::Signal,
+                    })
+                ));
+            } else {
+                assert_cancelled(&failure);
+                assert_eq!(polls.load(Ordering::SeqCst), cancel_on);
+            }
             Ok(failure)
         },
     )?;
+    assert_cancelled(&cancelled);
     assert!(boundary_poll < total_polls);
     let decode = cancelled
         .ledger()
@@ -605,6 +661,14 @@ fn reused_obj_scan_keeps_later_comment_chunk_admission_and_cancellation_prefixes
         .unwrap();
     assert_eq!(decode.attempted(), 45_130);
     assert_eq!(decode.consumed(), 45_130);
+    assert_eq!(
+        cancelled
+            .ledger()
+            .dimension(ImportDimension::Records)
+            .unwrap()
+            .attempted(),
+        3
+    );
     for failure in [&rejected, &calibration, &cancelled] {
         assert_eq!(work_consumed(failure, ImportDimension::Records), 3);
         let tokens = failure.ledger().dimension(ImportDimension::Tokens).unwrap();
@@ -740,48 +804,114 @@ fn repeated_texture_replacement_does_not_accumulate_live_reservations() -> TestR
 }
 
 #[test]
-fn owned_string_copy_polls_within_fixed_byte_chunks() -> TestResult<()> {
+fn owned_string_copy_keeps_completed_work_before_final_cancellation() -> TestResult<()> {
     let short_name = "x";
-    let long_name = "x".repeat(SCAN_CHUNK_BYTES * 8);
-    let short_document = format!("o {short_name}\nv 0 0 0\n");
-    let long_document = format!("o {long_name}\nv 0 0 0\n");
-    let short_state_line_bytes = "o ".len() + short_name.len();
-    let long_state_line_bytes = "o ".len() + long_name.len();
-    let expected_extra_polls = long_document.len().div_ceil(SCAN_CHUNK_BYTES)
-        - short_document.len().div_ceil(SCAN_CHUNK_BYTES)
-        + long_state_line_bytes.div_ceil(SCAN_CHUNK_BYTES)
-        - short_state_line_bytes.div_ceil(SCAN_CHUNK_BYTES)
-        + long_state_line_bytes.div_ceil(SCAN_CHUNK_BYTES)
-        - short_state_line_bytes.div_ceil(SCAN_CHUNK_BYTES)
-        + long_name.len().div_ceil(SCAN_CHUNK_BYTES)
-        - short_name.len().div_ceil(SCAN_CHUNK_BYTES);
-    let mut limits = ResourceLimits::default();
-    limits.max_records = 1;
+    let mut long_name = "x".repeat(SCAN_CHUNK_BYTES - 1);
+    long_name.push('\u{1f642}');
+    long_name.push_str(&"x".repeat(SCAN_CHUNK_BYTES * 8 - long_name.len()));
+    assert_eq!(long_name.len(), SCAN_CHUNK_BYTES * 8);
+    assert!(!long_name.is_char_boundary(SCAN_CHUNK_BYTES));
 
-    let (short_control, short_polls) = controlled_import(None);
-    let short_failure = expected_failure(import_assets_result_with_control(
-        "short-name.obj",
-        [("short-name.obj", short_document.as_bytes())],
-        limits.clone(),
-        false,
-        short_control,
-    )?);
-    let (long_control, long_polls) = controlled_import(None);
-    let long_failure = expected_failure(import_assets_result_with_control(
-        "long-name.obj",
-        [("long-name.obj", long_document.as_bytes())],
-        limits,
-        false,
-        long_control,
-    )?);
+    // These copies finish before the 256-action periodic bound. A mandatory post-copy
+    // checkpoint must still expose their physical completion before the next record.
+    for (label, name) in [("short", short_name), ("long", long_name.as_str())] {
+        let source = format!("{label}-name.obj");
+        let document = format!("o {name}\nv 0 0 0\n");
+        let name_bytes = u64::try_from(name.len())?;
+        let state_line_bytes = "o ".len() + name.len();
+        // Two whole-text passes, the first line scan, and both token byte lengths.
+        let expected_decode_work =
+            u64::try_from(document.len() * 2 + state_line_bytes + "o".len() + name.len())?;
+        let mut limits = ResourceLimits::default();
+        limits.max_records = 1;
+        limits.max_string_bytes = name.len();
+        limits.max_canonical_string_bytes = name.len();
 
-    assert_ledger_limit(&short_failure, ImportDimension::Records);
-    assert_ledger_limit(&long_failure, ImportDimension::Records);
-    let actual_extra_polls = long_polls.load(Ordering::SeqCst) - short_polls.load(Ordering::SeqCst);
-    assert!(
-        actual_extra_polls >= expected_extra_polls,
-        "long owned-string copy added {actual_extra_polls} polls, expected at least {expected_extra_polls}"
-    );
+        let (control, polls) = controlled_import(None);
+        let calibration = expected_failure(import_assets_result_with_control(
+            &source,
+            [(source.as_str(), document.as_bytes())],
+            limits.clone(),
+            false,
+            control,
+        )?);
+        assert_ledger_limit(&calibration, ImportDimension::Records);
+
+        let (copied_poll, cancelled) = first_cancelled_dimension_prefix_at_least(
+            polls.load(Ordering::SeqCst),
+            ImportDimension::CanonicalStringBytes,
+            name_bytes,
+            |cancel_on| {
+                let (control, _) = controlled_import(Some(cancel_on));
+                Ok(expected_failure(import_assets_result_with_control(
+                    &source,
+                    [(source.as_str(), document.as_bytes())],
+                    limits.clone(),
+                    false,
+                    control,
+                )?))
+            },
+        )?;
+        assert_cancelled(&cancelled);
+        assert!(copied_poll > 1);
+
+        let (control, _) = controlled_import(Some(copied_poll - 1));
+        let before_completion = expected_failure(import_assets_result_with_control(
+            &source,
+            [(source.as_str(), document.as_bytes())],
+            limits.clone(),
+            false,
+            control,
+        )?);
+        assert_cancelled(&before_completion);
+        let unfinished = before_completion
+            .ledger()
+            .dimension(ImportDimension::CanonicalStringBytes)
+            .unwrap();
+        assert_eq!(unfinished.attempted(), name_bytes);
+        assert!(unfinished.consumed() < name_bytes);
+
+        let mut one_short = limits;
+        one_short.max_canonical_string_bytes -= 1;
+        let rejected = expected_failure(import_bytes_result(
+            &source,
+            document.as_bytes(),
+            one_short,
+        )?);
+        assert_ledger_limit(&rejected, ImportDimension::CanonicalStringBytes);
+
+        for (failure, completed_name_bytes, attempted_records) in [
+            (&calibration, name_bytes, 2),
+            (&cancelled, name_bytes, 1),
+            (&before_completion, unfinished.consumed(), 1),
+            (&rejected, 0, 1),
+        ] {
+            let strings = failure
+                .ledger()
+                .dimension(ImportDimension::CanonicalStringBytes)
+                .unwrap();
+            assert_eq!(strings.attempted(), name_bytes, "{label}");
+            assert_eq!(strings.consumed(), completed_name_bytes, "{label}");
+            for (dimension, expected) in [
+                (ImportDimension::DecodeWork, expected_decode_work),
+                (ImportDimension::Tokens, 2),
+                (ImportDimension::Vertices, 0),
+            ] {
+                let snapshot = failure.ledger().dimension(dimension).unwrap();
+                assert_eq!(snapshot.attempted(), expected, "{label} {dimension:?}");
+                assert_eq!(snapshot.consumed(), expected, "{label} {dimension:?}");
+            }
+            let records = failure
+                .ledger()
+                .dimension(ImportDimension::Records)
+                .unwrap();
+            assert_eq!(records.attempted(), attempted_records, "{label}");
+            assert_eq!(records.consumed(), 1, "{label}");
+            assert_eq!(failure.ledger().current_live_bytes(), 0);
+            assert_eq!(failure.ledger().active_reservations(), 0);
+            assert_eq!(failure.ledger().committed_canonical_members(), 0);
+        }
+    }
     Ok(())
 }
 

@@ -12,7 +12,7 @@ use baozi_io::{AssetIo, AssetOpenWorkError, AssetPath, OpenedAsset};
 use crate::error::{ScopeAbortCause, TrustedExtensionBoundary};
 use crate::format::discard_untrusted_panic_payload;
 use crate::ledger::ImportDimension;
-use crate::store::{ImportObservedWorkFailure, ImportStoreHost};
+use crate::store::{ImportObservedWorkFailure, ImportStoreExecution};
 
 #[derive(Clone, Copy)]
 pub(crate) enum AssetOpenContext {
@@ -102,7 +102,7 @@ impl Drop for OpenedAssetOwner {
 /// Only a cache miss enters this function. The bound and open use the same borrowed backend/path;
 /// no admission authority, lifetime token, or completion callback escapes into the backend.
 pub(crate) fn open_asset(
-    host: ImportStoreHost<'_>,
+    exec: &mut ImportStoreExecution<'_>,
     io: &dyn AssetIo,
     path: &AssetPath,
     context: AssetOpenContext,
@@ -116,8 +116,8 @@ pub(crate) fn open_asset(
         .get();
 
     // Admission polls control again after the pure bound query, before any opaque backend IO.
-    let opened = host
-        .with_observed_work([(ImportDimension::WorkUnits, bound)], |work| {
+    let opened = exec
+        .with_observed_work([(ImportDimension::WorkUnits, bound)], |_exec, work| {
             // Install cleanup ownership before work completion or any later fallible check.
             let opened = catch_unwind(AssertUnwindSafe(|| {
                 io.open(path).map(OpenedAssetOwner::new)

@@ -11,11 +11,11 @@ use baozi_import::authoring::{
     Vec2, Vec3,
 };
 use baozi_import::{
-    CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
-    FormatDescriptor, FormatEncoding, FormatImporter, FormatSelection, ImportConfigOverlay,
-    ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer, OptionCompileLimits,
-    ParseResult, ParseScope, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
-    SceneDraft, import_bytes,
+    CapabilityStatus, CompiledOptions, DetectionOutcome, DetectionResult, DetectionScope, Format,
+    FormatCapability, FormatDescriptor, FormatEncoding, FormatSelection, ImportConfigOverlay,
+    ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer, NoFormatOptions,
+    OptionCompileError, OptionCompileLimits, ParseContext, ParseResult, ReadConfidence, ReadHint,
+    RegistryBuildLimits, RegistryBuildScope, RegistryBuilder,
 };
 use baozi_io::AssetPath;
 use baozi_postprocess::{
@@ -149,7 +149,16 @@ struct AppearanceImporter {
     image_len: usize,
 }
 
-impl FormatImporter for AppearanceImporter {
+impl Format for AppearanceImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(FormatId::new(FORMAT).unwrap(), "Appearance space fixture")
             .encoding(FormatEncoding::Binary)
@@ -170,7 +179,7 @@ impl FormatImporter for AppearanceImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
         let roots = [NodeLocalId::new(0)];
         let nodes = [NodeAuthoringNode::new(
             Presence::Absent,
@@ -236,7 +245,7 @@ impl FormatImporter for AppearanceImporter {
             )
             .unwrap(),
         ];
-        scope.submit_static_scene(
+        context.submit(
             StaticSceneBuilder::new(Presence::Present(&roots), &nodes)
                 .with_appearance(&images, &samplers, &textures, &bindings, &materials)
                 .with_scene_space(&SceneSpace::STANDARD_TARGET),
@@ -255,15 +264,15 @@ fn import_fixture(lengths: Lengths, image_len: usize) -> ImportReport {
             .with_format_selection(FormatSelection::Forced(FormatId::new(FORMAT).unwrap())),
     ));
     let request = registry
-        .compile_request(&request, OptionCompileLimits::default())
+        .plan(&request, OptionCompileLimits::default())
         .unwrap();
-    import_bytes(
-        &request,
-        AssetPath::new(PATH).unwrap(),
-        b"abc",
-        ImportOperationControl::default(),
-    )
-    .expect("public appearance fixture must pass central import validation")
+    request
+        .read_bytes(
+            AssetPath::new(PATH).unwrap(),
+            b"abc",
+            ImportOperationControl::default(),
+        )
+        .expect("public appearance fixture must pass central import validation")
 }
 
 fn options(units: f64) -> SpaceConversionOptions {

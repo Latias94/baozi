@@ -6,11 +6,12 @@ use std::sync::Mutex;
 
 use baozi_core::FormatId;
 use baozi_import::{
-    DependencyRequirement, DependencyRoleId, DetectionOutcome, DetectionResult, DetectionScope,
-    FormatDescriptor, FormatEncoding, FormatImporter, ImportCause, ImportDimension, ImportFailure,
-    ImportOperationControl, ImportReport, ImportRequest, OptionCompileLimits, ParseResult,
-    ParseScope, PreparedImportRequest, Probe, ReadConfidence, ReadHint, RegistryBuildLimits,
-    RegistryBuilder, SceneDraft, ScopeAbortCause, TrustedExtensionBoundary, import_asset,
+    CompiledOptions, DependencyRequirement, DependencyRoleId, DetectionOutcome, DetectionResult,
+    DetectionScope, Format, FormatDescriptor, FormatEncoding, ImportCause, ImportDimension,
+    ImportFailure, ImportOperationControl, ImportPlan, ImportReport, ImportRequest,
+    NoFormatOptions, OptionCompileError, OptionCompileLimits, ParseContext, ParseResult, Probe,
+    ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuildScope, RegistryBuilder,
+    ScopeAbortCause, TrustedExtensionBoundary,
 };
 use baozi_io::{
     AssetIo, AssetLength, AssetOpenError, AssetOpenErrorKind, AssetOpenStage, AssetOpenWorkError,
@@ -26,7 +27,16 @@ struct TestImporter {
     dependency: bool,
 }
 
-impl FormatImporter for TestImporter {
+impl Format for TestImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         let builder = FormatDescriptor::builder(
             FormatId::new("dev.baozi.test.open-work").unwrap(),
@@ -54,16 +64,19 @@ impl FormatImporter for TestImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        if self.dependency {
-            let role = DependencyRoleId::new("test.sidecar").unwrap();
-            // Both references authorize; the physical cache must query/open only once.
-            for _ in 0..2 {
-                let dependency = support::required_root_dependency(scope, &role, DEPENDENCY)?;
-                assert_eq!(dependency.bytes(), b"payload");
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        context.with_execution(|exec| -> ParseResult<()> {
+            if self.dependency {
+                let role = DependencyRoleId::new("test.sidecar").unwrap();
+                // Both references authorize; the physical cache must query/open only once.
+                for _ in 0..2 {
+                    let dependency = support::required_root_dependency(exec, &role, DEPENDENCY)?;
+                    assert_eq!(dependency.bytes(), b"payload");
+                }
             }
-        }
-        support::submit_minimal_scene(scope)
+            Ok(())
+        })?;
+        support::submit_minimal_scene(context)
     }
 }
 
@@ -151,13 +164,13 @@ impl AssetIo for TestIo {
     }
 }
 
-fn request(dependency: bool) -> PreparedImportRequest {
+fn request(dependency: bool) -> ImportPlan {
     let mut registry = RegistryBuilder::new();
     registry.register(TestImporter { dependency }).unwrap();
     registry
         .freeze(RegistryBuildLimits::default())
         .unwrap()
-        .compile_request(&ImportRequest::new(), OptionCompileLimits::default())
+        .plan(&ImportRequest::new(), OptionCompileLimits::default())
         .unwrap()
 }
 
@@ -170,13 +183,9 @@ fn run(
     io: &TestIo,
     control: ImportOperationControl,
 ) -> Result<ImportReport, ImportFailure> {
-    import_asset(
-        &request(dependency),
-        io,
-        AssetPath::new(PRIMARY).unwrap(),
-        control,
-    )
-    .map_err(|error| error.into_operation_failure().unwrap())
+    request(dependency)
+        .read_asset(io, AssetPath::new(PRIMARY).unwrap(), control)
+        .map_err(|error| error.into_operation_failure().unwrap())
 }
 
 fn extension_code(failure: &ImportFailure) -> &'static str {

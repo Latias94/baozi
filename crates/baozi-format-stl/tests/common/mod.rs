@@ -4,10 +4,10 @@ use baozi_format_stl::{FORMAT_ID, StlImporter};
 use baozi_import::authoring::FormatId;
 use baozi_import::{
     FormatFailureDetailValue, FormatFailureEnvelope, FormatSelection, ImportCause,
-    ImportConfigOverlay, ImportFailure, ImportOperationControl, ImportReport, ImportRequest,
-    ImportRequestLayer, ImportResult, OptionCompileLimits, PreparedImportRequest,
-    RegistryBuildLimits, RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, SceneSnapshot,
-    SceneSnapshotError, SceneSnapshotLimits, import_asset,
+    ImportConfigOverlay, ImportFailure, ImportOperationControl, ImportPlan, ImportReport,
+    ImportRequest, ImportRequestLayer, ImportResult, OptionCompileLimits, RegistryBuildLimits,
+    RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, SceneSnapshot, SceneSnapshotError,
+    SceneSnapshotLimits,
 };
 use baozi_io::{AssetPath, MemoryAssetIo};
 use std::error::Error;
@@ -119,13 +119,8 @@ pub fn import_bytes_with_limits(
     let io = MemoryAssetIo::new();
     io.try_insert(path.clone(), Arc::<[u8]>::from(bytes))
         .expect("test asset insertion must succeed");
-    let request = request(limits, false);
-    TestImportOutcome::new(import_asset(
-        &request,
-        &io,
-        path,
-        ImportOperationControl::default(),
-    ))
+    let plan = import_plan(limits, false);
+    TestImportOutcome::new(plan.read_asset(&io, path, ImportOperationControl::default()))
 }
 
 pub fn import_bytes_forced_with_limits(
@@ -151,8 +146,8 @@ pub fn import_bytes_forced_with_limits_and_control(
     let io = MemoryAssetIo::new();
     io.try_insert(path.clone(), Arc::<[u8]>::from(bytes))
         .expect("test asset insertion must succeed");
-    let request = request(limits, true);
-    TestImportOutcome::new(import_asset(&request, &io, path, control))
+    let plan = import_plan(limits, true);
+    TestImportOutcome::new(plan.read_asset(&io, path, control))
 }
 
 pub fn expected_stl_failure(failure: &ImportFailure) -> &FormatFailureEnvelope {
@@ -191,7 +186,7 @@ pub fn stl_string_detail<'failure>(
     })
 }
 
-fn request(limits: ResourceLimits, forced: bool) -> PreparedImportRequest {
+pub fn import_plan(limits: ResourceLimits, forced: bool) -> ImportPlan {
     let mut builder = RegistryBuilder::new();
     builder
         .register(StlImporter)
@@ -207,14 +202,14 @@ fn request(limits: ResourceLimits, forced: bool) -> PreparedImportRequest {
         ));
     }
     snapshot
-        .compile_request(
+        .plan(
             &ImportRequest::from_layers(
                 ImportRequestLayer::default(),
                 ImportRequestLayer::new(config),
             ),
             OptionCompileLimits::default(),
         )
-        .expect("STL request must compile")
+        .expect("STL plan must compile")
 }
 
 fn push_vec3(bytes: &mut Vec<u8>, values: [f32; 3]) {

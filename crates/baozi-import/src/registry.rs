@@ -1,23 +1,21 @@
-use crate::SceneDraft;
 use crate::descriptor::FormatDescriptor;
 use crate::detection::{DetectionResult, DetectionScope};
 use crate::format::{
-    BoundedFaultDetail, DetectionOutcome, FormatImporter, Probe, bounded_panic_detail,
+    BoundedFaultDetail, DetectionOutcome, Format, Probe, bounded_panic_detail,
     detection_fault_from_panic, discard_untrusted_panic_payload,
 };
 use crate::options::{
-    CompileAggregate, CompiledFormatOptions, FormatOptionCodec, FormatOptionLayers,
-    FormatOptionSchema, OptionCompileError, OptionCompileScope, OptionRuntimeTypeKey,
-    RegistryBuildLimits, RegistryBuildScope,
+    CompileAggregate, CompiledOptions, FormatOptionLayers, FormatOptionSchema, OptionCompileError,
+    OptionCompileScope, RegistryBuildLimits, RegistryBuildScope,
 };
-use crate::scope::{ParseResult, ParseScope};
+use crate::scope::{ParseContext, ParseResult};
 use crate::session::ReadHint;
 use baozi_core::FormatId;
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::{AssertUnwindSafe, RefUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -41,12 +39,12 @@ impl RegistryBuilder {
         Self::default()
     }
 
-    /// Registers a trusted importer with a qualified reverse-DNS ID.
-    pub fn register<I>(&mut self, importer: I) -> Result<(), RegistryRegistrationError>
+    /// Registers a trusted format with a qualified reverse-DNS ID.
+    pub fn register<F>(&mut self, format: F) -> Result<(), RegistryRegistrationError>
     where
-        I: FormatImporter,
+        F: Format,
     {
-        self.register_inner(Arc::new(importer))
+        self.register_inner(format)
     }
 
     /// Records a known but unavailable format without publishing a capability.
@@ -99,7 +97,7 @@ impl RegistryBuilder {
             }
             let mut scope = RegistryBuildScope::new(format, limits, &mut aggregate);
             let compiled = match invoke_extension(&pending.health, || {
-                pending.codec.compile_defaults(&mut scope)
+                Arc::clone(&pending.registration).compile_defaults(&mut scope)
             }) {
                 Ok(result) => result,
                 Err(RegistrationInvocationError::ExtensionPanicked { detail }) => {
@@ -124,26 +122,18 @@ impl RegistryBuilder {
                 });
             }
 
-            if compiled.runtime_type_key() != pending.expected_runtime
-                || compiled.runtime_type_key() != pending.codec_runtime
-            {
-                return Err(RegistryBuildError::RuntimeTypeMismatch {
-                    format: format.clone(),
-                });
-            }
-
-            let compiled = compiled.seal_schema(pending.schema.clone());
             let index = entries.len();
             let replaced =
                 by_id.insert(RegisteredFormatKey(Arc::clone(&pending.descriptor)), index);
             debug_assert!(replaced.is_none());
             entries.push(FrozenRegistration {
-                importer: Arc::clone(&pending.importer),
+                registration: Arc::clone(&pending.registration),
                 descriptor: Arc::clone(&pending.descriptor),
-                codec: Arc::clone(&pending.codec),
                 schema: pending.schema.clone(),
-                expected_runtime: pending.expected_runtime,
-                default_options: Arc::new(compiled),
+                default_invocation: PreparedInvocation {
+                    invocation: compiled,
+                    health: Arc::clone(&pending.health),
+                },
                 health: Arc::clone(&pending.health),
             });
         }
@@ -158,11 +148,8 @@ impl RegistryBuilder {
         })
     }
 
-    fn register_inner(
-        &mut self,
-        importer: Arc<dyn FormatImporter>,
-    ) -> Result<(), RegistryRegistrationError> {
-        let descriptor = catch_unwind(|| importer.descriptor()).map_err(|payload| {
+    fn register_inner<F: Format>(&mut self, format: F) -> Result<(), RegistryRegistrationError> {
+        let descriptor = catch_unwind(|| format.descriptor()).map_err(|payload| {
             RegistryRegistrationError::ImporterPanicked {
                 detail: bounded_panic_detail(payload),
             }
@@ -174,25 +161,15 @@ impl RegistryBuilder {
             return Err(RegistryRegistrationError::DuplicateFormatId { id });
         }
 
-        let captured = catch_unwind(|| {
-            let codec = importer.option_codec();
-            let expected_runtime = importer.option_runtime_type_key();
-            let codec_runtime = codec.runtime_type_key();
-            let schema = codec.schema();
-            (codec, expected_runtime, codec_runtime, schema)
-        })
-        .map_err(|payload| RegistryRegistrationError::ImporterPanicked {
-            detail: bounded_panic_detail(payload),
+        let schema = catch_unwind(|| format.option_schema()).map_err(|payload| {
+            RegistryRegistrationError::ImporterPanicked {
+                detail: bounded_panic_detail(payload),
+            }
         })?;
-        let (codec, expected_runtime, codec_runtime, schema) = captured;
-
         let pending = PendingRegistration {
-            importer,
+            registration: Arc::new(Registration { format }),
             descriptor: Arc::new(descriptor),
-            codec,
             schema,
-            expected_runtime,
-            codec_runtime,
             health: Arc::new(RegistrationHealth::new()),
         };
         validate_pending(&pending)?;
@@ -221,13 +198,88 @@ impl fmt::Debug for RegistryBuilder {
 }
 
 struct PendingRegistration {
-    importer: Arc<dyn FormatImporter>,
+    registration: Arc<dyn ErasedRegistration>,
     descriptor: Arc<FormatDescriptor>,
-    codec: Arc<dyn FormatOptionCodec>,
     schema: Option<FormatOptionSchema>,
-    expected_runtime: OptionRuntimeTypeKey,
-    codec_runtime: OptionRuntimeTypeKey,
     health: Arc<RegistrationHealth>,
+}
+
+struct Registration<F: Format> {
+    format: F,
+}
+
+trait ErasedRegistration: Send + Sync + RefUnwindSafe {
+    fn compile_defaults(
+        self: Arc<Self>,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<Arc<dyn ErasedInvocation>, OptionCompileError>;
+
+    fn detect(
+        &self,
+        probe: &Probe<'_>,
+        hint: &ReadHint,
+        scope: &DetectionScope<'_>,
+    ) -> DetectionResult<DetectionOutcome>;
+}
+
+impl<F: Format> ErasedRegistration for Registration<F> {
+    fn compile_defaults(
+        self: Arc<Self>,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<Arc<dyn ErasedInvocation>, OptionCompileError> {
+        let options = self.format.compile_defaults(scope)?;
+        Ok(Arc::new(PreparedFormat {
+            registration: self,
+            options,
+        }))
+    }
+
+    fn detect(
+        &self,
+        probe: &Probe<'_>,
+        hint: &ReadHint,
+        scope: &DetectionScope<'_>,
+    ) -> DetectionResult<DetectionOutcome> {
+        self.format.detect(probe, hint, scope)
+    }
+}
+
+struct PreparedFormat<F: Format> {
+    registration: Arc<Registration<F>>,
+    options: CompiledOptions<F::Options>,
+}
+
+trait ErasedInvocation: Send + Sync + RefUnwindSafe {
+    fn compile_overrides(
+        &self,
+        scope: &mut OptionCompileScope<'_>,
+        layers: FormatOptionLayers<'_>,
+    ) -> Result<Arc<dyn ErasedInvocation>, OptionCompileError>;
+
+    fn parse(&self, context: &mut ParseContext<'_>) -> ParseResult<()>;
+}
+
+impl<F: Format> ErasedInvocation for PreparedFormat<F> {
+    fn compile_overrides(
+        &self,
+        scope: &mut OptionCompileScope<'_>,
+        layers: FormatOptionLayers<'_>,
+    ) -> Result<Arc<dyn ErasedInvocation>, OptionCompileError> {
+        let options =
+            self.registration
+                .format
+                .compile_options(scope, self.options.value(), layers)?;
+        Ok(Arc::new(Self {
+            registration: Arc::clone(&self.registration),
+            options,
+        }))
+    }
+
+    fn parse(&self, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        self.registration
+            .format
+            .parse(self.options.value(), context)
+    }
 }
 
 fn validate_pending(pending: &PendingRegistration) -> Result<(), RegistryRegistrationError> {
@@ -236,11 +288,6 @@ fn validate_pending(pending: &PendingRegistration) -> Result<(), RegistryRegistr
         && schema.key().owner() != format
     {
         return Err(RegistryRegistrationError::OptionSchemaOwnerMismatch {
-            format: format.clone(),
-        });
-    }
-    if pending.expected_runtime != pending.codec_runtime {
-        return Err(RegistryRegistrationError::RuntimeTypeMismatch {
             format: format.clone(),
         });
     }
@@ -278,11 +325,6 @@ impl RegistrySnapshot {
 
     pub fn unavailable_reason(&self, id: &FormatId) -> Option<FormatUnavailability> {
         self.data.unavailable.get(id).copied()
-    }
-
-    /// Returns whether both handles refer to the same frozen registry publication.
-    pub fn has_same_identity(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.data, &other.data)
     }
 
     pub(crate) fn entries(&self) -> impl ExactSizeIterator<Item = RegistryEntry> + '_ {
@@ -372,13 +414,42 @@ impl fmt::Debug for UnavailableFormatIdsDebug<'_> {
 }
 
 struct FrozenRegistration {
-    importer: Arc<dyn FormatImporter>,
+    registration: Arc<dyn ErasedRegistration>,
     descriptor: Arc<FormatDescriptor>,
-    codec: Arc<dyn FormatOptionCodec>,
     schema: Option<FormatOptionSchema>,
-    expected_runtime: OptionRuntimeTypeKey,
-    default_options: Arc<CompiledFormatOptions>,
+    default_invocation: PreparedInvocation,
     health: Arc<RegistrationHealth>,
+}
+
+/// A format and its typed options, erased together after bounded compilation.
+#[derive(Clone)]
+pub(crate) struct PreparedInvocation {
+    invocation: Arc<dyn ErasedInvocation>,
+    health: Arc<RegistrationHealth>,
+}
+
+impl PreparedInvocation {
+    pub(crate) fn parse(
+        &self,
+        context: &mut ParseContext<'_>,
+    ) -> Result<ParseResult<()>, ParseInvocationError> {
+        let Some(permit) = self.health.begin_invocation() else {
+            return Err(ParseInvocationError::ExtensionPoisoned);
+        };
+        let result = match catch_unwind(AssertUnwindSafe(|| self.invocation.parse(context))) {
+            Ok(result) => result,
+            Err(payload) => {
+                permit.poison();
+                discard_untrusted_panic_payload(payload);
+                return Err(ParseInvocationError::ExtensionPanicked);
+            }
+        };
+        if self.health.is_poisoned() && result.is_ok() {
+            Err(ParseInvocationError::ExtensionPoisoned)
+        } else {
+            Ok(result)
+        }
+    }
 }
 
 /// Snapshot-qualified handle used only by import-session implementation.
@@ -409,12 +480,8 @@ impl RegistryEntry {
         self.registration().schema.as_ref()
     }
 
-    pub(crate) fn expected_runtime_type_key(&self) -> OptionRuntimeTypeKey {
-        self.registration().expected_runtime
-    }
-
-    pub(crate) fn default_options(&self) -> Arc<CompiledFormatOptions> {
-        Arc::clone(&self.registration().default_options)
+    pub(crate) fn default_invocation(&self) -> PreparedInvocation {
+        self.registration().default_invocation.clone()
     }
 
     pub(crate) const fn index(&self) -> usize {
@@ -438,7 +505,7 @@ impl RegistryEntry {
             ));
         };
         match catch_unwind(AssertUnwindSafe(|| {
-            registration.importer.detect(probe, hint, scope)
+            registration.registration.detect(probe, hint, scope)
         })) {
             Ok(Err(abort)) => Err(abort),
             Ok(Ok(_)) if registration.health.is_poisoned() => Ok(DetectionOutcome::Fault(
@@ -452,46 +519,25 @@ impl RegistryEntry {
         }
     }
 
-    pub(crate) fn compile_layers(
+    pub(crate) fn compile_overrides(
         &self,
         scope: &mut OptionCompileScope<'_>,
         layers: FormatOptionLayers<'_>,
-    ) -> Result<Result<CompiledFormatOptions, OptionCompileError>, RegistrationInvocationError>
-    {
+    ) -> Result<Result<PreparedInvocation, OptionCompileError>, RegistrationInvocationError> {
         let registration = self.registration();
-        let default_options = registration.default_options.as_ref();
         let compiled = invoke_extension(&registration.health, || {
             registration
-                .codec
-                .compile_layers(scope, default_options, layers)
+                .default_invocation
+                .invocation
+                .compile_overrides(scope, layers)
         })?;
         if registration.health.is_poisoned() {
             return Err(RegistrationInvocationError::ExtensionPoisoned);
         }
-        Ok(compiled.map(|compiled| compiled.seal_schema(registration.schema.clone())))
-    }
-
-    pub(crate) fn parse(
-        &self,
-        scope: &mut ParseScope<'_>,
-    ) -> Result<ParseResult<SceneDraft>, ParseInvocationError> {
-        let registration = self.registration();
-        let Some(permit) = registration.health.begin_invocation() else {
-            return Err(ParseInvocationError::ExtensionPoisoned);
-        };
-        let result = match catch_unwind(AssertUnwindSafe(|| registration.importer.parse(scope))) {
-            Ok(result) => result,
-            Err(payload) => {
-                permit.poison();
-                discard_untrusted_panic_payload(payload);
-                return Err(ParseInvocationError::ExtensionPanicked);
-            }
-        };
-        if registration.health.is_poisoned() && result.is_ok() {
-            Err(ParseInvocationError::ExtensionPoisoned)
-        } else {
-            Ok(result)
-        }
+        Ok(compiled.map(|invocation| PreparedInvocation {
+            invocation,
+            health: Arc::clone(&registration.health),
+        }))
     }
 
     pub(crate) fn belongs_to(&self, snapshot: &RegistrySnapshot) -> bool {
@@ -547,7 +593,6 @@ pub enum RegistryRegistrationError {
     DuplicateFormatId { id: FormatId },
     FormatIdMustBeQualified { id: FormatId },
     OptionSchemaOwnerMismatch { format: FormatId },
-    RuntimeTypeMismatch { format: FormatId },
     ImporterPanicked { detail: BoundedFaultDetail },
 }
 
@@ -559,7 +604,6 @@ impl RegistryRegistrationError {
             Self::DuplicateFormatId { .. } => "duplicate-format-id",
             Self::FormatIdMustBeQualified { .. } => "format-id-must-be-qualified",
             Self::OptionSchemaOwnerMismatch { .. } => "option-schema-owner-mismatch",
-            Self::RuntimeTypeMismatch { .. } => "option-runtime-type-mismatch",
             Self::ImporterPanicked { .. } => "importer-panicked",
         }
     }
@@ -576,12 +620,6 @@ impl fmt::Display for RegistryRegistrationError {
                 write!(
                     formatter,
                     "option schema owner does not match format {format}"
-                )
-            }
-            Self::RuntimeTypeMismatch { format } => {
-                write!(
-                    formatter,
-                    "option runtime type does not match importer {format}"
                 )
             }
             Self::ImporterPanicked { detail } => {
@@ -609,9 +647,6 @@ pub enum RegistryBuildError {
         format: FormatId,
         cause: OptionCompileError,
     },
-    RuntimeTypeMismatch {
-        format: FormatId,
-    },
     ExtensionPoisoned {
         format: FormatId,
     },
@@ -626,7 +661,6 @@ impl RegistryBuildError {
             Self::Registration(_) => "invalid-registration",
             Self::CodecPanicked { .. } => "default-codec-panicked",
             Self::CodecRejected { .. } => "default-codec-rejected",
-            Self::RuntimeTypeMismatch { .. } => "option-runtime-type-mismatch",
             Self::ExtensionPoisoned { .. } => "extension-poisoned",
             Self::AllocationFailed => "allocation-failed",
         }
@@ -649,10 +683,6 @@ impl fmt::Display for RegistryBuildError {
                     "default options for {format} were rejected: {cause}"
                 )
             }
-            Self::RuntimeTypeMismatch { format } => write!(
-                formatter,
-                "compiled default option type does not match importer {format}"
-            ),
             Self::ExtensionPoisoned { format } => {
                 write!(formatter, "format registration {format} is poisoned")
             }
@@ -767,7 +797,7 @@ mod tests {
     use crate::ledger::{ImportDimension, ImportOperationControl};
     use crate::limits::ResourceLimits;
     use crate::options::{
-        FormatOptionEnvelope, FormatOptionKey, FormatOptionSchemaId, FormatOptionSchemaKey,
+        FormatOptionEnvelope, FormatOptionSchemaId, FormatOptionSchemaKey, NoFormatOptions,
         OptionCompileLimits,
     };
     use crate::store::{
@@ -780,46 +810,48 @@ mod tests {
     };
     use std::cell::RefCell;
     use std::num::NonZeroU32;
-    use std::sync::Barrier;
     use std::sync::atomic::AtomicUsize;
+    use std::sync::{Barrier, Mutex};
     use std::thread;
 
     #[derive(Debug, PartialEq, Eq)]
     struct ReentrantOptions(u8);
 
-    struct ReentrantCodec {
+    struct ReentrantImporter {
         schema: FormatOptionSchema,
         concurrent_gate: Arc<Barrier>,
         layer_calls: AtomicUsize,
+        layer_values: Arc<Mutex<Vec<u8>>>,
+        detector_gate: Arc<Barrier>,
+        detector_calls: AtomicUsize,
     }
 
-    impl FormatOptionCodec for ReentrantCodec {
-        fn schema(&self) -> Option<FormatOptionSchema> {
-            Some(self.schema.clone())
+    impl Format for ReentrantImporter {
+        type Options = ReentrantOptions;
+
+        fn descriptor(&self) -> FormatDescriptor {
+            descriptor_for("org.example.reentrant", "reentrant")
         }
 
-        fn runtime_type_key(&self) -> OptionRuntimeTypeKey {
-            OptionRuntimeTypeKey::of::<ReentrantOptions>()
+        fn option_schema(&self) -> Option<FormatOptionSchema> {
+            Some(self.schema.clone())
         }
 
         fn compile_defaults(
             &self,
             scope: &mut RegistryBuildScope<'_>,
-        ) -> Result<CompiledFormatOptions, OptionCompileError> {
+        ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
             scope.charge_work(1)?;
             scope.finish(ReentrantOptions(0), 1)
         }
 
-        fn compile_layers(
+        fn compile_options(
             &self,
             scope: &mut OptionCompileScope<'_>,
-            defaults: &CompiledFormatOptions,
+            defaults: &Self::Options,
             layers: FormatOptionLayers<'_>,
-        ) -> Result<CompiledFormatOptions, OptionCompileError> {
-            let key = FormatOptionKey::<ReentrantOptions>::new(self.schema.clone());
-            let _ = defaults.downcast_ref(&key).ok_or_else(|| {
-                OptionCompileError::invalid_payload("default-type", "wrong default type")
-            })?;
+        ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+            assert_eq!(defaults, &ReentrantOptions(0));
             let payload = layers.caller().ok_or_else(|| {
                 OptionCompileError::invalid_payload("missing-layer", "missing caller layer")
             })?;
@@ -833,27 +865,9 @@ mod tests {
             if self.layer_calls.fetch_add(1, Ordering::AcqRel) < 2 {
                 self.concurrent_gate.wait();
             }
-            scope.finish(ReentrantOptions(*value), 1)
-        }
-    }
-
-    struct ReentrantImporter {
-        codec: Arc<dyn FormatOptionCodec>,
-        detector_gate: Arc<Barrier>,
-        detector_calls: AtomicUsize,
-    }
-
-    impl FormatImporter for ReentrantImporter {
-        fn descriptor(&self) -> FormatDescriptor {
-            descriptor_for("org.example.reentrant", "reentrant")
-        }
-
-        fn option_codec(&self) -> Arc<dyn FormatOptionCodec> {
-            Arc::clone(&self.codec)
-        }
-
-        fn option_runtime_type_key(&self) -> OptionRuntimeTypeKey {
-            OptionRuntimeTypeKey::of::<ReentrantOptions>()
+            let compiled = scope.finish(ReentrantOptions(*value), 1)?;
+            self.layer_values.lock().unwrap().push(compiled.value().0);
+            Ok(compiled)
         }
 
         fn detect(
@@ -872,7 +886,11 @@ mod tests {
             })
         }
 
-        fn parse(&self, _scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+        fn parse(
+            &self,
+            _options: &Self::Options,
+            _context: &mut ParseContext<'_>,
+        ) -> ParseResult<()> {
             unreachable!("registry reentrancy test does not parse")
         }
     }
@@ -883,9 +901,18 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
-    impl FormatImporter for RacingDetector {
+    impl Format for RacingDetector {
+        type Options = NoFormatOptions;
+
         fn descriptor(&self) -> FormatDescriptor {
             descriptor_for("org.example.racing-detector", "race")
+        }
+
+        fn compile_defaults(
+            &self,
+            scope: &mut RegistryBuildScope<'_>,
+        ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+            NoFormatOptions::compile_defaults(scope)
         }
 
         fn detect(
@@ -909,29 +936,36 @@ mod tests {
             Ok(DetectionOutcome::Match(ReadConfidence::Certain))
         }
 
-        fn parse(&self, _scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+        fn parse(
+            &self,
+            _options: &Self::Options,
+            _context: &mut ParseContext<'_>,
+        ) -> ParseResult<()> {
             unreachable!("detector poison race test does not parse")
         }
     }
 
-    struct DelayedDefaultPanicCodec {
+    struct DelayedDefaultPanicImporter {
         schema: FormatOptionSchema,
         calls: Arc<AtomicUsize>,
+        detector_calls: Arc<AtomicUsize>,
     }
 
-    impl FormatOptionCodec for DelayedDefaultPanicCodec {
-        fn schema(&self) -> Option<FormatOptionSchema> {
-            Some(self.schema.clone())
+    impl Format for DelayedDefaultPanicImporter {
+        type Options = ReentrantOptions;
+
+        fn descriptor(&self) -> FormatDescriptor {
+            descriptor_for("org.example.late-default-panic", "late")
         }
 
-        fn runtime_type_key(&self) -> OptionRuntimeTypeKey {
-            OptionRuntimeTypeKey::of::<ReentrantOptions>()
+        fn option_schema(&self) -> Option<FormatOptionSchema> {
+            Some(self.schema.clone())
         }
 
         fn compile_defaults(
             &self,
             scope: &mut RegistryBuildScope<'_>,
-        ) -> Result<CompiledFormatOptions, OptionCompileError> {
+        ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
             if self.calls.fetch_add(1, Ordering::AcqRel) >= 2 {
                 panic!("late default panic");
             }
@@ -939,32 +973,13 @@ mod tests {
             scope.finish(ReentrantOptions(0), 1)
         }
 
-        fn compile_layers(
+        fn compile_options(
             &self,
             scope: &mut OptionCompileScope<'_>,
-            _defaults: &CompiledFormatOptions,
+            _defaults: &Self::Options,
             _layers: FormatOptionLayers<'_>,
-        ) -> Result<CompiledFormatOptions, OptionCompileError> {
+        ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
             scope.finish(ReentrantOptions(0), 1)
-        }
-    }
-
-    struct DelayedDefaultPanicImporter {
-        codec: Arc<dyn FormatOptionCodec>,
-        detector_calls: Arc<AtomicUsize>,
-    }
-
-    impl FormatImporter for DelayedDefaultPanicImporter {
-        fn descriptor(&self) -> FormatDescriptor {
-            descriptor_for("org.example.late-default-panic", "late")
-        }
-
-        fn option_codec(&self) -> Arc<dyn FormatOptionCodec> {
-            Arc::clone(&self.codec)
-        }
-
-        fn option_runtime_type_key(&self) -> OptionRuntimeTypeKey {
-            OptionRuntimeTypeKey::of::<ReentrantOptions>()
         }
 
         fn detect(
@@ -977,7 +992,11 @@ mod tests {
             Ok(DetectionOutcome::NoMatch)
         }
 
-        fn parse(&self, _scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+        fn parse(
+            &self,
+            _options: &Self::Options,
+            _context: &mut ParseContext<'_>,
+        ) -> ParseResult<()> {
             unreachable!("default codec poison test does not parse")
         }
     }
@@ -1001,12 +1020,12 @@ mod tests {
         )
     }
 
-    fn compile_reentrant_value(
+    fn compile_reentrant_override(
         snapshot: RegistrySnapshot,
         format: FormatId,
         schema: FormatOptionSchema,
         value: u8,
-    ) -> u8 {
+    ) {
         let envelope = FormatOptionEnvelope::new(
             format.clone(),
             schema.key().clone(),
@@ -1018,16 +1037,12 @@ mod tests {
         let mut aggregate = CompileAggregate::default();
         let mut scope =
             OptionCompileScope::new(&format, OptionCompileLimits::default(), &mut aggregate);
-        let compiled = snapshot
+        let _invocation = snapshot
             .entry(&format)
             .unwrap()
-            .compile_layers(&mut scope, layers)
+            .compile_overrides(&mut scope, layers)
             .unwrap()
             .unwrap();
-        compiled
-            .downcast_ref(&FormatOptionKey::<ReentrantOptions>::new(schema))
-            .unwrap()
-            .0
     }
 
     struct PanickingDetector {
@@ -1055,7 +1070,9 @@ mod tests {
             .expect("the detection test retained-store owner must start")
     }
 
-    impl FormatImporter for PanickingDetector {
+    impl Format for PanickingDetector {
+        type Options = NoFormatOptions;
+
         fn descriptor(&self) -> FormatDescriptor {
             FormatDescriptor::builder(
                 FormatId::new("org.example.panicking-detector").unwrap(),
@@ -1068,6 +1085,13 @@ mod tests {
             .unwrap()
         }
 
+        fn compile_defaults(
+            &self,
+            scope: &mut RegistryBuildScope<'_>,
+        ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+            NoFormatOptions::compile_defaults(scope)
+        }
+
         fn detect(
             &self,
             _probe: &Probe<'_>,
@@ -1078,7 +1102,11 @@ mod tests {
             scope.with_work(1, || panic!("detector panic"))
         }
 
-        fn parse(&self, _scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+        fn parse(
+            &self,
+            _options: &Self::Options,
+            _context: &mut ParseContext<'_>,
+        ) -> ParseResult<()> {
             unreachable!("detector poison test does not parse")
         }
     }
@@ -1088,9 +1116,9 @@ mod tests {
         probe: &Probe<'_>,
         hint: &ReadHint,
     ) -> Result<DetectionOutcome, LedgerCause<ImportDimension>> {
-        let owner = detection_store_owner();
+        let mut owner = detection_store_owner();
         let terminal = RefCell::new(None);
-        let scope = DetectionScope::new(owner.host(), &terminal);
+        let scope = DetectionScope::new(owner.execution().unwrap(), &terminal).unwrap();
         let outcome = entry
             .detect(probe, hint, &scope)
             .expect("uncontrolled registry detector must not abort");
@@ -1103,9 +1131,9 @@ mod tests {
         probe: &Probe<'_>,
         hint: &ReadHint,
     ) -> Result<&'static str, LedgerCause<ImportDimension>> {
-        let owner = detection_store_owner();
+        let mut owner = detection_store_owner();
         let terminal = RefCell::new(None);
-        let scope = DetectionScope::new(owner.host(), &terminal);
+        let scope = DetectionScope::new(owner.execution().unwrap(), &terminal).unwrap();
         assert!(entry.detect(probe, hint, &scope).is_err());
         let abort = scope
             .into_terminal_abort()
@@ -1159,15 +1187,14 @@ mod tests {
     -> Result<(), LedgerCause<ImportDimension>> {
         let format = FormatId::new("org.example.reentrant").unwrap();
         let schema = reentrant_schema(&format);
-        let codec: Arc<dyn FormatOptionCodec> = Arc::new(ReentrantCodec {
-            schema: schema.clone(),
-            concurrent_gate: Arc::new(Barrier::new(2)),
-            layer_calls: AtomicUsize::new(0),
-        });
+        let layer_values = Arc::new(Mutex::new(Vec::new()));
         let mut builder = RegistryBuilder::new();
         builder
             .register(ReentrantImporter {
-                codec,
+                schema: schema.clone(),
+                concurrent_gate: Arc::new(Barrier::new(2)),
+                layer_calls: AtomicUsize::new(0),
+                layer_values: Arc::clone(&layer_values),
                 detector_gate: Arc::new(Barrier::new(2)),
                 detector_calls: AtomicUsize::new(0),
             })
@@ -1178,19 +1205,22 @@ mod tests {
         let left_format = format.clone();
         let left_schema = schema.clone();
         let left = thread::spawn(move || {
-            compile_reentrant_value(left_snapshot, left_format, left_schema, 11)
+            compile_reentrant_override(left_snapshot, left_format, left_schema, 11);
         });
         let right_snapshot = snapshot.clone();
         let right_format = format.clone();
         let right_schema = schema.clone();
         let right = thread::spawn(move || {
-            compile_reentrant_value(right_snapshot, right_format, right_schema, 29)
+            compile_reentrant_override(right_snapshot, right_format, right_schema, 29);
         });
-        let concurrent_options = (left.join().unwrap(), right.join().unwrap());
-        let serial_options = (
-            compile_reentrant_value(snapshot.clone(), format.clone(), schema.clone(), 11),
-            compile_reentrant_value(snapshot.clone(), format.clone(), schema, 29),
-        );
+        left.join().unwrap();
+        right.join().unwrap();
+        let mut concurrent_options = std::mem::take(&mut *layer_values.lock().unwrap());
+        concurrent_options.sort_unstable();
+        compile_reentrant_override(snapshot.clone(), format.clone(), schema.clone(), 11);
+        compile_reentrant_override(snapshot.clone(), format.clone(), schema, 29);
+        let serial_options = std::mem::take(&mut *layer_values.lock().unwrap());
+        assert_eq!(concurrent_options, [11, 29]);
         assert_eq!(concurrent_options, serial_options);
 
         let left_snapshot = snapshot.clone();
@@ -1349,19 +1379,16 @@ mod tests {
     }
 
     #[test]
-    fn default_codec_panic_poisons_existing_and_future_snapshots()
+    fn default_compiler_panic_poisons_existing_and_future_snapshots()
     -> Result<(), LedgerCause<ImportDimension>> {
         let format = FormatId::new("org.example.late-default-panic").unwrap();
         let default_calls = Arc::new(AtomicUsize::new(0));
         let detector_calls = Arc::new(AtomicUsize::new(0));
-        let codec: Arc<dyn FormatOptionCodec> = Arc::new(DelayedDefaultPanicCodec {
-            schema: reentrant_schema(&format),
-            calls: Arc::clone(&default_calls),
-        });
         let mut builder = RegistryBuilder::new();
         builder
             .register(DelayedDefaultPanicImporter {
-                codec,
+                schema: reentrant_schema(&format),
+                calls: Arc::clone(&default_calls),
                 detector_calls: Arc::clone(&detector_calls),
             })
             .unwrap();

@@ -20,11 +20,11 @@ use baozi_import::authoring::{
     SourceObjectLocator, SpatialAuthoringBatch, Vec3,
 };
 use baozi_import::{
-    CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
-    FormatDescriptor, FormatEncoding, FormatImporter, FormatSelection, ImportConfigOverlay,
-    ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer, OptionCompileLimits,
-    ParseResult, ParseScope, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
-    SceneDraft, import_bytes,
+    CapabilityStatus, CompiledOptions, DetectionOutcome, DetectionResult, DetectionScope, Format,
+    FormatCapability, FormatDescriptor, FormatEncoding, FormatSelection, ImportConfigOverlay,
+    ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer, NoFormatOptions,
+    OptionCompileError, OptionCompileLimits, ParseContext, ParseResult, ReadConfidence, ReadHint,
+    RegistryBuildLimits, RegistryBuildScope, RegistryBuilder,
 };
 use baozi_io::AssetPath;
 use baozi_postprocess::{
@@ -142,7 +142,16 @@ struct CameraLightImporter {
     resource: ResourceIdentity,
 }
 
-impl FormatImporter for CameraLightImporter {
+impl Format for CameraLightImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(self.format.clone(), "Camera and light space fixture")
             .encoding(FormatEncoding::Binary)
@@ -164,7 +173,7 @@ impl FormatImporter for CameraLightImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
         let cameras = cameras(self.fixture);
         let lights = lights(self.fixture);
         let roots = [NodeLocalId::new(0)];
@@ -275,9 +284,9 @@ impl FormatImporter for CameraLightImporter {
             .map(|owner| OwnerProvenanceAuthoring::new(owner, &attachment))
             .collect();
         let snapshots = [ResourceSnapshotAuthoring::snapshotted(
-            scope.primary_bytes(),
+            context.primary_bytes(),
         )];
-        scope.submit_scene(SceneAuthoringBatch::new(
+        context.submit_complete(SceneAuthoringBatch::new(
             SpatialAuthoringBatch::new(&SceneSpace::STANDARD_TARGET, &cameras, &lights),
             NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
             AppearanceAuthoringBatch::empty(),
@@ -314,15 +323,15 @@ fn import_fixture(fixture: Fixture) -> ImportReport {
             .with_format_selection(FormatSelection::Forced(FormatId::new(FORMAT).unwrap())),
     ));
     let request = registry
-        .compile_request(&request, OptionCompileLimits::default())
+        .plan(&request, OptionCompileLimits::default())
         .unwrap();
-    import_bytes(
-        &request,
-        AssetPath::new(PATH).unwrap(),
-        b"abc",
-        ImportOperationControl::default(),
-    )
-    .expect("public camera/light fixture must pass central import validation")
+    request
+        .read_bytes(
+            AssetPath::new(PATH).unwrap(),
+            b"abc",
+            ImportOperationControl::default(),
+        )
+        .expect("public camera/light fixture must pass central import validation")
 }
 
 fn options(units: f64) -> SpaceConversionOptions {

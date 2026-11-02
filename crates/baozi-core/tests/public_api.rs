@@ -31,12 +31,11 @@ fn scene_construction_is_nameable_only_as_one_opaque_value() {
 fn scene_bridge_is_available_without_feature_authority() {
     use baozi_core::__scene_integration::authoring::SceneAuthoringBatch;
     use baozi_core::__scene_integration::integration::{
-        SceneConstruction, SceneConstructionStartError, SceneDraft, SceneHandoffToken,
-        SceneValidationProof,
+        SceneConstruction, SceneConstructionStartError, SceneHandoffToken, SceneValidationProof,
     };
 
-    fn accepts_proven_types(_: SceneDraft, _: SceneValidationProof, _: SceneHandoffToken) {}
-    let _: fn(SceneDraft, SceneValidationProof, SceneHandoffToken) = accepts_proven_types;
+    fn accepts_proven_types(_: SceneValidationProof, _: SceneHandoffToken) {}
+    let _: fn(SceneValidationProof, SceneHandoffToken) = accepts_proven_types;
 
     fn _admit_authority_free_input(input: SceneAuthoringBatch<'_>) {
         let _: Result<SceneConstruction<'_>, SceneConstructionStartError> =

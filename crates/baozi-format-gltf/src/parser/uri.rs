@@ -2,7 +2,7 @@ use super::{ContentError, Result, enforce_usize_limit, to_u64};
 use crate::GltfFailure;
 use baozi_import::{
     FormatFailureDetailSink, FormatFailureEvidenceProducer, ImportStorageClass, ImportWorkClass,
-    MeteredVec, ParseScope,
+    MeteredVec, ParseExecution,
 };
 use std::fmt;
 
@@ -21,7 +21,7 @@ impl ProfileIdentity<'_> {
 /// Resource identities are logical labels, not URIs. Escape literal delimiters reversibly so
 /// a decoded filename containing '#' or '?' does not acquire URI fragment/query semantics.
 pub(super) fn profile_identity<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     path: &str,
 ) -> Result<ProfileIdentity<'scope>> {
     use baozi_import::CapacityPlan;
@@ -31,15 +31,14 @@ pub(super) fn profile_identity<'scope>(
         ImportStorageClass::FormatNormalization,
         "gltf-profile-identity-label",
     );
-    ctx.with_work(
-        ImportWorkClass::WorkUnits,
-        to_u64(path.len()),
-        |work| -> Result<()> {
+    ctx.with_work_group(
+        [(ImportWorkClass::WorkUnits, to_u64(path.len()))],
+        |ctx, work| -> Result<()> {
             let mut start = 0;
             let mut next_poll = 0;
             for (offset, character) in path.char_indices() {
                 if offset >= next_poll {
-                    work.poll()?;
+                    ctx.poll()?;
                     next_poll = offset.saturating_add(super::PARSER_POLL_INTERVAL);
                 }
                 let escape = match character {
@@ -48,11 +47,11 @@ pub(super) fn profile_identity<'scope>(
                     '?' => "%3F",
                     _ => continue,
                 };
-                label.try_push_str(&path[start..offset])?;
-                label.try_push_str(escape)?;
+                label.try_push_str(ctx, &path[start..offset])?;
+                label.try_push_str(ctx, escape)?;
                 start = offset + character.len_utf8();
             }
-            label.try_push_str(&path[start..])?;
+            label.try_push_str(ctx, &path[start..])?;
             work.complete_all()?;
             Ok(())
         },
@@ -114,7 +113,11 @@ impl Resource {
         GltfFailure::invalid_reference(self.subject(), Some(self.index()), reason).into()
     }
 
-    pub(super) fn unsupported(self, ctx: &ParseScope<'_>, reason: &'static str) -> ContentError {
+    pub(super) fn unsupported(
+        self,
+        ctx: &mut ParseExecution<'_, '_>,
+        reason: &'static str,
+    ) -> ContentError {
         let failure = GltfFailure::unsupported(self.subject(), format_args!("{self}: {reason}"));
         ctx.format_failure(IndexedUriFailure {
             failure,
@@ -172,26 +175,21 @@ impl RelativePath<'_, '_> {
 /// Encoded separators and encoded dot segments are outside this bounded profile;
 /// they must never acquire path structure as a side effect of decoding.
 pub(super) fn relative_path<'scope, 'uri>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     value: &'uri str,
     resource: Resource,
 ) -> Result<RelativePath<'scope, 'uri>> {
-    enforce_usize_limit(
-        ctx,
-        "max_string_bytes",
-        value.len(),
-        ctx.limits().max_string_bytes,
-    )?;
-    enforce_usize_limit(
-        ctx,
-        "max_path_length",
-        value.len(),
-        ctx.limits().max_path_length,
-    )?;
-    ctx.with_work(
-        ImportWorkClass::WorkUnits,
-        to_u64(value.len()),
-        |work| -> Result<_> {
+    {
+        let argument_0 = ctx.limits().max_string_bytes;
+        enforce_usize_limit(ctx, "max_string_bytes", value.len(), argument_0)
+    }?;
+    {
+        let argument_0 = ctx.limits().max_path_length;
+        enforce_usize_limit(ctx, "max_path_length", value.len(), argument_0)
+    }?;
+    ctx.with_work_group(
+        [(ImportWorkClass::WorkUnits, to_u64(value.len()))],
+        |ctx, work| -> Result<_> {
             if value.is_empty() {
                 return Err(resource.invalid("external URI path is empty"));
             }
@@ -213,7 +211,7 @@ pub(super) fn relative_path<'scope, 'uri>(
             let encoded = value.as_bytes();
             let has_escape = encoded.contains(&b'%');
             if has_escape {
-                decoded.try_reserve(encoded.len())?;
+                decoded.try_reserve(ctx, encoded.len())?;
             }
             let mut cursor = 0;
             let mut next_poll = 0;
@@ -221,7 +219,7 @@ pub(super) fn relative_path<'scope, 'uri>(
             let mut component_escaped = false;
             while cursor < encoded.len() {
                 if cursor >= next_poll {
-                    work.poll()?;
+                    ctx.poll()?;
                     next_poll = cursor.saturating_add(super::PARSER_POLL_INTERVAL);
                 }
                 let byte = encoded[cursor];

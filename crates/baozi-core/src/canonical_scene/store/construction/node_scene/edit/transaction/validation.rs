@@ -63,7 +63,7 @@ impl SceneEditPostflight<'_> {
             },
             |session, directory, evidence, scratch| {
                 let proof = if scratch.initialize(session, scratch_plan)?
-                    && scene.draft.brand == self.brand
+                    && scene.brand == self.brand
                     && output.source_generation == self.input.generation()
                 {
                     if let Some(storage) = self.storage {

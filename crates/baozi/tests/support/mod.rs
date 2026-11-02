@@ -15,10 +15,10 @@ use baozi_import::authoring::{
     ProvenanceNodeAuthoring, ProvenanceOperationAuthoring, SceneAuthoringBatch, SceneSpace,
     SpatialAuthoringBatch,
 };
-use baozi_import::{ParseResult, ParseScope, SceneDraft};
+use baozi_import::{ParseContext, ParseResult};
 
 /// Submits the smallest complete canonical Scene accepted by the production import rail.
-pub(crate) fn submit_minimal_scene(scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+pub(crate) fn submit_minimal_scene(scope: &mut ParseContext<'_>) -> ParseResult<()> {
     let provenance_ids = [ProvenanceLocalId::new(0)];
     let operation_kind = OperationKind::Generated;
     let provenance_nodes = [ProvenanceNodeAuthoring::operation(
@@ -37,7 +37,7 @@ pub(crate) fn submit_minimal_scene(scope: &mut ParseScope<'_>) -> ParseResult<Sc
     let nodes = [];
     let scene_space = SceneSpace::UNKNOWN;
 
-    scope.submit_scene(SceneAuthoringBatch::new(
+    scope.submit_complete(SceneAuthoringBatch::new(
         SpatialAuthoringBatch::new(&scene_space, &[], &[]),
         NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
         AppearanceAuthoringBatch::empty(),
@@ -52,7 +52,7 @@ pub(crate) fn submit_minimal_scene(scope: &mut ParseScope<'_>) -> ParseResult<Sc
 }
 
 /// Submits a complete Scene whose node-parent relation must be rejected by canonical preflight.
-pub(crate) fn submit_invalid_parent_scene(scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+pub(crate) fn submit_invalid_parent_scene(scope: &mut ParseContext<'_>) -> ParseResult<()> {
     let provenance_ids = [ProvenanceLocalId::new(0)];
     let operation_kind = OperationKind::Generated;
     let provenance_nodes = [ProvenanceNodeAuthoring::operation(
@@ -86,7 +86,7 @@ pub(crate) fn submit_invalid_parent_scene(scope: &mut ParseScope<'_>) -> ParseRe
     ];
     let scene_space = SceneSpace::UNKNOWN;
 
-    scope.submit_scene(SceneAuthoringBatch::new(
+    scope.submit_complete(SceneAuthoringBatch::new(
         SpatialAuthoringBatch::new(&scene_space, &[], &[]),
         NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
         AppearanceAuthoringBatch::empty(),
@@ -101,7 +101,7 @@ pub(crate) fn submit_invalid_parent_scene(scope: &mut ParseScope<'_>) -> ParseRe
 }
 
 /// Submits one root node with one point primitive and its aligned deformation/profile rows.
-pub(crate) fn submit_point_geometry_scene(scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+pub(crate) fn submit_point_geometry_scene(scope: &mut ParseContext<'_>) -> ParseResult<()> {
     let roots = [NodeLocalId::new(0)];
     let nodes = [NodeAuthoringNode::new(
         Presence::Absent,
@@ -155,7 +155,7 @@ pub(crate) fn submit_point_geometry_scene(scope: &mut ParseScope<'_>) -> ParseRe
     ];
     let scene_space = SceneSpace::UNKNOWN;
 
-    scope.submit_scene(SceneAuthoringBatch::new(
+    scope.submit_complete(SceneAuthoringBatch::new(
         SpatialAuthoringBatch::new(&scene_space, &[], &[]),
         NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
         AppearanceAuthoringBatch::empty(),

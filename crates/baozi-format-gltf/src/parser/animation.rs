@@ -12,7 +12,7 @@ use baozi_import::authoring::{
 };
 use baozi_import::{
     DiagnosticCode, ImportStorageClass, ImportWorkClass, ImportWorkScope, MeteredString,
-    MeteredVec, ParseScope, SourceScopeEntityKind,
+    MeteredVec, ParseExecution, SourceScopeEntityKind,
 };
 
 const MAX_CHANNEL_PROVENANCE_SOURCES: usize = 2 * AccessorSources::MAX_SOURCES;
@@ -134,15 +134,15 @@ pub(super) struct AnimationStorage<'scope> {
 }
 
 pub(super) fn preflight<'scope, 'document>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     gltf: &'document crate::document::Document<'_>,
     selected_nodes: &[bool],
 ) -> Result<AnimationContracts<'scope, 'document>> {
-    with_poll(ctx, || preflight_inner(ctx, gltf, selected_nodes))?
+    with_poll(ctx, |ctx| preflight_inner(ctx, gltf, selected_nodes))?
 }
 
 fn preflight_inner<'scope, 'document>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     gltf: &'document crate::document::Document<'_>,
     selected_nodes: &[bool],
 ) -> Result<AnimationContracts<'scope, 'document>> {
@@ -202,13 +202,13 @@ fn preflight_inner<'scope, 'document>(
     let mut retained_channel_count = 0usize;
     let mut visited_channels = 0usize;
 
+    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
     for animation in gltf.animations() {
         let animation_index = animation.index();
         let source_animation = source_animations.get(animation_index).ok_or_else(|| {
-            gltf_parse_error(
-                ctx,
-                format_args!("glTF animation {animation_index} is out of range"),
-            )
+            gltf_parse_error(format_args!(
+                "glTF animation {animation_index} is out of range"
+            ))
         })?;
         let materialization_offset = materialization_channels.len();
         let source_channel_offset = source_channels.len();
@@ -218,7 +218,11 @@ fn preflight_inner<'scope, 'document>(
         let mut animation_cells = 0usize;
 
         for (channel_index, runtime_channel) in animation.channels().enumerate() {
-            ctx.charge_work(1)?;
+            ctx.with_work(
+                &work_group,
+                [1],
+                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+            )?;
             if visited_channels.is_multiple_of(PARSER_POLL_INTERVAL) {
                 ctx.poll()?;
             }
@@ -228,14 +232,14 @@ fn preflight_inner<'scope, 'document>(
             runtime_channel_count = runtime_channel_count
                 .checked_add(1)
                 .ok_or_else(|| ctx.allocation_failure("gltf-animation-runtime-channel-count"))?;
-            let source_channel = source_animation.channels.get(channel_index).ok_or_else(|| {
-                gltf_parse_error(
-                    ctx,
-                    format_args!(
+            let source_channel = source_animation
+                .channels
+                .get(channel_index)
+                .ok_or_else(|| {
+                    gltf_parse_error(format_args!(
                         "glTF animation {animation_index} channel {channel_index} is out of range"
-                    ),
-                )
-            })?;
+                    ))
+                })?;
             let Some(source_node) = source_channel.target.node else {
                 // Core channels without a node have no effect. Source preflight separately
                 // rejects extension payloads that could introduce another targeting mechanism.
@@ -244,12 +248,9 @@ fn preflight_inner<'scope, 'document>(
             };
             let source_node_index = source_node.value();
             let Some(selected) = selected_nodes.get(source_node_index).copied() else {
-                return Err(gltf_parse_error(
-                    ctx,
-                    format_args!(
-                        "glTF animation {animation_index} channel {channel_index} targets missing node {source_node_index}"
-                    ),
-                ));
+                return Err(gltf_parse_error(format_args!(
+                    "glTF animation {animation_index} channel {channel_index} targets missing node {source_node_index}"
+                )));
             };
             let property = map_property(source_channel.target.path);
             let sampler = source_animation
@@ -257,7 +258,6 @@ fn preflight_inner<'scope, 'document>(
                 .get(source_channel.sampler.value())
                 .ok_or_else(|| {
                     gltf_parse_error(
-                        ctx,
                         format_args!(
                             "glTF animation {animation_index} channel {channel_index} sampler reference is out of range"
                         ),
@@ -279,12 +279,9 @@ fn preflight_inner<'scope, 'document>(
                 ),
             )?;
             if input.count == 0 {
-                return Err(gltf_parse_error(
-                    ctx,
-                    format_args!(
-                        "glTF animation {animation_index} channel {channel_index} input accessor is empty"
-                    ),
-                ));
+                return Err(gltf_parse_error(format_args!(
+                    "glTF animation {animation_index} channel {channel_index} input accessor is empty"
+                )));
             }
             if !selected {
                 source_channels.try_push_reserved(SourceChannelDisposition::ScopeOmitted)?;
@@ -315,12 +312,9 @@ fn preflight_inner<'scope, 'document>(
                     ))
                 })?;
             if *seen == animation_index {
-                return Err(gltf_parse_error(
-                    ctx,
-                    format_args!(
-                        "glTF animation {animation_index} has a duplicate animation target at channel {channel_index}"
-                    ),
-                ));
+                return Err(gltf_parse_error(format_args!(
+                    "glTF animation {animation_index} has a duplicate animation target at channel {channel_index}"
+                )));
             }
             *seen = animation_index;
 
@@ -380,12 +374,9 @@ fn preflight_inner<'scope, 'document>(
 
             let interpolation = map_interpolation(sampler.interpolation);
             if interpolation == AnimationInterpolation::CubicSpline && input.count < 2 {
-                return Err(gltf_parse_error(
-                    ctx,
-                    format_args!(
-                        "glTF animation {animation_index} channel {channel_index} cubic spline requires at least two keys"
-                    ),
-                ));
+                return Err(gltf_parse_error(format_args!(
+                    "glTF animation {animation_index} channel {channel_index} cubic spline requires at least two keys"
+                )));
             }
             let output = validate_accessor(
                 ctx,
@@ -412,13 +403,10 @@ fn preflight_inner<'scope, 'document>(
                 })
                 .ok_or_else(|| ctx.allocation_failure("gltf-animation-output-count"))?;
             if output.count != expected_output_count {
-                return Err(gltf_parse_error(
-                    ctx,
-                    format_args!(
-                        "glTF animation {animation_index} channel {channel_index} output accessor count {} does not match expected {expected_output_count}",
-                        output.count
-                    ),
-                ));
+                return Err(gltf_parse_error(format_args!(
+                    "glTF animation {animation_index} channel {channel_index} output accessor count {} does not match expected {expected_output_count}",
+                    output.count
+                )));
             }
             let output_cells = output
                 .count
@@ -453,13 +441,10 @@ fn preflight_inner<'scope, 'document>(
         }
 
         if runtime_channel_count != source_animation.channels.len() {
-            return Err(gltf_parse_error(
-                ctx,
-                format_args!(
-                    "glTF animation {animation_index} produced {runtime_channel_count} channels, expected {}",
-                    source_animation.channels.len()
-                ),
-            ));
+            return Err(gltf_parse_error(format_args!(
+                "glTF animation {animation_index} produced {runtime_channel_count} channels, expected {}",
+                source_animation.channels.len()
+            )));
         }
         let materialization_count = materialization_channels
             .len()
@@ -504,12 +489,9 @@ fn preflight_inner<'scope, 'document>(
         selected_animations.try_push_reserved(animation_selected)?;
     }
     if visited_channels != source_channel_count {
-        return Err(gltf_parse_error(
-            ctx,
-            format_args!(
-                "glTF animation iterator produced {visited_channels} channels, expected {source_channel_count}"
-            ),
-        ));
+        return Err(gltf_parse_error(format_args!(
+            "glTF animation iterator produced {visited_channels} channels, expected {source_channel_count}"
+        )));
     }
     Ok(AnimationContracts {
         clips,
@@ -523,7 +505,7 @@ fn preflight_inner<'scope, 'document>(
 }
 
 fn record_channel_losses(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     animation_index: usize,
     dispositions: &[SourceChannelDisposition],
     animation_selected: bool,
@@ -532,7 +514,7 @@ fn record_channel_losses(
         ImportStorageClass::FormatNormalization,
         "gltf-animation-loss-object-path",
     );
-    object_path.try_reserve(48)?;
+    object_path.try_reserve(ctx, 48)?;
     for (channel_index, disposition) in dispositions.iter().copied().enumerate() {
         if channel_index.is_multiple_of(super::PARSER_POLL_INTERVAL) {
             ctx.poll()?;
@@ -546,9 +528,10 @@ fn record_channel_losses(
             ),
         };
         object_path.truncate(0);
-        object_path.try_write_fmt(format_args!(
-            "/animations/{animation_index}/channels/{channel_index}"
-        ))?;
+        object_path.try_write_fmt(
+            ctx,
+            format_args!("/animations/{animation_index}/channels/{channel_index}"),
+        )?;
         let code = DiagnosticCode::new(code).map_err(|_| {
             ContentError::from(super::GltfFailure::internal(
                 "static glTF animation-loss code is invalid",
@@ -616,7 +599,7 @@ fn output_contract(property: AnimationProperty) -> AccessorContract {
 }
 
 pub(super) fn build_storage<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     buffers: &[Option<BufferData<'_>>],
     node_ids: &[Option<NodeLocalId>],
     mesh_instances: &[MeshInstanceStorage],
@@ -629,8 +612,13 @@ pub(super) fn build_storage<'scope>(
         None,
         "gltf-animation-mesh-instance-map",
     )?;
+    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
     for (ordinal, instance) in mesh_instances.iter().enumerate() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         let slot = instance_ids
             .as_mut_slice()
             .get_mut(instance.source_node_index)
@@ -679,7 +667,11 @@ pub(super) fn build_storage<'scope>(
     let mut maximum_pending_provenance = 0;
     let mut maximum_clip_provenance = 0usize;
     for clip in contracts.clips.as_slice() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         let references = clip
             .materialization_count
             .checked_add(clip.retained_channel_count)
@@ -706,7 +698,7 @@ pub(super) fn build_storage<'scope>(
                 to_u64(contracts.total_name_bytes),
             ),
         ],
-        |work| {
+        |ctx, work| {
             let mut clips = try_vec_capacity(
                 ctx,
                 ImportStorageClass::SceneConstruction,
@@ -739,7 +731,7 @@ pub(super) fn build_storage<'scope>(
             )?;
 
             for clip in contracts.clips.as_slice() {
-                work.poll()?;
+                ctx.poll()?;
                 let materialization_channels = checked_contract_range(ctx, contracts, *clip)?;
                 let channel_offset = channels.len();
                 let provenance_offset = clip_provenance.len();
@@ -770,7 +762,6 @@ pub(super) fn build_storage<'scope>(
                                 .get(channel.provenance_offset..channel_end)
                                 .ok_or_else(|| {
                                     gltf_parse_error(
-                                        ctx,
                                         "glTF animation channel provenance is incomplete",
                                     )
                                 })?;
@@ -797,16 +788,16 @@ pub(super) fn build_storage<'scope>(
                             ImportStorageClass::FormatNormalization,
                             "gltf-normalized-clip-name",
                         );
-                        owned.try_reserve(name.len())?;
+                        owned.try_reserve(ctx, name.len())?;
                         let mut rest = name;
                         while !rest.is_empty() {
-                            work.poll()?;
+                            ctx.poll()?;
                             let mut end = rest.len().min(PARSER_POLL_INTERVAL);
                             while !rest.is_char_boundary(end) {
                                 end -= 1;
                             }
                             let (chunk, tail) = rest.split_at(end);
-                            owned.try_push_str(chunk)?;
+                            owned.try_push_str(ctx, chunk)?;
                             rest = tail;
                         }
                         Ok(owned)
@@ -839,7 +830,7 @@ pub(super) fn build_storage<'scope>(
 }
 
 fn checked_contract_range<'a>(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     contracts: &'a AnimationContracts<'_, '_>,
     clip: AnimationClipContract<'_>,
 ) -> Result<&'a [AnimationMaterializationContract<'a>]> {
@@ -859,10 +850,10 @@ fn checked_contract_range<'a>(
 }
 
 fn read_duration_channel(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     buffers: &[Option<BufferData<'_>>],
     contract: &AnimationDurationContract<'_>,
-    work: &mut ImportWorkScope<'_, '_, 3>,
+    work: &mut ImportWorkScope<'_, 3>,
 ) -> Result<(f64, AccessorSources)> {
     let source = accessor_provenance(ctx, buffers, contract.source.sampler().input())?;
     let source_accessor = contract.source.sampler().input();
@@ -879,7 +870,7 @@ fn read_duration_channel(
     let mut previous = None;
     for key in 0..contract.key_count {
         if key.is_multiple_of(PARSER_POLL_INTERVAL) {
-            work.poll()?;
+            ctx.poll()?;
         }
         let time = next_gltf_value("glTF animation duration input iteration", &mut input)?
             .ok_or_else(|| {
@@ -912,12 +903,12 @@ fn read_duration_channel(
 }
 
 fn read_channel<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     buffers: &[Option<BufferData<'_>>],
     node_ids: &[Option<NodeLocalId>],
     instance_ids: &[Option<u32>],
     contract: &AnimationChannelContract<'_>,
-    work: &mut ImportWorkScope<'_, '_, 3>,
+    work: &mut ImportWorkScope<'_, 3>,
     provenance: &mut MeteredVec<'_, u32>,
 ) -> Result<(AnimationChannelStorage<'scope>, f64)> {
     let node = || {
@@ -1071,10 +1062,10 @@ fn read_channel<'scope>(
 }
 
 fn read_times<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     contract: &AnimationChannelContract<'_>,
     mut input: impl Iterator<Item = f32>,
-    work: &mut ImportWorkScope<'_, '_, 3>,
+    work: &mut ImportWorkScope<'_, 3>,
 ) -> Result<(MeteredVec<'scope, f64>, f64)> {
     let mut times = try_vec_capacity(
         ctx,
@@ -1085,7 +1076,7 @@ fn read_times<'scope>(
     let mut previous = None;
     for key in 0..contract.key_count {
         if key.is_multiple_of(PARSER_POLL_INTERVAL) {
-            work.poll()?;
+            ctx.poll()?;
         }
         let time = next_gltf_value("glTF animation input iteration", &mut input)?
             .ok_or_else(|| channel_error(ctx, contract, "input accessor ended early"))?;
@@ -1140,17 +1131,17 @@ impl CubicPart {
 }
 
 fn read_output_weights(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     contract: &AnimationChannelContract<'_>,
     mut output: impl Iterator<Item = f32>,
     values: &mut MeteredVec<'_, f32>,
     in_tangents: &mut MeteredVec<'_, f32>,
     out_tangents: &mut MeteredVec<'_, f32>,
-    work: &mut ImportWorkScope<'_, '_, 3>,
+    work: &mut ImportWorkScope<'_, 3>,
 ) -> Result<()> {
     for ordinal in 0..contract.output_count {
         if ordinal.is_multiple_of(PARSER_POLL_INTERVAL) {
-            work.poll()?;
+            ctx.poll()?;
         }
         let weight = next_gltf_value("glTF animation weight output iteration", &mut output)?
             .ok_or_else(|| channel_error(ctx, contract, "output accessor ended early"))?;
@@ -1177,13 +1168,13 @@ fn read_output_weights(
 }
 
 fn read_output_vectors<const N: usize>(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     contract: &AnimationChannelContract<'_>,
     mut output: impl Iterator<Item = [f32; N]>,
     values: &mut MeteredVec<'_, f32>,
     in_tangents: &mut MeteredVec<'_, f32>,
     out_tangents: &mut MeteredVec<'_, f32>,
-    work: &mut ImportWorkScope<'_, '_, 3>,
+    work: &mut ImportWorkScope<'_, 3>,
 ) -> Result<()> {
     if N != contract.value_width {
         return Err(ContentError::from(super::GltfFailure::internal(
@@ -1192,7 +1183,7 @@ fn read_output_vectors<const N: usize>(
     }
     for ordinal in 0..contract.output_count {
         if ordinal.is_multiple_of(PARSER_POLL_INTERVAL) {
-            work.poll()?;
+            ctx.poll()?;
         }
         let sample = next_gltf_value("glTF animation output iteration", &mut output)?
             .ok_or_else(|| channel_error(ctx, contract, "output accessor ended early"))?;
@@ -1236,7 +1227,7 @@ fn next_gltf_value<T>(
 }
 
 fn channel_error(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     contract: &AnimationChannelContract<'_>,
     reason: &'static str,
 ) -> ContentError {
@@ -1249,7 +1240,7 @@ fn channel_error(
 }
 
 fn validate_animation_time(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     animation_index: usize,
     channel_index: usize,
     time: f32,
@@ -1284,20 +1275,19 @@ fn validate_animation_time(
 }
 
 fn channel_error_at(
-    ctx: &ParseScope<'_>,
+    _ctx: &mut ParseExecution<'_, '_>,
     animation_index: usize,
     channel_index: usize,
     reason: &'static str,
 ) -> ContentError {
-    gltf_parse_error(
-        ctx,
-        format_args!("glTF animation {animation_index} channel {channel_index} {reason}"),
-    )
+    gltf_parse_error(format_args!(
+        "glTF animation {animation_index} channel {channel_index} {reason}"
+    ))
 }
 
 impl<'scope> AnimationStorage<'scope> {
     #[cfg(test)]
-    pub(super) fn empty(ctx: &'scope ParseScope<'_>) -> Self {
+    pub(super) fn empty(ctx: &mut ParseExecution<'_, 'scope>) -> Self {
         let class = ImportStorageClass::FormatNormalization;
         Self {
             clips: ctx.metered_vec(class, "gltf-empty-animation-clips"),
@@ -1315,14 +1305,22 @@ impl<'scope> AnimationStorage<'scope> {
         self.channels.len()
     }
 
-    pub(super) fn non_primary_provenance_count(&self, ctx: &ParseScope<'_>) -> Result<usize> {
+    pub(super) fn non_primary_provenance_count(
+        &self,
+        ctx: &mut ParseExecution<'_, '_>,
+    ) -> Result<usize> {
         let mut count = 0usize;
+        let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
         for sources in [
             self.clip_provenance.as_slice(),
             self.channel_provenance.as_slice(),
         ] {
             for chunk in sources.chunks(PARSER_POLL_INTERVAL) {
-                ctx.charge_work(to_u64(chunk.len()))?;
+                ctx.with_work(
+                    &work_group,
+                    [to_u64(chunk.len())],
+                    |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+                )?;
                 count = count
                     .checked_add(chunk.iter().filter(|&&source| source != 0).count())
                     .ok_or_else(|| ctx.allocation_failure("gltf-animation-provenance-count"))?;
@@ -1349,11 +1347,10 @@ impl<'scope> AnimationStorage<'scope> {
             .get(channel.provenance_offset..end)
     }
 
-    pub(super) fn with_authoring_batch<T>(
-        &self,
-        ctx: &ParseScope<'_>,
-        action: impl FnOnce(AnimationAuthoringBatch<'_>) -> Result<T>,
-    ) -> Result<T> {
+    pub(super) fn authoring_tables<'model>(
+        &'model self,
+        ctx: &mut ParseExecution<'_, 'scope>,
+    ) -> Result<AnimationAuthoringTables<'scope, 'model>> {
         let mut clips = try_vec_capacity(
             ctx,
             ImportStorageClass::SceneConstruction,
@@ -1421,9 +1418,17 @@ impl<'scope> AnimationStorage<'scope> {
                 None => authored_clip,
             })?;
         }
-        action(AnimationAuthoringBatch::new(
-            clips.as_slice(),
-            channels.as_slice(),
-        ))
+        Ok(AnimationAuthoringTables { clips, channels })
+    }
+}
+
+pub(super) struct AnimationAuthoringTables<'session, 'model> {
+    clips: MeteredVec<'session, AnimationClipAuthoring<'model>>,
+    channels: MeteredVec<'session, AnimationChannelAuthoring<'model>>,
+}
+
+impl AnimationAuthoringTables<'_, '_> {
+    pub(super) fn batch(&self) -> AnimationAuthoringBatch<'_> {
+        AnimationAuthoringBatch::new(self.clips.as_slice(), self.channels.as_slice())
     }
 }

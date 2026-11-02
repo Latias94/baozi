@@ -2,17 +2,18 @@ mod support;
 
 use baozi_core::FormatId;
 use baozi_import::{
-    CapabilityStatus, CauseOwner, ConformancePolicy, ConformedTextInput, DetectionOutcome,
-    DetectionResult, DetectionScope, DiagnosticByteRange, DiagnosticCode, DiagnosticSeverity,
-    FormatCapability, FormatDescriptor, FormatEncoding, FormatFailureEvidenceProducer,
-    FormatImporter, ImportCause, ImportConfigOverlay, ImportDimension, ImportFailure,
-    ImportLossDisposition, ImportLossKind, ImportOperationControl, ImportReport, ImportRequest,
-    ImportRequestLayer, ImportResult, LedgerCause, LossPolicy, OptionCompileLimits, ParseResult,
-    ParseScope, PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits,
-    RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, SceneDraft, ScopeAbortCause,
-    TextBomPolicy, TextConformanceViolationKind, TextControlPolicy, TextDecodingMode, TextHardCaps,
+    CapabilityStatus, CauseOwner, CompiledOptions, ConformancePolicy, ConformedTextInput,
+    DetectionOutcome, DetectionResult, DetectionScope, DiagnosticByteRange, DiagnosticCode,
+    DiagnosticSeverity, Format, FormatCapability, FormatDescriptor, FormatEncoding,
+    FormatFailureEvidenceProducer, ImportCause, ImportConfigOverlay, ImportDimension,
+    ImportFailure, ImportLossDisposition, ImportLossKind, ImportOperationControl, ImportPlan,
+    ImportReport, ImportRequest, ImportRequestLayer, ImportResult, LedgerCause, LossPolicy,
+    NoFormatOptions, OptionCompileError, OptionCompileLimits, ParseContext, ParseExecution,
+    ParseResult, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuildScope,
+    RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, ScopeAbortCause, TextBomPolicy,
+    TextConformanceViolationKind, TextControlPolicy, TextDecodingMode, TextHardCaps,
     TextInputOptions, TextInputRecoveryTracker, TextLexicalMode, TextNewline, TextProfile,
-    TextSourceEncoding, import_bytes as run_import_bytes,
+    TextSourceEncoding,
 };
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -148,7 +149,16 @@ impl TextInputImporter {
     }
 }
 
-impl FormatImporter for TextInputImporter {
+impl Format for TextInputImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         self.descriptor.clone()
     }
@@ -162,420 +172,425 @@ impl FormatImporter for TextInputImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        self.parse_calls.fetch_add(1, Ordering::AcqRel);
-        match self.behavior {
-            ParserBehavior::ExpectAccepted { options, expected } => {
-                scope
-                    .with_conformed_text_input(
-                        scope.diagnostic_source(),
-                        options,
-                        |accepted, recoveries| {
-                            assert_eq!(accepted.text(), expected.text);
-                            assert_eq!(
-                                accepted
-                                    .bom()
-                                    .map(|bom| (bom.raw_range(), bom.requires_diagnostic())),
-                                expected.bom.map(|(start, end, diagnostic_required)| {
-                                    (
-                                        DiagnosticByteRange::new(start, end)
-                                            .expect("expected BOM range must be valid"),
-                                        diagnostic_required,
-                                    )
-                                })
-                            );
-                            let lines = accepted.lines().collect::<Vec<_>>();
-                            assert_eq!(lines.len(), expected.lines.len());
-                            let mut replacement_index = 0;
-                            for (index, (actual, expected_line)) in
-                                lines.iter().zip(expected.lines).enumerate()
-                            {
-                                assert_eq!(actual.number(), u64::try_from(index + 1).unwrap());
-                                assert_eq!(actual.text(), expected_line.text);
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        context.with_execution(|exec| -> ParseResult<()> {
+            self.parse_calls.fetch_add(1, Ordering::AcqRel);
+            match self.behavior {
+                ParserBehavior::ExpectAccepted { options, expected } => {
+                    exec
+                        .with_conformed_text_input(
+                            exec.diagnostic_source(),
+                            options,
+                            |exec, accepted, recoveries| {
+                                assert_eq!(accepted.text(), expected.text);
                                 assert_eq!(
-                                    actual.raw_content_range(),
-                                    DiagnosticByteRange::new(
-                                        expected_line.raw_start,
-                                        expected_line.raw_end,
-                                    )
-                                    .expect("expected line raw range must be valid")
+                                    accepted
+                                        .bom()
+                                        .map(|bom| (bom.raw_range(), bom.requires_diagnostic())),
+                                    expected.bom.map(|(start, end, diagnostic_required)| {
+                                        (
+                                            DiagnosticByteRange::new(start, end)
+                                                .expect("expected BOM range must be valid"),
+                                            diagnostic_required,
+                                        )
+                                    })
                                 );
-                                assert_eq!(
-                                    actual.raw_record_range(),
-                                    DiagnosticByteRange::new(
-                                        expected_line.raw_start,
-                                        expected_line.raw_record_end,
-                                    )
-                                    .expect("expected line record range must be valid")
-                                );
-                                assert_eq!(
-                                    actual.decoded_content_range(),
-                                    expected_line.decoded_start..expected_line.decoded_end
-                                );
-                                assert_eq!(
-                                    actual.decoded_record_range(),
-                                    expected_line.decoded_start
-                                        ..expected_line.decoded_record_end
-                                );
-                                assert_eq!(actual.newline(), expected_line.newline);
-                                assert_eq!(
-                                    actual.replacements().len(),
-                                    expected_line.replacement_count
-                                );
-                                for actual in actual.replacements() {
-                                    let expected = expected.replacements.get(replacement_index).expect(
-                                        "actual replacement must have an expected contract entry",
+                                let lines = accepted.lines().collect::<Vec<_>>();
+                                assert_eq!(lines.len(), expected.lines.len());
+                                let mut replacement_index = 0;
+                                for (index, (actual, expected_line)) in
+                                    lines.iter().zip(expected.lines).enumerate()
+                                {
+                                    assert_eq!(actual.number(), u64::try_from(index + 1).unwrap());
+                                    assert_eq!(actual.text(), expected_line.text);
+                                    assert_eq!(
+                                        actual.raw_content_range(),
+                                        DiagnosticByteRange::new(
+                                            expected_line.raw_start,
+                                            expected_line.raw_end,
+                                        )
+                                        .expect("expected line raw range must be valid")
                                     );
                                     assert_eq!(
-                                        actual.raw_range(),
+                                        actual.raw_record_range(),
                                         DiagnosticByteRange::new(
-                                            expected.raw_start,
-                                            expected.raw_end,
+                                            expected_line.raw_start,
+                                            expected_line.raw_record_end,
                                         )
-                                        .expect("expected replacement raw range must be valid")
+                                        .expect("expected line record range must be valid")
                                     );
-                                    assert_eq!(actual.decoded_start(), expected.decoded_start);
-                                    assert_eq!(actual.decoded_end(), expected.decoded_end);
-                                    replacement_index += 1;
+                                    assert_eq!(
+                                        actual.decoded_content_range(),
+                                        expected_line.decoded_start..expected_line.decoded_end
+                                    );
+                                    assert_eq!(
+                                        actual.decoded_record_range(),
+                                        expected_line.decoded_start
+                                            ..expected_line.decoded_record_end
+                                    );
+                                    assert_eq!(actual.newline(), expected_line.newline);
+                                    assert_eq!(
+                                        actual.replacements().len(),
+                                        expected_line.replacement_count
+                                    );
+                                    for actual in actual.replacements() {
+                                        let expected = expected.replacements.get(replacement_index).expect(
+                                            "actual replacement must have an expected contract entry",
+                                        );
+                                        assert_eq!(
+                                            actual.raw_range(),
+                                            DiagnosticByteRange::new(
+                                                expected.raw_start,
+                                                expected.raw_end,
+                                            )
+                                            .expect("expected replacement raw range must be valid")
+                                        );
+                                        assert_eq!(actual.decoded_start(), expected.decoded_start);
+                                        assert_eq!(actual.decoded_end(), expected.decoded_end);
+                                        replacement_index += 1;
+                                    }
                                 }
-                            }
-                            assert_eq!(replacement_index, expected.replacements.len());
-                            authorize_text_obligations(recoveries, accepted)
-                        },
-                    )?
-                    .expect("test text input must conform");
-                support::submit_minimal_scene(scope)
-            }
-            ParserBehavior::ExpectRejected {
-                options,
-                expected_kind,
-                expected_range,
-            } => {
-                let rejected = scope
-                    .with_conformed_text_input(
-                        scope.diagnostic_source(),
-                        options,
-                        |_accepted, _recoveries| -> ParseResult<()> {
-                            panic!("rejected text input must not invoke the callback")
-                        },
-                    )?
-                    .expect_err("test text input must be rejected");
-                assert_eq!(rejected.kind(), expected_kind);
-                assert_eq!(
-                    rejected.raw_range(),
-                    expected_range.map(|(start, end)| {
-                        DiagnosticByteRange::new(start, end)
-                            .expect("expected violation range must be valid")
-                    })
-                );
-                Err(scope.format_failure(TestTextFailure))
-            }
-            ParserBehavior::PropagateScopeFailure { options } => {
-                scope
-                    .with_conformed_text_input(
-                        scope.diagnostic_source(),
-                        options,
-                        |accepted, recoveries| authorize_text_obligations(recoveries, accepted),
-                    )?
-                    .expect("test text input should only fail through the scope");
-                support::submit_minimal_scene(scope)
-            }
-            ParserBehavior::LeaveReplacementUnclassified { options } => {
-                scope
-                    .with_conformed_text_input(
-                        scope.diagnostic_source(),
-                        options,
-                        |accepted, _recoveries| {
-                            assert!(
-                                accepted.lines().any(|line| !line.replacements().is_empty()),
-                                "the fixture must expose at least one replacement"
-                            );
-                            Ok(())
-                        },
-                    )?
-                    .expect("test text input must conform before recovery classification");
-                support::submit_minimal_scene(scope)
-            }
-            ParserBehavior::LeaveBomDiagnosticUnclassified { options } => {
-                scope
-                    .with_conformed_text_input(
-                        scope.diagnostic_source(),
-                        options,
-                        |accepted, _recoveries| {
-                            assert!(
-                                accepted.bom().is_some_and(|bom| bom.requires_diagnostic()),
-                                "the fixture must expose a required BOM diagnostic"
-                            );
-                            Ok(())
-                        },
-                    )?
-                    .expect("test text input must conform before BOM classification");
-                support::submit_minimal_scene(scope)
-            }
-            ParserBehavior::ClassifyReplacementOutOfOrder { options } => {
-                scope
-                    .with_conformed_text_input(
-                        scope.diagnostic_source(),
-                        options,
-                        |accepted, recoveries| {
-                            let line = accepted
-                                .lines()
-                                .next()
-                                .expect("replacement fixture must have one line");
-                            let replacement = line
-                                .replacements()
-                                .get(1)
-                                .expect("replacement fixture must have a second replacement");
-                            recoveries.discard_replacement(replacement)
-                        },
-                    )?
-                    .expect("test text input must conform before replacement classification");
-                support::submit_minimal_scene(scope)
-            }
-            ParserBehavior::ExpectSourceRangeContractFailure { options } => {
-                let _ = scope.with_conformed_text_input(
-                    scope.diagnostic_source(),
-                    options,
-                    |_accepted, _recoveries| -> ParseResult<()> {
-                        panic!("an invalid source range must not invoke the callback")
-                    },
-                )?;
-                panic!("the source range fixture must fail before conformance")
-            }
-            ParserBehavior::CallbackFailureWithPendingObligations { options } => {
-                let _ = scope.with_conformed_text_input(
-                    scope.diagnostic_source(),
-                    options,
-                    |_accepted, _recoveries| -> ParseResult<()> {
-                        Err(scope.format_failure(TestTextFailure))
-                    },
-                )?;
-                panic!("the callback failure must remain terminal")
-            }
-            ParserBehavior::ExpectRecoveryProtocolFailure { options, violation } => {
-                scope
-                    .with_conformed_text_input(
-                        scope.diagnostic_source(),
-                        options,
-                        |accepted, recoveries| {
-                            let bom = accepted
-                                .bom()
-                                .filter(|bom| bom.requires_diagnostic())
-                                .expect("the protocol fixture must require a BOM diagnostic");
-                            let line = accepted
-                                .lines()
-                                .find(|line| !line.replacements().is_empty())
-                                .expect("the protocol fixture must expose a replacement");
-                            let replacement = line
-                                .replacements()
-                                .first()
-                                .expect("the protocol fixture must expose a replacement");
-                            let bom_code = DiagnosticCode::new(ACCEPTED_BOM_CODE)
-                                .expect("static BOM diagnostic code must be valid");
-                            match violation {
-                                RecoveryProtocolViolation::ReplacementBeforeBom => {
-                                    recoveries.discard_replacement(replacement)
-                                }
-                                RecoveryProtocolViolation::BomTwice => {
-                                    recoveries.record_bom_diagnostic(
-                                        bom,
-                                        bom_code,
-                                        format_args!("accepted UTF-8 BOM in test text"),
-                                    )?;
-                                    recoveries.record_bom_diagnostic(
-                                        bom,
-                                        bom_code,
-                                        format_args!("accepted UTF-8 BOM in test text"),
-                                    )
-                                }
-                                RecoveryProtocolViolation::ReplacementTwice => {
-                                    recoveries.record_bom_diagnostic(
-                                        bom,
-                                        bom_code,
-                                        format_args!("accepted UTF-8 BOM in test text"),
-                                    )?;
-                                    recoveries.discard_replacement(replacement)?;
-                                    recoveries.discard_replacement(replacement)
-                                }
-                            }
-                        },
-                    )?
-                    .expect("test text input must conform before recovery classification");
-                support::submit_minimal_scene(scope)
-            }
-            ParserBehavior::ExpectAcceptedShape {
-                options,
-                line_count,
-                replacement_count,
-            } => {
-                scope
-                    .with_conformed_text_input(
-                        scope.diagnostic_source(),
-                        options,
-                        |accepted, recoveries| {
-                            let mut actual_lines = 0usize;
-                            let mut actual_replacements = 0usize;
-                            for line in accepted.lines() {
-                                actual_lines += 1;
-                                actual_replacements += line.replacements().len();
-                                recoveries.discard_replacements(line.replacements())?;
-                            }
-                            assert_eq!(actual_lines, line_count);
-                            assert_eq!(actual_replacements, replacement_count);
-                            Ok(())
-                        },
-                    )?
-                    .expect("test text input shape must conform");
-                support::submit_minimal_scene(scope)
-            }
-            ParserBehavior::ExpectRecordCursor {
-                options,
-                expected,
-                expected_raw_offset,
-                expect_exhausted,
-            } => {
-                let mut cursor = scope
-                    .text_input_record_cursor(scope.diagnostic_source(), options)?
-                    .expect("record cursor profile must be declared");
-                for (record_index, expected) in expected.iter().enumerate() {
-                    cursor
-                        .with_next_record(|accepted, recoveries| {
-                            let mut lines = accepted.lines();
-                            let line = lines
-                                .next()
-                                .expect("each nonempty raw record must expose one line");
-                            assert!(lines.next().is_none());
-                            assert_eq!(
-                                line.number(),
-                                u64::try_from(record_index)
-                                    .expect("fixture record index must fit u64")
-                                    + 1
-                            );
-                            assert_eq!(line.text(), expected.text);
-                            assert_eq!(
-                                line.raw_content_range(),
-                                DiagnosticByteRange::new(expected.raw_start, expected.raw_end)
-                                    .expect("expected content range must be valid")
-                            );
-                            assert_eq!(
-                                line.raw_record_range(),
-                                DiagnosticByteRange::new(
-                                    expected.raw_start,
-                                    expected.raw_record_end,
-                                )
-                                .expect("expected record range must be valid")
-                            );
-                            assert_eq!(line.newline(), expected.newline);
-                            authorize_text_obligations(recoveries, accepted)
-                        })?
-                        .expect("cursor record must conform")
-                        .expect("cursor fixture must contain the expected record");
+                                assert_eq!(replacement_index, expected.replacements.len());
+                                authorize_text_obligations(exec, recoveries, accepted)
+                            },
+                        )?
+                        .expect("test text input must conform");
+                    Ok(())
                 }
-                assert_eq!(cursor.raw_offset(), expected_raw_offset);
-                if expect_exhausted {
-                    assert!(
-                        cursor
-                            .with_next_record(|_accepted, _recoveries| -> ParseResult<()> {
-                                panic!("an exhausted cursor must not invoke the callback")
-                            },)?
-                            .expect("cursor exhaustion is not a conformance violation")
-                            .is_none()
-                    );
-                }
-                support::submit_minimal_scene(scope)
-            }
-            ParserBehavior::ExerciseRecordCursorTransactions { options } => {
-                let mut cursor = scope
-                    .text_input_record_cursor(scope.diagnostic_source(), options)?
-                    .expect("record cursor profile must be declared");
-                let caught = catch_unwind(AssertUnwindSafe(|| {
-                    cursor.with_next_record(|_accepted, _recoveries| -> ParseResult<()> {
-                        panic!("record callback panic")
-                    })
-                }));
-                assert!(caught.is_err());
-                assert_eq!(cursor.raw_offset(), 0);
-
-                cursor
-                    .with_next_record(|accepted, recoveries| {
-                        let line = accepted
-                            .lines()
-                            .next()
-                            .expect("retry must expose first record");
-                        assert_eq!(line.text(), "a");
-                        authorize_text_obligations(recoveries, accepted)
-                    })?
-                    .expect("the valid retry must conform")
-                    .expect("the valid retry must invoke the callback");
-                assert_eq!(cursor.raw_offset(), 2);
-
-                for _ in 0..2 {
-                    let violation = cursor
-                        .with_next_record(|_accepted, _recoveries| -> ParseResult<()> {
-                            panic!("an invalid record must not invoke the callback")
-                        })?
-                        .expect_err("the invalid record must remain a conformance violation");
-                    assert_eq!(violation.kind(), TextConformanceViolationKind::InvalidUtf8);
+                ParserBehavior::ExpectRejected {
+                    options,
+                    expected_kind,
+                    expected_range,
+                } => {
+                    let rejected = exec
+                        .with_conformed_text_input(
+                            exec.diagnostic_source(),
+                            options,
+                            |_exec, _accepted, _recoveries| -> ParseResult<()> {
+                                panic!("rejected text input must not invoke the callback")
+                            },
+                        )?
+                        .expect_err("test text input must be rejected");
+                    assert_eq!(rejected.kind(), expected_kind);
                     assert_eq!(
-                        violation.raw_range(),
-                        Some(
-                            DiagnosticByteRange::new(2, 3)
-                                .expect("expected retry range must be valid")
-                        )
+                        rejected.raw_range(),
+                        expected_range.map(|(start, end)| {
+                            DiagnosticByteRange::new(start, end)
+                                .expect("expected violation range must be valid")
+                        })
                     );
-                    assert_eq!(cursor.raw_offset(), 2);
+                    Err(exec.format_failure(TestTextFailure))
                 }
-                support::submit_minimal_scene(scope)
-            }
-            ParserBehavior::ExpectRecordCursorRecoveries {
-                options,
-                record_count,
-            } => {
-                let mut cursor = scope
-                    .text_input_record_cursor(scope.diagnostic_source(), options)?
-                    .expect("record cursor profile must be declared");
-                for _ in 0..record_count {
+                ParserBehavior::PropagateScopeFailure { options } => {
+                    exec
+                        .with_conformed_text_input(
+                            exec.diagnostic_source(),
+                            options,
+                            |exec, accepted, recoveries| authorize_text_obligations(exec, recoveries, accepted),
+                        )?
+                        .expect("test text input should only fail through the exec");
+                    Ok(())
+                }
+                ParserBehavior::LeaveReplacementUnclassified { options } => {
+                    exec
+                        .with_conformed_text_input(
+                            exec.diagnostic_source(),
+                            options,
+                            |_exec, accepted, _recoveries| {
+                                assert!(
+                                    accepted.lines().any(|line| !line.replacements().is_empty()),
+                                    "the fixture must expose at least one replacement"
+                                );
+                                Ok(())
+                            },
+                        )?
+                        .expect("test text input must conform before recovery classification");
+                    Ok(())
+                }
+                ParserBehavior::LeaveBomDiagnosticUnclassified { options } => {
+                    exec
+                        .with_conformed_text_input(
+                            exec.diagnostic_source(),
+                            options,
+                            |_exec, accepted, _recoveries| {
+                                assert!(
+                                    accepted.bom().is_some_and(|bom| bom.requires_diagnostic()),
+                                    "the fixture must expose a required BOM diagnostic"
+                                );
+                                Ok(())
+                            },
+                        )?
+                        .expect("test text input must conform before BOM classification");
+                    Ok(())
+                }
+                ParserBehavior::ClassifyReplacementOutOfOrder { options } => {
+                    exec
+                        .with_conformed_text_input(
+                            exec.diagnostic_source(),
+                            options,
+                            |exec, accepted, recoveries| {
+                                let line = accepted
+                                    .lines()
+                                    .next()
+                                    .expect("replacement fixture must have one line");
+                                let replacement = line
+                                    .replacements()
+                                    .get(1)
+                                    .expect("replacement fixture must have a second replacement");
+                                recoveries.discard_replacement(exec, replacement)
+                            },
+                        )?
+                        .expect("test text input must conform before replacement classification");
+                    Ok(())
+                }
+                ParserBehavior::ExpectSourceRangeContractFailure { options } => {
+                    let _ = exec.with_conformed_text_input(
+                        exec.diagnostic_source(),
+                        options,
+                        |_exec, _accepted, _recoveries| -> ParseResult<()> {
+                            panic!("an invalid source range must not invoke the callback")
+                        },
+                    )?;
+                    panic!("the source range fixture must fail before conformance")
+                }
+                ParserBehavior::CallbackFailureWithPendingObligations { options } => {
+                    let _ = exec.with_conformed_text_input(
+                        exec.diagnostic_source(),
+                        options,
+                        |exec, _accepted, _recoveries| -> ParseResult<()> {
+                            Err(exec.format_failure(TestTextFailure))
+                        },
+                    )?;
+                    panic!("the callback failure must remain terminal")
+                }
+                ParserBehavior::ExpectRecoveryProtocolFailure { options, violation } => {
+                    exec
+                        .with_conformed_text_input(
+                            exec.diagnostic_source(),
+                            options,
+                            |exec, accepted, recoveries| {
+                                let bom = accepted
+                                    .bom()
+                                    .filter(|bom| bom.requires_diagnostic())
+                                    .expect("the protocol fixture must require a BOM diagnostic");
+                                let line = accepted
+                                    .lines()
+                                    .find(|line| !line.replacements().is_empty())
+                                    .expect("the protocol fixture must expose a replacement");
+                                let replacement = line
+                                    .replacements()
+                                    .first()
+                                    .expect("the protocol fixture must expose a replacement");
+                                let bom_code = DiagnosticCode::new(ACCEPTED_BOM_CODE)
+                                    .expect("static BOM diagnostic code must be valid");
+                                match violation {
+                                    RecoveryProtocolViolation::ReplacementBeforeBom => {
+                                        recoveries.discard_replacement(exec, replacement)
+                                    }
+                                    RecoveryProtocolViolation::BomTwice => {
+                                        recoveries.record_bom_diagnostic(exec,
+                                            bom,
+                                            bom_code,
+                                            format_args!("accepted UTF-8 BOM in test text"),
+                                        )?;
+                                        recoveries.record_bom_diagnostic(exec,
+                                            bom,
+                                            bom_code,
+                                            format_args!("accepted UTF-8 BOM in test text"),
+                                        )
+                                    }
+                                    RecoveryProtocolViolation::ReplacementTwice => {
+                                        recoveries.record_bom_diagnostic(exec,
+                                            bom,
+                                            bom_code,
+                                            format_args!("accepted UTF-8 BOM in test text"),
+                                        )?;
+                                        recoveries.discard_replacement(exec, replacement)?;
+                                        recoveries.discard_replacement(exec, replacement)
+                                    }
+                                }
+                            },
+                        )?
+                        .expect("test text input must conform before recovery classification");
+                    Ok(())
+                }
+                ParserBehavior::ExpectAcceptedShape {
+                    options,
+                    line_count,
+                    replacement_count,
+                } => {
+                    exec
+                        .with_conformed_text_input(
+                            exec.diagnostic_source(),
+                            options,
+                            |exec, accepted, recoveries| {
+                                let mut actual_lines = 0usize;
+                                let mut actual_replacements = 0usize;
+                                for line in accepted.lines() {
+                                    actual_lines += 1;
+                                    actual_replacements += line.replacements().len();
+                                    recoveries.discard_replacements(exec, line.replacements())?;
+                                }
+                                assert_eq!(actual_lines, line_count);
+                                assert_eq!(actual_replacements, replacement_count);
+                                Ok(())
+                            },
+                        )?
+                        .expect("test text input shape must conform");
+                    Ok(())
+                }
+                ParserBehavior::ExpectRecordCursor {
+                    options,
+                    expected,
+                    expected_raw_offset,
+                    expect_exhausted,
+                } => {
+                    let mut cursor = exec
+                        .text_input_record_cursor(exec.diagnostic_source(), options)?
+                        .expect("record cursor profile must be declared");
+                    for (record_index, expected) in expected.iter().enumerate() {
+                        cursor
+                            .with_next_record(exec, |exec, accepted, recoveries| {
+                                let mut lines = accepted.lines();
+                                let line = lines
+                                    .next()
+                                    .expect("each nonempty raw record must expose one line");
+                                assert!(lines.next().is_none());
+                                assert_eq!(
+                                    line.number(),
+                                    u64::try_from(record_index)
+                                        .expect("fixture record index must fit u64")
+                                        + 1
+                                );
+                                assert_eq!(line.text(), expected.text);
+                                assert_eq!(
+                                    line.raw_content_range(),
+                                    DiagnosticByteRange::new(expected.raw_start, expected.raw_end)
+                                        .expect("expected content range must be valid")
+                                );
+                                assert_eq!(
+                                    line.raw_record_range(),
+                                    DiagnosticByteRange::new(
+                                        expected.raw_start,
+                                        expected.raw_record_end,
+                                    )
+                                    .expect("expected record range must be valid")
+                                );
+                                assert_eq!(line.newline(), expected.newline);
+                                authorize_text_obligations(exec, recoveries, accepted)
+                            })?
+                            .expect("cursor record must conform")
+                            .expect("cursor fixture must contain the expected record");
+                    }
+                    assert_eq!(cursor.raw_offset(), expected_raw_offset);
+                    if expect_exhausted {
+                        assert!(
+                            cursor
+                                .with_next_record(exec, |_exec, _accepted, _recoveries| -> ParseResult<()> {
+                                    panic!("an exhausted cursor must not invoke the callback")
+                                },)?
+                                .expect("cursor exhaustion is not a conformance violation")
+                                .is_none()
+                        );
+                    }
+                    Ok(())
+                }
+                ParserBehavior::ExerciseRecordCursorTransactions { options } => {
+                    let mut cursor = exec
+                        .text_input_record_cursor(exec.diagnostic_source(), options)?
+                        .expect("record cursor profile must be declared");
+                    let caught = catch_unwind(AssertUnwindSafe(|| {
+                        cursor.with_next_record(exec, |_exec, _accepted, _recoveries| -> ParseResult<()> {
+                            panic!("record callback panic")
+                        })
+                    }));
+                    assert!(caught.is_err());
+                    assert_eq!(cursor.raw_offset(), 0);
+
                     cursor
-                        .with_next_record(|accepted, recoveries| {
-                            authorize_text_obligations(recoveries, accepted)
+                        .with_next_record(exec, |exec, accepted, recoveries| {
+                            let line = accepted
+                                .lines()
+                                .next()
+                                .expect("retry must expose first record");
+                            assert_eq!(line.text(), "a");
+                            authorize_text_obligations(exec, recoveries, accepted)
                         })?
-                        .expect("recovery record must conform")
-                        .expect("recovery fixture must contain every declared record");
+                        .expect("the valid retry must conform")
+                        .expect("the valid retry must invoke the callback");
+                    assert_eq!(cursor.raw_offset(), 2);
+
+                    for _ in 0..2 {
+                        let violation = cursor
+                            .with_next_record(exec, |_exec, _accepted, _recoveries| -> ParseResult<()> {
+                                panic!("an invalid record must not invoke the callback")
+                            })?
+                            .expect_err("the invalid record must remain a conformance violation");
+                        assert_eq!(violation.kind(), TextConformanceViolationKind::InvalidUtf8);
+                        assert_eq!(
+                            violation.raw_range(),
+                            Some(
+                                DiagnosticByteRange::new(2, 3)
+                                    .expect("expected retry range must be valid")
+                            )
+                        );
+                        assert_eq!(cursor.raw_offset(), 2);
+                    }
+                    Ok(())
                 }
-                support::submit_minimal_scene(scope)
+                ParserBehavior::ExpectRecordCursorRecoveries {
+                    options,
+                    record_count,
+                } => {
+                    let mut cursor = exec
+                        .text_input_record_cursor(exec.diagnostic_source(), options)?
+                        .expect("record cursor profile must be declared");
+                    for _ in 0..record_count {
+                        cursor
+                            .with_next_record(exec, |exec, accepted, recoveries| {
+                                authorize_text_obligations(exec, recoveries, accepted)
+                            })?
+                            .expect("recovery record must conform")
+                            .expect("recovery fixture must contain every declared record");
+                    }
+                    Ok(())
+                }
+                ParserBehavior::ExpectRecordCursorRejected {
+                    options,
+                    expected_kind,
+                } => {
+                    let violation =
+                        match exec.text_input_record_cursor(exec.diagnostic_source(), options)? {
+                            Ok(_cursor) => panic!("record cursor declaration must be rejected"),
+                            Err(violation) => violation,
+                        };
+                    assert_eq!(violation.kind(), expected_kind);
+                    assert_eq!(violation.raw_range(), None);
+                    Ok(())
+                }
+                ParserBehavior::PropagateRecordCursorFailure { options } => {
+                    let mut cursor = exec
+                        .text_input_record_cursor(exec.diagnostic_source(), options)?
+                        .expect("record cursor profile must be declared");
+                    let _unexpected = cursor.with_next_record(exec, |_exec, _accepted, _recoveries| Ok(()))?;
+                    panic!("the record cursor fixture must fail before invoking its callback")
+                }
             }
-            ParserBehavior::ExpectRecordCursorRejected {
-                options,
-                expected_kind,
-            } => {
-                let violation =
-                    match scope.text_input_record_cursor(scope.diagnostic_source(), options)? {
-                        Ok(_cursor) => panic!("record cursor declaration must be rejected"),
-                        Err(violation) => violation,
-                    };
-                assert_eq!(violation.kind(), expected_kind);
-                assert_eq!(violation.raw_range(), None);
-                support::submit_minimal_scene(scope)
-            }
-            ParserBehavior::PropagateRecordCursorFailure { options } => {
-                let mut cursor = scope
-                    .text_input_record_cursor(scope.diagnostic_source(), options)?
-                    .expect("record cursor profile must be declared");
-                let _unexpected = cursor.with_next_record(|_accepted, _recoveries| Ok(()))?;
-                panic!("the record cursor fixture must fail before invoking its callback")
-            }
-        }
+        })?;
+        support::submit_minimal_scene(context)
     }
 }
 
-fn authorize_text_obligations(
-    recoveries: &mut TextInputRecoveryTracker<'_, '_>,
-    accepted: &ConformedTextInput<'_>,
+fn authorize_text_obligations<'session>(
+    exec: &mut ParseExecution<'_, 'session>,
+    recoveries: &mut TextInputRecoveryTracker<'_, 'session>,
+    accepted: &ConformedTextInput<'session>,
 ) -> ParseResult<()> {
     if let Some(bom) = accepted.bom().filter(|bom| bom.requires_diagnostic()) {
         let code = DiagnosticCode::new(ACCEPTED_BOM_CODE)
             .expect("static BOM diagnostic code must be valid");
         recoveries.record_bom_diagnostic(
+            exec,
             bom,
             code,
             format_args!("accepted UTF-8 BOM in test text"),
@@ -586,6 +601,7 @@ fn authorize_text_obligations(
     for line in accepted.lines() {
         for replacement in line.replacements() {
             recoveries.record_format_recovery(
+                exec,
                 replacement,
                 code,
                 format_args!("replaced invalid UTF-8 in test text"),
@@ -664,7 +680,7 @@ fn text_profile_with_lexical(
     .expect("test text profile must be valid")
 }
 
-fn request_for(importer: TextInputImporter, limits: ResourceLimits) -> PreparedImportRequest {
+fn request_for(importer: TextInputImporter, limits: ResourceLimits) -> ImportPlan {
     request_for_with_policies(
         importer,
         limits,
@@ -678,7 +694,7 @@ fn request_for_with_policies(
     limits: ResourceLimits,
     conformance_policy: ConformancePolicy,
     loss_policy: LossPolicy,
-) -> PreparedImportRequest {
+) -> ImportPlan {
     let mut registry = RegistryBuilder::new();
     registry
         .register(importer)
@@ -691,7 +707,7 @@ fn request_for_with_policies(
         .with_conformance_policy(conformance_policy)
         .with_loss_policy(loss_policy);
     snapshot
-        .compile_request(
+        .plan(
             &ImportRequest::from_layers(
                 ImportRequestLayer::default(),
                 ImportRequestLayer::new(config),
@@ -723,12 +739,8 @@ fn operation_result<T>(result: ImportResult<T>) -> Result<T, ImportFailure> {
     clippy::result_large_err,
     reason = "contract assertions inspect complete bounded import failure evidence"
 )]
-fn import_bytes(
-    request: &PreparedImportRequest,
-    bytes: &[u8],
-) -> Result<ImportReport, ImportFailure> {
-    operation_result(run_import_bytes(
-        request,
+fn read_bytes(request: &ImportPlan, bytes: &[u8]) -> Result<ImportReport, ImportFailure> {
+    operation_result(request.read_bytes(
         baozi_io::AssetPath::new(SOURCE).expect("static source path must be valid"),
         bytes,
         ImportOperationControl::default(),
@@ -764,7 +776,7 @@ fn import_text_shape(
         },
     );
     let request = request_for(importer, limits);
-    import_bytes(&request, bytes)
+    read_bytes(&request, bytes)
 }
 
 fn line_index_peak(report: &ImportReport) -> u64 {
@@ -976,7 +988,7 @@ fn strict_utf8_text_is_copied_with_raw_line_starts() {
     );
     let request = request_for(importer, ResourceLimits::default());
 
-    let report = import_bytes(&request, b"v 1\r\n\tcaf\xc3\xa9\n")
+    let report = read_bytes(&request, b"v 1\r\n\tcaf\xc3\xa9\n")
         .expect("valid profiled UTF-8 text must import");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -1016,7 +1028,7 @@ fn accepted_bom_is_classified_and_removed_without_shifting_raw_lines() {
     let request = request_for(importer, ResourceLimits::default());
 
     let report =
-        import_bytes(&request, b"\xef\xbb\xbfo\n").expect("accepted BOM must not reach grammar");
+        read_bytes(&request, b"\xef\xbb\xbfo\n").expect("accepted BOM must not reach grammar");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
     assert_eq!(report.ledger().current_live_bytes(), 0);
@@ -1048,7 +1060,7 @@ fn empty_and_bom_only_inputs_have_no_grammar_lines() {
         );
         let request = request_for(importer, ResourceLimits::default());
 
-        let report = import_bytes(&request, bytes)
+        let report = read_bytes(&request, bytes)
             .expect("empty decoded input must not manufacture a grammar record");
 
         assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -1104,7 +1116,7 @@ fn raw_base_offsets_apply_to_cr_lines_without_reinterpreting_mid_source_bom() {
     let mut bytes = vec![b'x'; 100];
     bytes.extend_from_slice(b"\xef\xbb\xbfa\rz");
 
-    let report = import_bytes(&request, &bytes)
+    let report = read_bytes(&request, &bytes)
         .expect("raw-base text conformance must preserve shifted offsets");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -1200,7 +1212,7 @@ fn line_view_preserves_empty_records_and_cross_line_replacement_mapping() {
         recovery_loss_policy(),
     );
 
-    let report = import_bytes(&request, b"\n\r\na\xff\r\nz\xe2\x82")
+    let report = read_bytes(&request, b"\n\r\na\xff\r\nz\xe2\x82")
         .expect("line mapping must remain stable after UTF-8 replacement expansion");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -1266,7 +1278,7 @@ fn recovery_locations_follow_the_declared_cr_newline_profile() {
         recovery_loss_policy(),
     );
 
-    let report = import_bytes(&request, b"a\r\xff")
+    let report = read_bytes(&request, b"a\r\xff")
         .expect("declared CR text recovery must preserve raw locations");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -1328,7 +1340,7 @@ fn replace_invalid_utf8_records_raw_and_decoded_spans() {
     );
 
     let report =
-        import_bytes(&request, b"a\xffb\xe2\x82").expect("declared recovery mode must conform");
+        read_bytes(&request, b"a\xffb\xe2\x82").expect("declared recovery mode must conform");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
     assert_replacement_recovery(&report, [(1, 2), (3, 5)]);
@@ -1381,7 +1393,7 @@ fn replacement_ranges_remain_source_relative_after_a_nonzero_raw_base() {
         recovery_loss_policy(),
     );
 
-    let report = import_bytes(&request, b"xxa\xffb")
+    let report = read_bytes(&request, b"xxa\xffb")
         .expect("replacement evidence must retain absolute source offsets");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -1425,7 +1437,7 @@ fn replacement_recovery_requires_common_policies_before_parse_success() {
             loss_policy,
         );
 
-        let failure = import_bytes(&request, b"a\xff")
+        let failure = read_bytes(&request, b"a\xff")
             .expect_err("common policy gates must reject replacement recovery");
 
         assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -1464,7 +1476,7 @@ fn unclassified_replacement_cannot_publish_parse_success() {
             loss_policy,
         );
 
-        let failure = import_bytes(&request, b"a\xff")
+        let failure = read_bytes(&request, b"a\xff")
             .expect_err("unclassified replacement must prevent parse success");
 
         assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -1487,7 +1499,7 @@ fn completion_protocol_requires_bom_diagnostics_and_ordered_replacements() {
         },
     );
     let bom_request = request_for(bom_importer, ResourceLimits::default());
-    let bom_failure = import_bytes(&bom_request, b"\xef\xbb\xbfa")
+    let bom_failure = read_bytes(&bom_request, b"\xef\xbb\xbfa")
         .expect_err("required BOM diagnostic must prevent parse success when omitted");
     assert_eq!(bom_parse_calls.load(Ordering::Acquire), 1);
     assert_scope_descriptor_contract(&bom_failure, "text-input-bom-diagnostic-unclassified");
@@ -1508,7 +1520,7 @@ fn completion_protocol_requires_bom_diagnostics_and_ordered_replacements() {
         },
     );
     let replacement_request = request_for(replacement_importer, ResourceLimits::default());
-    let replacement_failure = import_bytes(&replacement_request, b"\xff\xfe")
+    let replacement_failure = read_bytes(&replacement_request, b"\xff\xfe")
         .expect_err("replacement classification must follow source order");
     assert_eq!(replacement_parse_calls.load(Ordering::Acquire), 1);
     assert_scope_descriptor_contract(&replacement_failure, "text-input-replacement-out-of-order");
@@ -1548,7 +1560,7 @@ fn text_input_source_range_rejects_invalid_offsets_before_conformance() {
             ParserBehavior::ExpectSourceRangeContractFailure { options },
         );
         let request = request_for(importer, ResourceLimits::default());
-        let failure = import_bytes(&request, b"\xff")
+        let failure = read_bytes(&request, b"\xff")
             .expect_err("an invalid source range must fail before conformance");
 
         assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -1591,7 +1603,7 @@ fn bounded_source_range_conforms_only_the_selected_bytes() {
         },
     );
     let accepted_request = request_for(accepted_importer, ResourceLimits::default());
-    import_bytes(&accepted_request, b"xA\r\n\xff")
+    read_bytes(&accepted_request, b"xA\r\n\xff")
         .expect("bytes outside the bounded range must remain untouched");
     assert_eq!(accepted_calls.load(Ordering::Acquire), 1);
 
@@ -1606,7 +1618,7 @@ fn bounded_source_range_conforms_only_the_selected_bytes() {
         },
     );
     let rejected_request = request_for(rejected_importer, ResourceLimits::default());
-    import_bytes(&rejected_request, b"xA\r\n\xff")
+    read_bytes(&rejected_request, b"xA\r\n\xff")
         .expect_err("extending the range must expose the invalid byte");
     assert_eq!(rejected_calls.load(Ordering::Acquire), 1);
 }
@@ -1645,7 +1657,7 @@ fn record_cursor_preserves_exact_ranges_and_can_stop_before_invalid_suffix() {
     );
     let request = request_for(importer, ResourceLimits::default());
 
-    import_bytes(&request, b"a\r\n\nb\xff")
+    read_bytes(&request, b"a\r\n\nb\xff")
         .expect("stopping the cursor must not inspect the invalid suffix");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -1682,7 +1694,7 @@ fn record_cursor_boundary_scan_is_decode_work_and_ignores_binary_suffix_size() {
         );
         let request = request_for(importer, ResourceLimits::default());
 
-        let report = import_bytes(&request, bytes)
+        let report = read_bytes(&request, bytes)
             .expect("the cursor must not inspect the binary suffix after one text record");
 
         assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -1722,7 +1734,7 @@ fn record_cursor_accepts_bom_with_diagnostic_without_counting_it_as_line_content
     limits.max_line_bytes = 1;
     let request = request_for(importer, limits);
 
-    let report = import_bytes(&request, b"\xef\xbb\xbfa\n\xff")
+    let report = read_bytes(&request, b"\xef\xbb\xbfa\n\xff")
         .expect("the BOM must not count against the first record's content limit");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -1779,7 +1791,7 @@ fn record_cursor_preserves_crlf_across_the_scan_quantum_boundary() {
     );
     let request = request_for(importer, ResourceLimits::default());
 
-    import_bytes(&request, &bytes)
+    read_bytes(&request, &bytes)
         .expect("a split CRLF must remain one record without inspecting the suffix");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -1810,7 +1822,7 @@ fn record_cursor_recovery_locations_advance_across_records() {
         recovery_loss_policy(),
     );
 
-    let report = import_bytes(&request, b"a\nb\xff\n")
+    let report = read_bytes(&request, b"a\nb\xff\n")
         .expect("record recovery must retain the source-level line number");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -1836,7 +1848,7 @@ fn record_cursor_decode_budget_includes_boundary_discovery() {
     limits.max_decode_work = 5;
     let request = request_for(importer, limits);
 
-    let failure = import_bytes(&request, b"a\n")
+    let failure = read_bytes(&request, b"a\n")
         .expect_err("one byte below the three-pass record cost must fail");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -1897,7 +1909,7 @@ fn bounded_record_cursor_exhausts_at_its_absolute_end() {
     );
     let request = request_for(importer, ResourceLimits::default());
 
-    import_bytes(&request, b"xa\nb\xff")
+    read_bytes(&request, b"xa\nb\xff")
         .expect("the cursor must stop at its configured absolute end");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -1923,7 +1935,7 @@ fn record_cursor_enforces_the_complete_selected_raw_range_before_iteration() {
     );
     let request = request_for(importer, ResourceLimits::default());
 
-    let failure = import_bytes(&request, b"a\n")
+    let failure = read_bytes(&request, b"a\n")
         .expect_err("the cursor must not split a complete selected raw limit across records");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -1958,7 +1970,7 @@ fn record_cursor_failure_paths_leave_the_current_record_transactional() {
     );
     let request = request_for(importer, ResourceLimits::default());
 
-    let report = import_bytes(&request, b"a\n\xff\n")
+    let report = read_bytes(&request, b"a\n\xff\n")
         .expect("panic and conformance failure must leave the current record retryable");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -1984,7 +1996,7 @@ fn record_cursor_stops_an_overlong_ascii_record_at_the_shared_line_limit() {
     limits.max_line_bytes = 4;
     let request = request_for(importer, limits);
 
-    let failure = import_bytes(&request, b"abcdefghijklmnopqrstuvwxyz")
+    let failure = read_bytes(&request, b"abcdefghijklmnopqrstuvwxyz")
         .expect_err("the cursor must not scan an entire overlong ASCII record");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -2012,7 +2024,7 @@ fn record_cursor_line_probe_does_not_reclassify_split_utf8() {
     limits.max_line_bytes = 1;
     let request = request_for(importer, limits);
 
-    let failure = import_bytes(&request, b"a\xc3\xa9\n")
+    let failure = read_bytes(&request, b"a\xc3\xa9\n")
         .expect_err("the line limit must win before a probe can split a UTF-8 scalar");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -2044,7 +2056,7 @@ fn raw_base_at_source_end_selects_an_empty_suffix() {
     );
     let request = request_for(importer, ResourceLimits::default());
 
-    let report = import_bytes(&request, b"abcd").expect("the exact source end is a valid suffix");
+    let report = read_bytes(&request, b"abcd").expect("the exact source end is a valid suffix");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
     assert_eq!(report.ledger().current_live_bytes(), 0);
@@ -2088,7 +2100,7 @@ fn combined_bom_and_replacement_protocol_is_ordered_and_exactly_once() {
             ConformancePolicy::AllowDeclaredRecovery,
             recovery_loss_policy(),
         );
-        let failure = import_bytes(&request, bytes)
+        let failure = read_bytes(&request, bytes)
             .expect_err("invalid recovery protocol ordering must prevent parse success");
 
         assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -2105,7 +2117,7 @@ fn combined_bom_and_replacement_protocol_is_ordered_and_exactly_once() {
         ConformancePolicy::AllowDeclaredRecovery,
         recovery_loss_policy(),
     );
-    let report = import_bytes(&request, bytes)
+    let report = read_bytes(&request, bytes)
         .expect("the ordered recovery protocol must preserve parse success");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -2149,7 +2161,7 @@ fn callback_failure_precedes_pending_bom_and_replacement_obligations() {
     );
     let request = request_for(importer, ResourceLimits::default());
 
-    let failure = import_bytes(&request, b"\xef\xbb\xbf\xff")
+    let failure = read_bytes(&request, b"\xef\xbb\xbf\xff")
         .expect_err("the callback failure must outrank unfinished recovery obligations");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -2191,7 +2203,7 @@ fn text_profile_declaration_violations_are_structured_without_storage() {
         );
         let request = request_for(importer, ResourceLimits::default());
 
-        let failure = import_bytes(&request, b"abc")
+        let failure = read_bytes(&request, b"abc")
             .expect_err("text profile declaration violation must remain format-owned");
 
         assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -2228,7 +2240,7 @@ fn record_cursor_validates_text_profile_before_bom_or_record_scanning() {
         );
         let request = request_for(importer, ResourceLimits::default());
 
-        let report = import_bytes(&request, b"\xef\xbb\xbfline\n")
+        let report = read_bytes(&request, b"\xef\xbb\xbfline\n")
             .expect("declaration rejection must precede the forbidden BOM fast path");
 
         assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -2263,7 +2275,7 @@ fn text_raw_limit_fails_before_decoded_storage_is_exposed() {
     );
     let request = request_for(importer, ResourceLimits::default());
 
-    let failure = import_bytes(&request, b"abcdef")
+    let failure = read_bytes(&request, b"abcdef")
         .expect_err("text raw surface cap must fail inside the parser scope");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -2290,7 +2302,7 @@ fn decoded_limit_fails_after_budgeted_scan_without_partial_text_storage() {
     let request = request_for(importer, limits);
 
     let failure =
-        import_bytes(&request, b"abcde").expect_err("decoded text cap must reject the input");
+        read_bytes(&request, b"abcde").expect_err("decoded text cap must reject the input");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
     assert_scope_resource_limit(&failure, 4);
@@ -2321,7 +2333,7 @@ fn line_byte_limit_fails_after_budgeted_scan_without_partial_text_storage() {
     limits.max_line_bytes = 3;
     let request = request_for(importer, limits);
 
-    let failure = import_bytes(&request, b"abcd\n")
+    let failure = read_bytes(&request, b"abcd\n")
         .expect_err("line byte cap must reject an overlong raw line");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -2374,7 +2386,7 @@ fn text_profile_violations_are_structured_before_storage_allocation() {
         );
         let request = request_for(importer, ResourceLimits::default());
 
-        let failure = import_bytes(&request, bytes)
+        let failure = read_bytes(&request, bytes)
             .expect_err("text profile violation must be reported by the format");
 
         assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -2405,7 +2417,7 @@ fn ascii_only_rejects_non_ascii_with_shifted_raw_range() {
     let mut bytes = vec![b'x'; 20];
     bytes.extend_from_slice(b"caf\xc3\xa9");
 
-    let failure = import_bytes(&request, &bytes)
+    let failure = read_bytes(&request, &bytes)
         .expect_err("ASCII-only text profile must reject the first non-ASCII byte");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -2432,7 +2444,7 @@ fn ascii_only_reports_invalid_utf8_before_non_ascii_classification() {
     );
     let request = request_for(importer, ResourceLimits::default());
 
-    let failure = import_bytes(&request, b"caf\xff")
+    let failure = read_bytes(&request, b"caf\xff")
         .expect_err("ASCII-only text must distinguish invalid UTF-8 from valid non-ASCII text");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -2467,7 +2479,7 @@ fn line_index_limit_fails_after_newline_scan_without_partial_text_storage() {
     limits.max_line_index_bytes = first_line_index_bytes;
     let request = request_for(importer, limits);
 
-    let failure = import_bytes(&request, b"a\nb\nc\nd\ne")
+    let failure = read_bytes(&request, b"a\nb\nc\nd\ne")
         .expect_err("line-index cap must reject the first capacity growth");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);

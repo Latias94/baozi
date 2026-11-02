@@ -2,17 +2,17 @@ mod support;
 
 use baozi_core::FormatId;
 use baozi_import::{
-    AuthorizedDependency, CapabilityStatus, CauseOwner, DependencyCacheDisposition,
-    DependencyPolicyError, DependencyReference, DependencyRequirement, DependencyResolver,
-    DependencyRoleId, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
-    FormatDescriptor, FormatEncoding, FormatImporter, ImportCause, ImportConfigOverlay,
+    AuthorizedDependency, CapabilityStatus, CauseOwner, CompiledOptions,
+    DependencyCacheDisposition, DependencyPolicyError, DependencyReference, DependencyRequirement,
+    DependencyResolver, DependencyRoleId, DetectionOutcome, DetectionResult, DetectionScope,
+    Format, FormatCapability, FormatDescriptor, FormatEncoding, ImportCause, ImportConfigOverlay,
     ImportDimension, ImportFailure, ImportLedgerSnapshot, ImportLossKind, ImportOperationControl,
-    ImportReport, ImportRequest, ImportRequestLayer, ImportResult, LossPolicy, ManifestReference,
-    ManifestRelationOutcome, ManifestResourceIdentityStability, ManifestSessionDependentReason,
-    ManifestUnavailableClass, ManifestUnavailableReplay, OptionCompileLimits, ParseResult,
-    ParseScope, PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits,
-    RegistryBuilder, SceneDraft, ScopeAbortCause,
-    import_asset_with_resolver as run_import_asset_with_resolver,
+    ImportPlan, ImportReport, ImportRequest, ImportRequestLayer, ImportResult, LossPolicy,
+    ManifestReference, ManifestRelationOutcome, ManifestResourceIdentityStability,
+    ManifestSessionDependentReason, ManifestUnavailableClass, ManifestUnavailableReplay,
+    NoFormatOptions, OptionCompileError, OptionCompileLimits, ParseContext, ParseResult,
+    ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuildScope, RegistryBuilder,
+    ScopeAbortCause,
 };
 use baozi_io::{
     AssetIo, AssetOpenError, AssetOpenWorkError, AssetPath, AuthorityDomain, MemoryAssetIo,
@@ -361,7 +361,16 @@ impl DependencySequenceImporter {
     }
 }
 
-impl FormatImporter for DependencySequenceImporter {
+impl Format for DependencySequenceImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new(self.id).expect("test format id must be valid"),
@@ -384,34 +393,41 @@ impl FormatImporter for DependencySequenceImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        for step in &self.steps {
-            let observation = match step.requirement {
-                DependencyRequirement::Required => {
-                    let snapshot =
-                        support::required_root_dependency(scope, &step.role, step.raw_reference)?;
-                    SnapshotObservation {
-                        bytes: snapshot.bytes().to_vec(),
-                        cache_disposition: snapshot.cache_disposition(),
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        context.with_execution(|exec| -> ParseResult<()> {
+            for step in &self.steps {
+                let observation = match step.requirement {
+                    DependencyRequirement::Required => {
+                        let snapshot = support::required_root_dependency(
+                            exec,
+                            &step.role,
+                            step.raw_reference,
+                        )?;
+                        SnapshotObservation {
+                            bytes: snapshot.bytes().to_vec(),
+                            cache_disposition: snapshot.cache_disposition(),
+                        }
                     }
-                }
-                DependencyRequirement::Optional => {
-                    let outcome = support::root_dependency(scope, &step.role, step.raw_reference)?;
-                    let Some(snapshot) = outcome.snapshot() else {
-                        continue;
-                    };
-                    SnapshotObservation {
-                        bytes: snapshot.bytes().to_vec(),
-                        cache_disposition: snapshot.cache_disposition(),
+                    DependencyRequirement::Optional => {
+                        let outcome =
+                            support::root_dependency(exec, &step.role, step.raw_reference)?;
+                        let Some(snapshot) = outcome.snapshot() else {
+                            continue;
+                        };
+                        SnapshotObservation {
+                            bytes: snapshot.bytes().to_vec(),
+                            cache_disposition: snapshot.cache_disposition(),
+                        }
                     }
-                }
-            };
-            self.observations
-                .lock()
-                .expect("observation mutex must remain usable")
-                .push(observation);
-        }
-        support::submit_minimal_scene(scope)
+                };
+                self.observations
+                    .lock()
+                    .expect("observation mutex must remain usable")
+                    .push(observation);
+            }
+            Ok(())
+        })?;
+        support::submit_minimal_scene(context)
     }
 }
 
@@ -435,10 +451,7 @@ fn optional(role: &DependencyRoleId, raw_reference: &'static str) -> DependencyS
     }
 }
 
-fn prepared_request(
-    importer: impl FormatImporter,
-    config: ImportConfigOverlay,
-) -> PreparedImportRequest {
+fn prepared_request(importer: impl Format, config: ImportConfigOverlay) -> ImportPlan {
     let mut builder = RegistryBuilder::new();
     builder
         .register(importer)
@@ -447,7 +460,7 @@ fn prepared_request(
         .freeze(RegistryBuildLimits::default())
         .expect("test registry freeze must succeed");
     snapshot
-        .compile_request(
+        .plan(
             &ImportRequest::from_layers(
                 ImportRequestLayer::default(),
                 ImportRequestLayer::new(config),
@@ -485,13 +498,12 @@ fn operation_result<T>(result: ImportResult<T>) -> Result<T, ImportFailure> {
     reason = "authority cache assertions inspect complete bounded import failure evidence"
 )]
 fn import_with_resolver(
-    request: &PreparedImportRequest,
+    request: &ImportPlan,
     io: &dyn AssetIo,
     source: AssetPath,
     resolver: &dyn DependencyResolver,
 ) -> Result<ImportReport, ImportFailure> {
-    operation_result(run_import_asset_with_resolver(
-        request,
+    operation_result(request.read_asset_with_resolver(
         io,
         source,
         resolver,

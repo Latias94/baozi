@@ -343,8 +343,8 @@ fn upstream_corners_and_deformations_reconstruct_after_scene_drop() -> Result<()
 mod color_domains {
     use super::*;
     use baozi::{
-        AttributeDomain, CapabilityStatus, FormatCapability, FormatDescriptor, FormatEncoding,
-        FormatId, FormatImporter, FormatSelection, ImportConfigOverlay, ImportOperationControl,
+        AttributeDomain, CapabilityStatus, Format, FormatCapability, FormatDescriptor,
+        FormatEncoding, FormatId, FormatSelection, ImportConfigOverlay, ImportOperationControl,
         ImportRequest, ImportRequestLayer, MaterialAssignment, OptionCompileLimits,
     };
     use baozi_import::authoring::{
@@ -355,8 +355,9 @@ mod color_domains {
         TangentHandednessEncoding,
     };
     use baozi_import::{
-        DetectionOutcome, DetectionResult, DetectionScope, ParseResult, ParseScope, Probe,
-        ReadConfidence, ReadHint, SceneDraft,
+        CompiledOptions, DetectionOutcome, DetectionResult, DetectionScope, NoFormatOptions,
+        OptionCompileError, ParseContext, ParseResult, Probe, ReadConfidence, ReadHint,
+        RegistryBuildScope,
     };
 
     #[derive(Clone, Copy)]
@@ -368,7 +369,16 @@ mod color_domains {
 
     struct ColorImporter(ColorCase);
 
-    impl FormatImporter for ColorImporter {
+    impl Format for ColorImporter {
+        type Options = NoFormatOptions;
+
+        fn compile_defaults(
+            &self,
+            scope: &mut RegistryBuildScope<'_>,
+        ) -> std::result::Result<CompiledOptions<Self::Options>, OptionCompileError> {
+            NoFormatOptions::compile_defaults(scope)
+        }
+
         fn descriptor(&self) -> FormatDescriptor {
             FormatDescriptor::builder(
                 FormatId::new("org.baozi.test.color-domains").unwrap(),
@@ -394,7 +404,7 @@ mod color_domains {
             })
         }
 
-        fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+        fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
             let positions = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
             let indices = [2, 0, 1, 1, 0, 3];
             let normals = [0.0, 0.0, 1.0].repeat(4);
@@ -482,7 +492,7 @@ mod color_domains {
                 NodeLocalId::new(0),
                 LogicalMeshLocalId::new(0),
             )];
-            scope.submit_static_scene(
+            scope.submit(
                 StaticSceneBuilder::new(Presence::Present(&roots), &nodes)
                     .with_scene_space(&SceneSpace::STANDARD_TARGET)
                     .with_geometry(&meshes, &primitives, &attributes, &instances),
@@ -499,16 +509,17 @@ mod color_domains {
                 FormatId::new("org.baozi.test.color-domains")?,
             )),
         ));
-        let request = importer.prepare_request(&input, OptionCompileLimits::default())?;
+        let request = importer.plan(&input, OptionCompileLimits::default())?;
         let io = MemoryAssetIo::new();
         let fixture = vec![b'c', b'o', b'l', b'o', b'r'];
         io.try_insert(AssetPath::new("color.fixture")?, Arc::from(fixture.clone()))?;
-        let report = importer.read_asset_with_request(
-            &io,
-            AssetPath::new("color.fixture")?,
-            &request,
-            ImportOperationControl::default(),
-        )?;
+        let report = request
+            .read_asset(
+                &io,
+                AssetPath::new("color.fixture")?,
+                ImportOperationControl::default(),
+            )
+            .map_err(baozi::Error::from)?;
         assert!(report.loss_evidence().is_empty());
         let (scene, evidence) = report.into_parts();
         let asset = ApplicationAsset::from_scene(&scene)?;

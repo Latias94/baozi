@@ -8,7 +8,7 @@ use baozi_import::{
     ImportReport, ImportRequest, ImportRequestLayer, ImportResult, ImportRunError,
     ImportTerminalCause, ImportTerminalFailureClass, LossPolicy, OptionCompileLimits,
     RegistryBuildLimits, RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, SceneSnapshot,
-    SceneSnapshotLimits, ScopeAbortCause, import_asset,
+    SceneSnapshotLimits, ScopeAbortCause,
 };
 use baozi_io::{AssetPath, MemoryAssetIo};
 use std::error::Error;
@@ -168,8 +168,8 @@ fn run_import_with_selection_and_control(
     if let Some(selection) = format_selection {
         config = config.with_format_selection(selection);
     }
-    let request = snapshot
-        .compile_request(
+    let plan = snapshot
+        .plan(
             &ImportRequest::from_layers(
                 ImportRequestLayer::default(),
                 ImportRequestLayer::new(config),
@@ -178,7 +178,7 @@ fn run_import_with_selection_and_control(
         )
         .map_err(|error| TestError::setup("request compilation", error))?;
 
-    Ok(import_asset(&request, &io, path, control))
+    Ok(plan.read_asset(&io, path, control))
 }
 
 pub fn expected_error(result: ImportResult<ImportReport>) -> TestResult<ImportFailure> {

@@ -58,14 +58,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             .with_resource_limits(ResourceLimitsOverlay::from_limits(limits)),
     )
     .try_with_format_option(ObjImportOptions::default().to_envelope()?)?;
-    let request = importer.prepare_request(
+    let plan = importer.plan(
         &ImportRequest::new().with_caller_layer(layer),
         OptionCompileLimits::default(),
     )?;
-    let report = importer.read_asset_with_request(
+    let report = plan.read_asset(
         &io,
         AssetPath::new(APPROVED[0])?,
-        &request,
         ImportOperationControl::default(),
     )?;
     println!(

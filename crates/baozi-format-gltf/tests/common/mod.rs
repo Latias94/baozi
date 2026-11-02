@@ -5,10 +5,9 @@ use baozi_import::authoring::{FormatId, Mat4};
 use baozi_import::{
     DenyDependencies, DetectionOptions, DetectionOutcome, FormatFailureDetailValue,
     FormatFailureEnvelope, FormatSelection, ImportCause, ImportConfigOverlay, ImportDiagnostic,
-    ImportFailure, ImportOperationControl, ImportProgressPhase, ImportProgressUnit, ImportReport,
-    ImportRequest, ImportRequestLayer, ImportResult, LossPolicy, OptionCompileLimits,
-    PreparedImportRequest, RegistryBuildLimits, RegistryBuilder, ResourceLimits,
-    ResourceLimitsOverlay, ScopeAbortCause, import_asset, import_asset_with_resolver,
+    ImportFailure, ImportOperationControl, ImportPlan, ImportProgressPhase, ImportProgressUnit,
+    ImportReport, ImportRequest, ImportRequestLayer, ImportResult, LossPolicy, OptionCompileLimits,
+    RegistryBuildLimits, RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, ScopeAbortCause,
 };
 use baozi_io::{AssetPath, MemoryAssetIo};
 use baozi_operation::{CancellationSignal, ProgressDecision, ProgressEvent};
@@ -106,11 +105,11 @@ pub fn import_assets_result_with_control(
     for (path, bytes) in assets {
         let _replaced = io.try_insert(AssetPath::new(path)?, Arc::<[u8]>::from(bytes))?;
     }
-    let request = prepared_request(options.limits, options.loss_policy)?;
+    let request = import_plan(options.limits, options.loss_policy)?;
     let result = if options.allow_dependencies {
-        import_asset(&request, &io, source_path, control)
+        request.read_asset(&io, source_path, control)
     } else {
-        import_asset_with_resolver(&request, &io, source_path, &DenyDependencies, control)
+        request.read_asset_with_resolver(&io, source_path, &DenyDependencies, control)
     };
     let diagnostics = match &result {
         Ok(report) => report.diagnostics().to_vec(),
@@ -122,15 +121,12 @@ pub fn import_assets_result_with_control(
     Ok((result, diagnostics))
 }
 
-fn prepared_request(
-    limits: ResourceLimits,
-    loss_policy: LossPolicy,
-) -> TestResult<PreparedImportRequest> {
+fn import_plan(limits: ResourceLimits, loss_policy: LossPolicy) -> TestResult<ImportPlan> {
     let mut registry = RegistryBuilder::new();
     registry.register(GltfImporter)?;
     let snapshot = registry.freeze(RegistryBuildLimits::default())?;
     let format = FormatId::new(FORMAT_ID)?;
-    Ok(snapshot.compile_request(
+    Ok(snapshot.plan(
         &ImportRequest::from_layers(
             ImportRequestLayer::default(),
             ImportRequestLayer::new(
@@ -156,7 +152,7 @@ pub fn detection_outcome(
     let mut registry = RegistryBuilder::new();
     registry.register(GltfImporter)?;
     let snapshot = registry.freeze(RegistryBuildLimits::default())?;
-    let request = snapshot.compile_request(
+    let request = snapshot.plan(
         &ImportRequest::from_layers(
             ImportRequestLayer::default(),
             ImportRequestLayer::new(
@@ -166,12 +162,7 @@ pub fn detection_outcome(
         ),
         OptionCompileLimits::default(),
     )?;
-    let result = import_asset(
-        &request,
-        &io,
-        source_path,
-        ImportOperationControl::default(),
-    );
+    let result = request.read_asset(&io, source_path, ImportOperationControl::default());
     let evidence = match &result {
         Ok(report) => report.detection_evidence(),
         Err(error) => error

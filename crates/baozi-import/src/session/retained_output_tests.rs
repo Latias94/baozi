@@ -3,24 +3,28 @@ use crate::authoring::{
     AuthoredTransform, NodeAuthoringNode, NodeLocalId, Presence, StaticSceneBuilder,
 };
 use crate::{
-    CapabilityStatus, DependencyRequirement, DependencyRoleId, DetectionOutcome, DetectionResult,
-    DiagnosticCode, DiagnosticSeverity, FormatCapability, FormatDescriptor, FormatEncoding,
-    FormatImporter, ImportConfigOverlay, ImportLossDisposition, ImportLossKind, ImportLossSubject,
-    ImportRequest, ImportRequestLayer, LossPolicy, OptionCompileLimits, ReadConfidence,
-    RegistryBuildLimits, RegistryBuilder, SourceScopeDisposition, SourceScopeEntityKind,
+    CapabilityStatus, CompiledOptions, DependencyRequirement, DependencyRoleId, DetectionOutcome,
+    DetectionResult, DiagnosticCode, DiagnosticSeverity, Format, FormatCapability,
+    FormatDescriptor, FormatEncoding, ImportConfigOverlay, ImportLossDisposition, ImportLossKind,
+    ImportLossSubject, ImportRequest, ImportRequestLayer, LossPolicy, NoFormatOptions,
+    OptionCompileError, OptionCompileLimits, ReadConfidence, RegistryBuildLimits,
+    RegistryBuildScope, RegistryBuilder, SourceScopeDisposition, SourceScopeEntityKind,
     SourceScopeSelectionOutcome, SourceScopeSelectionRequest,
 };
 use baozi_operation::{
-    PhysicalStorageAccount, PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryLimits,
-    PhysicalStorageAccountLimits,
+    CancellationOrigin, CancellationToken, PhysicalStorageAccount, PhysicalStorageAccountFactory,
+    PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits, ProgressDecision,
 };
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 struct RetainedOutputImporter {
     required: bool,
 }
 
-impl FormatImporter for RetainedOutputImporter {
+impl Format for RetainedOutputImporter {
+    type Options = NoFormatOptions;
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("dev.baozi.test.retained-output").unwrap(),
@@ -41,6 +45,13 @@ impl FormatImporter for RetainedOutputImporter {
         .unwrap()
     }
 
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn detect(
         &self,
         _probe: &Probe<'_>,
@@ -50,33 +61,43 @@ impl FormatImporter for RetainedOutputImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> crate::ParseResult<SceneDraft> {
-        scope.emit_diagnostic(
-            DiagnosticSeverity::Warning,
-            DiagnosticCode::new("test.retained_output").unwrap(),
-            format_args!("this retained diagnostic keeps its source and message"),
-        )?;
-        let mut closure = scope.source_scope_builder(
-            SourceScopeSelectionRequest::DocumentDefault,
-            SourceScopeSelectionOutcome::parentless_node_projection(scope.source().clone()),
-        )?;
-        closure.observe(
-            SourceScopeEntityKind::Node,
-            SourceScopeDisposition::Selected,
-            "nodes/zero",
-        )?;
-        scope.record_source_scope(closure.finish()?)?;
-        let reference = "textures/retained-and-unavailable-image.bin";
-        let dependency = scope.dependency(&scope.root_origin(), &role(), reference)?;
-        if dependency.unavailable_evidence().is_some() {
-            scope.record_source_semantic_loss(
-                DiagnosticCode::new("test.omitted_image").unwrap(),
-                SourceScopeEntityKind::Image,
-                "/images/0",
-                |_| {},
-                format_args!("omitted the image whose optional dependency is unavailable"),
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_>,
+    ) -> crate::ParseResult<()> {
+        context.with_execution(|exec| -> crate::ParseResult<()> {
+            exec.emit_diagnostic(
+                DiagnosticSeverity::Warning,
+                DiagnosticCode::new("test.retained_output").unwrap(),
+                format_args!("this retained diagnostic keeps its source and message"),
             )?;
-        }
+            let mut closure = exec.source_scope_builder(
+                SourceScopeSelectionRequest::DocumentDefault,
+                SourceScopeSelectionOutcome::parentless_node_projection(exec.source().clone()),
+            )?;
+            closure.observe(
+                exec,
+                SourceScopeEntityKind::Node,
+                SourceScopeDisposition::Selected,
+                "nodes/zero",
+            )?;
+            let finalized = closure.finish(exec)?;
+            exec.record_source_scope(finalized)?;
+            let reference = "textures/retained-and-unavailable-image.bin";
+            let origin = exec.root_origin();
+            let dependency = exec.dependency(&origin, &role(), reference)?;
+            if dependency.unavailable_evidence().is_some() {
+                exec.record_source_semantic_loss(
+                    DiagnosticCode::new("test.omitted_image").unwrap(),
+                    SourceScopeEntityKind::Image,
+                    "/images/0",
+                    |_| {},
+                    format_args!("omitted the image whose optional dependency is unavailable"),
+                )?;
+            }
+            Ok(())
+        })?;
         let roots = [NodeLocalId::new(0)];
         let nodes = [NodeAuthoringNode::new(
             Presence::Absent,
@@ -84,7 +105,7 @@ impl FormatImporter for RetainedOutputImporter {
             Presence::Absent,
             Presence::Absent,
         )];
-        scope.submit_static_scene(StaticSceneBuilder::new(Presence::Present(&roots), &nodes))
+        context.submit(StaticSceneBuilder::new(Presence::Present(&roots), &nodes))
     }
 }
 
@@ -92,17 +113,17 @@ fn role() -> DependencyRoleId {
     DependencyRoleId::new("retained.payload").unwrap()
 }
 
-fn request(required: bool) -> PreparedImportRequest {
+fn request(required: bool) -> ImportPlan {
     request_for(RetainedOutputImporter { required })
 }
 
-fn request_for(importer: impl FormatImporter + 'static) -> PreparedImportRequest {
+fn request_for(importer: impl Format + 'static) -> ImportPlan {
     let mut registry = RegistryBuilder::new();
     registry.register(importer).unwrap();
     registry
         .freeze(RegistryBuildLimits::default())
         .unwrap()
-        .compile_request(
+        .plan(
             &ImportRequest::from_layers(
                 ImportRequestLayer::default(),
                 ImportRequestLayer::new(
@@ -118,10 +139,15 @@ fn request_for(importer: impl FormatImporter + 'static) -> PreparedImportRequest
         .unwrap()
 }
 
-fn run(
-    request: &PreparedImportRequest,
+fn run(request: &ImportPlan) -> (crate::ImportResult<ImportReport>, PhysicalStorageAccount) {
+    run_with_control(request, ImportOperationControl::default())
+}
+
+fn run_with_control(
+    request: &ImportPlan,
+    control: ImportOperationControl,
 ) -> (crate::ImportResult<ImportReport>, PhysicalStorageAccount) {
-    let (store, account) = start_store(request);
+    let (store, account) = start_store_with_control(request, control);
     let authority = DirectBytesAuthority::new();
     let source = AssetPath::new(format!(
         "models/{}scene.retained",
@@ -136,14 +162,19 @@ fn run(
         store,
     );
     let result = match session.execute_bytes(b"immutable-input", SessionCreatedProof::new()) {
-        Ok(draft) => session.finalize_success(draft),
+        Ok(()) => session.finalize_success(),
         Err(cause) => session.finalize_failure(cause),
     };
     (result, account)
 }
 
-fn start_store(
-    request: &PreparedImportRequest,
+fn start_store(request: &ImportPlan) -> (ImportStoreSessionOwner, PhysicalStorageAccount) {
+    start_store_with_control(request, ImportOperationControl::default())
+}
+
+fn start_store_with_control(
+    request: &ImportPlan,
+    control: ImportOperationControl,
 ) -> (ImportStoreSessionOwner, PhysicalStorageAccount) {
     let factory = PhysicalStorageAccountFactory::try_new(
         PhysicalStorageAccountFactoryLimits::new(u64::MAX, 1).unwrap(),
@@ -154,9 +185,7 @@ fn start_store(
         .unwrap();
     let requirements = ImportStoreBootstrapRequirements::for_node_scene(request.limits()).unwrap();
     let bootstrap = try_import_store_bootstrap(request.limits(), requirements).unwrap();
-    let store =
-        ImportStoreSessionOwner::try_start(ImportOperationControl::default(), &account, bootstrap)
-            .unwrap();
+    let store = ImportStoreSessionOwner::try_start(control, &account, bootstrap).unwrap();
     (store, account)
 }
 
@@ -259,16 +288,17 @@ fn evidence_drop_before_scene_preserves_the_published_generation() {
 
 #[test]
 fn replacing_an_accounted_error_releases_its_detail_before_terminal_publication() {
-    let (store, account) = start_store(&request(true));
+    let (mut store, account) = start_store(&request(true));
     let baseline = account.snapshot();
     let scratch_baseline = store
-        .host()
+        .execution()
+        .unwrap()
         .dimension_state(ImportDimension::ScratchBytes)
         .unwrap()
         .live_bytes();
     let path = AssetPath::new("models/retained.asset").unwrap();
     let (context, storage) = crate::DependencyFailureContext::try_capture(
-        store.host(),
+        &mut store.execution().unwrap(),
         &AuthorityDomain::new(),
         &path,
         &role(),
@@ -300,14 +330,15 @@ fn replacing_an_accounted_error_releases_its_detail_before_terminal_publication(
     );
     assert_eq!(
         store
-            .host()
+            .execution()
+            .unwrap()
             .dimension_state(ImportDimension::ScratchBytes)
             .unwrap()
             .live_bytes(),
         scratch_baseline
     );
     drop(error);
-    let terminal = store.finish_scene(None).unwrap();
+    let terminal = store.finish_scene(SceneParseOutcome::Rejected).unwrap();
     let evidence = match &terminal {
         ImportStoreTerminalOutcome::Success { evidence, .. }
         | ImportStoreTerminalOutcome::RichFailure { evidence, .. }
@@ -322,12 +353,12 @@ fn replacing_an_accounted_error_releases_its_detail_before_terminal_publication(
 
 #[test]
 fn ambiguous_candidate_handle_retains_its_actual_storage_after_terminal_drop() {
-    let (store, account) = start_store(&request(false));
+    let (mut store, account) = start_store(&request(false));
     let mut identities = AccountedVec::new();
     identities
         .try_reserve(2, "test-ambiguous-identities", |bytes| {
             reserve_retained_bytes(
-                store.host(),
+                &mut store.execution().unwrap(),
                 ImportLedgerPhase::Detection,
                 ImportDimension::ScratchBytes,
                 bytes,
@@ -341,9 +372,11 @@ fn ambiguous_candidate_handle_retains_its_actual_storage_after_terminal_drop() {
         .try_push_reserved(FormatId::new("dev.baozi.test.second").unwrap())
         .unwrap();
     let identity_pointer = identities.as_ptr();
-    let candidates = crate::error::DetectionCandidates::try_new(identities, store.host()).unwrap();
+    let candidates =
+        crate::error::DetectionCandidates::try_new(identities, &mut store.execution().unwrap())
+            .unwrap();
     assert_eq!(candidates.as_slice().as_ptr(), identity_pointer);
-    drop(store.finish_scene(None).unwrap());
+    drop(store.finish_scene(SceneParseOutcome::Rejected).unwrap());
     assert_eq!(account.snapshot().live_retained_allocations(), 2);
     assert_eq!(candidates[0].as_str(), "dev.baozi.test.first");
     assert_eq!(candidates[1].as_str(), "dev.baozi.test.second");
@@ -370,9 +403,18 @@ struct EscapingFailureImporter {
     escaped: Arc<Mutex<Option<crate::ParseFailure>>>,
 }
 
-impl FormatImporter for EscapingFailureImporter {
+impl Format for EscapingFailureImporter {
+    type Options = NoFormatOptions;
+
     fn descriptor(&self) -> FormatDescriptor {
         RetainedOutputImporter { required: false }.descriptor()
+    }
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
     }
 
     fn detect(
@@ -384,10 +426,16 @@ impl FormatImporter for EscapingFailureImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> crate::ParseResult<SceneDraft> {
-        let failure = scope.format_failure(RetainedFormatFailure);
-        *self.escaped.lock().unwrap() = Some(failure);
-        Err(scope.allocation_failure("test-escaping-format-failure"))
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_>,
+    ) -> crate::ParseResult<()> {
+        context.with_execution(|exec| {
+            let failure = exec.format_failure(RetainedFormatFailure);
+            *self.escaped.lock().unwrap() = Some(failure);
+            Err(exec.allocation_failure("test-escaping-format-failure"))
+        })
     }
 }
 
@@ -417,4 +465,219 @@ fn format_failure_retained_by_an_extension_keeps_its_lease_after_session_drop() 
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
     assert!(!account.snapshot().poisoned());
+}
+
+#[derive(Clone, Copy)]
+enum ParserCompletion {
+    WithoutSubmission,
+    FailureAfterSubmission,
+    PanicAfterSubmission,
+    SwallowedFailure,
+}
+
+impl Format for ParserCompletion {
+    type Options = NoFormatOptions;
+
+    fn descriptor(&self) -> FormatDescriptor {
+        RetainedOutputImporter { required: false }.descriptor()
+    }
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
+    fn detect(
+        &self,
+        _probe: &Probe<'_>,
+        _hint: &ReadHint,
+        _scope: &DetectionScope<'_>,
+    ) -> DetectionResult<DetectionOutcome> {
+        Ok(DetectionOutcome::Match(ReadConfidence::Certain))
+    }
+
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_>,
+    ) -> crate::ParseResult<()> {
+        if matches!(self, Self::WithoutSubmission) {
+            return Ok(());
+        }
+        let failure = if matches!(self, Self::FailureAfterSubmission | Self::SwallowedFailure) {
+            Some(context.with_execution(|exec| -> crate::ParseResult<_> {
+                Ok(exec.format_failure(RetainedFormatFailure))
+            })?)
+        } else {
+            None
+        };
+        let roots = [NodeLocalId::new(0)];
+        let nodes = [NodeAuthoringNode::new(
+            Presence::Absent,
+            AuthoredTransform::identity_trs(),
+            Presence::Absent,
+            Presence::Absent,
+        )];
+        context.submit(StaticSceneBuilder::new(Presence::Present(&roots), &nodes))?;
+        match self {
+            Self::FailureAfterSubmission => Err(failure.unwrap()),
+            Self::PanicAfterSubmission => panic!("parser panic after a validated candidate"),
+            Self::SwallowedFailure => {
+                drop(failure);
+                Ok(())
+            }
+            Self::WithoutSubmission => unreachable!("the missing-submission path returned above"),
+        }
+    }
+}
+
+#[test]
+fn parser_acceptance_requires_submission_and_preserves_rejection_after_a_candidate() {
+    for completion in [
+        ParserCompletion::WithoutSubmission,
+        ParserCompletion::FailureAfterSubmission,
+        ParserCompletion::PanicAfterSubmission,
+        ParserCompletion::SwallowedFailure,
+    ] {
+        let (result, account) = run(&request_for(completion));
+        let failure = result.unwrap_err().into_operation_failure().unwrap();
+        match completion {
+            ParserCompletion::WithoutSubmission => {
+                assert_eq!(
+                    failure.last_completed().phase(),
+                    ImportPhase::SelectionCompleted
+                );
+                assert!(matches!(failure.cause(), ImportCause::Scope(abort)
+                if matches!(abort.cause(), ScopeAbortCause::DescriptorContract {
+                    code: "parse-success-without-validated-scene",
+                })));
+            }
+            ParserCompletion::FailureAfterSubmission => {
+                assert_eq!(failure.last_completed().phase(), ImportPhase::Validated);
+                assert!(matches!(failure.cause(), ImportCause::Format(envelope)
+                    if envelope.code() == "test.retained_format_failure" && envelope.has_storage()));
+            }
+            ParserCompletion::PanicAfterSubmission => {
+                assert_eq!(failure.last_completed().phase(), ImportPhase::Validated);
+                assert!(matches!(
+                    failure.cause(),
+                    ImportCause::TrustedExtension {
+                        boundary: TrustedExtensionBoundary::Importer,
+                        code: "importer-panicked",
+                    }
+                ));
+            }
+            ParserCompletion::SwallowedFailure => {
+                assert_eq!(failure.last_completed().phase(), ImportPhase::Validated);
+                assert!(matches!(failure.cause(), ImportCause::Scope(abort)
+                if matches!(abort.cause(), ScopeAbortCause::DescriptorContract {
+                    code: "format-failure-was-swallowed",
+                })));
+            }
+        }
+        assert_eq!(failure.ledger().current_live_bytes(), 0);
+        assert_eq!(failure.ledger().active_reservations(), 0);
+        drop(failure);
+        assert_eq!(account.snapshot().live_retained_bytes(), 0);
+        assert_eq!(account.snapshot().live_retained_allocations(), 0);
+        assert!(!account.snapshot().poisoned());
+    }
+}
+
+#[test]
+fn candidate_format_failure_yields_to_freeze_first_control() {
+    #[derive(Clone, Copy, Debug)]
+    enum FinalControl {
+        None,
+        Observer,
+        Signal,
+    }
+
+    for mode in [
+        FinalControl::None,
+        FinalControl::Observer,
+        FinalControl::Signal,
+    ] {
+        let cancellation = CancellationToken::new();
+        let cancellation_from_observer = cancellation.clone();
+        let final_events = Arc::new(AtomicUsize::new(0));
+        let observed_final_events = Arc::clone(&final_events);
+        let control = ImportOperationControl::default()
+            .with_cancellation(cancellation)
+            .with_progress_observer(
+                move |event: baozi_operation::ProgressEvent<
+                    ImportProgressPhase,
+                    ImportProgressUnit,
+                >| {
+                    if event.phase() == ImportProgressPhase::Finalize {
+                        observed_final_events.fetch_add(1, Ordering::AcqRel);
+                        match mode {
+                            FinalControl::None => {}
+                            FinalControl::Observer => return ProgressDecision::Cancel,
+                            FinalControl::Signal => cancellation_from_observer.cancel(),
+                        }
+                    }
+                    ProgressDecision::Continue
+                },
+            );
+        let (result, account) = run_with_control(
+            &request_for(ParserCompletion::FailureAfterSubmission),
+            control,
+        );
+        let failure = result.unwrap_err().into_operation_failure().unwrap();
+
+        assert_eq!(final_events.load(Ordering::Acquire), 1, "{mode:?}");
+        assert_eq!(failure.last_completed().phase(), ImportPhase::Validated);
+        assert!(failure.scene_validation_error().is_none());
+        assert!(failure.terminal_control_cause().is_none());
+        match mode {
+            FinalControl::None => {
+                let ImportCause::Format(envelope) = failure.cause() else {
+                    panic!("a ready rejected candidate must keep its original format failure");
+                };
+                assert_eq!(envelope.code(), "test.retained_format_failure");
+                assert!(envelope.has_storage());
+                assert!(matches!(
+                    failure.cause().owner(),
+                    crate::CauseOwner::Format(_)
+                ));
+            }
+            FinalControl::Observer | FinalControl::Signal => {
+                let ImportCause::Scope(abort) = failure.cause() else {
+                    panic!("freeze-first control must override the returned format failure");
+                };
+                let expected = match mode {
+                    FinalControl::Observer => CancellationOrigin::Observer,
+                    FinalControl::Signal => CancellationOrigin::Signal,
+                    FinalControl::None => unreachable!(),
+                };
+                assert!(matches!(
+                    abort.cause(),
+                    ScopeAbortCause::Control(ControlCause::Cancelled { origin })
+                        if *origin == expected
+                ));
+                assert_eq!(failure.cause().owner(), crate::CauseOwner::Operation);
+                assert!(matches!(
+                    failure.ledger().terminal_cause(),
+                    ImportTerminalCause::Failure(terminal)
+                        if terminal.class() == crate::ImportTerminalFailureClass::Control
+                ));
+            }
+        }
+        let output = failure
+            .ledger()
+            .dimension(ImportDimension::CanonicalOutputBytes)
+            .unwrap();
+        assert_eq!(output.committed(), 0);
+        assert_eq!(failure.ledger().committed_canonical_members(), 0);
+        assert_eq!(failure.ledger().current_live_bytes(), 0);
+        assert_eq!(failure.ledger().active_reservations(), 0);
+        drop(failure);
+        let released = account.snapshot();
+        assert_eq!(released.live_retained_bytes(), 0, "{mode:?}");
+        assert_eq!(released.live_retained_allocations(), 0, "{mode:?}");
+        assert!(!released.poisoned(), "{mode:?}");
+    }
 }

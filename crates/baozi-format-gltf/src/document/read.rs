@@ -5,7 +5,7 @@ use super::{
     schema::accessor::{ComponentType as C, Type},
 };
 use crate::GltfFailure;
-use baozi_import::{ParseResult, ParseScope};
+use baozi_import::{ParseExecution, ParseResult};
 
 #[derive(Clone, Copy)]
 struct Stream<'bytes> {
@@ -32,11 +32,11 @@ pub(crate) struct Bound<'bytes> {
 }
 
 pub(crate) fn bind<'bytes>(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     accessor: Accessor<'_>,
     mut buffer: impl FnMut(usize) -> Option<&'bytes [u8]>,
 ) -> ParseResult<Bound<'bytes>> {
-    let fail = |reason| {
+    let fail = |reason, ctx: &mut ParseExecution<'_, '_>| {
         ctx.format_failure(GltfFailure::invalid_accessor(
             Some(accessor.index()),
             reason,
@@ -48,62 +48,64 @@ pub(crate) fn bind<'bytes>(
     let size = component_size(component);
     let element = size
         .checked_mul(lanes(dimension))
-        .ok_or_else(|| fail("accessor element size overflow"))?;
+        .ok_or_else(|| fail("accessor element size overflow", ctx))?;
     let count =
-        usize::try_from(row.count).map_err(|_| fail("accessor count exceeds host domain"))?;
+        usize::try_from(row.count).map_err(|_| fail("accessor count exceeds host domain", ctx))?;
     if count == 0 {
-        return Err(fail("accessor count is zero"));
+        return Err(fail("accessor count is zero", ctx));
     }
     count
         .checked_mul(element)
-        .ok_or_else(|| fail("accessor logical byte range overflow"))?;
+        .ok_or_else(|| fail("accessor logical byte range overflow", ctx))?;
     if row.buffer_view.is_none() && row.byte_offset.is_some() {
         return Err(fail(
             "accessor without bufferView must not define byteOffset",
+            ctx,
         ));
     }
     let view_bytes = |id: super::schema::Index,
-                      buffer: &mut dyn FnMut(usize) -> Option<&'bytes [u8]>|
+                      buffer: &mut dyn FnMut(usize) -> Option<&'bytes [u8]>,
+                      ctx: &mut ParseExecution<'_, '_>|
      -> ParseResult<&'bytes [u8]> {
         let view = accessor
             .doc
             .tables
             .buffer_views
             .get(id.value())
-            .ok_or_else(|| fail("accessor view is missing"))?;
+            .ok_or_else(|| fail("accessor view is missing", ctx))?;
         let start = usize::try_from(view.byte_offset.map_or(0, |offset| offset))
-            .map_err(|_| fail("view offset exceeds host domain"))?;
+            .map_err(|_| fail("view offset exceeds host domain", ctx))?;
         let length = usize::try_from(view.byte_length)
-            .map_err(|_| fail("view length exceeds host domain"))?;
+            .map_err(|_| fail("view length exceeds host domain", ctx))?;
         let end = start
             .checked_add(length)
-            .ok_or_else(|| fail("view byte range overflow"))?;
+            .ok_or_else(|| fail("view byte range overflow", ctx))?;
         buffer(view.buffer.value())
             .and_then(|bytes| bytes.get(start..end))
-            .ok_or_else(|| fail("accessor buffer is unavailable or truncated"))
+            .ok_or_else(|| fail("accessor buffer is unavailable or truncated", ctx))
     };
     let base = row
         .buffer_view
         .map(|id| -> ParseResult<_> {
             let view = &accessor.doc.tables.buffer_views[id.value()];
-            let bytes = view_bytes(id, &mut buffer)?;
+            let bytes = view_bytes(id, &mut buffer, ctx)?;
             let stride = view.byte_stride.map_or(element, |stride| stride);
             if stride < element {
-                return Err(fail("accessor stride is smaller than its element"));
+                return Err(fail("accessor stride is smaller than its element", ctx));
             }
             let start = usize::try_from(row.byte_offset.map_or(0, |offset| offset))
-                .map_err(|_| fail("accessor offset exceeds host domain"))?;
+                .map_err(|_| fail("accessor offset exceeds host domain", ctx))?;
             let length = (count - 1)
                 .checked_mul(stride)
                 .and_then(|size| size.checked_add(element))
-                .ok_or_else(|| fail("accessor byte range overflow"))?;
+                .ok_or_else(|| fail("accessor byte range overflow", ctx))?;
             let end = start
                 .checked_add(length)
-                .ok_or_else(|| fail("accessor byte range overflow"))?;
+                .ok_or_else(|| fail("accessor byte range overflow", ctx))?;
             Ok(Stream {
                 bytes: bytes
                     .get(start..end)
-                    .ok_or_else(|| fail("accessor data is truncated"))?,
+                    .ok_or_else(|| fail("accessor data is truncated", ctx))?,
                 stride,
             })
         })
@@ -116,34 +118,40 @@ pub(crate) fn bind<'bytes>(
                 C::U8 => 1,
                 C::U16 => 2,
                 C::U32 => 4,
-                _ => return Err(fail("invalid sparse index component")),
+                _ => return Err(fail("invalid sparse index component", ctx)),
             };
             let count = usize::try_from(sparse.count)
-                .map_err(|_| fail("sparse count exceeds host domain"))?;
+                .map_err(|_| fail("sparse count exceeds host domain", ctx))?;
             if count == 0 || count > row.count as usize {
-                return Err(fail("sparse count is out of range"));
+                return Err(fail("sparse count is out of range", ctx));
             }
-            let slice = |bytes: &'bytes [u8], offset: u64, width: usize| -> ParseResult<_> {
+            let slice = |bytes: &'bytes [u8],
+                         offset: u64,
+                         width: usize,
+                         ctx: &mut ParseExecution<'_, '_>|
+             -> ParseResult<_> {
                 let start = usize::try_from(offset)
-                    .map_err(|_| fail("sparse offset exceeds host domain"))?;
+                    .map_err(|_| fail("sparse offset exceeds host domain", ctx))?;
                 let end = count
                     .checked_mul(width)
                     .and_then(|size| start.checked_add(size))
-                    .ok_or_else(|| fail("sparse byte range overflow"))?;
+                    .ok_or_else(|| fail("sparse byte range overflow", ctx))?;
                 bytes
                     .get(start..end)
-                    .ok_or_else(|| fail("sparse data is truncated"))
+                    .ok_or_else(|| fail("sparse data is truncated", ctx))
             };
             Ok(Sparse {
                 indices: slice(
-                    view_bytes(sparse.indices.buffer_view, &mut buffer)?,
+                    view_bytes(sparse.indices.buffer_view, &mut buffer, ctx)?,
                     sparse.indices.byte_offset,
                     index_size,
+                    ctx,
                 )?,
                 values: slice(
-                    view_bytes(sparse.values.buffer_view, &mut buffer)?,
+                    view_bytes(sparse.values.buffer_view, &mut buffer, ctx)?,
                     sparse.values.byte_offset,
                     element,
+                    ctx,
                 )?,
                 count,
                 index_size,

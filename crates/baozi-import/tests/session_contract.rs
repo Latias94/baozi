@@ -2,24 +2,23 @@ mod support;
 
 use baozi_core::FormatId;
 use baozi_import::{
-    AuthorizedDependency, CapabilityStatus, CauseOwner, DependencyPolicyError, DependencyReference,
-    DependencyRequirement, DependencyResolver, DependencyRoleId, DetectionFailure,
-    DetectionInconclusive, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
-    FormatDescriptor, FormatEncoding, FormatFailureDetailSink, FormatFailureDetailValue,
-    FormatFailureEvidence, FormatFailureEvidenceProducer, FormatImporter, FormatSelection,
-    ImportCause, ImportConfigOverlay, ImportDimension, ImportFailure, ImportLossKind,
-    ImportOperationControl, ImportPhase, ImportProgressPhase, ImportProgressUnit, ImportReport,
-    ImportRequest, ImportRequestLayer, ImportResult, ImportStorageClass, ImportTerminalCause,
-    ImportTerminalFailureClass, ImportWorkClass, InputReplayStatus, LossPolicy,
-    ManifestObservedOnlyReason, ManifestReference, ManifestRelationOutcome,
-    ManifestResourceIdentityStability, ManifestSessionDependentReason, ManifestUnavailableClass,
-    ManifestUnavailableReplay, MeteredDecodedText, MeteredString, MeteredVec, OptionCompileLimits,
-    ParseResult, ParseScope, PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits,
-    RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, SceneDraft, ScopeAbortCause,
-    SourceScopeSelectionOutcome, SourceScopeSelectionRequest, TextBomPolicy, TextControlPolicy,
+    AuthorizedDependency, CapabilityStatus, CauseOwner, CompiledOptions, DependencyPolicyError,
+    DependencyReference, DependencyRequirement, DependencyResolver, DependencyRoleId,
+    DetectionFailure, DetectionInconclusive, DetectionOutcome, DetectionResult, DetectionScope,
+    Format, FormatCapability, FormatDescriptor, FormatEncoding, FormatFailureDetailSink,
+    FormatFailureDetailValue, FormatFailureEvidence, FormatFailureEvidenceProducer,
+    FormatSelection, ImportCause, ImportConfigOverlay, ImportDimension, ImportFailure,
+    ImportLossKind, ImportOperationControl, ImportPhase, ImportPlan, ImportProgressPhase,
+    ImportProgressUnit, ImportReport, ImportRequest, ImportRequestLayer, ImportResult,
+    ImportStorageClass, ImportTerminalCause, ImportTerminalFailureClass, ImportWorkClass,
+    InputReplayStatus, LossPolicy, ManifestObservedOnlyReason, ManifestReference,
+    ManifestRelationOutcome, ManifestResourceIdentityStability, ManifestSessionDependentReason,
+    ManifestUnavailableClass, ManifestUnavailableReplay, MeteredDecodedText, MeteredVec,
+    NoFormatOptions, OptionCompileError, OptionCompileLimits, ParseContext, ParseResult,
+    ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuildScope, RegistryBuilder,
+    ResourceLimits, ResourceLimitsOverlay, ScopeAbortCause, TextBomPolicy, TextControlPolicy,
     TextDecodingMode, TextHardCaps, TextInputOptions, TextLexicalMode, TextNewline, TextProfile,
-    TextSourceEncoding, TrustedExtensionBoundary, import_asset as run_import_asset,
-    import_asset_with_resolver as run_import_asset_with_resolver, import_bytes as run_import_bytes,
+    TextSourceEncoding, TrustedExtensionBoundary,
 };
 use baozi_io::{
     AssetIo, AssetLength, AssetOpenError, AssetOpenErrorKind, AssetOpenStage, AssetOpenWorkError,
@@ -58,42 +57,40 @@ fn operation_result<T>(result: ImportResult<T>) -> Result<T, ImportFailure> {
     clippy::result_large_err,
     reason = "session contract assertions inspect complete bounded import failure evidence"
 )]
-fn import_asset(
-    request: &PreparedImportRequest,
+fn read_asset(
+    request: &ImportPlan,
     io: &dyn AssetIo,
     source: AssetPath,
     control: ImportOperationControl,
 ) -> Result<ImportReport, ImportFailure> {
-    operation_result(run_import_asset(request, io, source, control))
+    operation_result(request.read_asset(io, source, control))
 }
 
 #[allow(
     clippy::result_large_err,
     reason = "session contract assertions inspect complete bounded import failure evidence"
 )]
-fn import_asset_with_resolver(
-    request: &PreparedImportRequest,
+fn read_asset_with_resolver(
+    request: &ImportPlan,
     io: &dyn AssetIo,
     source: AssetPath,
     resolver: &dyn DependencyResolver,
     control: ImportOperationControl,
 ) -> Result<ImportReport, ImportFailure> {
-    operation_result(run_import_asset_with_resolver(
-        request, io, source, resolver, control,
-    ))
+    operation_result(request.read_asset_with_resolver(io, source, resolver, control))
 }
 
 #[allow(
     clippy::result_large_err,
     reason = "session contract assertions inspect complete bounded import failure evidence"
 )]
-fn import_bytes(
-    request: &PreparedImportRequest,
+fn read_bytes(
+    request: &ImportPlan,
     source: AssetPath,
     bytes: &[u8],
     control: ImportOperationControl,
 ) -> Result<ImportReport, ImportFailure> {
-    operation_result(run_import_bytes(request, source, bytes, control))
+    operation_result(request.read_bytes(source, bytes, control))
 }
 
 #[derive(Clone)]
@@ -165,7 +162,16 @@ impl RecordingImporter {
     }
 }
 
-impl FormatImporter for RecordingImporter {
+impl Format for RecordingImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         self.descriptor_value()
     }
@@ -196,57 +202,61 @@ impl FormatImporter for RecordingImporter {
         Ok(self.detection.clone())
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        self.primary_addresses
-            .lock()
-            .expect("recording mutex")
-            .push(scope.primary_bytes().as_ptr() as usize);
-        self.primary_views
-            .lock()
-            .expect("recording mutex")
-            .push(scope.primary_bytes().to_vec());
-        if let Some((role, _, behavior)) = &self.dependency {
-            match behavior {
-                DependencyBehavior::RequiredCaught => {
-                    let _ignored = support::required_root_dependency(scope, role, "missing.bin");
-                }
-                DependencyBehavior::RequiredAvailableWithDiagnostic => {
-                    let diagnostic_source = scope.diagnostic_source();
-                    assert_eq!(diagnostic_source.path(), scope.source());
-                    assert_eq!(diagnostic_source.bytes(), scope.primary_bytes());
-                    let dependency = support::required_root_dependency(scope, role, "missing.bin")?;
-                    assert_eq!(dependency.bytes(), b"dependency");
-                }
-                DependencyBehavior::RequiredAvailableTwice => {
-                    let first = support::required_root_dependency(scope, role, "missing.bin")?;
-                    let second = support::required_root_dependency(scope, role, "missing.bin")?;
-                    self.dependency_views
-                        .lock()
-                        .expect("recording mutex")
-                        .extend([first.bytes().to_vec(), second.bytes().to_vec()]);
-                    self.dependency_dispositions
-                        .lock()
-                        .expect("recording mutex")
-                        .extend([first.cache_disposition(), second.cache_disposition()]);
-                }
-                DependencyBehavior::OptionalTwice => {
-                    let first = support::root_dependency(scope, role, "missing.bin")?;
-                    let second = support::root_dependency(scope, role, "missing.bin")?;
-                    assert!(first.unavailable_evidence().is_some());
-                    assert!(second.unavailable_evidence().is_some());
-                }
-                DependencyBehavior::OptionalThenFail => {
-                    let dependency = support::root_dependency(scope, role, "missing.bin")?;
-                    assert!(dependency.unavailable_evidence().is_some());
-                    return Err(scope.format_failure(TestFormatCause::new(Arc::new(
-                        FormatFailureProducerObservation::default(),
-                    ))));
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        context.with_execution(|exec| -> ParseResult<()> {
+            self.primary_addresses
+                .lock()
+                .expect("recording mutex")
+                .push(exec.primary_bytes().as_ptr() as usize);
+            self.primary_views
+                .lock()
+                .expect("recording mutex")
+                .push(exec.primary_bytes().to_vec());
+            if let Some((role, _, behavior)) = &self.dependency {
+                match behavior {
+                    DependencyBehavior::RequiredCaught => {
+                        let _ignored = support::required_root_dependency(exec, role, "missing.bin");
+                    }
+                    DependencyBehavior::RequiredAvailableWithDiagnostic => {
+                        let diagnostic_source = exec.diagnostic_source();
+                        assert_eq!(diagnostic_source.path(), exec.source());
+                        assert_eq!(diagnostic_source.bytes(), exec.primary_bytes());
+                        let dependency =
+                            support::required_root_dependency(exec, role, "missing.bin")?;
+                        assert_eq!(dependency.bytes(), b"dependency");
+                    }
+                    DependencyBehavior::RequiredAvailableTwice => {
+                        let first = support::required_root_dependency(exec, role, "missing.bin")?;
+                        let second = support::required_root_dependency(exec, role, "missing.bin")?;
+                        self.dependency_views
+                            .lock()
+                            .expect("recording mutex")
+                            .extend([first.bytes().to_vec(), second.bytes().to_vec()]);
+                        self.dependency_dispositions
+                            .lock()
+                            .expect("recording mutex")
+                            .extend([first.cache_disposition(), second.cache_disposition()]);
+                    }
+                    DependencyBehavior::OptionalTwice => {
+                        let first = support::root_dependency(exec, role, "missing.bin")?;
+                        let second = support::root_dependency(exec, role, "missing.bin")?;
+                        assert!(first.unavailable_evidence().is_some());
+                        assert!(second.unavailable_evidence().is_some());
+                    }
+                    DependencyBehavior::OptionalThenFail => {
+                        let dependency = support::root_dependency(exec, role, "missing.bin")?;
+                        assert!(dependency.unavailable_evidence().is_some());
+                        return Err(exec.format_failure(TestFormatCause::new(Arc::new(
+                            FormatFailureProducerObservation::default(),
+                        ))));
+                    }
                 }
             }
-        }
+            Ok(())
+        })?;
         match self.scene_name {
-            Some(name) => support::submit_named_scene(scope, name),
-            None => support::submit_minimal_scene(scope),
+            Some(name) => support::submit_named_scene(context, name),
+            None => support::submit_minimal_scene(context),
         }
     }
 }
@@ -257,20 +267,14 @@ struct FormatFailingImporter {
 struct OversizedFormatFailingImporter;
 
 #[derive(Debug, Clone, Copy)]
-enum ReentrantFormatFailurePhase {
-    Code,
-    Details,
+enum EvidenceStoragePhase {
     DecodedStorage,
-    FormattedStorage,
-    MeteredStorage,
     ReservedStorage,
-    SceneStorageAdmission,
-    NestedFormatFailure,
-    Drop,
 }
 
-struct ReentrantFormatFailureImporter {
-    phase: ReentrantFormatFailurePhase,
+struct EvidenceStorageImporter {
+    phase: EvidenceStoragePhase,
+    reserve_capacity: bool,
 }
 
 struct PanickingImporter {
@@ -363,7 +367,16 @@ impl AssetIo for OpaquePanickingAssetIo {
     }
 }
 
-impl FormatImporter for PanickingImporter {
+impl Format for PanickingImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("dev.baozi.test.panic-shared").unwrap(),
@@ -385,13 +398,22 @@ impl FormatImporter for PanickingImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, _scope: &mut ParseContext<'_>) -> ParseResult<()> {
         self.calls.fetch_add(1, Ordering::AcqRel);
         panic!("shared registration panic")
     }
 }
 
-impl FormatImporter for OpaquePanickingImporter {
+impl Format for OpaquePanickingImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("dev.baozi.test.opaque-panic").unwrap(),
@@ -413,14 +435,23 @@ impl FormatImporter for OpaquePanickingImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, _scope: &mut ParseContext<'_>) -> ParseResult<()> {
         std::panic::panic_any(PanickingDropPayload {
             drops: Arc::clone(&self.payload_drops),
         })
     }
 }
 
-impl FormatImporter for RacingParsePoisonImporter {
+impl Format for RacingParsePoisonImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("dev.baozi.test.racing-parse-poison").unwrap(),
@@ -442,7 +473,7 @@ impl FormatImporter for RacingParsePoisonImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
         if self.calls.fetch_add(1, Ordering::AcqRel) == 0 {
             self.first_entered
                 .send(())
@@ -459,7 +490,16 @@ impl FormatImporter for RacingParsePoisonImporter {
     }
 }
 
-impl FormatImporter for FormatFailingImporter {
+impl Format for FormatFailingImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("dev.baozi.test.format-failure").unwrap(),
@@ -481,12 +521,23 @@ impl FormatImporter for FormatFailingImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        Err(scope.format_failure(TestFormatCause::new(Arc::clone(&self.observation))))
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        context.with_execution(|exec| -> ParseResult<()> {
+            Err(exec.format_failure(TestFormatCause::new(Arc::clone(&self.observation))))
+        })
     }
 }
 
-impl FormatImporter for OversizedFormatFailingImporter {
+impl Format for OversizedFormatFailingImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("dev.baozi.test.oversized-format-failure").unwrap(),
@@ -508,10 +559,12 @@ impl FormatImporter for OversizedFormatFailingImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        Err(scope.format_failure(OversizedFormatCause {
-            _payload: [0; 4 * 1024 + 1],
-        }))
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        context.with_execution(|exec| -> ParseResult<()> {
+            Err(exec.format_failure(OversizedFormatCause {
+                _payload: [0; 4 * 1024 + 1],
+            }))
+        })
     }
 }
 
@@ -669,110 +722,41 @@ impl Drop for LifecycleFormatCause {
     }
 }
 
-struct NestedFormatFailureProducer;
+struct EvidenceStorageProducer<'session> {
+    phase: EvidenceStoragePhase,
+    storage: RefCell<MeteredVec<'session, u8>>,
+    decoded: Option<RefCell<MeteredDecodedText<'session>>>,
+}
 
-impl FormatFailureEvidenceProducer for NestedFormatFailureProducer {
+impl FormatFailureEvidenceProducer for EvidenceStorageProducer<'_> {
     fn code(&self) -> &str {
-        "test.nested_format_failure"
-    }
-}
-
-struct ReentrantFormatFailureProducer<'scope, 'session> {
-    scope: &'scope ParseScope<'session>,
-    phase: ReentrantFormatFailurePhase,
-    storage: RefCell<Option<MeteredVec<'scope, u8>>>,
-    decoded: Option<RefCell<MeteredDecodedText<'scope>>>,
-    formatted: Option<RefCell<MeteredString<'scope>>>,
-}
-
-struct FailingFormatValue;
-
-impl fmt::Display for FailingFormatValue {
-    fn fmt(&self, _formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        Err(fmt::Error)
-    }
-}
-
-impl FormatFailureEvidenceProducer for ReentrantFormatFailureProducer<'_, '_> {
-    fn code(&self) -> &str {
-        if matches!(self.phase, ReentrantFormatFailurePhase::Code) {
-            drop(
-                self.scope
-                    .with_work(ImportWorkClass::WorkUnits, 1, |work| work.complete_all()),
-            );
-        }
-        "test.reentrant_format_failure"
+        "test.evidence_storage"
     }
 
     fn visit_details(&self, sink: &mut dyn FormatFailureDetailSink) {
-        match self.phase {
-            ReentrantFormatFailurePhase::Details => drop(self.scope.source_scope_builder(
-                SourceScopeSelectionRequest::DocumentDefault,
-                SourceScopeSelectionOutcome::parentless_node_projection(
-                    self.scope.source().try_clone().expect("source clone"),
-                ),
-            )),
-            ReentrantFormatFailurePhase::DecodedStorage => {
-                drop(
-                    self.decoded
-                        .as_ref()
-                        .expect("decoded-storage phase owns decoded text")
-                        .borrow_mut()
-                        .try_push_str_reserved("x"),
-                );
-            }
-            ReentrantFormatFailurePhase::FormattedStorage => {
-                drop(
-                    self.formatted
-                        .as_ref()
-                        .expect("formatted-storage phase owns a string")
-                        .borrow_mut()
-                        .try_write_fmt(format_args!("{}", FailingFormatValue)),
-                );
-            }
-            ReentrantFormatFailurePhase::MeteredStorage => {
-                drop(
-                    self.storage
-                        .borrow_mut()
-                        .as_mut()
-                        .expect("metered-storage phase owns storage")
-                        .try_push(1),
-                );
-            }
-            ReentrantFormatFailurePhase::ReservedStorage => {
-                drop(
-                    self.storage
-                        .borrow_mut()
-                        .as_mut()
-                        .expect("reserved-storage phase owns storage")
-                        .try_push_reserved(1),
-                );
-            }
-            ReentrantFormatFailurePhase::SceneStorageAdmission => drop(
-                self.scope
-                    .metered_opaque_allowance(ImportStorageClass::SceneConstruction, 1),
-            ),
-            ReentrantFormatFailurePhase::NestedFormatFailure => {
-                drop(self.scope.format_failure(NestedFormatFailureProducer));
-            }
-            ReentrantFormatFailurePhase::Code | ReentrantFormatFailurePhase::Drop => {}
-        }
-        sink.unsigned("ignored", 1);
+        let result = match self.phase {
+            EvidenceStoragePhase::DecodedStorage => self
+                .decoded
+                .as_ref()
+                .expect("decoded-storage phase owns decoded text")
+                .borrow_mut()
+                .try_push_str_reserved("x"),
+            EvidenceStoragePhase::ReservedStorage => self.storage.borrow_mut().try_push_reserved(1),
+        };
+        sink.unsigned("write_succeeded", u64::from(result.is_ok()));
     }
 }
 
-impl Drop for ReentrantFormatFailureProducer<'_, '_> {
-    fn drop(&mut self) {
-        if matches!(self.phase, ReentrantFormatFailurePhase::Drop) {
-            drop(
-                self.scope
-                    .with_work(ImportWorkClass::WorkUnits, 1, |work| work.complete_all()),
-            );
-        }
-    }
-}
+impl Format for EvidenceStorageImporter {
+    type Options = NoFormatOptions;
 
-impl FormatImporter for ReentrantFormatFailureImporter {
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("dev.baozi.test.reentrant-format-failure").unwrap(),
@@ -794,41 +778,27 @@ impl FormatImporter for ReentrantFormatFailureImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        let class = if matches!(
-            self.phase,
-            ReentrantFormatFailurePhase::SceneStorageAdmission
-        ) {
-            ImportStorageClass::SceneConstruction
-        } else {
-            ImportStorageClass::FormatNormalization
-        };
-        let mut storage = scope.metered_vec(class, "reentrant-format-failure-storage");
-        if matches!(self.phase, ReentrantFormatFailurePhase::ReservedStorage) {
-            storage.try_reserve(1)?;
-        }
-        let decoded = if matches!(self.phase, ReentrantFormatFailurePhase::DecodedStorage) {
-            Some(RefCell::new(scope.metered_decoded_text(
-                1,
-                "reentrant-format-failure-decoded-text",
-            )?))
-        } else {
-            None
-        };
-        let formatted =
-            matches!(self.phase, ReentrantFormatFailurePhase::FormattedStorage).then(|| {
-                RefCell::new(scope.metered_string(
-                    ImportStorageClass::FormatNormalization,
-                    "reentrant-format-failure-formatted-storage",
-                ))
-            });
-        Err(scope.format_failure(ReentrantFormatFailureProducer {
-            scope,
-            phase: self.phase,
-            storage: RefCell::new(Some(storage)),
-            decoded,
-            formatted,
-        }))
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        context.with_execution(|exec| -> ParseResult<()> {
+            let mut storage =
+                exec.metered_vec(ImportStorageClass::FormatNormalization, "evidence-storage");
+            if self.reserve_capacity {
+                storage.try_reserve(exec, 1)?;
+            }
+            let decoded = if matches!(self.phase, EvidenceStoragePhase::DecodedStorage) {
+                Some(RefCell::new(exec.metered_decoded_text(
+                    usize::from(self.reserve_capacity),
+                    "evidence-decoded-text",
+                )?))
+            } else {
+                None
+            };
+            Err(exec.format_failure(EvidenceStorageProducer {
+                phase: self.phase,
+                storage: RefCell::new(storage),
+                decoded,
+            }))
+        })
     }
 }
 
@@ -926,7 +896,16 @@ impl fmt::Display for PanickingDiagnosticMessage {
     }
 }
 
-impl FormatImporter for DiagnosticPanickingImporter {
+impl Format for DiagnosticPanickingImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("dev.baozi.test.diagnostic-panic").unwrap(),
@@ -948,38 +927,50 @@ impl FormatImporter for DiagnosticPanickingImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        let code = baozi_import::DiagnosticCode::new("test.diagnostic_panic").unwrap();
-        match self.mode {
-            DiagnosticPanicMode::Details => scope.emit_diagnostic_with(
-                baozi_import::DiagnosticSeverity::Warning,
-                code,
-                ImportProgressPhase::Decode,
-                scope.diagnostic_source(),
-                None,
-                None,
-                |_| panic!("diagnostic details panic"),
-                format_args!("diagnostic details panic"),
-            )?,
-            DiagnosticPanicMode::Message => {
-                let message = PanickingDiagnosticMessage;
-                scope.emit_diagnostic_with(
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        context.with_execution(|exec| -> ParseResult<()> {
+            let code = baozi_import::DiagnosticCode::new("test.diagnostic_panic").unwrap();
+            match self.mode {
+                DiagnosticPanicMode::Details => exec.emit_diagnostic_with(
                     baozi_import::DiagnosticSeverity::Warning,
                     code,
                     ImportProgressPhase::Decode,
-                    scope.diagnostic_source(),
+                    exec.diagnostic_source(),
                     None,
                     None,
-                    |_| {},
-                    format_args!("{message}"),
-                )?;
+                    |_| panic!("diagnostic details panic"),
+                    format_args!("diagnostic details panic"),
+                )?,
+                DiagnosticPanicMode::Message => {
+                    let message = PanickingDiagnosticMessage;
+                    exec.emit_diagnostic_with(
+                        baozi_import::DiagnosticSeverity::Warning,
+                        code,
+                        ImportProgressPhase::Decode,
+                        exec.diagnostic_source(),
+                        None,
+                        None,
+                        |_| {},
+                        format_args!("{message}"),
+                    )?;
+                }
             }
-        }
-        support::submit_minimal_scene(scope)
+            Ok(())
+        })?;
+        support::submit_minimal_scene(context)
     }
 }
 
-impl FormatImporter for NormalizationAdmissionImporter {
+impl Format for NormalizationAdmissionImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("dev.baozi.test.normalization-admission").unwrap(),
@@ -1002,14 +993,26 @@ impl FormatImporter for NormalizationAdmissionImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        let _dependency =
-            support::required_root_dependency(scope, &self.role, &self.raw_reference)?;
-        support::submit_minimal_scene(scope)
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        context.with_execution(|exec| -> ParseResult<()> {
+            let _dependency =
+                support::required_root_dependency(exec, &self.role, &self.raw_reference)?;
+            Ok(())
+        })?;
+        support::submit_minimal_scene(context)
     }
 }
 
-impl FormatImporter for TerminalLatchImporter {
+impl Format for TerminalLatchImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("dev.baozi.test.terminal-latch").unwrap(),
@@ -1035,82 +1038,79 @@ impl FormatImporter for TerminalLatchImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        let mut resize_storage = scope.metered_vec::<u8>(
-            ImportStorageClass::BackendDecode,
-            "terminal-latch-resize-storage",
-        );
-        resize_storage.try_push(0)?;
-        let resize_capacity = resize_storage.capacity();
-        let first_failure = match self.trigger {
-            TerminalLatchTrigger::MissingRequiredDependency => {
-                match support::required_root_dependency(scope, &self.required_role, "missing.bin") {
-                    Ok(_) => panic!("the required dependency is absent"),
-                    Err(failure) => failure,
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        let result = context.with_execution(|exec| -> ParseResult<()> {
+            let mut resize_storage = exec.metered_vec::<u8>(
+                ImportStorageClass::BackendDecode,
+                "terminal-latch-resize-storage",
+            );
+            resize_storage.try_push(exec, 0)?;
+            let resize_capacity = resize_storage.capacity();
+            let work = exec.bind_work_group([ImportWorkClass::WorkUnits])?;
+            let first_failure = match self.trigger {
+                TerminalLatchTrigger::MissingRequiredDependency => {
+                    match support::required_root_dependency(
+                        exec,
+                        &self.required_role,
+                        "missing.bin",
+                    ) {
+                        Ok(_) => panic!("the required dependency is absent"),
+                        Err(failure) => failure,
+                    }
                 }
+                TerminalLatchTrigger::ResourceLimit => exec
+                    .enforce_resource_limit("terminal-latch-trigger", 2, 1)
+                    .expect_err("the injected resource limit must fail"),
+                TerminalLatchTrigger::Cancellation => {
+                    self.cancellation.cancel();
+                    exec.poll()
+                        .expect_err("the injected cancellation must fail")
+                }
+            };
+            if !self.attempt_late_capabilities {
+                return Err(first_failure);
             }
-            TerminalLatchTrigger::ResourceLimit => scope
-                .enforce_resource_limit("terminal-latch-trigger", 2, 1)
-                .expect_err("the injected resource limit must fail"),
-            TerminalLatchTrigger::Cancellation => {
-                self.cancellation.cancel();
-                scope
-                    .poll()
-                    .expect_err("the injected cancellation must fail")
-            }
-        };
-        if !self.attempt_late_capabilities {
-            return Err(first_failure);
-        }
-        drop(first_failure);
+            drop(first_failure);
 
-        let record_late_success = |succeeded: bool| {
-            if succeeded {
-                self.late_successes.fetch_add(1, Ordering::AcqRel);
-            }
-        };
-        record_late_success(
-            support::root_dependency(scope, &self.optional_role, "late-optional.bin").is_ok(),
-        );
-        record_late_success(
-            support::required_root_dependency(scope, &self.required_role, "late-required.bin")
-                .is_ok(),
-        );
-        record_late_success(
-            scope
-                .with_work(ImportWorkClass::WorkUnits, 1, |work| work.complete_all())
-                .is_ok(),
-        );
-        record_late_success(
-            scope
-                .metered_opaque_allowance(ImportStorageClass::BackendDecode, 1)
-                .is_ok(),
-        );
-        record_late_success(resize_storage.try_reserve(resize_capacity).is_ok());
-        record_late_success(
-            scope
-                .report_progress(
+            let record_late_success = |succeeded: bool| {
+                if succeeded {
+                    self.late_successes.fetch_add(1, Ordering::AcqRel);
+                }
+            };
+            record_late_success(
+                support::root_dependency(exec, &self.optional_role, "late-optional.bin").is_ok(),
+            );
+            record_late_success(
+                support::required_root_dependency(exec, &self.required_role, "late-required.bin")
+                    .is_ok(),
+            );
+            record_late_success(
+                exec.with_work(&work, [1], |_exec, work| work.complete_all())
+                    .is_ok(),
+            );
+            record_late_success(
+                exec.metered_opaque_allowance(ImportStorageClass::BackendDecode, 1)
+                    .is_ok(),
+            );
+            record_late_success(resize_storage.try_reserve(exec, resize_capacity).is_ok());
+            record_late_success(
+                exec.report_progress(
                     ImportProgressPhase::Decode,
                     ImportProgressUnit::Records,
                     0,
                     None,
                 )
                 .is_ok(),
-        );
-        record_late_success(
-            scope
-                .enforce_resource_limit("late-noop-limit", 0, 1)
-                .is_ok(),
-        );
+            );
+            record_late_success(exec.enforce_resource_limit("late-noop-limit", 0, 1).is_ok());
 
-        let diagnostic_callbacks = Arc::clone(&self.diagnostic_callbacks);
-        record_late_success(
-            scope
-                .emit_diagnostic_with(
+            let diagnostic_callbacks = Arc::clone(&self.diagnostic_callbacks);
+            record_late_success(
+                exec.emit_diagnostic_with(
                     baozi_import::DiagnosticSeverity::Warning,
                     baozi_import::DiagnosticCode::new("test.late_diagnostic").unwrap(),
                     ImportProgressPhase::Decode,
-                    scope.diagnostic_source(),
+                    exec.diagnostic_source(),
                     None,
                     None,
                     move |_| {
@@ -1119,14 +1119,18 @@ impl FormatImporter for TerminalLatchImporter {
                     format_args!("late diagnostic"),
                 )
                 .is_ok(),
-        );
-        record_late_success(support::submit_minimal_scene(scope).is_ok());
+            );
 
-        let terminal_failure = scope.format_failure(LifecycleFormatCause {
-            mode: FailureEvidenceMode::Normal,
-            visits: Arc::clone(&self.format_detail_callbacks),
+            let terminal_failure = exec.format_failure(LifecycleFormatCause {
+                mode: FailureEvidenceMode::Normal,
+                visits: Arc::clone(&self.format_detail_callbacks),
+            });
+            Err(terminal_failure)
         });
-        Err(terminal_failure)
+        if self.attempt_late_capabilities && support::submit_minimal_scene(context).is_ok() {
+            self.late_successes.fetch_add(1, Ordering::AcqRel);
+        }
+        result
     }
 }
 
@@ -1141,7 +1145,16 @@ impl LifecycleFailureImporter {
     }
 }
 
-impl FormatImporter for LifecycleFailureImporter {
+impl Format for LifecycleFailureImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("dev.baozi.test.lifecycle-failure").unwrap(),
@@ -1163,25 +1176,28 @@ impl FormatImporter for LifecycleFailureImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        let failure = scope.format_failure(LifecycleFormatCause {
-            mode: self.evidence,
-            visits: Arc::clone(&self.visits),
-        });
-        match self.return_mode {
-            FailureReturnMode::Return => Err(failure),
-            FailureReturnMode::Swallow => {
-                drop(failure);
-                support::submit_minimal_scene(scope)
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        context.with_execution(|exec| -> ParseResult<()> {
+            let failure = exec.format_failure(LifecycleFormatCause {
+                mode: self.evidence,
+                visits: Arc::clone(&self.visits),
+            });
+            match self.return_mode {
+                FailureReturnMode::Return => Err(failure),
+                FailureReturnMode::Swallow => {
+                    drop(failure);
+                    Ok(())
+                }
+                FailureReturnMode::CancelAfterCreate => {
+                    self.cancellation
+                        .as_ref()
+                        .expect("cancellation token")
+                        .cancel();
+                    Err(failure)
+                }
             }
-            FailureReturnMode::CancelAfterCreate => {
-                self.cancellation
-                    .as_ref()
-                    .expect("cancellation token")
-                    .cancel();
-                Err(failure)
-            }
-        }
+        })?;
+        support::submit_minimal_scene(context)
     }
 }
 
@@ -1514,19 +1530,16 @@ impl AssetIo for VariableLengthIo {
     }
 }
 
-fn request_for(importer: impl FormatImporter) -> PreparedImportRequest {
+fn request_for(importer: impl Format) -> ImportPlan {
     request_for_with_config(importer, ImportConfigOverlay::default())
 }
 
-fn request_for_with_config(
-    importer: impl FormatImporter,
-    config: ImportConfigOverlay,
-) -> PreparedImportRequest {
+fn request_for_with_config(importer: impl Format, config: ImportConfigOverlay) -> ImportPlan {
     let mut builder = RegistryBuilder::new();
     builder.register(importer).unwrap();
     let snapshot = builder.freeze(RegistryBuildLimits::default()).unwrap();
     snapshot
-        .compile_request(
+        .plan(
             &ImportRequest::from_layers(
                 ImportRequestLayer::default(),
                 ImportRequestLayer::new(config),
@@ -1536,7 +1549,7 @@ fn request_for_with_config(
         .unwrap()
 }
 
-fn lossy_request_for(importer: impl FormatImporter) -> PreparedImportRequest {
+fn lossy_request_for(importer: impl Format) -> ImportPlan {
     request_for_with_config(
         importer,
         ImportConfigOverlay::default().with_loss_policy(
@@ -1545,10 +1558,7 @@ fn lossy_request_for(importer: impl FormatImporter) -> PreparedImportRequest {
     )
 }
 
-fn request_for_with_limits(
-    importer: impl FormatImporter,
-    limits: ResourceLimits,
-) -> PreparedImportRequest {
+fn request_for_with_limits(importer: impl Format, limits: ResourceLimits) -> ImportPlan {
     request_for_with_config(
         importer,
         ImportConfigOverlay::default()
@@ -1556,10 +1566,7 @@ fn request_for_with_limits(
     )
 }
 
-fn lossy_request_for_with_limits(
-    importer: impl FormatImporter,
-    limits: ResourceLimits,
-) -> PreparedImportRequest {
+fn lossy_request_for_with_limits(importer: impl Format, limits: ResourceLimits) -> ImportPlan {
     request_for_with_config(
         importer,
         ImportConfigOverlay::default()
@@ -1570,10 +1577,7 @@ fn lossy_request_for_with_limits(
     )
 }
 
-fn request_for_with_selection(
-    importer: impl FormatImporter,
-    selection: FormatSelection,
-) -> PreparedImportRequest {
+fn request_for_with_selection(importer: impl Format, selection: FormatSelection) -> ImportPlan {
     request_for_with_config(
         importer,
         ImportConfigOverlay::default().with_format_selection(selection),
@@ -1581,25 +1585,23 @@ fn request_for_with_selection(
 }
 
 fn request_for_with_detection(
-    importer: impl FormatImporter,
+    importer: impl Format,
     detection: baozi_import::DetectionOptions,
-) -> PreparedImportRequest {
+) -> ImportPlan {
     request_for_with_config(
         importer,
         ImportConfigOverlay::default().with_detection_options(detection),
     )
 }
 
-fn request_for_all(
-    importers: impl IntoIterator<Item = RecordingImporter>,
-) -> PreparedImportRequest {
+fn request_for_all(importers: impl IntoIterator<Item = RecordingImporter>) -> ImportPlan {
     let mut builder = RegistryBuilder::new();
     for importer in importers {
         builder.register(importer).unwrap();
     }
     let snapshot = builder.freeze(RegistryBuildLimits::default()).unwrap();
     snapshot
-        .compile_request(&ImportRequest::new(), OptionCompileLimits::default())
+        .plan(&ImportRequest::new(), OptionCompileLimits::default())
         .unwrap()
 }
 
@@ -1615,7 +1617,7 @@ fn primary_is_opened_once_and_probe_and_parser_share_the_first_snapshot() {
         [Arc::from(&b"first"[..]), Arc::from(&b"second"[..])],
     );
 
-    let report = import_asset(&request, &io, source, ImportOperationControl::default()).unwrap();
+    let report = read_asset(&request, &io, source, ImportOperationControl::default()).unwrap();
 
     assert_eq!(io.open_count(), 1);
     assert_eq!(
@@ -1638,7 +1640,7 @@ fn unhinted_maybe_retains_fault_and_inconclusive_selection_evidence() {
     let request = request_for_all([maybe, fault, inconclusive]);
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
 
-    let failure = import_asset(&request, &io, source, ImportOperationControl::default())
+    let failure = read_asset(&request, &io, source, ImportOperationControl::default())
         .expect_err("an unhinted Maybe candidate must not be selected");
 
     assert!(matches!(
@@ -1668,7 +1670,7 @@ fn primary_authority_is_frozen_for_diagnostics_and_same_authority_dependencies()
         (dependency, Arc::from(&b"dependency"[..])),
     ]);
 
-    let report = import_asset(&request, &io, source, ImportOperationControl::default())
+    let report = read_asset(&request, &io, source, ImportOperationControl::default())
         .expect("one primary binding must authorize the whole session");
 
     assert_eq!(io.authority_queries.load(Ordering::Acquire), 1);
@@ -1696,7 +1698,7 @@ fn variable_length_reads_are_admitted_before_backend_entry_and_retain_consumptio
                 b"ten bytes!",
                 Some(AssetLength::Exact(b"ten bytes!".len() as u64)),
             );
-            let baseline = import_asset(
+            let baseline = read_asset(
                 &request,
                 &baseline_io,
                 source.clone(),
@@ -1710,7 +1712,7 @@ fn variable_length_reads_are_admitted_before_backend_entry_and_retain_consumptio
                 .dimension(ImportDimension::WorkUnits)
                 .unwrap();
 
-            let failure = import_asset(&request, &io, source, ImportOperationControl::default())
+            let failure = read_asset(&request, &io, source, ImportOperationControl::default())
                 .expect_err("the bounded variable-length resource must fail closed at its limit");
 
             let requests = io.requests.lock().expect("read request mutex");
@@ -1767,7 +1769,7 @@ fn short_reads_reuse_byte_allowance_and_share_the_complete_snapshot() {
             let views = Arc::clone(&importer.primary_views);
             let request = request_for(importer);
 
-            let report = import_asset(&request, &io, source, ImportOperationControl::default())
+            let report = read_asset(&request, &io, source, ImportOperationControl::default())
                 .expect("legal short reads must retain unused byte admission");
 
             assert_eq!(*views.lock().unwrap(), [payload.to_vec(), payload.to_vec()]);
@@ -1816,7 +1818,7 @@ fn variable_length_primary_aggregate_and_backend_limits_accept_eof_and_reject_ex
                 let views = Arc::clone(&importer.primary_views);
                 let request = request_for_with_limits(importer, limits);
 
-                let result = import_asset(&request, &io, source, ImportOperationControl::default());
+                let result = read_asset(&request, &io, source, ImportOperationControl::default());
 
                 if payload.len() <= 4 {
                     let report = result.expect("below-limit and exact-limit EOF must succeed");
@@ -1877,7 +1879,7 @@ fn direct_bytes_uses_one_admitted_snapshot_for_detection_and_parsing() {
     let input = b"direct primary bytes";
     let input_address = input.as_ptr() as usize;
 
-    let report = import_bytes(&request, source, input, ImportOperationControl::default())
+    let report = read_bytes(&request, source, input, ImportOperationControl::default())
         .expect("direct bytes import");
 
     let addresses = addresses.lock().unwrap();
@@ -1920,7 +1922,7 @@ fn direct_bytes_rejects_primary_and_live_limits_before_copying() {
         limits.max_live_bytes = max_live_bytes;
         let request = request_for_with_limits(importer, limits);
 
-        let failure = import_bytes(&request, source, input, ImportOperationControl::default())
+        let failure = read_bytes(&request, source, input, ImportOperationControl::default())
             .expect_err("direct snapshot admission must fail");
 
         assert!(matches!(failure.cause(), ImportCause::Scope(_)));
@@ -1950,7 +1952,7 @@ fn swallowed_required_scope_abort_still_forces_terminal_failure() {
     let request = request_for(importer);
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
 
-    let failure = import_asset(&request, &io, source, ImportOperationControl::default())
+    let failure = read_asset(&request, &io, source, ImportOperationControl::default())
         .expect_err("latched abort must beat parser success");
 
     assert!(matches!(failure.cause(), ImportCause::Scope(_)));
@@ -2001,7 +2003,7 @@ fn terminal_latch_rejects_every_late_capability_without_side_effects() {
         let baseline_io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
         // Keep the same trigger and setup, then return its first failure without invoking any
         // late capability. Trigger-specific ownership work belongs to this baseline as well.
-        let baseline = import_asset(
+        let baseline = read_asset(
             &baseline_request,
             &baseline_io,
             source.clone(),
@@ -2020,7 +2022,7 @@ fn terminal_latch_rejects_every_late_capability_without_side_effects() {
         let request = lossy_request_for(importer);
         let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
 
-        let failure = import_asset(&request, &io, source, control(cancellation))
+        let failure = read_asset(&request, &io, source, control(cancellation))
             .expect_err("the first scope abort must remain terminal");
 
         let ImportCause::Scope(abort) = failure.cause() else {
@@ -2117,7 +2119,7 @@ fn dependency_normalization_is_admitted_before_path_growth_or_resolver_entry() {
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
     let resolver = CountingResolver::new();
 
-    let failure = import_asset_with_resolver(
+    let failure = read_asset_with_resolver(
         &request,
         &io,
         source,
@@ -2170,7 +2172,7 @@ fn optional_failure_is_cached_once_but_charged_for_each_logical_reference() {
     let request = lossy_request_for(importer);
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
 
-    let report = import_asset(&request, &io, source, ImportOperationControl::default()).unwrap();
+    let report = read_asset(&request, &io, source, ImportOperationControl::default()).unwrap();
 
     assert_eq!(
         io.open_count(),
@@ -2239,21 +2241,21 @@ fn immutable_namespace_negative_proof_is_cached_once_and_removes_unproven_reason
     )])
     .expect("unique immutable namespace");
 
-    let report = import_asset(
+    let report = read_asset(
         &request,
         &io,
         source.clone(),
         ImportOperationControl::default(),
     )
     .expect("an admitted immutable absence proof permits optional continuation");
-    let repeated = import_asset(&request, &io, source, ImportOperationControl::default())
+    let repeated = read_asset(&request, &io, source, ImportOperationControl::default())
         .expect("a fresh session must reproduce the same immutable proof manifest");
     let independent_io = ImmutableMemoryAssetIo::try_from_entries(vec![(
         AssetPath::new("asset.opt").unwrap(),
         Arc::from(&b"primary"[..]),
     )])
     .expect("an independently constructed immutable namespace");
-    let independent = import_asset(
+    let independent = read_asset(
         &request,
         &independent_io,
         AssetPath::new("asset.opt").unwrap(),
@@ -2280,7 +2282,7 @@ fn immutable_namespace_negative_proof_is_cached_once_and_removes_unproven_reason
         ),
     ])
     .expect("a changed immutable namespace");
-    let changed_namespace = import_asset(
+    let changed_namespace = read_asset(
         &request,
         &changed_namespace_io,
         AssetPath::new("asset.opt").unwrap(),
@@ -2400,7 +2402,7 @@ fn immutable_negative_proof_honors_exact_and_rejected_budgets() {
             Arc::from(&b"primary"[..]),
         )])
         .expect("unique immutable namespace");
-        import_asset(&request, &io, source, ImportOperationControl::default())
+        read_asset(&request, &io, source, ImportOperationControl::default())
     }
 
     let baseline = run(ResourceLimits::default()).expect("baseline proof import");
@@ -2632,7 +2634,7 @@ fn optional_dependency_cannot_suppress_structural_resource_graph_limits() {
         let request = lossy_request_for_with_limits(importer, limits);
         let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
 
-        let failure = import_asset(&request, &io, source, ImportOperationControl::default())
+        let failure = read_asset(&request, &io, source, ImportOperationControl::default())
             .expect_err("a structural graph limit cannot be converted into optional loss");
 
         let ImportCause::Scope(abort) = failure.cause() else {
@@ -2672,7 +2674,7 @@ fn optional_dependency_byte_budget_exhaustion_is_session_dependent_omission() {
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])])
         .with_asset(dependency, [Arc::from(&b"dependency"[..])]);
 
-    let report = import_asset(&request, &io, source, ImportOperationControl::default())
+    let report = read_asset(&request, &io, source, ImportOperationControl::default())
         .expect("optional dependency-byte budget exhaustion must remain a successful omission");
 
     assert_eq!(
@@ -2757,7 +2759,7 @@ fn optional_dependency_work_budget_exhaustion_is_session_dependent_omission() {
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])])
         .with_asset(dependency, [Arc::from(&b"dependency"[..])]);
 
-    let report = import_asset(&request, &io, source, ImportOperationControl::default())
+    let report = read_asset(&request, &io, source, ImportOperationControl::default())
         .expect("optional dependency-work budget exhaustion must remain a successful omission");
 
     assert_eq!(
@@ -2851,7 +2853,7 @@ fn available_dependency_manifest_digest(
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])])
         .with_asset(dependency, [Arc::from(&b"dependency"[..])]);
 
-    let report = import_asset(&request, &io, source, ImportOperationControl::default())
+    let report = read_asset(&request, &io, source, ImportOperationControl::default())
         .expect("available dependency manifest import");
 
     assert_eq!(io.open_count(), 2, "primary plus one dependency open");
@@ -2956,7 +2958,7 @@ fn successful_dependency_snapshot_is_shared_and_reused_without_reopening() {
         ],
     );
 
-    let report = import_asset(&request, &io, source, ImportOperationControl::default())
+    let report = read_asset(&request, &io, source, ImportOperationControl::default())
         .expect("two references must share the first admitted dependency snapshot");
 
     assert_eq!(io.open_count(), 2, "primary plus one dependency open");
@@ -3076,7 +3078,7 @@ fn optional_partial_read_failure_is_cached_with_physical_byte_accounting() {
         dependency_opens: AtomicUsize::new(0),
     };
 
-    let report = import_asset(&request, &io, source, ImportOperationControl::default())
+    let report = read_asset(&request, &io, source, ImportOperationControl::default())
         .expect("optional read failure must be retained and reused");
 
     assert_eq!(io.open_count(), 2, "primary plus one dependency open");
@@ -3125,7 +3127,7 @@ fn optional_reader_contract_violation_is_terminal_and_not_cacheable() {
         opens: AtomicUsize::new(0),
     };
 
-    let failure = import_asset(&request, &io, source, ImportOperationControl::default())
+    let failure = read_asset(&request, &io, source, ImportOperationControl::default())
         .expect_err("a trusted reader contract violation must terminate the session");
 
     assert!(matches!(
@@ -3163,7 +3165,7 @@ fn optional_dependency_loss_requires_explicit_caller_authority() {
 
     let preserving_request = request_for(importer.clone());
     let preserving_io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
-    let failure = import_asset(
+    let failure = read_asset(
         &preserving_request,
         &preserving_io,
         source.clone(),
@@ -3175,7 +3177,7 @@ fn optional_dependency_loss_requires_explicit_caller_authority() {
 
     let lossy_request = lossy_request_for(importer);
     let lossy_io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
-    let report = import_asset(
+    let report = read_asset(
         &lossy_request,
         &lossy_io,
         source,
@@ -3194,7 +3196,7 @@ fn format_failure_retains_stable_packed_evidence_and_owner() {
     });
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
 
-    let failure = import_asset(&request, &io, source, ImportOperationControl::default())
+    let failure = read_asset(&request, &io, source, ImportOperationControl::default())
         .expect_err("format failure must be retained");
     drop(request);
     drop(io);
@@ -3250,7 +3252,7 @@ fn large_format_failure_producer_is_destroyed_after_bounded_evidence_capture() {
     let request = request_for(OversizedFormatFailingImporter);
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
 
-    let failure = import_asset(&request, &io, source, ImportOperationControl::default())
+    let failure = read_asset(&request, &io, source, ImportOperationControl::default())
         .expect_err("the importer deliberately returns a format failure");
 
     assert!(matches!(
@@ -3277,7 +3279,7 @@ fn format_failure_storage_survives_all_terminal_evidence_paths() {
             mode,
             Arc::clone(&visits),
         ));
-        let failure = import_bytes(
+        let failure = read_bytes(
             &request,
             AssetPath::new("asset.lifecycle-failure").unwrap(),
             b"primary",
@@ -3331,37 +3333,58 @@ fn format_failure_storage_survives_all_terminal_evidence_paths() {
 }
 
 #[test]
-fn format_failure_evidence_callbacks_cannot_reenter_parse_capabilities() {
+fn format_failure_evidence_callbacks_validate_reserved_storage() {
     for phase in [
-        ReentrantFormatFailurePhase::Code,
-        ReentrantFormatFailurePhase::Details,
-        ReentrantFormatFailurePhase::DecodedStorage,
-        ReentrantFormatFailurePhase::FormattedStorage,
-        ReentrantFormatFailurePhase::MeteredStorage,
-        ReentrantFormatFailurePhase::ReservedStorage,
-        ReentrantFormatFailurePhase::SceneStorageAdmission,
-        ReentrantFormatFailurePhase::NestedFormatFailure,
-        ReentrantFormatFailurePhase::Drop,
+        EvidenceStoragePhase::DecodedStorage,
+        EvidenceStoragePhase::ReservedStorage,
     ] {
-        let request = request_for(ReentrantFormatFailureImporter { phase });
-        let failure = import_bytes(
-            &request,
-            AssetPath::new("asset.reentrant-format-failure").unwrap(),
-            b"primary",
-            ImportOperationControl::default(),
-        )
-        .expect_err("reentrant format evidence must fail closed");
+        for reserve_capacity in [false, true] {
+            let request = request_for(EvidenceStorageImporter {
+                phase,
+                reserve_capacity,
+            });
+            let failure = read_bytes(
+                &request,
+                AssetPath::new("asset.reentrant-format-failure").unwrap(),
+                b"primary",
+                ImportOperationControl::default(),
+            )
+            .expect_err(
+                "evidence capture must preserve the original failure or a capacity violation",
+            );
 
-        let ImportCause::Scope(abort) = failure.cause() else {
-            panic!("expected a scope contract failure for {phase:?}")
-        };
-        assert!(matches!(
-            abort.cause(),
-            ScopeAbortCause::DescriptorContract {
-                code: "parse-capability-reentered",
+            if reserve_capacity {
+                let ImportCause::Format(envelope) = failure.cause() else {
+                    panic!("reserved writes must preserve format evidence for {phase:?}")
+                };
+                assert_eq!(envelope.code(), "test.evidence_storage");
+                let detail = envelope
+                    .details()
+                    .get(0)
+                    .expect("reserved-write result is retained");
+                assert_eq!(detail.key(), "write_succeeded");
+                assert!(matches!(
+                    detail.value(),
+                    FormatFailureDetailValue::Unsigned(1)
+                ));
+            } else {
+                let ImportCause::Scope(abort) = failure.cause() else {
+                    panic!("an unreserved write must latch a scope failure for {phase:?}")
+                };
+                let expected = match phase {
+                    EvidenceStoragePhase::DecodedStorage => "decoded-text-length-exhausted",
+                    EvidenceStoragePhase::ReservedStorage => "metered-vector-capacity-not-reserved",
+                };
+                assert!(
+                    matches!(abort.cause(), ScopeAbortCause::DescriptorContract { code } if *code == expected)
+                );
             }
-        ));
-        assert_eq!(failure.ledger().current_live_bytes(), 0);
+            assert_eq!(
+                failure.ledger().current_live_bytes(),
+                0,
+                "{phase:?}/{reserve_capacity}"
+            );
+        }
     }
 }
 
@@ -3370,7 +3393,7 @@ fn diagnostic_callback_panics_have_their_own_stable_boundary_and_code() {
     for mode in [DiagnosticPanicMode::Details, DiagnosticPanicMode::Message] {
         let request = request_for(DiagnosticPanickingImporter { mode });
 
-        let failure = import_bytes(
+        let failure = read_bytes(
             &request,
             AssetPath::new("asset.diagnostic-panic").unwrap(),
             b"primary",
@@ -3400,7 +3423,7 @@ fn format_failure_storage_is_admitted_before_trusted_callbacks() {
         Arc::clone(&baseline_visits),
     ));
     let source = AssetPath::new("asset.lifecycle-failure").unwrap();
-    let baseline = import_bytes(
+    let baseline = read_bytes(
         &baseline_request,
         source.clone(),
         b"primary",
@@ -3423,7 +3446,7 @@ fn format_failure_storage_is_admitted_before_trusted_callbacks() {
         ),
         limits,
     );
-    let rejected = import_bytes(
+    let rejected = read_bytes(
         &rejected_request,
         source,
         b"primary",
@@ -3445,7 +3468,7 @@ fn swallowed_format_failure_is_a_descriptor_contract_failure() {
         visits: Arc::clone(&visits),
         cancellation: None,
     });
-    let failure = import_bytes(
+    let failure = read_bytes(
         &request,
         AssetPath::new("asset.lifecycle-failure").unwrap(),
         b"primary",
@@ -3476,7 +3499,7 @@ fn post_parse_cancellation_releases_staged_format_failure_storage() {
         cancellation: Some(cancellation.clone()),
     });
     let control = ImportOperationControl::default().with_cancellation(cancellation);
-    let failure = import_bytes(
+    let failure = read_bytes(
         &request,
         AssetPath::new("asset.lifecycle-failure").unwrap(),
         b"primary",
@@ -3512,7 +3535,7 @@ fn finalize_cancellation_overrides_a_pre_scene_format_failure() {
         },
     );
 
-    let failure = import_bytes(
+    let failure = read_bytes(
         &request,
         AssetPath::new("asset.pre-scene-final-cancel").unwrap(),
         b"primary",
@@ -3547,7 +3570,7 @@ fn failure_retains_optional_dependency_loss_evidence() {
     let request = lossy_request_for(importer);
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
 
-    let failure = import_asset(&request, &io, source, ImportOperationControl::default())
+    let failure = read_asset(&request, &io, source, ImportOperationControl::default())
         .expect_err("format failure after optional loss");
 
     assert_eq!(failure.optional_dependency_evidence().len(), 1);
@@ -3585,7 +3608,16 @@ impl StructuredDiagnosticImporter {
     }
 }
 
-impl FormatImporter for StructuredDiagnosticImporter {
+impl Format for StructuredDiagnosticImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("dev.baozi.test.structured-diagnostic").unwrap(),
@@ -3608,13 +3640,13 @@ impl FormatImporter for StructuredDiagnosticImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        scope
-            .with_conformed_text_input(
-                scope.diagnostic_source(),
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        context.with_execution(|exec| -> ParseResult<()> {
+            exec.with_conformed_text_input(
+                exec.diagnostic_source(),
                 TextInputOptions::new(TextDecodingMode::RejectInvalid, "structured-diagnostic")
                     .with_line_index_resource("structured-diagnostic-line-index"),
-                |input, _recoveries| {
+                |exec, input, _recoveries| {
                     let line = input
                         .lines()
                         .nth(1)
@@ -3623,7 +3655,7 @@ impl FormatImporter for StructuredDiagnosticImporter {
                         .diagnostic_location(baozi_import::DiagnosticByteRange::new(2, 4).unwrap())
                         .expect("fixture range must belong to the second line");
                     for record in 0..self.diagnostic_count {
-                        scope.emit_text_diagnostic_with(
+                        exec.emit_text_diagnostic_with(
                             baozi_import::DiagnosticSeverity::Warning,
                             baozi_import::DiagnosticCode::new("test.structured_warning").unwrap(),
                             ImportProgressPhase::Decode,
@@ -3643,7 +3675,9 @@ impl FormatImporter for StructuredDiagnosticImporter {
                 },
             )?
             .expect("structured diagnostic fixture must conform");
-        support::submit_minimal_scene(scope)
+            Ok(())
+        })?;
+        support::submit_minimal_scene(context)
     }
 }
 
@@ -3659,7 +3693,7 @@ fn import_structured_diagnostics(
     let request =
         request_for_with_limits(StructuredDiagnosticImporter::new(diagnostic_count), limits);
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"a\nprimary"[..])]);
-    import_asset(&request, &io, source, ImportOperationControl::default())
+    read_asset(&request, &io, source, ImportOperationControl::default())
 }
 
 #[test]
@@ -3668,7 +3702,7 @@ fn structured_diagnostic_retains_bounded_location_and_details() {
     let request = request_for(StructuredDiagnosticImporter::new(1));
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"a\nprimary"[..])]);
 
-    let report = import_asset(&request, &io, source, ImportOperationControl::default()).unwrap();
+    let report = read_asset(&request, &io, source, ImportOperationControl::default()).unwrap();
     let diagnostic = &report.diagnostics()[0];
 
     assert_eq!(diagnostic.phase(), ImportProgressPhase::Decode);
@@ -3732,7 +3766,7 @@ fn publication_peak_includes_output_and_retained_diagnostic_payload() {
     let request = request_for(StructuredDiagnosticImporter::new(1));
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"a\nprimary"[..])]);
 
-    let report = import_asset(&request, &io, source, ImportOperationControl::default()).unwrap();
+    let report = read_asset(&request, &io, source, ImportOperationControl::default()).unwrap();
     let canonical_output = report
         .ledger()
         .dimension(ImportDimension::CanonicalOutputBytes)
@@ -3776,7 +3810,7 @@ fn forced_detection_distinguishes_contradiction_fault_and_inconclusive() {
         FormatSelection::Forced(FormatId::new("dev.baozi.test.forced-no").unwrap()),
     );
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
-    let failure = import_asset(
+    let failure = read_asset(
         &request,
         &io,
         source.clone(),
@@ -3795,7 +3829,7 @@ fn forced_detection_distinguishes_contradiction_fault_and_inconclusive() {
         FormatSelection::Forced(FormatId::new("dev.baozi.test.forced-fault").unwrap()),
     );
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
-    let failure = import_asset(
+    let failure = read_asset(
         &request,
         &io,
         source.clone(),
@@ -3814,7 +3848,7 @@ fn forced_detection_distinguishes_contradiction_fault_and_inconclusive() {
         FormatSelection::Forced(FormatId::new("dev.baozi.test.forced-inc").unwrap()),
     );
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
-    assert!(import_asset(&request, &io, source, ImportOperationControl::default()).is_ok());
+    assert!(read_asset(&request, &io, source, ImportOperationControl::default()).is_ok());
 }
 
 #[test]
@@ -3824,7 +3858,7 @@ fn automatic_detection_only_reports_unsupported_for_clean_no_match() {
     clean.detection = DetectionOutcome::NoMatch;
     let request = request_for(clean);
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
-    let failure = import_asset(
+    let failure = read_asset(
         &request,
         &io,
         source.clone(),
@@ -3837,7 +3871,7 @@ fn automatic_detection_only_reports_unsupported_for_clean_no_match() {
     faulty.detection = DetectionOutcome::fault("fault");
     let request = request_for(faulty);
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
-    let failure = import_asset(&request, &io, source, ImportOperationControl::default())
+    let failure = read_asset(&request, &io, source, ImportOperationControl::default())
         .expect_err("fault is not unsupported");
     assert!(matches!(
         failure.cause(),
@@ -3861,7 +3895,7 @@ fn parser_panic_poison_is_shared_across_snapshots() {
     let snapshot_b = builder.freeze(RegistryBuildLimits::default()).unwrap();
     let compile = |snapshot: &baozi_import::RegistrySnapshot| {
         snapshot
-            .compile_request(
+            .plan(
                 &ImportRequest::from_layers(
                     ImportRequestLayer::default(),
                     ImportRequestLayer::new(ImportConfigOverlay::default().with_format_selection(
@@ -3879,14 +3913,14 @@ fn parser_panic_poison_is_shared_across_snapshots() {
     let source = AssetPath::new("asset.panic").unwrap();
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
 
-    let panicked = import_asset(
+    let panicked = read_asset(
         &request_a,
         &io,
         source.clone(),
         ImportOperationControl::default(),
     )
     .expect_err("the first parser invocation panics");
-    let poisoned = import_asset(&request_b, &io, source, ImportOperationControl::default())
+    let poisoned = read_asset(&request_b, &io, source, ImportOperationControl::default())
         .expect_err("the shared registration remains poisoned");
 
     assert!(matches!(
@@ -3923,7 +3957,7 @@ fn in_flight_parse_success_is_rejected_after_a_parallel_parser_panics() {
     let second_snapshot = builder.freeze(RegistryBuildLimits::default()).unwrap();
     let compile = |snapshot: &baozi_import::RegistrySnapshot| {
         snapshot
-            .compile_request(
+            .plan(
                 &ImportRequest::from_layers(
                     ImportRequestLayer::default(),
                     ImportRequestLayer::new(ImportConfigOverlay::default().with_format_selection(
@@ -3940,7 +3974,7 @@ fn in_flight_parse_success_is_rejected_after_a_parallel_parser_panics() {
     let second_request = compile(&second_snapshot);
 
     let first = std::thread::spawn(move || {
-        import_bytes(
+        read_bytes(
             &first_request,
             AssetPath::new("first.racing-parse-poison").unwrap(),
             b"primary",
@@ -3951,7 +3985,7 @@ fn in_flight_parse_success_is_rejected_after_a_parallel_parser_panics() {
     entered
         .recv_timeout(Duration::from_secs(5))
         .expect("the first parser reaches the controlled boundary");
-    let panicked = import_bytes(
+    let panicked = read_bytes(
         &second_request,
         AssetPath::new("second.racing-parse-poison").unwrap(),
         b"primary",
@@ -3991,7 +4025,7 @@ fn parser_panic_does_not_run_an_untrusted_payload_destructor() {
     let request = request_for(OpaquePanickingImporter {
         payload_drops: Arc::clone(&payload_drops),
     });
-    let failure = import_bytes(
+    let failure = read_bytes(
         &request,
         AssetPath::new("asset.opaque-panic").unwrap(),
         b"primary",
@@ -4038,7 +4072,7 @@ fn asset_io_panics_do_not_run_untrusted_payload_destructors() {
             payload_drops: Arc::clone(&payload_drops),
         };
 
-        let failure = import_asset(&request, &io, source, ImportOperationControl::default())
+        let failure = read_asset(&request, &io, source, ImportOperationControl::default())
             .expect_err("opaque AssetIo panic must be contained");
         let matched_boundary = match failure.cause() {
             ImportCause::TrustedExtension { boundary, code } => {
@@ -4067,7 +4101,7 @@ fn cancellation_before_primary_open_creates_failure_evidence_without_io() {
     token.cancel();
     let control = ImportOperationControl::default().with_cancellation(token);
 
-    let failure = import_asset(&request, &io, source, control).expect_err("cancelled");
+    let failure = read_asset(&request, &io, source, control).expect_err("cancelled");
 
     assert_eq!(io.open_count(), 0);
     assert_eq!(
@@ -4090,7 +4124,7 @@ fn detector_work_is_probe_bounded_and_post_detector_cancellation_prevents_select
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"0123456789abcdef"[..])]);
     let control = ImportOperationControl::default().with_cancellation(token);
 
-    let failure = import_asset(&request, &io, source, control).expect_err("cancelled after scan");
+    let failure = read_asset(&request, &io, source, control).expect_err("cancelled after scan");
 
     assert_eq!(observed.lock().unwrap()[0].len(), 8);
     assert_eq!(failure.last_completed().phase(), ImportPhase::PrimaryBound);
@@ -4108,7 +4142,7 @@ fn observer_panic_is_contained_and_releases_primary_snapshot() {
     let control = ImportOperationControl::default()
         .with_progress_observer(|_| -> ProgressDecision { panic!("observer panic") });
 
-    let failure = import_asset(&request, &io, source, control).expect_err("observer panic");
+    let failure = read_asset(&request, &io, source, control).expect_err("observer panic");
 
     assert!(matches!(failure.cause(), ImportCause::Scope(_)));
     assert_eq!(failure.ledger().current_live_bytes(), 0);
@@ -4131,7 +4165,7 @@ fn progress_observer_can_run_a_nested_import_without_lock_reentry() {
     let observed_successes = Arc::clone(&nested_successes);
     let control = ImportOperationControl::default().with_progress_observer(move |_| {
         if observed_calls.fetch_add(1, Ordering::AcqRel) == 0
-            && import_asset(
+            && read_asset(
                 &nested_request,
                 nested_io.as_ref(),
                 nested_source.clone(),
@@ -4150,7 +4184,7 @@ fn progress_observer_can_run_a_nested_import_without_lock_reentry() {
     ));
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"outer"[..])]);
 
-    let report = import_asset(&request, &io, source, control).expect("outer import");
+    let report = read_asset(&request, &io, source, control).expect("outer import");
 
     assert!(observer_calls.load(Ordering::Acquire) > 0);
     assert_eq!(nested_successes.load(Ordering::Acquire), 1);
@@ -4178,7 +4212,7 @@ fn final_observer_cancellation_rolls_back_publication_exactly_once() {
     ));
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
 
-    let failure = import_asset(&request, &io, source, control)
+    let failure = read_asset(&request, &io, source, control)
         .expect_err("final observer cancellation must roll back publication");
 
     let output = failure
@@ -4206,7 +4240,7 @@ fn diagnostic_storage_caps_drop_excess_without_changing_success() {
     let request = lossy_request_for_with_limits(importer, limits);
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
 
-    let report = import_asset(&request, &io, source, ImportOperationControl::default()).unwrap();
+    let report = read_asset(&request, &io, source, ImportOperationControl::default()).unwrap();
 
     assert_eq!(report.diagnostic_summary().attempted_count(), 2);
     assert_eq!(report.diagnostic_summary().stored_count(), 1);
@@ -4228,7 +4262,7 @@ fn complete_batch_activation_transitions_to_committed_output() {
     );
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
 
-    let report = import_asset(&request, &io, source, ImportOperationControl::default()).unwrap();
+    let report = read_asset(&request, &io, source, ImportOperationControl::default()).unwrap();
     let output = report
         .ledger()
         .dimension(ImportDimension::CanonicalOutputBytes)

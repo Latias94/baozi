@@ -47,11 +47,11 @@ mod validation_control;
 /// available; private fields, single-use values, central validation, and paired handoff enforce
 /// the protocol. Format plugins use `baozi_import::authoring` instead of this internal namespace.
 ///
-/// A materialized draft cannot expose or forge its canonical descriptor:
+/// Parser acceptance grants no Scene publication capability:
 ///
-/// ```compile_fail,E0616
-/// use baozi_core::__scene_integration::integration::SceneDraft;
-/// fn extract(draft: SceneDraft) { let _ = draft.0; }
+/// ```compile_fail,E0599
+/// use baozi_core::__scene_integration::integration::SceneParseOutcome;
+/// fn publish(outcome: SceneParseOutcome) { let _ = outcome.handoff(); }
 /// ```
 ///
 /// Construction keeps its branded execution request private:

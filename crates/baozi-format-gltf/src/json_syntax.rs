@@ -4,8 +4,8 @@ use crate::source_map::{
     SourcePayloadKind, SourcePayloadSite, SourceRange,
 };
 use baozi_import::{
-    ImportStorageClass, ImportWorkClass, ImportWorkScope, MeteredVec, ParseFailure, ParseResult,
-    ParseScope,
+    ImportStorageClass, ImportWorkClass, ImportWorkGroup, ImportWorkScope, MeteredVec,
+    ParseExecution, ParseFailure, ParseResult,
 };
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
@@ -34,7 +34,7 @@ impl From<ParseFailure> for ScanAbort {
 }
 
 pub(crate) fn admit<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     bytes: &[u8],
     raw_base: u64,
     is_glb: bool,
@@ -46,9 +46,10 @@ pub(crate) fn admit<'scope>(
     )?;
 
     let mut scanner = JsonScanner::new(ctx, bytes, raw_base, is_glb);
-    let scan_result = ctx.with_work(ImportWorkClass::DecodeWork, to_u64(bytes.len()), |work| {
-        scanner.scan(work)
-    });
+    let scan_result = ctx.with_work_group(
+        [(ImportWorkClass::DecodeWork, to_u64(bytes.len()))],
+        |ctx, work| scanner.scan(work, ctx),
+    );
     if let Err(abort) = scan_result {
         drop(scanner);
         return match abort {
@@ -77,7 +78,7 @@ pub(crate) fn admit<'scope>(
             (ImportWorkClass::Tokens, stats.tokens),
             (ImportWorkClass::Records, stats.containers),
         ],
-        || validate_duplicate_keys(ctx, bytes, raw_base, &mut keys),
+        |ctx, _parent| validate_duplicate_keys(ctx, bytes, raw_base, &mut keys),
     )?;
     debug_assert_eq!(stats.containers, stats.objects + stats.arrays);
     drop(keys);
@@ -116,11 +117,12 @@ pub(crate) struct JsonIndex<'scope> {
 }
 
 fn publish_ledger_limit<T>(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     class: ImportWorkClass,
     attempted: u64,
 ) -> ParseResult<T> {
-    let result: ParseResult<()> = ctx.with_work(class, attempted, |work| work.complete_all());
+    let result: ParseResult<()> =
+        ctx.with_work_group([(class, attempted)], |_ctx, work| work.complete_all());
     match result {
         Err(failure) => Err(failure),
         Ok(()) => Err(ctx.format_failure(GltfFailure::internal(
@@ -284,8 +286,7 @@ enum FrameState {
     ObjectCommaOrEnd,
 }
 
-struct JsonScanner<'scope, 'session, 'bytes> {
-    ctx: &'scope ParseScope<'session>,
+struct JsonScanner<'scope, 'bytes> {
     bytes: &'bytes [u8],
     raw_base: u64,
     is_glb: bool,
@@ -300,15 +301,14 @@ struct JsonScanner<'scope, 'session, 'bytes> {
     stats: JsonStats,
 }
 
-impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
+impl<'scope, 'bytes> JsonScanner<'scope, 'bytes> {
     fn new(
-        ctx: &'scope ParseScope<'session>,
+        ctx: &mut ParseExecution<'_, 'scope>,
         bytes: &'bytes [u8],
         raw_base: u64,
         is_glb: bool,
     ) -> Self {
         Self {
-            ctx,
             bytes,
             raw_base,
             is_glb,
@@ -335,20 +335,23 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
         }
     }
 
-    fn scan(&mut self, work: &mut ImportWorkScope<'_, 'session, 1>) -> ScanResult<()> {
+    fn scan(
+        &mut self,
+        work: &mut ImportWorkScope<'_, 1>,
+        ctx: &mut ParseExecution<'_, 'scope>,
+    ) -> ScanResult<()> {
         if self.bytes.starts_with(UTF8_BOM) {
-            self.consume(work, UTF8_BOM.len())?;
-            self.flush(work)?;
-            return Err(self
-                .ctx
+            self.consume(work, UTF8_BOM.len(), ctx)?;
+            self.flush(work, ctx)?;
+            return Err(ctx
                 .format_failure(GltfFailure::forbidden_bom(self.raw_base))
                 .into());
         }
 
         while self.root_end.is_none() {
-            self.skip_whitespace(work)?;
+            self.skip_whitespace(work, ctx)?;
             if let Some(frame) = self.frames.as_slice().last().copied() {
-                self.scan_frame(work, frame)?;
+                self.scan_frame(work, frame, ctx)?;
             } else if !self.root_started {
                 if self.cursor == self.bytes.len() {
                     return self.syntax_error(
@@ -357,19 +360,20 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                         self.cursor,
                         0,
                         "glTF JSON is missing a root value",
+                        ctx,
                     );
                 }
                 self.root_started = true;
-                self.scan_value(work, None)?;
+                self.scan_value(work, None, ctx)?;
                 if self.frames.is_empty() {
                     self.root_end = Some(self.cursor);
                 }
             } else {
-                return Err(self
-                    .ctx
+                let byte_offset = self.absolute_offset(self.cursor, ctx)?;
+                return Err(ctx
                     .format_failure(GltfFailure::invalid_json(
                         "json-syntax-map",
-                        self.absolute_offset(self.cursor)?,
+                        byte_offset,
                         0,
                         "glTF JSON root completion state is inconsistent",
                     ))
@@ -377,18 +381,19 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
             }
         }
 
-        self.scan_trailing(work)?;
-        self.flush(work)
+        self.scan_trailing(work, ctx)?;
+        self.flush(work, ctx)
     }
 
     fn scan_frame(
         &mut self,
-        work: &mut ImportWorkScope<'_, 'session, 1>,
+        work: &mut ImportWorkScope<'_, 1>,
         frame: JsonFrame,
+        ctx: &mut ParseExecution<'_, 'scope>,
     ) -> ScanResult<()> {
         match frame.state {
             FrameState::ArrayValueOrEnd if self.peek() == Some(b']') => {
-                self.close_container(work, b']')
+                self.close_container(work, b']', ctx)
             }
             FrameState::ArrayValueOrEnd | FrameState::ArrayValue => {
                 if self.cursor == self.bytes.len() {
@@ -398,28 +403,30 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                         self.cursor,
                         0,
                         "glTF JSON array is missing a value",
+                        ctx,
                     );
                 }
-                self.set_frame_state(FrameState::ArrayCommaOrEnd)?;
+                self.set_frame_state(FrameState::ArrayCommaOrEnd, ctx)?;
                 let next_ordinal = frame
                     .next_ordinal
                     .checked_add(1)
-                    .ok_or_else(|| self.ctx.allocation_failure("gltf-json-array-ordinal"))?;
-                self.active_frame_mut()?.next_ordinal = next_ordinal;
-                self.scan_value(work, Some(frame))
+                    .ok_or_else(|| ctx.allocation_failure("gltf-json-array-ordinal"))?;
+                self.active_frame_mut(ctx)?.next_ordinal = next_ordinal;
+                self.scan_value(work, Some(frame), ctx)
             }
             FrameState::ArrayCommaOrEnd => match self.peek() {
                 Some(b',') => {
-                    self.count_token(work)?;
-                    self.consume(work, 1)?;
-                    self.set_frame_state(FrameState::ArrayValue)
+                    self.count_token(work, ctx)?;
+                    self.consume(work, 1, ctx)?;
+                    self.set_frame_state(FrameState::ArrayValue, ctx)
                 }
-                Some(b']') => self.close_container(work, b']'),
+                Some(b']') => self.close_container(work, b']', ctx),
                 Some(_) => self.syntax_error_current(
                     work,
                     "json-array",
                     self.cursor,
                     "glTF JSON array expects a comma or closing bracket",
+                    ctx,
                 ),
                 None => self.syntax_error(
                     work,
@@ -427,34 +434,39 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                     self.cursor,
                     0,
                     "glTF JSON array is not closed",
+                    ctx,
                 ),
             },
             FrameState::ObjectKeyOrEnd if self.peek() == Some(b'}') => {
-                self.close_container(work, b'}')
+                self.close_container(work, b'}', ctx)
             }
             FrameState::ObjectKeyOrEnd | FrameState::ObjectKey => {
                 if self.peek() != Some(b'"') {
-                    let length = self.current_scalar_length(work)?;
+                    let length = self.current_scalar_length(work, ctx)?;
                     return self.syntax_error(
                         work,
                         "json-object",
                         self.cursor,
                         length,
                         "glTF JSON object expects a quoted object key",
+                        ctx,
                     );
                 }
-                let key = self.scan_string(work, true)?;
+                let key = self.scan_string(work, true, ctx)?;
                 let member = source_member(self.bytes, key.content_start, key.content_end);
-                work.poll()?;
-                self.keys.try_push(JsonKey {
-                    object_id: frame.object_id,
-                    raw_start: key.raw_start,
-                    raw_end: key.raw_end,
-                    content_start: key.content_start,
-                    content_end: key.content_end,
-                    digest: key.digest,
-                })?;
-                let frame = self.active_frame_mut()?;
+                ctx.poll()?;
+                self.keys.try_push(
+                    ctx,
+                    JsonKey {
+                        object_id: frame.object_id,
+                        raw_start: key.raw_start,
+                        raw_end: key.raw_end,
+                        content_start: key.content_start,
+                        content_end: key.content_end,
+                        digest: key.digest,
+                    },
+                )?;
+                let frame = self.active_frame_mut(ctx)?;
                 frame.member = member;
                 frame.member_key_start = key.raw_start;
                 frame.member_key_end = key.raw_end;
@@ -463,15 +475,16 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
             }
             FrameState::ObjectColon => match self.peek() {
                 Some(b':') => {
-                    self.count_token(work)?;
-                    self.consume(work, 1)?;
-                    self.set_frame_state(FrameState::ObjectValue)
+                    self.count_token(work, ctx)?;
+                    self.consume(work, 1, ctx)?;
+                    self.set_frame_state(FrameState::ObjectValue, ctx)
                 }
                 Some(_) => self.syntax_error_current(
                     work,
                     "json-object",
                     self.cursor,
                     "glTF JSON object key is missing a colon",
+                    ctx,
                 ),
                 None => self.syntax_error(
                     work,
@@ -479,6 +492,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                     self.cursor,
                     0,
                     "glTF JSON object key is missing a colon",
+                    ctx,
                 ),
             },
             FrameState::ObjectValue => {
@@ -489,23 +503,25 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                         self.cursor,
                         0,
                         "glTF JSON object key is missing a value",
+                        ctx,
                     );
                 }
-                self.set_frame_state(FrameState::ObjectCommaOrEnd)?;
-                self.scan_value(work, Some(frame))
+                self.set_frame_state(FrameState::ObjectCommaOrEnd, ctx)?;
+                self.scan_value(work, Some(frame), ctx)
             }
             FrameState::ObjectCommaOrEnd => match self.peek() {
                 Some(b',') => {
-                    self.count_token(work)?;
-                    self.consume(work, 1)?;
-                    self.set_frame_state(FrameState::ObjectKey)
+                    self.count_token(work, ctx)?;
+                    self.consume(work, 1, ctx)?;
+                    self.set_frame_state(FrameState::ObjectKey, ctx)
                 }
-                Some(b'}') => self.close_container(work, b'}'),
+                Some(b'}') => self.close_container(work, b'}', ctx),
                 Some(_) => self.syntax_error_current(
                     work,
                     "json-object",
                     self.cursor,
                     "glTF JSON object expects a comma or closing brace",
+                    ctx,
                 ),
                 None => self.syntax_error(
                     work,
@@ -513,6 +529,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                     self.cursor,
                     0,
                     "glTF JSON object is not closed",
+                    ctx,
                 ),
             },
         }
@@ -520,11 +537,12 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
 
     fn scan_value(
         &mut self,
-        work: &mut ImportWorkScope<'_, 'session, 1>,
+        work: &mut ImportWorkScope<'_, 1>,
         parent: Option<JsonFrame>,
+        ctx: &mut ParseExecution<'_, 'scope>,
     ) -> ScanResult<()> {
         let raw_start = self.cursor;
-        let source = self.value_source(parent)?;
+        let source = self.value_source(parent, ctx)?;
         let kind = match self.peek() {
             Some(b'{') => ValueKind::Object,
             Some(b'[') => ValueKind::Array,
@@ -534,17 +552,20 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
             _ => ValueKind::Number,
         };
         let value_id = self.index.values.len();
-        self.index.values.try_push(IndexedValue {
-            kind,
-            start: raw_start,
-            end: raw_start,
-            key_start: parent.map_or(0, |frame| frame.member_key_start),
-            key_end: parent.map_or(0, |frame| frame.member_key_end),
-            first_child: None,
-            last_child: None,
-            next_sibling: None,
-            child_count: 0,
-        })?;
+        self.index.values.try_push(
+            ctx,
+            IndexedValue {
+                kind,
+                start: raw_start,
+                end: raw_start,
+                key_start: parent.map_or(0, |frame| frame.member_key_start),
+                key_end: parent.map_or(0, |frame| frame.member_key_end),
+                first_child: None,
+                last_child: None,
+                next_sibling: None,
+                child_count: 0,
+            },
+        )?;
         if let Some(parent) = parent {
             let previous = self.index.values.as_slice()[parent.value_id].last_child;
             if let Some(previous) = previous {
@@ -557,24 +578,37 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
         }
         match self.peek() {
             Some(b'{') => {
-                return self.open_container(work, FrameState::ObjectKeyOrEnd, source, value_id);
+                return self.open_container(
+                    work,
+                    FrameState::ObjectKeyOrEnd,
+                    source,
+                    value_id,
+                    ctx,
+                );
             }
             Some(b'[') => {
-                return self.open_container(work, FrameState::ArrayValueOrEnd, source, value_id);
+                return self.open_container(
+                    work,
+                    FrameState::ArrayValueOrEnd,
+                    source,
+                    value_id,
+                    ctx,
+                );
             }
-            Some(b'"') => self.scan_string(work, false).map(|_| ()),
-            Some(b't') => self.scan_literal(work, b"true"),
-            Some(b'f') => self.scan_literal(work, b"false"),
-            Some(b'n') => self.scan_literal(work, b"null"),
-            Some(b'-' | b'0'..=b'9') => self.scan_number(work),
+            Some(b'"') => self.scan_string(work, false, ctx).map(|_| ()),
+            Some(b't') => self.scan_literal(work, b"true", ctx),
+            Some(b'f') => self.scan_literal(work, b"false", ctx),
+            Some(b'n') => self.scan_literal(work, b"null", ctx),
+            Some(b'-' | b'0'..=b'9') => self.scan_number(work, ctx),
             Some(byte) if byte >= 0x80 => {
-                let length = self.valid_utf8_scalar_width(work)?;
+                let length = self.valid_utf8_scalar_width(work, ctx)?;
                 self.syntax_error(
                     work,
                     "json-document",
                     self.cursor,
                     length,
                     "glTF JSON value begins with an unexpected Unicode scalar",
+                    ctx,
                 )
             }
             Some(_) => self.syntax_error(
@@ -583,6 +617,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                 self.cursor,
                 1,
                 "glTF JSON value begins with an unexpected byte",
+                ctx,
             ),
             None => self.syntax_error(
                 work,
@@ -590,20 +625,28 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                 self.cursor,
                 0,
                 "glTF JSON is missing a value",
+                ctx,
             ),
         }?;
         self.index.values.as_mut_slice()[value_id].end = self.cursor;
-        self.finish_source_range(source, raw_start)
+        self.finish_source_range(source, raw_start, ctx)
     }
 
-    fn value_source(&mut self, parent: Option<JsonFrame>) -> ScanResult<SourceContext> {
+    fn value_source(
+        &mut self,
+        parent: Option<JsonFrame>,
+        ctx: &mut ParseExecution<'_, 'scope>,
+    ) -> ScanResult<SourceContext> {
         let first = self.peek();
         match parent {
-            None if first == Some(b'{') => self.begin_source_entity(SourceEntityId {
-                kind: SourceEntityKind::Document,
-                parent_index: None,
-                source_index: 0,
-            }),
+            None if first == Some(b'{') => self.begin_source_entity(
+                SourceEntityId {
+                    kind: SourceEntityKind::Document,
+                    parent_index: None,
+                    source_index: 0,
+                },
+                ctx,
+            ),
             Some(
                 frame @ JsonFrame {
                     source: SourceContext::Entity { id, .. },
@@ -614,7 +657,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                     frame.member,
                     SourceMember::Extensions | SourceMember::Extras
                 ) {
-                    return self.begin_source_payload(id, SourcePayloadSite::Entity, frame);
+                    return self.begin_source_payload(id, SourcePayloadSite::Entity, frame, ctx);
                 }
                 if id.kind == SourceEntityKind::Light
                     && !matches!(
@@ -627,7 +670,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                             | SourceMember::Spot
                     )
                 {
-                    return self.begin_source_payload(id, SourcePayloadSite::Entity, frame);
+                    return self.begin_source_payload(id, SourcePayloadSite::Entity, frame, ctx);
                 }
                 if first == Some(b'[') {
                     return Ok(source_entity_array(id, frame.member)
@@ -670,7 +713,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                     SourceMember::Extensions | SourceMember::Extras
                 ) || unsupported
                 {
-                    return self.begin_source_payload(owner, site, frame);
+                    return self.begin_source_payload(owner, site, frame, ctx);
                 }
                 Ok(source_property(owner, site, frame.member, first))
             }
@@ -679,7 +722,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                     source: SourceContext::Extensions { owner, site, .. },
                     ..
                 },
-            ) => self.begin_source_payload(owner, site, frame),
+            ) => self.begin_source_payload(owner, site, frame, ctx),
             Some(
                 frame @ JsonFrame {
                     source: SourceContext::ExtensionProperty { owner, site, .. },
@@ -737,7 +780,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                     SourceMember::Extras | SourceMember::Extensions
                 ) || !supported
                 {
-                    self.begin_source_payload(owner, site, frame)
+                    self.begin_source_payload(owner, site, frame, ctx)
                 } else {
                     Ok(source_property(owner, site, frame.member, first))
                 }
@@ -746,24 +789,35 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                 source: SourceContext::EntityArray { kind, parent_index },
                 next_ordinal,
                 ..
-            }) if first == Some(b'{') => self.begin_source_entity(SourceEntityId {
-                kind,
-                parent_index,
-                source_index: next_ordinal,
-            }),
+            }) if first == Some(b'{') => self.begin_source_entity(
+                SourceEntityId {
+                    kind,
+                    parent_index,
+                    source_index: next_ordinal,
+                },
+                ctx,
+            ),
             _ => Ok(SourceContext::Other),
         }
     }
 
-    fn begin_source_entity(&mut self, id: SourceEntityId) -> ScanResult<SourceContext> {
-        let start = self.source_range(self.cursor)?;
-        let map_index = self.source_map.begin_entity(id, start)?;
+    fn begin_source_entity(
+        &mut self,
+        id: SourceEntityId,
+        ctx: &mut ParseExecution<'_, 'scope>,
+    ) -> ScanResult<SourceContext> {
+        let start = self.source_range(self.cursor, ctx)?;
+        let map_index = self.source_map.begin_entity(ctx, id, start)?;
         Ok(SourceContext::Entity { id, map_index })
     }
 
-    fn source_range(&self, raw_start: usize) -> ParseResult<SourceRange> {
+    fn source_range(
+        &self,
+        raw_start: usize,
+        ctx: &mut ParseExecution<'_, 'scope>,
+    ) -> ParseResult<SourceRange> {
         SourceRange::from_json_offsets(self.raw_base, raw_start, self.cursor)
-            .ok_or_else(|| self.ctx.allocation_failure("gltf-source-byte-range"))
+            .ok_or_else(|| ctx.allocation_failure("gltf-source-byte-range"))
     }
 
     fn begin_source_payload(
@@ -771,6 +825,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
         owner: SourceEntityId,
         site: SourcePayloadSite,
         frame: JsonFrame,
+        ctx: &mut ParseExecution<'_, 'scope>,
     ) -> ScanResult<SourceContext> {
         let kind = if matches!(frame.source, SourceContext::Extensions { .. }) {
             let extension = match frame.member {
@@ -797,15 +852,18 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
             frame.member_key_start,
             frame.member_key_end,
         )
-        .ok_or_else(|| self.ctx.allocation_failure("gltf-source-key-range"))?;
-        let payload_index = self.source_map.begin_payload(SourcePayload {
-            owner,
-            site,
-            kind,
-            key_range,
-            member_range: self.source_range(frame.member_key_start)?,
-            value_range: self.source_range(self.cursor)?,
-        })?;
+        .ok_or_else(|| ctx.allocation_failure("gltf-source-key-range"))?;
+        let payload_index = {
+            let argument_0 = SourcePayload {
+                owner,
+                site,
+                kind,
+                key_range,
+                member_range: self.source_range(frame.member_key_start, ctx)?,
+                value_range: self.source_range(self.cursor, ctx)?,
+            };
+            self.source_map.begin_payload(ctx, argument_0)
+        }?;
         if self.peek() != Some(b'{') {
             return Ok(SourceContext::Payload { payload_index });
         }
@@ -906,12 +964,17 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
         })
     }
 
-    fn finish_source_range(&mut self, source: SourceContext, raw_start: usize) -> ScanResult<()> {
+    fn finish_source_range(
+        &mut self,
+        source: SourceContext,
+        raw_start: usize,
+        ctx: &mut ParseExecution<'_, 'scope>,
+    ) -> ScanResult<()> {
         match source {
             SourceContext::Entity { map_index, .. } => {
-                let range = self.source_range(raw_start)?;
+                let range = self.source_range(raw_start, ctx)?;
                 let entity = self.source_map.entity_mut(map_index).ok_or_else(|| {
-                    self.ctx.format_failure(GltfFailure::internal(
+                    ctx.format_failure(GltfFailure::internal(
                         "JSON source range refers to a missing glTF entity",
                     ))
                 })?;
@@ -920,17 +983,17 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
             SourceContext::Payload { payload_index }
             | SourceContext::Extensions { payload_index, .. }
             | SourceContext::ExtensionProperty { payload_index, .. } => {
-                let range = self.source_range(raw_start)?;
-                let raw_end = self.absolute_offset(self.cursor)?;
+                let range = self.source_range(raw_start, ctx)?;
+                let raw_end = self.absolute_offset(self.cursor, ctx)?;
                 let payload = self.source_map.payload_mut(payload_index).ok_or_else(|| {
-                    self.ctx.format_failure(GltfFailure::internal(
+                    ctx.format_failure(GltfFailure::internal(
                         "JSON source range refers to a missing glTF payload",
                     ))
                 })?;
                 payload.value_range = range;
                 payload.member_range.byte_length = raw_end
                     .checked_sub(payload.member_range.byte_offset)
-                    .ok_or_else(|| self.ctx.allocation_failure("gltf-source-member-range"))?;
+                    .ok_or_else(|| ctx.allocation_failure("gltf-source-member-range"))?;
             }
             SourceContext::Other
             | SourceContext::EntityArray { .. }
@@ -941,36 +1004,40 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
 
     fn open_container(
         &mut self,
-        work: &mut ImportWorkScope<'_, 'session, 1>,
+        work: &mut ImportWorkScope<'_, 1>,
         state: FrameState,
         source: SourceContext,
         value_id: ValueId,
+        ctx: &mut ParseExecution<'_, 'scope>,
     ) -> ScanResult<()> {
         let depth = self
             .frames
             .len()
             .checked_add(1)
-            .ok_or_else(|| self.ctx.allocation_failure("gltf-json-nesting-depth"))?;
+            .ok_or_else(|| ctx.allocation_failure("gltf-json-nesting-depth"))?;
         self.enforce_usize_limit(
             work,
             "gltf-json-nesting-depth",
             depth,
             MAX_JSON_NESTING_DEPTH,
+            ctx,
         )?;
-        self.count_token(work)?;
+        self.count_token(work, ctx)?;
 
         let object_id = if state == FrameState::ObjectKeyOrEnd {
-            let objects = self.increment_counter(self.stats.objects, "gltf-json-objects")?;
+            let objects = self.increment_counter(self.stats.objects, "gltf-json-objects", ctx)?;
             self.stats.objects = objects;
             objects
         } else {
-            self.stats.arrays = self.increment_counter(self.stats.arrays, "gltf-json-arrays")?;
+            self.stats.arrays =
+                self.increment_counter(self.stats.arrays, "gltf-json-arrays", ctx)?;
             0
         };
-        let containers = self.increment_counter(self.stats.containers, "gltf-json-containers")?;
-        let record_limit = to_u64(self.ctx.limits().max_records);
+        let containers =
+            self.increment_counter(self.stats.containers, "gltf-json-containers", ctx)?;
+        let record_limit = to_u64(ctx.limits().max_records);
         if containers > record_limit {
-            self.flush(work)?;
+            self.flush(work, ctx)?;
             return Err(ScanAbort::LedgerLimit {
                 class: ImportWorkClass::Records,
                 attempted: containers,
@@ -978,51 +1045,55 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
         }
         self.stats.containers = containers;
 
-        work.poll()?;
-        self.frames.try_push(JsonFrame {
-            value_id,
-            state,
-            object_id,
-            raw_start: self.cursor,
-            next_ordinal: 0,
-            member: SourceMember::Other,
-            member_key_start: 0,
-            member_key_end: 0,
-            source,
-        })?;
-        self.consume(work, 1)
+        ctx.poll()?;
+        self.frames.try_push(
+            ctx,
+            JsonFrame {
+                value_id,
+                state,
+                object_id,
+                raw_start: self.cursor,
+                next_ordinal: 0,
+                member: SourceMember::Other,
+                member_key_start: 0,
+                member_key_end: 0,
+                source,
+            },
+        )?;
+        self.consume(work, 1, ctx)
     }
 
     fn close_container(
         &mut self,
-        work: &mut ImportWorkScope<'_, 'session, 1>,
+        work: &mut ImportWorkScope<'_, 1>,
         expected: u8,
+        ctx: &mut ParseExecution<'_, 'scope>,
     ) -> ScanResult<()> {
         if self.peek() != Some(expected) {
-            return Err(self
-                .ctx
+            let byte_offset = self.absolute_offset(self.cursor, ctx)?;
+            return Err(ctx
                 .format_failure(GltfFailure::invalid_json(
                     "json-syntax-map",
-                    self.absolute_offset(self.cursor)?,
+                    byte_offset,
                     0,
                     "glTF JSON container close state is inconsistent",
                 ))
                 .into());
         }
-        self.count_token(work)?;
-        self.consume(work, 1)?;
+        self.count_token(work, ctx)?;
+        self.consume(work, 1, ctx)?;
         let Some(closed) = self.frames.pop() else {
-            return Err(self
-                .ctx
+            let byte_offset = self.absolute_offset(self.cursor, ctx)?;
+            return Err(ctx
                 .format_failure(GltfFailure::invalid_json(
                     "json-syntax-map",
-                    self.absolute_offset(self.cursor)?,
+                    byte_offset,
                     0,
                     "glTF JSON container stack underflowed",
                 ))
                 .into());
         };
-        self.finish_source_range(closed.source, closed.raw_start)?;
+        self.finish_source_range(closed.source, closed.raw_start, ctx)?;
         self.index.values.as_mut_slice()[closed.value_id].end = self.cursor;
         if self.frames.is_empty() {
             self.root_end = Some(self.cursor);
@@ -1032,13 +1103,15 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
 
     fn scan_string(
         &mut self,
-        work: &mut ImportWorkScope<'_, 'session, 1>,
+        work: &mut ImportWorkScope<'_, 1>,
         hash_key: bool,
+        ctx: &mut ParseExecution<'_, 'scope>,
     ) -> ScanResult<ScannedString> {
-        self.count_token(work)?;
-        self.stats.strings = self.increment_counter(self.stats.strings, "gltf-json-strings")?;
+        self.count_token(work, ctx)?;
+        self.stats.strings =
+            self.increment_counter(self.stats.strings, "gltf-json-strings", ctx)?;
         let raw_start = self.cursor;
-        self.consume(work, 1)?;
+        self.consume(work, 1, ctx)?;
         let content_start = self.cursor;
         let mut hasher = hash_key.then(Sha256::new);
 
@@ -1050,12 +1123,13 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                     raw_start,
                     self.cursor - raw_start,
                     "glTF JSON string is not closed",
+                    ctx,
                 );
             };
             match byte {
                 b'"' => {
                     let content_end = self.cursor;
-                    self.consume(work, 1)?;
+                    self.consume(work, 1, ctx)?;
                     let digest = hasher.map_or([0; 32], |hasher| hasher.finalize().into());
                     return Ok(ScannedString {
                         raw_start,
@@ -1072,11 +1146,12 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                         self.cursor,
                         1,
                         "glTF JSON string contains an unescaped control character",
+                        ctx,
                     );
                 }
                 b'\\' => {
                     let escape_start = self.cursor;
-                    self.consume_string_bytes(work, content_start, 1)?;
+                    self.consume_string_bytes(work, content_start, 1, ctx)?;
                     let Some(escape) = self.peek() else {
                         return self.syntax_error(
                             work,
@@ -1084,15 +1159,16 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                             escape_start,
                             self.cursor - escape_start,
                             "glTF JSON string ends inside an escape",
+                            ctx,
                         );
                     };
                     match escape {
                         b'"' | b'\\' | b'/' => {
-                            self.consume_string_bytes(work, content_start, 1)?;
+                            self.consume_string_bytes(work, content_start, 1, ctx)?;
                             hash_scalar(&mut hasher, u32::from(escape));
                         }
                         b'b' | b'f' | b'n' | b'r' | b't' => {
-                            self.consume_string_bytes(work, content_start, 1)?;
+                            self.consume_string_bytes(work, content_start, 1, ctx)?;
                             let scalar = match escape {
                                 b'b' => 0x08,
                                 b'f' => 0x0c,
@@ -1103,8 +1179,9 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                             hash_scalar(&mut hasher, scalar);
                         }
                         b'u' => {
-                            self.consume_string_bytes(work, content_start, 1)?;
-                            let first = self.scan_hex_quad(work, content_start, escape_start)?;
+                            self.consume_string_bytes(work, content_start, 1, ctx)?;
+                            let first =
+                                self.scan_hex_quad(work, content_start, escape_start, ctx)?;
                             let scalar = if (0xd800..=0xdbff).contains(&first) {
                                 if self.peek() != Some(b'\\')
                                     || self.bytes.get(self.cursor + 1) != Some(&b'u')
@@ -1115,11 +1192,13 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                                         escape_start,
                                         self.cursor - escape_start,
                                         "glTF JSON high surrogate is not paired",
+                                        ctx,
                                     );
                                 }
                                 let low_start = self.cursor;
-                                self.consume_string_bytes(work, content_start, 2)?;
-                                let low = self.scan_hex_quad(work, content_start, low_start)?;
+                                self.consume_string_bytes(work, content_start, 2, ctx)?;
+                                let low =
+                                    self.scan_hex_quad(work, content_start, low_start, ctx)?;
                                 if !(0xdc00..=0xdfff).contains(&low) {
                                     return self.syntax_error(
                                         work,
@@ -1127,6 +1206,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                                         low_start,
                                         self.cursor - low_start,
                                         "glTF JSON high surrogate has an invalid low surrogate",
+                                        ctx,
                                     );
                                 }
                                 0x1_0000
@@ -1139,6 +1219,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                                     escape_start,
                                     self.cursor - escape_start,
                                     "glTF JSON contains an unpaired low surrogate",
+                                    ctx,
                                 );
                             } else {
                                 u32::from(first)
@@ -1151,23 +1232,24 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                                 "json-string",
                                 self.cursor,
                                 "glTF JSON string contains an invalid escape",
+                                ctx,
                             );
                         }
                     }
                 }
                 0x20..=0x7f => {
-                    self.consume_string_bytes(work, content_start, 1)?;
+                    self.consume_string_bytes(work, content_start, 1, ctx)?;
                     if let Some(hasher) = hasher.as_mut() {
                         hasher.update([byte]);
                     }
                 }
                 _ => {
-                    let width = self.valid_utf8_scalar_width(work)?;
-                    self.enforce_string_bytes(work, content_start, width)?;
+                    let width = self.valid_utf8_scalar_width(work, ctx)?;
+                    self.enforce_string_bytes(work, content_start, width, ctx)?;
                     if let Some(hasher) = hasher.as_mut() {
                         hasher.update(&self.bytes[self.cursor..self.cursor + width]);
                     }
-                    self.consume(work, width)?;
+                    self.consume(work, width, ctx)?;
                 }
             }
         }
@@ -1175,9 +1257,10 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
 
     fn scan_hex_quad(
         &mut self,
-        work: &mut ImportWorkScope<'_, 'session, 1>,
+        work: &mut ImportWorkScope<'_, 1>,
         content_start: usize,
         escape_start: usize,
+        ctx: &mut ParseExecution<'_, 'scope>,
     ) -> ScanResult<u16> {
         let mut value = 0_u16;
         for _ in 0..4 {
@@ -1188,6 +1271,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                     escape_start,
                     self.cursor - escape_start,
                     "glTF JSON Unicode escape is truncated",
+                    ctx,
                 );
             };
             let Some(digit) = hex_value(byte) else {
@@ -1196,25 +1280,31 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                     "json-string",
                     self.cursor,
                     "glTF JSON Unicode escape contains a non-hex digit",
+                    ctx,
                 );
             };
-            self.consume_string_bytes(work, content_start, 1)?;
+            self.consume_string_bytes(work, content_start, 1, ctx)?;
             value = (value << 4) | u16::from(digit);
         }
         Ok(value)
     }
 
-    fn scan_number(&mut self, work: &mut ImportWorkScope<'_, 'session, 1>) -> ScanResult<()> {
-        self.count_token(work)?;
-        self.stats.numbers = self.increment_counter(self.stats.numbers, "gltf-json-numbers")?;
+    fn scan_number(
+        &mut self,
+        work: &mut ImportWorkScope<'_, 1>,
+        ctx: &mut ParseExecution<'_, 'scope>,
+    ) -> ScanResult<()> {
+        self.count_token(work, ctx)?;
+        self.stats.numbers =
+            self.increment_counter(self.stats.numbers, "gltf-json-numbers", ctx)?;
         let start = self.cursor;
 
         if self.peek() == Some(b'-') {
-            self.consume_number_byte(work, start)?;
+            self.consume_number_byte(work, start, ctx)?;
         }
         match self.peek() {
             Some(b'0') => {
-                self.consume_number_byte(work, start)?;
+                self.consume_number_byte(work, start, ctx)?;
                 if self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
                     return self.syntax_error(
                         work,
@@ -1222,12 +1312,13 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                         self.cursor,
                         1,
                         "glTF JSON number has a leading zero",
+                        ctx,
                     );
                 }
             }
             Some(b'1'..=b'9') => {
                 while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
-                    self.consume_number_byte(work, start)?;
+                    self.consume_number_byte(work, start, ctx)?;
                 }
             }
             Some(_) => {
@@ -1236,6 +1327,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                     "json-number",
                     self.cursor,
                     "glTF JSON number is missing an integer digit",
+                    ctx,
                 );
             }
             None => {
@@ -1245,12 +1337,13 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                     self.cursor,
                     0,
                     "glTF JSON number is missing an integer digit",
+                    ctx,
                 );
             }
         }
 
         if self.peek() == Some(b'.') {
-            self.consume_number_byte(work, start)?;
+            self.consume_number_byte(work, start, ctx)?;
             if !self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
                 return self.syntax_error(
                     work,
@@ -1258,17 +1351,18 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                     self.cursor,
                     usize::from(self.cursor < self.bytes.len()),
                     "glTF JSON number fraction is missing a digit",
+                    ctx,
                 );
             }
             while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
-                self.consume_number_byte(work, start)?;
+                self.consume_number_byte(work, start, ctx)?;
             }
         }
 
         if self.peek().is_some_and(|byte| matches!(byte, b'e' | b'E')) {
-            self.consume_number_byte(work, start)?;
+            self.consume_number_byte(work, start, ctx)?;
             if self.peek().is_some_and(|byte| matches!(byte, b'+' | b'-')) {
-                self.consume_number_byte(work, start)?;
+                self.consume_number_byte(work, start, ctx)?;
             }
             if !self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
                 return self.syntax_error(
@@ -1277,10 +1371,11 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                     self.cursor,
                     usize::from(self.cursor < self.bytes.len()),
                     "glTF JSON number exponent is missing a digit",
+                    ctx,
                 );
             }
             while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
-                self.consume_number_byte(work, start)?;
+                self.consume_number_byte(work, start, ctx)?;
             }
         }
 
@@ -1290,6 +1385,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                 "json-number",
                 self.cursor,
                 "glTF JSON number has an invalid terminator",
+                ctx,
             );
         }
         Ok(())
@@ -1297,31 +1393,34 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
 
     fn scan_literal(
         &mut self,
-        work: &mut ImportWorkScope<'_, 'session, 1>,
+        work: &mut ImportWorkScope<'_, 1>,
         literal: &[u8],
+        ctx: &mut ParseExecution<'_, 'scope>,
     ) -> ScanResult<()> {
-        self.count_token(work)?;
+        self.count_token(work, ctx)?;
         let start = self.cursor;
         for expected in literal {
             let attempted = self
                 .cursor
                 .checked_add(1)
                 .and_then(|end| end.checked_sub(start))
-                .ok_or_else(|| self.ctx.allocation_failure("gltf-json-literal-bytes"))?;
+                .ok_or_else(|| ctx.allocation_failure("gltf-json-literal-bytes"))?;
             self.enforce_usize_limit(
                 work,
                 "gltf-json-literal-bytes",
                 attempted,
-                self.ctx.limits().max_token_bytes,
+                ctx.limits().max_token_bytes,
+                ctx,
             )?;
             match self.peek() {
-                Some(actual) if actual == *expected => self.consume(work, 1)?,
+                Some(actual) if actual == *expected => self.consume(work, 1, ctx)?,
                 Some(_) => {
                     return self.syntax_error_current(
                         work,
                         "json-literal",
                         self.cursor,
                         "glTF JSON literal is malformed",
+                        ctx,
                     );
                 }
                 None => {
@@ -1331,6 +1430,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                         start,
                         self.cursor - start,
                         "glTF JSON literal is truncated",
+                        ctx,
                     );
                 }
             }
@@ -1341,17 +1441,22 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                 "json-literal",
                 self.cursor,
                 "glTF JSON literal has an invalid terminator",
+                ctx,
             );
         }
         Ok(())
     }
 
-    fn scan_trailing(&mut self, work: &mut ImportWorkScope<'_, 'session, 1>) -> ScanResult<()> {
-        self.skip_whitespace(work)?;
+    fn scan_trailing(
+        &mut self,
+        work: &mut ImportWorkScope<'_, 1>,
+        ctx: &mut ParseExecution<'_, 'scope>,
+    ) -> ScanResult<()> {
+        self.skip_whitespace(work, ctx)?;
         if self.cursor == self.bytes.len() {
             return Ok(());
         }
-        let length = self.current_scalar_length(work)?;
+        let length = self.current_scalar_length(work, ctx)?;
         let (subject, reason) = if self.is_glb {
             (
                 "json-padding",
@@ -1363,24 +1468,32 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                 "glTF JSON contains trailing content after the root value",
             )
         };
-        self.syntax_error(work, subject, self.cursor, length, reason)
+        self.syntax_error(work, subject, self.cursor, length, reason, ctx)
     }
 
-    fn skip_whitespace(&mut self, work: &mut ImportWorkScope<'_, 'session, 1>) -> ScanResult<()> {
+    fn skip_whitespace(
+        &mut self,
+        work: &mut ImportWorkScope<'_, 1>,
+        ctx: &mut ParseExecution<'_, 'scope>,
+    ) -> ScanResult<()> {
         while self.peek().is_some_and(is_json_whitespace) {
-            self.consume(work, 1)?;
+            self.consume(work, 1, ctx)?;
         }
         Ok(())
     }
 
-    fn count_token(&mut self, work: &mut ImportWorkScope<'_, 'session, 1>) -> ScanResult<()> {
+    fn count_token(
+        &mut self,
+        work: &mut ImportWorkScope<'_, 1>,
+        ctx: &mut ParseExecution<'_, 'scope>,
+    ) -> ScanResult<()> {
         let attempted = self
             .stats
             .tokens
             .checked_add(1)
-            .ok_or_else(|| self.ctx.allocation_failure("gltf-json-token-count"))?;
-        if attempted > self.ctx.limits().max_tokens {
-            self.flush(work)?;
+            .ok_or_else(|| ctx.allocation_failure("gltf-json-token-count"))?;
+        if attempted > ctx.limits().max_tokens {
+            self.flush(work, ctx)?;
             return Err(ScanAbort::LedgerLimit {
                 class: ImportWorkClass::Tokens,
                 attempted,
@@ -1390,90 +1503,104 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
         Ok(())
     }
 
-    fn increment_counter(&self, current: u64, resource: &'static str) -> ScanResult<u64> {
+    fn increment_counter(
+        &self,
+        current: u64,
+        resource: &'static str,
+        ctx: &mut ParseExecution<'_, 'scope>,
+    ) -> ScanResult<u64> {
         let attempted = current
             .checked_add(1)
-            .ok_or_else(|| self.ctx.allocation_failure(resource))?;
+            .ok_or_else(|| ctx.allocation_failure(resource))?;
         Ok(attempted)
     }
 
     fn consume_string_bytes(
         &mut self,
-        work: &mut ImportWorkScope<'_, 'session, 1>,
+        work: &mut ImportWorkScope<'_, 1>,
         content_start: usize,
         amount: usize,
+        ctx: &mut ParseExecution<'_, 'scope>,
     ) -> ScanResult<()> {
-        self.enforce_string_bytes(work, content_start, amount)?;
-        self.consume(work, amount)
+        self.enforce_string_bytes(work, content_start, amount, ctx)?;
+        self.consume(work, amount, ctx)
     }
 
     fn enforce_string_bytes(
         &mut self,
-        work: &mut ImportWorkScope<'_, 'session, 1>,
+        work: &mut ImportWorkScope<'_, 1>,
         content_start: usize,
         amount: usize,
+        ctx: &mut ParseExecution<'_, 'scope>,
     ) -> ScanResult<()> {
         let end = self
             .cursor
             .checked_add(amount)
-            .ok_or_else(|| self.ctx.allocation_failure("gltf-json-string-bytes"))?;
+            .ok_or_else(|| ctx.allocation_failure("gltf-json-string-bytes"))?;
         let attempted = end
             .checked_sub(content_start)
-            .ok_or_else(|| self.ctx.allocation_failure("gltf-json-string-bytes"))?;
+            .ok_or_else(|| ctx.allocation_failure("gltf-json-string-bytes"))?;
         self.enforce_usize_limit(
             work,
             "gltf-json-string-bytes",
             attempted,
-            self.ctx.limits().max_token_bytes,
+            ctx.limits().max_token_bytes,
+            ctx,
         )
     }
 
     fn consume_number_byte(
         &mut self,
-        work: &mut ImportWorkScope<'_, 'session, 1>,
+        work: &mut ImportWorkScope<'_, 1>,
         start: usize,
+        ctx: &mut ParseExecution<'_, 'scope>,
     ) -> ScanResult<()> {
         let attempted = self
             .cursor
             .checked_add(1)
             .and_then(|end| end.checked_sub(start))
-            .ok_or_else(|| self.ctx.allocation_failure("gltf-json-number-bytes"))?;
+            .ok_or_else(|| ctx.allocation_failure("gltf-json-number-bytes"))?;
         self.enforce_usize_limit(
             work,
             "gltf-json-number-bytes",
             attempted,
-            self.ctx.limits().max_token_bytes,
+            ctx.limits().max_token_bytes,
+            ctx,
         )?;
-        self.consume(work, 1)
+        self.consume(work, 1, ctx)
     }
 
     fn enforce_usize_limit(
         &mut self,
-        work: &mut ImportWorkScope<'_, 'session, 1>,
+        work: &mut ImportWorkScope<'_, 1>,
         resource: &'static str,
         attempted: usize,
         limit: usize,
+        ctx: &mut ParseExecution<'_, 'scope>,
     ) -> ScanResult<()> {
         if attempted > limit {
-            self.flush(work)?;
-            return Err(self
-                .ctx
-                .resource_limit_exceeded(resource, to_u64(limit))
-                .into());
+            self.flush(work, ctx)?;
+            return Err(ctx.resource_limit_exceeded(resource, to_u64(limit)).into());
         }
         Ok(())
     }
 
-    fn set_frame_state(&mut self, state: FrameState) -> ScanResult<()> {
-        self.active_frame_mut()?.state = state;
+    fn set_frame_state(
+        &mut self,
+        state: FrameState,
+        ctx: &mut ParseExecution<'_, 'scope>,
+    ) -> ScanResult<()> {
+        self.active_frame_mut(ctx)?.state = state;
         Ok(())
     }
 
-    fn active_frame_mut(&mut self) -> ScanResult<&mut JsonFrame> {
-        let byte_offset = self.absolute_offset(self.cursor)?;
+    fn active_frame_mut(
+        &mut self,
+        ctx: &mut ParseExecution<'_, 'scope>,
+    ) -> ScanResult<&mut JsonFrame> {
+        let byte_offset = self.absolute_offset(self.cursor, ctx)?;
         let Some(frame) = self.frames.as_mut_slice().last_mut() else {
-            return Err(self
-                .ctx
+            return Err(ctx
                 .format_failure(GltfFailure::invalid_json(
                     "json-syntax-map",
                     byte_offset,
@@ -1487,10 +1614,11 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
 
     fn current_scalar_length(
         &mut self,
-        work: &mut ImportWorkScope<'_, 'session, 1>,
+        work: &mut ImportWorkScope<'_, 1>,
+        ctx: &mut ParseExecution<'_, 'scope>,
     ) -> ScanResult<usize> {
         match self.peek() {
-            Some(byte) if byte >= 0x80 => self.valid_utf8_scalar_width(work),
+            Some(byte) if byte >= 0x80 => self.valid_utf8_scalar_width(work, ctx),
             Some(_) => Ok(1),
             None => Ok(0),
         }
@@ -1498,7 +1626,8 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
 
     fn valid_utf8_scalar_width(
         &mut self,
-        work: &mut ImportWorkScope<'_, 'session, 1>,
+        work: &mut ImportWorkScope<'_, 1>,
+        ctx: &mut ParseExecution<'_, 'scope>,
     ) -> ScanResult<usize> {
         let lead = self.bytes[self.cursor];
         let width = match lead {
@@ -1511,23 +1640,25 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
         let encoded = &self.bytes[self.cursor..end];
         match std::str::from_utf8(encoded) {
             Ok(value) if value.chars().count() == 1 => Ok(width),
-            Ok(_) => Err(self
-                .ctx
-                .format_failure(GltfFailure::invalid_json(
-                    "json-syntax-map",
-                    self.absolute_offset(self.cursor)?,
-                    to_u64(encoded.len()),
-                    "glTF JSON UTF-8 scalar probe was ambiguous",
-                ))
-                .into()),
+            Ok(_) => {
+                let byte_offset = self.absolute_offset(self.cursor, ctx)?;
+                Err(ctx
+                    .format_failure(GltfFailure::invalid_json(
+                        "json-syntax-map",
+                        byte_offset,
+                        to_u64(encoded.len()),
+                        "glTF JSON UTF-8 scalar probe was ambiguous",
+                    ))
+                    .into())
+            }
             Err(source) => {
                 let byte_length = source.error_len().unwrap_or(encoded.len()).max(1);
-                self.flush(work)?;
-                Err(self
-                    .ctx
+                self.flush(work, ctx)?;
+                let byte_offset = self.absolute_offset(self.cursor, ctx)?;
+                Err(ctx
                     .format_failure(GltfFailure::invalid_utf8(
                         source,
-                        self.absolute_offset(self.cursor)?,
+                        byte_offset,
                         to_u64(byte_length),
                     ))
                     .into())
@@ -1537,20 +1668,21 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
 
     fn syntax_error<T>(
         &mut self,
-        work: &mut ImportWorkScope<'_, 'session, 1>,
+        work: &mut ImportWorkScope<'_, 1>,
         subject: &'static str,
         offset: usize,
         length: usize,
         reason: &'static str,
+        ctx: &mut ParseExecution<'_, 'scope>,
     ) -> ScanResult<T> {
         // UTF-8 conformance owns precedence over grammar errors anywhere in the admitted surface.
-        self.scan_remaining_utf8(work)?;
-        self.flush(work)?;
-        Err(self
-            .ctx
+        self.scan_remaining_utf8(work, ctx)?;
+        self.flush(work, ctx)?;
+        let byte_offset = self.absolute_offset(offset, ctx)?;
+        Err(ctx
             .format_failure(GltfFailure::invalid_json(
                 subject,
-                self.absolute_offset(offset)?,
+                byte_offset,
                 to_u64(length),
                 reason,
             ))
@@ -1559,18 +1691,20 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
 
     fn syntax_error_current<T>(
         &mut self,
-        work: &mut ImportWorkScope<'_, 'session, 1>,
+        work: &mut ImportWorkScope<'_, 1>,
         subject: &'static str,
         offset: usize,
         reason: &'static str,
+        ctx: &mut ParseExecution<'_, 'scope>,
     ) -> ScanResult<T> {
-        let length = self.current_scalar_length(work)?;
-        self.syntax_error(work, subject, offset, length, reason)
+        let length = self.current_scalar_length(work, ctx)?;
+        self.syntax_error(work, subject, offset, length, reason, ctx)
     }
 
     fn scan_remaining_utf8(
         &mut self,
-        work: &mut ImportWorkScope<'_, 'session, 1>,
+        work: &mut ImportWorkScope<'_, 1>,
+        ctx: &mut ParseExecution<'_, 'scope>,
     ) -> ScanResult<()> {
         while self.cursor < self.bytes.len() {
             let start = self.cursor;
@@ -1585,13 +1719,13 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
             let end = start.saturating_add(width).min(self.bytes.len());
             let encoded = &self.bytes[start..end];
             match std::str::from_utf8(encoded) {
-                Ok(value) if value.chars().count() == 1 => self.consume(work, width)?,
+                Ok(value) if value.chars().count() == 1 => self.consume(work, width, ctx)?,
                 Ok(_) => {
-                    return Err(self
-                        .ctx
+                    let byte_offset = self.absolute_offset(start, ctx)?;
+                    return Err(ctx
                         .format_failure(GltfFailure::invalid_json(
                             "json-syntax-map",
-                            self.absolute_offset(start)?,
+                            byte_offset,
                             to_u64(encoded.len()),
                             "glTF JSON UTF-8 scalar probe was ambiguous",
                         ))
@@ -1600,12 +1734,12 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                 Err(source) => {
                     let byte_length = source.error_len().unwrap_or(encoded.len()).max(1);
                     self.cursor = start;
-                    self.flush(work)?;
-                    return Err(self
-                        .ctx
+                    self.flush(work, ctx)?;
+                    let byte_offset = self.absolute_offset(start, ctx)?;
+                    return Err(ctx
                         .format_failure(GltfFailure::invalid_utf8(
                             source,
-                            self.absolute_offset(start)?,
+                            byte_offset,
                             to_u64(byte_length),
                         ))
                         .into());
@@ -1617,36 +1751,45 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
 
     fn consume(
         &mut self,
-        work: &mut ImportWorkScope<'_, 'session, 1>,
+        work: &mut ImportWorkScope<'_, 1>,
         amount: usize,
+        ctx: &mut ParseExecution<'_, 'scope>,
     ) -> ScanResult<()> {
         self.cursor = self
             .cursor
             .checked_add(amount)
             .filter(|end| *end <= self.bytes.len())
-            .ok_or_else(|| self.ctx.allocation_failure("gltf-json-scan-offset"))?;
+            .ok_or_else(|| ctx.allocation_failure("gltf-json-scan-offset"))?;
         if self.cursor - self.accounted_cursor >= SCAN_CHUNK_BYTES {
-            self.flush(work)?;
+            self.flush(work, ctx)?;
         }
         Ok(())
     }
 
-    fn flush(&mut self, work: &mut ImportWorkScope<'_, 'session, 1>) -> ScanResult<()> {
+    fn flush(
+        &mut self,
+        work: &mut ImportWorkScope<'_, 1>,
+        ctx: &mut ParseExecution<'_, 'scope>,
+    ) -> ScanResult<()> {
         let completed = self.cursor - self.accounted_cursor;
         if completed != 0 {
             work.complete([to_u64(completed)])?;
             self.accounted_cursor = self.cursor;
         }
-        Ok(work.poll()?)
+        Ok(ctx.poll()?)
     }
 
-    fn absolute_offset(&self, relative: usize) -> ParseResult<u64> {
+    fn absolute_offset(
+        &self,
+        relative: usize,
+        ctx: &mut ParseExecution<'_, 'scope>,
+    ) -> ParseResult<u64> {
         self.raw_base
             .checked_add(
                 u64::try_from(relative)
-                    .map_err(|_| self.ctx.allocation_failure("gltf-json-byte-offset"))?,
+                    .map_err(|_| ctx.allocation_failure("gltf-json-byte-offset"))?,
             )
-            .ok_or_else(|| self.ctx.allocation_failure("gltf-json-byte-offset"))
+            .ok_or_else(|| ctx.allocation_failure("gltf-json-byte-offset"))
     }
 
     fn peek(&self) -> Option<u8> {
@@ -1848,23 +1991,22 @@ fn source_entity_array(
     Some((kind, None))
 }
 
-fn validate_duplicate_keys(
-    ctx: &ParseScope<'_>,
+fn validate_duplicate_keys<'region>(
+    ctx: &mut ParseExecution<'region, '_>,
     bytes: &[u8],
     raw_base: u64,
     keys: &mut MeteredVec<'_, JsonKey>,
 ) -> ParseResult<()> {
     let sort_work = duplicate_sort_work(keys.len());
     if sort_work != 0 {
-        ctx.with_work(
-            ImportWorkClass::WorkUnits,
-            sort_work,
-            |work| -> ParseResult<()> {
+        ctx.with_work_group(
+            [(ImportWorkClass::WorkUnits, sort_work)],
+            |ctx, work| -> ParseResult<()> {
                 let mut comparisons = 0_u64;
                 keys.try_sort_unstable_by(|left, right| -> Result<Ordering, ParseFailure> {
                     comparisons = comparisons.saturating_add(1);
                     if comparisons.is_multiple_of(DUPLICATE_POLL_COMPARISONS) {
-                        work.poll()?;
+                        ctx.poll()?;
                     }
                     Ok(left
                         .object_id
@@ -1877,6 +2019,7 @@ fn validate_duplicate_keys(
         )?;
     }
 
+    let comparison_work = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
     let keys = keys.as_slice();
     let mut group_start = 0usize;
     while group_start < keys.len() {
@@ -1891,7 +2034,7 @@ fn validate_duplicate_keys(
 
         for left in group_start..group_end {
             for right in left + 1..group_end {
-                if decoded_keys_equal(ctx, bytes, &keys[left], &keys[right])? {
+                if decoded_keys_equal(ctx, &comparison_work, bytes, &keys[left], &keys[right])? {
                     let duplicate = keys[right];
                     let byte_offset = raw_base
                         .checked_add(to_u64(duplicate.raw_start))
@@ -1925,8 +2068,9 @@ fn duplicate_sort_work(key_count: usize) -> u64 {
     count.saturating_mul(levels.saturating_mul(4).saturating_add(4))
 }
 
-fn decoded_keys_equal(
-    ctx: &ParseScope<'_>,
+fn decoded_keys_equal<'region>(
+    ctx: &mut ParseExecution<'region, '_>,
+    comparison_work: &ImportWorkGroup<'region, 1>,
     bytes: &[u8],
     left: &JsonKey,
     right: &JsonKey,
@@ -1944,15 +2088,15 @@ fn decoded_keys_equal(
         .filter(|amount| *amount != 0)
         .unwrap_or(1);
     ctx.with_work(
-        ImportWorkClass::WorkUnits,
-        work_amount,
-        |work| -> ParseResult<bool> {
+        comparison_work,
+        [work_amount],
+        |ctx, work| -> ParseResult<bool> {
             let mut left = DecodedScalars::new(bytes, left.content_start, left.content_end);
             let mut right = DecodedScalars::new(bytes, right.content_start, right.content_end);
             let mut scalars = 0usize;
             let equal = loop {
                 if scalars.is_multiple_of(SCAN_CHUNK_BYTES) {
-                    work.poll()?;
+                    ctx.poll()?;
                 }
                 match (left.next_scalar(), right.next_scalar()) {
                     (Ok(Some(left)), Ok(Some(right))) if left == right => {
@@ -2094,10 +2238,10 @@ fn to_u64(value: usize) -> u64 {
 mod tests {
     use super::*;
     use baozi_import::{
-        DetectionOutcome, DetectionResult, DetectionScope, FormatDescriptor, FormatImporter,
+        DetectionOutcome, DetectionResult, DetectionScope, Format, FormatDescriptor,
         FormatSelection, ImportConfigOverlay, ImportOperationControl, ImportRequest,
         ImportRequestLayer, OptionCompileLimits, Probe, ReadConfidence, ReadHint,
-        RegistryBuildLimits, RegistryBuilder, SceneDraft, import_bytes,
+        RegistryBuildLimits, RegistryBuilder,
     };
     use baozi_io::AssetPath;
     use std::error::Error;
@@ -2107,14 +2251,26 @@ mod tests {
     };
 
     type TestResult = Result<(), Box<dyn Error>>;
-    type Inspect = fn(&ParseScope<'_>, &GltfSourceMap<'_>);
+    type Inspect = fn(&mut ParseExecution<'_, '_>, &GltfSourceMap<'_>);
 
     struct InspectAdmission {
         inspect: Inspect,
         inspected: Arc<AtomicBool>,
     }
 
-    impl FormatImporter for InspectAdmission {
+    impl Format for InspectAdmission {
+        type Options = baozi_import::NoFormatOptions;
+
+        fn compile_defaults(
+            &self,
+            scope: &mut baozi_import::RegistryBuildScope<'_>,
+        ) -> std::result::Result<
+            baozi_import::CompiledOptions<Self::Options>,
+            baozi_import::OptionCompileError,
+        > {
+            Self::Options::compile_defaults(scope)
+        }
+
         fn descriptor(&self) -> FormatDescriptor {
             crate::format_descriptor()
         }
@@ -2128,12 +2284,18 @@ mod tests {
             Ok(DetectionOutcome::Match(ReadConfidence::Certain))
         }
 
-        fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-            let map = GltfSourceMap::from_primary_for_test(scope)?;
-            (self.inspect)(scope, &map);
-            self.inspected.store(true, AtomicOrdering::SeqCst);
-            // The test stops at admission, before either backend decode or scene construction.
-            Err(scope.format_failure(GltfFailure::internal("source map inspection completed")))
+        fn parse(
+            &self,
+            _: &Self::Options,
+            context: &mut baozi_import::ParseContext<'_>,
+        ) -> ParseResult<()> {
+            context.with_execution(|scope| {
+                let map = GltfSourceMap::from_primary_for_test(scope)?;
+                (self.inspect)(scope, &map);
+                self.inspected.store(true, AtomicOrdering::SeqCst);
+                // The test stops at admission, before either backend decode or scene construction.
+                Err(scope.format_failure(GltfFailure::internal("source map inspection completed")))
+            })
         }
     }
 
@@ -2144,21 +2306,18 @@ mod tests {
             inspect,
             inspected: Arc::clone(&inspected),
         })?;
-        let request = registry
-            .freeze(RegistryBuildLimits::default())?
-            .compile_request(
-                &ImportRequest::from_layers(
-                    ImportRequestLayer::default(),
-                    ImportRequestLayer::new(ImportConfigOverlay::default().with_format_selection(
-                        FormatSelection::Forced(baozi_import::authoring::FormatId::new(
-                            crate::FORMAT_ID,
-                        )?),
-                    )),
-                ),
-                OptionCompileLimits::default(),
-            )?;
-        let result = import_bytes(
-            &request,
+        let request = registry.freeze(RegistryBuildLimits::default())?.plan(
+            &ImportRequest::from_layers(
+                ImportRequestLayer::default(),
+                ImportRequestLayer::new(ImportConfigOverlay::default().with_format_selection(
+                    FormatSelection::Forced(baozi_import::authoring::FormatId::new(
+                        crate::FORMAT_ID,
+                    )?),
+                )),
+            ),
+            OptionCompileLimits::default(),
+        )?;
+        let result = request.read_bytes(
             AssetPath::new("mapping.gltf")?,
             bytes,
             ImportOperationControl::default(),
@@ -2186,7 +2345,7 @@ mod tests {
         }
     }
 
-    fn assert_raw(scope: &ParseScope<'_>, range: SourceRange, expected: &str) {
+    fn assert_raw(scope: &mut ParseExecution<'_, '_>, range: SourceRange, expected: &str) {
         let raw = range.raw_range();
         let start = usize::try_from(raw.start).expect("fixture offset fits usize");
         let end = usize::try_from(raw.end).expect("fixture offset fits usize");
@@ -2212,7 +2371,7 @@ mod tests {
     #[test]
     fn raw_ranges_preserve_unicode_escaped_keys_and_glb_offsets() -> TestResult {
         let json = " \r\n{\"asset\":{\"version\":\"2.0\"},\"n\\u006fdes\":[{\"name\":\"包子🦀\",\"e\\u0078tras\": [\"原始\",{\"nodes\":[{}]}]}]}\n";
-        fn inspect(scope: &ParseScope<'_>, map: &GltfSourceMap<'_>) {
+        fn inspect(scope: &mut ParseExecution<'_, '_>, map: &GltfSourceMap<'_>) {
             let base = if scope.primary_bytes().starts_with(b"glTF") {
                 20
             } else {
@@ -2468,7 +2627,7 @@ mod tests {
                 {"extensions":{"KHR_materials_unlit" : [{"extras":false,"extensions":{"KHR_materials_unlit":{}}}]}}
             ]
         }"#;
-        fn inspect(scope: &ParseScope<'_>, map: &GltfSourceMap<'_>) {
+        fn inspect(scope: &mut ParseExecution<'_, '_>, map: &GltfSourceMap<'_>) {
             let expected = [
                 ("{}", None, None),
                 (r#"{"extras":null}"#, Some("null"), None),
@@ -2655,7 +2814,7 @@ mod tests {
                 }
             }]
         }"#;
-        fn inspect(scope: &ParseScope<'_>, map: &GltfSourceMap<'_>) {
+        fn inspect(scope: &mut ParseExecution<'_, '_>, map: &GltfSourceMap<'_>) {
             assert_eq!(map.entities().len(), 2);
             let payloads = map.payloads_for(id(SourceEntityKind::Material, None, 0));
             assert_eq!(payloads.len(), 5);
@@ -2901,7 +3060,7 @@ mod tests {
                 }
             }]
         }"#;
-        fn inspect(scope: &ParseScope<'_>, map: &GltfSourceMap<'_>) {
+        fn inspect(scope: &mut ParseExecution<'_, '_>, map: &GltfSourceMap<'_>) {
             use SourcePayloadSite as Site;
             assert_eq!(map.entities().len(), 2);
             assert!(map.get(id(SourceEntityKind::Material, None, 0)).is_none());
@@ -3028,7 +3187,7 @@ mod tests {
                 }
             }}
         ]}"#;
-        fn inspect(scope: &ParseScope<'_>, map: &GltfSourceMap<'_>) {
+        fn inspect(scope: &mut ParseExecution<'_, '_>, map: &GltfSourceMap<'_>) {
             assert_eq!(map.entities().len(), 14);
             assert_eq!(map.payloads().len(), 37);
             for (start, kind, name, array) in [
@@ -3122,7 +3281,7 @@ mod tests {
                 "sheenRoughnessTexture":{"index":4,"unexpected" : 8,"extensions":{"KHR_texture_transform":{"unexpected" : true}}}
             }
         }}]}"#;
-        fn inspect(scope: &ParseScope<'_>, map: &GltfSourceMap<'_>) {
+        fn inspect(scope: &mut ParseExecution<'_, '_>, map: &GltfSourceMap<'_>) {
             use SourcePayloadSite as Site;
             assert_eq!(map.entities().len(), 2);
             let payloads = map.payloads_for(id(SourceEntityKind::Material, None, 0));
@@ -3210,7 +3369,7 @@ mod tests {
                 }
             }]
         }"#;
-        fn inspect(scope: &ParseScope<'_>, map: &GltfSourceMap<'_>) {
+        fn inspect(scope: &mut ParseExecution<'_, '_>, map: &GltfSourceMap<'_>) {
             use SourceExtensionKind as Extension;
             use SourcePayloadSite as Site;
             let document = id(SourceEntityKind::Document, None, 0);
@@ -3422,7 +3581,7 @@ mod tests {
             "materials":[{"extensions":{"KHR_lights_punctual":{"lights":[{}]}}}],
             "extras":{"extensions":{"KHR_lights_punctual":{"lights":[{}]}}}
         }"#;
-        fn inspect(scope: &ParseScope<'_>, map: &GltfSourceMap<'_>) {
+        fn inspect(scope: &mut ParseExecution<'_, '_>, map: &GltfSourceMap<'_>) {
             let lights = map
                 .entities()
                 .iter()

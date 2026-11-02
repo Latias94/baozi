@@ -22,12 +22,17 @@ struct DepthFrame<'graph> {
 impl ResourceGraph {
     pub(super) fn plan_existing_target(
         &mut self,
-        host: ImportStoreHost<'_>,
+        exec: &mut ImportStoreExecution<'_>,
         target: usize,
         source: usize,
         target_depth: u64,
     ) -> Result<AccountedVec<DepthUpdate>, ResourceGraphError> {
-        charge_graph_work(host, 1)?;
+        exec.poll()
+            .map_err(|cause| ResourceGraphError::Scope(cause.into_scope_abort_cause()))?;
+        let group = exec
+            .bind_group([ImportDimension::ResourceGraphWork])
+            .map_err(|cause| ResourceGraphError::Scope(cause.into_scope_abort_cause()))?;
+        charge_bound_work(&group, 1)?;
         if target == source {
             return Err(ResourceGraphError::Cycle);
         }
@@ -41,7 +46,8 @@ impl ResourceGraph {
         if target_node.outgoing_count == 0 {
             let mut updates = AccountedVec::new();
             push_scratch(
-                host,
+                exec,
+                &group,
                 &mut updates,
                 DepthUpdate {
                     index: target,
@@ -62,9 +68,15 @@ impl ResourceGraph {
         let mut stack = AccountedVec::new();
         let mut postorder = AccountedVec::new();
         let first = enter(nodes, relations, target, epoch)?;
-        push_scratch(host, &mut stack, first, "resource-graph-depth-stack")?;
+        push_scratch(
+            exec,
+            &group,
+            &mut stack,
+            first,
+            "resource-graph-depth-stack",
+        )?;
         while let Some(frame) = stack.last_mut() {
-            charge_graph_work(host, 1)?;
+            charge_bound_graph_work(exec, &group, 1)?;
             match frame.outgoing.next() {
                 Some(Err(error)) => return Err(error),
                 Some(Ok(relation)) => {
@@ -85,13 +97,20 @@ impl ResourceGraph {
                         continue;
                     }
                     let child = enter(nodes, relations, child, epoch)?;
-                    push_scratch(host, &mut stack, child, "resource-graph-depth-stack")?;
+                    push_scratch(
+                        exec,
+                        &group,
+                        &mut stack,
+                        child,
+                        "resource-graph-depth-stack",
+                    )?;
                 }
                 None => {
                     let index = frame.index;
                     nodes[index].depth_visit.state = 2;
                     push_scratch(
-                        host,
+                        exec,
+                        &group,
                         &mut postorder,
                         index,
                         "resource-graph-depth-postorder",
@@ -105,7 +124,7 @@ impl ResourceGraph {
         let maximum_depth = u64::try_from(self.limits.max_resource_graph_depth).unwrap_or(u64::MAX);
         let mut updates = AccountedVec::new();
         for &index in postorder.iter().rev() {
-            charge_graph_work(host, 1)?;
+            charge_bound_graph_work(exec, &group, 1)?;
             let node = &nodes[index];
             let proposed = node.depth_visit.proposed;
             if proposed > maximum_depth {
@@ -116,7 +135,8 @@ impl ResourceGraph {
             }
             if proposed > node.depth {
                 push_scratch(
-                    host,
+                    exec,
+                    &group,
                     &mut updates,
                     DepthUpdate {
                         index,
@@ -130,7 +150,7 @@ impl ResourceGraph {
                 .ok_or(ResourceGraphError::Overflow)?;
             let outgoing = outgoing(node, relations);
             for relation in outgoing {
-                charge_graph_work(host, 1)?;
+                charge_bound_graph_work(exec, &group, 1)?;
                 if let GraphRelationOutcome::Available { target: child } = relation?.outcome {
                     let visit = &mut nodes
                         .get_mut(child)
@@ -181,14 +201,15 @@ fn outgoing<'graph>(
 }
 
 fn push_scratch<T>(
-    host: ImportStoreHost<'_>,
+    exec: &mut ImportStoreExecution<'_>,
+    group: &ImportBoundWorkGroup<'_, 1>,
     values: &mut AccountedVec<T>,
     value: T,
     resource: &'static str,
 ) -> Result<(), ResourceGraphError> {
-    charge_graph_work(host, 1)?;
+    charge_bound_graph_work(exec, group, 1)?;
     values
-        .try_reserve(1, resource, |bytes| reserve_graph_storage(host, bytes))
+        .try_reserve(1, resource, |bytes| reserve_graph_storage(exec, bytes))
         .map_err(ResourceGraphError::Scope)?;
     values
         .try_push_reserved(value)

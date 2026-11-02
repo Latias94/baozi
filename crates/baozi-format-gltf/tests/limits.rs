@@ -11,21 +11,13 @@ use common::{
     expected_error, glb_with_json, import_assets_result_with_control, sidecar_options,
     triangle_gltf_with_buffer_uri,
 };
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 
 const SCAN_CHUNK_BYTES: usize = 4 * 1024;
 const ENCODED_CHUNKS: usize = 9;
 const ENCODED_BYTES: usize = SCAN_CHUNK_BYTES * ENCODED_CHUNKS;
 const DECODED_BYTES: usize = ENCODED_BYTES / 4 * 3;
 const CANCELLATION_FIXTURE_CHUNKS: usize = 64;
-
-fn cancel_on_next_poll(calibration_polls: &AtomicUsize) -> usize {
-    let completed_polls = calibration_polls.load(Ordering::SeqCst);
-    assert!(completed_polls > 0);
-    completed_polls
-        .checked_add(1)
-        .expect("relative cancellation poll must fit usize")
-}
 
 fn assert_cancelled(failure: &ImportFailure) {
     assert!(
@@ -386,7 +378,7 @@ fn data_uri_base64_scan_cancellation_is_bounded_by_scan_chunks() -> TestResult<(
         .expect("data URI string limit must fit the resource counter");
     let mut calibration_options = GltfTestOptions::memory();
     calibration_options.limits.max_string_bytes = valid_uri.len() - 1;
-    let (calibration_control, calibration_polls) = controlled_import(None);
+    let (calibration_control, _calibration_polls) = controlled_import(None);
     let (calibration_result, calibration_diagnostics) = import_assets_result_with_control(
         "base64-scan-calibration.gltf",
         [("base64-scan-calibration.gltf", valid_document.clone())],
@@ -409,7 +401,13 @@ fn data_uri_base64_scan_cancellation_is_bounded_by_scan_chunks() -> TestResult<(
         dimension_consumed(&calibration_failure, ImportDimension::DecodeWork),
         document_decode_work
     );
-    let cancel_on = cancel_on_next_poll(&calibration_polls);
+    // Locate the interior of the scan using otherwise identical early/late syntax failures.
+    // A string-limit failure has a different terminal path and cannot calibrate the next
+    // successful-path callback. This midpoint must precede the last chunk's whitespace.
+    let early_polls = early_polls.load(Ordering::SeqCst);
+    let late_polls = late_polls.load(Ordering::SeqCst);
+    let cancel_on = early_polls + (late_polls - early_polls) / 2;
+    assert!(early_polls < cancel_on && cancel_on < late_polls);
     let (control, polls) = controlled_import(Some(cancel_on));
     let (result, diagnostics) = import_assets_result_with_control(
         "base64-scan-cancel.gltf",
@@ -436,7 +434,7 @@ fn data_uri_base64_scan_cancellation_is_bounded_by_scan_chunks() -> TestResult<(
     );
 
     let mut boundary_encoded = valid_encoded.into_bytes();
-    boundary_encoded[0] = b' ';
+    boundary_encoded[SCAN_CHUNK_BYTES * (CANCELLATION_FIXTURE_CHUNKS - 1)] = b' ';
     let boundary_encoded =
         String::from_utf8(boundary_encoded).expect("base64 scan fixture must remain ASCII");
     let boundary_document =

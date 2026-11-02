@@ -1,3 +1,4 @@
+use super::action_tests::record_event;
 use super::*;
 
 const POSITIONS: [[f64; 3]; 5] = [
@@ -20,15 +21,20 @@ fn cancellation_before_kernel_work_preserves_candidate_storage() {
     let mut scratch = [CornerScratch::default(); POSITIONS.len()];
     let sentinel = [[usize::MAX; 3]; POSITIONS.len() - 2];
     let mut output = sentinel;
+    let mut events = Vec::new();
     let result = triangulate_polygon(
         &positions,
         &source_corners,
         &mut scratch,
         &mut output,
-        &mut || Err::<(), _>(Cancelled),
+        &mut |event| {
+            record_event(&mut events, event);
+            Err::<(), _>(Cancelled)
+        },
     );
 
     assert_eq!(result, Err(TriangulationError::Control(Cancelled)));
+    assert_eq!(events, [WorkEvent::Checkpoint]);
     assert_eq!(output, sentinel);
     assert_eq!(positions, POSITIONS);
     assert_eq!(source_corners, SOURCE_CORNERS);
@@ -40,33 +46,33 @@ fn cancellation_after_candidate_work_is_still_a_failed_kernel_result() {
     let source_corners = SOURCE_CORNERS;
     let mut scratch = [CornerScratch::default(); POSITIONS.len()];
     let mut output = [[usize::MAX; 3]; POSITIONS.len() - 2];
-    let mut checkpoints = 0;
+    let mut baseline = Vec::new();
     triangulate_polygon(
         &positions,
         &source_corners,
         &mut scratch,
         &mut output,
-        &mut || {
-            checkpoints += 1;
+        &mut |event| {
+            record_event(&mut baseline, event);
             Ok::<_, Cancelled>(())
         },
     )
     .expect("the baseline polygon must complete");
-    assert!(checkpoints > 1);
+    let candidate = output;
+    assert_eq!(baseline.last(), Some(&WorkEvent::Checkpoint));
+    assert_eq!(baseline[baseline.len() - 2], WorkEvent::Complete);
 
     let mut scratch = [CornerScratch::default(); POSITIONS.len()];
     let mut output = [[usize::MAX; 3]; POSITIONS.len() - 2];
-    let stop = checkpoints - 1;
-    let mut visited = 0;
+    let mut events = Vec::new();
     let result = triangulate_polygon(
         &positions,
         &source_corners,
         &mut scratch,
         &mut output,
-        &mut || {
-            let current = visited;
-            visited += 1;
-            if current == stop {
+        &mut |event| {
+            record_event(&mut events, event);
+            if events.len() == baseline.len() {
                 Err(Cancelled)
             } else {
                 Ok(())
@@ -75,7 +81,14 @@ fn cancellation_after_candidate_work_is_still_a_failed_kernel_result() {
     );
 
     assert_eq!(result, Err(TriangulationError::Control(Cancelled)));
-    assert_eq!(visited, stop + 1);
+    assert_eq!(
+        events, baseline,
+        "all physical leaves completed before the final poll"
+    );
+    assert_eq!(
+        output, candidate,
+        "fully written storage remains a private failed candidate"
+    );
     assert_eq!(positions, POSITIONS);
     assert_eq!(source_corners, SOURCE_CORNERS);
 }
@@ -91,36 +104,37 @@ fn cancellation_during_independent_postflight_preserves_candidate_input() {
         &source_corners,
         &mut kernel_scratch,
         &mut triangles,
-        &mut || Ok::<_, Cancelled>(()),
+        &mut |_| Ok::<_, Cancelled>(()),
     )
     .expect("the baseline polygon must triangulate");
     let candidate = triangles;
     let mut scratch = [CornerScratch::default(); POSITIONS.len()];
-    let mut checkpoints = 0;
+    let mut baseline = Vec::new();
     validate_polygon_triangulation(
         &positions,
         &source_corners,
         &triangles,
         &mut scratch,
-        &mut || {
-            checkpoints += 1;
+        &mut |event| {
+            record_event(&mut baseline, event);
             Ok::<_, Cancelled>(())
         },
     )
     .expect("the baseline candidate must pass postflight");
 
     let mut scratch = [CornerScratch::default(); POSITIONS.len()];
-    let stop = checkpoints / 2;
-    let mut visited = 0;
+    let stop = (baseline.len() / 2..baseline.len())
+        .find(|&index| baseline[index] == WorkEvent::Begin)
+        .expect("postflight has a middle leaf to reject");
+    let mut events = Vec::new();
     let result = validate_polygon_triangulation(
         &positions,
         &source_corners,
         &triangles,
         &mut scratch,
-        &mut || {
-            let current = visited;
-            visited += 1;
-            if current == stop {
+        &mut |event| {
+            record_event(&mut events, event);
+            if events.len() == stop + 1 {
                 Err(Cancelled)
             } else {
                 Ok(())
@@ -129,7 +143,16 @@ fn cancellation_during_independent_postflight_preserves_candidate_input() {
     );
 
     assert_eq!(result, Err(TriangulationError::Control(Cancelled)));
-    assert_eq!(visited, stop + 1);
+    assert_eq!(
+        events,
+        baseline[..=stop],
+        "only the admitted/completed prefix remains"
+    );
+    assert_eq!(
+        events.last(),
+        Some(&WorkEvent::Begin),
+        "rejected leaf has no completion"
+    );
     assert_eq!(positions, POSITIONS);
     assert_eq!(source_corners, SOURCE_CORNERS);
     assert_eq!(triangles, candidate);

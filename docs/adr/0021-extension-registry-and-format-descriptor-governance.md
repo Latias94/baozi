@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-22
+updated: 2026-11-02
 authors:
   - Codex
 decision_type: architecture
@@ -20,29 +20,36 @@ related:
   - docs/adr/0041-resource-dependency-graph-and-successful-input-manifest.md
   - docs/adr/0043-producer-attestation-closed-input-qualification-and-import-build-identity.md
 evidence:
+  - docs/research/2026-11-02-typed-format-context-design.md
+  - crates/baozi-import/src/format.rs
+  - crates/baozi-import/src/options.rs
+  - crates/baozi-import/src/registry.rs
+  - crates/baozi-import/src/request.rs
   - crates/baozi-import/src/descriptor.rs
   - crates/baozi-import/tests/maturity_authority.rs
 ---
 
-# ADR 0021: Extension Registry, Format Descriptor, and Codec Governance
+# ADR 0021: Extension Registry and Format Descriptor Governance
 
 ## Context
 
-Baozi needs heterogeneous built-in and third-party importers without exposing format-backend types or
-making a generic option method destroy `FormatImporter` object safety. A mutable registry during an
-import would also make detection, option compilation, and evidence depend on races. Finally, support
-claims drift when every format invents its own ID, descriptor, maturity, and codec metadata.
+Baozi needs heterogeneous built-in and third-party formats while keeping each format's concrete
+option type bound to its parser. A mutable registry during an import would make detection, option
+compilation, and evidence depend on races. Support claims also drift when every format invents its
+own ID, descriptor, maturity, and option-schema metadata.
 
 Third-party importers execute in-process and therefore are trusted extension code. Registration is an
 explicit Rust extension surface, not a dynamic-plugin sandbox or stable C ABI.
 
 ## Decision
 
-`baozi-import` owns validated `FormatDescriptor`, registry-bound capability slots for heterogeneous
-detector/parser/codec objects, the mutable registry builder, and the immutable registry snapshot. ADR
-0016 separately owns option envelopes, codec semantics, precedence, compilation, and the private
-typed store; ADR 0046 owns the exact detector/parser invocation traits, scope views, failure
-transport, validation call, and lifecycle outcomes; ADR 0029 owns detection semantics and selection.
+`baozi-import` owns validated `FormatDescriptor`, the mutable registry builder, immutable registry
+snapshots, and private adapters for heterogeneous `Format` implementations. A generic
+`Registration<F>` retains the format; a `PreparedInvocation` privately erases it together with
+`CompiledOptions<F::Options>`. ADR 0016 separately owns option envelopes, precedence, bounded typed
+compilation, and prepared override selection; ADR 0046 owns plan execution, exact detector/parser
+invocation methods, context views, failure transport, validation call, and lifecycle outcomes;
+ADR 0029 owns detection semantics and selection.
 
 Accepted freezes these ownership boundaries. It does not promote the extension trait to the stable
 facade tier or claim all descriptor tooling is implemented.
@@ -52,18 +59,19 @@ facade tier or claim all descriptor tooling is implemented.
 This ADR is the sole owner of registry registration, builder mutation, freeze ordering and atomicity,
 immutable snapshot lifetime, descriptor and namespace claims, extension unloading, callable trust,
 the shared registration health latch, unwind containment and phase mapping, permanent poisoning, and
-the rule that a poisoned extension is never invoked again. These rules apply uniformly to codec,
-detector, and parser call sites.
+the rule that a poisoned extension is never invoked again. These rules apply uniformly to registered
+default/option compilation, detection, and parsing.
 
-ADR 0016 is the sole owner of option envelope/schema/version transport, precedence, normal codec
-input/output semantics, compiler scopes and budgets, compiled-value verification, and the private
-request option store. This ADR attaches that capability to a registry entry and governs its lifetime
-and failure health; it does not define another payload grammar, precedence chain, compiler scope, or
-ordinary option error taxonomy. ADR 0046 owns parse outcome composition after session creation.
+ADR 0016 is the sole owner of option envelope/schema/version transport, precedence, typed compiler
+input/output semantics, scopes and budgets, `CompiledOptions<T>` admission, and prepared override
+selection. This ADR owns private registration/invocation erasure, lifetime, and health; it defines no
+second payload grammar, precedence chain, compiler scope, or ordinary option error taxonomy.
+ADR 0046 owns plan execution and parse outcome composition after session creation.
 
 ### Registration and Snapshot
 
-Registration occurs on a builder before an import request is compiled. Each registration validates:
+`RegistryBuilder::register<F: Format>` accepts a concrete format before request planning. Each
+registration validates:
 
 - one bounded stable `FormatId`, unique in that registry;
 - an immutable descriptor with extensions/media types, encoding/container kind, text profile where
@@ -71,23 +79,30 @@ Registration occurs on a builder before an import request is compiled. Each regi
   support documentation, and target constraints;
 - one bounded immutable dependency-role table whose globally qualified role IDs are unique and map
   each role to exactly one `Required` or `Optional` requirement;
-- one object-safe detector/parser implementation;
-- one object-safe option codec descriptor, including the no-options codec when applicable;
-- exact agreement between the importer expectation and codec descriptor's sealed
-  `OptionRuntimeTypeKey`;
+- one `Format` implementation with associated `Options`, both
+  `Send + Sync + RefUnwindSafe + 'static`;
+- optional `FormatOptionSchema` metadata whose owner equals the descriptor's `FormatId`;
+- typed default/layer compilation and parsing bound to that same `Options` type;
 - every extension namespace claim and declarative extension schema advertised by the descriptor; and
 - consistency between descriptor capability claims and enabled crate features.
 
-Registration may perform these checks eagerly, but immutable-snapshot creation is the non-bypassable
-gate. `RegistryBuilder::freeze` runs under a bounded `RegistryBuildScope`, visits every registration in
-stable `FormatId` order, invokes its codec's default-layer compilation, verifies the returned runtime
-type/concrete erased value, and caches it as `Arc<CompiledFormatOptions>`. Per-codec and aggregate
-work, decoded cells/bytes, recursion, live capacity, result bytes, and panic detail are bounded.
+Descriptor and optional wire-schema metadata are captured exactly once at registration. Freeze and
+request planning use those captured values. A metadata unwind returns bounded
+`RegistryRegistrationError::ImporterPanicked` before an entry is admitted; a foreign schema owner
+returns `OptionSchemaOwnerMismatch`.
 
-Default compilation panic, budget/allocation failure, or runtime-type disagreement is a structured
-`RegistryBuildError`. Freeze is atomic and publishes no partial snapshot, so a bad plugin never enters
-an immutable registry snapshot. A builder API may surface the same error at eager registration time,
-but successful eager checking does not remove the final freeze gate.
+Immutable-snapshot creation is the non-bypassable default-compilation gate. `RegistryBuilder::freeze`
+visits registrations in stable `FormatId` order and invokes `Format::compile_defaults` under a bounded
+`RegistryBuildScope`. Its `CompiledOptions<F::Options>` is retained with `Arc<Registration<F>>` in a
+private `PreparedFormat<F>`, then exposed internally through `PreparedInvocation`. Per-registration
+and aggregate work, decoded cells/bytes, recursion, live capacity, result bytes, and error/panic detail
+remain bounded. Scope `finish` checks outstanding reservations, including zero-byte tokens, before
+admitting result bytes. Formats without options use `NoFormatOptions::compile_defaults` through the
+same gate.
+
+Default compilation panic, ordinary rejection, budget/allocation failure, or unfinished reservations
+produce a structured `RegistryBuildError`. Freeze is atomic and publishes no partial snapshot.
+Returning another option type fails Rust compilation; no runtime type-key agreement is required.
 
 `FormatId` uses a bounded lowercase ASCII reverse-DNS grammar for every registered format. Baozi's
 built-ins use `org.baozi.<format>`; external registrations use a namespace they control, for example
@@ -123,50 +138,61 @@ The complete ordered role table and requirement mapping are part of
 it consumes the exact frozen role ID and derives requirement from this table without redefining role
 semantics.
 
-Successful freeze returns an immutable snapshot containing importer/codec/schema objects and one
-precompiled default-options `Arc` per importer. Requests and sessions may share that snapshot across
-threads, but registration/removal cannot affect them. Detection iteration, descriptor enumeration, and
-evidence use stable `FormatId` ordering rather than builder insertion order.
+### Prepared Defaults and Plans
 
-Request compilation never scans or invokes every snapshot codec. It validates and compiles only
-format-specific envelopes actually submitted by the expanded preset/caller request, using the target's
-cached default as its base. All submitted targets are compiled before session creation and IO, even if
-one is forced or another is later selected automatically. A selected format with no submitted layer
-uses its cached default `Arc` directly. Thus request codec cost is proportional to submitted envelope
-count/bytes/work, not registry size, and an unsubmitted irrelevant codec cannot poison the request.
+Successful freeze returns an immutable snapshot containing captured descriptors, optional option
+schemas, private registrations, shared health, and one cached default prepared invocation per format.
+Plans and sessions may share that snapshot across threads; builder registration/removal cannot affect
+them. Detection, descriptor enumeration, and evidence use stable `FormatId` order.
+
+`RegistrySnapshot::plan(&ImportRequest, OptionCompileLimits)` resolves common configuration and
+validates all submitted target metadata before invoking any target's option compiler. It compiles
+only submitted preset/caller envelopes, once per target in stable `FormatId` order, against the
+cached typed default.
+A missing wire schema rejects submitted options; it does not prevent metered default compilation.
+Every submitted target must compile before session creation or IO, even if selection later chooses
+another format. With no submitted layer, selection reuses the exact shared default invocation;
+planning neither scans nor invokes unsubmitted option compilers.
+
+The resulting immutable `ImportPlan` owns the snapshot, resolved configuration, prepared overrides,
+stable override order, and storage-account factory. Its own `read_bytes`, `read_asset`, and
+`read_asset_with_resolver` methods execute that snapshot, without another importer/plan pairing API.
+Clones share prepared invocations and live-account admission limits. A plan holds no input, active
+work, or mutable operation control; each read creates a fresh session under ADR 0046.
 
 ### Registered Callable and Health Boundary
 
-The registry stores detector, parser, and codec objects behind heterogeneous object-safe,
-`Send + Sync + RefUnwindSafe + 'static` capabilities. This ADR owns their registration identity,
-snapshot lifetime, invocation health wrapper, unwind latch, and permanent poison state. It does not
-own or restate detector/parser method parameters, domain return types, scope semantics, validation,
-or outcome composition.
+The registry's private `ErasedRegistration` and `ErasedInvocation` traits provide heterogeneous,
+object-safe storage for concrete formats and prepared typed options. The public extension contract
+is `Format` with associated `Options`; it requires no public codec, runtime type key, option store,
+or parse-side downcast. This ADR owns registration identity, snapshot lifetime, the health wrapper,
+and permanent poison. ADR 0046 owns detector/parser parameters, domain returns, context semantics,
+validation, and outcome composition.
 
-The health wrapper passes the downstream invocation context through unchanged and observes only
-whether the callable returned or unwound. It cannot add a second coordinator, inspect or relabel a
-domain error, convert a terminal scope failure into registry health, or construct a normal domain
-outcome. A panic is mapped to the shared poisoned-registration state before the downstream owner
-constructs its bounded failure; an ordinary returned error does not become poison merely because the
-registry stored the callable.
+The health wrapper passes the downstream invocation context unchanged, contains unwind, and checks
+registration health before invocation and before accepting a successful return. It cannot add a
+second coordinator, inspect or relabel domain error content, convert a terminal scope failure into
+registry health, or construct a normal domain outcome. A panic sets shared poison before the
+downstream owner constructs bounded failure evidence; an ordinary returned error does not poison
+the registration. A racing poison discards apparent success while preserving an already returned
+detector scope abort or parser failure under its owning lifecycle rules.
 
-The codec is part of the registered importer capability because only that importer can define its
-concrete type and schema. It exposes object-safe schema/version/runtime-type inspection and bounded
-default/overlay compilation through ADR 0016's `RegistryBuildScope` and `OptionCompileScope`. It does
-not own envelope transport, precedence, either scope, compiled-value wrapper/store, or public
-configuration parsing. The sealed runtime type key is process-local and never substitutes for the
-stable serialized schema identity.
+Only the concrete format defines its option type and optional schema. The generic adapter retains
+`CompiledOptions<F::Options>` with that format and passes `&F::Options` directly to `Format::parse`.
+Private erasure preserves this pairing; it does not define another schema identity, envelope
+transport, precedence rule, scope, or public configuration parser.
 
-At freeze, a codec receives only the registry-build scope and empty/default layer contract. At request
-time, the compiler consumes public envelopes before codec invocation; each submitted target codec
-receives its cached default plus ADR 0016's opaque ordered layer view and accesses payloads through
-`OptionCompileScope`. A raw envelope payload slice is not part of the codec capability.
+At freeze, default compilation receives only the bounded registry-build scope. At request time,
+`Format::compile_options` receives its cached typed default and ADR 0016's opaque
+`FormatOptionLayers` with separate preset/caller presence. Payload access goes through
+`OptionCompileScope` readers; an unrestricted envelope payload slice is not passed to the format.
 
-An importer/codec descriptor key mismatch fails registration/freeze. ADR 0016 defines erased-value
-verification and its ordinary typed failure. This ADR defines the unwind branch: a default codec
-panic maps to bounded `RegistryBuildError`, a submitted-layer codec panic maps to bounded
-`RequestError`, and both poison the shared registration before returning. Neither path reaches session
-creation or asset IO, and the parser never discovers an option type mismatch after detection.
+ADR 0016 owns ordinary typed compilation failures. This ADR defines the unwind branch: a default
+compiler panic maps to bounded `RegistryBuildError::CodecPanicked`, a submitted-layer compiler panic
+maps to bounded `RequestError::CodecPanicked`, and both poison the shared registration before
+returning. Ordinary compiler rejection retains the corresponding `CodecRejected` variant. These
+error names do not expose a codec capability. Neither compilation path reaches session creation or
+asset IO; an option type mismatch cannot be deferred to parsing.
 
 ### Domain Failure Non-Ownership
 
@@ -241,12 +267,13 @@ claim, duplicate schema identity, conflicting schema body, reserved-prefix claim
 registrant's namespace is a structured registration error even when the duplicate bytes are equal.
 
 Freezing a registry builder creates one immutable, stably ordered
-importer/codec/default-options/namespace/schema snapshot. Builder removal or replacement affects only
-snapshots created afterward. Existing requests and sessions retain their original importer/codec
-objects and compiled-default `Arc` values. Canonical construction copies the exact Baozi-owned
+format/default-invocation/namespace/schema snapshot. Builder removal or replacement affects only
+snapshots created afterward. Existing plans and sessions retain their original registrations and
+shared prepared defaults/overrides. Canonical construction copies the exact Baozi-owned
 declarative schema subset needed by retained typed descriptors into the resulting scene generation, so a
 `ValidatedScene` can outlive and be edited after the originating plugin code is unloaded. Unloading
-code therefore requires dropping every registry snapshot/session that retains its trait objects.
+code therefore requires dropping every builder, snapshot, plan, or session that retains its private
+registration or prepared invocation.
 Validated scenes and terminal import outcomes contain only Baozi-owned declarative data, so neither
 retains plugin code or becomes invalid after unload.
 
@@ -256,50 +283,55 @@ The extension trait is a deliberate lower-level Rust API with its own stability 
 offer explicit registration without re-exporting backend internals. Baozi may break the trait before
 its declared stabilization gate rather than maintain duplicate legacy or version-suffixed traits.
 
-Registered importer, detector, and codec capabilities must be semantically reentrant and contain no
+Registered format compilation, detection, and parsing must be semantically reentrant and contain no
 cross-session parse or option state. All operation state belongs on the call stack, in format-private
 temporary models, or behind the active owner-supplied invocation scope; selected compiled options are
-exposed only as an immutable `&T`. A first-party implementation may not hide serialization behind an
-internal mutex.
+exposed only as an immutable `&F::Options`. A first-party implementation may not hide serialization
+behind an internal mutex.
 Barrier tests run the same snapshot concurrently with different inputs and options and compare each
 result with its serial baseline.
 
 Extension code is trusted and its callable traits require `RefUnwindSafe` in addition to
-`Send + Sync`. This ADR requires unwind containment and typed failure evidence at registered codec,
-detector, and parser boundaries; ADRs 0020 and 0033 own resolver, IO, and callback boundary outcomes.
+`Send + Sync`. This ADR requires unwind containment and typed failure evidence at registered option
+compiler, detector, and parser boundaries; ADRs 0046 and 0033 own resolver, IO, and callback outcomes.
 Every registration owns one shared, one-way health latch retained by the builder and every snapshot
-derived from it. A panic from any callable codec, detector, or parser atomically poisons that
-registration. Every later freeze, codec, forced-detection, or parse attempt returns stable
-`ExtensionPoisoned` evidence without invoking the instance again. A default-codec panic still
-prevents snapshot publication, but it poisons the pending registration so a later freeze cannot retry
-the same failed extension.
+derived from it, including their prepared invocations and plans. A panic from registered compilation,
+detection, or parsing atomically poisons that registration. Every later freeze, option-compilation,
+forced-detection, or parse attempt returns stable `ExtensionPoisoned` evidence without invoking the
+instance again. A default-compiler panic prevents snapshot publication and poisons the pending
+registration so a later freeze cannot retry the same failed extension. Concurrent invocation
+admission is linearized by the shared latch; already admitted calls may overlap, but an observed
+racing poison cannot become success.
 `AssertUnwindSafe` may cover session-owned staging that is discarded after unwind, but it never
 declares a plugin reusable. Panic containment still cannot contain abort, infinite loop, process exit,
 arbitrary filesystem access, or unbounded allocation by code already executing in the process.
 Hostile extensions require host-managed process isolation.
 
-The shared poison latch applies only to registry-owned codec, detector, and parser registrations that
+The shared poison latch applies only to registry-owned format registrations that
 Baozi retains and may invoke across operations. Host-supplied `AssetIo`, resolver, and per-operation
 observer capabilities are not silently enrolled in that registry or retained by Baozi for later
-reuse. ADRs 0020 and 0033 own their operation-local failure outcomes; the host decides whether to
+reuse. ADRs 0046 and 0033 own their operation-local failure outcomes; the host decides whether to
 reuse or retire its own object after the operation. If Baozi later introduces a shared registry for
 those capabilities, an Accepted architecture update must assign its health owner and linearization
 rules before reuse.
 
 ```mermaid
 flowchart TB
-    Builtin[Built-in importer] --> Builder[Registry builder]
-    Extension[Trusted qualified importer] --> Builder
-    Builder --> Validate[Validate ID descriptor codec namespaces schemas]
-    Validate --> BuildScope[Bounded RegistryBuildScope]
-    BuildScope --> DefaultCompile[Compile and type-check every default]
-    DefaultCompile --> Snapshot[Immutable snapshot with Arc defaults]
-    Submitted[Submitted preset or caller envelopes only] --> Compile[Bounded request override compilation]
-    Snapshot --> Compile
-    Compile --> Admission[Validate all submitted targets]
-    Admission --> Selected[Selected registered capability view]
-    Snapshot --> Selected
-    Compile --> Selected
+    Builtin[Built-in Format with associated Options] --> Builder[Generic RegistryBuilder registration]
+    Extension[Trusted qualified Format with associated Options] --> Builder
+    Builder --> Validate[Capture descriptor and optional option schema once]
+    Validate --> Claims[Validate ID owner namespaces and declarative schemas]
+    Claims --> BuildScope[Bounded RegistryBuildScope]
+    BuildScope --> DefaultCompile[Compile typed defaults and finish reservations]
+    DefaultCompile --> Snapshot[Immutable snapshot with private registrations and prepared defaults]
+    Submitted[Submitted preset or caller envelopes only] --> Admission[Validate all target metadata]
+    Snapshot --> Admission
+    Admission --> Compile[Bounded compilation of submitted overrides]
+    Compile --> Plan[Immutable self-executing ImportPlan]
+    Snapshot --> Plan
+    Plan --> Read[Plan read method starts fresh session]
+    Read --> Selected[Selected PreparedInvocation with shared health]
+    Selected --> Parse[Concrete Format parse with typed Options and ParseContext]
 ```
 
 ## Alternatives Considered
@@ -314,25 +346,26 @@ to every optional format. Rejected.
 This is plugin-friendly but race-prone, non-reproducible, and incompatible with typed pre-IO option
 validation. Rejected.
 
-### Option C: Validated builder plus immutable object-safe registry snapshot
+### Option C: Validated builder plus immutable snapshot of typed formats
 
-This supports heterogeneous extensions while making descriptor, codec, detection, and session inputs
-deterministic. Chosen.
+Private generic adapters retain format/option type pairing while heterogeneous registry storage,
+captured metadata, prepared defaults, and shared health govern each plan. Chosen.
 
 ## Consequences
 
 Positive:
 
 - One immutable snapshot governs request compilation and detection.
-- Every snapshot contains a bounded, type-checked immutable default-options value for each importer.
-- Requests invoke codecs only for submitted format layers and reuse snapshot defaults otherwise.
-- Format descriptors, option codecs, namespaces, and declarative schemas have explicit owners.
+- Every snapshot contains a bounded, typed default invocation for each format.
+- Plans compile only submitted format layers and reuse snapshot defaults otherwise.
+- Format descriptors, typed option compilation, namespaces, and declarative schemas have explicit owners.
 - Optional format crates remain isolated from the facade's concrete types.
 - Registry insertion order cannot change evidence or selection.
 
 Negative:
 
-- Extension authors must implement descriptor and codec contracts even for no-options formats.
+- Extension authors must implement descriptor and bounded typed-default contracts; no-options formats
+  use the host's metered helper without declaring a wire schema.
 - Registry freeze performs bounded default compilation for every registration and can reject the
   proposed snapshot atomically.
 - The lower-level trait remains a compatibility surface within its declared pre-stable tier.
@@ -347,15 +380,16 @@ Negative:
 | Registry declaration is mistaken for exact executable evidence | Critical | Keep declaration identity here, keep exact tested implementation/build evidence under ADR 0011, and forbid descriptor/package/plugin metadata from claiming runtime measurement. |
 | Proposed producer/build identity leaks into production registry APIs | Critical | ADR 0043 remains non-authoritative; API-shape and package checks reject candidate types until one atomic Accepted promotion. |
 | Registry mutation races an import | High | Freeze immutable snapshot before request compilation; no session mutation API. |
-| Codec type/schema disagrees with parser expectation | High | Registration checks the sealed runtime type key, compile verifies the actual erased type, and selected-importer downcast tests remain a defense in depth. |
-| Broken plugin default enters a snapshot | Critical | Atomic bounded freeze compiles every default, rejects panic, budget, allocation, or type failure as `RegistryBuildError`, and permanently poisons a registration whose codec unwinds. |
-| Unrelated codec poisons a request | High | Requests call only codecs targeted by submitted envelopes and use cached default `Arc` values for every other candidate. |
+| Format and options lose their association during erasure | High | `Registration<F>` and the prepared adapter retain `CompiledOptions<F::Options>` together; wrong types fail compilation, and wire-schema owner/version checks precede compilation. |
+| Broken plugin default enters a snapshot | Critical | Atomic bounded freeze rejects panic, ordinary rejection, budget/allocation failure, or unfinished reservations as `RegistryBuildError`; default-compiler unwind permanently poisons the registration. |
+| Unsubmitted compiler runs during planning | High | Plans compile only submitted targets and reuse cached default invocations for every other candidate. |
 | Shared importer leaks state across sessions | Critical | Require semantic reentrancy, immutable selected options, concurrent-versus-serial conformance tests, and no hidden first-party serialization mutex. |
 | Panicked plugin instance is invoked again | Critical | Require `RefUnwindSafe`, atomically poison the registration after an unwind, and return stable `ExtensionPoisoned` without reinvocation. |
-| Request work scales with registry size | High | Build the override map from submitted envelopes; instrument zero codec calls for a no-envelope request. |
-| Registry health wrapper reinterprets a domain result | Critical | the wrapper observes only return versus unwind, never constructs a domain outcome, and cannot convert an ordinary error into poison or a terminal scope failure into success |
+| Planning reconstructs unsubmitted defaults | High | Build prepared overrides only for submitted targets; instrument zero option-compilation calls for a no-envelope plan. |
+| A plan executes with a foreign registry or resets clone admission | High | Execute through the plan's own snapshot and share the storage-account factory across clones. |
+| Registry health wrapper reinterprets a domain result | Critical | Contain unwind and reject success after observed poison without interpreting domain error content, constructing an outcome, or converting ordinary errors into poison. |
 | External ID collides with a Baozi-owned ID | Medium | Qualified namespaces plus deterministic duplicate rejection; no caller-asserted first-party registration path. |
-| Plugin removal changes schema meaning for an existing scene | High | Scenes retain only immutable Baozi-owned declarative schema data; plugin code remains only in live registry/session snapshots. |
+| Plugin removal changes schema meaning for an existing scene | High | Scenes retain only immutable Baozi-owned declarative schema data; plugin code remains with live registration and prepared-invocation owners. |
 | Two plugins claim one namespace or schema ID | High | Reject duplicate, reserved, and out-of-prefix claims deterministically before snapshot creation. |
 | Users mistake panic containment for sandboxing | Critical | Explicit trusted boundary and process-isolation requirement. |
 
@@ -363,32 +397,59 @@ Negative:
 
 | Contract | Testable acceptance |
 | --- | --- |
-| Object safety | Heterogeneous detector, parser, and codec objects are stored through object-safe `Send + Sync + RefUnwindSafe` capabilities; lifecycle tests under ADR 0046 own the exact detector/parser method shapes. |
-| Snapshot immutability | Mutating the builder after snapshot creation cannot affect an existing request/session or its compiled-default `Arc` identity. |
-| Registration validation | Duplicate/invalid ID, malformed descriptor, schema/runtime-type mismatch, and impossible claims fail before IO. |
+| Typed heterogeneous registration | Custom `Format` implementations with different `Options` use private erased registration/invocation traits; wrong default, override, or parse option types fail compilation. ADR 0046 owns detector/parser method shapes. |
+| Metadata capture | Descriptor and optional wire-schema methods run once per registration; freeze/planning reuse captured values, and metadata unwind publishes no entry. |
+| Snapshot immutability | Mutating the builder after snapshot creation cannot affect an existing plan/session or its shared default invocation and typed value. |
+| Registration validation | Duplicate/invalid ID, malformed descriptor, foreign schema owner, and impossible claims fail before IO. |
 | Dependency role authority | Freeze rejects malformed, duplicate, or ambiguous role tables; selected-scope tests prove calls accept only `(origin, role, hostile reference)`, derive one frozen requirement, and reject unknown/foreign roles before cache or IO. |
 | Maturity boundary | Registry API/serialization contains only `Unverified` and issuer-scoped `SelfAttested`; source/API-shape tests find no `BaoziVerified` field, token, constructor, or freeze input. |
 | Evidence join boundary | ADR 0011 tooling joins the immutable declaration identity and effective option profile to the current managed evidence snapshot outside registry freeze; orphan or mismatched inventory entries cannot change runtime registration. |
 | Identity ownership | Mutation tests prove descriptor/profile/default/schema drift changes the registry declaration while tested source/dependency/config/generated/native/toolchain drift invalidates ADR 0011's managed evidence subject without changing registry identity. |
 | Proposed identity isolation | Compile/API-shape and packaged-surface tests prove no ADR 0043 producer, qualification, or build-identity type is accepted or exposed while that ADR remains Proposed. |
-| Atomic default freeze | Every registered codec compiles defaults under bounded `RegistryBuildScope`; any panic/type/budget/allocation error yields `RegistryBuildError`, no partial snapshot, and no bad plugin in a snapshot. A default-codec unwind also poisons the builder registration, so later freezes return `ExtensionPoisoned` without reinvocation. |
+| Atomic default freeze | Every format, including `NoFormatOptions`, compiles typed defaults under bounded `RegistryBuildScope`; panic, ordinary rejection, budget/allocation failure, or unfinished reservations yield `RegistryBuildError` and no partial snapshot. A default-compiler unwind poisons the builder registration, so later freezes return `ExtensionPoisoned` without reinvocation. |
 | Namespace ownership | Baozi-owned, external, reserved, child-prefix, shared-schema, duplicate, and conflicting-body fixtures all use qualified IDs and follow the deterministic ownership rules. |
-| Request codec boundary | Submitted-layer scope exhaustion, erased-type disagreement, and unwindable codec panic return bounded pre-session `RequestError` values with zero asset opens. |
-| No-envelope selection | Automatic detection with no format envelopes performs zero request codec calls and gives the selected parser its snapshot-cached default `Arc`. |
-| Submitted-only complexity | Growing the registry without changing submitted envelopes does not change request codec call/work counts; adding submitted bytes changes only their bounded targets. |
+| Request compilation boundary | Unsupported options, submitted-layer rejection, scope exhaustion, unfinished reservations, and unwindable compiler panic return bounded pre-session `RequestError` values with zero asset opens. |
+| Optional schema | No-schema formats compile metered defaults but reject every submitted envelope before any target compiler runs. |
+| No-envelope selection | A no-envelope plan performs zero request option-compilation calls and gives the selected parser its exact snapshot-cached typed default through the shared invocation. |
+| Submitted-only invocation | Growing the registry adds no request option-compilation calls for unsubmitted formats; each submitted target compiles once against its cached default. |
 | Multi-format request | Every submitted format target compiles before session/IO even when forced or automatic selection later chooses another target. |
-| Common configuration | Starting from the same frozen snapshot, changing only common import overlays invokes no format codec. |
+| Metadata admission | Invalid metadata on any submitted target prevents all target option-compilation calls, even when earlier targets are valid. |
+| Compilation completion | Both scopes enforce aggregate/per-registration or per-target budgets, result bytes, and release of every live reservation, including zero-byte tokens; repeated `finish` is rejected. |
+| Common configuration | Starting from the same frozen snapshot, changing only common import overlays invokes no format-option compiler. |
 | Stable ordering | All builder insertion permutations produce equal descriptor enumeration and detection evidence. |
-| Snapshot and unload | Builder removal cannot affect an existing snapshot/session; after those objects drop, an imported scene still validates and remaps typed descriptors without plugin code. |
-| Capability limits | Registry API-shape tests expose no mutation, health-latch, poison-reset, another codec's options, or domain failure/outcome constructor through a registered callable slot. |
-| Invocation pass-through | Instrumented integration proves the registry wrapper passes the owner-supplied invocation context unchanged, adds no coordinator, and cannot inspect or reinterpret the returned domain value. |
-| Registry-unload isolation | Outcomes composed under ADR 0046 remain printable, source-traversable, and droppable after builder, snapshot, and importer teardown without invoking a registered callable. Exact domain transport, packing, source-chain, and producer-teardown semantics remain exclusively owned by ADR 0046. |
+| Executable plans | Plan read methods use their owned snapshot and create independent sessions without importer/plan pairing; clones share prepared invocations and live-account admission capacity. |
+| Snapshot and unload | Builder removal cannot affect an existing snapshot/plan/session; after all registration/invocation owners drop, an imported scene still validates and remaps typed descriptors without plugin code. |
+| Capability limits | Registry API-shape tests expose no mutation, health-latch, poison-reset, another format's options, public option downcast, or domain failure/outcome constructor through a registered callable slot. |
+| Invocation pass-through | Integration proves the wrapper passes the owner-supplied context unchanged, adds no coordinator, and preserves domain errors while rejecting success after observed poison. |
+| Registry-unload isolation | Outcomes composed under ADR 0046 remain printable, source-traversable, and droppable after builder, snapshot, plan, and format teardown without invoking a registered callable. Exact domain transport, packing, source-chain, and producer-teardown semantics remain exclusively owned by ADR 0046. |
 | Backend isolation | Public facade/report/core fields, terminal errors, and stable schemas contain no registry entry, health/poison state, registered callable, or executable backend/plugin object; registry teardown cannot change an existing outcome. |
-| Trust boundary | An unwindable default-codec panic is `RegistryBuildError`, submitted-layer codec panic is `RequestError`, and detector/parser panic becomes its session-owned typed failure; docs require process isolation for hostile extensions. |
+| Trust boundary | An unwindable default-compiler panic is `RegistryBuildError`, submitted-layer compiler panic is `RequestError`, and detector/parser panic becomes its session-owned typed failure; docs require process isolation for hostile extensions. |
 | Reentrancy | Barrier tests share one snapshot across distinct inputs/options; concurrent results equal their serial baselines, selected options are immutable, and first-party importers contain no session-state fields or hidden serialization mutex. |
-| Panic poisoning | Default-codec, request-codec, detector, and parser panic fixtures are invoked once, poison their registration atomically across the builder and all snapshots, and every later entry path returns `ExtensionPoisoned` without calling the object again. |
+| Panic poisoning | Default-compiler, request-compiler, detector, and parser panic fixtures poison their registration atomically across builder, snapshots, and plans; every later entry path returns `ExtensionPoisoned` without another call. |
+| Racing poison | Barrier tests admit overlapping calls without serialization, reject apparent success after observed poison, and preserve an in-flight detector scope abort or parser error under lifecycle precedence. |
 
 ## Amendment History
+
+### 2026-11-02: Erase typed format invocations privately
+
+- Affected: current decision, registration/freeze, prepared plans, callable health, unload lifetime,
+  diagram, risks, and acceptance.
+- Previous: public object-safe `FormatImporter` and `FormatOptionCodec` capabilities agreed through
+  `OptionRuntimeTypeKey`; erased `CompiledFormatOptions` values lived in a `FormatOptionStore` and
+  required parse-side downcasts. `PreparedImportRequest` was paired with a separate importer.
+- New: generic `Registration<F>` binds `Format::Options`; bounded `CompiledOptions<F::Options>` and
+  the format are erased together behind private `PreparedInvocation`. Metadata is captured once,
+  wire schemas are optional, and an immutable `ImportPlan` owns and executes its snapshot.
+- Impact: former importer/codec/key/store contracts are replaced without compatibility aliases;
+  `ImportPlan` replaces `PreparedImportRequest` without an alias. Stable ordering, atomic freeze,
+  compilation budgets and reservation completion, schema/version checks, cached defaults,
+  pre-IO admission, unload isolation, shared poison, racing-poison checks, and semantic reentrancy
+  remain required. Earlier amendments remain historical.
+- Review basis: the [typed-format/context design](../research/2026-11-02-typed-format-context-design.md),
+  ADR 0046, and the production sources listed above. This source-based amendment establishes no
+  executed compiler, runtime, performance, or release result.
+- Rationale: private erasure keeps heterogeneous extension storage while Rust preserves the concrete
+  format/options pairing and the registry retains health and lifetime authority.
 
 ### 2026-07-22: Require registry-unload isolation without owning domain transport
 

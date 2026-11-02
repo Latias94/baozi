@@ -1,13 +1,10 @@
 use crate::format::BoundedFaultDetail;
 use baozi_core::FormatId;
-use std::any::{Any, TypeId};
 use std::cell::Cell;
 use std::fmt;
-use std::marker::PhantomData;
 use std::num::NonZeroU32;
 use std::panic::RefUnwindSafe;
 use std::rc::Rc;
-use std::sync::{Arc, OnceLock};
 
 const MAX_SCHEMA_ID_BYTES: usize = 64;
 const MAX_ENVELOPE_PAYLOAD_BYTES: usize = 1024 * 1024;
@@ -115,7 +112,7 @@ impl FormatOptionSchemaKey {
     }
 }
 
-/// Immutable schema metadata exposed by an option codec.
+/// Immutable schema metadata exposed by a format.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormatOptionSchema {
     key: FormatOptionSchemaKey,
@@ -134,48 +131,6 @@ impl FormatOptionSchema {
     pub const fn version(&self) -> NonZeroU32 {
         self.version
     }
-}
-
-/// Opaque process-local identity for a concrete compiled option type.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct OptionRuntimeTypeKey(TypeId);
-
-impl OptionRuntimeTypeKey {
-    pub fn of<T: Any + Send + Sync + RefUnwindSafe>() -> Self {
-        Self(TypeId::of::<T>())
-    }
-}
-
-impl fmt::Debug for OptionRuntimeTypeKey {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("OptionRuntimeTypeKey(..)")
-    }
-}
-
-/// Typed key shared by a format's codec, parser, and envelope factory.
-#[derive(Debug, Clone)]
-pub struct FormatOptionKey<T: Any + Send + Sync + RefUnwindSafe> {
-    schema: FormatOptionSchema,
-    runtime: OptionRuntimeTypeKey,
-    option_type: PhantomData<fn() -> T>,
-}
-
-impl<T: Any + Send + Sync + RefUnwindSafe> FormatOptionKey<T> {
-    pub fn new(schema: FormatOptionSchema) -> Self {
-        Self {
-            schema,
-            runtime: OptionRuntimeTypeKey::of::<T>(),
-            option_type: PhantomData,
-        }
-    }
-
-    pub const fn schema(&self) -> &FormatOptionSchema {
-        &self.schema
-    }
-
-    pub const fn runtime_type_key(&self) -> OptionRuntimeTypeKey {
-        self.runtime
-    }
 
     /// Wraps payload emitted by the owning format's canonical encoder.
     ///
@@ -185,9 +140,9 @@ impl<T: Any + Send + Sync + RefUnwindSafe> FormatOptionKey<T> {
         payload: impl AsRef<[u8]>,
     ) -> Result<FormatOptionEnvelope, FormatOptionEnvelopeError> {
         FormatOptionEnvelope::new(
-            self.schema.key.owner.clone(),
-            self.schema.key.clone(),
-            self.schema.version,
+            self.key.owner.clone(),
+            self.key.clone(),
+            self.version,
             payload,
         )
     }
@@ -479,7 +434,7 @@ pub(crate) struct CompileAggregate {
     result_bytes: u64,
 }
 
-/// Capability supplied to a codec while a registry snapshot is frozen.
+/// Capability supplied to a format while a registry snapshot is frozen.
 pub struct RegistryBuildScope<'a> {
     format: &'a FormatId,
     limits: RegistryBuildLimits,
@@ -559,11 +514,11 @@ impl<'a> RegistryBuildScope<'a> {
     }
 
     /// Closes this one-shot scope and returns a value only after all reservations are released.
-    pub fn finish<T: Any + Send + Sync + RefUnwindSafe>(
+    pub fn finish<T: Send + Sync + RefUnwindSafe + 'static>(
         &mut self,
         value: T,
         retained_bytes: u64,
-    ) -> Result<CompiledFormatOptions, OptionCompileError> {
+    ) -> Result<CompiledOptions<T>, OptionCompileError> {
         self.live.finish(&self.aggregate.live_bytes)?;
         charge(
             &mut self.counters.result_bytes,
@@ -573,7 +528,7 @@ impl<'a> RegistryBuildScope<'a> {
             self.limits.max_total_result_bytes,
             OptionBudget::ResultBytes,
         )?;
-        Ok(CompiledFormatOptions::new(value, retained_bytes))
+        Ok(CompiledOptions::new(value, retained_bytes))
     }
 }
 
@@ -583,7 +538,7 @@ impl Drop for RegistryBuildScope<'_> {
     }
 }
 
-/// Capability supplied to a codec for one submitted request target.
+/// Capability supplied to a format for one submitted request target.
 pub struct OptionCompileScope<'a> {
     format: &'a FormatId,
     limits: OptionCompileLimits,
@@ -674,11 +629,11 @@ impl<'a> OptionCompileScope<'a> {
     }
 
     /// Closes this one-shot scope and returns a value only after all reservations are released.
-    pub fn finish<T: Any + Send + Sync + RefUnwindSafe>(
+    pub fn finish<T: Send + Sync + RefUnwindSafe + 'static>(
         &mut self,
         value: T,
         retained_bytes: u64,
-    ) -> Result<CompiledFormatOptions, OptionCompileError> {
+    ) -> Result<CompiledOptions<T>, OptionCompileError> {
         self.live.finish(&self.aggregate.live_bytes)?;
         charge(
             &mut self.counters.result_bytes,
@@ -688,7 +643,7 @@ impl<'a> OptionCompileScope<'a> {
             self.limits.max_total_result_bytes,
             OptionBudget::ResultBytes,
         )?;
-        Ok(CompiledFormatOptions::new(value, retained_bytes))
+        Ok(CompiledOptions::new(value, retained_bytes))
     }
 }
 
@@ -802,7 +757,7 @@ impl<'payload> FormatOptionReader<'_, 'payload, '_> {
     }
 }
 
-/// Opaque, precedence-ordered layers supplied to one format codec.
+/// Opaque, precedence-ordered layers supplied to one format.
 #[derive(Debug, Clone, Copy)]
 pub struct FormatOptionLayers<'a> {
     preset: Option<FormatOptionPayload<'a>>,
@@ -826,79 +781,59 @@ impl<'a> FormatOptionLayers<'a> {
     }
 }
 
-/// Type-erased immutable options whose concrete identity was derived by Baozi.
-pub struct CompiledFormatOptions {
-    schema: Option<FormatOptionSchema>,
-    runtime: OptionRuntimeTypeKey,
-    value: Arc<dyn Any + Send + Sync + RefUnwindSafe>,
+/// Typed immutable options admitted by a bounded compilation scope.
+///
+/// Both compilation phases retain the actual value type, so a format cannot
+/// return defaults or overrides of a different type.
+///
+/// ```compile_fail,E0308
+/// use baozi_import::{CompiledOptions, OptionCompileError, RegistryBuildScope};
+///
+/// fn wrong_defaults(
+///     scope: &mut RegistryBuildScope<'_>,
+/// ) -> Result<CompiledOptions<u8>, OptionCompileError> {
+///     scope.finish(false, 1)
+/// }
+/// ```
+///
+/// ```compile_fail,E0308
+/// use baozi_import::{CompiledOptions, OptionCompileError, OptionCompileScope};
+///
+/// fn wrong_overrides(
+///     scope: &mut OptionCompileScope<'_>,
+/// ) -> Result<CompiledOptions<u8>, OptionCompileError> {
+///     scope.finish(false, 1)
+/// }
+/// ```
+pub struct CompiledOptions<T> {
+    value: T,
     retained_bytes: u64,
 }
 
-impl CompiledFormatOptions {
-    fn new<T: Any + Send + Sync + RefUnwindSafe>(value: T, retained_bytes: u64) -> Self {
+impl<T> CompiledOptions<T> {
+    fn new(value: T, retained_bytes: u64) -> Self {
         Self {
-            schema: None,
-            runtime: OptionRuntimeTypeKey::of::<T>(),
-            value: Arc::new(value),
+            value,
             retained_bytes,
         }
-    }
-
-    /// Seals the registry-owned schema after a codec returns its erased value.
-    ///
-    /// Codecs cannot choose or relabel this binding: the registry supplies the
-    /// descriptor captured for the registration that invoked the codec.
-    pub(crate) fn seal_schema(mut self, schema: Option<FormatOptionSchema>) -> Self {
-        self.schema = schema;
-        self
-    }
-
-    pub const fn runtime_type_key(&self) -> OptionRuntimeTypeKey {
-        self.runtime
     }
 
     pub const fn retained_bytes(&self) -> u64 {
         self.retained_bytes
     }
 
-    pub fn downcast_ref<T: Any + Send + Sync + RefUnwindSafe>(
-        &self,
-        key: &FormatOptionKey<T>,
-    ) -> Option<&T> {
-        (self.runtime == key.runtime && self.schema.as_ref() == Some(key.schema()))
-            .then(|| (self.value.as_ref() as &dyn Any).downcast_ref::<T>())
-            .flatten()
+    pub(crate) const fn value(&self) -> &T {
+        &self.value
     }
 }
 
-impl fmt::Debug for CompiledFormatOptions {
+impl<T> fmt::Debug for CompiledOptions<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("CompiledFormatOptions")
-            .field("schema", &self.schema)
-            .field("runtime", &self.runtime)
+            .debug_struct("CompiledOptions")
             .field("retained_bytes", &self.retained_bytes)
             .finish_non_exhaustive()
     }
-}
-
-/// Object-safe format-owned compilation capability.
-pub trait FormatOptionCodec: Send + Sync + RefUnwindSafe + 'static {
-    fn schema(&self) -> Option<FormatOptionSchema>;
-
-    fn runtime_type_key(&self) -> OptionRuntimeTypeKey;
-
-    fn compile_defaults(
-        &self,
-        scope: &mut RegistryBuildScope<'_>,
-    ) -> Result<CompiledFormatOptions, OptionCompileError>;
-
-    fn compile_layers(
-        &self,
-        scope: &mut OptionCompileScope<'_>,
-        defaults: &CompiledFormatOptions,
-        layers: FormatOptionLayers<'_>,
-    ) -> Result<CompiledFormatOptions, OptionCompileError>;
 }
 
 /// Stable resource dimension exceeded during bounded option compilation.
@@ -1023,48 +958,18 @@ impl fmt::Display for OptionErrorCode {
     }
 }
 
-/// Concrete default used by every importer without configurable options.
+/// Concrete default used by every format without configurable options.
 #[derive(Debug, Default)]
 #[non_exhaustive]
 pub struct NoFormatOptions;
 
-#[derive(Debug)]
-struct NoOptionsCodec;
-
-impl FormatOptionCodec for NoOptionsCodec {
-    fn schema(&self) -> Option<FormatOptionSchema> {
-        None
-    }
-
-    fn runtime_type_key(&self) -> OptionRuntimeTypeKey {
-        no_options_runtime_type_key()
-    }
-
-    fn compile_defaults(
-        &self,
+impl NoFormatOptions {
+    pub fn compile_defaults(
         scope: &mut RegistryBuildScope<'_>,
-    ) -> Result<CompiledFormatOptions, OptionCompileError> {
+    ) -> Result<CompiledOptions<Self>, OptionCompileError> {
         scope.charge_work(1)?;
         scope.finish(NoFormatOptions, 0)
     }
-
-    fn compile_layers(
-        &self,
-        _scope: &mut OptionCompileScope<'_>,
-        _defaults: &CompiledFormatOptions,
-        _layers: FormatOptionLayers<'_>,
-    ) -> Result<CompiledFormatOptions, OptionCompileError> {
-        Err(OptionCompileError::OptionsUnsupported)
-    }
-}
-
-pub(crate) fn no_options_codec() -> Arc<dyn FormatOptionCodec> {
-    static CODEC: OnceLock<Arc<dyn FormatOptionCodec>> = OnceLock::new();
-    Arc::clone(CODEC.get_or_init(|| Arc::new(NoOptionsCodec)))
-}
-
-pub(crate) fn no_options_runtime_type_key() -> OptionRuntimeTypeKey {
-    OptionRuntimeTypeKey::of::<NoFormatOptions>()
 }
 
 #[derive(Debug, Default)]
@@ -1280,14 +1185,14 @@ mod tests {
     #[derive(Debug, PartialEq, Eq)]
     struct TestOptions(u8);
 
-    fn key() -> FormatOptionKey<TestOptions> {
-        FormatOptionKey::new(FormatOptionSchema::new(
+    fn schema() -> FormatOptionSchema {
+        FormatOptionSchema::new(
             FormatOptionSchemaKey::new(
                 FormatId::new("org.example.test").unwrap(),
                 FormatOptionSchemaId::new("import-options").unwrap(),
             ),
             NonZeroU32::new(1).unwrap(),
-        ))
+        )
     }
 
     #[test]
@@ -1344,11 +1249,12 @@ mod tests {
     }
 
     #[test]
-    fn typed_factory_seals_the_target_owner() {
-        let key = key();
-        let envelope = key.envelope_from_canonical_payload([7]).unwrap();
-        assert_eq!(envelope.target(), key.schema().key().owner());
-        assert_eq!(envelope.schema(), key.schema().key());
+    fn schema_factory_seals_the_target_owner() {
+        let schema = schema();
+        let envelope = schema.envelope_from_canonical_payload([7]).unwrap();
+        assert_eq!(envelope.target(), schema.key().owner());
+        assert_eq!(envelope.schema(), schema.key());
+        assert_eq!(envelope.version(), schema.version());
     }
 
     #[test]
@@ -1362,8 +1268,7 @@ mod tests {
 
     #[test]
     fn option_debug_views_do_not_bypass_metered_payload_reads() {
-        let key = key();
-        let envelope = key
+        let envelope = schema()
             .envelope_from_canonical_payload([222, 173, 190, 239])
             .unwrap();
         let envelope_debug = format!("{envelope:?}");
@@ -1381,8 +1286,7 @@ mod tests {
     fn compiled_option_storage_is_ref_unwind_safe() {
         fn require_ref_unwind_safe<T: RefUnwindSafe>() {}
 
-        require_ref_unwind_safe::<CompiledFormatOptions>();
-        require_ref_unwind_safe::<FormatOptionKey<TestOptions>>();
+        require_ref_unwind_safe::<CompiledOptions<TestOptions>>();
     }
 
     #[test]
@@ -1391,34 +1295,23 @@ mod tests {
         let mut aggregate = CompileAggregate::default();
         let mut scope =
             RegistryBuildScope::new(&format, RegistryBuildLimits::default(), &mut aggregate);
-        let compiled = scope
-            .finish(TestOptions(7), 1)
-            .unwrap()
-            .seal_schema(Some(key().schema().clone()));
-        assert_eq!(compiled.downcast_ref(&key()), Some(&TestOptions(7)));
-        assert_eq!(
-            compiled.runtime_type_key(),
-            OptionRuntimeTypeKey::of::<TestOptions>()
-        );
+        let compiled: CompiledOptions<TestOptions> = scope.finish(TestOptions(7), 1).unwrap();
+        assert_eq!(compiled.value(), &TestOptions(7));
+        assert_eq!(compiled.retained_bytes(), 1);
     }
 
     #[test]
-    fn compiled_value_requires_the_exact_frozen_schema() {
+    fn no_options_defaults_still_require_metered_work() {
         let format = FormatId::new("org.example.test").unwrap();
+        let limits = RegistryBuildLimits::new(OptionScopeLimits::new(0, 0, 0, 0, 0, 0, 0), 0, 0, 0);
         let mut aggregate = CompileAggregate::default();
-        let mut scope =
-            RegistryBuildScope::new(&format, RegistryBuildLimits::default(), &mut aggregate);
-        let compiled = scope
-            .finish(TestOptions(7), 1)
-            .unwrap()
-            .seal_schema(Some(key().schema().clone()));
-        drop(scope);
-        let wrong_key = FormatOptionKey::<TestOptions>::new(FormatOptionSchema::new(
-            FormatOptionSchemaKey::new(format, FormatOptionSchemaId::new("other-options").unwrap()),
-            NonZeroU32::new(1).unwrap(),
+        let mut scope = RegistryBuildScope::new(&format, limits, &mut aggregate);
+        assert!(matches!(
+            NoFormatOptions::compile_defaults(&mut scope),
+            Err(OptionCompileError::BudgetExceeded {
+                budget: OptionBudget::Work,
+            })
         ));
-
-        assert_eq!(compiled.downcast_ref(&wrong_key), None);
     }
 
     #[test]

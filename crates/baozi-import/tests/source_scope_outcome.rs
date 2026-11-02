@@ -2,16 +2,16 @@ mod support;
 
 use baozi_core::FormatId;
 use baozi_import::{
-    CapabilityStatus, CauseOwner, DetectionOutcome, DetectionResult, DetectionScope,
-    DiagnosticCode, FormatCapability, FormatDescriptor, FormatEncoding, FormatFailureDetailSink,
-    FormatFailureEvidenceProducer, FormatImporter, ImportCause, ImportConfigOverlay,
+    CapabilityStatus, CauseOwner, CompiledOptions, DetectionOutcome, DetectionResult,
+    DetectionScope, DiagnosticCode, Format, FormatCapability, FormatDescriptor, FormatEncoding,
+    FormatFailureDetailSink, FormatFailureEvidenceProducer, ImportCause, ImportConfigOverlay,
     ImportDimension, ImportFailure, ImportLossDisposition, ImportLossKind, ImportLossSubject,
-    ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer, ImportResult,
-    LossPolicy, OptionCompileLimits, ParseResult, ParseScope, PreparedImportRequest,
-    ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder, ResourceLimits,
-    ResourceLimitsOverlay, SceneDraft, ScopeAbortCause, SourceScopeDetailState,
-    SourceScopeDisposition, SourceScopeEntityKind, SourceScopeSelectionOutcome,
-    SourceScopeSelectionRequest, import_bytes,
+    ImportOperationControl, ImportPlan, ImportReport, ImportRequest, ImportRequestLayer,
+    ImportResult, LossPolicy, NoFormatOptions, OptionCompileError, OptionCompileLimits,
+    ParseContext, ParseExecution, ParseResult, ReadConfidence, ReadHint, RegistryBuildLimits,
+    RegistryBuildScope, RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, ScopeAbortCause,
+    SourceScopeDetailState, SourceScopeDisposition, SourceScopeEntityKind,
+    SourceScopeSelectionOutcome, SourceScopeSelectionRequest,
 };
 use baozi_io::AssetPath;
 use baozi_operation::{CancellationOrigin, CancellationToken, ControlCause};
@@ -48,7 +48,16 @@ struct SelectionImporter {
     fail_after_record: bool,
 }
 
-impl FormatImporter for SelectionImporter {
+impl Format for SelectionImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         ScopeImporter {
             exit: Exit::Success,
@@ -66,27 +75,41 @@ impl FormatImporter for SelectionImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        let document = AssetPath::new(self.document).unwrap();
-        let actual = match self.actual_scene {
-            Some(index) => SourceScopeSelectionOutcome::declared_scene(document, index),
-            None => SourceScopeSelectionOutcome::parentless_node_projection(document),
-        };
-        let mut builder = scope.source_scope_builder(self.requested, actual)?;
-        builder.observe(
-            SourceScopeEntityKind::Scene,
-            SourceScopeDisposition::Selected,
-            "scene:main",
-        )?;
-        scope.record_source_scope(builder.finish()?)?;
-        if self.fail_after_record {
-            return Err(scope.format_failure(TestFormatFailure));
-        }
-        support::submit_minimal_scene(scope)
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        context.with_execution(|exec| -> ParseResult<()> {
+            let document = AssetPath::new(self.document).unwrap();
+            let actual = match self.actual_scene {
+                Some(index) => SourceScopeSelectionOutcome::declared_scene(document, index),
+                None => SourceScopeSelectionOutcome::parentless_node_projection(document),
+            };
+            let mut builder = exec.source_scope_builder(self.requested, actual)?;
+            builder.observe(
+                exec,
+                SourceScopeEntityKind::Scene,
+                SourceScopeDisposition::Selected,
+                "scene:main",
+            )?;
+            let record = builder.finish(exec)?;
+            exec.record_source_scope(record)?;
+            if self.fail_after_record {
+                return Err(exec.format_failure(TestFormatFailure));
+            }
+            Ok(())
+        })?;
+        support::submit_minimal_scene(context)
     }
 }
 
-impl FormatImporter for SourceSemanticLossImporter {
+impl Format for SourceSemanticLossImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("dev.baozi.test.source-semantic-loss").unwrap(),
@@ -108,22 +131,34 @@ impl FormatImporter for SourceSemanticLossImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        scope.record_source_semantic_loss(
-            DiagnosticCode::new(SOURCE_SEMANTIC_LOSS_CODE).unwrap(),
-            SourceScopeEntityKind::AnimationChannel,
-            "/animations/3/channels/5",
-            |details| {
-                details.unsigned("animation_index", 3);
-                details.unsigned("channel_index", 5);
-            },
-            format_args!("omitted one source animation channel"),
-        )?;
-        support::submit_minimal_scene(scope)
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        context.with_execution(|exec| -> ParseResult<()> {
+            exec.record_source_semantic_loss(
+                DiagnosticCode::new(SOURCE_SEMANTIC_LOSS_CODE).unwrap(),
+                SourceScopeEntityKind::AnimationChannel,
+                "/animations/3/channels/5",
+                |details| {
+                    details.unsigned("animation_index", 3);
+                    details.unsigned("channel_index", 5);
+                },
+                format_args!("omitted one source animation channel"),
+            )?;
+            Ok(())
+        })?;
+        support::submit_minimal_scene(context)
     }
 }
 
-impl FormatImporter for ScopeImporter {
+impl Format for ScopeImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("dev.baozi.test.source-scope").unwrap(),
@@ -145,31 +180,29 @@ impl FormatImporter for ScopeImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        if matches!(self.exit, Exit::NoRecord) {
-            return support::submit_minimal_scene(scope);
-        }
-        if matches!(self.exit, Exit::TypedSuccess) {
-            record_typed(scope)?;
-            return support::submit_minimal_scene(scope);
-        }
-        if matches!(self.exit, Exit::LightSuccess) {
-            record_lights(scope, self.identities)?;
-            return support::submit_minimal_scene(scope);
-        }
-
-        record(scope, self.identities)?;
-        match self.exit {
-            Exit::NoRecord => unreachable!(),
-            Exit::Success => support::submit_minimal_scene(scope),
-            Exit::TypedSuccess => unreachable!(),
-            Exit::LightSuccess => unreachable!(),
-            Exit::FailureAfterRecord => Err(scope.format_failure(TestFormatFailure)),
-            Exit::Duplicate => {
-                record(scope, &["scene:duplicate"])?;
-                unreachable!("the sealed source-scope slot must reject a duplicate")
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        context.with_execution(|exec| -> ParseResult<()> {
+            match self.exit {
+                Exit::NoRecord => {}
+                Exit::TypedSuccess => record_typed(exec)?,
+                Exit::LightSuccess => record_lights(exec, self.identities)?,
+                Exit::Success | Exit::FailureAfterRecord | Exit::Duplicate => {
+                    record(exec, self.identities)?;
+                    match self.exit {
+                        Exit::FailureAfterRecord => {
+                            return Err(exec.format_failure(TestFormatFailure));
+                        }
+                        Exit::Duplicate => {
+                            record(exec, &["scene:duplicate"])?;
+                            unreachable!("the sealed source-scope slot must reject a duplicate")
+                        }
+                        _ => {}
+                    }
+                }
             }
-        }
+            Ok(())
+        })?;
+        support::submit_minimal_scene(context)
     }
 }
 
@@ -177,7 +210,16 @@ struct CancelBeforeEmptyIdentityImporter {
     cancellation: CancellationToken,
 }
 
-impl FormatImporter for CancelBeforeEmptyIdentityImporter {
+impl Format for CancelBeforeEmptyIdentityImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("dev.baozi.test.source-scope-cancellation").unwrap(),
@@ -199,22 +241,25 @@ impl FormatImporter for CancelBeforeEmptyIdentityImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        let mut builder = scope.source_scope_builder(
-            SourceScopeSelectionRequest::DocumentDefault,
-            selection_outcome(),
-        )?;
-        self.cancellation.cancel();
-        builder.observe(
-            SourceScopeEntityKind::Scene,
-            SourceScopeDisposition::Selected,
-            "",
-        )?;
-        unreachable!("an empty source identity must still observe cancellation")
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        context.with_execution(|exec| -> ParseResult<()> {
+            let mut builder = exec.source_scope_builder(
+                SourceScopeSelectionRequest::DocumentDefault,
+                selection_outcome(),
+            )?;
+            self.cancellation.cancel();
+            builder.observe(
+                exec,
+                SourceScopeEntityKind::Scene,
+                SourceScopeDisposition::Selected,
+                "",
+            )?;
+            unreachable!("an empty source identity must still observe cancellation")
+        })
     }
 }
 
-fn record(scope: &ParseScope<'_>, identities: &[&str]) -> ParseResult<()> {
+fn record(scope: &mut ParseExecution<'_, '_>, identities: &[&str]) -> ParseResult<()> {
     let mut builder = scope.source_scope_builder(
         SourceScopeSelectionRequest::DocumentDefault,
         selection_outcome(),
@@ -225,13 +270,13 @@ fn record(scope: &ParseScope<'_>, identities: &[&str]) -> ParseResult<()> {
         } else {
             SourceScopeDisposition::Omitted
         };
-        builder.observe(SourceScopeEntityKind::Scene, disposition, identity)?;
+        builder.observe(scope, SourceScopeEntityKind::Scene, disposition, identity)?;
     }
-    let record = builder.finish()?;
+    let record = builder.finish(scope)?;
     scope.record_source_scope(record)
 }
 
-fn record_typed(scope: &ParseScope<'_>) -> ParseResult<()> {
+fn record_typed(scope: &mut ParseExecution<'_, '_>) -> ParseResult<()> {
     let mut builder = scope.source_scope_builder(
         SourceScopeSelectionRequest::DocumentDefault,
         selection_outcome(),
@@ -253,19 +298,20 @@ fn record_typed(scope: &ParseScope<'_>) -> ParseResult<()> {
             "bc",
         ),
     ] {
-        builder.observe(kind, disposition, identity)?;
+        builder.observe(scope, kind, disposition, identity)?;
     }
-    let record = builder.finish()?;
+    let record = builder.finish(scope)?;
     scope.record_source_scope(record)
 }
 
-fn record_lights(scope: &ParseScope<'_>, identities: &[&str]) -> ParseResult<()> {
+fn record_lights(scope: &mut ParseExecution<'_, '_>, identities: &[&str]) -> ParseResult<()> {
     let mut builder = scope.source_scope_builder(
         SourceScopeSelectionRequest::DocumentDefault,
         selection_outcome(),
     )?;
     for (index, identity) in identities.iter().enumerate() {
         builder.observe(
+            scope,
             SourceScopeEntityKind::Light,
             if index == 1 {
                 SourceScopeDisposition::Omitted
@@ -275,7 +321,10 @@ fn record_lights(scope: &ParseScope<'_>, identities: &[&str]) -> ParseResult<()>
             identity,
         )?;
     }
-    scope.record_source_scope(builder.finish()?)
+    {
+        let record = builder.finish(scope)?;
+        scope.record_source_scope(record)
+    }
 }
 
 #[derive(Debug)]
@@ -316,15 +365,15 @@ fn request_for(
     identities: &'static [&'static str],
     limits: ResourceLimits,
     loss_policy: LossPolicy,
-) -> PreparedImportRequest {
+) -> ImportPlan {
     compile_request(ScopeImporter { exit, identities }, limits, loss_policy)
 }
 
 fn compile_request(
-    importer: impl FormatImporter,
+    importer: impl Format,
     limits: ResourceLimits,
     loss_policy: LossPolicy,
-) -> PreparedImportRequest {
+) -> ImportPlan {
     let mut registry = RegistryBuilder::new();
     registry.register(importer).unwrap();
     let snapshot = registry.freeze(RegistryBuildLimits::default()).unwrap();
@@ -332,7 +381,7 @@ fn compile_request(
         .with_resource_limits(ResourceLimitsOverlay::from_limits(limits))
         .with_loss_policy(loss_policy);
     snapshot
-        .compile_request(
+        .plan(
             &ImportRequest::from_layers(
                 ImportRequestLayer::default(),
                 ImportRequestLayer::new(config),
@@ -353,8 +402,7 @@ fn run(
     loss_policy: LossPolicy,
 ) -> Result<ImportReport, ImportFailure> {
     let request = request_for(exit, identities, limits, loss_policy);
-    operation_result(import_bytes(
-        &request,
+    operation_result(request.read_bytes(
         AssetPath::new(SOURCE).unwrap(),
         b"scope",
         ImportOperationControl::default(),
@@ -375,8 +423,7 @@ fn run_source_semantic_loss(loss_policy: LossPolicy) -> Result<ImportReport, Imp
         ResourceLimits::default(),
         loss_policy,
     );
-    operation_result(import_bytes(
-        &request,
+    operation_result(request.read_bytes(
         AssetPath::new(SOURCE).unwrap(),
         b"scope",
         ImportOperationControl::default(),
@@ -480,8 +527,7 @@ fn empty_identity_observation_polls_before_charging_work() {
         ResourceLimits::default(),
         LossPolicy::preserve_or_fail(),
     );
-    let failure = operation_result(import_bytes(
-        &request,
+    let failure = operation_result(request.read_bytes(
         AssetPath::new(SOURCE).unwrap(),
         b"scope",
         ImportOperationControl::default().with_cancellation(cancellation),
@@ -1003,8 +1049,7 @@ fn selection_request_is_retained_and_changes_the_digest_for_the_same_outcome() {
             limits,
             LossPolicy::preserve_or_fail(),
         );
-        let report = operation_result(import_bytes(
-            &request,
+        let report = operation_result(request.read_bytes(
             AssetPath::new(SOURCE).unwrap(),
             b"scope",
             ImportOperationControl::default(),
@@ -1061,8 +1106,7 @@ fn invalid_selection_request_outcome_pairs_are_rejected_before_evidence_admissio
             ResourceLimits::default(),
             LossPolicy::preserve_or_fail(),
         );
-        let failure = operation_result(import_bytes(
-            &request,
+        let failure = operation_result(request.read_bytes(
             AssetPath::new(SOURCE).unwrap(),
             b"scope",
             ImportOperationControl::default(),
@@ -1095,8 +1139,7 @@ fn collapsed_selection_request_survives_later_failure_with_the_complete_digest()
             limits,
             provenance_loss_policy(),
         );
-        let failure = operation_result(import_bytes(
-            &request,
+        let failure = operation_result(request.read_bytes(
             AssetPath::new(SOURCE).unwrap(),
             b"scope",
             ImportOperationControl::default(),

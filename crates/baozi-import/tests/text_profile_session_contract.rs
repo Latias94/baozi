@@ -2,16 +2,16 @@ mod support;
 
 use baozi_core::FormatId;
 use baozi_import::{
-    CapabilityStatus, CauseOwner, ConformancePolicy, DetectionOutcome, DetectionResult,
-    DetectionScope, DiagnosticByteRange, DiagnosticCode, DiagnosticSeverity, FormatCapability,
-    FormatDescriptor, FormatEncoding, FormatImporter, ImportCause, ImportConfigOverlay,
+    CapabilityStatus, CauseOwner, CompiledOptions, ConformancePolicy, DetectionOutcome,
+    DetectionResult, DetectionScope, DiagnosticByteRange, DiagnosticCode, DiagnosticSeverity,
+    Format, FormatCapability, FormatDescriptor, FormatEncoding, ImportCause, ImportConfigOverlay,
     ImportDiagnostic, ImportDimension, ImportFailure, ImportLossDisposition, ImportLossKind,
-    ImportOperationControl, ImportPhase, ImportReport, ImportRequest, ImportRequestLayer,
-    ImportResult, LossPolicy, OptionCompileLimits, ParseResult, ParseScope, PreparedImportRequest,
-    ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder, ResourceLimits,
-    ResourceLimitsOverlay, SceneDraft, ScopeAbortCause, TextBomPolicy, TextControlPolicy,
-    TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding,
-    import_asset as run_import_asset, import_bytes as run_import_bytes,
+    ImportOperationControl, ImportPhase, ImportPlan, ImportReport, ImportRequest,
+    ImportRequestLayer, ImportResult, LossPolicy, NoFormatOptions, OptionCompileError,
+    OptionCompileLimits, ParseContext, ParseResult, ReadConfidence, ReadHint, RegistryBuildLimits,
+    RegistryBuildScope, RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, ScopeAbortCause,
+    TextBomPolicy, TextControlPolicy, TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline,
+    TextProfile, TextSourceEncoding,
 };
 use baozi_io::{
     AssetIo, AssetLength, AssetOpenError, AssetOpenWorkError, AssetPath, AssetReadError,
@@ -60,7 +60,16 @@ impl ContractImporter {
     }
 }
 
-impl FormatImporter for ContractImporter {
+impl Format for ContractImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         self.descriptor.clone()
     }
@@ -74,23 +83,26 @@ impl FormatImporter for ContractImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        self.parse_calls.fetch_add(1, Ordering::AcqRel);
-        *self
-            .captured_limits
-            .lock()
-            .expect("captured-limit mutex must remain available") = Some(scope.limits().clone());
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        context.with_execution(|exec| -> ParseResult<()> {
+            self.parse_calls.fetch_add(1, Ordering::AcqRel);
+            *self
+                .captured_limits
+                .lock()
+                .expect("captured-limit mutex must remain available") = Some(exec.limits().clone());
 
-        if matches!(self.behavior, ParserBehavior::Recover) {
-            scope.record_format_recovery(
-                DiagnosticCode::new(RECOVERY_CODE).expect("static diagnostic code must be valid"),
-                scope.diagnostic_source(),
-                DiagnosticByteRange::new(1, 4).expect("static byte range must be valid"),
-                format_args!("replaced invalid UTF-8"),
-            )?;
-        }
-
-        support::submit_minimal_scene(scope)
+            if matches!(self.behavior, ParserBehavior::Recover) {
+                exec.record_format_recovery(
+                    DiagnosticCode::new(RECOVERY_CODE)
+                        .expect("static diagnostic code must be valid"),
+                    exec.diagnostic_source(),
+                    DiagnosticByteRange::new(1, 4).expect("static byte range must be valid"),
+                    format_args!("replaced invalid UTF-8"),
+                )?;
+            }
+            Ok(())
+        })?;
+        support::submit_minimal_scene(context)
     }
 }
 
@@ -140,7 +152,7 @@ fn request_for(
     limits: ResourceLimits,
     conformance: ConformancePolicy,
     loss_policy: LossPolicy,
-) -> PreparedImportRequest {
+) -> ImportPlan {
     let mut registry = RegistryBuilder::new();
     registry
         .register(importer)
@@ -153,7 +165,7 @@ fn request_for(
         .with_conformance_policy(conformance)
         .with_loss_policy(loss_policy);
     snapshot
-        .compile_request(
+        .plan(
             &ImportRequest::from_layers(
                 ImportRequestLayer::default(),
                 ImportRequestLayer::new(config),
@@ -185,12 +197,8 @@ fn operation_result<T>(result: ImportResult<T>) -> Result<T, ImportFailure> {
     clippy::result_large_err,
     reason = "contract assertions inspect complete bounded import failure evidence"
 )]
-fn import_bytes(
-    request: &PreparedImportRequest,
-    bytes: &[u8],
-) -> Result<ImportReport, ImportFailure> {
-    operation_result(run_import_bytes(
-        request,
+fn read_bytes(request: &ImportPlan, bytes: &[u8]) -> Result<ImportReport, ImportFailure> {
+    operation_result(request.read_bytes(
         AssetPath::new(SOURCE).expect("static source path must be valid"),
         bytes,
         ImportOperationControl::default(),
@@ -270,7 +278,7 @@ fn binary_descriptor_cannot_record_text_recovery() {
         recovery_loss_policy(),
     );
 
-    let failure = import_bytes(&request, SOURCE_BYTES)
+    let failure = read_bytes(&request, SOURCE_BYTES)
         .expect_err("binary descriptors must not authorize text recovery");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -291,7 +299,7 @@ fn reject_only_text_profile_cannot_record_replacement_recovery() {
         recovery_loss_policy(),
     );
 
-    let failure = import_bytes(&request, SOURCE_BYTES)
+    let failure = read_bytes(&request, SOURCE_BYTES)
         .expect_err("reject-only text profiles must not authorize replacement recovery");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -328,7 +336,7 @@ fn declared_replacement_recovery_still_requires_both_common_policies() {
             conformance,
             loss_policy,
         );
-        let result = import_bytes(&request, SOURCE_BYTES);
+        let result = read_bytes(&request, SOURCE_BYTES);
 
         match expected {
             ImportLossDisposition::Applied => {
@@ -405,7 +413,7 @@ fn selected_text_profile_freezes_per_dimension_minima_without_raising_request_li
             LossPolicy::preserve_or_fail(),
         );
 
-        import_bytes(&request, SOURCE_BYTES).expect("input is below every effective text limit");
+        read_bytes(&request, SOURCE_BYTES).expect("input is below every effective text limit");
 
         assert_eq!(parse_calls.load(Ordering::Acquire), 1);
         let effective = captured_limits
@@ -432,7 +440,7 @@ fn primary_bytes_over_text_profile_raw_cap_fail_before_parser_entry() {
         LossPolicy::preserve_or_fail(),
     );
 
-    let failure = import_bytes(&request, SOURCE_BYTES)
+    let failure = read_bytes(&request, SOURCE_BYTES)
         .expect_err("profile raw cap must reject the primary snapshot before parsing");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 0);
@@ -553,13 +561,9 @@ fn successful_primary_bind_freezes_backend_hard_cap_into_parse_scope_limits() {
         reader_calls: Arc::clone(&reader_calls),
     };
 
-    let report = operation_result(run_import_asset(
-        &request,
-        &io,
-        source,
-        ImportOperationControl::default(),
-    ))
-    .expect("input below every intersected primary cap must import successfully");
+    let report =
+        operation_result(request.read_asset(&io, source, ImportOperationControl::default()))
+            .expect("input below every intersected primary cap must import successfully");
 
     assert!(reader_calls.load(Ordering::Acquire) > 0);
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
@@ -608,13 +612,9 @@ fn lower_backend_hard_cap_wins_on_primary_open_before_read_or_parse() {
         reader_calls: Arc::clone(&reader_calls),
     };
 
-    let failure = operation_result(run_import_asset(
-        &request,
-        &io,
-        source,
-        ImportOperationControl::default(),
-    ))
-    .expect_err("backend cap below request and profile caps must win");
+    let failure =
+        operation_result(request.read_asset(&io, source, ImportOperationControl::default()))
+            .expect_err("backend cap below request and profile caps must win");
 
     assert_eq!(reader_calls.load(Ordering::Acquire), 0);
     assert_eq!(parse_calls.load(Ordering::Acquire), 0);

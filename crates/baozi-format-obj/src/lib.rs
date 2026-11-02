@@ -10,17 +10,17 @@ mod parser;
 
 pub(crate) use error::ObjFailure;
 pub use error::ObjFailureCode;
-pub use options::{ObjImportOptions, ObjTextDecodingMode, obj_import_option_key};
+pub use options::{ObjImportOptions, ObjTextDecodingMode};
 
 use baozi_import::authoring::FormatId;
 use baozi_import::{
-    CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
-    FormatDescriptor, FormatEncoding, FormatImporter, OptionRuntimeTypeKey, ParseResult,
-    ParseScope, Probe, ReadHint, RegistryBuilder, RegistryRegistrationError, SceneDraft,
-    TextBomPolicy, TextControlPolicy, TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline,
-    TextProfile, TextSourceEncoding,
+    CapabilityStatus, CompiledOptions, DetectionOutcome, DetectionResult, DetectionScope, Format,
+    FormatCapability, FormatDescriptor, FormatEncoding, FormatOptionLayers, FormatOptionSchema,
+    OptionCompileError, OptionCompileScope, ParseContext, ParseResult, Probe, ReadHint,
+    RegistryBuildScope, RegistryBuilder, RegistryRegistrationError, TextBomPolicy,
+    TextControlPolicy, TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline, TextProfile,
+    TextSourceEncoding,
 };
-use std::sync::Arc;
 
 pub const FORMAT_ID: &str = "org.baozi.obj";
 const DIFFUSE_TEXTURE_ROLE: &str = "diffuse-texture";
@@ -125,17 +125,31 @@ pub(crate) fn diffuse_texture_role() -> baozi_import::DependencyRoleId {
         .expect("static OBJ dependency role must be valid")
 }
 
-impl FormatImporter for ObjImporter {
+impl Format for ObjImporter {
+    type Options = ObjImportOptions;
+
     fn descriptor(&self) -> FormatDescriptor {
         format_descriptor()
     }
 
-    fn option_codec(&self) -> Arc<dyn baozi_import::FormatOptionCodec> {
-        options::option_codec()
+    fn option_schema(&self) -> Option<FormatOptionSchema> {
+        Some(options::option_schema())
     }
 
-    fn option_runtime_type_key(&self) -> OptionRuntimeTypeKey {
-        OptionRuntimeTypeKey::of::<ObjImportOptions>()
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        options::compile_defaults(scope)
+    }
+
+    fn compile_options(
+        &self,
+        scope: &mut OptionCompileScope<'_>,
+        defaults: &Self::Options,
+        layers: FormatOptionLayers<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        options::compile_options(scope, defaults, layers)
     }
 
     fn detect(
@@ -147,8 +161,8 @@ impl FormatImporter for ObjImporter {
         detect::can_read(probe, hint, scope)
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        parser::read_obj(scope)
+    fn parse(&self, options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        parser::read_obj(options, context)
     }
 }
 
@@ -157,7 +171,7 @@ mod tests {
     use super::*;
     use baozi_import::{
         FormatSelection, ImportConfigOverlay, ImportOperationControl, ImportRequest,
-        ImportRequestLayer, OptionCompileLimits, RegistryBuildLimits, import_bytes,
+        ImportRequestLayer, OptionCompileLimits, RegistryBuildLimits,
     };
     use baozi_io::AssetPath;
     use baozi_test_support::assert_support_matrix_row;
@@ -201,15 +215,15 @@ mod tests {
         ));
         let request = ImportRequest::new().with_caller_layer(ImportRequestLayer::new(config));
         let request = registry
-            .compile_request(&request, OptionCompileLimits::default())
+            .plan(&request, OptionCompileLimits::default())
             .expect("OBJ request compilation");
-        let report = import_bytes(
-            &request,
-            AssetPath::new("triangle.obj").expect("test source path"),
-            b"o triangle\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n",
-            ImportOperationControl::default(),
-        )
-        .expect("complete-batch OBJ import");
+        let report = request
+            .read_bytes(
+                AssetPath::new("triangle.obj").expect("test source path"),
+                b"o triangle\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n",
+                ImportOperationControl::default(),
+            )
+            .expect("complete-batch OBJ import");
 
         assert!(report.diagnostics().is_empty());
         assert!(report.scene().canonical_block_count() > 0);

@@ -1,7 +1,7 @@
 use crate::limits::ResourceLimits;
 use crate::store::{
-    ImportStoreHost, ImportStoreHostError, ImportStoreTerminalCause, ImportStoreTerminalEvidence,
-    ImportStoreTerminalFailureClass,
+    ImportStoreExecution, ImportStoreHostError, ImportStoreTerminalCause,
+    ImportStoreTerminalEvidence, ImportStoreTerminalFailureClass,
 };
 use baozi_operation::{
     DimensionPolicy, LedgerLimits, LedgerLimitsError, OperationControl, OperationOwner,
@@ -510,7 +510,7 @@ impl ImportDimensionSnapshot {
 }
 
 pub(crate) fn tighten_selected_format_limits(
-    host: ImportStoreHost<'_>,
+    exec: &mut ImportStoreExecution<'_>,
     limits: &ResourceLimits,
 ) -> Result<(), ImportStoreHostError> {
     for dimension in [
@@ -520,7 +520,7 @@ pub(crate) fn tighten_selected_format_limits(
         ImportDimension::Tokens,
         ImportDimension::CanonicalStringBytes,
     ] {
-        host.tighten_dimension_policy(dimension, dimension.policy(limits))?;
+        exec.tighten_dimension_policy(dimension, dimension.policy(limits))?;
     }
     Ok(())
 }

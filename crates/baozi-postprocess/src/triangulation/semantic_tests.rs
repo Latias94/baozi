@@ -1,3 +1,4 @@
+use super::action_tests::record_event;
 use super::*;
 
 const POSITIONS: [[f64; 3]; 5] = [
@@ -16,17 +17,23 @@ fn triangulation_preserves_source_identity_and_ring_semantics() {
     let source_corners = SOURCE_CORNERS;
     let mut scratch = [CornerScratch::default(); POSITIONS.len()];
     let mut output = [[usize::MAX; 3]; POSITIONS.len() - 2];
+    let mut events = Vec::new();
 
     let written = triangulate_polygon(
         &positions,
         &source_corners,
         &mut scratch,
         &mut output,
-        &mut || Ok::<_, ()>(()),
+        &mut |event| {
+            record_event(&mut events, event);
+            Ok::<_, ()>(())
+        },
     )
     .expect("the admitted simple polygon must triangulate");
 
     assert_eq!(written, POSITIONS.len() - 2);
+    assert_eq!(events.first(), Some(&WorkEvent::Checkpoint));
+    assert_eq!(events.last(), Some(&WorkEvent::Checkpoint));
     assert_eq!(positions, POSITIONS);
     assert_eq!(source_corners, SOURCE_CORNERS);
 
@@ -62,12 +69,18 @@ fn triangulation_preserves_source_identity_and_ring_semantics() {
     assert!(seen.into_iter().all(|present| present));
 
     let mut postflight_scratch = [CornerScratch::default(); POSITIONS.len()];
+    let mut postflight_events = Vec::new();
     validate_polygon_triangulation(
         &positions,
         &source_corners,
         &output,
         &mut postflight_scratch,
-        &mut || Ok::<_, ()>(()),
+        &mut |event| {
+            record_event(&mut postflight_events, event);
+            Ok::<_, ()>(())
+        },
     )
     .expect("the emitted candidate must satisfy independent postflight");
+    assert_eq!(postflight_events.first(), Some(&WorkEvent::Checkpoint));
+    assert_eq!(postflight_events.last(), Some(&WorkEvent::Checkpoint));
 }

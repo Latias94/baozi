@@ -22,11 +22,11 @@ use baozi_import::authoring::{
     StaticSceneBuilder, TangentBasisConvention, TangentConventions, TangentHandednessEncoding,
 };
 use baozi_import::{
-    CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
-    FormatDescriptor, FormatEncoding, FormatImporter, FormatSelection, ImportConfigOverlay,
-    ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer, OptionCompileLimits,
-    ParseResult, ParseScope, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
-    SceneDraft, import_asset,
+    CapabilityStatus, CompiledOptions, DetectionOutcome, DetectionResult, DetectionScope, Format,
+    FormatCapability, FormatDescriptor, FormatEncoding, FormatSelection, ImportConfigOverlay,
+    ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer, NoFormatOptions,
+    OptionCompileError, OptionCompileLimits, ParseContext, ParseResult, ReadConfidence, ReadHint,
+    RegistryBuildLimits, RegistryBuildScope, RegistryBuilder,
 };
 use baozi_io::{AssetPath, MemoryAssetIo};
 use baozi_postprocess::{
@@ -787,7 +787,16 @@ enum Fixture {
 
 struct FieldImporter(Fixture);
 
-impl FormatImporter for FieldImporter {
+impl Format for FieldImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new(FORMAT).unwrap(),
@@ -811,7 +820,7 @@ impl FormatImporter for FieldImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
         let (normal, uv) = match self.0 {
             Fixture::Domains { normal, uv } => (normal, uv),
             _ => (AttributeDomain::Vertex, AttributeDomain::Vertex),
@@ -946,7 +955,7 @@ impl FormatImporter for FieldImporter {
         )];
         let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
         let Fixture::Morph { semantic, .. } = self.0 else {
-            return scope.submit_static_scene(
+            return context.submit(
                 StaticSceneBuilder::new(Presence::Present(&[]), &[])
                     .with_scene_space(&SceneSpace::STANDARD_TARGET)
                     .with_geometry(&meshes, &primitives, &attributes, &[]),
@@ -1020,9 +1029,9 @@ impl FormatImporter for FieldImporter {
             .map(|owner| OwnerProvenanceAuthoring::new(owner, &attachment))
             .collect();
         let snapshots = [ResourceSnapshotAuthoring::snapshotted(
-            scope.primary_bytes(),
+            context.primary_bytes(),
         )];
-        scope.submit_scene(SceneAuthoringBatch::new(
+        context.submit_complete(SceneAuthoringBatch::new(
             SpatialAuthoringBatch::new(&SceneSpace::STANDARD_TARGET, &[], &[]),
             NodeAuthoringBatch::new(Presence::Present(&[]), &[]),
             AppearanceAuthoringBatch::empty(),
@@ -1047,13 +1056,14 @@ fn import_fixture(fixture: Fixture) -> ImportReport {
             .with_format_selection(FormatSelection::Forced(FormatId::new(FORMAT).unwrap())),
     ));
     let request = registry
-        .compile_request(&request, OptionCompileLimits::default())
+        .plan(&request, OptionCompileLimits::default())
         .unwrap();
     let io = MemoryAssetIo::new();
     let path = AssetPath::new(PATH).unwrap();
     io.try_insert(path.clone(), Arc::<[u8]>::from(b"abc".as_slice()))
         .unwrap();
-    import_asset(&request, &io, path, ImportOperationControl::default())
+    request
+        .read_asset(&io, path, ImportOperationControl::default())
         .expect("public authoring fixture must pass central validation")
 }
 

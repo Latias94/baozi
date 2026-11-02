@@ -5,8 +5,8 @@ use crate::document::schema as json;
 use crate::document::{MagFilter, MinFilter, WrappingMode};
 use crate::document::{Mode, Semantic};
 use crate::{
-    GltfFailure, GltfSceneSelection, admission, external_buffer_role, external_image_role,
-    gltf_import_option_key,
+    GltfFailure, GltfImportOptions, GltfSceneSelection, admission, external_buffer_role,
+    external_image_role,
 };
 use baozi_import::authoring::{
     AttributeSemantic, AuthoredTransform, AuthoringRange, CameraLocalId, CameraProjection,
@@ -17,10 +17,10 @@ use baozi_import::authoring::{
     TexelFilter, TextureAddressMode, TextureAuthoring, TextureLocalId, Vec3,
 };
 use baozi_import::{
-    DiagnosticCode, DiagnosticSeverity, ImportStorageClass, ImportWorkClass, ImportWorkScope,
-    MeteredOrderedMap, MeteredString, MeteredVec, ParseFailure, ParseResult, ParseScope,
-    SceneDraft, SourceScopeDisposition, SourceScopeEntityKind, SourceScopeRecordBuilder,
-    SourceScopeSelectionOutcome, SourceScopeSelectionRequest,
+    DiagnosticCode, DiagnosticSeverity, ImportStorageClass, ImportWorkClass, ImportWorkGroup,
+    ImportWorkScope, MeteredOrderedMap, MeteredString, MeteredVec, ParseContext, ParseExecution,
+    ParseFailure, ParseResult, SourceScopeDisposition, SourceScopeEntityKind,
+    SourceScopeRecordBuilder, SourceScopeSelectionOutcome, SourceScopeSelectionRequest,
 };
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::{DecodeError, DecodeSliceError, Engine as _};
@@ -92,11 +92,16 @@ impl From<GltfFailure> for ContentError {
     }
 }
 
-pub(crate) fn read_gltf(scope: &ParseScope<'_>) -> ParseResult<SceneDraft> {
-    match read_gltf_inner(scope) {
-        Ok(draft) => Ok(draft),
+pub(crate) fn read_gltf(
+    options: &GltfImportOptions,
+    context: &mut ParseContext<'_>,
+) -> ParseResult<()> {
+    match read_gltf_inner(options, context) {
+        Ok(()) => Ok(()),
         Err(ContentError::Scope(error)) => Err(error),
-        Err(error) => Err(scope.format_failure(error.into_format_failure())),
+        Err(error) => {
+            context.with_execution(|exec| Err(exec.format_failure(error.into_format_failure())))
+        }
     }
 }
 
@@ -104,12 +109,16 @@ fn to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
-fn authoring_u32(ctx: &ParseScope<'_>, value: usize, resource: &'static str) -> Result<u32> {
+fn authoring_u32(
+    ctx: &mut ParseExecution<'_, '_>,
+    value: usize,
+    resource: &'static str,
+) -> Result<u32> {
     u32::try_from(value).map_err(|_| ctx.allocation_failure(resource).into())
 }
 
 fn enforce_usize_limit(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     resource: &'static str,
     attempted: usize,
     limit: usize,
@@ -118,10 +127,15 @@ fn enforce_usize_limit(
     Ok(())
 }
 
-fn selected_count(ctx: &ParseScope<'_>, values: &[bool]) -> Result<usize> {
+fn selected_count(ctx: &mut ParseExecution<'_, '_>, values: &[bool]) -> Result<usize> {
     let mut count = 0usize;
+    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
     for chunk in values.chunks(PARSER_POLL_INTERVAL) {
-        ctx.charge_work(to_u64(chunk.len()))?;
+        ctx.with_work(
+            &work_group,
+            [to_u64(chunk.len())],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         for selected in chunk {
             count = count.checked_add(usize::from(*selected)).ok_or_else(|| {
                 ContentError::from(GltfFailure::internal("selection count overflow"))
@@ -132,7 +146,7 @@ fn selected_count(ctx: &ParseScope<'_>, values: &[bool]) -> Result<usize> {
 }
 
 fn checked_add_with_limit(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     resource: &'static str,
     current: usize,
     amount: usize,
@@ -155,22 +169,31 @@ struct PreparedDocument<'scope, 'document> {
     morph_contracts: morph::MorphContracts<'scope>,
 }
 
-fn read_gltf_inner(ctx: &ParseScope<'_>) -> Result<SceneDraft> {
-    let normalized = read_normalized_gltf(ctx)?;
-    normalized::submit(ctx, &normalized)
+fn read_gltf_inner(options: &GltfImportOptions, context: &mut ParseContext<'_>) -> Result<()> {
+    let normalized = context.with_execution(|exec| read_normalized_gltf(exec, options))?;
+    normalized::submit(context, &normalized)
 }
 
 /// Completes decoding before canonical construction can enter its own call chain.
 /// Prepared contracts, typed rows, and structural storage are released before submission.
-fn read_normalized_gltf<'scope>(ctx: &'scope ParseScope<'_>) -> Result<NormalizedGltf<'scope>> {
-    let gltf = crate::document::Document::decode(ctx, admission::admit(ctx)?)?;
-    let node_graph = preflight_node_graph(ctx, &gltf)?;
+fn read_normalized_gltf<'scope>(
+    ctx: &mut ParseExecution<'_, 'scope>,
+    options: &GltfImportOptions,
+) -> Result<NormalizedGltf<'scope>> {
+    let surfaces = admission::admit(ctx)?;
+    let gltf = crate::document::Document::decode(ctx, surfaces)?;
+    let node_graph = preflight_node_graph(ctx, &gltf, options)?;
     let animation_contracts = animation::preflight(ctx, &gltf, node_graph.selected.as_slice())?;
     let mut resource_closure =
         build_resource_closure(ctx, &gltf, &node_graph, &animation_contracts)?;
     let material_contracts = materials::preflight(ctx, &gltf, &resource_closure)?;
+    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
     for binding in material_contracts.all_bindings() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         mark_texture(
             ctx,
             gltf.tables(),
@@ -198,7 +221,7 @@ fn read_normalized_gltf<'scope>(ctx: &'scope ParseScope<'_>) -> Result<Normalize
         &material_contracts,
     )?;
     accessor::validate_vertex_views(ctx, &gltf, &resource_closure)?;
-    let material_count = with_poll(ctx, || gltf.materials().count())?;
+    let material_count = with_poll(ctx, |_ctx| gltf.materials().count())?;
     let geometry_contracts = preflight_geometry_contracts(
         ctx,
         &gltf,
@@ -239,23 +262,28 @@ fn read_normalized_gltf<'scope>(ctx: &'scope ParseScope<'_>) -> Result<Normalize
 }
 
 fn owned_name<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     value: Option<&str>,
     resource: &'static str,
 ) -> Result<Option<MeteredString<'scope>>> {
     value
         .map(|value| {
             let mut output = ctx.metered_string(ImportStorageClass::FormatNormalization, resource);
-            output.try_reserve(value.len())?;
+            output.try_reserve(ctx, value.len())?;
             let mut remaining = value;
+            let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
             while !remaining.is_empty() {
                 let mut end = remaining.len().min(PARSER_POLL_INTERVAL);
                 while !remaining.is_char_boundary(end) {
                     end -= 1;
                 }
                 let (chunk, rest) = remaining.split_at(end);
-                ctx.charge_work(to_u64(chunk.len()))?;
-                output.try_push_str(chunk)?;
+                ctx.with_work(
+                    &work_group,
+                    [to_u64(chunk.len())],
+                    |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+                )?;
+                output.try_push_str(ctx, chunk)?;
                 remaining = rest;
             }
             Ok(output)
@@ -266,11 +294,16 @@ fn owned_name<'scope>(
 /// Called only after retained payloads have passed profile admission. Unknown selected
 /// behavior is a hard error, so these diagnostics never claim to omit a retained payload.
 fn report_uninterpreted_extension_declarations(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     root: &json::Tables<'_>,
 ) -> Result<()> {
+    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
     for name in &root.extensions_used {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         if !is_supported_extension(name) {
             push_warning(
                 ctx,
@@ -285,13 +318,13 @@ fn report_uninterpreted_extension_declarations(
 }
 
 fn preflight_canonical_base_strings(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     gltf: &crate::document::Document<'_>,
     graph: &NodeGraph<'_, '_>,
     closure: &ResourceClosure<'_>,
     lights: &lights::LightStorage<'_>,
 ) -> Result<usize> {
-    with_poll(ctx, || {
+    with_poll(ctx, |ctx| {
         let mut bytes = 0usize;
         let limit = ctx.limits().max_canonical_string_bytes;
 
@@ -307,22 +340,18 @@ fn preflight_canonical_base_strings(
                 continue;
             }
             if let Some(name) = mesh.name() {
-                enforce_usize_limit(
-                    ctx,
-                    "max_string_bytes",
-                    name.len(),
-                    ctx.limits().max_string_bytes,
-                )?;
+                {
+                    let argument_0 = ctx.limits().max_string_bytes;
+                    enforce_usize_limit(ctx, "max_string_bytes", name.len(), argument_0)
+                }?;
                 add_repeated_string_bytes(ctx, &mut bytes, name.len(), limit)?;
-                let primitive_count = with_poll(ctx, || mesh.primitives().len())?;
+                let primitive_count = with_poll(ctx, |_ctx| mesh.primitives().len())?;
                 for primitive_index in 0..primitive_count {
                     let generated_len = primitive_name_len(ctx, name, primitive_index)?;
-                    enforce_usize_limit(
-                        ctx,
-                        "max_string_bytes",
-                        generated_len,
-                        ctx.limits().max_string_bytes,
-                    )?;
+                    {
+                        let argument_0 = ctx.limits().max_string_bytes;
+                        enforce_usize_limit(ctx, "max_string_bytes", generated_len, argument_0)
+                    }?;
                 }
             }
         }
@@ -333,18 +362,15 @@ fn preflight_canonical_base_strings(
                 continue;
             }
             let Some(node) = graph.document.node(node_index) else {
-                return Err(gltf_parse_error(
-                    ctx,
-                    format_args!("glTF node graph references missing node {node_index}"),
-                ));
+                return Err(gltf_parse_error(format_args!(
+                    "glTF node graph references missing node {node_index}"
+                )));
             };
             if let Some(name) = node.name() {
-                enforce_usize_limit(
-                    ctx,
-                    "max_string_bytes",
-                    name.len(),
-                    ctx.limits().max_string_bytes,
-                )?;
+                {
+                    let argument_0 = ctx.limits().max_string_bytes;
+                    enforce_usize_limit(ctx, "max_string_bytes", name.len(), argument_0)
+                }?;
                 add_repeated_string_bytes(ctx, &mut bytes, name.len(), limit)?;
             }
         }
@@ -355,12 +381,10 @@ fn preflight_canonical_base_strings(
                 continue;
             }
             if let Some(name) = skin.name() {
-                enforce_usize_limit(
-                    ctx,
-                    "max_string_bytes",
-                    name.len(),
-                    ctx.limits().max_string_bytes,
-                )?;
+                {
+                    let argument_0 = ctx.limits().max_string_bytes;
+                    enforce_usize_limit(ctx, "max_string_bytes", name.len(), argument_0)
+                }?;
                 add_repeated_string_bytes(ctx, &mut bytes, name.len(), limit)?;
             }
         }
@@ -383,8 +407,13 @@ fn preflight_canonical_base_strings(
             }
         }
 
+        let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
         for name in lights.names.as_slice() {
-            ctx.charge_work(1)?;
+            ctx.with_work(
+                &work_group,
+                [1],
+                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+            )?;
             if let Some(name) = name {
                 add_repeated_string_bytes(ctx, &mut bytes, name.len(), limit)?;
             }
@@ -404,46 +433,51 @@ impl ResolvedTextureUris<'_> {
 }
 
 fn preflight_texture_strings<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     gltf: &crate::document::Document<'_>,
     repeated_mesh_string_bytes: usize,
     closure: &ResourceClosure<'_>,
     materials: &MaterialContracts<'_>,
 ) -> Result<ResolvedTextureUris<'scope>> {
-    with_poll(ctx, || {
+    with_poll(ctx, |ctx| {
         let mut bytes = repeated_mesh_string_bytes;
         let limit = ctx.limits().max_canonical_string_bytes;
-        let image_count = with_poll(ctx, || gltf.images().len())?;
+        let image_count = with_poll(ctx, |_ctx| gltf.images().len())?;
         let mut resolved_uris = ctx.metered_ordered_map(
             ImportStorageClass::FormatNormalization,
             "gltf-resolved-texture-uris",
         );
 
+        let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
         for (index, image) in gltf.images().enumerate() {
-            ctx.charge_work(1)?;
+            ctx.with_work(
+                &work_group,
+                [1],
+                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+            )?;
             if closure.images.as_slice()[index]
                 && let Some(name) = image.name()
             {
-                enforce_usize_limit(
-                    ctx,
-                    "max_string_bytes",
-                    name.len(),
-                    ctx.limits().max_string_bytes,
-                )?;
+                {
+                    let argument_0 = ctx.limits().max_string_bytes;
+                    enforce_usize_limit(ctx, "max_string_bytes", name.len(), argument_0)
+                }?;
                 add_repeated_string_bytes(ctx, &mut bytes, name.len(), limit)?;
             }
         }
         for (index, sampler) in gltf.samplers().enumerate() {
-            ctx.charge_work(1)?;
+            ctx.with_work(
+                &work_group,
+                [1],
+                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+            )?;
             if closure.samplers.as_slice()[index]
                 && let Some(name) = sampler.name()
             {
-                enforce_usize_limit(
-                    ctx,
-                    "max_string_bytes",
-                    name.len(),
-                    ctx.limits().max_string_bytes,
-                )?;
+                {
+                    let argument_0 = ctx.limits().max_string_bytes;
+                    enforce_usize_limit(ctx, "max_string_bytes", name.len(), argument_0)
+                }?;
                 add_repeated_string_bytes(ctx, &mut bytes, name.len(), limit)?;
             }
         }
@@ -460,18 +494,20 @@ fn preflight_texture_strings<'scope>(
                 continue;
             }
             if let Some(name) = material.name() {
-                enforce_usize_limit(
-                    ctx,
-                    "max_string_bytes",
-                    name.len(),
-                    ctx.limits().max_string_bytes,
-                )?;
+                {
+                    let argument_0 = ctx.limits().max_string_bytes;
+                    enforce_usize_limit(ctx, "max_string_bytes", name.len(), argument_0)
+                }?;
                 add_repeated_string_bytes(ctx, &mut bytes, name.len(), limit)?;
             }
             for binding in materials.bindings(ctx, material_index)? {
-                ctx.charge_work(1)?;
+                ctx.with_work(
+                    &work_group,
+                    [1],
+                    |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+                )?;
                 let texture = gltf.textures().nth(binding.source_texture).ok_or_else(|| {
-                    gltf_parse_error(ctx, "compiled material texture reference is missing")
+                    gltf_parse_error("compiled material texture reference is missing")
                 })?;
                 preflight_texture_reference(
                     ctx,
@@ -492,7 +528,7 @@ fn preflight_texture_strings<'scope>(
 }
 
 fn preflight_texture_reference<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     bytes: &mut usize,
     limit: usize,
     texture: crate::document::Texture<'_>,
@@ -503,28 +539,23 @@ fn preflight_texture_reference<'scope>(
     let image = texture.source();
     let image_name = image.name();
     if let Some(name) = image_name {
-        enforce_usize_limit(
-            ctx,
-            "max_string_bytes",
-            name.len(),
-            ctx.limits().max_string_bytes,
-        )?;
+        {
+            let argument_0 = ctx.limits().max_string_bytes;
+            enforce_usize_limit(ctx, "max_string_bytes", name.len(), argument_0)
+        }?;
     }
     if let ImageSource::Uri { uri, .. } = image.source() {
-        enforce_usize_limit(
-            ctx,
-            "max_string_bytes",
-            uri.len(),
-            ctx.limits().max_string_bytes,
-        )?;
+        {
+            let argument_0 = ctx.limits().max_string_bytes;
+            enforce_usize_limit(ctx, "max_string_bytes", uri.len(), argument_0)
+        }?;
     }
 
     let image_index = image.index();
     if image_index >= image_count {
-        return Err(gltf_parse_error(
-            ctx,
-            format_args!("glTF texture references missing image {image_index}"),
-        ));
+        return Err(gltf_parse_error(format_args!(
+            "glTF texture references missing image {image_index}"
+        )));
     }
     let resolved_uri_len = match image.source() {
         ImageSource::Uri { uri, .. } if !is_data_uri(uri) => {
@@ -536,10 +567,12 @@ fn preflight_texture_reference<'scope>(
                     ImportStorageClass::FormatNormalization,
                     resolution_bytes,
                 )?;
-                let resolved = ctx.with_work(
-                    ImportWorkClass::WorkUnits,
-                    to_u64(ctx.source().as_str().len().saturating_add(reference.len())),
-                    |work| -> Result<_> {
+                let resolved = ctx.with_work_group(
+                    [(
+                        ImportWorkClass::WorkUnits,
+                        to_u64(ctx.source().as_str().len().saturating_add(reference.len())),
+                    )],
+                    |ctx, work| -> Result<_> {
                         let resolved =
                             ctx.source().resolve_from_file(reference).map_err(|error| {
                                 GltfFailure::invalid_reference(
@@ -556,19 +589,16 @@ fn preflight_texture_reference<'scope>(
                     ImportStorageClass::FormatNormalization,
                     "gltf-resolved-texture-uri",
                 );
-                resolved_uri.try_push_str(resolved.as_str())?;
-                resolved_uris.try_insert(image_index, resolved_uri)?;
+                resolved_uri.try_push_str(ctx, resolved.as_str())?;
+                resolved_uris.try_insert(ctx, image_index, resolved_uri)?;
             }
             Some(
                 resolved_uris
                     .get(&image_index)
                     .ok_or_else(|| {
-                        gltf_parse_error(
-                            ctx,
-                            format_args!(
-                                "glTF texture resolution plan is missing image {image_index}"
-                            ),
-                        )
+                        gltf_parse_error(format_args!(
+                            "glTF texture resolution plan is missing image {image_index}"
+                        ))
                     })?
                     .len(),
             )
@@ -578,12 +608,10 @@ fn preflight_texture_reference<'scope>(
 
     let texture_name = texture.name();
     if let Some(name) = texture_name {
-        enforce_usize_limit(
-            ctx,
-            "max_string_bytes",
-            name.len(),
-            ctx.limits().max_string_bytes,
-        )?;
+        {
+            let argument_0 = ctx.limits().max_string_bytes;
+            enforce_usize_limit(ctx, "max_string_bytes", name.len(), argument_0)
+        }?;
     }
     if let Some(name) = texture_name {
         add_repeated_string_bytes(ctx, bytes, name.len(), limit)?;
@@ -595,7 +623,10 @@ fn preflight_texture_reference<'scope>(
     Ok(())
 }
 
-fn texture_path_resolution_allowance(ctx: &ParseScope<'_>, reference: &str) -> Result<u64> {
+fn texture_path_resolution_allowance(
+    ctx: &mut ParseExecution<'_, '_>,
+    reference: &str,
+) -> Result<u64> {
     let source_bytes = ctx
         .source()
         .as_str()
@@ -621,7 +652,7 @@ fn texture_path_resolution_allowance(ctx: &ParseScope<'_>, reference: &str) -> R
 }
 
 fn add_repeated_string_bytes(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     bytes: &mut usize,
     amount: usize,
     limit: usize,
@@ -631,7 +662,7 @@ fn add_repeated_string_bytes(
 }
 
 fn primitive_name_len(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     mesh_name: &str,
     primitive_index: usize,
 ) -> Result<usize> {
@@ -657,14 +688,13 @@ fn decimal_digits(mut value: usize) -> usize {
     digits
 }
 
-fn complete_canonical_string_work(ctx: &ParseScope<'_>, bytes: usize) -> Result<()> {
+fn complete_canonical_string_work(ctx: &mut ParseExecution<'_, '_>, bytes: usize) -> Result<()> {
     if bytes == 0 {
         return Ok(());
     }
-    ctx.with_work(
-        ImportWorkClass::CanonicalStringBytes,
-        to_u64(bytes),
-        |work| -> Result<()> {
+    ctx.with_work_group(
+        [(ImportWorkClass::CanonicalStringBytes, to_u64(bytes))],
+        |_ctx, work| -> Result<()> {
             work.complete_all()?;
             Ok(())
         },
@@ -672,7 +702,7 @@ fn complete_canonical_string_work(ctx: &ParseScope<'_>, bytes: usize) -> Result<
 }
 
 fn accessor_provenance(
-    ctx: &ParseScope<'_>,
+    _ctx: &mut ParseExecution<'_, '_>,
     buffers: &[Option<BufferData<'_>>],
     accessor: crate::document::Accessor<'_>,
 ) -> Result<AccessorSources> {
@@ -693,13 +723,10 @@ fn accessor_provenance(
                 .and_then(Option::as_ref)
                 .map(BufferData::provenance)
                 .ok_or_else(|| {
-                    gltf_parse_error(
-                        ctx,
-                        format_args!(
-                            "glTF accessor {} references unavailable buffer {buffer_index}",
-                            accessor.index()
-                        ),
-                    )
+                    gltf_parse_error(format_args!(
+                        "glTF accessor {} references unavailable buffer {buffer_index}",
+                        accessor.index()
+                    ))
                 })?,
         );
     }
@@ -709,7 +736,7 @@ fn accessor_provenance(
 /// Conservative work for collecting R references, heap sorting, deduplicating, and copying them.
 /// Heap construction takes at most 2R comparisons; extraction at most 2R * bit_length(R).
 /// The remaining 3R covers collection, adjacent comparisons, and the retained copy.
-fn provenance_work_bound(ctx: &ParseScope<'_>, references: usize) -> Result<u64> {
+fn provenance_work_bound(ctx: &mut ParseExecution<'_, '_>, references: usize) -> Result<u64> {
     let levels = u64::from(usize::BITS - references.leading_zeros());
     to_u64(references)
         .checked_mul(2 * levels + 5)
@@ -719,10 +746,10 @@ fn provenance_work_bound(ctx: &ParseScope<'_>, references: usize) -> Result<u64>
 /// Appends one owner's sorted unique sources, preserving every earlier owner's range.
 /// Callers prepay provenance_work_bound before entering their non-nestable decode work scope.
 /// Pending storage is reused between owners; the retained table only needs unique-source capacity.
-fn try_extend_provenance_unique(
-    ctx: &ParseScope<'_>,
-    values: &mut MeteredVec<'_, u32>,
-    pending: &mut MeteredVec<'_, u32>,
+fn try_extend_provenance_unique<'session>(
+    ctx: &mut ParseExecution<'_, 'session>,
+    values: &mut MeteredVec<'session, u32>,
+    pending: &mut MeteredVec<'session, u32>,
 ) -> Result<()> {
     let mut until_poll = 0;
     let mut control = || -> Result<()> {
@@ -751,14 +778,14 @@ fn try_extend_provenance_unique(
 }
 
 fn load_buffers<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     gltf: &crate::document::Document<'_>,
     glb_bin_bytes: Option<&[u8]>,
     closure: &ResourceClosure<'_>,
 ) -> Result<BufferSet<'scope>> {
-    let buffer_count = with_poll(ctx, || gltf.buffers().count())?;
+    let buffer_count = with_poll(ctx, |_ctx| gltf.buffers().count())?;
     let mut buffers = ctx.metered_vec(ImportStorageClass::BackendDecode, "gltf-buffer-list");
-    buffers.try_reserve(buffer_count)?;
+    buffers.try_reserve(ctx, buffer_count)?;
     let mut external_resource_count = 0usize;
     for (ordinal, buffer) in gltf.buffers().enumerate() {
         poll_parser_loop(ctx, ordinal)?;
@@ -825,7 +852,7 @@ fn load_buffers<'scope>(
 }
 
 fn load_data_uri_buffer<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     uri: &str,
     buffer_index: usize,
     declared_length: usize,
@@ -847,7 +874,7 @@ struct DecodedDataUri<'scope, 'uri> {
 }
 
 fn decode_data_uri_payload<'scope, 'uri>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     uri: &'uri str,
     resource: uri::Resource,
     reference: &'static str,
@@ -856,23 +883,19 @@ fn decode_data_uri_payload<'scope, 'uri>(
 ) -> Result<DecodedDataUri<'scope, 'uri>> {
     let subject = resource.name();
     let subject_index = resource.index();
-    enforce_usize_limit(
-        ctx,
-        "max_string_bytes",
-        uri.len(),
-        ctx.limits().max_string_bytes,
-    )?;
+    {
+        let argument_0 = ctx.limits().max_string_bytes;
+        enforce_usize_limit(ctx, "max_string_bytes", uri.len(), argument_0)
+    }?;
     let Some(payload) = uri.get(5..).filter(|_| is_data_uri(uri)) else {
-        return Err(gltf_parse_error(
-            ctx,
-            format_args!("glTF {subject} {subject_index} has an invalid data URI"),
-        ));
+        return Err(gltf_parse_error(format_args!(
+            "glTF {subject} {subject_index} has an invalid data URI"
+        )));
     };
     let Some((metadata, encoded)) = payload.split_once(',') else {
-        return Err(gltf_parse_error(
-            ctx,
-            format_args!("glTF {subject} {subject_index} data URI has no comma separator"),
-        ));
+        return Err(gltf_parse_error(format_args!(
+            "glTF {subject} {subject_index} data URI has no comma separator"
+        )));
     };
     if metadata.contains('%') {
         return Err(resource.unsupported(ctx, "percent-encoded data URLs are unsupported"));
@@ -897,14 +920,14 @@ fn decode_data_uri_payload<'scope, 'uri>(
                 u64::try_from(encoded.len()).unwrap_or(u64::MAX),
             ),
         ],
-        |work| -> Result<_> {
+        |ctx, work| -> Result<_> {
             let mut decoded = ctx.metered_vec(ImportStorageClass::BackendDecode, allocation);
-            decoded.try_reserve(stored_length)?;
+            decoded.try_reserve(ctx, stored_length)?;
             let mut decoded_length = 0usize;
             let mut chunk_output = [0_u8; PARSER_POLL_INTERVAL];
             for (chunk_index, chunk) in encoded.as_bytes().chunks(PARSER_POLL_INTERVAL).enumerate()
             {
-                work.poll()?;
+                ctx.poll()?;
                 let chunk_start = chunk_index * PARSER_POLL_INTERVAL;
                 let chunk_capacity = base64::decoded_len_estimate(chunk.len());
                 let output = chunk_output.get_mut(..chunk_capacity).ok_or_else(|| {
@@ -929,7 +952,7 @@ fn decode_data_uri_payload<'scope, 'uri>(
                 let retained_chunk = stored_length
                     .saturating_sub(decoded_length)
                     .min(chunk_written);
-                decoded.try_extend_from_slice(&output[..retained_chunk])?;
+                decoded.try_extend_from_slice(ctx, &output[..retained_chunk])?;
                 decoded_length = decoded_length
                     .checked_add(chunk_written)
                     .ok_or_else(|| ctx.allocation_failure("gltf-data-uri-buffer"))?;
@@ -942,7 +965,6 @@ fn decode_data_uri_payload<'scope, 'uri>(
             }
             if decoded_len < retained_length {
                 return Err(gltf_parse_error(
-                    ctx,
                     format_args!(
                         "glTF {subject} {subject_index} declares {retained_length} bytes but only {decoded_len} bytes are available"
                     ),
@@ -961,7 +983,11 @@ fn decode_data_uri_payload<'scope, 'uri>(
     })
 }
 
-fn base64_decoded_len(ctx: &ParseScope<'_>, encoded: &str, resource: uri::Resource) -> Result<u64> {
+fn base64_decoded_len(
+    ctx: &mut ParseExecution<'_, '_>,
+    encoded: &str,
+    resource: uri::Resource,
+) -> Result<u64> {
     let subject = resource.name();
     let subject_index = resource.index();
     if encoded.is_empty() {
@@ -978,12 +1004,9 @@ fn base64_decoded_len(ctx: &ParseScope<'_>, encoded: &str, resource: uri::Resour
                 return Err(resource.unsupported(ctx, "percent-encoded data URLs are unsupported"));
             }
             if byte.is_ascii_whitespace() {
-                return Err(gltf_parse_error(
-                    ctx,
-                    format_args!(
-                        "glTF {subject} {subject_index} data URI base64 contains whitespace"
-                    ),
-                ));
+                return Err(gltf_parse_error(format_args!(
+                    "glTF {subject} {subject_index} data URI base64 contains whitespace"
+                )));
             }
             if byte == b'=' {
                 padding_started = true;
@@ -995,16 +1018,14 @@ fn base64_decoded_len(ctx: &ParseScope<'_>, encoded: &str, resource: uri::Resour
         }
     }
     if !encoded.len().is_multiple_of(4) {
-        return Err(gltf_parse_error(
-            ctx,
-            format_args!("glTF {subject} {subject_index} data URI base64 length is not padded"),
-        ));
+        return Err(gltf_parse_error(format_args!(
+            "glTF {subject} {subject_index} data URI base64 length is not padded"
+        )));
     }
     if invalid_padding {
-        return Err(gltf_parse_error(
-            ctx,
-            format_args!("glTF {subject} {subject_index} data URI base64 padding is invalid"),
-        ));
+        return Err(gltf_parse_error(format_args!(
+            "glTF {subject} {subject_index} data URI base64 padding is invalid"
+        )));
     }
     let groups = (encoded.len() / 4) as u64;
     groups
@@ -1029,18 +1050,16 @@ fn offset_base64_decode_error(error: DecodeError, chunk_start: usize) -> DecodeE
 }
 
 fn load_external_buffer<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     uri: &str,
     buffer_index: usize,
     declared_length: usize,
     provenance: u32,
 ) -> Result<BufferData<'scope>> {
-    enforce_usize_limit(
-        ctx,
-        "max_string_bytes",
-        uri.len(),
-        ctx.limits().max_string_bytes,
-    )?;
+    {
+        let argument_0 = ctx.limits().max_string_bytes;
+        enforce_usize_limit(ctx, "max_string_bytes", uri.len(), argument_0)
+    }?;
     let reference = uri::relative_path(ctx, uri, uri::Resource::Buffer(buffer_index))?;
     let origin = ctx.root_origin();
     let outcome = ctx.dependency(&origin, &external_buffer_role(), reference.as_str())?;
@@ -1065,7 +1084,7 @@ fn load_external_buffer<'scope>(
 }
 
 fn copy_buffer<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     source: &[u8],
     allocation: &'static str,
 ) -> Result<BufferData<'scope>> {
@@ -1075,7 +1094,7 @@ fn copy_buffer<'scope>(
 }
 
 fn copy_buffer_prefix<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     source: &[u8],
     declared_length: usize,
     allocation: &'static str,
@@ -1095,19 +1114,18 @@ fn copy_buffer_prefix<'scope>(
 }
 
 fn copy_buffer_bytes<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     source: &[u8],
     allocation: &'static str,
 ) -> Result<MeteredVec<'scope, u8>> {
-    let copied = ctx.with_work(
-        ImportWorkClass::DecodeWork,
-        to_u64(source.len()),
-        |work| -> Result<_> {
+    let copied = ctx.with_work_group(
+        [(ImportWorkClass::DecodeWork, to_u64(source.len()))],
+        |ctx, work| -> Result<_> {
             let mut copied = ctx.metered_vec(ImportStorageClass::BackendDecode, allocation);
-            copied.try_reserve(source.len())?;
+            copied.try_reserve(ctx, source.len())?;
             for chunk in source.chunks(PARSER_POLL_INTERVAL) {
-                work.poll()?;
-                copied.try_extend_from_slice(chunk)?;
+                ctx.poll()?;
+                copied.try_extend_from_slice(ctx, chunk)?;
                 work.complete([to_u64(chunk.len())])?;
             }
             Ok(copied)
@@ -1116,26 +1134,25 @@ fn copy_buffer_bytes<'scope>(
     Ok(copied)
 }
 
-fn gltf_parse_error(ctx: &ParseScope<'_>, message: impl fmt::Display) -> ContentError {
-    ContentError::parse(ctx.source(), None, message)
+fn gltf_parse_error(message: impl fmt::Display) -> ContentError {
+    GltfFailure::invalid_document(message).into()
 }
 
 fn normalize_document<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     gltf: &crate::document::Document<'_>,
     buffers: BufferSet<'scope>,
     prepared: &PreparedDocument<'_, '_>,
     source_map: &crate::source_map::GltfSourceMap<'_>,
     lights: lights::LightStorage<'scope>,
 ) -> Result<NormalizedGltf<'scope>> {
-    let external_image_resource_offset = authoring_u32(
-        ctx,
-        buffers
+    let external_image_resource_offset = {
+        let argument_0 = buffers
             .external_resource_count()
             .checked_add(1)
-            .ok_or_else(|| ctx.allocation_failure("gltf-external-image-resource-offset"))?,
-        "gltf-external-image-resource-offset",
-    )?;
+            .ok_or_else(|| ctx.allocation_failure("gltf-external-image-resource-offset"))?;
+        authoring_u32(ctx, argument_0, "gltf-external-image-resource-offset")
+    }?;
     let external_images = load_external_image_resources(
         ctx,
         gltf,
@@ -1192,11 +1209,16 @@ fn normalize_document<'scope>(
         ImportStorageClass::FormatNormalization,
         "gltf-normalized-buffer-resources",
     );
-    resources.try_reserve(buffers.external_resource_count())?;
+    resources.try_reserve(ctx, buffers.external_resource_count())?;
     let mut buffers = buffers;
+    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
     while let Some(buffer) = buffers.values.pop() {
         let source_index = buffers.values.len();
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         if let Some(BufferData::External { identity, .. }) = buffer {
             resources.try_push_reserved(BufferResource {
                 source_index,
@@ -1233,7 +1255,7 @@ fn normalize_document<'scope>(
 }
 
 fn load_external_image_resources<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     gltf: &crate::document::Document<'_>,
     resolved_texture_uris: &ResolvedTextureUris<'_>,
     closure: &ResourceClosure<'_>,
@@ -1243,7 +1265,7 @@ fn load_external_image_resources<'scope>(
         ImportStorageClass::FormatNormalization,
         "gltf-external-image-resources",
     );
-    values.try_reserve(resolved_texture_uris.values.len())?;
+    values.try_reserve(ctx, resolved_texture_uris.values.len())?;
     for (ordinal, image) in gltf.images().enumerate() {
         poll_parser_loop(ctx, ordinal)?;
         if !closure
@@ -1279,7 +1301,7 @@ fn load_external_image_resources<'scope>(
 }
 
 fn build_appearance_storage<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     gltf: &crate::document::Document<'_>,
     buffers: &[Option<BufferData<'_>>],
     external_images: &ExternalImageResources<'scope>,
@@ -1288,7 +1310,7 @@ fn build_appearance_storage<'scope>(
     let resolved_texture_uris = &prepared.resolved_texture_uris;
     let material_contracts = &prepared.material_contracts;
     let closure = &prepared.resource_closure;
-    let material_count = with_poll(ctx, || gltf.materials().count())?;
+    let material_count = with_poll(ctx, |_ctx| gltf.materials().count())?;
     let mut storage = AppearanceStorage {
         images: ctx.metered_vec(
             ImportStorageClass::SceneConstruction,
@@ -1381,7 +1403,7 @@ fn build_appearance_storage<'scope>(
         ))
         .ok_or_else(|| ctx.allocation_failure("gltf-authoring-material-count"))?;
     authoring_u32(ctx, material_count, "gltf-authoring-material-count")?;
-    storage.materials.try_reserve(material_count)?;
+    storage.materials.try_reserve(ctx, material_count)?;
     for (material_index, material) in gltf.materials().enumerate() {
         poll_parser_loop(ctx, material_index)?;
         if !closure
@@ -1408,7 +1430,7 @@ fn build_appearance_storage<'scope>(
             material_contracts,
         )?;
         let Some(slot) = storage.material_ids.as_mut_slice().get_mut(material_index) else {
-            return Err(gltf_parse_error(ctx, "glTF material id map is incomplete"));
+            return Err(gltf_parse_error("glTF material id map is incomplete"));
         };
         *slot = Some(local_id);
     }
@@ -1419,7 +1441,7 @@ fn build_appearance_storage<'scope>(
 }
 
 fn build_shared_appearance_resources<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     gltf: &crate::document::Document<'_>,
     buffers: &[Option<BufferData<'_>>],
     resolved_texture_uris: &ResolvedTextureUris<'_>,
@@ -1428,11 +1450,11 @@ fn build_shared_appearance_resources<'scope>(
     storage: &mut AppearanceStorage<'scope>,
 ) -> Result<()> {
     let selected_image_count = selected_count(ctx, closure.images.as_slice())?;
-    storage.images.try_reserve(selected_image_count)?;
-    storage.image_names.try_reserve(selected_image_count)?;
+    storage.images.try_reserve(ctx, selected_image_count)?;
+    storage.image_names.try_reserve(ctx, selected_image_count)?;
     storage
         .encoded_image_payloads
-        .try_reserve(selected_image_count)?;
+        .try_reserve(ctx, selected_image_count)?;
     for (image_index, image) in gltf.images().enumerate() {
         poll_parser_loop(ctx, image_index)?;
         if !closure
@@ -1464,27 +1486,24 @@ fn build_shared_appearance_resources<'scope>(
             }
             ImageSource::Uri { mime_type, .. } => {
                 let resolved = resolved_texture_uris.get(&image_index).ok_or_else(|| {
-                    gltf_parse_error(
-                        ctx,
-                        format_args!("glTF texture resolution plan is missing image {image_index}"),
-                    )
+                    gltf_parse_error(format_args!(
+                        "glTF texture resolution plan is missing image {image_index}"
+                    ))
                 })?;
                 let (resource_index, _) =
                     external_images.get(ctx, image_index)?.ok_or_else(|| {
-                        gltf_parse_error(
-                            ctx,
-                            format_args!("glTF texture resource is missing image {image_index}"),
-                        )
+                        gltf_parse_error(format_args!(
+                            "glTF texture resource is missing image {image_index}"
+                        ))
                     })?;
                 let media_type =
                     mime_type
                         .map(ExtensionMediaType::new)
                         .transpose()
                         .map_err(|_| {
-                            gltf_parse_error(
-                                ctx,
-                                format_args!("glTF image {image_index} has an invalid media type"),
-                            )
+                            gltf_parse_error(format_args!(
+                                "glTF image {image_index} has an invalid media type"
+                            ))
                         })?;
                 complete_canonical_string_work(ctx, resolved.len())?;
                 (
@@ -1509,11 +1528,14 @@ fn build_shared_appearance_resources<'scope>(
             storage.images.len(),
             "gltf-authoring-image-id",
         )?);
-        storage.images.try_push(ImageStorage {
-            payload,
-            provenance,
-            media_type,
-        })?;
+        storage.images.try_push(
+            ctx,
+            ImageStorage {
+                payload,
+                provenance,
+                media_type,
+            },
+        )?;
         complete_canonical_string_work(ctx, image.name().map_or(0, str::len))?;
         storage.image_names.try_push_reserved(owned_name(
             ctx,
@@ -1521,19 +1543,19 @@ fn build_shared_appearance_resources<'scope>(
             "gltf-normalized-image-name",
         )?)?;
         let Some(slot) = storage.image_ids.as_mut_slice().get_mut(image_index) else {
-            return Err(gltf_parse_error(ctx, "glTF image id map is incomplete"));
+            return Err(gltf_parse_error("glTF image id map is incomplete"));
         };
         *slot = Some(local_id);
     }
 
     let selected_sampler_count = selected_count(ctx, closure.samplers.as_slice())?;
-    storage.samplers.try_reserve(selected_sampler_count)?;
+    storage.samplers.try_reserve(ctx, selected_sampler_count)?;
     storage
         .sampler_names
-        .try_reserve(selected_sampler_count.saturating_add(1))?;
+        .try_reserve(ctx, selected_sampler_count.saturating_add(1))?;
     storage
         .sampler_provenance
-        .try_reserve(selected_sampler_count.saturating_add(1))?;
+        .try_reserve(ctx, selected_sampler_count.saturating_add(1))?;
     for (sampler_index, sampler) in gltf.samplers().enumerate() {
         poll_parser_loop(ctx, sampler_index)?;
         if !closure
@@ -1552,26 +1574,28 @@ fn build_shared_appearance_resources<'scope>(
         )?);
         storage
             .samplers
-            .try_push(SamplerAuthoring::new(map_sampler(sampler)))?;
+            .try_push(ctx, SamplerAuthoring::new(map_sampler(sampler)))?;
         complete_canonical_string_work(ctx, sampler.name().map_or(0, str::len))?;
         storage.sampler_names.try_push_reserved(owned_name(
             ctx,
             sampler.name(),
             "gltf-normalized-sampler-name",
         )?)?;
-        storage.sampler_provenance.try_push(0)?;
+        storage.sampler_provenance.try_push(ctx, 0)?;
         let Some(slot) = storage.sampler_ids.as_mut_slice().get_mut(sampler_index) else {
-            return Err(gltf_parse_error(ctx, "glTF sampler id map is incomplete"));
+            return Err(gltf_parse_error("glTF sampler id map is incomplete"));
         };
         *slot = Some(local_id);
     }
 
     let selected_texture_count = selected_count(ctx, closure.textures.as_slice())?;
-    storage.textures.try_reserve(selected_texture_count)?;
+    storage.textures.try_reserve(ctx, selected_texture_count)?;
     storage
         .texture_provenance
-        .try_reserve(selected_texture_count)?;
-    storage.texture_names.try_reserve(selected_texture_count)?;
+        .try_reserve(ctx, selected_texture_count)?;
+    storage
+        .texture_names
+        .try_reserve(ctx, selected_texture_count)?;
     for (texture_index, texture) in gltf.textures().enumerate() {
         poll_parser_loop(ctx, texture_index)?;
         if !closure
@@ -1590,12 +1614,9 @@ fn build_shared_appearance_resources<'scope>(
             .copied()
             .flatten()
         else {
-            return Err(gltf_parse_error(
-                ctx,
-                format_args!(
-                    "glTF texture {texture_index} references an image outside the closure"
-                ),
-            ));
+            return Err(gltf_parse_error(format_args!(
+                "glTF texture {texture_index} references an image outside the closure"
+            )));
         };
         let sampler_id = match texture.sampler().index() {
             Some(sampler_index) => storage
@@ -1605,12 +1626,9 @@ fn build_shared_appearance_resources<'scope>(
                 .copied()
                 .flatten()
                 .ok_or_else(|| {
-                    gltf_parse_error(
-                        ctx,
-                        format_args!(
-                            "glTF texture {texture_index} references a sampler outside the closure"
-                        ),
-                    )
+                    gltf_parse_error(format_args!(
+                        "glTF texture {texture_index} references a sampler outside the closure"
+                    ))
                 })?,
             None => {
                 if let Some(default_sampler) = storage.default_sampler {
@@ -1623,9 +1641,9 @@ fn build_shared_appearance_resources<'scope>(
                     )?);
                     storage
                         .samplers
-                        .try_push(SamplerAuthoring::new(map_sampler(texture.sampler())))?;
+                        .try_push(ctx, SamplerAuthoring::new(map_sampler(texture.sampler())))?;
                     storage.sampler_names.try_push_reserved(None)?;
-                    storage.sampler_provenance.try_push(0)?;
+                    storage.sampler_provenance.try_push(ctx, 0)?;
                     storage.default_sampler = Some(default_sampler);
                     default_sampler
                 }
@@ -1638,15 +1656,15 @@ fn build_shared_appearance_resources<'scope>(
         )?);
         storage
             .textures
-            .try_push(TextureAuthoring::new(image_id, sampler_id))?;
-        storage.texture_provenance.try_push(0)?;
+            .try_push(ctx, TextureAuthoring::new(image_id, sampler_id))?;
+        storage.texture_provenance.try_push(ctx, 0)?;
         storage.texture_names.try_push_reserved(owned_name(
             ctx,
             texture.name(),
             "gltf-normalized-texture-name",
         )?)?;
         let Some(slot) = storage.texture_ids.as_mut_slice().get_mut(texture_index) else {
-            return Err(gltf_parse_error(ctx, "glTF texture id map is incomplete"));
+            return Err(gltf_parse_error("glTF texture id map is incomplete"));
         };
         *slot = Some(local_id);
     }
@@ -1663,7 +1681,7 @@ fn store_encoded_image_payload<'scope>(
 }
 
 fn image_media_type(
-    ctx: &ParseScope<'_>,
+    _ctx: &mut ParseExecution<'_, '_>,
     image_index: usize,
     media_type: Option<&str>,
 ) -> Result<Option<ExtensionMediaType>> {
@@ -1671,15 +1689,14 @@ fn image_media_type(
         .map(ExtensionMediaType::new)
         .transpose()
         .map_err(|_| {
-            gltf_parse_error(
-                ctx,
-                format_args!("glTF image {image_index} has an invalid media type"),
-            )
+            gltf_parse_error(format_args!(
+                "glTF image {image_index} has an invalid media type"
+            ))
         })
 }
 
 fn copy_buffer_view_image<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     buffers: &[Option<BufferData<'_>>],
     view: crate::document::View<'_>,
     image_index: usize,
@@ -1689,25 +1706,19 @@ fn copy_buffer_view_image<'scope>(
         .get(buffer_index)
         .and_then(Option::as_ref)
         .ok_or_else(|| {
-            gltf_parse_error(
-                ctx,
-                format_args!(
-                    "glTF image {image_index} references unavailable buffer {buffer_index}"
-                ),
-            )
+            gltf_parse_error(format_args!(
+                "glTF image {image_index} references unavailable buffer {buffer_index}"
+            ))
         })?;
     let end = view
         .offset()
         .checked_add(view.length())
         .ok_or_else(|| ctx.allocation_failure("gltf-image-buffer-view-range"))?;
     let bytes = buffer.as_slice().get(view.offset()..end).ok_or_else(|| {
-        gltf_parse_error(
-            ctx,
-            format_args!(
-                "glTF image {image_index} bufferView {} exceeds buffer {buffer_index}",
-                view.index()
-            ),
-        )
+        gltf_parse_error(format_args!(
+            "glTF image {image_index} bufferView {} exceeds buffer {buffer_index}",
+            view.index()
+        ))
     })?;
     Ok((
         copy_buffer_bytes(ctx, bytes, "gltf-buffer-view-image")?,
@@ -1736,25 +1747,23 @@ struct GeometryContracts<'scope> {
 }
 
 fn preflight_geometry_contracts<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     gltf: &crate::document::Document<'_>,
     material_count: usize,
     closure: &ResourceClosure<'_>,
     materials: &MaterialContracts<'_>,
 ) -> Result<GeometryContracts<'scope>> {
-    let mesh_count = with_poll(ctx, || gltf.meshes().count())?;
+    let mesh_count = with_poll(ctx, |_ctx| gltf.meshes().count())?;
     let selected_mesh_count = selected_count(ctx, closure.meshes.as_slice())?;
-    enforce_usize_limit(
-        ctx,
-        "max_meshes",
-        selected_mesh_count,
-        ctx.limits().max_meshes,
-    )?;
+    {
+        let argument_0 = ctx.limits().max_meshes;
+        enforce_usize_limit(ctx, "max_meshes", selected_mesh_count, argument_0)
+    }?;
     let mut meshes = ctx.metered_vec(
         ImportStorageClass::FormatNormalization,
         "gltf-geometry-contract-meshes",
     );
-    meshes.try_reserve(mesh_count)?;
+    meshes.try_reserve(ctx, mesh_count)?;
 
     let mut total_primitives = 0usize;
     let mut total_vertices = 0usize;
@@ -1777,19 +1786,22 @@ fn preflight_geometry_contracts<'scope>(
             meshes.try_push_reserved(None)?;
             continue;
         }
-        let primitive_count = with_poll(ctx, || mesh.primitives().len())?;
-        total_primitives = checked_add_with_limit(
-            ctx,
-            "max_primitives",
-            total_primitives,
-            primitive_count,
-            ctx.limits().max_primitives,
-        )?;
+        let primitive_count = with_poll(ctx, |_ctx| mesh.primitives().len())?;
+        total_primitives = {
+            let argument_0 = ctx.limits().max_primitives;
+            checked_add_with_limit(
+                ctx,
+                "max_primitives",
+                total_primitives,
+                primitive_count,
+                argument_0,
+            )
+        }?;
         let mut primitives = ctx.metered_vec(
             ImportStorageClass::FormatNormalization,
             "gltf-geometry-contract-primitives",
         );
-        primitives.try_reserve(primitive_count)?;
+        primitives.try_reserve(ctx, primitive_count)?;
         for (primitive_ordinal, primitive) in mesh.primitives().enumerate() {
             poll_parser_loop(ctx, primitive_ordinal)?;
             let contract = validate_primitive_contract(
@@ -1806,59 +1818,76 @@ fn preflight_geometry_contracts<'scope>(
                     let has_tangent = primitive.get(&Semantic::Tangents).is_some();
                     if !has_normal || !has_tangent {
                         return Err(gltf_parse_error(
-                            ctx,
                             "glTF clearcoatNormalTexture requires NORMAL and TANGENT attributes or a base normal texture",
                         ));
                     }
                 }
             }
             needs_default_material |= contract.material_index.is_none();
-            total_vertices = checked_add_with_limit(
-                ctx,
-                "max_vertices",
-                total_vertices,
-                contract.position_count,
-                ctx.limits().max_vertices,
-            )?;
-            total_faces = checked_add_with_limit(
-                ctx,
-                "max_faces",
-                total_faces,
-                contract.face_count,
-                ctx.limits().max_faces,
-            )?;
-            total_topology_cells = checked_add_with_limit(
-                ctx,
-                "max_total_topology_cells",
-                total_topology_cells,
-                contract.index_count,
-                ctx.limits().max_total_topology_cells,
-            )?;
-            total_attribute_streams = checked_add_with_limit(
-                ctx,
-                "max_total_vertex_attribute_streams",
-                total_attribute_streams,
-                contract.attribute_stream_count,
-                ctx.limits().max_total_vertex_attribute_streams,
-            )?;
+            total_vertices = {
+                let argument_0 = ctx.limits().max_vertices;
+                checked_add_with_limit(
+                    ctx,
+                    "max_vertices",
+                    total_vertices,
+                    contract.position_count,
+                    argument_0,
+                )
+            }?;
+            total_faces = {
+                let argument_0 = ctx.limits().max_faces;
+                checked_add_with_limit(
+                    ctx,
+                    "max_faces",
+                    total_faces,
+                    contract.face_count,
+                    argument_0,
+                )
+            }?;
+            total_topology_cells = {
+                let argument_0 = ctx.limits().max_total_topology_cells;
+                checked_add_with_limit(
+                    ctx,
+                    "max_total_topology_cells",
+                    total_topology_cells,
+                    contract.index_count,
+                    argument_0,
+                )
+            }?;
+            total_attribute_streams = {
+                let argument_0 = ctx.limits().max_total_vertex_attribute_streams;
+                checked_add_with_limit(
+                    ctx,
+                    "max_total_vertex_attribute_streams",
+                    total_attribute_streams,
+                    contract.attribute_stream_count,
+                    argument_0,
+                )
+            }?;
             let attribute_cells = contract
                 .position_count
                 .checked_mul(contract.attribute_stream_count)
                 .ok_or_else(|| ctx.allocation_failure("gltf-attribute-cell-counter"))?;
-            total_attribute_cells = checked_add_with_limit(
-                ctx,
-                "max_total_vertex_attribute_cells",
-                total_attribute_cells,
-                attribute_cells,
-                ctx.limits().max_total_vertex_attribute_cells,
-            )?;
-            total_influence_cells = checked_add_with_limit(
-                ctx,
-                "max_influence_cells",
-                total_influence_cells,
-                contract.influences.cell_count,
-                ctx.limits().max_influence_cells,
-            )?;
+            total_attribute_cells = {
+                let argument_0 = ctx.limits().max_total_vertex_attribute_cells;
+                checked_add_with_limit(
+                    ctx,
+                    "max_total_vertex_attribute_cells",
+                    total_attribute_cells,
+                    attribute_cells,
+                    argument_0,
+                )
+            }?;
+            total_influence_cells = {
+                let argument_0 = ctx.limits().max_influence_cells;
+                checked_add_with_limit(
+                    ctx,
+                    "max_influence_cells",
+                    total_influence_cells,
+                    contract.influences.cell_count,
+                    argument_0,
+                )
+            }?;
             authoring_u32(ctx, total_influence_cells, "gltf-total-influence-cells")?;
             total_influence_offsets = total_influence_offsets
                 .checked_add(contract.influences.offset_count)
@@ -1912,7 +1941,7 @@ impl fmt::Display for AccessorOwner {
 }
 
 fn validate_primitive_contract(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     gltf: &crate::document::Document<'_>,
     mesh_index: usize,
     primitive_index: usize,
@@ -1920,12 +1949,15 @@ fn validate_primitive_contract(
 ) -> Result<PrimitiveContract> {
     let primitive = json_primitive(ctx, gltf, mesh_index, primitive_index)?;
     let attribute_stream_count = primitive.attributes.len();
-    enforce_usize_limit(
-        ctx,
-        "max_vertex_attribute_streams_per_mesh",
-        attribute_stream_count,
-        ctx.limits().max_vertex_attribute_streams_per_mesh,
-    )?;
+    {
+        let argument_0 = ctx.limits().max_vertex_attribute_streams_per_mesh;
+        enforce_usize_limit(
+            ctx,
+            "max_vertex_attribute_streams_per_mesh",
+            attribute_stream_count,
+            argument_0,
+        )
+    }?;
     let owner = AccessorOwner::Primitive {
         mesh_index,
         primitive_index,
@@ -2043,7 +2075,7 @@ fn validate_primitive_contract(
 /// glTF requires a complete nonempty primitive; core topology also admits empty authoring input.
 /// Count canonical topology elements (including points/segments) before dependency I/O.
 fn primitive_face_count(
-    ctx: &ParseScope<'_>,
+    _ctx: &mut ParseExecution<'_, '_>,
     owner: AccessorOwner,
     mode: Mode,
     corners: usize,
@@ -2056,17 +2088,16 @@ fn primitive_face_count(
         Mode::Triangles if corners != 0 && corners.is_multiple_of(3) => corners / 3,
         Mode::TriangleStrip | Mode::TriangleFan if corners >= 3 => corners - 2,
         _ => {
-            return Err(gltf_parse_error(
-                ctx,
-                format_args!("{owner} mode {mode:?} has an invalid draw index count {corners}"),
-            ));
+            return Err(gltf_parse_error(format_args!(
+                "{owner} mode {mode:?} has an invalid draw index count {corners}"
+            )));
         }
     };
     Ok(faces)
 }
 
 fn json_primitive<'a>(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     gltf: &'a crate::document::Document<'_>,
     mesh_index: usize,
     primitive_index: usize,
@@ -2084,14 +2115,17 @@ fn json_primitive<'a>(
         })
 }
 
-fn with_poll<T>(ctx: &ParseScope<'_>, f: impl FnOnce() -> T) -> Result<T> {
+fn with_poll<'region, 'session, T>(
+    ctx: &mut ParseExecution<'region, 'session>,
+    f: impl FnOnce(&mut ParseExecution<'region, 'session>) -> T,
+) -> Result<T> {
     ctx.poll()?;
-    let value = f();
+    let value = f(ctx);
     ctx.poll()?;
     Ok(value)
 }
 
-fn poll_parser_loop(ctx: &ParseScope<'_>, completed: usize) -> Result<()> {
+fn poll_parser_loop(ctx: &mut ParseExecution<'_, '_>, completed: usize) -> Result<()> {
     if completed.is_multiple_of(PARSER_POLL_INTERVAL) {
         ctx.poll()?;
     }
@@ -2099,39 +2133,35 @@ fn poll_parser_loop(ctx: &ParseScope<'_>, completed: usize) -> Result<()> {
 }
 
 fn collect_exact<'scope, T>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     class: ImportStorageClass,
     expected: usize,
     allocation: &'static str,
     values: impl Iterator<Item = T>,
 ) -> Result<MeteredVec<'scope, T>> {
     let mut collected = ctx.metered_vec(class, allocation);
-    collected.try_reserve(expected)?;
+    collected.try_reserve(ctx, expected)?;
     for value in values {
         poll_parser_loop(ctx, collected.len())?;
         if collected.len() == expected {
-            return Err(gltf_parse_error(
-                ctx,
-                format_args!("{allocation} produced more than {expected} values"),
-            ));
+            return Err(gltf_parse_error(format_args!(
+                "{allocation} produced more than {expected} values"
+            )));
         }
         collected.try_push_reserved(value)?;
     }
     if collected.len() != expected {
-        return Err(gltf_parse_error(
-            ctx,
-            format_args!(
-                "{allocation} produced {} values, expected {expected}",
-                collected.len()
-            ),
-        ));
+        return Err(gltf_parse_error(format_args!(
+            "{allocation} produced {} values, expected {expected}",
+            collected.len()
+        )));
     }
     Ok(collected)
 }
 
 fn collect_exact_with_work<'scope, T, const N: usize>(
-    ctx: &'scope ParseScope<'_>,
-    work: &mut ImportWorkScope<'_, '_, N>,
+    ctx: &mut ParseExecution<'_, 'scope>,
+    work: &mut ImportWorkScope<'_, N>,
     expected: usize,
     allocation: &'static str,
     _operation: &'static str,
@@ -2139,70 +2169,65 @@ fn collect_exact_with_work<'scope, T, const N: usize>(
     per_item: [u64; N],
 ) -> Result<MeteredVec<'scope, T>> {
     let mut collected = ctx.metered_vec(ImportStorageClass::FormatNormalization, allocation);
-    collected.try_reserve(expected)?;
+    collected.try_reserve(ctx, expected)?;
     loop {
         if collected.len().is_multiple_of(PARSER_POLL_INTERVAL) {
-            work.poll()?;
+            ctx.poll()?;
         }
         let next = values.next();
         let Some(value) = next else {
             break;
         };
         if collected.len() == expected {
-            return Err(gltf_parse_error(
-                ctx,
-                format_args!("{allocation} produced more than {expected} values"),
-            ));
+            return Err(gltf_parse_error(format_args!(
+                "{allocation} produced more than {expected} values"
+            )));
         }
         collected.try_push_reserved(value)?;
         work.complete(per_item)?;
     }
     if collected.len() != expected {
-        return Err(gltf_parse_error(
-            ctx,
-            format_args!(
-                "{allocation} produced {} values, expected {expected}",
-                collected.len()
-            ),
-        ));
+        return Err(gltf_parse_error(format_args!(
+            "{allocation} produced {} values, expected {expected}",
+            collected.len()
+        )));
     }
     Ok(collected)
 }
 
 fn try_vec_capacity<'scope, T>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     class: ImportStorageClass,
     capacity: usize,
     allocation: &'static str,
 ) -> Result<MeteredVec<'scope, T>> {
     let mut values = ctx.metered_vec(class, allocation);
-    values.try_reserve(capacity)?;
+    values.try_reserve(ctx, capacity)?;
     Ok(values)
 }
 
 fn try_vec_filled<'scope, T: Copy>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     class: ImportStorageClass,
     length: usize,
     value: T,
     allocation: &'static str,
 ) -> Result<MeteredVec<'scope, T>> {
     let mut values = try_vec_capacity(ctx, class, length, allocation)?;
-    values.try_resize(length, value)?;
+    values.try_resize(ctx, length, value)?;
     Ok(values)
 }
 
-fn build_geometry_storage<'scope>(
-    ctx: &'scope ParseScope<'_>,
+fn build_geometry_storage<'region, 'scope>(
+    ctx: &mut ParseExecution<'region, 'scope>,
     gltf: &crate::document::Document<'_>,
     buffers: &[Option<BufferData<'_>>],
     contracts: &GeometryContracts<'_>,
     appearance: &AppearanceStorage<'_>,
 ) -> Result<GeometryStorage<'scope>> {
-    let mesh_count = with_poll(ctx, || gltf.meshes().count())?;
+    let mesh_count = with_poll(ctx, |_ctx| gltf.meshes().count())?;
     if contracts.meshes.len() != mesh_count {
         return Err(gltf_parse_error(
-            ctx,
             "glTF geometry contract mesh count changed before materialization",
         ));
     }
@@ -2216,7 +2241,7 @@ fn build_geometry_storage<'scope>(
         .iter()
         .filter(|mesh| mesh.is_some())
         .count();
-    logical_meshes.try_reserve(selected_mesh_count)?;
+    logical_meshes.try_reserve(ctx, selected_mesh_count)?;
     let mut logical_mesh_ids = try_vec_filled(
         ctx,
         ImportStorageClass::FormatNormalization,
@@ -2254,15 +2279,27 @@ fn build_geometry_storage<'scope>(
         ImportStorageClass::FormatNormalization,
         "gltf-primitive-pending-provenance",
     );
+    let primitive_work = ctx.bind_work_group([
+        ImportWorkClass::Primitives,
+        ImportWorkClass::Vertices,
+        ImportWorkClass::Faces,
+        ImportWorkClass::TopologyCells,
+        ImportWorkClass::AttributeStreams,
+        ImportWorkClass::AttributeCells,
+        ImportWorkClass::InfluenceCells,
+        ImportWorkClass::WorkUnits,
+    ])?;
+    let mesh_work = ctx.bind_work_group([
+        ImportWorkClass::Meshes,
+        ImportWorkClass::CanonicalStringBytes,
+    ])?;
     for (mesh_ordinal, mesh) in gltf.meshes().enumerate() {
         poll_parser_loop(ctx, mesh_ordinal)?;
         let mesh_contracts = contracts
             .meshes
             .as_slice()
             .get(mesh_ordinal)
-            .ok_or_else(|| {
-                gltf_parse_error(ctx, "glTF geometry contract mesh table is incomplete")
-            })?;
+            .ok_or_else(|| gltf_parse_error("glTF geometry contract mesh table is incomplete"))?;
         let Some(mesh_contracts) = mesh_contracts.as_ref() else {
             continue;
         };
@@ -2272,27 +2309,21 @@ fn build_geometry_storage<'scope>(
             "gltf-authoring-logical-mesh-id",
         )?);
         let Some(slot) = logical_mesh_ids.as_mut_slice().get_mut(mesh_ordinal) else {
-            return Err(gltf_parse_error(
-                ctx,
-                "glTF logical mesh id map is incomplete",
-            ));
+            return Err(gltf_parse_error("glTF logical mesh id map is incomplete"));
         };
         *slot = Some(logical_mesh_id);
         let name_bytes = mesh.name().map_or(0, str::len);
-        ctx.with_work_group(
-            [
-                (ImportWorkClass::Meshes, 1),
-                (ImportWorkClass::CanonicalStringBytes, to_u64(name_bytes)),
-            ],
-            |work| -> Result<()> {
+        ctx.with_work(
+            &mesh_work,
+            [1, to_u64(name_bytes)],
+            |_ctx, work| -> Result<()> {
                 work.complete_all()?;
                 Ok(())
             },
         )?;
-        let primitive_count = with_poll(ctx, || mesh.primitives().len())?;
+        let primitive_count = with_poll(ctx, |_ctx| mesh.primitives().len())?;
         if mesh_contracts.primitives.len() != primitive_count {
             return Err(gltf_parse_error(
-                ctx,
                 "glTF geometry contract primitive count changed before materialization",
             ));
         }
@@ -2300,7 +2331,7 @@ fn build_geometry_storage<'scope>(
             ImportStorageClass::SceneConstruction,
             "gltf-authoring-primitives-per-logical-mesh",
         );
-        primitives.try_reserve(primitive_count)?;
+        primitives.try_reserve(ctx, primitive_count)?;
         for (primitive_ordinal, primitive) in mesh.primitives().enumerate() {
             poll_parser_loop(ctx, primitive_ordinal)?;
             let contract = *mesh_contracts
@@ -2308,10 +2339,11 @@ fn build_geometry_storage<'scope>(
                 .as_slice()
                 .get(primitive_ordinal)
                 .ok_or_else(|| {
-                    gltf_parse_error(ctx, "glTF geometry contract primitive table is incomplete")
+                    gltf_parse_error("glTF geometry contract primitive table is incomplete")
                 })?;
             primitives.try_push_reserved(build_primitive_authoring(
                 ctx,
+                &primitive_work,
                 buffers,
                 &mesh,
                 primitive,
@@ -2337,8 +2369,9 @@ fn build_geometry_storage<'scope>(
     clippy::too_many_arguments,
     reason = "the existing authoring inputs borrow separate admitted provenance output and reusable scratch"
 )]
-fn build_primitive_authoring<'scope>(
-    ctx: &'scope ParseScope<'_>,
+fn build_primitive_authoring<'region, 'scope>(
+    ctx: &mut ParseExecution<'region, 'scope>,
+    primitive_work: &ImportWorkGroup<'region, 8>,
     buffers: &[Option<BufferData<'_>>],
     mesh: &crate::document::Mesh<'_>,
     primitive: crate::document::Primitive<'_>,
@@ -2365,31 +2398,26 @@ fn build_primitive_authoring<'scope>(
         .and_then(|work| work.checked_add(merge_work))
         .ok_or_else(|| ctx.allocation_failure("gltf-primitive-provenance-work"))?;
     ctx.charge_work(collection_work)?;
-    pending_provenance.try_reserve(provenance_references)?;
+    pending_provenance.try_reserve(ctx, provenance_references)?;
     // Four lanes bound every admitted stream; source bounds and decoding share one traversal.
     let mesh_sample_work = to_u64(attribute_cell_count)
         .checked_mul(4 * accessor::MESH_SAMPLE_WORK_PER_LANE)
         .and_then(|work| work.checked_add(to_u64(contract.attribute_stream_count).checked_mul(9)?))
         .and_then(|work| work.checked_add(contract.influences.work))
         .ok_or_else(|| ctx.allocation_failure("gltf-mesh-sample-work"))?;
-    let (output, non_unit_rows) = ctx.with_work_group(
+    let (output, non_unit_rows) = ctx.with_work(
+        primitive_work,
         [
-            (ImportWorkClass::Primitives, 1),
-            (ImportWorkClass::Vertices, to_u64(contract.position_count)),
-            (ImportWorkClass::Faces, to_u64(contract.face_count)),
-            (ImportWorkClass::TopologyCells, to_u64(contract.index_count)),
-            (
-                ImportWorkClass::AttributeStreams,
-                to_u64(contract.attribute_stream_count),
-            ),
-            (
-                ImportWorkClass::AttributeCells,
-                to_u64(attribute_cell_count),
-            ),
-            (ImportWorkClass::InfluenceCells, to_u64(contract.influences.cell_count)),
-            (ImportWorkClass::WorkUnits, mesh_sample_work),
+            1,
+            to_u64(contract.position_count),
+            to_u64(contract.face_count),
+            to_u64(contract.index_count),
+            to_u64(contract.attribute_stream_count),
+            to_u64(attribute_cell_count),
+            to_u64(contract.influences.cell_count),
+            mesh_sample_work,
         ],
-        |work| -> Result<_> {
+        |ctx, work| -> Result<_> {
             let provenance_offset = provenance.len();
             for (ordinal, (_, accessor)) in primitive.attributes().enumerate() {
                 poll_parser_loop(ctx, ordinal)?;
@@ -2404,7 +2432,7 @@ fn build_primitive_authoring<'scope>(
             }
             try_extend_provenance_unique(ctx, provenance, pending_provenance)?;
             let position_source = primitive.get(&Semantic::Positions)
-                .ok_or_else(|| gltf_parse_error(ctx, "glTF POSITION accessor disappeared after preflight"))?;
+                .ok_or_else(|| gltf_parse_error("glTF POSITION accessor disappeared after preflight"))?;
             let positions = accessor::collect_mesh_attribute::<3>(
                 ctx, position_source, buffers, Semantic::Positions,
                 contract.position_count, "gltf-position-values",
@@ -2429,7 +2457,7 @@ fn build_primitive_authoring<'scope>(
             .unwrap_or_else(|| {
                 ctx.metered_vec(ImportStorageClass::SceneConstruction, "gltf-tangent-values")
             });
-            let indices = with_poll(ctx, || {
+            let indices = with_poll(ctx, |ctx| {
                 primitive.indices().map(|source| -> Result<_> {
                     let indices = accessor::bind(ctx, source, buffers)?.indices().ok_or_else(|| {
                         GltfFailure::invalid_accessor(Some(source.index()), "invalid index accessor encoding")
@@ -2443,14 +2471,14 @@ fn build_primitive_authoring<'scope>(
                 None if contract.index_count == 0 => {
                     ctx.metered_vec(ImportStorageClass::SceneConstruction, "gltf-index-values")
                 }
-                None => return Err(gltf_parse_error(ctx, "glTF indices accessor could not be read")),
+                None => return Err(gltf_parse_error("glTF indices accessor could not be read")),
             };
 
             let mut attributes = ctx.metered_vec(
                 ImportStorageClass::SceneConstruction,
                 "gltf-authoring-primitive-attributes",
             );
-            attributes.try_push(AttributeStorage {
+            { let value = AttributeStorage {
                 semantic: AttributeSemantic::Position,
                 lanes: 3,
                 values: positions,
@@ -2458,12 +2486,12 @@ fn build_primitive_authoring<'scope>(
                     ctx,
                     buffers,
                     primitive.get(&Semantic::Positions).ok_or_else(|| {
-                        gltf_parse_error(ctx, "glTF POSITION accessor disappeared after preflight")
+                        gltf_parse_error("glTF POSITION accessor disappeared after preflight")
                     })?,
                 )?,
-            })?;
+            }; attributes.try_push(ctx, value) }?;
             if !normals.is_empty() {
-                attributes.try_push(AttributeStorage {
+                { let value = AttributeStorage {
                     semantic: AttributeSemantic::Normal,
                     lanes: 3,
                     values: normals,
@@ -2471,13 +2499,13 @@ fn build_primitive_authoring<'scope>(
                         ctx,
                         buffers,
                         primitive.get(&Semantic::Normals).ok_or_else(|| {
-                            gltf_parse_error(ctx, "glTF NORMAL accessor disappeared after preflight")
+                            gltf_parse_error("glTF NORMAL accessor disappeared after preflight")
                         })?,
                     )?,
-                })?;
+                }; attributes.try_push(ctx, value) }?;
             }
             if !tangents.is_empty() {
-                attributes.try_push(AttributeStorage {
+                { let value = AttributeStorage {
                     semantic: AttributeSemantic::Tangent,
                     lanes: 4,
                     values: tangents,
@@ -2485,10 +2513,10 @@ fn build_primitive_authoring<'scope>(
                         ctx,
                         buffers,
                         primitive.get(&Semantic::Tangents).ok_or_else(|| {
-                            gltf_parse_error(ctx, "glTF TANGENT accessor disappeared after preflight")
+                            gltf_parse_error("glTF TANGENT accessor disappeared after preflight")
                         })?,
                     )?,
-                })?;
+                }; attributes.try_push(ctx, value) }?;
             }
             for set in 0..8 {
                 let Some(values) = primitive.get(&Semantic::TexCoords(set)).map(|source| {
@@ -2501,7 +2529,7 @@ fn build_primitive_authoring<'scope>(
                 else {
                     break;
                 };
-                attributes.try_push(AttributeStorage {
+                { let value = AttributeStorage {
                     semantic: AttributeSemantic::Texcoord(set),
                     lanes: 2,
                     values,
@@ -2510,12 +2538,11 @@ fn build_primitive_authoring<'scope>(
                         buffers,
                         primitive.get(&Semantic::TexCoords(set)).ok_or_else(|| {
                             gltf_parse_error(
-                                ctx,
                                 format_args!("glTF TEXCOORD_{set} accessor disappeared after preflight"),
                             )
                         })?,
                     )?,
-                })?;
+                }; attributes.try_push(ctx, value) }?;
             }
             for set in 0..8 {
                 let Some(values) = primitive.get(&Semantic::Colors(set)).map(|source| -> Result<_> {
@@ -2535,7 +2562,7 @@ fn build_primitive_authoring<'scope>(
                 else {
                     break;
                 };
-                attributes.try_push(AttributeStorage {
+                { let value = AttributeStorage {
                     semantic: AttributeSemantic::Color(set),
                     lanes: 4,
                     values,
@@ -2544,14 +2571,13 @@ fn build_primitive_authoring<'scope>(
                         buffers,
                         primitive.get(&Semantic::Colors(set)).ok_or_else(|| {
                             gltf_parse_error(
-                                ctx,
                                 format_args!("glTF COLOR_{set} accessor disappeared after preflight"),
                             )
                         })?,
                     )?,
-                })?;
+                }; attributes.try_push(ctx, value) }?;
             }
-            let influences = with_poll(ctx, || influences::build_rows(ctx, buffers, &primitive, contract.influences),
+            let influences = with_poll(ctx, |ctx| influences::build_rows(ctx, buffers, &primitive, contract.influences),
             )??;
             work.complete_all()?;
             Ok((PrimitiveStorage {
@@ -2567,7 +2593,6 @@ fn build_primitive_authoring<'scope>(
                             .flatten()
                             .ok_or_else(|| {
                                 gltf_parse_error(
-                                    ctx,
                                     format_args!(
                                         "glTF primitive references material {index} outside the closure"
                                     ),
@@ -2576,7 +2601,7 @@ fn build_primitive_authoring<'scope>(
                     ),
                     None => MaterialAssignment::ImplicitDefault(
                         appearance.default_material.ok_or_else(|| {
-                            gltf_parse_error(ctx, "glTF selected primitive has no default material")
+                            gltf_parse_error("glTF selected primitive has no default material")
                         })?,
                     ),
                 },
@@ -2603,36 +2628,31 @@ fn build_primitive_authoring<'scope>(
 }
 
 fn collect_indices<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     contract: PrimitiveContract,
     indices: crate::document::read::Indices<'_>,
 ) -> Result<MeteredVec<'scope, u32>> {
     let restart = indices.restart;
     let mut collected = ctx.metered_vec(ImportStorageClass::SceneConstruction, "gltf-index-values");
-    collected.try_reserve(contract.index_count)?;
+    collected.try_reserve(ctx, contract.index_count)?;
     for index in indices {
         poll_parser_loop(ctx, collected.len())?;
         if collected.len() == contract.index_count {
             return Err(gltf_parse_error(
-                ctx,
                 "glTF index stream exceeds its admitted count",
             ));
         }
         // Reject the source-width restart sentinel before its original component type is lost.
         if index == restart || index as usize >= contract.position_count {
-            return Err(gltf_parse_error(
-                ctx,
-                format_args!(
-                    "glTF index {} contains invalid vertex index {index}",
-                    collected.len()
-                ),
-            ));
+            return Err(gltf_parse_error(format_args!(
+                "glTF index {} contains invalid vertex index {index}",
+                collected.len()
+            )));
         }
         collected.try_push_reserved(index)?;
     }
     if collected.len() != contract.index_count {
         return Err(gltf_parse_error(
-            ctx,
             "glTF index stream differs from its admitted count",
         ));
     }
@@ -2640,7 +2660,7 @@ fn collect_indices<'scope>(
 }
 
 fn build_scene_nodes<'scope, 'document>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     graph: &NodeGraph<'document, '_>,
     logical_mesh_ids: &MeteredVec<'_, Option<LogicalMeshLocalId>>,
     cameras: &CameraStorage<'_>,
@@ -2697,26 +2717,21 @@ fn build_scene_nodes<'scope, 'document>(
         poll_parser_loop(ctx, constructed)?;
         constructed += 1;
         let node = graph.document.node(node_index).ok_or_else(|| {
-            gltf_parse_error(
-                ctx,
-                format_args!("glTF node graph references missing node {node_index}"),
-            )
+            gltf_parse_error(format_args!(
+                "glTF node graph references missing node {node_index}"
+            ))
         })?;
         let slot = storage
             .node_ids
             .as_mut_slice()
             .get_mut(node_index)
             .ok_or_else(|| {
-                gltf_parse_error(
-                    ctx,
-                    format_args!("glTF node index {node_index} is out of range"),
-                )
+                gltf_parse_error(format_args!("glTF node index {node_index} is out of range"))
             })?;
         if slot.is_some() {
-            return Err(gltf_parse_error(
-                ctx,
-                format_args!("glTF node {node_index} was constructed more than once"),
-            ));
+            return Err(gltf_parse_error(format_args!(
+                "glTF node {node_index} was constructed more than once"
+            )));
         }
         let node_id = NodeLocalId::new(authoring_u32(
             ctx,
@@ -2728,7 +2743,7 @@ fn build_scene_nodes<'scope, 'document>(
             storage.roots.try_push_reserved(node_id)?;
         }
 
-        let transform = match with_poll(ctx, || node.transform())? {
+        let transform = match with_poll(ctx, |_ctx| node.transform())? {
             crate::document::NodeTransform::Matrix { matrix } => {
                 AuthoredTransform::try_matrix(Mat4 { cols: matrix })
             }
@@ -2743,12 +2758,9 @@ fn build_scene_nodes<'scope, 'document>(
             ),
         }
         .map_err(|_| {
-            gltf_parse_error(
-                ctx,
-                format_args!("glTF node {node_index} transform is invalid"),
-            )
+            gltf_parse_error(format_args!("glTF node {node_index} transform is invalid"))
         })?;
-        let camera = match with_poll(ctx, || node.camera())? {
+        let camera = match with_poll(ctx, |_ctx| node.camera())? {
             Some(camera) => cameras
                 .camera_ids
                 .as_slice()
@@ -2756,13 +2768,10 @@ fn build_scene_nodes<'scope, 'document>(
                 .copied()
                 .flatten()
                 .ok_or_else(|| {
-                    gltf_parse_error(
-                        ctx,
-                        format_args!(
-                            "glTF selected node {node_index} references camera {} outside the closure",
-                            camera.index()
-                        ),
-                    )
+                    gltf_parse_error(format_args!(
+                        "glTF selected node {node_index} references camera {} outside the closure",
+                        camera.index()
+                    ))
                 })
                 .map(Some)?,
             None => None,
@@ -2778,7 +2787,7 @@ fn build_scene_nodes<'scope, 'document>(
                     .copied()
                     .flatten()
                     .ok_or_else(|| {
-                        gltf_parse_error(ctx, "selected glTF node light is outside the closure")
+                        gltf_parse_error("selected glTF node light is outside the closure")
                     })
             })
             .transpose()?;
@@ -2788,7 +2797,7 @@ fn build_scene_nodes<'scope, 'document>(
             camera.map_or(Presence::Absent, Presence::Present),
             light.map_or(Presence::Absent, Presence::Present),
         );
-        let name = with_poll(ctx, || node.name())?;
+        let name = with_poll(ctx, |_ctx| node.name())?;
         if let Some(name) = name {
             complete_canonical_string_work(ctx, name.len())?;
         }
@@ -2797,21 +2806,18 @@ fn build_scene_nodes<'scope, 'document>(
             .try_push_reserved(owned_name(ctx, name, "gltf-normalized-node-name")?)?;
         storage.nodes.try_push_reserved(authored)?;
 
-        let skin_index = with_poll(ctx, || node.skin())?.map(|skin| skin.index());
-        if let Some(mesh) = with_poll(ctx, || node.mesh())? {
+        let skin_index = with_poll(ctx, |_ctx| node.skin())?.map(|skin| skin.index());
+        if let Some(mesh) = with_poll(ctx, |_ctx| node.mesh())? {
             let logical_mesh = logical_mesh_ids
                 .as_slice()
                 .get(mesh.index())
                 .copied()
                 .flatten()
                 .ok_or_else(|| {
-                    gltf_parse_error(
-                        ctx,
-                        format_args!(
-                            "glTF selected node {node_index} references mesh {} outside the closure",
-                            mesh.index()
-                        ),
-                    )
+                    gltf_parse_error(format_args!(
+                        "glTF selected node {node_index} references mesh {} outside the closure",
+                        mesh.index()
+                    ))
                 })?;
             storage
                 .mesh_instances
@@ -2889,7 +2895,7 @@ struct ResourceClosure<'scope> {
 }
 
 fn build_resource_closure<'scope, 'document>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     gltf: &'document crate::document::Document<'_>,
     graph: &NodeGraph<'document, '_>,
     animation_contracts: &animation::AnimationContracts<'_, '_>,
@@ -3013,10 +3019,9 @@ fn build_resource_closure<'scope, 'document>(
             continue;
         }
         let node = root.nodes.get(node_index).ok_or_else(|| {
-            gltf_parse_error(
-                ctx,
-                format_args!("glTF closure references missing node {node_index}"),
-            )
+            gltf_parse_error(format_args!(
+                "glTF closure references missing node {node_index}"
+            ))
         })?;
         match (node.mesh, node.skin) {
             (Some(mesh), Some(skin)) => {
@@ -3031,10 +3036,9 @@ fn build_resource_closure<'scope, 'document>(
             }
             (Some(mesh), None) => mark_mesh(ctx, root, &mut closure, mesh.value())?,
             (None, Some(_)) => {
-                return Err(gltf_parse_error(
-                    ctx,
-                    format_args!("glTF selected node {node_index} declares a skin without a mesh"),
-                ));
+                return Err(gltf_parse_error(format_args!(
+                    "glTF selected node {node_index} declares a skin without a mesh"
+                )));
             }
             (None, None) => {}
         }
@@ -3088,7 +3092,6 @@ fn build_resource_closure<'scope, 'document>(
             }
             let sampler = animation.samplers.get(channel.sampler.value()).ok_or_else(|| {
                 gltf_parse_error(
-                    ctx,
                     format_args!(
                         "glTF animation {animation_index} channel {channel_index} sampler reference is out of range"
                     ),
@@ -3129,7 +3132,7 @@ fn build_resource_closure<'scope, 'document>(
 }
 
 fn validate_selected_primitive_semantics(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     mesh_index: usize,
     primitive_index: usize,
     primitive: &json::mesh::Primitive<'_>,
@@ -3171,7 +3174,7 @@ fn validate_selected_primitive_semantics(
 }
 
 fn ensure_contiguous_attribute_sets(
-    ctx: &ParseScope<'_>,
+    _ctx: &mut ParseExecution<'_, '_>,
     mesh_index: usize,
     primitive_index: usize,
     semantic: &'static str,
@@ -3183,38 +3186,34 @@ fn ensure_contiguous_attribute_sets(
     if sets[..=last].iter().all(|selected| *selected) {
         return Ok(());
     }
-    Err(gltf_parse_error(
-        ctx,
-        format_args!(
-            "glTF mesh {mesh_index} primitive {primitive_index} has non-contiguous {semantic} sets"
-        ),
-    ))
+    Err(gltf_parse_error(format_args!(
+        "glTF mesh {mesh_index} primitive {primitive_index} has non-contiguous {semantic} sets"
+    )))
 }
 
-fn charge_closure_work(ctx: &ParseScope<'_>) -> Result<()> {
+fn charge_closure_work(ctx: &mut ParseExecution<'_, '_>) -> Result<()> {
     ctx.charge_work(1)?;
     Ok(())
 }
 
 fn mark_bool(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     values: &mut MeteredVec<'_, bool>,
     index: usize,
     kind: &'static str,
 ) -> Result<()> {
     charge_closure_work(ctx)?;
     let Some(selected) = values.as_mut_slice().get_mut(index) else {
-        return Err(gltf_parse_error(
-            ctx,
-            format_args!("glTF closure references missing {kind} {index}"),
-        ));
+        return Err(gltf_parse_error(format_args!(
+            "glTF closure references missing {kind} {index}"
+        )));
     };
     *selected = true;
     Ok(())
 }
 
 fn mark_skin(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     root: &json::Tables<'_>,
     closure: &mut ResourceClosure<'_>,
     selected_nodes: &[bool],
@@ -3226,10 +3225,9 @@ fn mark_skin(
         .get(skin_index)
         .copied()
         .ok_or_else(|| {
-            gltf_parse_error(
-                ctx,
-                format_args!("glTF closure references missing skin {skin_index}"),
-            )
+            gltf_parse_error(format_args!(
+                "glTF closure references missing skin {skin_index}"
+            ))
         })?;
     if was_selected {
         charge_closure_work(ctx)?;
@@ -3237,34 +3235,27 @@ fn mark_skin(
     }
     mark_bool(ctx, &mut closure.skins, skin_index, "skin")?;
     let skin = root.skins.get(skin_index).ok_or_else(|| {
-        gltf_parse_error(
-            ctx,
-            format_args!("glTF closure references missing skin {skin_index}"),
-        )
+        gltf_parse_error(format_args!(
+            "glTF closure references missing skin {skin_index}"
+        ))
     })?;
     for (joint_ordinal, joint) in skin.joints.iter().enumerate() {
         charge_closure_work(ctx)?;
         poll_parser_loop(ctx, joint_ordinal)?;
         let joint_index = joint.value();
         if !selected_nodes.get(joint_index).copied().unwrap_or(false) {
-            return Err(gltf_parse_error(
-                ctx,
-                format_args!(
-                    "glTF skin {skin_index} references joint node {joint_index} outside the imported scene"
-                ),
-            ));
+            return Err(gltf_parse_error(format_args!(
+                "glTF skin {skin_index} references joint node {joint_index} outside the imported scene"
+            )));
         }
     }
     if let Some(skeleton) = skin.skeleton {
         charge_closure_work(ctx)?;
         let skeleton_index = skeleton.value();
         if !selected_nodes.get(skeleton_index).copied().unwrap_or(false) {
-            return Err(gltf_parse_error(
-                ctx,
-                format_args!(
-                    "glTF skin {skin_index} references skeleton root node {skeleton_index} outside the imported scene"
-                ),
-            ));
+            return Err(gltf_parse_error(format_args!(
+                "glTF skin {skin_index} references skeleton root node {skeleton_index} outside the imported scene"
+            )));
         }
     }
     if let Some(accessor) = skin.inverse_bind_matrices {
@@ -3274,7 +3265,7 @@ fn mark_skin(
 }
 
 fn mark_mesh(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     root: &json::Tables<'_>,
     closure: &mut ResourceClosure<'_>,
     mesh_index: usize,
@@ -3285,10 +3276,9 @@ fn mark_mesh(
         .get(mesh_index)
         .copied()
         .ok_or_else(|| {
-            gltf_parse_error(
-                ctx,
-                format_args!("glTF closure references missing mesh {mesh_index}"),
-            )
+            gltf_parse_error(format_args!(
+                "glTF closure references missing mesh {mesh_index}"
+            ))
         })?;
     if was_selected {
         charge_closure_work(ctx)?;
@@ -3296,10 +3286,9 @@ fn mark_mesh(
     }
     mark_bool(ctx, &mut closure.meshes, mesh_index, "mesh")?;
     let mesh = root.meshes.get(mesh_index).ok_or_else(|| {
-        gltf_parse_error(
-            ctx,
-            format_args!("glTF closure references missing mesh {mesh_index}"),
-        )
+        gltf_parse_error(format_args!(
+            "glTF closure references missing mesh {mesh_index}"
+        ))
     })?;
     for (primitive_index, primitive) in mesh.primitives.iter().enumerate() {
         charge_closure_work(ctx)?;
@@ -3328,7 +3317,7 @@ fn mark_mesh(
 }
 
 fn mark_texture(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     root: &json::Tables<'_>,
     closure: &mut ResourceClosure<'_>,
     texture_index: usize,
@@ -3339,10 +3328,9 @@ fn mark_texture(
         .get(texture_index)
         .copied()
         .ok_or_else(|| {
-            gltf_parse_error(
-                ctx,
-                format_args!("glTF closure references missing texture {texture_index}"),
-            )
+            gltf_parse_error(format_args!(
+                "glTF closure references missing texture {texture_index}"
+            ))
         })?;
     if was_selected {
         charge_closure_work(ctx)?;
@@ -3350,18 +3338,16 @@ fn mark_texture(
     }
     mark_bool(ctx, &mut closure.textures, texture_index, "texture")?;
     let texture = root.textures.get(texture_index).ok_or_else(|| {
-        gltf_parse_error(
-            ctx,
-            format_args!("glTF closure references missing texture {texture_index}"),
-        )
+        gltf_parse_error(format_args!(
+            "glTF closure references missing texture {texture_index}"
+        ))
     })?;
     let image_index = texture.source.value();
     mark_bool(ctx, &mut closure.images, image_index, "image")?;
     let image = root.images.get(image_index).ok_or_else(|| {
-        gltf_parse_error(
-            ctx,
-            format_args!("glTF closure references missing image {image_index}"),
-        )
+        gltf_parse_error(format_args!(
+            "glTF closure references missing image {image_index}"
+        ))
     })?;
     if let Some(view) = image.buffer_view {
         mark_buffer_view(ctx, root, closure, view.value())?;
@@ -3373,7 +3359,7 @@ fn mark_texture(
 }
 
 fn mark_accessor(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     root: &json::Tables<'_>,
     closure: &mut ResourceClosure<'_>,
     accessor_index: usize,
@@ -3384,10 +3370,9 @@ fn mark_accessor(
         .get(accessor_index)
         .copied()
         .ok_or_else(|| {
-            gltf_parse_error(
-                ctx,
-                format_args!("glTF closure references missing accessor {accessor_index}"),
-            )
+            gltf_parse_error(format_args!(
+                "glTF closure references missing accessor {accessor_index}"
+            ))
         })?;
     if was_selected {
         charge_closure_work(ctx)?;
@@ -3395,10 +3380,9 @@ fn mark_accessor(
     }
     mark_bool(ctx, &mut closure.accessors, accessor_index, "accessor")?;
     let accessor = root.accessors.get(accessor_index).ok_or_else(|| {
-        gltf_parse_error(
-            ctx,
-            format_args!("glTF closure references missing accessor {accessor_index}"),
-        )
+        gltf_parse_error(format_args!(
+            "glTF closure references missing accessor {accessor_index}"
+        ))
     })?;
     if let Some(view) = accessor.buffer_view {
         mark_buffer_view(ctx, root, closure, view.value())?;
@@ -3411,7 +3395,7 @@ fn mark_accessor(
 }
 
 fn mark_buffer_view(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     root: &json::Tables<'_>,
     closure: &mut ResourceClosure<'_>,
     view_index: usize,
@@ -3422,10 +3406,9 @@ fn mark_buffer_view(
         .get(view_index)
         .copied()
         .ok_or_else(|| {
-            gltf_parse_error(
-                ctx,
-                format_args!("glTF closure references missing bufferView {view_index}"),
-            )
+            gltf_parse_error(format_args!(
+                "glTF closure references missing bufferView {view_index}"
+            ))
         })?;
     if was_selected {
         charge_closure_work(ctx)?;
@@ -3433,17 +3416,16 @@ fn mark_buffer_view(
     }
     mark_bool(ctx, &mut closure.buffer_views, view_index, "bufferView")?;
     let view = root.buffer_views.get(view_index).ok_or_else(|| {
-        gltf_parse_error(
-            ctx,
-            format_args!("glTF closure references missing bufferView {view_index}"),
-        )
+        gltf_parse_error(format_args!(
+            "glTF closure references missing bufferView {view_index}"
+        ))
     })?;
     mark_bool(ctx, &mut closure.buffers, view.buffer.value(), "buffer")?;
     Ok(())
 }
 
 fn record_source_scope(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     gltf: &crate::document::Document<'_>,
     graph: &NodeGraph<'_, '_>,
     animation_contracts: &animation::AnimationContracts<'_, '_>,
@@ -3459,7 +3441,7 @@ fn record_source_scope(
             SourceScopeSelectionOutcome::declared_scene(
                 source_document,
                 u64::try_from(scene_index).map_err(|_| {
-                    gltf_parse_error(ctx, "glTF selected scene index exceeds source-scope range")
+                    gltf_parse_error("glTF selected scene index exceeds source-scope range")
                 })?,
             )
         }
@@ -3472,10 +3454,11 @@ fn record_source_scope(
         ImportStorageClass::FormatNormalization,
         "gltf-source-scope-identity",
     );
-    identity.try_reserve(32)?;
+    identity.try_reserve(ctx, 32)?;
 
     for scene_index in 0..document.scenes.len() {
         observe_source_index(
+            ctx,
             &mut builder,
             &mut identity,
             SourceScopeEntityKind::Scene,
@@ -3486,6 +3469,7 @@ fn record_source_scope(
     }
     for (node_index, selected) in graph.selected.as_slice().iter().copied().enumerate() {
         observe_source_index(
+            ctx,
             &mut builder,
             &mut identity,
             SourceScopeEntityKind::Node,
@@ -3496,6 +3480,7 @@ fn record_source_scope(
     }
     for (camera_index, selected) in closure.cameras.as_slice().iter().copied().enumerate() {
         observe_source_index(
+            ctx,
             &mut builder,
             &mut identity,
             SourceScopeEntityKind::Camera,
@@ -3506,6 +3491,7 @@ fn record_source_scope(
     }
     for (mesh_index, selected) in closure.meshes.as_slice().iter().copied().enumerate() {
         observe_source_index(
+            ctx,
             &mut builder,
             &mut identity,
             SourceScopeEntityKind::Mesh,
@@ -3514,13 +3500,13 @@ fn record_source_scope(
             mesh_index,
         )?;
         let mesh = document.meshes.get(mesh_index).ok_or_else(|| {
-            gltf_parse_error(
-                ctx,
-                format_args!("glTF source-scope mesh {mesh_index} is missing"),
-            )
+            gltf_parse_error(format_args!(
+                "glTF source-scope mesh {mesh_index} is missing"
+            ))
         })?;
         for (primitive_index, _primitive) in mesh.primitives.iter().enumerate() {
             observe_source_identity(
+                ctx,
                 &mut builder,
                 &mut identity,
                 SourceScopeEntityKind::Primitive,
@@ -3531,6 +3517,7 @@ fn record_source_scope(
     }
     for (material_index, selected) in closure.materials.as_slice().iter().copied().enumerate() {
         observe_source_identity(
+            ctx,
             &mut builder,
             &mut identity,
             SourceScopeEntityKind::Material,
@@ -3540,6 +3527,7 @@ fn record_source_scope(
     }
     for (texture_index, selected) in closure.textures.as_slice().iter().copied().enumerate() {
         observe_source_identity(
+            ctx,
             &mut builder,
             &mut identity,
             SourceScopeEntityKind::Texture,
@@ -3549,6 +3537,7 @@ fn record_source_scope(
     }
     for (image_index, selected) in closure.images.as_slice().iter().copied().enumerate() {
         observe_source_identity(
+            ctx,
             &mut builder,
             &mut identity,
             SourceScopeEntityKind::Image,
@@ -3558,6 +3547,7 @@ fn record_source_scope(
     }
     for (sampler_index, selected) in closure.samplers.as_slice().iter().copied().enumerate() {
         observe_source_identity(
+            ctx,
             &mut builder,
             &mut identity,
             SourceScopeEntityKind::Sampler,
@@ -3567,6 +3557,7 @@ fn record_source_scope(
     }
     for (skin_index, selected) in closure.skins.as_slice().iter().copied().enumerate() {
         observe_source_index(
+            ctx,
             &mut builder,
             &mut identity,
             SourceScopeEntityKind::Skin,
@@ -3583,6 +3574,7 @@ fn record_source_scope(
         .enumerate()
     {
         observe_source_index(
+            ctx,
             &mut builder,
             &mut identity,
             SourceScopeEntityKind::Animation,
@@ -3608,6 +3600,7 @@ fn record_source_scope(
             })?;
         for (sampler_index, selected) in samplers.iter().copied().enumerate() {
             observe_source_identity(
+                ctx,
                 &mut builder,
                 &mut identity,
                 SourceScopeEntityKind::AnimationSampler,
@@ -3630,6 +3623,7 @@ fn record_source_scope(
                     ))
                 })?;
             observe_source_channel(
+                ctx,
                 &mut builder,
                 &mut identity,
                 selected.is_retained(),
@@ -3648,6 +3642,7 @@ fn record_source_scope(
     }
     for (buffer_index, selected) in closure.buffers.as_slice().iter().copied().enumerate() {
         observe_source_identity(
+            ctx,
             &mut builder,
             &mut identity,
             SourceScopeEntityKind::Buffer,
@@ -3657,6 +3652,7 @@ fn record_source_scope(
     }
     for (view_index, selected) in closure.buffer_views.as_slice().iter().copied().enumerate() {
         observe_source_identity(
+            ctx,
             &mut builder,
             &mut identity,
             SourceScopeEntityKind::BufferView,
@@ -3666,6 +3662,7 @@ fn record_source_scope(
     }
     for (accessor_index, selected) in closure.accessors.as_slice().iter().copied().enumerate() {
         observe_source_identity(
+            ctx,
             &mut builder,
             &mut identity,
             SourceScopeEntityKind::Accessor,
@@ -3676,6 +3673,7 @@ fn record_source_scope(
 
     for (light_index, selected) in closure.lights.as_slice().iter().copied().enumerate() {
         observe_source_identity(
+            ctx,
             &mut builder,
             &mut identity,
             SourceScopeEntityKind::Light,
@@ -3683,22 +3681,24 @@ fn record_source_scope(
             format_args!("l{light_index}"),
         )?;
     }
-    let record = builder.finish()?;
+    let record = builder.finish(ctx)?;
     ctx.record_source_scope(record)?;
     Ok(())
 }
 
-fn observe_source_index(
-    builder: &mut SourceScopeRecordBuilder<'_, '_>,
-    identity: &mut MeteredString<'_>,
+fn observe_source_index<'session>(
+    ctx: &mut ParseExecution<'_, 'session>,
+    builder: &mut SourceScopeRecordBuilder<'session>,
+    identity: &mut MeteredString<'session>,
     kind: SourceScopeEntityKind,
     selected: bool,
     prefix: char,
     index: usize,
 ) -> Result<()> {
     identity.truncate(0);
-    identity.try_write_fmt(format_args!("{prefix}{index}"))?;
+    identity.try_write_fmt(ctx, format_args!("{prefix}{index}"))?;
     builder.observe(
+        ctx,
         kind,
         if selected {
             SourceScopeDisposition::Selected
@@ -3710,16 +3710,18 @@ fn observe_source_index(
     Ok(())
 }
 
-fn observe_source_identity(
-    builder: &mut SourceScopeRecordBuilder<'_, '_>,
-    identity: &mut MeteredString<'_>,
+fn observe_source_identity<'session>(
+    ctx: &mut ParseExecution<'_, 'session>,
+    builder: &mut SourceScopeRecordBuilder<'session>,
+    identity: &mut MeteredString<'session>,
     kind: SourceScopeEntityKind,
     selected: bool,
     value: fmt::Arguments<'_>,
 ) -> Result<()> {
     identity.truncate(0);
-    identity.try_write_fmt(value)?;
+    identity.try_write_fmt(ctx, value)?;
     builder.observe(
+        ctx,
         kind,
         if selected {
             SourceScopeDisposition::Selected
@@ -3731,16 +3733,18 @@ fn observe_source_identity(
     Ok(())
 }
 
-fn observe_source_channel(
-    builder: &mut SourceScopeRecordBuilder<'_, '_>,
-    identity: &mut MeteredString<'_>,
+fn observe_source_channel<'session>(
+    ctx: &mut ParseExecution<'_, 'session>,
+    builder: &mut SourceScopeRecordBuilder<'session>,
+    identity: &mut MeteredString<'session>,
     selected: bool,
     animation_index: usize,
     channel_index: usize,
 ) -> Result<()> {
     identity.truncate(0);
-    identity.try_write_fmt(format_args!("a{animation_index}c{channel_index}"))?;
+    identity.try_write_fmt(ctx, format_args!("a{animation_index}c{channel_index}"))?;
     builder.observe(
+        ctx,
         SourceScopeEntityKind::AnimationChannel,
         if selected {
             SourceScopeDisposition::Selected
@@ -3753,33 +3757,34 @@ fn observe_source_channel(
 }
 
 fn preflight_node_graph<'document, 'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     gltf: &'document crate::document::Document<'_>,
+    options: &GltfImportOptions,
 ) -> Result<NodeGraph<'document, 'scope>> {
-    let selection = ctx.options(&gltf_import_option_key())?.scene_selection();
+    let selection = options.scene_selection();
     let selection_request = match selection {
         GltfSceneSelection::DocumentDefault => SourceScopeSelectionRequest::DocumentDefault,
         GltfSceneSelection::SceneIndex(scene_index) => SourceScopeSelectionRequest::ExplicitScene {
             scene_index: u64::from(scene_index),
         },
     };
-    let node_count = with_poll(ctx, || gltf.nodes().len())?;
+    let node_count = with_poll(ctx, |_ctx| gltf.nodes().len())?;
     ctx.with_work_group(
         [
             (ImportWorkClass::GraphNodes, to_u64(node_count)),
             (ImportWorkClass::GraphWork, to_u64(node_count)),
         ],
-        |work| -> Result<()> {
+        |ctx, work| -> Result<()> {
             // Borrowing rows removes the handle table, not the observable visit prefixes.
-            work.poll()?;
+            ctx.poll()?;
             for (ordinal, _) in gltf.nodes().enumerate() {
                 if ordinal.is_multiple_of(PARSER_POLL_INTERVAL) {
-                    work.poll()?;
+                    ctx.poll()?;
                 }
                 work.complete([1, 1])?;
             }
             if node_count.is_multiple_of(PARSER_POLL_INTERVAL) {
-                work.poll()?;
+                ctx.poll()?;
             }
             Ok(())
         },
@@ -3797,25 +3802,24 @@ fn preflight_node_graph<'document, 'scope>(
         None,
         "gltf-node-parents",
     )?;
+    let edge_work =
+        ctx.bind_work_group([ImportWorkClass::GraphEdges, ImportWorkClass::GraphWork])?;
     for (parent_index, node) in gltf.nodes().enumerate() {
         poll_parser_loop(ctx, parent_index)?;
-        let child_count = with_poll(ctx, || node.children().len())?;
-        let child_indices = ctx.with_work_group(
-            [
-                (ImportWorkClass::GraphEdges, to_u64(child_count)),
-                (ImportWorkClass::GraphWork, to_u64(child_count)),
-            ],
-            |work| -> Result<_> {
+        let child_count = with_poll(ctx, |_ctx| node.children().len())?;
+        let child_indices = ctx.with_work(
+            &edge_work, [to_u64(child_count), to_u64(child_count)],
+            |ctx, work| -> Result<_> {
                 let mut child_indices = ctx.metered_vec(
                     ImportStorageClass::FormatNormalization,
                     "gltf-node-child-list",
                 );
-                child_indices.try_reserve(child_count)?;
-                work.poll()?;
+                child_indices.try_reserve(ctx, child_count)?;
+                ctx.poll()?;
                 let mut node_children = node.children();
                 loop {
                     if child_indices.len().is_multiple_of(PARSER_POLL_INTERVAL) {
-                        work.poll()?;
+                        ctx.poll()?;
                     }
                     let next = node_children.next();
                     let Some(child) = next else {
@@ -3823,7 +3827,6 @@ fn preflight_node_graph<'document, 'scope>(
                     };
                     if child_indices.len() == child_count {
                         return Err(gltf_parse_error(
-                            ctx,
                             format_args!(
                                 "gltf-node-child-list produced more than {child_count} values"
                             ),
@@ -3832,7 +3835,6 @@ fn preflight_node_graph<'document, 'scope>(
                     let child_index = child.index();
                     if child_index >= node_count {
                         return Err(gltf_parse_error(
-                            ctx,
                             format_args!(
                                 "glTF node {parent_index} references missing child {child_index}"
                             ),
@@ -3840,13 +3842,11 @@ fn preflight_node_graph<'document, 'scope>(
                     }
                     if child_index == parent_index {
                         return Err(gltf_parse_error(
-                            ctx,
                             format_args!("glTF node graph contains a cycle at node {parent_index}"),
                         ));
                     }
                     if let Some(existing_parent) = parents.as_slice()[child_index] {
                         return Err(gltf_parse_error(
-                            ctx,
                             format_args!(
                                 "glTF node {child_index} has multiple parents ({existing_parent} and {parent_index})"
                             ),
@@ -3858,7 +3858,6 @@ fn preflight_node_graph<'document, 'scope>(
                 }
                 if child_indices.len() != child_count {
                     return Err(gltf_parse_error(
-                        ctx,
                         format_args!(
                             "gltf-node-child-list produced {} values, expected {child_count}",
                             child_indices.len()
@@ -3888,7 +3887,7 @@ fn preflight_node_graph<'document, 'scope>(
 }
 
 fn validate_canonical_graph_limits<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     children: &[MeteredVec<'_, usize>],
     roots: &[usize],
 ) -> Result<MeteredVec<'scope, bool>> {
@@ -3920,22 +3919,20 @@ fn validate_canonical_graph_limits<'scope>(
         observe_graph_depth(ctx, &mut max_depth, depth)?;
 
         let node_children = children.get(node_index).ok_or_else(|| {
-            gltf_parse_error(
-                ctx,
-                format_args!("glTF node graph references missing node {node_index}"),
-            )
+            gltf_parse_error(format_args!(
+                "glTF node graph references missing node {node_index}"
+            ))
         })?;
         let selected_node = selected.as_mut_slice().get_mut(node_index).ok_or_else(|| {
-            gltf_parse_error(
-                ctx,
-                format_args!("glTF selected node {node_index} is out of range"),
-            )
+            gltf_parse_error(format_args!(
+                "glTF selected node {node_index} is out of range"
+            ))
         })?;
         *selected_node = true;
         let child_depth = depth
             .checked_add(1)
             .ok_or_else(|| ctx.allocation_failure("gltf-graph-depth-counter"))?;
-        pending.try_reserve(node_children.len())?;
+        pending.try_reserve(ctx, node_children.len())?;
         for (child_ordinal, child) in node_children.as_slice().iter().rev().copied().enumerate() {
             poll_parser_loop(ctx, child_ordinal)?;
             pending.try_push_reserved((child, child_depth))?;
@@ -3945,30 +3942,35 @@ fn validate_canonical_graph_limits<'scope>(
     Ok(selected)
 }
 
-fn charge_canonical_graph_shape(ctx: &ParseScope<'_>, root_count: usize) -> Result<()> {
+fn charge_canonical_graph_shape(ctx: &mut ParseExecution<'_, '_>, root_count: usize) -> Result<()> {
     Ok(ctx.with_work_group(
         [
             (ImportWorkClass::GraphNodes, 1),
             (ImportWorkClass::GraphEdges, to_u64(root_count)),
         ],
-        |work| work.complete_all(),
+        |_ctx, work| work.complete_all(),
     )?)
 }
 
-fn observe_graph_depth(ctx: &ParseScope<'_>, maximum: &mut usize, depth: usize) -> Result<()> {
+fn observe_graph_depth(
+    ctx: &mut ParseExecution<'_, '_>,
+    maximum: &mut usize,
+    depth: usize,
+) -> Result<()> {
     let additional = depth.saturating_sub(*maximum);
     if additional == 0 {
         return Ok(());
     }
-    ctx.with_work(ImportWorkClass::GraphDepth, to_u64(additional), |work| {
-        work.complete_all()
-    })?;
+    ctx.with_work_group(
+        [(ImportWorkClass::GraphDepth, to_u64(additional))],
+        |_ctx, work| work.complete_all(),
+    )?;
     *maximum = depth;
     Ok(())
 }
 
 fn validate_graph_depth_and_cycles(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     children: &[MeteredVec<'_, usize>],
     parents: &[Option<usize>],
 ) -> Result<()> {
@@ -4009,32 +4011,33 @@ fn validate_graph_depth_and_cycles(
     }
 
     if queue.len() != parents.len() {
-        return Err(gltf_parse_error(ctx, "glTF node graph contains a cycle"));
+        return Err(gltf_parse_error("glTF node graph contains a cycle"));
     }
     Ok(())
 }
 
 fn select_and_validate_scene_roots<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     gltf: &crate::document::Document<'_>,
     parents: &[Option<usize>],
     selection: GltfSceneSelection,
 ) -> Result<(MeteredVec<'scope, usize>, NodeSelectionOutcome)> {
-    let scene_count = with_poll(ctx, || gltf.scenes().len())?;
+    let scene_count = with_poll(ctx, |_ctx| gltf.scenes().len())?;
     let mut scene_roots = ctx.metered_vec(
         ImportStorageClass::FormatNormalization,
         "gltf-scene-root-lists",
     );
 
+    let root_work = ctx.bind_work_group([ImportWorkClass::GraphWork])?;
     for (scene_index, scene) in gltf.scenes().enumerate() {
         poll_parser_loop(ctx, scene_index)?;
-        let roots = ctx.with_work(ImportWorkClass::GraphWork, 1, |work| -> Result<_> {
-            scene_roots.try_reserve(1)?;
-            work.poll()?;
+        let roots = ctx.with_work(&root_work, [1], |ctx, work| -> Result<_> {
+            scene_roots.try_reserve(ctx, 1)?;
+            ctx.poll()?;
             let root_count = scene.nodes().len();
             work.complete_all()?;
             work.replenish(to_u64(root_count))?;
-            work.poll()?;
+            ctx.poll()?;
             let roots = scene.nodes();
             collect_exact_with_work(
                 ctx,
@@ -4060,27 +4063,20 @@ fn select_and_validate_scene_roots<'scope>(
         for (root_ordinal, &root_index) in roots.as_slice().iter().enumerate() {
             poll_parser_loop(ctx, root_ordinal)?;
             let Some(parent) = parents.get(root_index) else {
-                return Err(gltf_parse_error(
-                    ctx,
-                    format_args!(
-                        "glTF scene {scene_index} references missing root node {root_index}"
-                    ),
-                ));
+                return Err(gltf_parse_error(format_args!(
+                    "glTF scene {scene_index} references missing root node {root_index}"
+                )));
             };
             if seen_in_scene.as_slice()[root_index] == scene_index {
-                return Err(gltf_parse_error(
-                    ctx,
-                    format_args!(
-                        "glTF scene {scene_index} contains duplicate root node {root_index}"
-                    ),
-                ));
+                return Err(gltf_parse_error(format_args!(
+                    "glTF scene {scene_index} contains duplicate root node {root_index}"
+                )));
             }
             seen_in_scene.as_mut_slice()[root_index] = scene_index;
             if parent.is_some() {
-                return Err(gltf_parse_error(
-                    ctx,
-                    format_args!("glTF scene {scene_index} root node {root_index} has a parent"),
-                ));
+                return Err(gltf_parse_error(format_args!(
+                    "glTF scene {scene_index} root node {root_index} has a parent"
+                )));
             }
         }
     }
@@ -4106,7 +4102,7 @@ fn select_and_validate_scene_roots<'scope>(
         }
         GltfSceneSelection::DocumentDefault => {
             let default_scene_index =
-                with_poll(ctx, || gltf.default_scene().map(|scene| scene.index()))?;
+                with_poll(ctx, |_ctx| gltf.default_scene().map(|scene| scene.index()))?;
             match (default_scene_index, scene_count) {
                 (Some(scene_index), _) => NodeSelectionOutcome::DeclaredScene(scene_index),
                 (None, 0) => NodeSelectionOutcome::ParentlessNodeProjection,
@@ -4118,10 +4114,9 @@ fn select_and_validate_scene_roots<'scope>(
     match selection_outcome {
         NodeSelectionOutcome::DeclaredScene(scene_index) => {
             let selected = scene_roots.as_slice().get(scene_index).ok_or_else(|| {
-                gltf_parse_error(
-                    ctx,
-                    format_args!("glTF selected scene index {scene_index} is out of range"),
-                )
+                gltf_parse_error(format_args!(
+                    "glTF selected scene index {scene_index} is out of range"
+                ))
             })?;
             let mut roots = try_vec_capacity(
                 ctx,
@@ -4135,21 +4130,22 @@ fn select_and_validate_scene_roots<'scope>(
             }
             Ok((roots, NodeSelectionOutcome::DeclaredScene(scene_index)))
         }
-        NodeSelectionOutcome::ParentlessNodeProjection => {
-            ctx.with_work(ImportWorkClass::GraphWork, 1, |work| -> Result<_> {
+        NodeSelectionOutcome::ParentlessNodeProjection => ctx.with_work_group(
+            [(ImportWorkClass::GraphWork, 1)],
+            |ctx, work| -> Result<_> {
                 let mut roots = ctx.metered_vec(
                     ImportStorageClass::FormatNormalization,
                     "gltf-derived-scene-roots",
                 );
                 work.complete_all()?;
                 for (chunk_index, chunk) in parents.chunks(PARSER_POLL_INTERVAL).enumerate() {
-                    work.poll()?;
+                    ctx.poll()?;
                     let root_count = chunk.iter().filter(|parent| parent.is_none()).count();
                     if root_count == 0 {
                         continue;
                     }
                     work.replenish(to_u64(root_count))?;
-                    roots.try_reserve(root_count)?;
+                    roots.try_reserve(ctx, root_count)?;
                     let base = chunk_index
                         .checked_mul(PARSER_POLL_INTERVAL)
                         .ok_or_else(|| ctx.allocation_failure("gltf-derived-root-index"))?;
@@ -4165,19 +4161,19 @@ fn select_and_validate_scene_roots<'scope>(
                     }
                 }
                 Ok((roots, NodeSelectionOutcome::ParentlessNodeProjection))
-            })
-        }
+            },
+        ),
     }
 }
 
-fn build_skins<'scope>(
-    ctx: &'scope ParseScope<'_>,
+fn build_skins<'region, 'scope>(
+    ctx: &mut ParseExecution<'region, 'scope>,
     gltf: &crate::document::Document<'_>,
     buffers: &[Option<BufferData<'_>>],
     node_ids: &[Option<NodeLocalId>],
     closure: &ResourceClosure<'_>,
 ) -> Result<SkinStorage<'scope>> {
-    let skin_count = with_poll(ctx, || gltf.skins().len())?;
+    let skin_count = with_poll(ctx, |_ctx| gltf.skins().len())?;
     let selected_skin_count = selected_count(ctx, closure.skins.as_slice())?;
 
     let mut storage = SkinStorage {
@@ -4195,21 +4191,22 @@ fn build_skins<'scope>(
             "gltf-skin-id-map",
         )?,
     };
+    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
+    let matrix_work = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
     for (ordinal, skin) in gltf.skins().enumerate() {
         poll_parser_loop(ctx, ordinal)?;
         let skin_index = skin.index();
         let Some(is_selected) = closure.skins.as_slice().get(skin_index).copied() else {
-            return Err(gltf_parse_error(
-                ctx,
-                format_args!("glTF skin index {skin_index} is out of range"),
-            ));
+            return Err(gltf_parse_error(format_args!(
+                "glTF skin index {skin_index} is out of range"
+            )));
         };
         if !is_selected {
             continue;
         }
 
-        let joint_count = with_poll(ctx, || skin.joints().len())?;
-        let joints = with_poll(ctx, || {
+        let joint_count = with_poll(ctx, |_ctx| skin.joints().len())?;
+        let joints = with_poll(ctx, |ctx| {
             collect_exact(
                 ctx,
                 ImportStorageClass::FormatNormalization,
@@ -4240,7 +4237,7 @@ fn build_skins<'scope>(
             mapped_joints.try_push_reserved(*node_id)?;
         }
 
-        let skeleton_root = match with_poll(ctx, || skin.skeleton())? {
+        let skeleton_root = match with_poll(ctx, |_ctx| skin.skeleton())? {
             Some(root) => match node_ids.get(root.index()).copied().flatten() {
                 Some(node_id) => Some(node_id),
                 None => {
@@ -4258,14 +4255,18 @@ fn build_skins<'scope>(
             None => None,
         };
 
-        ctx.charge_work(AccessorSources::COLLECTION_WORK_BOUND)?;
+        ctx.with_work(
+            &work_group,
+            [AccessorSources::COLLECTION_WORK_BOUND],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         let provenance = skin
             .inverse_bind_matrices()
             .map(|accessor| accessor_provenance(ctx, buffers, accessor))
             .transpose()?
             .unwrap_or(AccessorSources::ROOT);
         let inverse_bind_matrices =
-            collect_inverse_bind_matrices(ctx, buffers, &skin, mapped_joints.len())?;
+            collect_inverse_bind_matrices(ctx, &matrix_work, buffers, &skin, mapped_joints.len())?;
 
         let source_name = skin.name();
         complete_canonical_string_work(ctx, source_name.map_or(0, str::len))?;
@@ -4283,18 +4284,18 @@ fn build_skins<'scope>(
             provenance,
         })?;
         let Some(slot) = storage.skin_ids.as_mut_slice().get_mut(skin_index) else {
-            return Err(gltf_parse_error(
-                ctx,
-                format_args!("glTF skin index {skin_index} is out of range"),
-            ));
+            return Err(gltf_parse_error(format_args!(
+                "glTF skin index {skin_index} is out of range"
+            )));
         };
         *slot = Some(local_id);
     }
     Ok(storage)
 }
 
-fn collect_inverse_bind_matrices<'scope>(
-    ctx: &'scope ParseScope<'_>,
+fn collect_inverse_bind_matrices<'region, 'scope>(
+    ctx: &mut ParseExecution<'region, 'scope>,
+    matrix_work: &ImportWorkGroup<'region, 1>,
     buffers: &[Option<BufferData<'_>>],
     skin: &crate::document::Skin<'_>,
     joint_count: usize,
@@ -4302,77 +4303,68 @@ fn collect_inverse_bind_matrices<'scope>(
     let scalar_count = to_u64(joint_count)
         .checked_mul(16)
         .ok_or_else(|| ctx.allocation_failure("gltf-inverse-bind-work"))?;
-    ctx.with_work(
-        ImportWorkClass::WorkUnits,
-        scalar_count,
-        |work| -> Result<_> {
-            let mut collected = try_vec_capacity(
-                ctx,
-                ImportStorageClass::SceneConstruction,
-                joint_count,
-                "gltf-inverse-bind-matrices",
-            )?;
-            if skin.inverse_bind_matrices().is_some() {
-                let source = skin
-                    .inverse_bind_matrices()
-                    .ok_or_else(|| GltfFailure::internal("inverse bind accessor disappeared"))?;
-                let matrices = accessor::bind(ctx, source, buffers)?
-                    .matrices()
-                    .ok_or_else(|| {
-                        GltfFailure::invalid_accessor(
-                            Some(source.index()),
-                            "invalid inverse bind matrix shape",
-                        )
-                    })?;
-                with_poll(ctx, || -> Result<()> {
-                    for cols in matrices {
-                        if collected.len().is_multiple_of(PARSER_POLL_INTERVAL) {
-                            work.poll()?;
-                        }
-                        if collected.len() == joint_count {
-                            return Err(gltf_parse_error(
-                                ctx,
-                                "glTF inverse bind matrix reader exceeded the joint count",
-                            ));
-                        }
-                        let matrix = Mat4 { cols };
-                        if !matrix.is_finite() || !matrix.is_affine() {
-                            return Err(gltf_parse_error(
-                                ctx,
-                                format_args!(
-                                    "glTF skin {} inverse bind matrix {} must be finite and affine",
-                                    skin.index(),
-                                    collected.len(),
-                                ),
-                            ));
-                        }
-                        collected.try_push_reserved(matrix)?;
-                        work.complete([16])?;
+    ctx.with_work(matrix_work, [scalar_count], |ctx, work| -> Result<_> {
+        let mut collected = try_vec_capacity(
+            ctx,
+            ImportStorageClass::SceneConstruction,
+            joint_count,
+            "gltf-inverse-bind-matrices",
+        )?;
+        if skin.inverse_bind_matrices().is_some() {
+            let source = skin
+                .inverse_bind_matrices()
+                .ok_or_else(|| GltfFailure::internal("inverse bind accessor disappeared"))?;
+            let matrices = accessor::bind(ctx, source, buffers)?
+                .matrices()
+                .ok_or_else(|| {
+                    GltfFailure::invalid_accessor(
+                        Some(source.index()),
+                        "invalid inverse bind matrix shape",
+                    )
+                })?;
+            with_poll(ctx, |ctx| -> Result<()> {
+                for cols in matrices {
+                    if collected.len().is_multiple_of(PARSER_POLL_INTERVAL) {
+                        ctx.poll()?;
                     }
-                    Ok(())
-                })??;
-            } else {
-                for joint in 0..joint_count {
-                    if joint.is_multiple_of(PARSER_POLL_INTERVAL) {
-                        work.poll()?;
+                    if collected.len() == joint_count {
+                        return Err(gltf_parse_error(
+                            "glTF inverse bind matrix reader exceeded the joint count",
+                        ));
                     }
-                    collected.try_push_reserved(Mat4::IDENTITY)?;
+                    let matrix = Mat4 { cols };
+                    if !matrix.is_finite() || !matrix.is_affine() {
+                        return Err(gltf_parse_error(format_args!(
+                            "glTF skin {} inverse bind matrix {} must be finite and affine",
+                            skin.index(),
+                            collected.len(),
+                        )));
+                    }
+                    collected.try_push_reserved(matrix)?;
                     work.complete([16])?;
                 }
+                Ok(())
+            })??;
+        } else {
+            for joint in 0..joint_count {
+                if joint.is_multiple_of(PARSER_POLL_INTERVAL) {
+                    ctx.poll()?;
+                }
+                collected.try_push_reserved(Mat4::IDENTITY)?;
+                work.complete([16])?;
             }
-            if collected.len() != joint_count {
-                return Err(gltf_parse_error(
-                    ctx,
-                    "glTF inverse bind matrix count does not match joint count",
-                ));
-            }
-            Ok(collected)
-        },
-    )
+        }
+        if collected.len() != joint_count {
+            return Err(gltf_parse_error(
+                "glTF inverse bind matrix count does not match joint count",
+            ));
+        }
+        Ok(collected)
+    })
 }
 
 fn build_mesh_instance_deformations<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     gltf: &crate::document::Document<'_>,
     mesh_instances: &[MeshInstanceStorage],
     skin_ids: &[Option<SkinLocalId>],
@@ -4383,6 +4375,8 @@ fn build_mesh_instance_deformations<'scope>(
         mesh_instances.len(),
         "gltf-normalized-instance-deformations",
     )?;
+    let weight_work =
+        ctx.bind_work_group([ImportWorkClass::WorkUnits, ImportWorkClass::MorphCells])?;
     for (ordinal, instance) in mesh_instances.iter().enumerate() {
         poll_parser_loop(ctx, ordinal)?;
         let skin = match instance.skin_index {
@@ -4392,7 +4386,7 @@ fn build_mesh_instance_deformations<'scope>(
                 .flatten()
                 .map(Presence::Present)
                 .ok_or_else(|| {
-                    gltf_parse_error(ctx, format_args!("glTF skin {index} was not imported"))
+                    gltf_parse_error(format_args!("glTF skin {index} was not imported"))
                 })?,
             None => Presence::Absent,
         };
@@ -4400,17 +4394,15 @@ fn build_mesh_instance_deformations<'scope>(
             .tables()
             .nodes
             .get(instance.source_node_index)
-            .ok_or_else(|| gltf_parse_error(ctx, "glTF morph instance node disappeared"))?
+            .ok_or_else(|| gltf_parse_error("glTF morph instance node disappeared"))?
             .weights
             .as_deref();
         let weights = weights
             .map(|weights| -> Result<_> {
-                ctx.with_work_group(
-                    [
-                        (ImportWorkClass::WorkUnits, to_u64(weights.len())),
-                        (ImportWorkClass::MorphCells, to_u64(weights.len())),
-                    ],
-                    |work| -> Result<_> {
+                ctx.with_work(
+                    &weight_work,
+                    [to_u64(weights.len()), to_u64(weights.len())],
+                    |ctx, work| -> Result<_> {
                         let mut owned = try_vec_capacity(
                             ctx,
                             ImportStorageClass::FormatNormalization,
@@ -4418,7 +4410,7 @@ fn build_mesh_instance_deformations<'scope>(
                             "gltf-normalized-instance-weights",
                         )?;
                         for chunk in weights.chunks(PARSER_POLL_INTERVAL) {
-                            work.poll()?;
+                            ctx.poll()?;
                             owned.try_extend_from_slice_reserved(chunk)?;
                             work.complete([to_u64(chunk.len()), to_u64(chunk.len())])?;
                         }
@@ -4433,7 +4425,7 @@ fn build_mesh_instance_deformations<'scope>(
 }
 
 fn validate_skin_inverse_bind_accessor(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     gltf: &crate::document::Document<'_>,
     skin_index: usize,
     joint_count: usize,
@@ -4474,12 +4466,17 @@ fn validate_skin_inverse_bind_accessor(
 }
 
 fn preflight_skin_accessors(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     gltf: &crate::document::Document<'_>,
     closure: &ResourceClosure<'_>,
 ) -> Result<()> {
+    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
     for (skin_index, skin) in gltf.tables().skins.iter().enumerate() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         poll_parser_loop(ctx, skin_index)?;
         if closure.skins.as_slice()[skin_index] {
             validate_skin_inverse_bind_accessor(ctx, gltf, skin_index, skin.joints.len())?;
@@ -4489,11 +4486,11 @@ fn preflight_skin_accessors(
 }
 
 fn build_cameras<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     gltf: &crate::document::Document<'_>,
     closure: &ResourceClosure<'_>,
 ) -> Result<CameraStorage<'scope>> {
-    let camera_count = with_poll(ctx, || gltf.cameras().count())?;
+    let camera_count = with_poll(ctx, |_ctx| gltf.cameras().count())?;
     let selected_camera_count = selected_count(ctx, closure.cameras.as_slice())?;
     let mut storage = CameraStorage {
         authored: try_vec_capacity(
@@ -4527,7 +4524,7 @@ fn build_cameras<'scope>(
         {
             continue;
         }
-        let projection = with_poll(ctx, || match camera.projection() {
+        let projection = with_poll(ctx, |_ctx| match camera.projection() {
             json::Projection::Orthographic {
                 xmag,
                 ymag,
@@ -4554,10 +4551,7 @@ fn build_cameras<'scope>(
             ),
         })?
         .map_err(|_| {
-            gltf_parse_error(
-                ctx,
-                format_args!("glTF camera {ordinal} projection is invalid"),
-            )
+            gltf_parse_error(format_args!("glTF camera {ordinal} projection is invalid"))
         })?;
         let name = match camera.name() {
             Some(name) if name.len() > ctx.limits().max_string_bytes => {
@@ -4581,7 +4575,7 @@ fn build_cameras<'scope>(
             .names
             .try_push_reserved(owned_name(ctx, name, "gltf-normalized-camera-name")?)?;
         let Some(slot) = storage.camera_ids.as_mut_slice().get_mut(ordinal) else {
-            return Err(gltf_parse_error(ctx, "glTF camera id map is incomplete"));
+            return Err(gltf_parse_error("glTF camera id map is incomplete"));
         };
         *slot = Some(local_id);
     }
@@ -4651,7 +4645,7 @@ fn is_data_uri(uri: &str) -> bool {
 }
 
 fn push_warning(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     code: &'static str,
     message: impl fmt::Display,
 ) -> Result<()> {
@@ -4665,11 +4659,11 @@ fn push_warning(
 mod provenance_work_tests {
     use super::*;
     use baozi_import::{
-        DetectionOutcome, DetectionResult, DetectionScope, FormatDescriptor, FormatImporter,
+        DetectionOutcome, DetectionResult, DetectionScope, Format, FormatDescriptor,
         FormatSelection, ImportConfigOverlay, ImportDimension, ImportFailure,
         ImportOperationControl, ImportRequest, ImportRequestLayer, OptionCompileLimits, Probe,
         ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder, ResourceLimits,
-        ResourceLimitsOverlay, import_asset,
+        ResourceLimitsOverlay,
     };
     use baozi_io::{AssetPath, MemoryAssetIo};
     use std::sync::{
@@ -4678,7 +4672,7 @@ mod provenance_work_tests {
     };
 
     type TestResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-    type Inspect = fn(&ParseScope<'_>, usize, bool) -> Result<()>;
+    type Inspect = fn(&mut ParseExecution<'_, '_>, usize, bool) -> Result<()>;
 
     struct InspectWork {
         inspect: Inspect,
@@ -4687,7 +4681,19 @@ mod provenance_work_tests {
         completed: Arc<AtomicBool>,
     }
 
-    impl FormatImporter for InspectWork {
+    impl Format for InspectWork {
+        type Options = baozi_import::NoFormatOptions;
+
+        fn compile_defaults(
+            &self,
+            scope: &mut baozi_import::RegistryBuildScope<'_>,
+        ) -> std::result::Result<
+            baozi_import::CompiledOptions<Self::Options>,
+            baozi_import::OptionCompileError,
+        > {
+            Self::Options::compile_defaults(scope)
+        }
+
         fn descriptor(&self) -> FormatDescriptor {
             crate::format_descriptor()
         }
@@ -4701,15 +4707,21 @@ mod provenance_work_tests {
             Ok(DetectionOutcome::Match(ReadConfidence::Certain))
         }
 
-        fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-            (self.inspect)(scope, self.count, self.exercise).map_err(|error| match error {
-                ContentError::Scope(failure) => failure,
-                error => scope.format_failure(error.into_format_failure()),
-            })?;
-            self.completed.store(true, Ordering::SeqCst);
-            Err(scope.format_failure(GltfFailure::internal(
-                "provenance work inspection completed",
-            )))
+        fn parse(
+            &self,
+            _: &Self::Options,
+            context: &mut baozi_import::ParseContext<'_>,
+        ) -> ParseResult<()> {
+            context.with_execution(|scope| {
+                (self.inspect)(scope, self.count, self.exercise).map_err(|error| match error {
+                    ContentError::Scope(failure) => failure,
+                    error => scope.format_failure(error.into_format_failure()),
+                })?;
+                self.completed.store(true, Ordering::SeqCst);
+                Err(scope.format_failure(GltfFailure::internal(
+                    "provenance work inspection completed",
+                )))
+            })
         }
     }
 
@@ -4731,29 +4743,26 @@ mod provenance_work_tests {
         if let Some(max_work) = max_work {
             limits.max_work_units = max_work;
         }
-        let request = registry
-            .freeze(RegistryBuildLimits::default())?
-            .compile_request(
-                &ImportRequest::from_layers(
-                    ImportRequestLayer::default(),
-                    ImportRequestLayer::new(
-                        ImportConfigOverlay::default()
-                            .with_resource_limits(ResourceLimitsOverlay::from_limits(limits))
-                            .with_format_selection(FormatSelection::Forced(
-                                baozi_import::authoring::FormatId::new(crate::FORMAT_ID)?,
-                            )),
-                    ),
+        let request = registry.freeze(RegistryBuildLimits::default())?.plan(
+            &ImportRequest::from_layers(
+                ImportRequestLayer::default(),
+                ImportRequestLayer::new(
+                    ImportConfigOverlay::default()
+                        .with_resource_limits(ResourceLimitsOverlay::from_limits(limits))
+                        .with_format_selection(FormatSelection::Forced(
+                            baozi_import::authoring::FormatId::new(crate::FORMAT_ID)?,
+                        )),
                 ),
-                OptionCompileLimits::default(),
-            )?;
+            ),
+            OptionCompileLimits::default(),
+        )?;
         let io = MemoryAssetIo::new();
         let _ = io.try_insert(AssetPath::new("work.gltf")?, Arc::<[u8]>::from(&b"{}"[..]))?;
         let _ = io.try_insert(
             AssetPath::new("image.png")?,
             Arc::<[u8]>::from(&[1, 2, 3][..]),
         )?;
-        let result = import_asset(
-            &request,
+        let result = request.read_asset(
             &io,
             AssetPath::new("work.gltf")?,
             ImportOperationControl::default(),
@@ -4772,12 +4781,16 @@ mod provenance_work_tests {
             .map_or(0, |entry| entry.consumed())
     }
 
-    fn inspect_images(scope: &ParseScope<'_>, count: usize, exercise: bool) -> Result<()> {
+    fn inspect_images(
+        scope: &mut ParseExecution<'_, '_>,
+        count: usize,
+        exercise: bool,
+    ) -> Result<()> {
         let mut values = scope.metered_vec(
             ImportStorageClass::FormatNormalization,
             "image-lookup-fixture",
         );
-        values.try_reserve(count)?;
+        values.try_reserve(scope, count)?;
         let origin = scope.root_origin();
         for index in 0..count {
             let outcome = scope.dependency(&origin, &external_image_role(), "image.png")?;
@@ -4808,7 +4821,11 @@ mod provenance_work_tests {
         Ok(())
     }
 
-    fn inspect_unique_sources(scope: &ParseScope<'_>, count: usize, exercise: bool) -> Result<()> {
+    fn inspect_unique_sources(
+        scope: &mut ParseExecution<'_, '_>,
+        count: usize,
+        exercise: bool,
+    ) -> Result<()> {
         let mut pending = scope.metered_vec(
             ImportStorageClass::FormatNormalization,
             "pending-provenance-fixture",
@@ -4817,8 +4834,8 @@ mod provenance_work_tests {
             ImportStorageClass::FormatNormalization,
             "retained-provenance-fixture",
         );
-        pending.try_reserve(2 * count)?;
-        values.try_reserve(count + 2)?;
+        pending.try_reserve(scope, 2 * count)?;
+        values.try_reserve(scope, count + 2)?;
         values.try_push_reserved(91)?;
         values.try_push_reserved(72)?;
         for source in (0..count).rev() {
@@ -4828,16 +4845,20 @@ mod provenance_work_tests {
         let capacity = pending.capacity();
         if exercise {
             // Match production's prepaid work and non-nestable sample decode boundary.
-            let charged = scope.charge_work(provenance_work_bound(scope, pending.len())?);
+            let work_bound = provenance_work_bound(scope, pending.len())?;
+            let charged = scope.charge_work(work_bound);
             if let Err(failure) = charged {
                 assert_eq!(values.as_slice(), &[91, 72]);
                 return Err(failure.into());
             }
-            scope.with_work(ImportWorkClass::AnimationCells, 1, |work| -> Result<()> {
-                try_extend_provenance_unique(scope, &mut values, &mut pending)?;
-                work.complete_all()?;
-                Ok(())
-            })?;
+            scope.with_work_group(
+                [(ImportWorkClass::AnimationCells, 1)],
+                |scope, work| -> Result<()> {
+                    try_extend_provenance_unique(scope, &mut values, &mut pending)?;
+                    work.complete_all()?;
+                    Ok(())
+                },
+            )?;
             assert_eq!(&values.as_slice()[..2], &[91, 72]);
             assert_eq!(values.len(), count + 2);
             for (index, &source) in values.as_slice()[2..].iter().enumerate() {
@@ -4846,9 +4867,10 @@ mod provenance_work_tests {
             assert!(pending.is_empty());
             assert_eq!(pending.capacity(), capacity);
             // Reusing the scratch must append another owner without merging with the prefix.
-            values.try_reserve(2)?;
-            pending.try_extend_from_slice(&[7, 2, 7])?;
-            scope.charge_work(provenance_work_bound(scope, pending.len())?)?;
+            values.try_reserve(scope, 2)?;
+            pending.try_extend_from_slice(scope, &[7, 2, 7])?;
+            let work_bound = provenance_work_bound(scope, pending.len())?;
+            scope.charge_work(work_bound)?;
             try_extend_provenance_unique(scope, &mut values, &mut pending)?;
             assert_eq!(&values.as_slice()[count + 2..], &[2, 7]);
         }

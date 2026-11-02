@@ -22,9 +22,9 @@ nor its JSON schema/serialization/import helpers creates the fixtures or expecta
 | API | Purpose |
 | --- | --- |
 | `register()` | Register only the public glTF plugin and freeze a `RegistrySnapshot`. |
-| `compile(&snapshot, selection)` | Compile forced glTF options with explicit `GltfSceneSelection` and `preserve_or_fail` loss policy. |
-| `import_embedded(&request, path, bytes, read)` | Import GLB or data URI JSON without secondary asset authority. |
-| `import_from_io(&request, &io, path, read)` | Import through the supplied existing `AssetIo` authority, including selected external buffers. |
+| `compile(&snapshot, selection)` | Return an `ImportPlan` with forced glTF, explicit `GltfSceneSelection` and `preserve_or_fail` loss policy. |
+| `import_embedded(&plan, path, bytes, read)` | Execute `plan.read_bytes` for GLB or data URI JSON without secondary asset authority. |
+| `import_from_io(&plan, &io, path, read)` | Execute `plan.read_asset` through the supplied existing `AssetIo` authority, including selected external buffers. |
 | `Observation<T>` | Return caller-selected owned facts and the original detached `ImportEvidence`; the Scene is destroyed before return. |
 | `selected_fixtures()` | Return a fixed six-file list of original raw assets for tests and separate official validation. |
 
@@ -42,18 +42,18 @@ use baozi_io::AssetPath;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let registry = register()?;
-    let request = compile(&registry, GltfSceneSelection::DocumentDefault)?;
+    let plan = compile(&registry, GltfSceneSelection::DocumentDefault)?;
     let bytes = selected_fixtures()
         .into_iter()
         .find_map(|(name, bytes)| (name == "selected.glb").then_some(bytes))
         .ok_or("missing fixed fixture")?;
     let observation = import_embedded(
-        &request,
+        &plan,
         AssetPath::new("example/selected.glb")?,
         &bytes,
         |scene| scene.meshes().filter_map(|mesh| mesh.name().map(str::to_owned)).collect::<Vec<_>>(),
     )?;
-    drop((request, registry, bytes));
+    drop((plan, registry, bytes));
     assert_eq!(observation.facts, ["Selected mesh"]);
     assert!(observation.evidence.loss_evidence().is_empty());
     Ok(())

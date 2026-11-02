@@ -3,14 +3,13 @@ mod support;
 use baozi_core::FormatId;
 use baozi_import::authoring::SceneSpace;
 use baozi_import::{
-    CapabilityStatus, CompiledFormatOptions, DetectionOutcome, DetectionResult, DetectionScope,
-    FormatCapability, FormatDescriptor, FormatEncoding, FormatImporter, FormatOptionCodec,
-    FormatOptionKey, FormatOptionLayers, FormatOptionSchema, FormatOptionSchemaId,
-    FormatOptionSchemaKey, FormatSelection, ImportConfigOverlay, ImportOperationControl,
-    ImportReport, ImportRequest, ImportRequestLayer, OptionCompileError, OptionCompileLimits,
-    OptionCompileScope, OptionRuntimeTypeKey, ParseResult, ParseScope, PreparedImportRequest,
+    CapabilityStatus, CompiledOptions, DetectionOutcome, DetectionResult, DetectionScope, Format,
+    FormatCapability, FormatDescriptor, FormatEncoding, FormatOptionLayers, FormatOptionSchema,
+    FormatOptionSchemaId, FormatOptionSchemaKey, FormatSelection, ImportConfigOverlay,
+    ImportOperationControl, ImportPlan, ImportReport, ImportRequest, ImportRequestLayer,
+    OptionCompileError, OptionCompileLimits, OptionCompileScope, ParseContext, ParseResult,
     ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuildScope, RegistryBuilder,
-    RegistrySnapshot, SceneDraft, import_bytes,
+    RegistrySnapshot,
 };
 use baozi_io::AssetPath;
 use std::num::NonZeroU32;
@@ -24,55 +23,6 @@ const FORMAT_EXTENSION: &str = "parser-reentrancy";
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ReentrantOptions {
     scale: u8,
-}
-
-#[derive(Debug)]
-struct ReentrantCodec {
-    schema: FormatOptionSchema,
-}
-
-impl FormatOptionCodec for ReentrantCodec {
-    fn schema(&self) -> Option<FormatOptionSchema> {
-        Some(self.schema.clone())
-    }
-
-    fn runtime_type_key(&self) -> OptionRuntimeTypeKey {
-        OptionRuntimeTypeKey::of::<ReentrantOptions>()
-    }
-
-    fn compile_defaults(
-        &self,
-        scope: &mut RegistryBuildScope<'_>,
-    ) -> Result<CompiledFormatOptions, OptionCompileError> {
-        scope.charge_work(1)?;
-        scope.finish(ReentrantOptions { scale: 1 }, 1)
-    }
-
-    fn compile_layers(
-        &self,
-        scope: &mut OptionCompileScope<'_>,
-        defaults: &CompiledFormatOptions,
-        layers: FormatOptionLayers<'_>,
-    ) -> Result<CompiledFormatOptions, OptionCompileError> {
-        scope.charge_work(1)?;
-        let key = FormatOptionKey::<ReentrantOptions>::new(self.schema.clone());
-        let mut scale = defaults
-            .downcast_ref(&key)
-            .ok_or_else(|| {
-                OptionCompileError::invalid_payload(
-                    "default-type",
-                    "default parser options have the wrong runtime type",
-                )
-            })?
-            .scale;
-        if let Some(payload) = layers.preset() {
-            scale = read_scale(scope, payload)?;
-        }
-        if let Some(payload) = layers.caller() {
-            scale = read_scale(scope, payload)?;
-        }
-        scope.finish(ReentrantOptions { scale }, 1)
-    }
 }
 
 fn read_scale(
@@ -133,8 +83,7 @@ impl Drop for ParserPermit<'_> {
 
 struct ReentrantImporter {
     descriptor: FormatDescriptor,
-    option_key: FormatOptionKey<ReentrantOptions>,
-    codec: Arc<dyn FormatOptionCodec>,
+    schema: FormatOptionSchema,
     overlap: Arc<ParserOverlap>,
     observations: Arc<Mutex<Vec<ParseObservation>>>,
 }
@@ -147,17 +96,40 @@ struct ParseObservation {
     scaled_input: u16,
 }
 
-impl FormatImporter for ReentrantImporter {
+impl Format for ReentrantImporter {
+    type Options = ReentrantOptions;
+
     fn descriptor(&self) -> FormatDescriptor {
         self.descriptor.clone()
     }
 
-    fn option_codec(&self) -> Arc<dyn FormatOptionCodec> {
-        Arc::clone(&self.codec)
+    fn option_schema(&self) -> Option<FormatOptionSchema> {
+        Some(self.schema.clone())
     }
 
-    fn option_runtime_type_key(&self) -> OptionRuntimeTypeKey {
-        OptionRuntimeTypeKey::of::<ReentrantOptions>()
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        scope.charge_work(1)?;
+        scope.finish(ReentrantOptions { scale: 1 }, 1)
+    }
+
+    fn compile_options(
+        &self,
+        scope: &mut OptionCompileScope<'_>,
+        defaults: &Self::Options,
+        layers: FormatOptionLayers<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        scope.charge_work(1)?;
+        let mut scale = defaults.scale;
+        if let Some(payload) = layers.preset() {
+            scale = read_scale(scope, payload)?;
+        }
+        if let Some(payload) = layers.caller() {
+            scale = read_scale(scope, payload)?;
+        }
+        scope.finish(ReentrantOptions { scale }, 1)
     }
 
     fn detect(
@@ -169,9 +141,9 @@ impl FormatImporter for ReentrantImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
         let _permit = self.overlap.enter();
-        let scale = scope.options(&self.option_key)?.scale;
+        let scale = options.scale;
         let input = *scope
             .primary_bytes()
             .first()
@@ -197,7 +169,7 @@ impl FormatImporter for ReentrantImporter {
 
 type RegistryFixture = (
     RegistrySnapshot,
-    FormatOptionKey<ReentrantOptions>,
+    FormatOptionSchema,
     Arc<ParserOverlap>,
     Arc<Mutex<Vec<ParseObservation>>>,
 );
@@ -212,8 +184,6 @@ fn registry_fixture() -> RegistryFixture {
         ),
         NonZeroU32::new(1).expect("nonzero schema version"),
     );
-    let option_key = FormatOptionKey::<ReentrantOptions>::new(schema.clone());
-    let codec: Arc<dyn FormatOptionCodec> = Arc::new(ReentrantCodec { schema });
     let overlap = Arc::new(ParserOverlap::new());
     let observations = Arc::new(Mutex::new(Vec::new()));
     let descriptor = FormatDescriptor::builder(format, "Parser reentrancy contract")
@@ -226,8 +196,7 @@ fn registry_fixture() -> RegistryFixture {
     builder
         .register(ReentrantImporter {
             descriptor,
-            option_key: option_key.clone(),
-            codec,
+            schema: schema.clone(),
             overlap: Arc::clone(&overlap),
             observations: Arc::clone(&observations),
         })
@@ -235,41 +204,36 @@ fn registry_fixture() -> RegistryFixture {
     let snapshot = builder
         .freeze(RegistryBuildLimits::default())
         .expect("parser reentrancy registry freezes");
-    (snapshot, option_key, overlap, observations)
+    (snapshot, schema, overlap, observations)
 }
 
 fn compile_request(
     snapshot: &RegistrySnapshot,
-    option_key: &FormatOptionKey<ReentrantOptions>,
+    schema: &FormatOptionSchema,
     scale: Option<u8>,
-) -> PreparedImportRequest {
-    let selection = FormatSelection::Forced(option_key.schema().key().owner().clone());
+) -> ImportPlan {
+    let selection = FormatSelection::Forced(schema.key().owner().clone());
     let mut caller =
         ImportRequestLayer::new(ImportConfigOverlay::default().with_format_selection(selection));
     if let Some(scale) = scale {
         caller = caller
             .try_with_format_option(
-                option_key
+                schema
                     .envelope_from_canonical_payload([scale])
                     .expect("valid parser reentrancy option envelope"),
             )
             .expect("one option envelope per request");
     }
     snapshot
-        .compile_request(
+        .plan(
             &ImportRequest::from_layers(ImportRequestLayer::default(), caller),
             OptionCompileLimits::default(),
         )
         .expect("parser reentrancy request compiles")
 }
 
-fn import_success(
-    request: &PreparedImportRequest,
-    source: &'static str,
-    input: u8,
-) -> ImportReport {
-    match import_bytes(
-        request,
+fn import_success(request: &ImportPlan, source: &'static str, input: u8) -> ImportReport {
+    match request.read_bytes(
         AssetPath::new(source).expect("valid parser reentrancy source"),
         &[input],
         ImportOperationControl::default(),
@@ -280,8 +244,8 @@ fn import_success(
 }
 
 fn run_concurrently(
-    left_request: Arc<PreparedImportRequest>,
-    right_request: Arc<PreparedImportRequest>,
+    left_request: Arc<ImportPlan>,
+    right_request: Arc<ImportPlan>,
     left_input: u8,
     right_input: u8,
 ) -> (ImportReport, ImportReport) {
@@ -361,8 +325,8 @@ fn assert_observations(
 
 #[test]
 fn one_prepared_request_is_semantically_reentrant_for_distinct_primary_inputs() {
-    let (snapshot, option_key, overlap, observations) = registry_fixture();
-    let request = Arc::new(compile_request(&snapshot, &option_key, None));
+    let (snapshot, schema, overlap, observations) = registry_fixture();
+    let request = Arc::new(compile_request(&snapshot, &schema, None));
     let (concurrent_left, concurrent_right) =
         run_concurrently(Arc::clone(&request), Arc::clone(&request), 3, 11);
     let serial_left = import_success(request.as_ref(), "left.parser-reentrancy", 3);
@@ -392,9 +356,9 @@ fn one_prepared_request_is_semantically_reentrant_for_distinct_primary_inputs() 
 
 #[test]
 fn one_snapshot_is_semantically_reentrant_for_distinct_immutable_parser_options() {
-    let (snapshot, option_key, overlap, observations) = registry_fixture();
-    let left_request = Arc::new(compile_request(&snapshot, &option_key, Some(2)));
-    let right_request = Arc::new(compile_request(&snapshot, &option_key, Some(7)));
+    let (snapshot, schema, overlap, observations) = registry_fixture();
+    let left_request = Arc::new(compile_request(&snapshot, &schema, Some(2)));
+    let right_request = Arc::new(compile_request(&snapshot, &schema, Some(7)));
     let (concurrent_left, concurrent_right) =
         run_concurrently(Arc::clone(&left_request), Arc::clone(&right_request), 5, 3);
     let serial_left = import_success(left_request.as_ref(), "left.parser-reentrancy", 5);

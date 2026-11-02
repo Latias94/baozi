@@ -8,7 +8,7 @@ use crate::document::mesh_encoding::{
 pub(super) const MESH_SAMPLE_WORK_PER_LANE: u64 = 8;
 
 pub(super) fn bind<'bytes>(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     accessor: crate::document::Accessor<'_>,
     buffers: &'bytes [Option<BufferData<'_>>],
 ) -> Result<crate::document::read::Bound<'bytes>> {
@@ -65,7 +65,7 @@ pub(super) struct AccessorInfo {
 }
 
 pub(super) fn validate_mesh_attribute(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     gltf: &crate::document::Document<'_>,
     index: usize,
     owner: AccessorOwner,
@@ -271,7 +271,7 @@ impl<const N: usize> MeshAccessorBounds<N> {
 }
 
 pub(super) fn collect_mesh_attribute<'scope, const N: usize>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     accessor: crate::document::Accessor<'_>,
     buffers: &[Option<BufferData<'_>>],
     semantic: Semantic,
@@ -327,7 +327,7 @@ pub(super) fn collect_mesh_attribute<'scope, const N: usize>(
 
 /// Track distinct selected vertex accessors per view without comparing accessor pairs.
 pub(super) fn validate_vertex_views(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     document: &crate::document::Document<'_>,
     closure: &ResourceClosure<'_>,
 ) -> Result<()> {
@@ -340,7 +340,7 @@ pub(super) fn validate_vertex_views(
         None,
         "gltf-vertex-view-accessors",
     )?;
-    let mut visit = |id: json::Index| -> Result<()> {
+    let mut visit = |id: json::Index, ctx: &mut ParseExecution<'_, '_>| -> Result<()> {
         ctx.charge_work(1)?;
         let index = id.value();
         let accessor = &root.accessors[index];
@@ -361,23 +361,36 @@ pub(super) fn validate_vertex_views(
         *first = Some(index);
         Ok(())
     };
+    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
     for (index, mesh) in root.meshes.iter().enumerate() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         if !closure.meshes.as_slice()[index] {
             continue;
         }
         for primitive in &mesh.primitives {
-            ctx.charge_work(1)?;
+            ctx.with_work(
+                &work_group,
+                [1],
+                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+            )?;
             for &id in primitive.attributes.values() {
-                visit(id)?;
+                visit(id, ctx)?;
             }
             for target in primitive.targets.iter().flatten() {
-                ctx.charge_work(1)?;
+                ctx.with_work(
+                    &work_group,
+                    [1],
+                    |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+                )?;
                 for id in [target.positions, target.normals, target.tangents]
                     .into_iter()
                     .flatten()
                 {
-                    visit(id)?;
+                    visit(id, ctx)?;
                 }
             }
         }
@@ -386,7 +399,7 @@ pub(super) fn validate_vertex_views(
 }
 
 pub(super) fn validate_accessor(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     gltf: &crate::document::Document<'_>,
     accessor_index: usize,
     owner: AccessorOwner,
@@ -461,7 +474,7 @@ struct AccessorLayoutCheck<'a> {
 }
 
 fn validate_accessor_layout(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     gltf: &crate::document::Document<'_>,
     check: AccessorLayoutCheck<'_>,
 ) -> Result<()> {
@@ -641,15 +654,21 @@ fn validate_base_layout(
 /// The sequential backend reader assumes ordered indices; malformed streams would otherwise
 /// silently retain base values. Borrow the admitted buffers instead of collecting another table.
 pub(super) fn validate_sparse_indices(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     gltf: &crate::document::Document<'_>,
     buffers: &[Option<BufferData<'_>>],
     closure: &ResourceClosure<'_>,
 ) -> Result<()> {
     use crate::document::IndexType;
 
+    let sparse_work = ctx.bind_work_group([ImportWorkClass::DecodeWork])?;
+    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
     for (ordinal, accessor) in gltf.accessors().enumerate() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         poll_parser_loop(ctx, ordinal)?;
         if !closure.accessors.as_slice()[ordinal] {
             continue;
@@ -679,12 +698,12 @@ pub(super) fn validate_sparse_indices(
             .get(start..end)
             .ok_or_else(|| invalid("sparse index data is truncated"))?;
         ctx.with_work(
-            ImportWorkClass::DecodeWork,
-            to_u64(sparse.count()),
-            |work| -> Result<()> {
+            &sparse_work,
+            [to_u64(sparse.count())],
+            |ctx, work| -> Result<()> {
                 let mut previous = None;
                 for chunk in bytes.chunks(PARSER_POLL_INTERVAL * index_size) {
-                    work.poll()?;
+                    ctx.poll()?;
                     for value in chunk.chunks_exact(index_size) {
                         let index = match (indices.index_type(), value) {
                             (IndexType::U8, &[x]) => u32::from(x),

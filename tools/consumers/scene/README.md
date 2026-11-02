@@ -13,6 +13,11 @@ triangle index/UV lane pairing. UVs survive all three operations and each report
 evidence remains readable after Scene teardown.
 `verify` takes the expected format set from its caller; it never infers expectations from registration.
 
+The custom fixture implements `Format` with `Options = NoFormatOptions` and compiles its defaults
+through `NoFormatOptions::compile_defaults`. Its `parse` method receives the typed options and a
+`ParseContext`, then submits the original hierarchy, geometry, appearance, camera and light rows
+through `ParseContext::submit` with `StaticSceneBuilder`.
+
 Run from the repository root, reusing its target directory:
 
 ```text

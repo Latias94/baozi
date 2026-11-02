@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-08-19
+updated: 2026-11-02
 authors:
   - Codex
 decision_type: architecture
@@ -21,6 +22,13 @@ evidence:
   - docs/conformance/contracts.toml
   - crates/baozi-import/src/session.rs
   - crates/baozi-import/src/store/scene_activation.rs
+  - docs/research/2026-11-02-typed-format-context-design.md
+  - crates/baozi-import/src/format.rs
+  - crates/baozi-import/src/options.rs
+  - crates/baozi-import/src/registry.rs
+  - crates/baozi-import/src/request.rs
+  - crates/baozi-import/src/scope.rs
+  - crates/baozi-import/src/store.rs
 related:
   - docs/adr/0013-post-process-pipeline-semantics-presets-and-mutation-model.md
   - docs/adr/0014-parser-security-unsafe-ffi-and-panic-boundary-policy.md
@@ -57,9 +65,42 @@ borrowed capabilities for untrusted format code.
 
 ## Decision
 
+### Typed Invocations and Executable Plans
+
+Registration accepts `Format` with an associated `Options` type. The selected invocation calls
+`parse(&self, &Self::Options, &mut ParseContext<'_>) -> ParseResult<()>`. Defaults and submitted layers
+compile to `CompiledOptions<Self::Options>` through the host's bounded `RegistryBuildScope` and
+`OptionCompileScope`. Their `finish` methods check outstanding reservations and account result bytes;
+formats without options use the metered `NoFormatOptions::compile_defaults` helper.
+Format implementations are shared, semantically reentrant capabilities and may not retain
+per-session parse or option state.
+
+The registry privately erases the concrete format and its correctly typed options together. Public
+codec/runtime-key agreement and parse-side options downcasting are unnecessary. Descriptor and
+wire-schema metadata are captured once at registration. Versioned envelopes, schema-owner and
+version checks, aggregate/per-target compilation bounds, cached snapshot defaults, stable
+registration/override order, and preset/caller field-presence semantics remain required. ADR 0016
+owns option policy; ADR 0021 owns registry lifecycle, callable trust, and shared poison health. The
+private adapter retains their unwind containment and racing-poison checks, with the same invocation
+path for built-in and custom formats.
+
+`RegistrySnapshot::plan(&ImportRequest, OptionCompileLimits)` returns an immutable `ImportPlan` after
+validating all submitted targets and compiling their options before any session or primary IO.
+The plan owns its registry snapshot, resolved configuration, prepared typed invocations, and storage
+account factory. It executes its own `read_bytes`, `read_asset`, and `read_asset_with_resolver`
+methods; another `Importer` is not paired with it at execution time. The facade's default reads
+compile and execute this same plan path. `ImportPlan` replaces `PreparedImportRequest` without a
+compatibility alias.
+
+A plan retains no input, active work, or mutable operation control. Each execution creates a fresh
+session; independent invocations remain concurrent. Clones share the compiled invocations and
+storage-account admission limit rather than resetting that limit. Direct-byte input still grants
+no secondary asset authority; asset and resolver methods retain the object-bound authorization and
+stable snapshot rules of ADRs 0010 and 0029.
+
 ### One Session Owner
 
-After request and typed option compilation succeeds, one fallible bootstrap creates `ImportSession`.
+After plan compilation succeeds, one fallible bootstrap creates `ImportSession` for that execution.
 The session owns:
 
 - the sole import operation and ledger;
@@ -77,59 +118,98 @@ Failure transitions cannot allocate replacement state. Any session storage survi
 validation must account for early fallback preparation as well as the normal finalizer; introducing
 a new long-lived scratch reservation cannot silently change which failure paths may freeze.
 The import state slot and semantic vocabulary live in one startup-admitted `AccountedVec` cell.
-Phase transitions borrow that cell instead of moving the full state through the outer import
-frames. Before terminal preparation, the session extracts its pending linear owner, destroys
-the empty cell allocation, and releases its charge. Early fallback paths obey the same lifetime
-boundary; no additional allocation occurs at the terminal pivot.
+The state slot is an ordinary exclusively accessed value, without a whole-owner `RefCell` or a
+saved host that parser containers can reacquire. Execution regions borrow disjoint work, storage,
+and control views from the existing dormant owner. Short per-service cells and ADR 0047's numeric
+work borrows do not become an alternate owner. Phase transitions borrow the admitted cell instead
+of moving the full state through the outer import frames. Before terminal preparation, the session
+extracts its pending linear owner, destroys the empty cell allocation, and releases its charge.
+Early fallback paths obey the same lifetime boundary; no additional allocation occurs at the
+terminal pivot.
 Dropping an intact dormant session, including during unrelated host unwind, destroys its healthy
-operation baseline normally. A host that extracts that owner from its stable session slot marks
-the transient activation obligation explicitly. Abandoning that transfer or an active scoped
-driver remains an ownership fault and invokes containment; a panic flag alone does not establish
-that fault.
+operation baseline normally. An activation transition that extracts that owner from its stable slot
+marks the transient activation obligation explicitly. Abandoning that transfer or an active scoped
+driver remains an ownership fault and invokes containment; a panic flag alone does not establish that
+fault.
 
 ### Capability-Limited Stages
 
 ```mermaid
 sequenceDiagram
     participant Caller
+    participant Plan as ImportPlan
     participant Session as ImportSession
     participant Detect as DetectionScope
-    participant Parser as FormatImporter
-    participant Parse as ParseScope
+    participant Parser as Format
+    participant Parse as ParseContext
+    participant Exec as ParseExecution
     participant Core as Scene construction
 
-    Caller->>Session: compiled request + input authority
+    Caller->>Plan: read method with input authority and control
+    Plan->>Session: bootstrap one execution from prepared invocation
     Session->>Detect: borrowed detection capability
     Detect-->>Session: selected format evidence
-    Session->>Parser: exact registered importer invocation
-    Session->>Parse: borrowed parse capability
-    Parser->>Parse: metered work, storage, dependencies, diagnostics
-    Parser->>Core: submit one complete typed Scene description
-    Core-->>Parser: non-owning SceneDraft
-    Parser-->>Session: ParseResult<SceneDraft>
-    Session->>Core: pair descriptor with retained pending owner
-    Core-->>Session: validated candidate or typed failure
-    Session-->>Caller: exactly one ImportReport or ImportFailure
+    Session->>Parser: parse typed Options with exclusive ParseContext
+    Parser->>Parse: with_execution callback
+    Parse->>Exec: borrow existing work, storage, control
+    Parser->>Exec: explicit metered work, storage, services
+    Exec-->>Parse: end region with owned session-bound values
+    Parse-->>Parser: staged authoring storage
+    Parser->>Parse: submit or submit_complete outside region
+    Parse->>Core: one complete SceneConstruction
+    Core-->>Session: retain private validated candidate or failure
+    Parse-->>Parser: ParseResult<()>
+    Parser-->>Session: ParseResult<()>
+    Session->>Core: reconciled parser outcome at freeze
+    Core-->>Session: matched generation/proof/root handoff or failure
+    Session-->>Plan: exactly one ImportReport or ImportFailure
+    Plan-->>Caller: same terminal result
 ```
 
 `DetectionScope` can inspect only the stable primary input and bounded detection facilities.
-`ParseScope` borrows metered work, temporary storage, dependency, diagnostic, option, source-scope,
-and Scene-authoring capabilities. Neither scope can escape the session, finalize an outcome, obtain
-the raw operation, or publish a Scene.
+`ParseContext<'session>` holds exclusive access to the session owner and is the only parser-facing
+Scene submission capability. `with_execution<R, E>` lends `ParseExecution<'region, 'session>` through
+a higher-ranked callback, `for<'region> FnOnce(&mut ParseExecution<'region, 'session>) -> Result<R, E>`,
+with `E: From<ParseFailure>`. The result is independent of the region lifetime. Bound work groups,
+work scopes, and control cannot escape that region or cross threads; neither the context nor its
+execution view can finalize an outcome, obtain the raw operation, or publish a Scene.
 
-The registry invokes exactly the selected importer. Format failures cross the seam only as bounded
-Baozi-owned inert evidence; foreign error objects, callbacks, handles, and destructors do not enter
-the terminal result.
+Execution provides explicit metered work, storage, dependency, diagnostic, loss, and source-scope
+services. It holds no pointer back to the context and cannot submit a Scene. Immutable primary-input
+and origin getters expose their actual session lifetimes. Metered containers retain their values,
+reservations, independent session issuer, and terminal latch, without borrowing the context or
+execution. They may leave a region and supply borrowed authoring input after it ends; growth
+receives the current matching execution explicitly. Text cursors, source-scope builders, and
+dependency handles retain their genuine source, IO, issuer, and storage lifetimes rather than a
+context-address token or saved host. ADR 0047 owns their accounting and release rules.
 
-### Draft Pairing and Scene Activation
+The registry invokes exactly the selected prepared format. Format failures cross the seam only as
+bounded Baozi-owned inert evidence; foreign error objects, callbacks, handles, and destructors do not
+enter the terminal result.
 
-The parser returns `ParseResult<SceneDraft>`. The session privately retains the matching construction
-owner and consumes both together after parser-local buffers and borrows have ended. Missing,
-duplicated, already-consumed, stale, or foreign descriptors are trusted-extension contract failures.
+### Candidate Submission and Scene Activation
+
+`ParseContext::submit(StaticSceneBuilder<'_>)` and `submit_complete(SceneAuthoringBatch<'_>)` return
+`ParseResult<()>`. The static builder reuses the existing omitted-domain and document-provenance
+defaulting implementation; complete input follows the same core construction path. Authoring
+allocations run in execution regions that end before submission consumes the dormant owner.
+Complex scenes stage owned payloads and descriptor tables in outer locals, then borrow those tables
+for the final batch. No self-referential prepared object or second canonical model is required.
+
+Submission synchronously materializes and centrally validates the candidate, retaining its linear
+owner privately in the session. There is no public `SceneDraft` delivery. Parser success is an
+independent `ParseResult<()>`, checked after parser-local borrows and owners end. Success requires
+exactly one validated submission and no latched scope/construction failure, swallowed format
+failure, parser error or panic, or registration poison, including a racing poison. A second
+submission latches failure while preserving the original pending owner for safe cleanup. Missing
+submission and caught errors cannot become successful publication.
 
 Scene activation consumes the session's dormant authority once. Core receives only the bounded
 construction lane required by ADR 0045, never the import outcome-evidence owner or a second ledger.
-Success performs one no-fail publication pivot and pure handoff. Failure retains zero public Scene.
+The session supplies its reconciled `SceneParseOutcome` at the existing freeze boundary. Core retains
+construction-brand, validation-proof, generation-admission, and prepared-root/handoff checks;
+rejection cannot reserve a generation for the candidate. Success performs one no-fail publication
+pivot and pure handoff. Failure retains zero public Scene.
 
 ### Terminal Cause and Outcome
 
@@ -141,6 +221,17 @@ The first authoritative lower cause is preserved. Later control, ledger, product
 faults may strengthen containment according to their owning ADRs but cannot be hidden by a parser
 catching an earlier error or returning a different value. The terminal ledger evidence is the sole
 authority for final operation class and code; a parallel runtime classifier is forbidden.
+
+A final checkpoint can observe cancellation after the operation has already selected a ledger
+failure. Retain that control observation alongside the primary failure rather than rejecting the
+terminal owner or relabeling its ledger class. `ImportFailure::terminal_control_cause` exposes this
+later interruption. When the operation selects control as primary, the public cause retains the
+exact control origin. The existing authoritative Scene-validation exception remains unchanged.
+
+Optional-dependency loss authority does not turn the hard aggregate `TotalAssetBytes` ceiling into
+an unavailable input. Reject that attempted acquisition with its original ledger cause before
+cache/loss/diagnostic work can obscure it. Acquisition-local per-resource byte/work limits retain
+their separately authorized optional omission and session-dependent manifest semantics.
 
 Successful reports own the validated Scene, ledger snapshot, phase evidence, diagnostics, source
 scope, loss evidence, and any completed successful input manifest. Failures own only evidence that
@@ -211,7 +302,7 @@ Positive:
 - every admitted import has one operation, outcome owner, and terminal result;
 - parser code cannot publish, relabel terminal causes, or access raw storage authority;
 - format panics and failures can be contained at one invocation seam;
-- draft/owner pairing prevents foreign or caught-error publication; and
+- private candidate ownership and independent parser acceptance prevent caught-error publication; and
 - resource, diagnostic, loss, and phase evidence reach one result consistently.
 
 Negative:
@@ -225,7 +316,8 @@ Negative:
 | Risk | Severity | Mitigation |
 | --- | --- | --- |
 | A parser catches a construction failure and returns success | Critical | latch construction failure in the session before control returns |
-| A foreign draft publishes another construction | Critical | pair every descriptor with one private retained owner and brand |
+| A candidate or proof from another construction publishes | Critical | keep candidates private and verify construction brand, core proof, and prepared-root/handoff pairing |
+| Region borrows block storage growth or escape into submission | High | use disjoint execution views, independent session issuers, and a higher-ranked result boundary |
 | Early failures bypass the canonical terminal path | Critical | create the session owner before primary binding and detection |
 | Core starts a second import ledger | Critical | pass only a bounded construction lane from the session-owned operation |
 | Runtime error and ledger terminal disagree | High | derive final class/code only from terminal ledger evidence |
@@ -238,19 +330,48 @@ Negative:
 | --- | --- | --- |
 | Import operation owners | exactly one per admitted session | session and ledger ownership tests |
 | Terminal results | exactly one normal report/failure, or one containment error | cancellation, panic, and finalization matrix |
-| Descriptor misuse | zero publication for missing, duplicate, stale, or foreign drafts | malicious importer tests |
+| Submission misuse | zero publication for missing/duplicate submission, caught failure, post-submission error/panic, or poison | malicious format and session tests |
+| Candidate pairing | zero publication for a mismatched construction brand, proof, or prepared root | core/import handoff tests |
+| Region lifetime | work/control cannot escape; owned session-bound storage can leave a region before submission | compile-fail and custom-format compile-pass coverage |
 | Parser authority leakage | zero raw operation, retained store, finalizer, or publication type | rustdoc and packaged-consumer checks |
 | Phase correctness | every cancellation stage reports the last completed public milestone | stage-boundary tests |
 | Resource release | zero live temporary and retained failure storage after terminal owners drop | ledger/account tests |
 
 ## Acceptance Criteria
 
-- Request and option compilation completes before the session touches primary IO.
+- `Format` binds one associated `Options` type through bounded compilation and a private erased invocation.
+- `ImportPlan` compiles before session creation or primary IO and executes against its own registry.
+- Plan clones preserve the shared account limit; independent reads create independent sessions.
 - Bootstrap creates the only import operation and outcome owner before detection.
 - Detection and parsing receive borrowed, bounded, non-finalizing capabilities.
-- Exactly the selected registered importer is invoked, and foreign failures become inert evidence.
-- The parser returns one non-owning draft descriptor paired with a session-held construction owner.
-- Missing, duplicate, caught-error, stale, or foreign descriptors cannot publish.
+- Exactly the selected prepared format is invoked, and foreign failures become inert evidence.
+- Higher-ranked execution regions borrow the existing work/storage/control views; containers retain
+  independent session identity and receive execution explicitly for growth.
+- The ordinary admitted state slot has no whole-owner `RefCell` or parser-container host fallback.
+- Only outer context submission accepts a Scene; submission and parsing return `ParseResult<()>`.
+- Missing/duplicate submission, caught failure, post-submission error/panic, and poison cannot publish.
+- Core brand/proof/root pairing and generation admission remain mandatory at freeze/handoff.
 - Success returns one centrally validated Scene; failure returns no partial Scene.
 - Terminal class and code come from one ledger-evidence authority.
 - Postprocess uses a separate operation and lifecycle.
+
+## Amendment History
+
+### 2026-11-02: Bind typed format plans to exclusive parse contexts
+
+- Affected: `Decision / Typed Invocations and Executable Plans`, `One Session Owner`,
+  `Capability-Limited Stages`, `Candidate Submission and Scene Activation`, and their verification
+  requirements.
+- Previous: `ParseScope` exposed authoring and work through the session host, and the parser returned
+  `SceneDraft` for later pairing with the retained owner.
+- New: `Format` binds associated options in a private prepared invocation; `ImportPlan` executes its
+  own snapshot. Outer `ParseContext` submits unit results while higher-ranked `ParseExecution`
+  regions lend disjoint capabilities from the ordinary state slot. The candidate remains private.
+- Impact: this breaks the former importer, request, scope, and draft APIs without compatibility
+  aliases. Pre-IO option rejection, concurrency, single ownership, authorization, poison containment,
+  cause precedence, central validation, and terminal storage lifetimes remain required.
+- Review basis: the [typed-format/context design](../research/2026-11-02-typed-format-context-design.md),
+  including its independent feasibility review, and the production sources above. Integration must
+  verify the affected compiler and runtime gates; this amendment claims no executed result.
+- Rationale: import retains its sole session/finalizer and core retains canonical publication.
+  Narrowing the borrowed interfaces preserves the original lifecycle and security decision.

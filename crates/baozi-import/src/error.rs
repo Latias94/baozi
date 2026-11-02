@@ -5,7 +5,7 @@ use crate::diagnostic::{
 };
 use crate::ledger::{ImportDimension, ImportLedgerPhase, ImportTerminalFailure};
 use crate::metered_storage::{AccountedVec, capacity_plan_cause};
-use crate::store::{ImportStoreHost, ImportStoreReservation};
+use crate::store::{ImportStoreExecution, ImportStoreReservation};
 use baozi_core::FormatId;
 use baozi_io::{AssetOpenError, AssetReadError, PathError};
 use baozi_operation::{CapacityPlan, CapacityPlanError, ControlCause, LedgerCause};
@@ -47,13 +47,13 @@ struct OwnedDetectionCandidates {
 impl DetectionCandidates {
     pub(crate) fn try_new(
         candidates: AccountedVec<FormatId>,
-        host: ImportStoreHost<'_>,
+        exec: &mut ImportStoreExecution<'_>,
     ) -> Result<Self, ScopeAbortCause> {
         const RESOURCE: &str = "ambiguous-format-candidate-owner";
         let capacity_error = |cause| capacity_plan_cause(RESOURCE, cause);
         let plan =
             CapacityPlan::for_type::<OwnedDetectionCandidates>(0, 0, 1).map_err(capacity_error)?;
-        let mut storage = host
+        let mut storage = exec
             .reserve_retained(
                 ImportLedgerPhase::OutcomeFinalization,
                 ImportDimension::ScratchBytes,
@@ -70,7 +70,7 @@ impl DetectionCandidates {
         let actual = plan
             .finish(owned.len(), owned.capacity())
             .map_err(capacity_error)?;
-        host.resize(&mut storage, actual)
+        exec.resize(&mut storage, actual)
             .map_err(|cause| cause.into_scope_abort_cause())?;
         owned.push(OwnedDetectionCandidates {
             candidates,
@@ -947,7 +947,7 @@ pub struct FormatFailureEnvelope {
 
 struct OwnedFormatFailureEvidence {
     evidence: FormatFailureEvidence,
-    // The envelope can escape its ParseScope. It releases all three backing allocations before
+    // The envelope can outlive its parse context. It releases all three backing allocations before
     // refunding this lease, including the cell allocation that contains the lease itself.
     storage: Option<crate::store::ImportStoreReservation>,
 }

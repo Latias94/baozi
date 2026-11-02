@@ -3,20 +3,21 @@
 use baozi_import::{DiagnosticCode, SourceScopeEntityKind};
 
 use super::{
-    ImportStorageClass, ImportWorkClass, ObjFailure, ObjParser, ParseResult, ParseScope,
-    ParsedTexcoord, Token, Vec3, parse_f32, resolve_index,
+    ImportStorageClass, ObjFailure, ObjParser, ParseExecution, ParseResult, ParsedTexcoord, Token,
+    Vec3, parse_f32, resolve_index,
 };
 
-impl ObjParser<'_, '_> {
+impl<'region, 'session> ObjParser<'region, 'session> {
     pub(super) fn parse_omitted_geometry(
         &mut self,
+        exec: &mut ParseExecution<'region, 'session>,
         tokens: &[Token<'_>],
         line_number: u32,
     ) -> ParseResult<()> {
         let is_line = tokens[0].text == "l";
         let minimum = if is_line { 2 } else { 1 };
         if tokens.len() - 1 < minimum {
-            return Err(self.scope.format_failure(ObjFailure::statement(
+            return Err(exec.format_failure(ObjFailure::statement(
                 "point-or-line",
                 "too-few-vertices",
                 line_number,
@@ -26,7 +27,7 @@ impl ObjParser<'_, '_> {
         // Validate supported point/line reference shapes before requesting omission authority.
         // Normal indices and free-form line variants are outside this bounded OBJ profile.
         for chunk in tokens[1..].chunks(64) {
-            self.scope.poll()?;
+            exec.poll()?;
             for token in chunk {
                 let mut parts = token.text.split('/');
                 let position = parts.next().unwrap_or_default();
@@ -36,7 +37,7 @@ impl ObjParser<'_, '_> {
                     || (!is_line && texcoord.is_some())
                     || texcoord == Some("")
                 {
-                    return Err(self.scope.format_failure(ObjFailure::statement(
+                    return Err(exec.format_failure(ObjFailure::statement(
                         "point-or-line",
                         "invalid-vertex-reference",
                         line_number,
@@ -44,7 +45,7 @@ impl ObjParser<'_, '_> {
                     )));
                 }
                 resolve_index(
-                    self.scope,
+                    exec,
                     position,
                     self.parsed.positions.len(),
                     "position",
@@ -53,7 +54,7 @@ impl ObjParser<'_, '_> {
                 )?;
                 if let Some(texcoord) = texcoord {
                     resolve_index(
-                        self.scope,
+                        exec,
                         texcoord,
                         self.parsed.texcoords.len(),
                         "texcoord",
@@ -63,18 +64,21 @@ impl ObjParser<'_, '_> {
                 }
             }
         }
-        let mut path = self.scope.metered_string(
+        let mut path = exec.metered_string(
             ImportStorageClass::FormatNormalization,
             "obj-omitted-geometry-path",
         );
-        path.try_write_fmt(format_args!("/records/{line_number}/{}", tokens[0].text))?;
+        path.try_write_fmt(
+            exec,
+            format_args!("/records/{line_number}/{}", tokens[0].text),
+        )?;
         let code = DiagnosticCode::new(if is_line {
             "obj.line_geometry_omitted"
         } else {
             "obj.point_geometry_omitted"
         })
         .expect("static OBJ diagnostic code must be valid");
-        self.scope.record_source_semantic_loss(
+        exec.record_source_semantic_loss(
             code,
             SourceScopeEntityKind::Primitive,
             path.as_str(),
@@ -93,113 +97,109 @@ impl ObjParser<'_, '_> {
 
     pub(super) fn parse_position(
         &mut self,
+        exec: &mut ParseExecution<'region, 'session>,
         tokens: &[Token<'_>],
         line_number: u32,
     ) -> ParseResult<()> {
-        require_record_components(self.scope, tokens, &[3, 4, 6, 7], "position", line_number)?;
+        require_record_components(exec, tokens, &[3, 4, 6, 7], "position", line_number)?;
         let components = tokens.len() - 1;
-        let position =
-            self.scope
-                .with_work(ImportWorkClass::Vertices, 1, |work| -> ParseResult<_> {
-                    work.run_all(|| {
-                        let mut position = Vec3::new(
-                            parse_f32(self.scope, "position", tokens[1], line_number)?,
-                            parse_f32(self.scope, "position", tokens[2], line_number)?,
-                            parse_f32(self.scope, "position", tokens[3], line_number)?,
-                        );
-                        if components == 4 {
-                            let weight =
-                                parse_f32(self.scope, "position-weight", tokens[4], line_number)?;
-                            if weight == 0.0 {
-                                return Err(self.scope.format_failure(ObjFailure::statement(
-                                    "position-weight",
-                                    "zero-homogeneous-weight",
-                                    line_number,
-                                    tokens[4].column,
-                                )));
-                            }
-                            position = Vec3::new(
-                                position.x / weight,
-                                position.y / weight,
-                                position.z / weight,
-                            );
-                            if !position.is_finite() {
-                                return Err(self.scope.format_failure(ObjFailure::non_finite(
-                                    "homogeneous-position",
-                                    line_number,
-                                    tokens[4].column,
-                                )));
-                            }
-                        } else {
-                            // Six/seven-component extensions are not homogeneous positions. Validate
-                            // the entire suffix before asking for authority to omit its semantics.
-                            for token in &tokens[4..] {
-                                parse_f32(self.scope, "vertex-color", *token, line_number)?;
-                            }
-                        }
-                        Ok(position)
-                    })
-                })?;
+        let position = exec.with_work(&self.vertex_work, [1], |exec, work| -> ParseResult<_> {
+            work.run_all(|| {
+                let mut position = Vec3::new(
+                    parse_f32(exec, "position", tokens[1], line_number)?,
+                    parse_f32(exec, "position", tokens[2], line_number)?,
+                    parse_f32(exec, "position", tokens[3], line_number)?,
+                );
+                if components == 4 {
+                    let weight = parse_f32(exec, "position-weight", tokens[4], line_number)?;
+                    if weight == 0.0 {
+                        return Err(exec.format_failure(ObjFailure::statement(
+                            "position-weight",
+                            "zero-homogeneous-weight",
+                            line_number,
+                            tokens[4].column,
+                        )));
+                    }
+                    position = Vec3::new(
+                        position.x / weight,
+                        position.y / weight,
+                        position.z / weight,
+                    );
+                    if !position.is_finite() {
+                        return Err(exec.format_failure(ObjFailure::non_finite(
+                            "homogeneous-position",
+                            line_number,
+                            tokens[4].column,
+                        )));
+                    }
+                } else {
+                    // Six/seven-component extensions are not homogeneous positions. Validate
+                    // the entire suffix before asking for authority to omit its semantics.
+                    for token in &tokens[4..] {
+                        parse_f32(exec, "vertex-color", *token, line_number)?;
+                    }
+                }
+                Ok(position)
+            })
+        })?;
         if matches!(components, 6 | 7) {
-            record_vertex_color_loss(self.scope, tokens, line_number)?;
+            record_vertex_color_loss(exec, tokens, line_number)?;
         }
-        self.parsed.positions.try_push(position)
+        self.parsed.positions.try_push(exec, position)
     }
 
     pub(super) fn parse_texcoord(
         &mut self,
+        exec: &mut ParseExecution<'region, 'session>,
         tokens: &[Token<'_>],
         line_number: u32,
     ) -> ParseResult<()> {
-        require_record_components(self.scope, tokens, &[2, 3], "texcoord", line_number)?;
+        require_record_components(exec, tokens, &[2, 3], "texcoord", line_number)?;
         let lanes = if tokens.len() == 4 { 3 } else { 2 };
-        self.scope.with_work(
-            ImportWorkClass::AttributeCells,
-            1,
-            |work| -> ParseResult<()> {
-                work.run_all(|| {
-                    let value = [
-                        parse_f32(self.scope, "texcoord", tokens[1], line_number)?,
-                        parse_f32(self.scope, "texcoord", tokens[2], line_number)?,
-                        if lanes == 3 {
-                            parse_f32(self.scope, "texcoord", tokens[3], line_number)?
-                        } else {
-                            0.0
-                        },
-                    ];
-                    self.parsed.texcoords.try_push(ParsedTexcoord {
+        exec.with_work(&self.attribute_work, [1], |exec, work| -> ParseResult<()> {
+            work.run_all(|| {
+                let value = [
+                    parse_f32(exec, "texcoord", tokens[1], line_number)?,
+                    parse_f32(exec, "texcoord", tokens[2], line_number)?,
+                    if lanes == 3 {
+                        parse_f32(exec, "texcoord", tokens[3], line_number)?
+                    } else {
+                        0.0
+                    },
+                ];
+                self.parsed.texcoords.try_push(
+                    exec,
+                    ParsedTexcoord {
                         values: value,
                         lanes,
-                    })
-                })
-            },
-        )
+                    },
+                )
+            })
+        })
     }
 
     pub(super) fn parse_normal(
         &mut self,
+        exec: &mut ParseExecution<'region, 'session>,
         tokens: &[Token<'_>],
         line_number: u32,
     ) -> ParseResult<()> {
-        require_record_components(self.scope, tokens, &[3], "normal", line_number)?;
-        self.scope.with_work(
-            ImportWorkClass::AttributeCells,
-            1,
-            |work| -> ParseResult<()> {
-                work.run_all(|| {
-                    self.parsed.normals.try_push([
-                        parse_f32(self.scope, "normal", tokens[1], line_number)?,
-                        parse_f32(self.scope, "normal", tokens[2], line_number)?,
-                        parse_f32(self.scope, "normal", tokens[3], line_number)?,
-                    ])
-                })
-            },
-        )
+        require_record_components(exec, tokens, &[3], "normal", line_number)?;
+        exec.with_work(&self.attribute_work, [1], |exec, work| -> ParseResult<()> {
+            work.run_all(|| {
+                let normal = [
+                    parse_f32(exec, "normal", tokens[1], line_number)?,
+                    parse_f32(exec, "normal", tokens[2], line_number)?,
+                    parse_f32(exec, "normal", tokens[3], line_number)?,
+                ];
+                self.parsed.normals.try_push(exec, normal)
+            })
+        })
     }
 }
 
 fn require_record_components(
-    scope: &ParseScope<'_>,
+    exec: &mut ParseExecution<'_, '_>,
     tokens: &[Token<'_>],
     allowed: &[usize],
     subject: &'static str,
@@ -213,7 +213,7 @@ fn require_record_components(
     } else {
         "unsupported-component-count"
     };
-    Err(scope.format_failure(ObjFailure::statement(
+    Err(exec.format_failure(ObjFailure::statement(
         subject,
         reason,
         line_number,
@@ -222,19 +222,19 @@ fn require_record_components(
 }
 
 fn record_vertex_color_loss(
-    scope: &ParseScope<'_>,
+    exec: &mut ParseExecution<'_, '_>,
     tokens: &[Token<'_>],
     line_number: u32,
 ) -> ParseResult<()> {
-    let mut object_path = scope.metered_string(
+    let mut object_path = exec.metered_string(
         ImportStorageClass::FormatNormalization,
         "obj-vertex-color-object-path",
     );
-    object_path.try_write_fmt(format_args!("/records/{line_number}/vertex-color"))?;
+    object_path.try_write_fmt(exec, format_args!("/records/{line_number}/vertex-color"))?;
     let components = tokens.len() - 1;
     let code = DiagnosticCode::new("obj.vertex_color_omitted")
         .expect("static OBJ diagnostic code must be valid");
-    scope.record_source_semantic_loss(
+    exec.record_source_semantic_loss(
         code,
         SourceScopeEntityKind::Mesh,
         object_path.as_str(),

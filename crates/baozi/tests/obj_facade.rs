@@ -113,13 +113,10 @@ f 1 2 3
             LossPolicy::preserve_or_fail().allow(ImportLossKind::OptionalDependencyUnavailable),
         )),
     );
-    let request = importer.prepare_request(&options, OptionCompileLimits::default())?;
-    let report = importer.read_asset_with_request(
-        &io,
-        obj_path,
-        &request,
-        ImportOperationControl::default(),
-    )?;
+    let request = importer.plan(&options, OptionCompileLimits::default())?;
+    let report = request
+        .read_asset(&io, obj_path, ImportOperationControl::default())
+        .map_err(baozi::Error::from)?;
 
     assert_eq!(report.format().id().as_str(), "org.baozi.obj");
     assert_eq!(scene_snapshot(&report).logical_mesh_count(), 1);
@@ -134,7 +131,7 @@ f 1 2 3
 }
 
 #[test]
-fn repeated_oversized_mtl_references_preserve_non_refundable_terminal_budget() -> Result<()> {
+fn repeated_oversized_mtl_references_stop_at_the_hard_total_byte_limit() -> Result<()> {
     let obj_path = AssetPath::new("models/repeated-mtl.obj")?;
     let mtl_path = AssetPath::new("models/material.mtl")?;
     let obj = b"mtllib material.mtl\nmtllib material.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
@@ -159,16 +156,17 @@ fn repeated_oversized_mtl_references_preserve_non_refundable_terminal_budget() -
                 .with_resource_limits(ResourceLimitsOverlay::from_limits(limits)),
         ),
     );
-    let request = importer.prepare_request(&options, OptionCompileLimits::default())?;
+    let request = importer.plan(&options, OptionCompileLimits::default())?;
 
-    let error = importer
-        .read_asset_with_request(&io, obj_path, &request, ImportOperationControl::default())
-        .expect_err("dependency-byte exhaustion must remain the terminal ledger cause");
+    let error = request
+        .read_asset(&io, obj_path, ImportOperationControl::default())
+        .map_err(baozi::Error::from)
+        .expect_err("aggregate-byte exhaustion must remain the terminal ledger cause");
     let baozi::Error::Import(failure) = error else {
-        panic!("dependency-byte exhaustion must retain a complete import failure")
+        panic!("aggregate-byte exhaustion must retain a complete import failure")
     };
     let ImportTerminalCause::Failure(terminal) = failure.ledger().terminal_cause() else {
-        panic!("dependency-byte exhaustion cannot publish a successful terminal")
+        panic!("aggregate-byte exhaustion cannot publish a successful terminal")
     };
     assert_eq!(terminal.class(), ImportTerminalFailureClass::Ledger);
     assert_eq!(terminal.code(), 1);
@@ -187,7 +185,7 @@ fn repeated_oversized_mtl_references_preserve_non_refundable_terminal_budget() -
             .dimension(ImportDimension::DependencyReference)
             .expect("dependency-reference accounting should exist")
             .consumed(),
-        2
+        1
     );
     let dependency_bytes = failure
         .ledger()
@@ -195,9 +193,56 @@ fn repeated_oversized_mtl_references_preserve_non_refundable_terminal_budget() -
         .expect("dependency-byte accounting should exist");
     assert_eq!(dependency_bytes.attempted(), mtl.len() as u64);
     assert_eq!(dependency_bytes.consumed(), 0);
-    assert_eq!(failure.optional_dependency_evidence().len(), 2);
+    let total_bytes = failure
+        .ledger()
+        .dimension(ImportDimension::TotalAssetBytes)
+        .expect("aggregate-byte accounting should exist");
+    assert_eq!(total_bytes.attempted(), (obj.len() + mtl.len()) as u64);
+    assert_eq!(total_bytes.consumed(), obj.len() as u64);
+    assert!(failure.optional_dependency_evidence().is_empty());
+    assert!(failure.diagnostics().is_empty());
+    Ok(())
+}
+
+#[test]
+fn repeated_oversized_mtl_references_remain_optional_within_the_total_budget() -> Result<()> {
+    let obj_path = AssetPath::new("models/repeated-mtl.obj")?;
+    let mtl_path = AssetPath::new("models/material.mtl")?;
+    let obj = b"mtllib material.mtl\nmtllib material.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+    let mtl = b"newmtl red\nKd 1 0 0\n";
+    let io = MemoryAssetIo::new();
+    io.try_insert(obj_path.clone(), Arc::from(obj.as_slice()))
+        .expect("the in-memory OBJ index should reserve one entry");
+    io.try_insert(mtl_path, Arc::from(mtl.as_slice()))
+        .expect("the in-memory MTL index should reserve one entry");
+    let mut limits = ResourceLimits::default();
+    limits.max_dependency_asset_bytes = 4;
+    let options = ImportRequest::from_layers(
+        ImportRequestLayer::default(),
+        ImportRequestLayer::new(
+            ImportConfigOverlay::default()
+                .with_loss_policy(
+                    LossPolicy::preserve_or_fail()
+                        .allow(ImportLossKind::OptionalDependencyUnavailable),
+                )
+                .with_resource_limits(ResourceLimitsOverlay::from_limits(limits)),
+        ),
+    );
+    let report = Importer::new()?
+        .plan(&options, OptionCompileLimits::default())?
+        .read_asset(&io, obj_path, ImportOperationControl::default())
+        .map_err(baozi::Error::from)?;
+
+    assert_eq!(scene_snapshot(&report).logical_mesh_count(), 1);
+    assert_eq!(report.optional_dependency_evidence().len(), 2);
+    let total_bytes = report
+        .ledger()
+        .dimension(ImportDimension::TotalAssetBytes)
+        .expect("aggregate-byte accounting should exist");
+    assert_eq!(total_bytes.attempted(), (obj.len() + mtl.len()) as u64);
+    assert_eq!(total_bytes.consumed(), obj.len() as u64);
     assert_eq!(
-        failure
+        report
             .diagnostics()
             .iter()
             .filter(|diagnostic| diagnostic.code().as_str() == "obj.mtl_unavailable")

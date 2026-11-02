@@ -3,14 +3,14 @@
 mod support;
 
 use baozi_format_obj::{FORMAT_ID, ObjImporter};
-use baozi_import::{ImportOperationControl, PreparedImportRequest, import_asset};
+use baozi_import::{ImportOperationControl, ImportPlan};
 use baozi_io::{AssetPath, MemoryAssetIo};
 use libfuzzer_sys::fuzz_target;
 use std::sync::{Arc, OnceLock};
 
 fuzz_target!(|data: &[u8]| {
-    static REQUEST: OnceLock<PreparedImportRequest> = OnceLock::new();
-    let request = REQUEST.get_or_init(|| support::prepared_request(ObjImporter, FORMAT_ID));
+    static REQUEST: OnceLock<ImportPlan> = OnceLock::new();
+    let request = REQUEST.get_or_init(|| support::import_plan(ObjImporter, FORMAT_ID));
     let obj_path = AssetPath::new("fuzz.obj").expect("the static fuzz path must be valid");
     let mtl_path = AssetPath::new("fuzz.mtl").expect("the static fuzz path must be valid");
 
@@ -27,7 +27,7 @@ fuzz_target!(|data: &[u8]| {
     io.try_insert(mtl_path, Arc::<[u8]>::from(mtl_bytes))
         .expect("the dependency fuzz asset insertion must succeed");
 
-    if let Ok(report) = import_asset(request, &io, obj_path, ImportOperationControl::default()) {
+    if let Ok(report) = request.read_asset(&io, obj_path, ImportOperationControl::default()) {
         support::assert_validated_snapshot(report.scene());
     }
 });

@@ -1,10 +1,7 @@
-use std::cell::RefCell;
-
-use crate::SceneDraft;
 use baozi_core::__scene_integration::integration::{
     SceneActivationOutput, SceneActivationPostflight, SceneActivationRejection,
     SceneCanonicalRootTag, SceneConstruction, SceneEvidenceRecipe, SceneHandoffToken,
-    SceneOutcomeEvidenceTag, SceneValidationProof, consume_scene_freeze_permit,
+    SceneOutcomeEvidenceTag, SceneParseOutcome, SceneValidationProof, consume_scene_freeze_permit,
 };
 use baozi_operation::__retained_store_integration::activation::{
     ActivatedCanonicalStoreSession, CanonicalActivationOutcome, CanonicalActivationSeal,
@@ -27,9 +24,12 @@ use super::{
     ImportStoreActivationError, ImportStoreFailureCauseAuthority, ImportStoreFinalizationError,
     ImportStoreHostError, ImportStoreMinimalFallback, ImportStoreOutcomeOwner,
     ImportStoreRichFailure, ImportStoreSessionOwner, ImportStoreSessionState,
-    ImportStoreSuccessReport, ImportStoreTerminalCause, ImportStoreTerminalClass,
-    ImportStoreTerminalEvidence, ImportStoreTerminalOutcome, ImportStoreTerminalProjectionError,
+    ImportStoreSuccessReport, ImportStoreTerminalCause, ImportStoreTerminalEvidence,
+    ImportStoreTerminalOutcome, ImportStoreTerminalProjectionError,
 };
+
+#[cfg(test)]
+use super::ImportStoreTerminalClass;
 
 #[cfg(test)]
 mod transition_tests;
@@ -255,7 +255,7 @@ fn activation_failure_result(
     authoring_rejected: bool,
     validation_error: Option<baozi_core::SceneValidationError>,
     control_cause: Option<ControlCause>,
-) -> Result<SceneDraft, ImportStoreActivationError> {
+) -> Result<(), ImportStoreActivationError> {
     if let Some(cause) = control_cause {
         Err(ImportStoreActivationError::Control(cause))
     } else if let Some(detail) = validation_error {
@@ -458,10 +458,9 @@ impl ImportStorePreparedScene {
                 let published = store.handoff();
                 let evidence =
                     ImportStoreTerminalEvidence::try_from_ledger(published.ledger_evidence)?;
-                if evidence.cause() == ImportStoreTerminalCause::Success
-                    || (control_cause.is_some()
-                        && evidence.cause().class() != ImportStoreTerminalClass::Control)
-                {
+                // A terminal checkpoint may observe control after the sole operation owner
+                // already selected a ledger failure. That observation is supplemental evidence.
+                if evidence.cause() == ImportStoreTerminalCause::Success {
                     return Err(ImportStoreTerminalProjectionError::TerminalOwnerCauseMismatch);
                 }
                 Ok(ImportStoreTerminalOutcome::RichFailure {
@@ -481,10 +480,7 @@ impl ImportStorePreparedScene {
                 let published = store.handoff();
                 let evidence =
                     ImportStoreTerminalEvidence::try_from_ledger(published.ledger_evidence)?;
-                if evidence.cause() == ImportStoreTerminalCause::Success
-                    || (control_cause.is_some()
-                        && evidence.cause().class() != ImportStoreTerminalClass::Control)
-                {
+                if evidence.cause() == ImportStoreTerminalCause::Success {
                     return Err(ImportStoreTerminalProjectionError::TerminalOwnerCauseMismatch);
                 }
                 Ok(ImportStoreTerminalOutcome::MinimalFallback {
@@ -508,7 +504,7 @@ pub(crate) enum ImportStoreSceneBoundary {
 
 #[must_use = "the Scene activation transition must install a pending owner or become contained"]
 pub(super) struct ImportStoreActivationTransition<'session> {
-    state: &'session RefCell<ImportStoreSessionState>,
+    state: &'session mut ImportStoreSessionState,
     containment: StoreActivationContainmentAnchor,
     armed: bool,
 }
@@ -519,28 +515,21 @@ pub(super) struct ImportStoreActivationTransition<'session> {
 )]
 impl<'session> ImportStoreActivationTransition<'session> {
     pub(super) fn begin(
-        state: &'session RefCell<ImportStoreSessionState>,
+        state: &'session mut ImportStoreSessionState,
     ) -> Result<(ImportStoreOutcomeOwner, Self), ImportStoreHostError> {
-        let mut slot = state
-            .try_borrow_mut()
-            .map_err(|_| ImportStoreHostError::ReentrantBorrow)?;
-        let containment = match &*slot {
+        let containment = match state {
             ImportStoreSessionState::Dormant(owner) => owner.activation_containment_anchor(),
             ImportStoreSessionState::Contained => {
                 return Err(ImportStoreHostError::OperationContained);
             }
-            ImportStoreSessionState::Transitioning | ImportStoreSessionState::Pending(_) => {
-                return Err(ImportStoreHostError::OperationConsumed);
-            }
+            _ => return Err(ImportStoreHostError::OperationConsumed),
         };
-        // Arm before extracting the owner; no state-slot borrow reaches owner code or Drop.
+        let previous = std::mem::replace(state, ImportStoreSessionState::Transitioning);
         let transition = Self {
             state,
             containment,
             armed: true,
         };
-        let previous = std::mem::replace(&mut *slot, ImportStoreSessionState::Transitioning);
-        drop(slot);
         match previous {
             ImportStoreSessionState::Dormant(owner) => {
                 Ok((owner.into_activation_transition(), transition))
@@ -558,14 +547,11 @@ impl<'session> ImportStoreActivationTransition<'session> {
             self.contain();
             return Err(ImportStoreActivationError::Containment(cause));
         }
-        if let Ok(mut slot) = self.state.try_borrow_mut()
-            && matches!(*slot, ImportStoreSessionState::Transitioning)
-        {
-            *slot = ImportStoreSessionState::Pending(pending);
+        if matches!(*self.state, ImportStoreSessionState::Transitioning) {
+            *self.state = ImportStoreSessionState::Pending(pending);
             self.armed = false;
             return Ok(());
         }
-        // Neither a conflicting borrow nor an unexpected slot proves payload cleanup is safe.
         let cause = self.containment.retain(pending);
         self.contain();
         Err(ImportStoreActivationError::Containment(cause))
@@ -577,10 +563,8 @@ impl<'session> ImportStoreActivationTransition<'session> {
 
     fn contain_in_place(&mut self) {
         let _ = self.containment.contain();
-        if let Ok(mut slot) = self.state.try_borrow_mut()
-            && matches!(*slot, ImportStoreSessionState::Transitioning)
-        {
-            *slot = ImportStoreSessionState::Contained;
+        if matches!(*self.state, ImportStoreSessionState::Transitioning) {
+            *self.state = ImportStoreSessionState::Contained;
         }
         self.armed = false;
     }
@@ -666,25 +650,24 @@ fn prepare_never_activated_rejection(
 fn prepare_candidate(
     owner: ImportSceneCandidate,
     evidence: SceneEvidenceRecipe,
-    draft: Option<SceneDraft>,
+    outcome: SceneParseOutcome,
 ) -> Result<ImportStorePreparedScene, ImportStoreActivationError> {
     match owner
         .try_issue_freeze_permit(scene_final_progress())
         .map_err(ImportStoreActivationError::Containment)?
     {
         CanonicalFreezePermitIssue::Ready(permit) => {
-            // A missing descriptor only closes an already-failed import. Its terminal
-            // evidence must not replace the earlier importer or scope cause. Once a
-            // descriptor is supplied, pairing and generation failures belong to this
-            // Scene transaction and remain operation-authoritative.
-            let rejection_authority = if draft.is_none() {
+            // A rejected parser closes its candidate without replacing the original import
+            // cause. An accepted parser delegates generation/freeze failures to this Scene
+            // transaction's existing operation authority.
+            let rejection_authority = if matches!(outcome, SceneParseOutcome::Rejected) {
                 ImportStoreFailureCauseAuthority::OriginalImport
             } else {
                 ImportStoreFailureCauseAuthority::OperationTerminal
             };
             consume_scene_freeze_permit(
                 permit,
-                draft,
+                outcome,
                 |rejected| {
                     let control_cause = canonical_rejection_control(rejected.cause());
                     let validation = rejected
@@ -942,7 +925,7 @@ fn validate_activated_scene(
     transition: ImportStoreActivationTransition<'_>,
     activated: ImportSceneActivated,
     postflight: SceneActivationPostflight,
-) -> Result<SceneDraft, ImportStoreActivationError> {
+) -> Result<(), ImportStoreActivationError> {
     let evidence = postflight.candidate_evidence(activated.output());
     let central = activated
         .validate_centrally(
@@ -969,12 +952,11 @@ fn install_central_scene(
     transition: ImportStoreActivationTransition<'_>,
     central: ImportSceneCentralOutcome,
     evidence: SceneEvidenceRecipe,
-) -> Result<SceneDraft, ImportStoreActivationError> {
+) -> Result<(), ImportStoreActivationError> {
     match central {
         CanonicalCentralValidationOutcome::Candidate(owner) => {
-            let draft = owner.output().draft();
             transition.install(ImportPendingScene::Candidate { owner, evidence })?;
-            Ok(draft)
+            Ok(())
         }
         CanonicalCentralValidationOutcome::Rejected(owner) => {
             let control_cause = scene_rejection_control(owner.cause());
@@ -1003,7 +985,7 @@ fn validate_scene_activation(
     transition: ImportStoreActivationTransition<'_>,
     outcome: ImportSceneActivationOutcome,
     postflight: SceneActivationPostflight,
-) -> Result<SceneDraft, ImportStoreActivationError> {
+) -> Result<(), ImportStoreActivationError> {
     match outcome {
         CanonicalActivationOutcome::Activated(activated) => {
             validate_activated_scene(transition, activated, postflight)
@@ -1047,11 +1029,7 @@ impl ImportStoreSessionOwner {
     pub(crate) fn completed_scene_boundary(
         &self,
     ) -> Result<Option<ImportStoreSceneBoundary>, ImportStoreHostError> {
-        let state = self
-            .state
-            .try_borrow()
-            .map_err(|_| ImportStoreHostError::ReentrantBorrow)?;
-        Ok(match &*state {
+        Ok(match &self.state {
             ImportStoreSessionState::Pending(ImportPendingScene::Candidate { .. }) => {
                 Some(ImportStoreSceneBoundary::Validated)
             }
@@ -1078,11 +1056,12 @@ impl ImportStoreSessionOwner {
     }
 
     pub(crate) fn submit_scene<'input>(
-        &self,
+        &mut self,
         construction: SceneConstruction<'input>,
-    ) -> Result<SceneDraft, ImportStoreActivationError> {
-        let (owner, transition) = ImportStoreActivationTransition::begin(&self.state)
-            .map_err(ImportStoreActivationError::StoreUnavailable)?;
+    ) -> Result<(), ImportStoreActivationError> {
+        let (owner, transition) =
+            ImportStoreActivationTransition::begin(&mut self.storage[0].state)
+                .map_err(ImportStoreActivationError::StoreUnavailable)?;
         let (outcome, postflight) = match activate_scene(owner, construction) {
             Ok(activated) => activated,
             Err(cause) => {
@@ -1095,12 +1074,12 @@ impl ImportStoreSessionOwner {
 
     pub(super) fn prepare_scene(
         self,
-        draft: Option<SceneDraft>,
+        outcome: SceneParseOutcome,
     ) -> Result<ImportStorePreparedScene, ImportStoreActivationError> {
         let (state, unsubmitted_evidence) = self.into_terminal_state();
         match state {
             ImportStoreSessionState::Pending(ImportPendingScene::Candidate { owner, evidence }) => {
-                prepare_candidate(owner, evidence, draft)
+                prepare_candidate(owner, evidence, outcome)
             }
             ImportStoreSessionState::Pending(ImportPendingScene::ActivationRejected {
                 owner,
@@ -1147,10 +1126,10 @@ impl ImportStoreSessionOwner {
 
     pub(crate) fn finish_scene(
         self,
-        draft: Option<SceneDraft>,
+        outcome: SceneParseOutcome,
     ) -> Result<ImportStoreTerminalOutcome, ImportStoreFinalizationError> {
         let prepared = self
-            .prepare_scene(draft)
+            .prepare_scene(outcome)
             .map_err(ImportStoreFinalizationError::Activation)?;
         prepared
             .handoff()

@@ -1,10 +1,10 @@
 #![cfg(feature = "format-obj")]
 
 use baozi::{
-    ConformancePolicy, FormatOptionEnvelope, FormatOptionKey, FormatOptionSchemaId,
-    FormatOptionSchemaKey, ImportConfigOverlay, ImportLossKind, ImportOperationControl,
-    ImportPreset, ImportRequest, ImportRequestLayer, Importer, LossPolicy, ObjImportOptions,
-    ObjTextDecodingMode, OptionCompileLimits, obj_import_option_key,
+    ConformancePolicy, FormatOptionEnvelope, FormatOptionSchemaId, FormatOptionSchemaKey,
+    ImportConfigOverlay, ImportLossKind, ImportOperationControl, ImportPreset, ImportRequest,
+    ImportRequestLayer, Importer, LossPolicy, ObjImportOptions, ObjTextDecodingMode,
+    OptionCompileLimits,
 };
 use std::num::NonZeroU32;
 
@@ -13,52 +13,53 @@ const INVALID_NAME: &[u8] = b"o invalid-\xff\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3
 #[test]
 fn facade_only_obj_options_apply_caller_precedence_over_a_preset() {
     let importer = Importer::new().unwrap();
-    let key: FormatOptionKey<ObjImportOptions> = obj_import_option_key();
     let permissive = ObjImportOptions::default()
         .with_text_decoding_mode(ObjTextDecodingMode::ReplaceInvalidUtf8);
+    let envelope = permissive.to_envelope().unwrap();
+    let format = envelope.target().clone();
     let preset = ImportPreset::new(
         ImportConfigOverlay::default()
             .with_conformance_policy(ConformancePolicy::AllowDeclaredRecovery)
             .with_loss_policy(LossPolicy::preserve_or_fail().allow(ImportLossKind::FormatRecovery)),
     )
-    .try_with_format_option(permissive.to_envelope().unwrap())
+    .try_with_format_option(envelope)
     .unwrap();
     let request = ImportRequest::new().try_with_preset(&preset).unwrap();
     let prepared = importer
-        .prepare_request(&request, OptionCompileLimits::default())
+        .plan(&request, OptionCompileLimits::default())
         .unwrap();
-    let permissive_result = importer
-        .read_bytes_with_request(
-            "named.obj",
+    let permissive_result = prepared
+        .read_bytes(
+            baozi::AssetPath::new("named.obj").expect("valid source path"),
             INVALID_NAME,
-            &prepared,
             ImportOperationControl::default(),
         )
+        .map_err(baozi::Error::from)
         .unwrap();
     assert_eq!(permissive_result.loss_evidence().len(), 1);
     assert!(
         prepared
             .overridden_formats()
-            .any(|format| format == key.schema().key().owner())
+            .any(|overridden| overridden == &format)
     );
 
     let caller = ImportRequestLayer::default()
         .try_with_format_option(ObjImportOptions::default().to_envelope().unwrap())
         .unwrap();
     let prepared = importer
-        .prepare_request(
+        .plan(
             &request.with_caller_layer(caller),
             OptionCompileLimits::default(),
         )
         .unwrap();
     assert!(
-        importer
-            .read_bytes_with_request(
-                "named.obj",
+        prepared
+            .read_bytes(
+                baozi::AssetPath::new("named.obj").expect("valid source path"),
                 INVALID_NAME,
-                &prepared,
                 ImportOperationControl::default(),
             )
+            .map_err(baozi::Error::from)
             .is_err()
     );
 }
@@ -66,10 +67,16 @@ fn facade_only_obj_options_apply_caller_precedence_over_a_preset() {
 #[test]
 fn invalid_and_unknown_obj_option_envelopes_fail_before_asset_io() {
     let importer = Importer::new().unwrap();
-    let key = obj_import_option_key();
-    let invalid = key.envelope_from_canonical_payload([0x80]).unwrap();
+    let defaults = ObjImportOptions::default().to_envelope().unwrap();
+    let invalid = FormatOptionEnvelope::new(
+        defaults.target().clone(),
+        defaults.schema().clone(),
+        defaults.version(),
+        [0x80],
+    )
+    .unwrap();
     let unknown_schema = FormatOptionSchemaKey::new(
-        key.schema().key().owner().clone(),
+        defaults.target().clone(),
         FormatOptionSchemaId::new("unknown-obj-options").unwrap(),
     );
     let unknown = FormatOptionEnvelope::new(
@@ -84,7 +91,7 @@ fn invalid_and_unknown_obj_option_envelopes_fail_before_asset_io() {
             .try_with_format_option(envelope)
             .unwrap();
         let error = importer
-            .prepare_request(
+            .plan(
                 &ImportRequest::new().with_caller_layer(layer),
                 OptionCompileLimits::default(),
             )

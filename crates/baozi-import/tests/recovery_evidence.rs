@@ -2,17 +2,17 @@ mod support;
 
 use baozi_core::FormatId;
 use baozi_import::{
-    CapabilityStatus, CauseOwner, ConformancePolicy, DetectionOutcome, DetectionResult,
-    DetectionScope, DiagnosticByteRange, DiagnosticCode, FormatCapability, FormatDescriptor,
-    FormatEncoding, FormatFailureDetailSink, FormatFailureEvidenceProducer, FormatImporter,
+    CapabilityStatus, CauseOwner, CompiledOptions, ConformancePolicy, DetectionOutcome,
+    DetectionResult, DetectionScope, DiagnosticByteRange, DiagnosticCode, Format, FormatCapability,
+    FormatDescriptor, FormatEncoding, FormatFailureDetailSink, FormatFailureEvidenceProducer,
     ImportCause, ImportConfigOverlay, ImportDimension, ImportFailure, ImportLossDisposition,
-    ImportLossKind, ImportLossSubject, ImportOperationControl, ImportProgressPhase,
+    ImportLossKind, ImportLossSubject, ImportOperationControl, ImportPlan, ImportProgressPhase,
     ImportProgressUnit, ImportReport, ImportRequest, ImportRequestLayer, ImportResult,
-    ImportTerminalCause, ImportTerminalFailureClass, LossPolicy, OptionCompileLimits, ParseResult,
-    ParseScope, PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits,
-    RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, SceneDraft, SceneValidationError,
-    ScopeAbortCause, TextBomPolicy, TextControlPolicy, TextDecodingMode, TextHardCaps,
-    TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding, import_bytes,
+    ImportTerminalCause, ImportTerminalFailureClass, LossPolicy, NoFormatOptions,
+    OptionCompileError, OptionCompileLimits, ParseContext, ParseResult, ReadConfidence, ReadHint,
+    RegistryBuildLimits, RegistryBuildScope, RegistryBuilder, ResourceLimits,
+    ResourceLimitsOverlay, SceneValidationError, ScopeAbortCause, TextBomPolicy, TextControlPolicy,
+    TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding,
 };
 use baozi_io::AssetPath;
 use baozi_operation::{CancellationToken, ProgressDecision};
@@ -37,7 +37,16 @@ struct RecoveryImporter {
     cancellation: Option<CancellationToken>,
 }
 
-impl FormatImporter for RecoveryImporter {
+impl Format for RecoveryImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("dev.baozi.test.recovery-evidence").unwrap(),
@@ -60,24 +69,29 @@ impl FormatImporter for RecoveryImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        scope.record_format_recovery(
-            DiagnosticCode::new(RECOVERY_CODE).unwrap(),
-            scope.diagnostic_source(),
-            DiagnosticByteRange::new(1, 4).unwrap(),
-            format_args!("recovered malformed token"),
-        )?;
+    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
+        scope.with_execution(|exec| -> ParseResult<()> {
+            exec.record_format_recovery(
+                DiagnosticCode::new(RECOVERY_CODE).unwrap(),
+                exec.diagnostic_source(),
+                DiagnosticByteRange::new(1, 4).unwrap(),
+                format_args!("recovered malformed token"),
+            )?;
+            Ok(())
+        })?;
 
         match self.exit {
             RecoveryExit::Success => support::submit_minimal_scene(scope),
-            RecoveryExit::FormatFailure => Err(scope.format_failure(TestFormatFailure)),
+            RecoveryExit::FormatFailure => {
+                scope.with_execution(|exec| Err(exec.format_failure(TestFormatFailure)))
+            }
             RecoveryExit::AuthoringRejection => support::submit_invalid_parent_scene(scope),
             RecoveryExit::Cancellation => {
                 self.cancellation
                     .as_ref()
                     .expect("cancellation token")
                     .cancel();
-                scope.poll()?;
+                scope.with_execution(|exec| exec.poll())?;
                 unreachable!("cancelled recovery import must stop at the scope boundary")
             }
         }
@@ -147,7 +161,7 @@ fn request_for(
     conformance: ConformancePolicy,
     loss_policy: LossPolicy,
     limits: ResourceLimits,
-) -> PreparedImportRequest {
+) -> ImportPlan {
     let mut registry = RegistryBuilder::new();
     registry
         .register(RecoveryImporter { exit, cancellation })
@@ -158,7 +172,7 @@ fn request_for(
         .with_conformance_policy(conformance)
         .with_loss_policy(loss_policy);
     snapshot
-        .compile_request(
+        .plan(
             &ImportRequest::from_layers(
                 ImportRequestLayer::default(),
                 ImportRequestLayer::new(config),
@@ -187,12 +201,7 @@ fn run(
     let control = cancellation.map_or_else(ImportOperationControl::default, |token| {
         ImportOperationControl::default().with_cancellation(token)
     });
-    operation_result(import_bytes(
-        &request,
-        AssetPath::new(SOURCE).unwrap(),
-        SOURCE_BYTES,
-        control,
-    ))
+    operation_result(request.read_bytes(AssetPath::new(SOURCE).unwrap(), SOURCE_BYTES, control))
 }
 
 fn assert_recovery_evidence(
@@ -273,8 +282,7 @@ fn final_observer_cancellation_rolls_back_output_and_retains_recovery_evidence()
         },
     );
 
-    let failure = operation_result(import_bytes(
-        &request,
+    let failure = operation_result(request.read_bytes(
         AssetPath::new(SOURCE).unwrap(),
         SOURCE_BYTES,
         control,

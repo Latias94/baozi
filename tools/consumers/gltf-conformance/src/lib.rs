@@ -7,10 +7,9 @@
 use baozi_format_gltf::{GltfImportOptions, GltfSceneSelection};
 use baozi_import::{
     FormatOptionEnvelopeError, FormatSelection, ImportConfigOverlay, ImportEvidence,
-    ImportOperationControl, ImportReport, ImportRequest, ImportRequestBuildError,
-    ImportRequestLayer, ImportResult, LossPolicy, OptionCompileLimits, PreparedImportRequest,
-    RegistryBuildError, RegistryBuildLimits, RegistryBuilder, RegistrySnapshot, RequestError,
-    ValidatedScene,
+    ImportOperationControl, ImportPlan, ImportReport, ImportRequest, ImportRequestBuildError,
+    ImportRequestLayer, ImportResult, LossPolicy, OptionCompileLimits, RegistryBuildError,
+    RegistryBuildLimits, RegistryBuilder, RegistrySnapshot, RequestError, ValidatedScene,
 };
 use baozi_io::{AssetIo, AssetPath};
 use std::fmt;
@@ -33,7 +32,7 @@ pub fn register() -> Result<RegistrySnapshot, RegistryBuildError> {
 pub fn compile(
     registry: &RegistrySnapshot,
     selection: GltfSceneSelection,
-) -> Result<PreparedImportRequest, CompileError> {
+) -> Result<ImportPlan, CompileError> {
     let options = GltfImportOptions::default()
         .with_scene_selection(selection)
         .to_envelope()
@@ -48,7 +47,7 @@ pub fn compile(
     .try_with_format_option(options)
     .map_err(CompileError::Layer)?;
     registry
-        .compile_request(
+        .plan(
             &ImportRequest::from_layers(ImportRequestLayer::default(), caller),
             OptionCompileLimits::default(),
         )
@@ -61,12 +60,12 @@ pub fn compile(
     reason = "preserve the public import error and its complete typed terminal evidence"
 )]
 pub fn import_embedded<T>(
-    request: &PreparedImportRequest,
+    plan: &ImportPlan,
     source: AssetPath,
     bytes: &[u8],
     read: impl FnOnce(&ValidatedScene) -> T,
 ) -> ImportResult<Observation<T>> {
-    baozi_import::import_bytes(request, source, bytes, ImportOperationControl::default())
+    plan.read_bytes(source, bytes, ImportOperationControl::default())
         .map(|report| detach(report, read))
 }
 
@@ -76,12 +75,12 @@ pub fn import_embedded<T>(
     reason = "preserve the public import error and its complete typed terminal evidence"
 )]
 pub fn import_from_io<T>(
-    request: &PreparedImportRequest,
+    plan: &ImportPlan,
     io: &dyn AssetIo,
     source: AssetPath,
     read: impl FnOnce(&ValidatedScene) -> T,
 ) -> ImportResult<Observation<T>> {
-    baozi_import::import_asset(request, io, source, ImportOperationControl::default())
+    plan.read_asset(io, source, ImportOperationControl::default())
         .map(|report| detach(report, read))
 }
 

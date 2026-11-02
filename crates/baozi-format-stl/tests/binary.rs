@@ -3,16 +3,62 @@ mod common;
 use baozi_core::{AttributeData, AttributeDomain, TopologyKind};
 use baozi_format_stl::StlFailureCode;
 use baozi_import::{
-    DetectionOutcome, ImportCause, ImportDimension, ImportTerminalCause,
+    DetectionOutcome, ImportCause, ImportDimension, ImportOperationControl, ImportTerminalCause,
     ImportTerminalFailureClass, ReadConfidence, ResourceLimits,
 };
+use baozi_io::AssetPath;
 use common::{
-    BinaryFacet, binary_stl, expected_stl_failure, import_bytes, import_bytes_with_limits,
-    scene_snapshot, snapshot_line,
+    BinaryFacet, TestImportOutcome, ascii_triangle, binary_stl, expected_stl_failure, import_bytes,
+    import_bytes_with_limits, import_plan, scene_snapshot, snapshot_line,
 };
 use std::error::Error;
 
 type TestResult = Result<(), Box<dyn Error + Send + Sync>>;
+
+#[test]
+fn planned_byte_imports_detach_from_input_and_plan() -> TestResult {
+    for (encoding, bytes) in [
+        (
+            "binary",
+            binary_stl(b"binary", &[BinaryFacet::unit_triangle()]),
+        ),
+        ("ascii", ascii_triangle("detached").into_bytes()),
+    ] {
+        let report = {
+            let plan = import_plan(ResourceLimits::default(), false);
+            let source = AssetPath::new(format!("detached-{encoding}.stl"))?;
+            let report = TestImportOutcome::new(plan.read_bytes(
+                source,
+                &bytes,
+                ImportOperationControl::default(),
+            ))
+            .expect("STL caller bytes must import without asset IO");
+            drop(plan);
+            drop(bytes);
+            report
+        };
+
+        let snapshot = scene_snapshot(&report)?;
+        assert_eq!(snapshot.primitive_index_count(), 3, "{encoding}");
+        assert_eq!(snapshot.f32_scalar_count(), 18, "{encoding}");
+        let mesh = report.scene().meshes().next().expect("one STL mesh");
+        let primitive = mesh.primitives().next().expect("one STL primitive");
+        assert_eq!(primitive.indices(), Some(&[0, 1, 2][..]), "{encoding}");
+        let AttributeData::DenseF32 { lanes: 3, values } = primitive
+            .normals(AttributeDomain::Vertex)
+            .expect("authored facet normals")
+            .data()
+        else {
+            panic!("expected detached dense STL normals");
+        };
+        assert_eq!(values, &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]);
+        assert!(report.diagnostics().is_empty(), "{encoding}");
+        assert!(report.loss_evidence().is_empty(), "{encoding}");
+        assert_eq!(report.source().as_str(), format!("detached-{encoding}.stl"));
+        assert_eq!(report.ledger().current_live_bytes(), 0, "{encoding}");
+    }
+    Ok(())
+}
 
 #[test]
 fn imports_one_triangle_binary_stl_through_session() -> TestResult {

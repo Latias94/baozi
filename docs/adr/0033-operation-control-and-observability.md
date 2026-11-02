@@ -112,6 +112,14 @@ Byte-oriented text profile, UTF-8, token-boundary, and owned-string copy loops p
 declared item quantum. The bound applies independently to repeated passes: validating, tokenizing, and
 copying the same surface each require their own checkpoints rather than borrowing another pass's poll.
 
+Bounded library geometry kernels use at most 256 fixed actions between periodic control polls. One
+action is a fixed leaf such as a lane read, comparison/swap, triangle predicate or reserved append;
+an input-sized loop or external callback is not one action. Work admission and actual completion
+still occur at each leaf. No consumed-work delta is deferred until the periodic poll. Execution
+entry, explicit checkpoints, allocation, IO, external callbacks, semantic-parent completion and final
+success retain their full checks outside work/storage guards. This replaces historical per-action
+callback counts with a bounded cadence without promising elapsed-time interruption of blocking work.
+
 On cancellation, the coordinator stops work and returns a typed control cause. The owning operation
 discards unpublished staging, releases live reservations, and finalizes its own failure retaining
 prior diagnostics and ledger evidence. Post-process cancellation leaves the input `ValidatedScene`

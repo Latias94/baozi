@@ -5,7 +5,6 @@ use baozi_format_obj::{FORMAT_ID, ObjImporter};
 use baozi_import::{
     FormatSelection, ImportConfigOverlay, ImportOperationControl, ImportReport, ImportRequest,
     ImportRequestLayer, OptionCompileLimits, RegistryBuildLimits, RegistryBuilder, ValidatedScene,
-    import_asset,
 };
 use baozi_io::{AssetPath, MemoryAssetIo};
 use std::sync::Arc;
@@ -37,9 +36,10 @@ pub fn import_obj(bytes: &[u8]) -> ImportReport {
         )),
     ));
     let request = registry
-        .compile_request(&request, OptionCompileLimits::default())
+        .plan(&request, OptionCompileLimits::default())
         .expect("test request should compile");
-    import_asset(&request, &io, source, ImportOperationControl::default())
+    request
+        .read_asset(&io, source, ImportOperationControl::default())
         .expect("test OBJ should import")
 }
 

@@ -26,9 +26,9 @@ Construction, publication, and mutation use different capabilities:
 ```mermaid
 stateDiagram-v2
     [*] --> SceneConstruction: import session or trusted producer creates
-    SceneConstruction --> SceneDraft: bounded authoring returns branded descriptor
-    SceneDraft --> ValidatedSceneG: exact owner plus descriptor validates
-    SceneDraft --> [*]: validation fails
+    SceneConstruction --> PendingCandidate: outer context submits bounded authoring
+    PendingCandidate --> ValidatedSceneG: successful parse, validation and finalization
+    PendingCandidate --> [*]: parse, validation or control fails
     ValidatedSceneG --> SceneEdit: begin edit
     SceneEdit --> PrivateCandidate: apply declared effects
     PrivateCandidate --> SceneEdit: local checks pass
@@ -37,9 +37,12 @@ stateDiagram-v2
 ```
 
 - The opaque core-owned `SceneConstruction` continuation owns unvalidated construction state. An
-  import session retains it while `ParseScope` lends parsers only bounded authoring capabilities.
-- `SceneDraft` is a branded, non-owning directory-slot descriptor, not publishable scene proof. A
-  format importer returns `ParseResult<SceneDraft>` to the session that owns the exact continuation.
+  import session retains the sole outcome owner and lends a selected parser one `ParseContext`.
+  Short execution regions borrow its work, storage and control without retaining the context in
+  containers or authoring values.
+- A format stages authoring values, submits them through the outer context and returns
+  `ParseResult<()>`. The pending candidate remains private to its session, coupled to its exact
+  construction brand. An error, panic or cancellation after submission prevents publication.
 - The central validator in `baozi-core` is the only constructor of `ValidatedScene`. Import sessions,
   postprocess code, and downstream producers may call it, but cannot forge its proof.
 - `ValidatedScene` exposes read-only views and typed iterators. Its collections are not publicly

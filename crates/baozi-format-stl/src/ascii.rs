@@ -3,150 +3,177 @@ use crate::parser::{ParsedMesh, ParsedStl};
 use baozi_import::authoring::Vec3;
 use baozi_import::{
     ConformedTextInput, DiagnosticByteRange, DiagnosticCode, DiagnosticSeverity,
-    ImportProgressPhase, ImportStorageClass, ImportWorkClass, MeteredString, MeteredVec,
-    ParseFailure, ParseResult, ParseScope, TextConformanceViolation, TextConformanceViolationKind,
-    TextDecodingMode, TextDiagnosticLocation, TextInputLine, TextInputOptions,
+    ImportProgressPhase, ImportStorageClass, ImportWorkClass, ImportWorkGroup, MeteredString,
+    MeteredVec, ParseExecution, ParseFailure, ParseResult, TextConformanceViolation,
+    TextConformanceViolationKind, TextDecodingMode, TextDiagnosticLocation, TextInputLine,
+    TextInputOptions,
 };
 
 const CHECKPOINT_CHUNK_BYTES: usize = 4 * 1024;
 
-pub(crate) fn parse<'scope>(scope: &'scope ParseScope<'_>) -> ParseResult<ParsedStl<'scope>> {
+pub(crate) fn parse<'session>(
+    exec: &mut ParseExecution<'_, 'session>,
+) -> ParseResult<ParsedStl<'session>> {
     let options = TextInputOptions::new(TextDecodingMode::RejectInvalid, "stl-text-input")
         .with_decoded_resource("stl-decoded-text")
         .with_line_resource("line-bytes")
         .with_line_index_resource("stl-line-index-bytes");
-    scope
-        .with_conformed_text_input(scope.diagnostic_source(), options, |input, _recoveries| {
-            AsciiParser::new(scope).parse(input)
-        })?
-        .map_err(|violation| text_conformance_failure(scope, violation))
+    exec.with_conformed_text_input(
+        exec.diagnostic_source(),
+        options,
+        |exec, input, _recoveries| AsciiParser::new(exec)?.parse(exec, input),
+    )?
+    .map_err(|violation| text_conformance_failure(exec, violation))
 }
 
 fn text_conformance_failure(
-    scope: &ParseScope<'_>,
+    exec: &mut ParseExecution<'_, '_>,
     violation: TextConformanceViolation,
 ) -> ParseFailure {
     let raw_offset = violation.raw_range().map(DiagnosticByteRange::start);
     match violation.kind() {
         TextConformanceViolationKind::ForbiddenBom => {
-            byte_conformance_failure(scope, raw_offset, "forbidden-bom-range-missing", |offset| {
+            byte_conformance_failure(exec, raw_offset, "forbidden-bom-range-missing", |offset| {
                 StlFailure::non_ascii(offset, "forbidden-bom")
             })
         }
         TextConformanceViolationKind::InvalidUtf8 => byte_conformance_failure(
-            scope,
+            exec,
             raw_offset,
             "invalid-utf8-range-missing",
             StlFailure::invalid_utf8_at,
         ),
         TextConformanceViolationKind::UnsupportedNewline => byte_conformance_failure(
-            scope,
+            exec,
             raw_offset,
             "unsupported-newline-range-missing",
             |offset| StlFailure::invalid_control(offset, "bare-cr"),
         ),
-        TextConformanceViolationKind::ForbiddenControl => byte_conformance_failure(
-            scope,
-            raw_offset,
-            "forbidden-control-range-missing",
-            |offset| {
-                let reason = usize::try_from(offset)
-                    .ok()
-                    .and_then(|offset| scope.primary_bytes().get(offset))
-                    .filter(|&&byte| byte == b'\0')
-                    .map_or("forbidden-control", |_| "nul-byte");
-                StlFailure::invalid_control(offset, reason)
-            },
-        ),
+        TextConformanceViolationKind::ForbiddenControl => {
+            let reason = raw_offset
+                .and_then(|offset| usize::try_from(offset).ok())
+                .and_then(|offset| exec.primary_bytes().get(offset))
+                .filter(|&&byte| byte == b'\0')
+                .map_or("forbidden-control", |_| "nul-byte");
+            byte_conformance_failure(
+                exec,
+                raw_offset,
+                "forbidden-control-range-missing",
+                |offset| StlFailure::invalid_control(offset, reason),
+            )
+        }
         TextConformanceViolationKind::NonAscii => {
-            byte_conformance_failure(scope, raw_offset, "non-ascii-range-missing", |offset| {
+            byte_conformance_failure(exec, raw_offset, "non-ascii-range-missing", |offset| {
                 StlFailure::non_ascii(offset, "non-ascii-byte")
             })
         }
         TextConformanceViolationKind::MissingTextProfile => {
-            internal_text_conformance_failure(scope, "missing-text-profile")
+            internal_text_conformance_failure(exec, "missing-text-profile")
         }
         TextConformanceViolationKind::UnsupportedSourceEncoding => {
-            internal_text_conformance_failure(scope, "unsupported-source-encoding")
+            internal_text_conformance_failure(exec, "unsupported-source-encoding")
         }
         TextConformanceViolationKind::DecodingModeNotDeclared => {
-            internal_text_conformance_failure(scope, "decoding-mode-not-declared")
+            internal_text_conformance_failure(exec, "decoding-mode-not-declared")
         }
-        _ => internal_text_conformance_failure(scope, "unknown-violation"),
+        _ => internal_text_conformance_failure(exec, "unknown-violation"),
     }
 }
 
 fn byte_conformance_failure(
-    scope: &ParseScope<'_>,
+    exec: &mut ParseExecution<'_, '_>,
     raw_offset: Option<u64>,
     missing_range_reason: &'static str,
     failure: impl FnOnce(u64) -> StlFailure,
 ) -> ParseFailure {
     match raw_offset {
-        Some(offset) => scope.format_failure(failure(offset)),
-        None => internal_text_conformance_failure(scope, missing_range_reason),
+        Some(offset) => exec.format_failure(failure(offset)),
+        None => internal_text_conformance_failure(exec, missing_range_reason),
     }
 }
 
-fn internal_text_conformance_failure(scope: &ParseScope<'_>, reason: &'static str) -> ParseFailure {
-    scope.format_failure(StlFailure::content(
+fn internal_text_conformance_failure(
+    exec: &mut ParseExecution<'_, '_>,
+    reason: &'static str,
+) -> ParseFailure {
+    exec.format_failure(StlFailure::content(
         StlFailureCode::InternalInvariant,
         "text-conformance",
         reason,
     ))
 }
 
-struct AsciiParser<'scope, 'session> {
-    scope: &'scope ParseScope<'session>,
-    parsed: ParsedStl<'scope>,
+struct AsciiParser<'region, 'session> {
+    record_work: ImportWorkGroup<'region, 1>,
+    line_work: ImportWorkGroup<'region, 1>,
+    token_work: ImportWorkGroup<'region, 2>,
+    solid_work: ImportWorkGroup<'region, 2>,
+    mesh_work: ImportWorkGroup<'region, 1>,
+    facet_work: ImportWorkGroup<'region, 3>,
+    parsed: ParsedStl<'session>,
     state: State,
-    current: Option<SolidBuilder<'scope>>,
+    current: Option<SolidBuilder<'session>>,
 }
 
-impl<'scope, 'session> AsciiParser<'scope, 'session> {
-    fn new(scope: &'scope ParseScope<'session>) -> Self {
-        Self {
-            scope,
+impl<'region, 'session> AsciiParser<'region, 'session> {
+    fn new(exec: &mut ParseExecution<'region, 'session>) -> ParseResult<Self> {
+        Ok(Self {
+            record_work: exec.bind_work_group([ImportWorkClass::Records])?,
+            line_work: exec.bind_work_group([ImportWorkClass::LineBytes])?,
+            token_work: exec
+                .bind_work_group([ImportWorkClass::Tokens, ImportWorkClass::TokenBytes])?,
+            solid_work: exec
+                .bind_work_group([ImportWorkClass::Solids, ImportWorkClass::StringBytes])?,
+            mesh_work: exec.bind_work_group([ImportWorkClass::Meshes])?,
+            facet_work: exec.bind_work_group([
+                ImportWorkClass::Faces,
+                ImportWorkClass::Vertices,
+                ImportWorkClass::AttributeCells,
+            ])?,
             parsed: ParsedStl {
                 material_color: None,
-                meshes: scope.metered_vec(ImportStorageClass::FormatNormalization, "stl-meshes"),
+                meshes: exec.metered_vec(ImportStorageClass::FormatNormalization, "stl-meshes"),
             },
             state: State::Start,
             current: None,
-        }
+        })
     }
 
-    fn parse(mut self, input: &ConformedTextInput<'scope>) -> ParseResult<ParsedStl<'scope>> {
-        let mut token_buffer = TokenBuffer::new(self.scope);
+    fn parse(
+        mut self,
+        exec: &mut ParseExecution<'region, 'session>,
+        input: &ConformedTextInput<'session>,
+    ) -> ParseResult<ParsedStl<'session>> {
+        let mut token_buffer = TokenBuffer::new(exec);
         for line in input.lines() {
-            self.scope
-                .with_work(ImportWorkClass::Records, 1, |work| work.complete_all())?;
+            exec.with_work(&self.record_work, [1], |_exec, work| work.complete_all())?;
             let line_number = u32::try_from(line.number())
-                .map_err(|_| self.scope.allocation_failure("stl-line-number"))?;
-            self.parse_line(&line, line_number, &mut token_buffer)?;
+                .map_err(|_| exec.allocation_failure("stl-line-number"))?;
+            self.parse_line(exec, &line, line_number, &mut token_buffer)?;
         }
-        self.finish_file()?;
+        self.finish_file(exec)?;
         Ok(self.parsed)
     }
 
     fn parse_line(
         &mut self,
-        line: &TextInputLine<'_, 'scope>,
+        exec: &mut ParseExecution<'region, 'session>,
+        line: &TextInputLine<'_, 'session>,
         line_number: u32,
-        token_buffer: &mut TokenBuffer<'scope>,
+        token_buffer: &mut TokenBuffer<'session>,
     ) -> ParseResult<()> {
         let text = line.text();
-        account_line_bytes(self.scope, text)?;
-        let tokens = tokenize(self.scope, text, token_buffer)?;
+        account_line_bytes(exec, &self.line_work, text)?;
+        let tokens = tokenize(exec, &self.token_work, text, token_buffer)?;
         if tokens.is_empty() {
             return Ok(());
         }
-        let first = required_token(self.scope, &tokens, 0)?;
+        let first = required_token(exec, &tokens, 0)?;
 
         let state = std::mem::replace(&mut self.state, State::Start);
         match state {
-            State::Start => self.parse_start_line(line, text, &tokens, line_number),
-            State::InSolid => self.parse_solid_line(text, &tokens, line_number),
+            State::Start => self.parse_start_line(exec, line, text, &tokens, line_number),
+            State::InSolid => self.parse_solid_line(exec, text, &tokens, line_number),
             State::NeedOuterLoop { normal } => {
                 if tokens_match(&tokens, &["outer", "loop"]) {
                     self.state = State::InLoop {
@@ -157,6 +184,7 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
                     Ok(())
                 } else {
                     Err(self.failure(
+                        exec,
                         "outer-loop",
                         "expected-after-facet-normal",
                         line_number,
@@ -172,13 +200,14 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
                 if keyword_is(first, "vertex") {
                     if vertex_count == vertices.len() {
                         return Err(self.failure(
+                            exec,
                             "facet",
                             "more-than-three-vertices",
                             line_number,
                             first.column,
                         ));
                     }
-                    let vertex = parse_vec3(self.scope, &tokens, "vertex", line_number)?;
+                    let vertex = parse_vec3(exec, &tokens, "vertex", line_number)?;
                     vertices[vertex_count] = vertex;
                     vertex_count += 1;
                     self.state = State::InLoop {
@@ -190,6 +219,7 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
                 } else if tokens_match(&tokens, &["endloop"]) {
                     if vertex_count != vertices.len() {
                         return Err(self.failure(
+                            exec,
                             "facet",
                             "fewer-than-three-vertices",
                             line_number,
@@ -200,6 +230,7 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
                     Ok(())
                 } else {
                     Err(self.failure(
+                        exec,
                         "facet-loop",
                         "expected-vertex-or-endloop",
                         line_number,
@@ -209,11 +240,17 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
             }
             State::NeedEndFacet { normal, vertices } => {
                 if tokens_match(&tokens, &["endfacet"]) {
-                    self.push_facet(normal, &vertices)?;
+                    self.push_facet(exec, normal, &vertices)?;
                     self.state = State::InSolid;
                     Ok(())
                 } else {
-                    Err(self.failure("facet", "expected-endfacet", line_number, first.column))
+                    Err(self.failure(
+                        exec,
+                        "facet",
+                        "expected-endfacet",
+                        line_number,
+                        first.column,
+                    ))
                 }
             }
         }
@@ -221,36 +258,45 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
 
     fn parse_start_line(
         &mut self,
-        decoded_line: &TextInputLine<'_, 'scope>,
+        exec: &mut ParseExecution<'region, 'session>,
+        decoded_line: &TextInputLine<'_, 'session>,
         line: &str,
         tokens: &TokenLine<'_, '_>,
         line_number: u32,
     ) -> ParseResult<()> {
-        let first = required_token(self.scope, tokens, 0)?;
+        let first = required_token(exec, tokens, 0)?;
         if !keyword_is(first, "solid") {
-            return Err(self.failure("document", "expected-solid", line_number, first.column));
+            return Err(self.failure(
+                exec,
+                "document",
+                "expected-solid",
+                line_number,
+                first.column,
+            ));
         }
-        self.start_solid(decoded_line, line, tokens)
+        self.start_solid(exec, decoded_line, line, tokens)
     }
 
     fn parse_solid_line(
         &mut self,
+        exec: &mut ParseExecution<'region, 'session>,
         line: &str,
         tokens: &TokenLine<'_, '_>,
         line_number: u32,
     ) -> ParseResult<()> {
-        let first = required_token(self.scope, tokens, 0)?;
+        let first = required_token(exec, tokens, 0)?;
         if keyword_is(first, "facet") {
-            let normal = parse_facet_normal(self.scope, tokens, line_number)?;
+            let normal = parse_facet_normal(exec, tokens, line_number)?;
             self.state = State::NeedOuterLoop { normal };
             Ok(())
         } else if keyword_is(first, "endsolid") {
             let name = trailing_text_after_first_token(line, tokens);
-            self.finish_solid(name, line_number, first.column)
+            self.finish_solid(exec, name, line_number, first.column)
         } else if keyword_is(first, "solid") {
-            Err(self.failure("solid", "nested-solid", line_number, first.column))
+            Err(self.failure(exec, "solid", "nested-solid", line_number, first.column))
         } else {
             Err(self.failure(
+                exec,
                 "solid",
                 "expected-facet-or-endsolid",
                 line_number,
@@ -261,60 +307,58 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
 
     fn start_solid(
         &mut self,
-        decoded_line: &TextInputLine<'_, 'scope>,
+        exec: &mut ParseExecution<'region, 'session>,
+        decoded_line: &TextInputLine<'_, 'session>,
         line: &str,
         tokens: &TokenLine<'_, '_>,
     ) -> ParseResult<()> {
-        let scope = self.scope;
         let name_value = trailing_text_after_first_token(line, tokens);
         let name_bytes = name_value
-            .map(|name| usize_amount(scope, name.len(), "stl-solid-name"))
+            .map(|name| usize_amount(exec, name.len(), "stl-solid-name"))
             .transpose()?
             .unwrap_or(0);
-        scope.with_work_group(
-            [
-                (ImportWorkClass::Solids, 1),
-                (ImportWorkClass::StringBytes, name_bytes),
-            ],
-            |work| -> ParseResult<()> {
+        exec.with_work(
+            &self.solid_work,
+            [1, name_bytes],
+            |exec, work| -> ParseResult<()> {
                 let name = match name_value {
                     Some(value) => Some(work.run([0, name_bytes], || -> ParseResult<_> {
-                        let mut owned = scope.metered_string(
+                        let mut owned = exec.metered_string(
                             ImportStorageClass::SceneConstruction,
                             "stl-solid-name",
                         );
-                        owned.try_push_str(value)?;
+                        owned.try_push_str(exec, value)?;
                         Ok(owned)
                     })?),
                     None => None,
                 };
-                let first = required_token(scope, tokens, 0)?;
+                let first = required_token(exec, tokens, 0)?;
                 let column_offset = first
                     .column
                     .checked_sub(1)
                     .map(u64::from)
-                    .ok_or_else(|| scope.allocation_failure("stl-solid-byte-offset"))?;
+                    .ok_or_else(|| exec.allocation_failure("stl-solid-byte-offset"))?;
                 let token_offset = decoded_line
                     .raw_content_range()
                     .start()
                     .checked_add(column_offset)
-                    .ok_or_else(|| scope.allocation_failure("stl-solid-byte-offset"))?;
+                    .ok_or_else(|| exec.allocation_failure("stl-solid-byte-offset"))?;
                 let token_end = token_offset
                     .checked_add(usize_amount(
-                        scope,
+                        exec,
                         first.text.len(),
                         "stl-solid-byte-range",
                     )?)
-                    .ok_or_else(|| scope.allocation_failure("stl-solid-byte-range"))?;
-                let start = diagnostic_range(scope, token_offset, token_end)?;
+                    .ok_or_else(|| exec.allocation_failure("stl-solid-byte-range"))?;
+                let start = diagnostic_range(exec, token_offset, token_end)?;
                 let start_location = decoded_line.diagnostic_location(start).ok_or_else(|| {
-                    scope.format_failure(StlFailure::content(
+                    exec.format_failure(StlFailure::content(
                         StlFailureCode::InternalInvariant,
                         "diagnostic-line-column",
                         "invalid-solid-start",
                     ))
                 })?;
-                self.current = Some(SolidBuilder::new(scope, name, start_location));
+                self.current = Some(SolidBuilder::new(exec, name, start_location));
                 self.state = State::InSolid;
                 work.complete([1, 0])
             },
@@ -323,20 +367,27 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
 
     fn finish_solid(
         &mut self,
+        exec: &mut ParseExecution<'region, 'session>,
         name: Option<&str>,
         line_number: u32,
         column: u32,
     ) -> ParseResult<()> {
         let Some(current) = self.current.take() else {
-            return Err(self.failure("endsolid", "without-active-solid", line_number, column));
+            return Err(self.failure(
+                exec,
+                "endsolid",
+                "without-active-solid",
+                line_number,
+                column,
+            ));
         };
         let start_name = current.name.as_ref().map_or("", MeteredString::as_str);
-        if !solid_names_match(self.scope, start_name, name.unwrap_or(""))? {
-            return Err(self.failure("endsolid", "name-mismatch", line_number, column));
+        if !solid_names_match(exec, start_name, name.unwrap_or(""))? {
+            return Err(self.failure(exec, "endsolid", "name-mismatch", line_number, column));
         }
 
         if current.face_count == 0 {
-            self.scope.emit_text_diagnostic_with(
+            exec.emit_text_diagnostic_with(
                 DiagnosticSeverity::Warning,
                 DiagnosticCode::new("stl.empty_solid")
                     .expect("static STL diagnostic code must be valid"),
@@ -347,59 +398,62 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
                 format_args!("ASCII STL solid contains no facets"),
             )?;
         } else {
-            self.scope
-                .with_work(ImportWorkClass::Meshes, 1, |work| -> ParseResult<()> {
-                    work.run_all(|| {
-                        self.parsed.meshes.try_push(ParsedMesh {
+            exec.with_work(&self.mesh_work, [1], |exec, work| -> ParseResult<()> {
+                work.run_all(|| {
+                    self.parsed.meshes.try_push(
+                        exec,
+                        ParsedMesh {
                             name: current.name,
                             positions: current.positions,
                             normals: current.normals,
                             colors: None,
-                        })
-                    })
-                })?;
+                        },
+                    )
+                })
+            })?;
         }
 
         self.state = State::Start;
         Ok(())
     }
 
-    fn push_facet(&mut self, normal: Vec3, vertices: &[Vec3; 3]) -> ParseResult<()> {
-        let scope = self.scope;
+    fn push_facet(
+        &mut self,
+        exec: &mut ParseExecution<'region, 'session>,
+        normal: Vec3,
+        vertices: &[Vec3; 3],
+    ) -> ParseResult<()> {
         let positions = vertices.map(vec3_components);
         let normals = [vec3_components(normal); 3];
-        scope.with_work_group(
-            [
-                (ImportWorkClass::Faces, 1),
-                (ImportWorkClass::Vertices, 3),
-                (ImportWorkClass::AttributeCells, 6),
-            ],
-            |work| -> ParseResult<()> {
+        exec.with_work(
+            &self.facet_work,
+            [1, 3, 6],
+            |exec, work| -> ParseResult<()> {
                 let Some(current) = self.current.as_mut() else {
-                    return Err(scope.format_failure(StlFailure::content(
+                    return Err(exec.format_failure(StlFailure::content(
                         StlFailureCode::InternalInvariant,
                         "facet",
                         "outside-solid",
                     )));
                 };
                 work.run([0, 3, 3], || {
-                    current.positions.try_extend_from_slice(&positions)
+                    current.positions.try_extend_from_slice(exec, &positions)
                 })?;
                 work.run([0, 0, 3], || {
-                    current.normals.try_extend_from_slice(&normals)
+                    current.normals.try_extend_from_slice(exec, &normals)
                 })?;
                 work.run([1, 0, 0], || {
                     current.face_count = current
                         .face_count
                         .checked_add(1)
-                        .ok_or_else(|| scope.allocation_failure("stl-face-counter"))?;
+                        .ok_or_else(|| exec.allocation_failure("stl-face-counter"))?;
                     Ok(())
                 })
             },
         )
     }
 
-    fn finish_file(&self) -> ParseResult<()> {
+    fn finish_file(&self, exec: &mut ParseExecution<'_, '_>) -> ParseResult<()> {
         let reason = match &self.state {
             State::Start => return Ok(()),
             State::InSolid => "ended-before-endsolid",
@@ -407,7 +461,7 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
             State::InLoop { .. } => "ended-inside-facet-loop",
             State::NeedEndFacet { .. } => "ended-before-endfacet",
         };
-        Err(self.scope.format_failure(StlFailure::content(
+        Err(exec.format_failure(StlFailure::content(
             StlFailureCode::InvalidStructure,
             "ascii-document",
             reason,
@@ -416,12 +470,13 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
 
     fn failure(
         &self,
+        exec: &mut ParseExecution<'_, '_>,
         subject: &'static str,
         reason: &'static str,
         line: u32,
         column: u32,
     ) -> ParseFailure {
-        self.scope.format_failure(StlFailure::located(
+        exec.format_failure(StlFailure::located(
             StlFailureCode::InvalidStructure,
             subject,
             reason,
@@ -431,43 +486,43 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
     }
 }
 
-fn account_line_bytes(scope: &ParseScope<'_>, line: &str) -> ParseResult<()> {
-    let amount = usize_amount(scope, line.len(), "stl-line-bytes")?;
-    scope.with_work(
-        ImportWorkClass::LineBytes,
-        amount,
-        |work| -> ParseResult<()> {
-            for _ in (CHECKPOINT_CHUNK_BYTES..line.len()).step_by(CHECKPOINT_CHUNK_BYTES) {
-                work.poll()?;
-            }
-            work.complete_all()
-        },
-    )
+fn account_line_bytes<'region>(
+    exec: &mut ParseExecution<'region, '_>,
+    group: &ImportWorkGroup<'region, 1>,
+    line: &str,
+) -> ParseResult<()> {
+    let amount = usize_amount(exec, line.len(), "stl-line-bytes")?;
+    exec.with_work(group, [amount], |exec, work| -> ParseResult<()> {
+        for _ in (CHECKPOINT_CHUNK_BYTES..line.len()).step_by(CHECKPOINT_CHUNK_BYTES) {
+            exec.poll()?;
+        }
+        work.complete_all()
+    })
 }
 
-struct SolidBuilder<'scope> {
-    name: Option<MeteredString<'scope>>,
-    positions: MeteredVec<'scope, [f32; 3]>,
-    normals: MeteredVec<'scope, [f32; 3]>,
+struct SolidBuilder<'session> {
+    name: Option<MeteredString<'session>>,
+    positions: MeteredVec<'session, [f32; 3]>,
+    normals: MeteredVec<'session, [f32; 3]>,
     face_count: usize,
-    start_location: TextDiagnosticLocation<'scope>,
+    start_location: TextDiagnosticLocation<'session>,
 }
 
 const fn vec3_components(value: Vec3) -> [f32; 3] {
     [value.x, value.y, value.z]
 }
 
-impl<'scope> SolidBuilder<'scope> {
+impl<'session> SolidBuilder<'session> {
     fn new(
-        scope: &'scope ParseScope<'_>,
-        name: Option<MeteredString<'scope>>,
-        start_location: TextDiagnosticLocation<'scope>,
+        exec: &mut ParseExecution<'_, 'session>,
+        name: Option<MeteredString<'session>>,
+        start_location: TextDiagnosticLocation<'session>,
     ) -> Self {
         Self {
             name,
-            positions: scope
+            positions: exec
                 .metered_vec(ImportStorageClass::SceneConstruction, "stl-ascii-positions"),
-            normals: scope.metered_vec(ImportStorageClass::SceneConstruction, "stl-ascii-normals"),
+            normals: exec.metered_vec(ImportStorageClass::SceneConstruction, "stl-ascii-normals"),
             face_count: 0,
             start_location,
         }
@@ -504,14 +559,14 @@ struct TokenSpan {
     column: u32,
 }
 
-struct TokenBuffer<'scope> {
-    values: MeteredVec<'scope, TokenSpan>,
+struct TokenBuffer<'session> {
+    values: MeteredVec<'session, TokenSpan>,
 }
 
-impl<'scope> TokenBuffer<'scope> {
-    fn new(scope: &'scope ParseScope<'_>) -> Self {
+impl<'session> TokenBuffer<'session> {
+    fn new(exec: &mut ParseExecution<'_, 'session>) -> Self {
         Self {
-            values: scope.metered_vec(ImportStorageClass::FormatNormalization, "stl-tokens"),
+            values: exec.metered_vec(ImportStorageClass::FormatNormalization, "stl-tokens"),
         }
     }
 }
@@ -544,10 +599,11 @@ impl<'line> TokenLine<'line, '_> {
     }
 }
 
-fn tokenize<'line, 'buffer, 'scope>(
-    scope: &'scope ParseScope<'_>,
+fn tokenize<'line, 'buffer, 'region, 'session>(
+    exec: &mut ParseExecution<'region, 'session>,
+    group: &ImportWorkGroup<'region, 2>,
     line: &'line str,
-    tokens: &'buffer mut TokenBuffer<'scope>,
+    tokens: &'buffer mut TokenBuffer<'session>,
 ) -> ParseResult<TokenLine<'line, 'buffer>> {
     tokens.values.truncate(0);
     let mut start = None;
@@ -555,19 +611,19 @@ fn tokenize<'line, 'buffer, 'scope>(
 
     for (index, byte) in line.bytes().enumerate() {
         if index >= next_poll {
-            scope.poll()?;
+            exec.poll()?;
             next_poll = next_poll.saturating_add(4096);
         }
         if byte.is_ascii_whitespace() {
             if let Some(token_start) = start.take() {
-                push_token(scope, tokens, line, token_start, index)?;
+                push_token(exec, group, tokens, line, token_start, index)?;
             }
         } else if start.is_none() {
             start = Some(index);
         }
     }
     if let Some(token_start) = start {
-        push_token(scope, tokens, line, token_start, line.len())?;
+        push_token(exec, group, tokens, line, token_start, line.len())?;
     }
     Ok(TokenLine {
         line,
@@ -575,37 +631,36 @@ fn tokenize<'line, 'buffer, 'scope>(
     })
 }
 
-fn push_token<'scope>(
-    scope: &'scope ParseScope<'_>,
-    tokens: &mut TokenBuffer<'scope>,
+fn push_token<'region, 'session>(
+    exec: &mut ParseExecution<'region, 'session>,
+    group: &ImportWorkGroup<'region, 2>,
+    tokens: &mut TokenBuffer<'session>,
     line: &str,
     start: usize,
     end: usize,
 ) -> ParseResult<()> {
     let text = &line[start..end];
-    let token_bytes = usize_amount(scope, text.len(), "stl-token-bytes")?;
-    scope.with_work_group(
-        [
-            (ImportWorkClass::Tokens, 1),
-            (ImportWorkClass::TokenBytes, token_bytes),
-        ],
-        |work| -> ParseResult<()> {
-            let column = u32::try_from(start)
-                .ok()
-                .and_then(|value| value.checked_add(1))
-                .ok_or_else(|| scope.allocation_failure("stl-token-column"))?;
-            work.run_all(|| tokens.values.try_push(TokenSpan { start, end, column }))
-        },
-    )
+    let token_bytes = usize_amount(exec, text.len(), "stl-token-bytes")?;
+    exec.with_work(group, [1, token_bytes], |exec, work| -> ParseResult<()> {
+        let column = u32::try_from(start)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| exec.allocation_failure("stl-token-column"))?;
+        work.run_all(|| {
+            tokens
+                .values
+                .try_push(exec, TokenSpan { start, end, column })
+        })
+    })
 }
 
 fn parse_facet_normal(
-    scope: &ParseScope<'_>,
+    exec: &mut ParseExecution<'_, '_>,
     tokens: &TokenLine<'_, '_>,
     line_number: u32,
 ) -> ParseResult<Vec3> {
     if tokens.len() != 5 || !tokens_prefix_matches(tokens, &["facet", "normal"]) {
-        return Err(scope.format_failure(StlFailure::located(
+        return Err(exec.format_failure(StlFailure::located(
             StlFailureCode::InvalidStructure,
             "facet-normal",
             "expected-three-components",
@@ -613,11 +668,11 @@ fn parse_facet_normal(
             tokens.first().map_or(1, |token| token.column),
         )));
     }
-    parse_vec3_components(scope, tokens, 2, line_number)
+    parse_vec3_components(exec, tokens, 2, line_number)
 }
 
 fn parse_vec3(
-    scope: &ParseScope<'_>,
+    exec: &mut ParseExecution<'_, '_>,
     tokens: &TokenLine<'_, '_>,
     keyword: &'static str,
     line_number: u32,
@@ -627,7 +682,7 @@ fn parse_vec3(
             .get(0)
             .is_some_and(|token| keyword_is(token, keyword))
     {
-        return Err(scope.format_failure(StlFailure::located(
+        return Err(exec.format_failure(StlFailure::located(
             StlFailureCode::InvalidStructure,
             keyword,
             "expected-three-components",
@@ -635,37 +690,32 @@ fn parse_vec3(
             tokens.first().map_or(1, |token| token.column),
         )));
     }
-    parse_vec3_components(scope, tokens, 1, line_number)
+    parse_vec3_components(exec, tokens, 1, line_number)
 }
 
 fn parse_vec3_components(
-    scope: &ParseScope<'_>,
+    exec: &mut ParseExecution<'_, '_>,
     tokens: &TokenLine<'_, '_>,
     start: usize,
     line_number: u32,
 ) -> ParseResult<Vec3> {
+    let x = required_token(exec, tokens, start)?;
+    let y = required_token(exec, tokens, start + 1)?;
+    let z = required_token(exec, tokens, start + 2)?;
     Ok(Vec3::new(
-        parse_f32(scope, required_token(scope, tokens, start)?, line_number)?,
-        parse_f32(
-            scope,
-            required_token(scope, tokens, start + 1)?,
-            line_number,
-        )?,
-        parse_f32(
-            scope,
-            required_token(scope, tokens, start + 2)?,
-            line_number,
-        )?,
+        parse_f32(exec, x, line_number)?,
+        parse_f32(exec, y, line_number)?,
+        parse_f32(exec, z, line_number)?,
     ))
 }
 
 fn required_token<'line>(
-    scope: &ParseScope<'_>,
+    exec: &mut ParseExecution<'_, '_>,
     tokens: &TokenLine<'line, '_>,
     index: usize,
 ) -> ParseResult<Token<'line>> {
     tokens.get(index).ok_or_else(|| {
-        scope.format_failure(StlFailure::content(
+        exec.format_failure(StlFailure::content(
             StlFailureCode::InternalInvariant,
             "ascii-token-range",
             "invalid-token-span",
@@ -673,13 +723,17 @@ fn required_token<'line>(
     })
 }
 
-fn parse_f32(scope: &ParseScope<'_>, token: Token<'_>, line_number: u32) -> ParseResult<f32> {
+fn parse_f32(
+    exec: &mut ParseExecution<'_, '_>,
+    token: Token<'_>,
+    line_number: u32,
+) -> ParseResult<f32> {
     let value = token
         .text
         .parse::<f32>()
-        .map_err(|_| scope.format_failure(StlFailure::invalid_float(line_number, token.column)))?;
+        .map_err(|_| exec.format_failure(StlFailure::invalid_float(line_number, token.column)))?;
     if !value.is_finite() {
-        return Err(scope.format_failure(StlFailure::located(
+        return Err(exec.format_failure(StlFailure::located(
             StlFailureCode::NonFiniteNumber,
             "float",
             "non-finite",
@@ -691,20 +745,20 @@ fn parse_f32(scope: &ParseScope<'_>, token: Token<'_>, line_number: u32) -> Pars
 }
 
 fn usize_amount(
-    scope: &ParseScope<'_>,
+    exec: &ParseExecution<'_, '_>,
     value: usize,
     resource: &'static str,
 ) -> Result<u64, ParseFailure> {
-    u64::try_from(value).map_err(|_| scope.allocation_failure(resource))
+    u64::try_from(value).map_err(|_| exec.allocation_failure(resource))
 }
 
 fn diagnostic_range(
-    scope: &ParseScope<'_>,
+    exec: &mut ParseExecution<'_, '_>,
     start: u64,
     end: u64,
 ) -> ParseResult<DiagnosticByteRange> {
     DiagnosticByteRange::new(start, end).map_err(|_| {
-        scope.format_failure(StlFailure::content(
+        exec.format_failure(StlFailure::content(
             StlFailureCode::InternalInvariant,
             "diagnostic-byte-range",
             "invalid-byte-range",
@@ -722,7 +776,11 @@ fn trailing_text_after_first_token<'line>(
     line.get(start..end)
 }
 
-fn solid_names_match(scope: &ParseScope<'_>, start: &str, end: &str) -> ParseResult<bool> {
+fn solid_names_match(
+    exec: &mut ParseExecution<'_, '_>,
+    start: &str,
+    end: &str,
+) -> ParseResult<bool> {
     if start.len() != end.len() {
         return Ok(false);
     }
@@ -731,7 +789,7 @@ fn solid_names_match(scope: &ParseScope<'_>, start: &str, end: &str) -> ParseRes
         .chunks(CHECKPOINT_CHUNK_BYTES)
         .zip(end.as_bytes().chunks(CHECKPOINT_CHUNK_BYTES))
     {
-        scope.poll()?;
+        exec.poll()?;
         if start != end {
             return Ok(false);
         }

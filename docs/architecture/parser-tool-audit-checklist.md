@@ -25,12 +25,12 @@ The decision remains per format. Passing this checklist does not make a tool a p
 
 - [ ] Tool types do not appear in public Baozi APIs, re-exports, diagnostics, or scene IR.
 - [ ] Tool errors are converted through crate-private synchronous evidence producers admitted through
-  the selected `ParseScope`, or to bounded Baozi diagnostics/loss facts.
-- [ ] `ParseScope` copies dynamic codes, detail keys, string values, and scalars into Baozi-owned
+  the selected `ParseExecution`, or to bounded Baozi diagnostics/loss facts.
+- [ ] `ParseExecution` copies dynamic codes, detail keys, string values, and scalars into Baozi-owned
   `FormatFailureEvidence`; the producer and every backend error are destroyed before return.
 - [ ] Public outcomes expose no backend source chain, concrete downcast target, callback, vtable,
   native handle, or plugin-owned destructor.
-- [ ] Producer code/detail/destructor callbacks cannot reenter `ParseScope` or derived metered
+- [ ] Producer code/detail/destructor callbacks cannot reenter execution or derived metered
   capabilities; contract tests cover direct and pre-reserved storage paths.
 - [ ] Session-terminal capability-produced `ScopeAbort` values are propagated unchanged and are never
   caught or reclassified as format failures.
@@ -38,9 +38,10 @@ The decision remains per format. Passing this checklist does not make a tool a p
   non-abort outcome after bounded diagnostic/loss evidence is recorded; parser code never simulates
   optional continuation by catching `ParseFailure`.
 - [ ] Tool ASTs are private, short-lived, and converted into a format-private normalized model or
-  Baozi-owned `SceneDraft` data through the Scene construction capability.
-- [ ] Parser code cannot return `ValidatedScene`; the import session always performs central
-  validation after receiving `SceneDraft`.
+  authoring values submitted through the outer `ParseContext` after execution borrows end.
+- [ ] `Format` receives its own typed options and returns `ParseResult<()>`. The parser cannot return
+  `ValidatedScene`, retain execution authority, or publish a candidate. The import session performs
+  central validation and finalizes its privately retained candidate only after successful parsing.
 - [ ] Public behavior is documented in `docs/formats/<format>.md`, not in tool-specific terms.
 - [ ] Disabling the format or optional backend removes the tool from the dependency tree.
 
@@ -94,7 +95,7 @@ The decision remains per format. Passing this checklist does not make a tool a p
 - [ ] Tool-specific error trees are collapsed into stable Baozi diagnostic codes/messages.
 - [ ] Strict versus permissive behavior is documented for the format.
 - [ ] Recoverable errors are intentionally chosen; unrecoverable structural errors return a stable
-  format-owned cause through the selected `ParseScope`.
+  format-owned cause through the selected `ParseExecution`.
 - [ ] Malformed fixture tests cover incomplete records, invalid numbers, invalid encoding, bad
   counts, and unexpected EOF.
 

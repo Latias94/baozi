@@ -4,11 +4,11 @@ use baozi_import::authoring::{
     GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, Presence, StaticSceneBuilder,
 };
 use baozi_import::{
-    CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
-    FormatDescriptor, FormatEncoding, FormatImporter, FormatSelection, ImportConfigOverlay,
-    ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer, OptionCompileLimits,
-    ParseResult, ParseScope, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
-    SceneDraft, import_bytes,
+    CapabilityStatus, CompiledOptions, DetectionOutcome, DetectionResult, DetectionScope, Format,
+    FormatCapability, FormatDescriptor, FormatEncoding, FormatSelection, ImportConfigOverlay,
+    ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer, NoFormatOptions,
+    OptionCompileError, OptionCompileLimits, ParseContext, ParseResult, ReadConfidence, ReadHint,
+    RegistryBuildLimits, RegistryBuildScope, RegistryBuilder,
 };
 use baozi_io::AssetPath;
 use baozi_postprocess::{
@@ -43,7 +43,16 @@ impl Fixture {
 
 struct Importer(Fixture);
 
-impl FormatImporter for Importer {
+impl Format for Importer {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(FormatId::new(FORMAT).unwrap(), "Tangent precision fixture")
             .encoding(FormatEncoding::Binary)
@@ -61,7 +70,7 @@ impl FormatImporter for Importer {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
         let f = self.0;
         let narrow_positions = f.positions.map(|p| p.map(|v| v as f32));
         let narrow_uvs = f.uvs.map(|p| p.map(|v| v as f32));
@@ -142,7 +151,7 @@ impl FormatImporter for Importer {
             AuthoringRange::new(0, 3),
         )];
         let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
-        scope.submit_static_scene(
+        context.submit(
             StaticSceneBuilder::new(Presence::Present(&[]), &[])
                 .with_scene_space(&SceneSpace::STANDARD_TARGET)
                 .with_geometry(&meshes, &primitives, &attributes, &[]),
@@ -159,15 +168,15 @@ fn import(fixture: Fixture) -> ImportReport {
             .with_format_selection(FormatSelection::Forced(FormatId::new(FORMAT).unwrap())),
     ));
     let request = registry
-        .compile_request(&request, OptionCompileLimits::default())
+        .plan(&request, OptionCompileLimits::default())
         .unwrap();
-    import_bytes(
-        &request,
-        AssetPath::new("precision.fixture").unwrap(),
-        b"precision",
-        ImportOperationControl::default(),
-    )
-    .unwrap()
+    request
+        .read_bytes(
+            AssetPath::new("precision.fixture").unwrap(),
+            b"precision",
+            ImportOperationControl::default(),
+        )
+        .unwrap()
 }
 
 fn assert_basis(fixture: Fixture, expected: [f64; 4]) {

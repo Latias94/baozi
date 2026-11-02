@@ -418,7 +418,17 @@ fn real_runtime_kernel_output_rejection_preserves_the_written_prefix() {
 
 struct SparseTriangle;
 
-impl baozi_import::FormatImporter for SparseTriangle {
+impl baozi_import::Format for SparseTriangle {
+    type Options = baozi_import::NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut baozi_import::RegistryBuildScope<'_>,
+    ) -> Result<baozi_import::CompiledOptions<Self::Options>, baozi_import::OptionCompileError>
+    {
+        baozi_import::NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> baozi_import::FormatDescriptor {
         baozi_import::FormatDescriptor::builder(
             baozi_core::FormatId::new("dev.baozi.test.normal-runtime-sparse").unwrap(),
@@ -446,8 +456,9 @@ impl baozi_import::FormatImporter for SparseTriangle {
 
     fn parse(
         &self,
-        scope: &mut baozi_import::ParseScope<'_>,
-    ) -> baozi_import::ParseResult<baozi_import::SceneDraft> {
+        _options: &Self::Options,
+        context: &mut baozi_import::ParseContext<'_>,
+    ) -> baozi_import::ParseResult<()> {
         use baozi_import::authoring::{
             AttributeSemantic, AuthoringRange, GeometryAttributeAuthoring,
             GeometryLogicalMeshAuthoring, GeometryPrimitiveAuthoring, GeometryTopologyAuthoring,
@@ -469,7 +480,7 @@ impl baozi_import::FormatImporter for SparseTriangle {
             AuthoringRange::new(0, 1),
         )];
         let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
-        scope.submit_static_scene(
+        context.submit(
             StaticSceneBuilder::new(Presence::Present(&[]), &[])
                 .with_scene_space(&baozi_core::SceneSpace::STANDARD_TARGET)
                 .with_geometry(&meshes, &primitives, &positions, &[]),
@@ -482,13 +493,12 @@ fn projected_sparse_budget_rejection_keeps_comparison_and_tuple_prefixes() {
     use baozi_import::{
         FormatSelection, ImportConfigOverlay, ImportOperationControl, ImportRequest,
         ImportRequestLayer, OptionCompileLimits, RegistryBuildLimits, RegistryBuilder,
-        import_bytes,
     };
     let mut registry = RegistryBuilder::new();
     registry.register(SparseTriangle).unwrap();
     let registry = registry.freeze(RegistryBuildLimits::default()).unwrap();
     let request = registry
-        .compile_request(
+        .plan(
             &ImportRequest::new().with_caller_layer(ImportRequestLayer::new(
                 ImportConfigOverlay::default().with_format_selection(FormatSelection::Forced(
                     baozi_core::FormatId::new("dev.baozi.test.normal-runtime-sparse").unwrap(),
@@ -497,14 +507,14 @@ fn projected_sparse_budget_rejection_keeps_comparison_and_tuple_prefixes() {
             OptionCompileLimits::default(),
         )
         .unwrap();
-    let (scene, import) = import_bytes(
-        &request,
-        baozi_io::AssetPath::new("normals.fixture").unwrap(),
-        b"sparse",
-        ImportOperationControl::default(),
-    )
-    .unwrap()
-    .into_parts();
+    let (scene, import) = request
+        .read_bytes(
+            baozi_io::AssetPath::new("normals.fixture").unwrap(),
+            b"sparse",
+            ImportOperationControl::default(),
+        )
+        .unwrap()
+        .into_parts();
     let primitive = scene.meshes().next().unwrap().primitives().next().unwrap();
     let positions = primitive.positions().unwrap();
     let generation = scene.generation();

@@ -178,7 +178,7 @@ fn measure_inner(
     let importer = Importer::new()?;
     let mut limits = ResourceLimitsOverlay::default();
     limits.max_work_units = Some(options.max_work_units);
-    let request = importer.prepare_request(
+    let request = importer.plan(
         &ImportRequest::new().with_caller_layer(ImportRequestLayer::new(
             ImportConfigOverlay::default().with_resource_limits(limits),
         )),
@@ -187,19 +187,21 @@ fn measure_inner(
     *phase = "import";
     let import_started = Instant::now();
     let report = if let Some(bytes) = &preload {
-        importer.read_bytes_with_request(
-            source,
-            bytes,
-            &request,
-            ImportOperationControl::default(),
-        )?
+        request
+            .read_bytes(
+                AssetPath::new(source)?,
+                bytes,
+                ImportOperationControl::default(),
+            )
+            .map_err(baozi::Error::from)?
     } else {
-        importer.read_asset_with_request(
-            io.as_ref().ok_or("missing file IO")?,
-            source_path,
-            &request,
-            ImportOperationControl::default(),
-        )?
+        request
+            .read_asset(
+                io.as_ref().ok_or("missing file IO")?,
+                source_path,
+                ImportOperationControl::default(),
+            )
+            .map_err(baozi::Error::from)?
     };
     let import_ns = import_started.elapsed().as_nanos();
     let (mut scene, evidence) = report.into_parts();

@@ -8,9 +8,10 @@ use baozi::{
     ProgressDecision, ProgressDeliveryLimits, ProgressEvent, ReadConfidence,
 };
 use baozi_import::{
-    DetectionOutcome, DetectionResult, DetectionScope, FormatFailureDetailSink,
-    FormatFailureDetailValue, FormatFailureEvidenceProducer, FormatImporter, ParseResult,
-    ParseScope, Probe, ReadHint, SceneDraft,
+    CompiledOptions, DetectionOutcome, DetectionResult, DetectionScope, Format,
+    FormatFailureDetailSink, FormatFailureDetailValue, FormatFailureEvidenceProducer,
+    NoFormatOptions, OptionCompileError, ParseContext, ParseResult, Probe, ReadHint,
+    RegistryBuildScope,
 };
 use std::error::Error as StdError;
 use std::sync::Arc;
@@ -59,7 +60,16 @@ impl FormatFailureEvidenceProducer for TestFormatFailure {
     }
 }
 
-impl FormatImporter for TestImporter {
+impl Format for TestImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> std::result::Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new(FORMAT_ID).expect("qualified test format id"),
@@ -81,17 +91,19 @@ impl FormatImporter for TestImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        if self.fail {
-            return Err(
-                scope.format_failure(TestFormatFailure::new(Arc::clone(&self.failure_drops)))
-            );
-        }
-        scope.emit_diagnostic(
-            DiagnosticSeverity::Warning,
-            DiagnosticCode::new("test.imported").expect("valid diagnostic code"),
-            format_args!("test importer completed"),
-        )?;
+    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
+        scope.with_execution(|exec| {
+            if self.fail {
+                return Err(
+                    exec.format_failure(TestFormatFailure::new(Arc::clone(&self.failure_drops)))
+                );
+            }
+            exec.emit_diagnostic(
+                DiagnosticSeverity::Warning,
+                DiagnosticCode::new("test.imported").expect("valid diagnostic code"),
+                format_args!("test importer completed"),
+            )
+        })?;
         support::submit_minimal_scene(scope)
     }
 }
@@ -220,15 +232,15 @@ fn strict_conformance_does_not_promote_arbitrary_diagnostics() {
         ),
     );
     let request = importer
-        .prepare_request(&options, OptionCompileLimits::default())
+        .plan(&options, OptionCompileLimits::default())
         .expect("request must compile");
-    let report = importer
-        .read_bytes_with_request(
-            "model.facade-test",
+    let report = request
+        .read_bytes(
+            baozi::AssetPath::new("model.facade-test").expect("valid source path"),
             b"opaque",
-            &request,
             ImportOperationControl::default(),
         )
+        .map_err(baozi::Error::from)
         .expect("diagnostic severity is not conformance authority");
     assert_eq!(report.diagnostic_summary().attempted_count(), 1);
 }

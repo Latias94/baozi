@@ -8,12 +8,13 @@ use baozi_import::authoring::{
     SceneAuthoringBatch, SceneSpace, SpatialAuthoringBatch,
 };
 use baozi_import::{
-    CapabilityStatus, DetectionEvidence, DetectionInconclusive, DetectionOptions, DetectionOutcome,
-    DetectionResult, DetectionScope, FormatCapability, FormatDescriptor, FormatEncoding,
-    FormatImporter, FormatSelection, ImportConfigOverlay, ImportOperationControl, ImportRequest,
-    ImportRequestLayer, ImportResult, OptionCompileLimits, ParseResult, ParseScope,
-    PreparedImportRequest, Probe, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
-    ResourceLimits, ResourceLimitsOverlay, SceneDraft, import_bytes,
+    CapabilityStatus, CompiledOptions, DetectionEvidence, DetectionInconclusive, DetectionOptions,
+    DetectionOutcome, DetectionResult, DetectionScope, Format, FormatCapability, FormatDescriptor,
+    FormatEncoding, FormatSelection, ImportConfigOverlay, ImportOperationControl, ImportPlan,
+    ImportRequest, ImportRequestLayer, ImportResult, NoFormatOptions, OptionCompileError,
+    OptionCompileLimits, ParseContext, ParseResult, Probe, ReadConfidence, ReadHint,
+    RegistryBuildLimits, RegistryBuildScope, RegistryBuilder, ResourceLimits,
+    ResourceLimitsOverlay,
 };
 use baozi_io::AssetPath;
 use libfuzzer_sys::fuzz_target;
@@ -213,7 +214,16 @@ impl SyntheticImporter {
     }
 }
 
-impl FormatImporter for SyntheticImporter {
+impl Format for SyntheticImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> std::result::Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         self.descriptor.clone()
     }
@@ -239,7 +249,7 @@ impl FormatImporter for SyntheticImporter {
         }
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
         let provenance_ids = [ProvenanceLocalId::new(0)];
         let operation_kind = OperationKind::Generated;
         let provenance_nodes = [ProvenanceNodeAuthoring::operation(
@@ -258,7 +268,7 @@ impl FormatImporter for SyntheticImporter {
         let nodes = [];
         let scene_space = SceneSpace::UNKNOWN;
 
-        scope.submit_scene(SceneAuthoringBatch::new(
+        scope.submit_complete(SceneAuthoringBatch::new(
             SpatialAuthoringBatch::new(&scene_space, &[], &[]),
             NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
             AppearanceAuthoringBatch::empty(),
@@ -274,7 +284,7 @@ impl FormatImporter for SyntheticImporter {
 }
 
 fn run_case(case: &FuzzCase<'_>, order: RegistrationOrder) -> Observation {
-    let request = prepared_request(case, order);
+    let request = import_plan(case, order);
     let first = import_observation(&request, case);
     let second = import_observation(&request, case);
     assert_eq!(
@@ -284,17 +294,12 @@ fn run_case(case: &FuzzCase<'_>, order: RegistrationOrder) -> Observation {
     first
 }
 
-fn import_observation(request: &PreparedImportRequest, case: &FuzzCase<'_>) -> Observation {
+fn import_observation(request: &ImportPlan, case: &FuzzCase<'_>) -> Observation {
     let source = AssetPath::new(case.source).expect("synthetic source paths are valid");
-    observe(import_bytes(
-        &request,
-        source,
-        case.primary,
-        ImportOperationControl::default(),
-    ))
+    observe(request.read_bytes(source, case.primary, ImportOperationControl::default()))
 }
 
-fn prepared_request(case: &FuzzCase<'_>, order: RegistrationOrder) -> PreparedImportRequest {
+fn import_plan(case: &FuzzCase<'_>, order: RegistrationOrder) -> ImportPlan {
     let mut registry = RegistryBuilder::new();
     match order {
         RegistrationOrder::Forward => {
@@ -318,7 +323,7 @@ fn prepared_request(case: &FuzzCase<'_>, order: RegistrationOrder) -> PreparedIm
         .expect("synthetic registry freezes");
     let detection = DetectionOptions::new(case.probe_bytes).expect("bounded probe limit is valid");
     snapshot
-        .compile_request(
+        .plan(
             &ImportRequest::from_layers(
                 ImportRequestLayer::default(),
                 ImportRequestLayer::new(

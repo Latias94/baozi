@@ -10,11 +10,11 @@ use baozi_import::authoring::{
     UvOrigin, Vec3,
 };
 use baozi_import::{
-    CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
-    FormatDescriptor, FormatEncoding, FormatImporter, FormatSelection, ImportConfigOverlay,
-    ImportOperationControl, ImportRequest, ImportRequestLayer, OptionCompileLimits, ParseResult,
-    ParseScope, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder, SceneDraft,
-    import_bytes,
+    CapabilityStatus, CompiledOptions, DetectionOutcome, DetectionResult, DetectionScope, Format,
+    FormatCapability, FormatDescriptor, FormatEncoding, FormatSelection, ImportConfigOverlay,
+    ImportOperationControl, ImportRequest, ImportRequestLayer, NoFormatOptions, OptionCompileError,
+    OptionCompileLimits, ParseContext, ParseResult, ReadConfidence, ReadHint, RegistryBuildLimits,
+    RegistryBuildScope, RegistryBuilder,
 };
 use baozi_io::AssetPath;
 use baozi_postprocess::{
@@ -32,7 +32,16 @@ enum Fixture {
 
 struct DomainImporter(Fixture);
 
-impl FormatImporter for DomainImporter {
+impl Format for DomainImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("org.baozi.space-domain").unwrap(),
@@ -51,7 +60,7 @@ impl FormatImporter for DomainImporter {
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
         let positions = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
         let normals = [1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0];
         let tangents = [1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, -1.0, 0.0, 0.0, 1.0, 1.0];
@@ -149,7 +158,7 @@ impl FormatImporter for DomainImporter {
                 ..SceneSpace::STANDARD_TARGET
             }
         };
-        scope.submit_static_scene(
+        context.submit(
             StaticSceneBuilder::new(Presence::Present(&[NodeLocalId::new(0)]), &nodes)
                 .with_scene_space(&space)
                 .with_geometry(&meshes, &primitives, &attributes, &[]),
@@ -167,17 +176,17 @@ fn scene(fixture: Fixture) -> ValidatedScene {
         )),
     ));
     let request = registry
-        .compile_request(&request, OptionCompileLimits::default())
+        .plan(&request, OptionCompileLimits::default())
         .unwrap();
-    import_bytes(
-        &request,
-        AssetPath::new("domain.fixture").unwrap(),
-        b"input",
-        ImportOperationControl::default(),
-    )
-    .unwrap()
-    .into_parts()
-    .0
+    request
+        .read_bytes(
+            AssetPath::new("domain.fixture").unwrap(),
+            b"input",
+            ImportOperationControl::default(),
+        )
+        .unwrap()
+        .into_parts()
+        .0
 }
 
 fn reflection() -> SpaceConversionOptions {

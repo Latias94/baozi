@@ -11,17 +11,17 @@ mod source_map;
 
 pub(crate) use error::GltfFailure;
 pub use error::GltfFailureCode;
-pub use options::{GltfImportOptions, GltfSceneSelection, gltf_import_option_key};
+pub use options::{GltfImportOptions, GltfSceneSelection};
 
 use baozi_import::authoring::FormatId;
 use baozi_import::{
-    CapabilityStatus, DependencyRequirement, DependencyRoleId, DetectionOutcome, DetectionResult,
-    DetectionScope, FormatCapability, FormatDescriptor, FormatEncoding, FormatImporter,
-    OptionRuntimeTypeKey, ParseResult, ParseScope, Probe, ReadHint, RegistryBuilder,
-    RegistryRegistrationError, SceneDraft, TextBomPolicy, TextControlPolicy, TextDecodingMode,
-    TextHardCaps, TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding,
+    CapabilityStatus, CompiledOptions, DependencyRequirement, DependencyRoleId, DetectionOutcome,
+    DetectionResult, DetectionScope, Format, FormatCapability, FormatDescriptor, FormatEncoding,
+    FormatOptionLayers, FormatOptionSchema, OptionCompileError, OptionCompileScope, ParseContext,
+    ParseResult, Probe, ReadHint, RegistryBuildScope, RegistryBuilder, RegistryRegistrationError,
+    TextBomPolicy, TextControlPolicy, TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline,
+    TextProfile, TextSourceEncoding,
 };
-use std::sync::Arc;
 
 /// Stable identity of the selected glTF 2.0 and GLB profile.
 pub const FORMAT_ID: &str = "org.baozi.gltf";
@@ -101,17 +101,31 @@ pub(crate) fn external_image_role() -> DependencyRoleId {
     DependencyRoleId::new(EXTERNAL_IMAGE_ROLE).expect("static glTF dependency role must be valid")
 }
 
-impl FormatImporter for GltfImporter {
+impl Format for GltfImporter {
+    type Options = GltfImportOptions;
+
     fn descriptor(&self) -> FormatDescriptor {
         format_descriptor()
     }
 
-    fn option_codec(&self) -> Arc<dyn baozi_import::FormatOptionCodec> {
-        options::option_codec()
+    fn option_schema(&self) -> Option<FormatOptionSchema> {
+        Some(options::option_schema())
     }
 
-    fn option_runtime_type_key(&self) -> OptionRuntimeTypeKey {
-        OptionRuntimeTypeKey::of::<GltfImportOptions>()
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        options::compile_defaults(scope)
+    }
+
+    fn compile_options(
+        &self,
+        scope: &mut OptionCompileScope<'_>,
+        defaults: &Self::Options,
+        layers: FormatOptionLayers<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        options::compile_options(scope, defaults, layers)
     }
 
     fn detect(
@@ -123,8 +137,12 @@ impl FormatImporter for GltfImporter {
         detect::can_read(probe, hint, scope)
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        parser::read_gltf(scope)
+    fn parse(
+        &self,
+        options: &GltfImportOptions,
+        context: &mut ParseContext<'_>,
+    ) -> ParseResult<()> {
+        parser::read_gltf(options, context)
     }
 }
 

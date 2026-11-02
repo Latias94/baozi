@@ -9,7 +9,7 @@ use crate::canonical_scene::store::schema::CanonicalSchema;
 pub struct SceneEditEvidenceTag;
 
 /// Flattened primitive-local source-corner triples, in output triangle order. Selected edits
-/// prefix the sequence with the actual origin count, so an absent relation is represented by [0].
+/// prefix the sequence with the actual origin count, so an absent relation is represented by `[0]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SceneGeometryCornerOriginsTag;
 

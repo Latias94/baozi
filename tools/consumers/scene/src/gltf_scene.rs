@@ -64,7 +64,7 @@ const DOCUMENT: &str = r#"{
   "bufferViews": [
     {"buffer": 0, "byteOffset": 0, "byteLength": 72, "byteStride": 24},
     {"buffer": 0, "byteOffset": 72, "byteLength": 24},
-    {"buffer": 0, "byteOffset": 96, "byteLength": 12},
+    {"buffer": 0, "byteOffset": 96, "byteLength": 12, "byteStride": 4},
     {"buffer": 0, "byteOffset": 108, "byteLength": 48},
     {"buffer": 0, "byteOffset": 156, "byteLength": 6},
     {"buffer": 0, "byteOffset": 164, "byteLength": 36},

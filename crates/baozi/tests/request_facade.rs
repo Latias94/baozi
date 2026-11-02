@@ -15,7 +15,7 @@ fn facade_prepares_a_reusable_import_preset_without_lower_crate_types() {
     let importer = Importer::empty().expect("empty facade registry");
 
     let prepared = importer
-        .prepare_request(&request, OptionCompileLimits::default())
+        .plan(&request, OptionCompileLimits::default())
         .expect("facade request preparation");
 
     assert_eq!(

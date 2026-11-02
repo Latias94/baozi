@@ -1,8 +1,8 @@
 use super::*;
 use baozi_io::{AssetOpenError, AssetOpenErrorKind, AssetOpenStage};
 
-fn graph_work(host: ImportStoreHost<'_>) -> u64 {
-    let state = host
+fn graph_work(exec: &ImportStoreExecution<'_>) -> u64 {
+    let state = exec
         .dimension_state(ImportDimension::ResourceGraphWork)
         .unwrap();
     assert_eq!(state.attempted(), state.consumed());
@@ -18,14 +18,15 @@ fn unique_resources_and_repeated_leaf_references_use_bounded_graph_work() {
             max_resource_graph_work: 16_000_000,
             ..ResourceLimits::default()
         };
-        let (owner, account) = store_owner_and_account(&limits, ImportOperationControl::default());
-        let host = owner.host();
+        let (mut owner, account) =
+            store_owner_and_account(&limits, ImportOperationControl::default());
+        let exec = &mut owner.execution().unwrap();
         let authority = AuthorityDomain::new();
         let primary_path = AssetPath::new("main.bin").unwrap();
         let role = DependencyRoleId::new("test.resource").unwrap();
         let mut graph = ResourceGraph::new(limits);
         graph
-            .bind_primary(host, &authority, &primary_path, b"primary")
+            .bind_primary(exec, &authority, &primary_path, b"primary")
             .unwrap();
         let primary = graph.source_for_primary().unwrap();
         let count = u64::try_from(leaf_count).unwrap();
@@ -36,19 +37,19 @@ fn unique_resources_and_repeated_leaf_references_use_bounded_graph_work() {
         // Warm acquisition storage independently of logical graph insertion. This phase includes
         // index initialization, record moves/rebuilds, miss/insertion/transition probes, and no
         // graph nodes or relations. All paths have nine bytes and all snapshots have one byte.
-        let before_warm = graph_work(host);
+        let before_warm = graph_work(exec);
         for (index, identity) in identities.iter().enumerate() {
-            let before = graph_work(host);
-            let (cache_index, snapshot) = cache_snapshot(&mut graph, host, identity, b"x");
+            let before = graph_work(exec);
+            let (cache_index, snapshot) = cache_snapshot(&mut graph, exec, identity, b"x");
             assert_eq!(cache_index, index);
             assert_eq!(snapshot.bytes(), b"x");
             if index == 0 {
                 // The empty cache initializes eight slots and performs one insertion probe and
                 // one resolving-to-available probe. The initial empty lookup examines no slot.
-                assert_eq!(graph_work(host) - before, 8 + 1 + 1);
+                assert_eq!(graph_work(exec) - before, 8 + 1 + 1);
             }
         }
-        let warm_work = graph_work(host) - before_warm;
+        let warm_work = graph_work(exec) - before_warm;
         assert_eq!(graph.nodes.len(), 1);
         assert_eq!(graph.relation_count, 0);
         assert!(warm_work >= 8 + 2 * count);
@@ -68,14 +69,14 @@ fn unique_resources_and_repeated_leaf_references_use_bounded_graph_work() {
         // graph-wide prefix walk cannot hide by making this measurement grow with N.
         let mut probes = Vec::with_capacity(leaf_count);
         for (index, identity) in identities.iter().enumerate() {
-            let before = graph_work(host);
+            let before = graph_work(exec);
             let Some(ResourceAcquisitionState::Available { cache_index, .. }) =
-                graph.acquisition_state(host, identity).unwrap()
+                graph.acquisition_state(exec, identity).unwrap()
             else {
                 panic!("warm-up must retain an available acquisition");
             };
             assert_eq!(cache_index, index);
-            let actual = graph_work(host) - before;
+            let actual = graph_work(exec) - before;
             assert!((1..=64).contains(&actual), "lookup probes: {actual}");
             probes.push(actual);
         }
@@ -85,28 +86,28 @@ fn unique_resources_and_repeated_leaf_references_use_bounded_graph_work() {
             "acquisition lookup probes at N={count}: {total_probes}"
         );
 
-        let before_find = graph_work(host);
+        let before_find = graph_work(exec);
         for identity in &identities {
-            assert_eq!(graph.find_node(host, identity).unwrap(), None);
+            assert_eq!(graph.find_node(exec, identity).unwrap(), None);
         }
         assert_eq!(
-            graph_work(host) - before_find,
+            graph_work(exec) - before_find,
             count + total_probes,
             "unbound graph lookup performs one primary comparison plus acquisition probes"
         );
 
-        let before_unique = graph_work(host);
+        let before_unique = graph_work(exec);
         for identity in &identities {
-            add_available(&mut graph, host, primary, &role, identity, b"x");
+            add_available(&mut graph, exec, primary, &role, identity, b"x");
         }
-        let unique_work = graph_work(host) - before_unique;
+        let unique_work = graph_work(exec) - before_unique;
         // A nine-byte reference, one relation action, one primary comparison, and one cache
         // binding make 12 fixed actions. Target lookup and acquisition reuse each probe once.
         assert_eq!(unique_work, 12 * count + 2 * total_probes);
-        let nodes = host
+        let nodes = exec
             .dimension_state(ImportDimension::ResourceGraphNodes)
             .unwrap();
-        let relations = host
+        let relations = exec
             .dimension_state(ImportDimension::ResourceGraphRelations)
             .unwrap();
         assert_eq!(nodes.attempted(), count + 1);
@@ -116,18 +117,18 @@ fn unique_resources_and_repeated_leaf_references_use_bounded_graph_work() {
 
         let last = identities.last().unwrap();
         let last_probes = *probes.last().unwrap();
-        let before_lookup = graph_work(host);
-        let last_node = graph.find_node(host, last).unwrap().unwrap();
-        let lookup_work = graph_work(host) - before_lookup;
+        let before_lookup = graph_work(exec);
+        let last_node = graph.find_node(exec, last).unwrap().unwrap();
+        let lookup_work = graph_work(exec) - before_lookup;
         assert_eq!(lookup_work, 1 + last_probes);
-        let before_reuse = graph_work(host);
+        let before_reuse = graph_work(exec);
         for _ in 0..leaf_count {
             assert_eq!(
-                add_available(&mut graph, host, primary, &role, last, b"x"),
+                add_available(&mut graph, exec, primary, &role, last, b"x"),
                 last_node,
             );
         }
-        let reuse_work = graph_work(host) - before_reuse;
+        let reuse_work = graph_work(exec) - before_reuse;
         // The existing-target depth action replaces new binding initialization. Acquisition
         // reuse is a separate probe pass even when its shared snapshot digest is already cached.
         assert_eq!(
@@ -135,10 +136,10 @@ fn unique_resources_and_repeated_leaf_references_use_bounded_graph_work() {
             12 * count + 2 * count * last_probes,
             "reuse must perform only fixed actions and both bounded probe passes at N={count}"
         );
-        let nodes = host
+        let nodes = exec
             .dimension_state(ImportDimension::ResourceGraphNodes)
             .unwrap();
-        let relations = host
+        let relations = exec
             .dimension_state(ImportDimension::ResourceGraphRelations)
             .unwrap();
         assert_eq!(nodes.attempted(), count + 1);
@@ -150,7 +151,7 @@ fn unique_resources_and_repeated_leaf_references_use_bounded_graph_work() {
         assert_eq!(graph.maximum_depth(), 1);
 
         // Manifest sorting is charged to InputManifestWork, outside these phase measurements.
-        graph.seal(host).unwrap();
+        graph.seal(exec).unwrap();
         let manifest = graph.take_manifest().unwrap();
         let counts = manifest.counts();
         assert_eq!(counts.node_class_count(), count + 1);
@@ -199,58 +200,56 @@ fn unique_resources_and_repeated_leaf_references_use_bounded_graph_work() {
 #[test]
 fn indexed_node_lookup_requires_an_available_bound_exact_identity() {
     let limits = ResourceLimits::default();
-    let (owner, account) = store_owner_and_account(&limits, ImportOperationControl::default());
-    let host = owner.host();
+    let (mut owner, account) = store_owner_and_account(&limits, ImportOperationControl::default());
+    let exec = &mut owner.execution().unwrap();
     let authority = AuthorityDomain::new();
     let other_authority = AuthorityDomain::new();
     let primary_path = AssetPath::new("main.bin").unwrap();
     let role = DependencyRoleId::new("test.resource").unwrap();
     let mut graph = ResourceGraph::new(limits);
     graph
-        .bind_primary(host, &authority, &primary_path, b"primary")
+        .bind_primary(exec, &authority, &primary_path, b"primary")
         .unwrap();
     let primary = graph.source_for_primary().unwrap();
     let primary_identity = dependency_identity(&authority, primary_path.as_str());
     assert_eq!(
-        graph.find_node(host, &primary_identity).unwrap(),
+        graph.find_node(exec, &primary_identity).unwrap(),
         Some(primary)
     );
     let other_primary = dependency_identity(&other_authority, primary_path.as_str());
-    assert_eq!(graph.find_node(host, &other_primary).unwrap(), None);
-    let other_node = add_available(&mut graph, host, primary, &role, &other_primary, b"x");
+    assert_eq!(graph.find_node(exec, &other_primary).unwrap(), None);
+    let other_node = add_available(&mut graph, exec, primary, &role, &other_primary, b"x");
     assert_ne!(other_node, primary);
     assert_eq!(
-        graph.find_node(host, &other_primary).unwrap(),
+        graph.find_node(exec, &other_primary).unwrap(),
         Some(other_node)
     );
 
     let identity = dependency_identity(&authority, "leaf.bin");
-    let (_, snapshot) = cache_snapshot(&mut graph, host, &identity, b"x");
-    assert_eq!(graph.find_node(host, &identity).unwrap(), None);
-    let node = add_available(&mut graph, host, primary, &role, &identity, b"x");
-    assert_eq!(graph.find_node(host, &identity).unwrap(), Some(node));
+    let (_, snapshot) = cache_snapshot(&mut graph, exec, &identity, b"x");
+    assert_eq!(graph.find_node(exec, &identity).unwrap(), None);
+    let node = add_available(&mut graph, exec, primary, &role, &identity, b"x");
+    assert_eq!(graph.find_node(exec, &identity).unwrap(), Some(node));
     let foreign_identity = dependency_identity(&other_authority, identity.path().as_str());
-    assert_eq!(graph.find_node(host, &foreign_identity).unwrap(), None);
+    assert_eq!(graph.find_node(exec, &foreign_identity).unwrap(), None);
 
     let resolving = dependency_identity(&authority, "resolving.bin");
-    graph.reserve_acquisition_capacity(host).unwrap();
+    graph.reserve_acquisition_capacity(exec).unwrap();
+    let identity_reservation =
+        reserve_graph_storage(exec, resolving.path().as_str().len() as u64).unwrap();
     assert!(
         graph
-            .begin_acquisition(
-                host,
-                resolving.try_clone().unwrap(),
-                reserve_graph_storage(host, resolving.path().as_str().len() as u64).unwrap(),
-            )
+            .begin_acquisition(exec, resolving.try_clone().unwrap(), identity_reservation,)
             .unwrap()
     );
-    assert_eq!(graph.find_node(host, &resolving).unwrap(), None);
+    assert_eq!(graph.find_node(exec, &resolving).unwrap(), None);
     assert!(matches!(
-        graph.acquisition_state(host, &resolving).unwrap(),
+        graph.acquisition_state(exec, &resolving).unwrap(),
         Some(ResourceAcquisitionState::Resolving)
     ));
     graph
         .complete_failed_acquisition(
-            host,
+            exec,
             &resolving,
             ScopeAbortCause::AssetOpen(AssetOpenError::new(
                 AssetOpenStage::Open,
@@ -260,9 +259,9 @@ fn indexed_node_lookup_requires_an_available_bound_exact_identity() {
             PendingNegativeObservation::None,
         )
         .unwrap();
-    assert_eq!(graph.find_node(host, &resolving).unwrap(), None);
+    assert_eq!(graph.find_node(exec, &resolving).unwrap(), None);
     assert!(matches!(
-        graph.acquisition_state(host, &resolving).unwrap(),
+        graph.acquisition_state(exec, &resolving).unwrap(),
         Some(ResourceAcquisitionState::Failed { .. })
     ));
     drop(snapshot);
@@ -273,75 +272,71 @@ fn indexed_node_lookup_requires_an_available_bound_exact_identity() {
 #[test]
 fn abandoned_cache_slot_reuse_binds_only_the_new_available_identity() {
     let limits = ResourceLimits::default();
-    let (owner, account) = store_owner_and_account(&limits, ImportOperationControl::default());
-    let host = owner.host();
+    let (mut owner, account) = store_owner_and_account(&limits, ImportOperationControl::default());
+    let exec = &mut owner.execution().unwrap();
     let authority = AuthorityDomain::new();
     let primary_path = AssetPath::new("main.bin").unwrap();
     let role = DependencyRoleId::new("test.resource").unwrap();
     let mut graph = ResourceGraph::new(limits);
     graph
-        .bind_primary(host, &authority, &primary_path, b"primary")
+        .bind_primary(exec, &authority, &primary_path, b"primary")
         .unwrap();
     let primary = graph.source_for_primary().unwrap();
     let anchor = dependency_identity(&authority, "anchor.bin");
-    let (anchor_cache, snapshot) = cache_snapshot(&mut graph, host, &anchor, b"x");
-    let anchor_node = add_available(&mut graph, host, primary, &role, &anchor, b"x");
+    let (anchor_cache, snapshot) = cache_snapshot(&mut graph, exec, &anchor, b"x");
+    let anchor_node = add_available(&mut graph, exec, primary, &role, &anchor, b"x");
     let abandoned = dependency_identity(&authority, "abandoned.bin");
-    graph.reserve_acquisition_capacity(host).unwrap();
+    graph.reserve_acquisition_capacity(exec).unwrap();
+    let identity_reservation =
+        reserve_graph_storage(exec, abandoned.path().as_str().len() as u64).unwrap();
     assert!(
         graph
-            .begin_acquisition(
-                host,
-                abandoned.try_clone().unwrap(),
-                reserve_graph_storage(host, abandoned.path().as_str().len() as u64).unwrap(),
-            )
+            .begin_acquisition(exec, abandoned.try_clone().unwrap(), identity_reservation,)
             .unwrap()
     );
     let abandoned_slot = graph
         .cache
-        .controlled_record_index(host, &abandoned)
+        .controlled_record_index(exec, &abandoned)
         .unwrap()
         .unwrap();
     assert_ne!(abandoned_slot, anchor_cache);
-    assert_eq!(graph.find_node(host, &abandoned).unwrap(), None);
-    graph.abandon_acquisition(host, &abandoned).unwrap();
-    assert!(graph.acquisition_state(host, &abandoned).unwrap().is_none());
-    assert_eq!(graph.find_node(host, &abandoned).unwrap(), None);
+    assert_eq!(graph.find_node(exec, &abandoned).unwrap(), None);
+    graph.abandon_acquisition(exec, &abandoned).unwrap();
+    assert!(graph.acquisition_state(exec, &abandoned).unwrap().is_none());
+    assert_eq!(graph.find_node(exec, &abandoned).unwrap(), None);
     assert!(graph.source_for_cache(abandoned_slot).is_err());
 
     let replacement = dependency_identity(&authority, "replacement.bin");
-    graph.reserve_acquisition_capacity(host).unwrap();
+    graph.reserve_acquisition_capacity(exec).unwrap();
+    let identity_reservation =
+        reserve_graph_storage(exec, replacement.path().as_str().len() as u64).unwrap();
     assert!(
         graph
-            .begin_acquisition(
-                host,
-                replacement.try_clone().unwrap(),
-                reserve_graph_storage(host, replacement.path().as_str().len() as u64).unwrap(),
-            )
+            .begin_acquisition(exec, replacement.try_clone().unwrap(), identity_reservation,)
             .unwrap()
     );
     let replacement_slot = graph
-        .complete_acquisition(host, &replacement, Arc::clone(&snapshot), None)
+        .complete_acquisition(exec, &replacement, Arc::clone(&snapshot), None)
         .unwrap();
     assert_eq!(replacement_slot, abandoned_slot);
     assert_eq!(graph.origin_identity(replacement_slot), Some(&replacement));
-    assert_eq!(graph.find_node(host, &replacement).unwrap(), None);
+    assert_eq!(graph.find_node(exec, &replacement).unwrap(), None);
     assert!(graph.source_for_cache(replacement_slot).is_err());
-    let replacement_node = add_available(&mut graph, host, primary, &role, &replacement, b"x");
+    let replacement_node = add_available(&mut graph, exec, primary, &role, &replacement, b"x");
     assert_ne!(replacement_node, anchor_node);
     assert_eq!(
         graph.source_for_cache(replacement_slot).unwrap(),
         replacement_node
     );
     assert_eq!(
-        graph.find_node(host, &replacement).unwrap(),
+        graph.find_node(exec, &replacement).unwrap(),
         Some(replacement_node)
     );
-    assert_eq!(graph.find_node(host, &abandoned).unwrap(), None);
-    assert!(graph.acquisition_state(host, &abandoned).unwrap().is_none());
+    assert_eq!(graph.find_node(exec, &abandoned).unwrap(), None);
+    assert!(graph.acquisition_state(exec, &abandoned).unwrap().is_none());
     assert_eq!(graph.source_for_cache(anchor_cache).unwrap(), anchor_node);
-    assert_eq!(graph.find_node(host, &anchor).unwrap(), Some(anchor_node));
-    graph.seal(host).unwrap();
+    assert_eq!(graph.find_node(exec, &anchor).unwrap(), Some(anchor_node));
+    graph.seal(exec).unwrap();
     let manifest = graph.take_manifest().unwrap();
     assert_eq!(manifest.counts().node_class_count(), 3);
     assert_eq!(manifest.counts().available_relation_occurrence_count(), 2);
@@ -363,56 +358,54 @@ fn acquisition_operations_observe_cancellation_before_the_next_probe() {
         let limits = ResourceLimits::default();
         let cancellation = baozi_operation::CancellationToken::new();
         let control = ImportOperationControl::default().with_cancellation(cancellation.clone());
-        let (owner, account) = store_owner_and_account(&limits, control);
-        let host = owner.host();
+        let (mut owner, account) = store_owner_and_account(&limits, control);
+        let exec = &mut owner.execution().unwrap();
         let authority = AuthorityDomain::new();
         let mut graph = ResourceGraph::new(limits);
         graph
             .bind_primary(
-                host,
+                exec,
                 &authority,
                 &AssetPath::new("main.bin").unwrap(),
                 b"primary",
             )
             .unwrap();
         let anchor = dependency_identity(&authority, "anchor.bin");
-        let (_, snapshot) = cache_snapshot(&mut graph, host, &anchor, b"x");
+        let (_, snapshot) = cache_snapshot(&mut graph, exec, &anchor, b"x");
         let identity = dependency_identity(&authority, "resolving.bin");
-        graph.reserve_acquisition_capacity(host).unwrap();
+        graph.reserve_acquisition_capacity(exec).unwrap();
+        let identity_reservation =
+            reserve_graph_storage(exec, identity.path().as_str().len() as u64).unwrap();
         assert!(
             graph
-                .begin_acquisition(
-                    host,
-                    identity.try_clone().unwrap(),
-                    reserve_graph_storage(host, identity.path().as_str().len() as u64).unwrap(),
-                )
+                .begin_acquisition(exec, identity.try_clone().unwrap(), identity_reservation,)
                 .unwrap()
         );
         let candidate = dependency_identity(&authority, "candidate.bin");
-        graph.reserve_acquisition_capacity(host).unwrap();
+        graph.reserve_acquisition_capacity(exec).unwrap();
         let mut candidate_reservation =
-            Some(reserve_graph_storage(host, candidate.path().as_str().len() as u64).unwrap());
-        let before = graph_work(host);
+            Some(reserve_graph_storage(exec, candidate.path().as_str().len() as u64).unwrap());
+        let before = graph_work(exec);
         cancellation.cancel();
         let result = match operation {
             "lookup" => graph
-                .acquisition_state(host, &identity)
+                .acquisition_state(exec, &identity)
                 .map(|_| ())
                 .map_err(ResourceGraphError::into_scope_cause),
             "begin" => graph
-                .begin_acquisition(host, candidate, candidate_reservation.take().unwrap())
+                .begin_acquisition(exec, candidate, candidate_reservation.take().unwrap())
                 .map(|_| ())
                 .map_err(ResourceGraphError::into_scope_cause),
             "available" => graph
-                .complete_acquisition(host, &identity, Arc::clone(&snapshot), None)
+                .complete_acquisition(exec, &identity, Arc::clone(&snapshot), None)
                 .map(|_| ())
                 .map_err(ResourceGraphError::into_scope_cause),
             "abandon" => graph
-                .abandon_acquisition(host, &identity)
+                .abandon_acquisition(exec, &identity)
                 .map_err(ResourceGraphError::into_scope_cause),
             "failed" => graph
                 .complete_failed_acquisition(
-                    host,
+                    exec,
                     &identity,
                     ScopeAbortCause::AssetOpen(AssetOpenError::new(
                         AssetOpenStage::Open,
@@ -433,7 +426,7 @@ fn acquisition_operations_observe_cancellation_before_the_next_probe() {
             ),
             "{operation} must preserve cancellation instead of reporting a missing cache transition"
         );
-        assert_eq!(graph_work(host), before);
+        assert_eq!(graph_work(exec), before);
         drop(candidate_reservation);
         drop(snapshot);
         drop(graph);
@@ -444,20 +437,20 @@ fn acquisition_operations_observe_cancellation_before_the_next_probe() {
 #[test]
 fn acquisition_lookup_preserves_graph_work_denial_as_a_scope_ledger_failure() {
     let limits = ResourceLimits::default();
-    let (owner, account) = store_owner_and_account(&limits, ImportOperationControl::default());
-    let host = owner.host();
+    let (mut owner, account) = store_owner_and_account(&limits, ImportOperationControl::default());
+    let exec = &mut owner.execution().unwrap();
     let authority = AuthorityDomain::new();
     let identity = dependency_identity(&authority, "available.bin");
     let mut graph = ResourceGraph::new(limits);
-    let (_, snapshot) = cache_snapshot(&mut graph, host, &identity, b"x");
-    let before = graph_work(host);
-    host.tighten_dimension_policy(
+    let (_, snapshot) = cache_snapshot(&mut graph, exec, &identity, b"x");
+    let before = graph_work(exec);
+    exec.tighten_dimension_policy(
         ImportDimension::ResourceGraphWork,
         DimensionPolicy::counter(before, before, 0),
     )
     .unwrap();
     assert!(matches!(
-        graph.acquisition_state(host, &identity),
+        graph.acquisition_state(exec, &identity),
         Err(ResourceGraphError::Scope(ScopeAbortCause::Ledger(
             baozi_operation::LedgerCause::LimitExceeded {
                 class: baozi_operation::CounterClass::Attempted,
@@ -467,7 +460,7 @@ fn acquisition_lookup_preserves_graph_work_denial_as_a_scope_ledger_failure() {
             }
         ))) if value == before + 1 && limit == before
     ));
-    let work = host
+    let work = exec
         .dimension_state(ImportDimension::ResourceGraphWork)
         .unwrap();
     assert_eq!(work.attempted(), before + 1);

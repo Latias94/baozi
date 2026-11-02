@@ -3,14 +3,14 @@ mod common;
 use baozi_core::{MetadataValueRef, Vec3};
 use baozi_format_obj::{
     FORMAT_ID, ObjFailureCode, ObjImportOptions, ObjImporter, ObjTextDecodingMode,
-    format_descriptor, obj_import_option_key,
+    format_descriptor,
 };
 use baozi_import::authoring::FormatId;
 use baozi_import::{
-    ConformancePolicy, FormatSelection, ImportCause, ImportConfigOverlay, ImportDimension,
+    ConformancePolicy, Format, FormatSelection, ImportCause, ImportConfigOverlay, ImportDimension,
     ImportLossDisposition, ImportLossKind, ImportOperationControl, ImportRequest,
     ImportRequestLayer, LossPolicy, OptionCompileLimits, RegistryBuildLimits, RegistryBuilder,
-    ResourceLimits, ScopeAbortCause, TextDecodingMode, import_asset,
+    ResourceLimits, ScopeAbortCause, TextDecodingMode,
 };
 use baozi_io::{AssetPath, MemoryAssetIo};
 use common::{
@@ -103,10 +103,10 @@ fn decoder_uses_only_frozen_effective_limit_authority() {
 
 #[test]
 fn option_schema_and_canonical_payload_are_stable() -> TestResult<()> {
-    let key = obj_import_option_key();
-    assert_eq!(key.schema().key().owner().as_str(), FORMAT_ID);
-    assert_eq!(key.schema().key().local().as_str(), "import-options");
-    assert_eq!(key.schema().version().get(), 1);
+    let schema = ObjImporter.option_schema().expect("OBJ option schema");
+    assert_eq!(schema.key().owner().as_str(), FORMAT_ID);
+    assert_eq!(schema.key().local().as_str(), "import-options");
+    assert_eq!(schema.version().get(), 1);
 
     let mut registry = RegistryBuilder::new();
     registry.register(ObjImporter)?;
@@ -116,22 +116,22 @@ fn option_schema_and_canonical_payload_are_stable() -> TestResult<()> {
         [1_u8, 0].as_slice(),
         [1_u8, 1].as_slice(),
     ] {
-        let envelope = key.envelope_from_canonical_payload(payload)?;
+        let envelope = schema.envelope_from_canonical_payload(payload)?;
         let config = ImportConfigOverlay::default()
             .with_format_selection(FormatSelection::Forced(FormatId::new(FORMAT_ID)?));
         let caller = ImportRequestLayer::new(config).try_with_format_option(envelope)?;
         let request = ImportRequest::new().with_caller_layer(caller);
-        snapshot.compile_request(&request, OptionCompileLimits::default())?;
+        snapshot.plan(&request, OptionCompileLimits::default())?;
     }
     Ok(())
 }
 
 #[test]
-fn option_codec_rejects_noncanonical_payloads() -> TestResult<()> {
+fn typed_options_reject_noncanonical_payloads() -> TestResult<()> {
     let mut registry = RegistryBuilder::new();
     registry.register(ObjImporter)?;
     let snapshot = registry.freeze(RegistryBuildLimits::default())?;
-    let key = obj_import_option_key();
+    let schema = ObjImporter.option_schema().expect("OBJ option schema");
 
     for payload in [
         Vec::new(),
@@ -141,14 +141,14 @@ fn option_codec_rejects_noncanonical_payloads() -> TestResult<()> {
         vec![0, 0],
         vec![1, 0, 0],
     ] {
-        let envelope = key.envelope_from_canonical_payload(payload)?;
+        let envelope = schema.envelope_from_canonical_payload(payload)?;
         let config = ImportConfigOverlay::default()
             .with_format_selection(FormatSelection::Forced(FormatId::new(FORMAT_ID)?));
         let caller = ImportRequestLayer::new(config).try_with_format_option(envelope)?;
         let request = ImportRequest::new().with_caller_layer(caller);
         assert!(
             snapshot
-                .compile_request(&request, OptionCompileLimits::default())
+                .plan(&request, OptionCompileLimits::default())
                 .is_err(),
             "payload must be rejected"
         );
@@ -169,23 +169,18 @@ fn option_layers_preserve_absent_fields_and_caller_wins() -> TestResult<()> {
         let mut registry = RegistryBuilder::new();
         registry.register(ObjImporter)?;
         let snapshot = registry.freeze(RegistryBuildLimits::default())?;
-        let key = obj_import_option_key();
+        let schema = ObjImporter.option_schema().expect("OBJ option schema");
         let preset = ImportRequestLayer::new(ImportConfigOverlay::default())
-            .try_with_format_option(key.envelope_from_canonical_payload(preset_payload)?)?;
+            .try_with_format_option(schema.envelope_from_canonical_payload(preset_payload)?)?;
         let config = ImportConfigOverlay::default()
             .with_format_selection(FormatSelection::Forced(FormatId::new(FORMAT_ID)?))
             .with_conformance_policy(ConformancePolicy::AllowDeclaredRecovery)
             .with_loss_policy(LossPolicy::preserve_or_fail().allow(ImportLossKind::FormatRecovery));
         let caller = ImportRequestLayer::new(config)
-            .try_with_format_option(key.envelope_from_canonical_payload(caller_payload)?)?;
+            .try_with_format_option(schema.envelope_from_canonical_payload(caller_payload)?)?;
         let request = ImportRequest::from_layers(preset, caller);
-        let request = snapshot.compile_request(&request, OptionCompileLimits::default())?;
-        operation_result(import_asset(
-            &request,
-            &io,
-            source,
-            ImportOperationControl::default(),
-        ))
+        let request = snapshot.plan(&request, OptionCompileLimits::default())?;
+        operation_result(request.read_asset(&io, source, ImportOperationControl::default()))
     }
 
     let bytes = recovered_obj(&[0xff], b"");

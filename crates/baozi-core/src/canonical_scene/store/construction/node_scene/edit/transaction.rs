@@ -16,7 +16,6 @@ mod space;
 mod tangents_tests;
 mod validation;
 use super::plan::{BoundPendingNodeSceneEdit, NodeSceneEditPlanError, NodeSceneEditProgram};
-use crate::canonical_scene::store::construction::node_scene::NodeSceneDraft;
 use crate::canonical_scene::store::construction::node_scene::materialization::{
     NodeSceneActivationOutput, NodeSceneEvidenceRecipe, NodeSceneLaneOutput,
 };
@@ -1261,10 +1260,7 @@ impl<O: OperationOwner> SceneEditExecutionPlan<'_, '_, O> {
         let output = SceneEditOutput {
             scene: NodeSceneLaneOutput::from_inner(NodeSceneActivationOutput {
                 tables: graph.tables,
-                draft: NodeSceneDraft {
-                    brand: self.brand,
-                    directory,
-                },
+                brand: self.brand,
                 refs: graph.refs,
                 evidence_counts: pending.counts.evidence,
                 central_validation: pending.counts.central_validation_plan,

@@ -3,12 +3,12 @@ use super::*;
 const INDICES: [u32; 6] = [3, 1, 1, 0, 2, 3];
 
 pub(super) fn submit(
-    scope: &ParseScope<'_>,
+    context: &mut ParseContext<'_>,
     topology: GeometryTopologyAuthoring<'static>,
     corners: u8,
     indexed: bool,
     repeated_end: bool,
-) -> ParseResult<SceneDraft> {
+) -> ParseResult<()> {
     let positions = [
         0.0, -0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 3.0, 0.0, 0.0, 2.0, 1.0, 0.0,
     ];
@@ -83,7 +83,7 @@ pub(super) fn submit(
         AuthoringRange::new(0, 4),
     )];
     let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
-    scope.submit_static_scene(
+    context.submit(
         StaticSceneBuilder::new(Presence::Present(&[]), &[]).with_geometry(
             &meshes,
             &primitives,

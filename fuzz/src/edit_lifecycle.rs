@@ -16,7 +16,7 @@ use baozi::{
 };
 use baozi_format_obj::{FORMAT_ID as OBJ_FORMAT_ID, ObjImporter};
 use baozi_format_ply::PlyImporter;
-use baozi_import::{ImportOperationControl, PreparedImportRequest, ResourceLimits, import_bytes};
+use baozi_import::{ImportOperationControl, ImportPlan, ResourceLimits};
 
 use super::support;
 
@@ -40,31 +40,31 @@ pub fn run(data: &[u8]) -> Option<LifecycleRun> {
     if !(HEADER_BYTES..=HEADER_BYTES + MAX_ASSET_BYTES).contains(&data.len()) {
         return None;
     }
-    static OBJ_REQUEST: OnceLock<PreparedImportRequest> = OnceLock::new();
-    static PLY_REQUEST: OnceLock<PreparedImportRequest> = OnceLock::new();
+    static OBJ_REQUEST: OnceLock<ImportPlan> = OnceLock::new();
+    static PLY_REQUEST: OnceLock<ImportPlan> = OnceLock::new();
     let (request, path) = if data[0] & 1 == 0 {
         (
             OBJ_REQUEST.get_or_init(|| {
-                support::prepared_request_with_limits(ObjImporter, OBJ_FORMAT_ID, import_limits())
+                support::import_plan_with_limits(ObjImporter, OBJ_FORMAT_ID, import_limits())
             }),
             "lifecycle.obj",
         )
     } else {
         (
             PLY_REQUEST.get_or_init(|| {
-                support::prepared_request_with_limits(PlyImporter, "org.baozi.ply", import_limits())
+                support::import_plan_with_limits(PlyImporter, "org.baozi.ply", import_limits())
             }),
             "lifecycle.ply",
         )
     };
     let source = AssetPath::new(path).expect("the static lifecycle path is valid");
-    let report = import_bytes(
-        request,
-        source,
-        &data[HEADER_BYTES..],
-        ImportOperationControl::default(),
-    )
-    .ok()?;
+    let report = request
+        .read_bytes(
+            source,
+            &data[HEADER_BYTES..],
+            ImportOperationControl::default(),
+        )
+        .ok()?;
     let (mut scene, import_evidence) = report.into_parts();
     assert!(import_evidence.matches_scene(&scene));
     let input_generation = scene.generation();

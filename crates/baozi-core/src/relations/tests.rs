@@ -34,7 +34,7 @@ use crate::__scene_integration::authoring::{
     SpatialAuthoringBatch,
 };
 use crate::__scene_integration::integration::{
-    SceneConstruction, SceneOutcomeEvidenceTag, SceneSessionActivationBootstrap,
+    SceneConstruction, SceneOutcomeEvidenceTag, SceneParseOutcome, SceneSessionActivationBootstrap,
     consume_scene_freeze_permit, scene_failure_evidence_field_work,
     scene_failure_evidence_member_count,
 };
@@ -314,7 +314,6 @@ fn publish_scene(
     let CanonicalCentralValidationOutcome::Candidate(candidate) = central else {
         panic!("relations fixture central validation failed");
     };
-    let draft = candidate.output().draft();
     let CanonicalFreezePermitIssue::Ready(permit) = candidate
         .try_issue_freeze_permit(FinalProgress::new(Phase::Publish, Unit::Scene, 1))
         .unwrap()
@@ -323,7 +322,7 @@ fn publish_scene(
     };
     let (scene, evidence, ledger) = consume_scene_freeze_permit(
         permit,
-        Some(draft),
+        SceneParseOutcome::Accepted,
         |_| panic!("relations fixture generation rejected"),
         |token, joint, seal| {
             let PreparedStoreSuccessOutcome::Success(store) = joint.prepare(seal).unwrap() else {

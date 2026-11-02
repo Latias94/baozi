@@ -263,6 +263,7 @@ pub mod __retained_store_integration {
             PublishedStoreEvidenceOnlySuccessParts, RetainedStoreOperation,
             RetainedStorePublicationPlan, RetainedStoreReservation, RetainedStoreSharePlan,
             RetainedStoreStartError, RetainedStoreStartPlan, RetainedStoreWriterPlan,
+            StoreStorageObservation,
         };
         pub use crate::retained::{RetainedStorage, SharedRetainedStorage};
     }

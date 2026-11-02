@@ -16,6 +16,11 @@ evidence:
   - crates/baozi-operation/src/ledger/work.rs
   - crates/baozi-operation/src/ledger/evidence.rs
   - crates/baozi-operation/src/concrete_store/activation/preflight.rs
+  - docs/research/2026-11-02-typed-format-context-design.md
+  - crates/baozi-import/src/scope.rs
+  - crates/baozi-import/src/metered_storage.rs
+  - crates/baozi-import/src/store.rs
+  - crates/baozi-import/src/store/execution.rs
 related:
   - docs/adr/0002-runtime-concurrency-observability.md
   - docs/adr/0009-data-ownership-zero-copy-lifetimes-and-memory-layout.md
@@ -90,6 +95,49 @@ subtracts only the snapshot's own admission from current counters; it never rest
 global baseline. The outgoing snapshot's backing is excluded from current ledger-owned evidence
 while its construction overlap remains in the peak. Final composition uses preadmitted staging and
 retains the metered catalogue owners through the observation interval.
+
+### Import Execution Regions and Storage Identity
+
+`ParseContext::with_execution` lends `ParseExecution<'region, 'session>` through a higher-ranked
+callback whose result cannot depend on `'region`. The execution view borrows the existing
+invocation's disjoint work, storage, and control capabilities. It creates no new ledger, numeric
+backend, pending-work cache, or reference-counted work owner. The startup-admitted state slot is an
+ordinary exclusive value; no whole-owner `RefCell` guard or saved session host mediates parser work
+or container growth. The short numeric `LocalWork` borrows above remain part of the sole mechanism.
+ADR 0046 owns capability issuance and the outer submission lifecycle.
+
+Bind an `ImportWorkGroup<'region, N>` for the actual repeated dimensions at region or loop entry.
+`with_work` and `with_parent_work` receive that group and pass both execution and the existing
+`ImportWorkScope<'region, N>` to their callbacks. These are the invocation's real parser channels,
+not observed-work envelopes that preconsume unused headroom. Cold convenience adapters may bind
+once for a whole cold operation. Ordinary children remain non-nestable; a semantic parent may admit
+sequential children through the explicit executor. Group admission preserves caller-ordered
+attempted/item-limit checks; completion across the admitted dimensions remains atomic.
+
+Complete each physical prefix immediately. Poll before automatic parent completion and before a
+region returns success. Callback errors, incomplete returns, and cancellation retain the existing
+cause precedence; cleanup may resolve only a verified suffix. Work groups, scopes, and control
+cannot escape the region or cross threads. A forgotten scope remains outstanding in the same owner,
+including a zero-sized or fully completed scope, and prevents region success and terminal freeze.
+
+`MeteredVec`, `MeteredString`, `MeteredOrderedMap`, and `MeteredDecodedText` own their values and
+capacity reservations together. Their independent identity uses the session's existing issuer and
+terminal latch, without borrowing owner state, vocabulary, context, execution, or control. Such
+containers may leave one execution region and be reused in another from the same session, or supply
+borrowed authoring input after the region ends. Growth and metered copying receive the current
+`ParseExecution` explicitly and verify issuer identity before allocation or accounting mutation.
+Reserved writes need no executor when they only fill already admitted capacity: they do not enter
+the allocator or introduce a hidden poll after source-unit completion. Their caller still owns the
+bounded work and control boundary. Decoded logical bytes and allocator slack remain distinct.
+
+Text advancement and recovery, source-scope observation/finalization, dependency acquisition, graph
+updates, and hashing receive execution explicitly. Cursors and evidence builders retain genuine
+source/profile/issuer state and owned reservations; dependency handles retain actual IO/issuer
+lifetimes and snapshot owners. None reacquires a whole-session host or uses a context-address token.
+Ending a region releases no container capacity by itself. The actual payload is destroyed before
+its reservation. Temporary parser authoring storage is released before terminal freeze; retained
+failure and outcome evidence keeps its actual owners under the rules below. Submission uses the
+same dormant operation after the relevant region borrows end, without a second construction ledger.
 
 ### Evidence Planes
 
@@ -266,6 +314,8 @@ Negative:
 | Panic refunds completed work or consumes the panicking unit | Critical | finalize only returned units and retain prior prefix |
 | Item limits are bypassed by repeated replenishment | High | bind item limits to one logical item and reject unqualified replenishment |
 | Allocation occurs before budget admission | Critical | reserve and validate ownership before allocation/growth |
+| A container retains the executor or grows through a foreign session | High | retain an independent issuer/latch and require a matching explicit execution for growth |
+| A region leaks work or silently closes a forgotten scope | Critical | use higher-ranked region lifetimes and verify outstanding ownership before region success and terminal freeze |
 | Live bytes are refunded while storage remains reachable | Critical | release only after verified owner destruction; contain uncertain release |
 | Shared retained storage is charged once per Scene | High | separate operation attribution from ADR 0044 physical ownership |
 | Ordinary work exhausts failure reporting | High | protect a bounded terminal allowance inside the hard total |
@@ -281,12 +331,21 @@ Negative:
 | Live release | current live and active reservations reach zero after owner drop | allocation/drop-order tests |
 | Peak accuracy | peak equals the greatest simultaneously owned admitted capacity | staged allocation tests |
 | Semantic envelope | actual consumed work equals the sealed description on success | canonical construction/validation tests |
+| Region ownership | work/control cannot escape or cross threads; session-bound containers can leave a region | compile-fail and compile-pass capability tests |
+| Parser scope completion | forgotten zero/full scopes and incomplete callbacks cannot yield success | parser work and finalization contract tests |
+| Container lifetime | same-session growth remains admitted; foreign-session growth has no allocation side effects; payload drops before reservation | metered-storage identity, growth, and drop tests |
 | Physical/logical separation | shared payload is physically charged once without changing operation evidence | multi-generation lineage tests |
 | Terminal availability | bounded rich failure or minimal fallback exists for every safely finalizable operation | terminal-budget matrix |
 
 ## Acceptance Criteria
 
 - Every admitted operation has one ledger and one domain-owned phase/dimension vocabulary.
+- Import execution borrows disjoint capabilities from an ordinary admitted state slot, without a
+  whole-owner `RefCell`, saved parser host, or second work backend.
+- Region-bound parser groups/scopes use the existing channels and preserve ordered admission,
+  completed prefixes, parent/child rules, failure precedence, and outstanding-scope detection.
+- Containers retain independent session identity and actual reservations, receive execution for
+  growth, and may outlive a region without retaining work or control authority.
 - Attempted, consumed, live, peak, committed output, and outcome evidence remain distinct.
 - Attempted and consumed counters never decrease; completed work is never refunded.
 - An action consumes only after normal return, including a returned semantic rejection.
@@ -295,3 +354,23 @@ Negative:
 - Protected terminal work is bounded, included in the hard total, and inaccessible to ordinary work.
 - Retained physical ownership follows ADR 0044 and cannot be reconstructed from ledger counters.
 - Public outcomes expose immutable semantic evidence, not raw ledger or retained-store authority.
+
+## Amendment History
+
+### 2026-11-02: Separate import execution borrows from metered storage identity
+
+- Affected: `Decision / Invocation Work and Independent Storage`, `Import Execution Regions and
+  Storage Identity`, and their risks, success metrics, and acceptance criteria.
+- Previous: the invocation-local work/storage split did not specify the replacement for import's
+  whole-owner host projection or the region-independent identity of parser containers.
+- New: higher-ranked `ParseExecution` regions borrow the existing disjoint capabilities; parser
+  groups use the real work channels and containers retain an independent session issuer/latch.
+  Growth receives execution explicitly; the state slot remains an ordinary admitted value.
+- Impact: parser work and storage call sites change, while attempted/consumed prefixes, item limits,
+  outstanding-scope detection, control precedence, capacity qualification, protected terminal work,
+  payload-before-reservation destruction, and ADR 0044 physical ownership remain required.
+- Review basis: the [typed-format/context design](../research/2026-11-02-typed-format-context-design.md),
+  including its independent feasibility review, and the operation/import sources above. Compiler,
+  runtime, memory, and performance qualification remain separate integration work.
+- Rationale: this refines how import borrows the same ledger and storage owners; it does not select
+  a new accounting model or change any evidence plane.

@@ -20,8 +20,8 @@ use baozi_import::authoring::{
     SourceObjectLocator, SpatialAuthoringBatch,
 };
 use baozi_import::{
-    DetectionOutcome, DetectionResult, DetectionScope, FormatImporter, ParseResult, ParseScope,
-    Probe, ReadHint, SceneDraft,
+    CompiledOptions, DetectionOutcome, DetectionResult, DetectionScope, Format, NoFormatOptions,
+    OptionCompileError, ParseContext, ParseResult, Probe, ReadHint, RegistryBuildScope,
 };
 
 const JSON: &[u8] = br#"{ "nested": [null, 1.00e+02, {"escape":"\u0061"}] }"#;
@@ -30,7 +30,16 @@ const JSON: &[u8] = br#"{ "nested": [null, 1.00e+02, {"escape":"\u0061"}] }"#;
 // together. All observations below use the ordinary baozi facade, including after real edits.
 struct ProvenanceFixture;
 
-impl FormatImporter for ProvenanceFixture {
+impl Format for ProvenanceFixture {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> std::result::Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("org.baozi.provenance-fixture").unwrap(),
@@ -52,7 +61,7 @@ impl FormatImporter for ProvenanceFixture {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
         let roots = [NodeLocalId::new(1)];
         let nodes = [
             NodeAuthoringNode::new(
@@ -191,7 +200,7 @@ impl FormatImporter for ProvenanceFixture {
                 ExtensionValueRef::String("canonical tangent annotation"),
             ),
         ];
-        scope.submit_scene(SceneAuthoringBatch::new(
+        scope.submit_complete(SceneAuthoringBatch::new(
             SpatialAuthoringBatch::new(&SceneSpace::STANDARD_TARGET, &[], &[]),
             NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
             AppearanceAuthoringBatch::empty(),

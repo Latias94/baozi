@@ -2,14 +2,13 @@ mod support;
 
 use baozi_core::FormatId;
 use baozi_import::{
-    AuthorizedDependency, CapabilityStatus, CauseOwner, DependencyPolicyError, DependencyReference,
-    DependencyRequirement, DependencyResolver, DependencyRoleId, DetectionOutcome, DetectionResult,
-    DetectionScope, FormatCapability, FormatDescriptor, FormatEncoding, FormatImporter,
-    ImportCause, ImportDimension, ImportFailure, ImportOperationControl, ImportPhase, ImportReport,
-    ImportRequest, ImportResult, OptionCompileLimits, ParseResult, ParseScope,
-    PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
-    SceneDraft, ScopeAbortCause, import_asset as run_import_asset,
-    import_asset_with_resolver as run_import_asset_with_resolver,
+    AuthorizedDependency, CapabilityStatus, CauseOwner, CompiledOptions, DependencyPolicyError,
+    DependencyReference, DependencyRequirement, DependencyResolver, DependencyRoleId,
+    DetectionOutcome, DetectionResult, DetectionScope, Format, FormatCapability, FormatDescriptor,
+    FormatEncoding, ImportCause, ImportDimension, ImportFailure, ImportOperationControl,
+    ImportPhase, ImportPlan, ImportReport, ImportRequest, ImportResult, NoFormatOptions,
+    OptionCompileError, OptionCompileLimits, ParseContext, ParseResult, ReadConfidence, ReadHint,
+    RegistryBuildLimits, RegistryBuildScope, RegistryBuilder, ScopeAbortCause,
 };
 use baozi_io::{
     AssetIo, AssetLength, AssetOpenError, AssetOpenWorkError, AssetPath, AssetReadError,
@@ -43,29 +42,27 @@ fn operation_result<T>(result: ImportResult<T>) -> Result<T, ImportFailure> {
     clippy::result_large_err,
     reason = "cancellation contract assertions inspect complete bounded import failure evidence"
 )]
-fn import_asset(
-    request: &PreparedImportRequest,
+fn read_asset(
+    request: &ImportPlan,
     io: &dyn AssetIo,
     source: AssetPath,
     control: ImportOperationControl,
 ) -> Result<ImportReport, ImportFailure> {
-    operation_result(run_import_asset(request, io, source, control))
+    operation_result(request.read_asset(io, source, control))
 }
 
 #[allow(
     clippy::result_large_err,
     reason = "cancellation contract assertions inspect complete bounded import failure evidence"
 )]
-fn import_asset_with_resolver(
-    request: &PreparedImportRequest,
+fn read_asset_with_resolver(
+    request: &ImportPlan,
     io: &dyn AssetIo,
     source: AssetPath,
     resolver: &dyn DependencyResolver,
     control: ImportOperationControl,
 ) -> Result<ImportReport, ImportFailure> {
-    operation_result(run_import_asset_with_resolver(
-        request, io, source, resolver, control,
-    ))
+    operation_result(request.read_asset_with_resolver(io, source, resolver, control))
 }
 
 struct EmptyImporter;
@@ -85,7 +82,16 @@ struct CachedDependencyCancellationImporter {
     late_successes: Arc<AtomicUsize>,
 }
 
-impl FormatImporter for EmptyImporter {
+impl Format for EmptyImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("dev.baozi.test.cancellation").unwrap(),
@@ -107,12 +113,21 @@ impl FormatImporter for EmptyImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        support::submit_minimal_scene(scope)
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        support::submit_minimal_scene(context)
     }
 }
 
-impl FormatImporter for RequiredDependencyImporter {
+impl Format for RequiredDependencyImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("dev.baozi.test.dependency-cancellation").unwrap(),
@@ -135,9 +150,12 @@ impl FormatImporter for RequiredDependencyImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        let _dependency = support::required_root_dependency(scope, &self.role, "sidecar.bin")?;
-        support::submit_minimal_scene(scope)
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        context.with_execution(|exec| -> ParseResult<()> {
+            let _dependency = support::required_root_dependency(exec, &self.role, "sidecar.bin")?;
+            Ok(())
+        })?;
+        support::submit_minimal_scene(context)
     }
 }
 
@@ -153,7 +171,16 @@ impl SceneSubmissionCancellationImporter {
     }
 }
 
-impl FormatImporter for SceneSubmissionCancellationImporter {
+impl Format for SceneSubmissionCancellationImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("dev.baozi.test.scene-submission-cancellation").unwrap(),
@@ -175,19 +202,28 @@ impl FormatImporter for SceneSubmissionCancellationImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
         self.cancel();
         match support::submit_minimal_scene(scope) {
-            Ok(draft) => {
+            Ok(()) => {
                 self.record_late_success(true);
-                Ok(draft)
+                Ok(())
             }
             Err(failure) => Err(failure),
         }
     }
 }
 
-impl FormatImporter for CachedDependencyCancellationImporter {
+impl Format for CachedDependencyCancellationImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("dev.baozi.test.cached-dependency-cancellation").unwrap(),
@@ -210,19 +246,21 @@ impl FormatImporter for CachedDependencyCancellationImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        let first = support::required_root_dependency(scope, &self.role, "sidecar.bin")?;
-        drop(first);
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        context.with_execution(|exec| -> ParseResult<()> {
+            let first = support::required_root_dependency(exec, &self.role, "sidecar.bin")?;
+            drop(first);
 
-        self.cancellation.cancel();
-        let second_succeeded =
-            support::required_root_dependency(scope, &self.role, "sidecar.bin").is_ok();
-        if second_succeeded {
-            self.late_successes.fetch_add(1, Ordering::AcqRel);
-        }
+            self.cancellation.cancel();
+            let second_succeeded =
+                support::required_root_dependency(exec, &self.role, "sidecar.bin").is_ok();
+            if second_succeeded {
+                self.late_successes.fetch_add(1, Ordering::AcqRel);
+            }
 
-        scope.poll()?;
-        unreachable!("cancelled parser must not continue")
+            exec.poll()?;
+            unreachable!("cancelled parser must not continue")
+        })
     }
 }
 
@@ -381,12 +419,12 @@ impl DependencyResolver for CountingResolver {
     }
 }
 
-fn request_for(importer: impl FormatImporter) -> PreparedImportRequest {
+fn request_for(importer: impl Format) -> ImportPlan {
     let mut registry = RegistryBuilder::new();
     registry.register(importer).unwrap();
     let snapshot = registry.freeze(RegistryBuildLimits::default()).unwrap();
     snapshot
-        .compile_request(&ImportRequest::new(), OptionCompileLimits::default())
+        .plan(&ImportRequest::new(), OptionCompileLimits::default())
         .unwrap()
 }
 
@@ -404,7 +442,7 @@ fn primary_open_cancellation_precedes_exact_length_charge_capacity_and_reader_en
     let request = request_for(EmptyImporter);
     let control = ImportOperationControl::default().with_cancellation(cancellation);
 
-    let failure = import_asset(&request, &io, source, control)
+    let failure = read_asset(&request, &io, source, control)
         .expect_err("cancellation raised by open must stop snapshot admission");
 
     let ImportCause::Scope(abort) = failure.cause() else {
@@ -451,7 +489,7 @@ fn dependency_open_cancellation_precedes_exact_length_charge_capacity_and_reader
     let request = request_for(RequiredDependencyImporter { role });
     let control = ImportOperationControl::default().with_cancellation(cancellation);
 
-    let failure = import_asset(&request, &io, source, control)
+    let failure = read_asset(&request, &io, source, control)
         .expect_err("dependency-open cancellation must stop snapshot admission");
 
     let ImportCause::Scope(abort) = failure.cause() else {
@@ -498,7 +536,7 @@ fn cancellation_is_admitted_before_complete_batch_scene_submission() {
     });
     let control = ImportOperationControl::default().with_cancellation(cancellation);
 
-    let failure = import_asset(&request, &io, source, control)
+    let failure = read_asset(&request, &io, source, control)
         .expect_err("Scene submission must admit cancellation before activation");
 
     let ImportCause::Scope(abort) = failure.cause() else {
@@ -543,7 +581,7 @@ fn cached_dependency_reuse_admits_cancellation_before_reference_and_resolver_wor
     });
     let control = ImportOperationControl::default().with_cancellation(cancellation);
 
-    let failure = import_asset_with_resolver(&request, &io, source, &resolver, control)
+    let failure = read_asset_with_resolver(&request, &io, source, &resolver, control)
         .expect_err("cached dependency reuse must admit cancellation before logical work");
 
     let ImportCause::Scope(abort) = failure.cause() else {

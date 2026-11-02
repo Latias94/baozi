@@ -1,8 +1,9 @@
+use crate::dependency::DependencyOriginIssuer;
 use crate::error::ScopeAbortCause;
 use crate::ledger::ImportDimension;
 use crate::metered_storage::AccountedVec;
 use crate::scope::{
-    ImportStorageClass, METERED_COPY_POLL_INTERVAL, ParseFailure, ParseResult, ParseScope,
+    ImportStorageClass, METERED_COPY_POLL_INTERVAL, ParseExecution, ParseFailure, ParseResult,
 };
 use baozi_io::AssetPath;
 use sha2::{Digest, Sha256};
@@ -327,8 +328,8 @@ impl fmt::Debug for SourceScopeRecord {
 
 /// Incremental, session-metered construction of one source-scope record.
 #[must_use = "finish and submit source-scope evidence or drop the builder"]
-pub struct SourceScopeRecordBuilder<'scope, 'session> {
-    scope: &'scope ParseScope<'session>,
+pub struct SourceScopeRecordBuilder<'session> {
+    issuer: &'session DependencyOriginIssuer,
     selection_request: SourceScopeSelectionRequest,
     selection_outcome: SourceScopeSelectionOutcome,
     counts: [SourceScopeCounts; SourceScopeEntityKind::COUNT],
@@ -341,9 +342,9 @@ pub struct SourceScopeRecordBuilder<'scope, 'session> {
     _document_storage: crate::store::ImportStoreReservation,
 }
 
-impl<'scope, 'session> SourceScopeRecordBuilder<'scope, 'session> {
+impl<'session> SourceScopeRecordBuilder<'session> {
     pub(crate) fn new(
-        scope: &'scope ParseScope<'session>,
+        scope: &mut ParseExecution<'_, 'session>,
         selection_request: SourceScopeSelectionRequest,
         selection_outcome: SourceScopeSelectionOutcome,
     ) -> ParseResult<Self> {
@@ -379,7 +380,7 @@ impl<'scope, 'session> SourceScopeRecordBuilder<'scope, 'session> {
             }
         }
         Ok(Self {
-            scope,
+            issuer: scope.session_issuer(),
             selection_request,
             selection_outcome,
             counts: [SourceScopeCounts::default(); SourceScopeEntityKind::COUNT],
@@ -401,32 +402,29 @@ impl<'scope, 'session> SourceScopeRecordBuilder<'scope, 'session> {
 
     pub fn observe(
         &mut self,
+        scope: &mut ParseExecution<'_, 'session>,
         kind: SourceScopeEntityKind,
         disposition: SourceScopeDisposition,
         identity: &str,
     ) -> ParseResult<()> {
-        self.scope.poll()?;
-        let identity_bytes = u64::try_from(identity.len()).map_err(|_| {
-            self.scope
-                .resource_limit_exceeded("source-scope-identity-bytes", u64::MAX)
-        })?;
-        self.scope.enforce_resource_limit(
+        scope.check_session(self.issuer)?;
+        scope.poll()?;
+        let identity_bytes = u64::try_from(identity.len())
+            .map_err(|_| scope.resource_limit_exceeded("source-scope-identity-bytes", u64::MAX))?;
+        scope.enforce_resource_limit(
             "source-scope-identity-bytes",
             identity_bytes,
-            u64::try_from(self.scope.limits().max_string_bytes).unwrap_or(u64::MAX),
+            u64::try_from(scope.limits().max_string_bytes).unwrap_or(u64::MAX),
         )?;
-        let observed_count = self.observed_count.checked_add(1).ok_or_else(|| {
-            self.scope
-                .resource_limit_exceeded("source-scope-items", u64::MAX)
-        })?;
+        let observed_count = self
+            .observed_count
+            .checked_add(1)
+            .ok_or_else(|| scope.resource_limit_exceeded("source-scope-items", u64::MAX))?;
         let observed_bytes = self
             .observed_bytes
             .checked_add(identity_bytes)
-            .ok_or_else(|| {
-                self.scope
-                    .resource_limit_exceeded("source-scope-digest-bytes", u64::MAX)
-            })?;
-        self.scope.source_scope_charge_batch(&[
+            .ok_or_else(|| scope.resource_limit_exceeded("source-scope-digest-bytes", u64::MAX))?;
+        scope.source_scope_charge_batch(&[
             (ImportDimension::SourceScopeItemCount, 1),
             (ImportDimension::SourceScopeDigestBytes, identity_bytes),
         ])?;
@@ -440,17 +438,14 @@ impl<'scope, 'session> SourceScopeRecordBuilder<'scope, 'session> {
             .enumerate()
         {
             if chunk_index != 0 {
-                self.scope.poll()?;
+                scope.poll()?;
             }
             self.digest.update(chunk);
         }
 
         self.counts[kind.index()]
             .increment(disposition)
-            .map_err(|()| {
-                self.scope
-                    .resource_limit_exceeded("source-scope-typed-count", u64::MAX)
-            })?;
+            .map_err(|()| scope.resource_limit_exceeded("source-scope-typed-count", u64::MAX))?;
         self.observed_count = observed_count;
         self.observed_bytes = observed_bytes;
 
@@ -458,26 +453,25 @@ impl<'scope, 'session> SourceScopeRecordBuilder<'scope, 'session> {
             return Ok(());
         }
 
-        let exceeds_count = observed_count > self.scope.limits().max_source_scope_detail_count;
-        let exceeds_bytes = observed_bytes > self.scope.limits().max_source_scope_detail_bytes;
+        let exceeds_count = observed_count > scope.limits().max_source_scope_detail_count;
+        let exceeds_bytes = observed_bytes > scope.limits().max_source_scope_detail_bytes;
         if exceeds_count || exceeds_bytes {
-            if !self
-                .scope
+            if !scope
                 .loss_policy()
                 .allows(crate::ImportLossKind::ProvenanceEvidenceLoss)
             {
                 let (resource, limit) = if exceeds_count {
                     (
                         "source-scope-detail-count",
-                        self.scope.limits().max_source_scope_detail_count,
+                        scope.limits().max_source_scope_detail_count,
                     )
                 } else {
                     (
                         "source-scope-detail-bytes",
-                        self.scope.limits().max_source_scope_detail_bytes,
+                        scope.limits().max_source_scope_detail_bytes,
                     )
                 };
-                return Err(self.scope.resource_limit_exceeded(resource, limit));
+                return Err(scope.resource_limit_exceeded(resource, limit));
             }
             self.detail_state = SourceScopeDetailState::Collapsed;
             self.detail_indexes = AccountedVec::new();
@@ -485,37 +479,37 @@ impl<'scope, 'session> SourceScopeRecordBuilder<'scope, 'session> {
             return Ok(());
         }
 
-        self.scope.source_scope_charge_batch(&[
+        scope.source_scope_charge_batch(&[
             (ImportDimension::SourceScopeDetailCount, 1),
             (ImportDimension::SourceScopeDetailBytes, identity_bytes),
         ])?;
 
         self.detail_indexes
             .try_reserve(1, "source-scope-detail-index", |bytes| {
-                self.scope.reserve_retained_storage_cause(
+                scope.reserve_retained_storage_cause(
                     ImportStorageClass::FormatNormalization,
                     bytes,
                     u64::from(bytes != 0),
                 )
             })
-            .map_err(|cause| self.scope.source_scope_abort(cause))?;
+            .map_err(|cause| scope.source_scope_abort(cause))?;
         self.detail_bytes
             .try_reserve(identity.len(), "source-scope-detail-bytes", |bytes| {
-                self.scope.reserve_retained_storage_cause(
+                scope.reserve_retained_storage_cause(
                     ImportStorageClass::FormatNormalization,
                     bytes,
                     u64::from(bytes != 0),
                 )
             })
-            .map_err(|cause| self.scope.source_scope_abort(cause))?;
+            .map_err(|cause| scope.source_scope_abort(cause))?;
 
         let start = self.detail_bytes.len();
         for chunk in identity.as_bytes().chunks(METERED_COPY_POLL_INTERVAL) {
-            self.scope.poll()?;
+            scope.poll()?;
             self.detail_bytes
                 .try_extend_from_slice_reserved(chunk)
                 .map_err(|()| {
-                    self.scope.source_scope_descriptor_failure(
+                    scope.source_scope_descriptor_failure(
                         "source-scope-detail-capacity-not-admitted",
                     )
                 })?;
@@ -528,17 +522,19 @@ impl<'scope, 'session> SourceScopeRecordBuilder<'scope, 'session> {
                 len: identity.len(),
             })
             .map_err(|_| {
-                self.scope
-                    .source_scope_descriptor_failure("source-scope-index-capacity-not-admitted")
+                scope.source_scope_descriptor_failure("source-scope-index-capacity-not-admitted")
             })?;
         Ok(())
     }
 
-    pub fn finish(self) -> ParseResult<FinalizedSourceScopeRecord<'scope, 'session>> {
-        self.scope.source_scope_preflight()?;
+    pub fn finish(
+        self,
+        scope: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<FinalizedSourceScopeRecord<'session>> {
+        scope.check_session(self.issuer)?;
         let digest = SourceScopeDigest(self.digest.finalize().into());
         Ok(FinalizedSourceScopeRecord {
-            scope: self.scope,
+            issuer: self.issuer,
             record: LiveSourceScopeRecord {
                 selection_request: self.selection_request,
                 selection_outcome: self.selection_outcome,
@@ -563,16 +559,16 @@ impl<'scope, 'session> SourceScopeRecordBuilder<'scope, 'session> {
     }
 }
 
-/// A finalized record that can only be submitted back to its originating ParseScope.
-#[must_use = "submit finalized source-scope evidence to its originating parse scope"]
-pub struct FinalizedSourceScopeRecord<'scope, 'session> {
-    scope: &'scope ParseScope<'session>,
+/// Finalized evidence carrying only its independent issuing session identity.
+#[must_use = "submit finalized source-scope evidence to its issuing session"]
+pub struct FinalizedSourceScopeRecord<'session> {
+    issuer: &'session DependencyOriginIssuer,
     record: LiveSourceScopeRecord,
 }
 
-impl FinalizedSourceScopeRecord<'_, '_> {
-    pub(crate) fn belongs_to(&self, scope: &ParseScope<'_>) -> bool {
-        std::ptr::eq(self.scope, scope)
+impl FinalizedSourceScopeRecord<'_> {
+    pub(crate) fn is_issued_by(&self, issuer: &DependencyOriginIssuer) -> bool {
+        std::ptr::eq(self.issuer, issuer)
     }
 
     pub(crate) fn into_record(self) -> LiveSourceScopeRecord {
@@ -624,7 +620,7 @@ impl LiveSourceScopeRecord {
     }
 }
 
-impl fmt::Debug for FinalizedSourceScopeRecord<'_, '_> {
+impl fmt::Debug for FinalizedSourceScopeRecord<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("FinalizedSourceScopeRecord")
@@ -632,7 +628,7 @@ impl fmt::Debug for FinalizedSourceScopeRecord<'_, '_> {
     }
 }
 
-impl ParseScope<'_> {
+impl ParseExecution<'_, '_> {
     pub(crate) fn source_scope_descriptor_failure(&self, code: &'static str) -> ParseFailure {
         self.source_scope_abort(ScopeAbortCause::DescriptorContract { code })
     }
@@ -641,11 +637,10 @@ impl ParseScope<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SceneDraft as CanonicalSceneDraft;
     use crate::metered_storage::inject_next_accounted_allocation_failure;
     use crate::{
-        CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
-        FormatDescriptor, FormatEncoding, FormatImporter, ImportCause, ImportConfigOverlay,
+        CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, Format,
+        FormatCapability, FormatDescriptor, FormatEncoding, ImportCause, ImportConfigOverlay,
         ImportLossKind, ImportOperationControl, ImportRequest, ImportRequestLayer, LossPolicy,
         OptionCompileLimits, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
         ResourceLimits, ResourceLimitsOverlay,
@@ -655,7 +650,16 @@ mod tests {
 
     struct CollapsedAllocationFailureImporter;
 
-    impl FormatImporter for CollapsedAllocationFailureImporter {
+    impl Format for CollapsedAllocationFailureImporter {
+        type Options = crate::NoFormatOptions;
+
+        fn compile_defaults(
+            &self,
+            scope: &mut crate::RegistryBuildScope<'_>,
+        ) -> Result<crate::CompiledOptions<Self::Options>, crate::OptionCompileError> {
+            crate::NoFormatOptions::compile_defaults(scope)
+        }
+
         fn descriptor(&self) -> FormatDescriptor {
             FormatDescriptor::builder(
                 FormatId::new("dev.baozi.test.source-scope-allocation").unwrap(),
@@ -677,24 +681,31 @@ mod tests {
             Ok(DetectionOutcome::Match(ReadConfidence::Certain))
         }
 
-        fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<CanonicalSceneDraft> {
-            let document = scope
-                .source()
-                .try_clone()
-                .map_err(|_| scope.allocation_failure("source-scope-document"))?;
-            let mut builder = scope.source_scope_builder(
-                SourceScopeSelectionRequest::DocumentDefault,
-                SourceScopeSelectionOutcome::parentless_node_projection(document),
-            )?;
-            builder.observe(
-                SourceScopeEntityKind::Scene,
-                SourceScopeDisposition::Selected,
-                "scene",
-            )?;
-            let finalized = builder.finish()?;
-            inject_next_accounted_allocation_failure();
-            scope.record_source_scope(finalized)?;
-            unreachable!("the injected loss-evidence allocation must fail")
+        fn parse(
+            &self,
+            _options: &Self::Options,
+            context: &mut crate::ParseContext<'_>,
+        ) -> ParseResult<()> {
+            context.with_execution(|scope| -> ParseResult<()> {
+                let document = scope
+                    .source()
+                    .try_clone()
+                    .map_err(|_| scope.allocation_failure("source-scope-document"))?;
+                let mut builder = scope.source_scope_builder(
+                    SourceScopeSelectionRequest::DocumentDefault,
+                    SourceScopeSelectionOutcome::parentless_node_projection(document),
+                )?;
+                builder.observe(
+                    scope,
+                    SourceScopeEntityKind::Scene,
+                    SourceScopeDisposition::Selected,
+                    "scene",
+                )?;
+                let finalized = builder.finish(scope)?;
+                inject_next_accounted_allocation_failure();
+                scope.record_source_scope(finalized)?;
+                unreachable!("the injected loss-evidence allocation must fail")
+            })
         }
     }
 
@@ -715,7 +726,7 @@ mod tests {
                 LossPolicy::preserve_or_fail().allow(ImportLossKind::ProvenanceEvidenceLoss),
             );
         let request = snapshot
-            .compile_request(
+            .plan(
                 &ImportRequest::from_layers(
                     ImportRequestLayer::default(),
                     ImportRequestLayer::new(config),
@@ -724,13 +735,13 @@ mod tests {
             )
             .unwrap();
 
-        let error = crate::import_bytes(
-            &request,
-            AssetPath::new("scene.scope-allocation").unwrap(),
-            b"scope",
-            ImportOperationControl::default(),
-        )
-        .unwrap_err();
+        let error = request
+            .read_bytes(
+                AssetPath::new("scene.scope-allocation").unwrap(),
+                b"scope",
+                ImportOperationControl::default(),
+            )
+            .unwrap_err();
         let failure = error
             .into_operation_failure()
             .expect("the allocation fault occurs after session creation");

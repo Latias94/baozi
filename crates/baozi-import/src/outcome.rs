@@ -537,7 +537,9 @@ impl ImportFailure {
         self.cause().scene_validation_error()
     }
 
-    /// Returns a later terminal interruption retained alongside a primary semantic rejection.
+    /// Returns a later terminal interruption retained alongside the primary failure.
+    ///
+    /// A later cancellation does not replace an already selected ledger or semantic rejection.
     pub const fn terminal_control_cause(&self) -> Option<&baozi_operation::ControlCause> {
         self.terminal_control_cause.as_ref()
     }

@@ -2,14 +2,13 @@ mod support;
 
 use baozi_core::{FormatId, SCENE_VALIDATION_POLL_INTERVAL};
 use baozi_import::{
-    CapabilityStatus, CauseOwner, DependencyRequirement, DependencyRoleId, DetectionAbort,
-    DetectionFaultCode, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
-    FormatDescriptor, FormatEncoding, FormatImporter, ImportCause, ImportDimension, ImportFailure,
-    ImportOperationControl, ImportPhase, ImportProgressPhase, ImportProgressUnit, ImportReport,
-    ImportRequest, ImportResult, OptionCompileLimits, ParseResult, ParseScope,
-    PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
-    SceneDraft, ScopeAbortCause, import_asset as run_import_asset,
-    import_bytes as run_import_bytes,
+    CapabilityStatus, CauseOwner, CompiledOptions, DependencyRequirement, DependencyRoleId,
+    DetectionAbort, DetectionFaultCode, DetectionOutcome, DetectionResult, DetectionScope, Format,
+    FormatCapability, FormatDescriptor, FormatEncoding, ImportCause, ImportDimension,
+    ImportFailure, ImportOperationControl, ImportPhase, ImportPlan, ImportProgressPhase,
+    ImportProgressUnit, ImportReport, ImportRequest, ImportResult, NoFormatOptions,
+    OptionCompileError, OptionCompileLimits, ParseContext, ParseResult, ReadConfidence, ReadHint,
+    RegistryBuildLimits, RegistryBuildScope, RegistryBuilder, ScopeAbortCause,
 };
 use baozi_io::{
     AssetIo, AssetLength, AssetOpenError, AssetOpenWorkError, AssetPath, AssetReadError,
@@ -51,26 +50,26 @@ fn operation_result<T>(result: ImportResult<T>) -> Result<T, ImportFailure> {
     clippy::result_large_err,
     reason = "cancellation stage assertions inspect complete bounded import failure evidence"
 )]
-fn import_asset(
-    request: &PreparedImportRequest,
+fn read_asset(
+    request: &ImportPlan,
     io: &dyn AssetIo,
     source: AssetPath,
     control: ImportOperationControl,
 ) -> Result<ImportReport, ImportFailure> {
-    operation_result(run_import_asset(request, io, source, control))
+    operation_result(request.read_asset(io, source, control))
 }
 
 #[allow(
     clippy::result_large_err,
     reason = "cancellation stage assertions inspect complete bounded import failure evidence"
 )]
-fn import_bytes(
-    request: &PreparedImportRequest,
+fn read_bytes(
+    request: &ImportPlan,
     source: AssetPath,
     bytes: &[u8],
     control: ImportOperationControl,
 ) -> Result<ImportReport, ImportFailure> {
-    operation_result(run_import_bytes(request, source, bytes, control))
+    operation_result(request.read_bytes(source, bytes, control))
 }
 
 fn descriptor(id: &str, name: &str, extension: &str) -> FormatDescriptor {
@@ -91,7 +90,16 @@ struct EmptyImporter {
     extension: &'static str,
 }
 
-impl FormatImporter for EmptyImporter {
+impl Format for EmptyImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         descriptor(self.id, self.name, self.extension)
     }
@@ -105,8 +113,8 @@ impl FormatImporter for EmptyImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        support::submit_minimal_scene(scope)
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        support::submit_minimal_scene(context)
     }
 }
 
@@ -114,7 +122,16 @@ struct RequiredDependencyImporter {
     role: DependencyRoleId,
 }
 
-impl FormatImporter for RequiredDependencyImporter {
+impl Format for RequiredDependencyImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("dev.baozi.test.dependency-read-cancellation")
@@ -138,15 +155,27 @@ impl FormatImporter for RequiredDependencyImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        let _dependency = support::required_root_dependency(scope, &self.role, "sidecar.bin")?;
-        support::submit_minimal_scene(scope)
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        context.with_execution(|exec| -> ParseResult<()> {
+            let _dependency = support::required_root_dependency(exec, &self.role, "sidecar.bin")?;
+            Ok(())
+        })?;
+        support::submit_minimal_scene(context)
     }
 }
 
 struct DeepSceneImporter;
 
-impl FormatImporter for DeepSceneImporter {
+impl Format for DeepSceneImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         descriptor(
             "dev.baozi.test.validation-cancellation",
@@ -164,8 +193,8 @@ impl FormatImporter for DeepSceneImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        support::submit_node_scene(scope, VALIDATION_NODE_COUNT)
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        support::submit_node_scene(context, VALIDATION_NODE_COUNT)
     }
 }
 
@@ -175,7 +204,16 @@ struct DetectorScanCancellationImporter {
     parse_calls: Arc<AtomicUsize>,
 }
 
-impl FormatImporter for DetectorScanCancellationImporter {
+impl Format for DetectorScanCancellationImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         descriptor(
             "dev.baozi.test.detector-scan-cancellation",
@@ -211,9 +249,9 @@ impl FormatImporter for DetectorScanCancellationImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
         self.parse_calls.fetch_add(1, Ordering::AcqRel);
-        support::submit_minimal_scene(scope)
+        support::submit_minimal_scene(context)
     }
 }
 
@@ -229,7 +267,16 @@ struct LatchThenPanicDetectorImporter {
     parse_calls: Arc<AtomicUsize>,
 }
 
-impl FormatImporter for LatchThenPanicDetectorImporter {
+impl Format for LatchThenPanicDetectorImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         descriptor(
             "dev.baozi.test.detector-latch-then-panic",
@@ -250,9 +297,9 @@ impl FormatImporter for LatchThenPanicDetectorImporter {
         panic!("detector panicked after latching cancellation")
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
         self.parse_calls.fetch_add(1, Ordering::AcqRel);
-        support::submit_minimal_scene(scope)
+        support::submit_minimal_scene(context)
     }
 }
 
@@ -275,7 +322,16 @@ struct DetectorContractImporter {
     parse_calls: Arc<AtomicUsize>,
 }
 
-impl FormatImporter for DetectorContractImporter {
+impl Format for DetectorContractImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         let (id, name, extension) = match self.violation {
             DetectorContractViolation::ZeroWork => (
@@ -372,13 +428,22 @@ impl FormatImporter for DetectorContractImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
         self.parse_calls.fetch_add(1, Ordering::AcqRel);
-        support::submit_minimal_scene(scope)
+        support::submit_minimal_scene(context)
     }
 }
 
-impl FormatImporter for RecoveringDetectorCancellationImporter {
+impl Format for RecoveringDetectorCancellationImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         descriptor(
             "dev.baozi.test.detector-cancellation-latch",
@@ -400,9 +465,9 @@ impl FormatImporter for RecoveringDetectorCancellationImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
         self.parse_calls.fetch_add(1, Ordering::AcqRel);
-        support::submit_minimal_scene(scope)
+        support::submit_minimal_scene(context)
     }
 }
 
@@ -500,7 +565,7 @@ impl CancellationSignal for ValidationCancellation {
     }
 }
 
-fn request_for(importer: impl FormatImporter) -> PreparedImportRequest {
+fn request_for(importer: impl Format) -> ImportPlan {
     let mut registry = RegistryBuilder::new();
     registry
         .register(importer)
@@ -509,7 +574,7 @@ fn request_for(importer: impl FormatImporter) -> PreparedImportRequest {
         .freeze(RegistryBuildLimits::default())
         .expect("cancellation stage registry freezes");
     snapshot
-        .compile_request(&ImportRequest::new(), OptionCompileLimits::default())
+        .plan(&ImportRequest::new(), OptionCompileLimits::default())
         .expect("cancellation stage request compiles")
 }
 
@@ -567,7 +632,7 @@ fn detector_scan_cancellation_stops_before_the_second_work_chunk() {
     });
     let control = ImportOperationControl::default().with_cancellation(cancellation);
 
-    let failure = import_bytes(
+    let failure = read_bytes(
         &request,
         AssetPath::new("asset.detector-scan-cancel")
             .expect("valid detector scan cancellation source"),
@@ -604,7 +669,7 @@ fn detector_cannot_recover_from_latched_scan_cancellation() {
     });
     let control = ImportOperationControl::default().with_cancellation(cancellation);
 
-    let failure = import_bytes(
+    let failure = read_bytes(
         &request,
         AssetPath::new("asset.detector-cancel-latch")
             .expect("valid detector cancellation latch source"),
@@ -633,7 +698,7 @@ fn detector_panic_cannot_replace_latched_cancellation_and_poisons_registration()
     let source = AssetPath::new("asset.detector-latch-then-panic")
         .expect("valid detector latch then panic source");
 
-    let first = import_bytes(
+    let first = read_bytes(
         &request,
         source.clone(),
         DETECTOR_SCAN_BYTES,
@@ -646,7 +711,7 @@ fn detector_panic_cannot_replace_latched_cancellation_and_poisons_registration()
     assert_eq!(detect_calls.load(Ordering::Acquire), 1);
     assert_eq!(parse_calls.load(Ordering::Acquire), 0);
 
-    let poisoned = import_bytes(
+    let poisoned = read_bytes(
         &request,
         source,
         DETECTOR_SCAN_BYTES,
@@ -680,7 +745,7 @@ fn detector_cannot_nest_work_callbacks() {
         parse_calls: Arc::clone(&parse_calls),
     });
 
-    let failure = import_bytes(
+    let failure = read_bytes(
         &request,
         AssetPath::new("asset.detector-nested-work").expect("valid nested work source"),
         DETECTOR_SCAN_BYTES,
@@ -701,7 +766,7 @@ fn detector_cannot_admit_zero_sized_work() {
         parse_calls: Arc::clone(&parse_calls),
     });
 
-    let failure = import_bytes(
+    let failure = read_bytes(
         &request,
         AssetPath::new("asset.detector-zero-work").expect("valid zero work source"),
         DETECTOR_SCAN_BYTES,
@@ -722,7 +787,7 @@ fn detector_callback_error_preserves_attempted_without_consumed_work() {
         parse_calls: Arc::clone(&parse_calls),
     });
 
-    let failure = import_bytes(
+    let failure = read_bytes(
         &request,
         AssetPath::new("asset.detector-callback-error").expect("valid callback error source"),
         DETECTOR_SCAN_BYTES,
@@ -743,7 +808,7 @@ fn detector_poll_during_callback_latches_contract_after_consumed_work() {
         parse_calls: Arc::clone(&parse_calls),
     });
 
-    let failure = import_bytes(
+    let failure = read_bytes(
         &request,
         AssetPath::new("asset.detector-poll-during-callback")
             .expect("valid poll during callback source"),
@@ -770,7 +835,7 @@ fn detector_abort_token_cannot_be_replayed_across_scopes() {
     let source =
         AssetPath::new("asset.detector-replay-abort").expect("valid detector abort replay source");
 
-    let first = import_bytes(
+    let first = read_bytes(
         &request,
         source.clone(),
         DETECTOR_SCAN_BYTES,
@@ -779,7 +844,7 @@ fn detector_abort_token_cannot_be_replayed_across_scopes() {
     .expect_err("the originating scope must retain the oversized-work failure");
     assert_detector_contract_failure(&first, "detector-work-quantum-exceeded", 0, 0);
 
-    let replay = import_bytes(
+    let replay = read_bytes(
         &request,
         source,
         DETECTOR_SCAN_BYTES,
@@ -812,7 +877,7 @@ fn primary_multichunk_read_polls_cancellation_before_the_second_chunk() {
     });
     let control = ImportOperationControl::default().with_cancellation(cancellation);
 
-    let failure = import_asset(&request, &io, source, control)
+    let failure = read_asset(&request, &io, source, control)
         .expect_err("primary read cancellation must stop before the second chunk");
 
     assert_signal_cancellation(&failure);
@@ -850,7 +915,7 @@ fn dependency_multichunk_read_polls_cancellation_before_the_second_chunk() {
     let request = request_for(RequiredDependencyImporter { role });
     let control = ImportOperationControl::default().with_cancellation(cancellation);
 
-    let failure = import_asset(&request, &io, source, control)
+    let failure = read_asset(&request, &io, source, control)
         .expect_err("dependency read cancellation must stop before the second chunk");
 
     assert_signal_cancellation(&failure);
@@ -901,7 +966,7 @@ fn import_validation_cancellation_preserves_draft_stage_and_releases_validation_
         );
     let request = request_for(DeepSceneImporter);
 
-    let failure = import_bytes(
+    let failure = read_bytes(
         &request,
         AssetPath::new("asset.validation-cancel").expect("valid validation cancellation source"),
         b"primary",
@@ -959,7 +1024,7 @@ fn final_progress_can_trigger_signal_cancellation_at_the_last_publication_checkp
         extension: "publication-checkpoint",
     });
 
-    let failure = import_bytes(&request, source, b"primary", control)
+    let failure = read_bytes(&request, source, b"primary", control)
         .expect_err("last pre-publication poll must observe signal cancellation");
 
     assert_signal_cancellation(&failure);

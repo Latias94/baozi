@@ -170,7 +170,7 @@ pub(super) struct ExternalImageResources<'scope> {
 impl ExternalImageResources<'_> {
     pub(super) fn get(
         &self,
-        ctx: &baozi_import::ParseScope<'_>,
+        ctx: &mut baozi_import::ParseExecution<'_, '_>,
         image_index: usize,
     ) -> super::Result<Option<(u32, &DependencySnapshot<'_>)>> {
         let values = self.values.as_slice();

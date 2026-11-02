@@ -1,13 +1,13 @@
 use baozi_import::authoring::FormatId;
 use baozi_import::{
-    AuthorizedDependency, CapabilityStatus, CauseOwner, DependencyPolicyError, DependencyReference,
-    DependencyRequirement, DependencyResolver, DependencyRoleId, DetectionOutcome, DetectionResult,
-    DetectionScope, FormatCapability, FormatDescriptor, FormatEncoding,
-    FormatFailureEvidenceProducer, FormatImporter, ImportCause, ImportConfigOverlay,
-    ImportDimension, ImportFailure, ImportLossKind, ImportOperationControl, ImportRequest,
-    ImportRequestLayer, LossPolicy, OptionCompileLimits, ParseResult, ParseScope,
-    PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
-    SceneDraft, ScopeAbortCause, import_asset, import_asset_with_resolver,
+    AuthorizedDependency, CapabilityStatus, CauseOwner, CompiledOptions, DependencyPolicyError,
+    DependencyReference, DependencyRequirement, DependencyResolver, DependencyRoleId,
+    DetectionOutcome, DetectionResult, DetectionScope, Format, FormatCapability, FormatDescriptor,
+    FormatEncoding, FormatFailureEvidenceProducer, ImportCause, ImportConfigOverlay,
+    ImportDimension, ImportFailure, ImportLossKind, ImportOperationControl, ImportPlan,
+    ImportRequest, ImportRequestLayer, LossPolicy, NoFormatOptions, OptionCompileError,
+    OptionCompileLimits, ParseContext, ParseResult, ReadConfidence, ReadHint, RegistryBuildLimits,
+    RegistryBuildScope, RegistryBuilder, ScopeAbortCause,
 };
 use baozi_io::{
     AssetIo, AssetOpenError, AssetOpenErrorKind, AssetOpenWorkError, AssetPath, AuthorityDomain,
@@ -36,7 +36,16 @@ impl FormatFailureEvidenceProducer for UnexpectedAvailability {
     }
 }
 
-impl FormatImporter for NestedRequiredImporter {
+impl Format for NestedRequiredImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("dev.baozi.test.dependency-context").unwrap(),
@@ -62,22 +71,24 @@ impl FormatImporter for NestedRequiredImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        let sidecar = scope.dependency(
-            &scope.root_origin(),
-            &role("sidecar.required"),
-            "materials/library.side",
-        )?;
-        let sidecar = scope.into_available_dependency(sidecar)?;
-        let payload =
-            scope.dependency(&sidecar.origin(), &role("payload.required"), self.reference);
-        if self.catch_failure {
-            // A plugin cannot erase the latched required failure by returning its own error.
-            drop(payload);
-        } else {
-            let _ = payload?;
-        }
-        Err(scope.format_failure(UnexpectedAvailability))
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        context.with_execution(|exec| -> ParseResult<()> {
+            let sidecar = exec.dependency(
+                &exec.root_origin(),
+                &role("sidecar.required"),
+                "materials/library.side",
+            )?;
+            let sidecar = exec.into_available_dependency(sidecar)?;
+            let payload =
+                exec.dependency(&sidecar.origin(), &role("payload.required"), self.reference);
+            if self.catch_failure {
+                // A plugin cannot erase the latched required failure by returning its own error.
+                drop(payload);
+            } else {
+                let _ = payload?;
+            }
+            Err(exec.format_failure(UnexpectedAvailability))
+        })
     }
 }
 
@@ -165,7 +176,7 @@ fn role(value: &str) -> DependencyRoleId {
     DependencyRoleId::new(value).unwrap()
 }
 
-fn request(reference: &'static str, catch_failure: bool) -> PreparedImportRequest {
+fn request(reference: &'static str, catch_failure: bool) -> ImportPlan {
     let mut builder = RegistryBuilder::new();
     builder
         .register(NestedRequiredImporter {
@@ -176,7 +187,7 @@ fn request(reference: &'static str, catch_failure: bool) -> PreparedImportReques
     builder
         .freeze(RegistryBuildLimits::default())
         .unwrap()
-        .compile_request(
+        .plan(
             &ImportRequest::from_layers(
                 ImportRequestLayer::default(),
                 ImportRequestLayer::new(
@@ -244,15 +255,15 @@ fn scope_cause(failure: &ImportFailure) -> &ScopeAbortCause {
 #[test]
 fn missing_nested_required_dependency_retains_origin_role_and_both_targets() {
     let io = LoggedIo::new(true);
-    let failure = import_asset(
-        &request(REFERENCE, false),
-        &io,
-        AssetPath::new(SOURCE).unwrap(),
-        ImportOperationControl::default(),
-    )
-    .unwrap_err()
-    .into_operation_failure()
-    .unwrap();
+    let failure = request(REFERENCE, false)
+        .read_asset(
+            &io,
+            AssetPath::new(SOURCE).unwrap(),
+            ImportOperationControl::default(),
+        )
+        .unwrap_err()
+        .into_operation_failure()
+        .unwrap();
     assert_context(&failure, &io, REFERENCE);
     let context = failure.cause().dependency_context().unwrap();
     assert_eq!(context.normalized_path().unwrap().as_str(), NORMALIZED);
@@ -279,16 +290,16 @@ fn missing_nested_required_dependency_retains_origin_role_and_both_targets() {
 #[test]
 fn denied_nested_required_dependency_remains_terminal_when_the_plugin_catches_it() {
     let io = LoggedIo::new(true);
-    let failure = import_asset_with_resolver(
-        &request(REFERENCE, true),
-        &io,
-        AssetPath::new(SOURCE).unwrap(),
-        &NestedResolver::Deny,
-        ImportOperationControl::default(),
-    )
-    .unwrap_err()
-    .into_operation_failure()
-    .unwrap();
+    let failure = request(REFERENCE, true)
+        .read_asset_with_resolver(
+            &io,
+            AssetPath::new(SOURCE).unwrap(),
+            &NestedResolver::Deny,
+            ImportOperationControl::default(),
+        )
+        .unwrap_err()
+        .into_operation_failure()
+        .unwrap();
     assert_context(&failure, &io, REFERENCE);
     let context = failure.cause().dependency_context().unwrap();
     assert_eq!(context.normalized_path().unwrap().as_str(), NORMALIZED);
@@ -315,16 +326,16 @@ fn denied_nested_required_dependency_remains_terminal_when_the_plugin_catches_it
 fn redirected_required_dependency_retains_the_authorized_backend_identity() {
     let io = LoggedIo::new(true);
     let resolver = NestedResolver::Redirect(LoggedIo::new(false));
-    let failure = import_asset_with_resolver(
-        &request(REFERENCE, false),
-        &io,
-        AssetPath::new(SOURCE).unwrap(),
-        &resolver,
-        ImportOperationControl::default(),
-    )
-    .unwrap_err()
-    .into_operation_failure()
-    .unwrap();
+    let failure = request(REFERENCE, false)
+        .read_asset_with_resolver(
+            &io,
+            AssetPath::new(SOURCE).unwrap(),
+            &resolver,
+            ImportOperationControl::default(),
+        )
+        .unwrap_err()
+        .into_operation_failure()
+        .unwrap();
     assert_context(&failure, &io, REFERENCE);
     let context = failure.cause().dependency_context().unwrap();
     assert_eq!(context.normalized_path().unwrap().as_str(), NORMALIZED);
@@ -353,15 +364,15 @@ fn redirected_required_dependency_retains_the_authorized_backend_identity() {
 fn rejected_nested_reference_keeps_its_spelling_and_path_rule_without_opening_it() {
     const ESCAPE: &str = "../../../outside.bin";
     let io = LoggedIo::new(true);
-    let failure = import_asset(
-        &request(ESCAPE, false),
-        &io,
-        AssetPath::new(SOURCE).unwrap(),
-        ImportOperationControl::default(),
-    )
-    .unwrap_err()
-    .into_operation_failure()
-    .unwrap();
+    let failure = request(ESCAPE, false)
+        .read_asset(
+            &io,
+            AssetPath::new(SOURCE).unwrap(),
+            ImportOperationControl::default(),
+        )
+        .unwrap_err()
+        .into_operation_failure()
+        .unwrap();
     assert_context(&failure, &io, ESCAPE);
     let context = failure.cause().dependency_context().unwrap();
     assert!(context.normalized_path().is_none());

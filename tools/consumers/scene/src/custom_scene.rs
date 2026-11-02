@@ -17,14 +17,23 @@ use baozi_import::authoring::{
     TextureSourceKey, TextureStrength, TextureTransform, ThicknessFactors, TransmissionFactors,
 };
 use baozi_import::{
-    CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
-    FormatDescriptor, FormatEncoding, FormatImporter, ParseResult, ParseScope, Probe,
-    ReadConfidence, ReadHint, SceneDraft,
+    CapabilityStatus, CompiledOptions, DetectionOutcome, DetectionResult, DetectionScope, Format,
+    FormatCapability, FormatDescriptor, FormatEncoding, NoFormatOptions, OptionCompileError,
+    ParseContext, ParseResult, Probe, ReadConfidence, ReadHint, RegistryBuildScope,
 };
 
 struct CustomScene;
 
-impl FormatImporter for CustomScene {
+impl Format for CustomScene {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> std::result::Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             baozi::FormatId::new("dev.baozi.consumer.scene").unwrap(),
@@ -46,7 +55,7 @@ impl FormatImporter for CustomScene {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
         let parent = if scope.primary_bytes() == b"bad-parent" {
             3
         } else {
@@ -173,7 +182,7 @@ impl FormatImporter for CustomScene {
         )
         .unwrap()
         .with_name("lengths")];
-        scope.submit_static_scene(
+        scope.submit(
             StaticSceneBuilder::new(Presence::Present(&roots), &nodes)
                 .with_scene_space(&baozi::SceneSpace::STANDARD_TARGET)
                 .with_spatial_definitions(&cameras, &lights)

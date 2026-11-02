@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-08
-updated: 2026-07-10
+updated: 2026-11-02
 authors:
   - Codex
 decision_type: architecture
@@ -32,6 +32,14 @@ or schedule work.
 Baozi's canonical core is synchronous, runtime-neutral, and deterministic. The host owns admission
 of concurrent import sessions and the capacity on which they execute. Baozi owns only work inside an
 admitted session, subject to the session's frozen budget and operation control.
+
+Ordinary work state belongs to one invocation; independently surviving storage owners retain their
+required shared accounting. `ParseContext` lends short disjoint execution regions, and containers
+hold no execution owner. Control polling is independent of exact physical completion: bounded
+geometry kernels poll after at most 256 fixed library actions, text traversal retains its 4,096-byte
+frontier, and external/IO/allocation/parent/final checkpoints remain mandatory. These algorithmic
+bounds do not interrupt a blocking backend call or impose a wall-clock deadline on arbitrary code.
+ADRs 0033, 0046 and 0047 own the detailed control, lifecycle and accounting contracts.
 
 Accepted means this contract is authoritative. It does not claim that every adapter or optimization
 described here is implemented.

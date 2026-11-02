@@ -1,6 +1,10 @@
+mod execution;
 mod scene_activation;
 
-use std::cell::{RefCell, RefMut};
+pub(crate) use execution::{
+    ImportBoundWorkGroup, ImportParserAdmissionError, ImportParserWorkScope, ImportStoreExecution,
+};
+
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64};
 
@@ -13,8 +17,8 @@ use baozi_core::__scene_integration::integration::{
 use baozi_core::{SceneValidationLimits, ValidatedScene as CanonicalValidatedScene};
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalActivationSessionPolicy, CanonicalMaterializationRole, CanonicalValidationRole,
-    RetainedStoreDimensionState, RetainedStoreObservedWork, RetainedStoreSessionOutcomeOwner,
-    RetainedStoreWriterRole, StoreActivationContainment,
+    RetainedStoreDimensionState, RetainedStoreSessionOutcomeOwner, RetainedStoreWriterRole,
+    StoreActivationContainment,
 };
 use baozi_operation::__retained_store_integration::authority::{
     RetainedStoreOperation, RetainedStoreReservation, RetainedStoreSharePlan,
@@ -1105,8 +1109,8 @@ pub(crate) struct ImportStoreBootstrap {
 
 /// Sole retained-store owner for one import session before canonical activation begins.
 ///
-/// Producer-facing code borrows [`ImportStoreHost`] rather than the raw operation, store keys, or
-/// physical account. The private state slot retains the session-lifetime outcome owner and its
+/// Producer-facing code borrows [`ImportStoreExecution`] rather than the raw operation, store
+/// keys or physical account. The private state slot retains the session-lifetime outcome owner and its
 /// dormant Scene authority across producer work, then consumes that owner exactly once when the
 /// core-sealed Scene plan reaches activation.
 pub(crate) struct ImportStoreSessionOwner {
@@ -1116,7 +1120,7 @@ pub(crate) struct ImportStoreSessionOwner {
 }
 
 pub(crate) struct ImportStoreSessionData {
-    state: RefCell<ImportStoreSessionState>,
+    state: ImportStoreSessionState,
     vocabulary: ImportStoreVocabulary,
     unsubmitted_evidence: SceneEvidenceRecipe,
 }
@@ -1203,25 +1207,32 @@ impl ImportStoreSessionOwner {
                 failure,
             )
             .map_err(ImportStoreSessionStartError::Containment)?;
-        let data = ImportStoreSessionData {
-            state: RefCell::new(ImportStoreSessionState::Dormant(owner)),
+        let mut data = ImportStoreSessionData {
+            state: ImportStoreSessionState::Dormant(owner),
             vocabulary,
             unsubmitted_evidence,
         };
-        let host = ImportStoreHost {
-            state: &data.state,
-            vocabulary: &data.vocabulary,
+        let ImportStoreSessionState::Dormant(owner) = &mut data.state else {
+            unreachable!()
         };
         let mut storage = AccountedVec::new();
         storage
             .try_reserve_capacity(1, "import-session-state", |bytes| {
-                host.reserve_retained(
-                    ImportLedgerPhase::PrimarySnapshot,
-                    ImportDimension::ScratchBytes,
-                    bytes,
-                    1,
-                )
-                .map_err(ImportStoreHostError::into_scope_abort_cause)
+                owner
+                    .reserve_retained_storage(
+                        data.vocabulary.phase(ImportLedgerPhase::PrimarySnapshot),
+                        data.vocabulary.dimension(ImportDimension::ScratchBytes),
+                        bytes,
+                        1,
+                    )
+                    .map(|raw| ImportStoreReservation {
+                        raw: Some(raw),
+                        bytes,
+                    })
+                    .map_err(|cause| {
+                        project_store_runtime_error(&data.vocabulary, cause)
+                            .into_scope_abort_cause()
+                    })
             })
             .map_err(ImportStoreSessionStartError::Storage)?;
         storage.push_reserved_infallible(data);
@@ -1235,26 +1246,16 @@ impl ImportStoreSessionOwner {
             .expect("the startup-admitted session has exactly one state cell");
         // No state-cell reservation may reach the final ledger freeze.
         drop(self);
-        (data.state.into_inner(), data.unsubmitted_evidence)
+        (data.state, data.unsubmitted_evidence)
     }
 
-    pub(crate) fn host(&self) -> ImportStoreHost<'_> {
-        ImportStoreHost {
-            state: &self.state,
-            vocabulary: &self.vocabulary,
-        }
-    }
-
-    pub(crate) fn poll_parser_boundary(&self) -> Result<(), ImportStoreHostError> {
-        let mut state = self
-            .state
-            .try_borrow_mut()
-            .map_err(|_| ImportStoreHostError::ReentrantBorrow)?;
-        match &mut *state {
+    pub(crate) fn poll_parser_boundary(&mut self) -> Result<(), ImportStoreHostError> {
+        let data = &mut self.storage[0];
+        match &mut data.state {
             ImportStoreSessionState::Dormant(owner) => owner
                 .producer_host()
                 .poll()
-                .map_err(|cause| project_store_runtime_error(&self.vocabulary, cause)),
+                .map_err(|cause| project_store_runtime_error(&data.vocabulary, cause)),
             ImportStoreSessionState::Pending(_) => Ok(()),
             ImportStoreSessionState::Transitioning => Err(ImportStoreHostError::OperationConsumed),
             ImportStoreSessionState::Contained => Err(ImportStoreHostError::OperationContained),
@@ -1364,292 +1365,8 @@ impl std::error::Error for ImportStoreFinalizationError {
     }
 }
 
-/// Borrowed import-semantic producer capability backed by the session's sole retained operation.
-///
-/// This adapter never exposes operation-native keys, publication authority, terminal dimensions,
-/// or the physical account. Observed-work permits remain inside one closure so they cannot escape
-/// the state borrow that owns the operation.
-#[derive(Clone, Copy)]
-pub(crate) struct ImportStoreHost<'session> {
-    state: &'session RefCell<ImportStoreSessionState>,
-    vocabulary: &'session ImportStoreVocabulary,
-}
-
-#[allow(
-    clippy::result_large_err,
-    reason = "producer failures retain exact typed store causes without allocating on error paths"
-)]
-impl ImportStoreHost<'_> {
-    fn runtime_error(&self, cause: StoreRuntimeError) -> ImportStoreHostError {
-        project_store_runtime_error(self.vocabulary, cause)
-    }
-
-    fn try_outcome_owner(
-        &self,
-    ) -> Result<RefMut<'_, ImportStoreOutcomeOwner>, ImportStoreHostError> {
-        let state = self
-            .state
-            .try_borrow_mut()
-            .map_err(|_| ImportStoreHostError::ReentrantBorrow)?;
-        RefMut::filter_map(state, |state| match state {
-            ImportStoreSessionState::Dormant(owner) => Some(owner),
-            ImportStoreSessionState::Transitioning
-            | ImportStoreSessionState::Pending(_)
-            | ImportStoreSessionState::Contained => None,
-        })
-        .map_err(|state| inactive_store_state_error(&state))
-    }
-
-    pub(crate) fn poll(&self) -> Result<(), ImportStoreHostError> {
-        self.try_outcome_owner()?
-            .producer_host()
-            .poll()
-            .map_err(|cause| self.runtime_error(cause))
-    }
-
-    pub(crate) fn report_progress(
-        &self,
-        phase: ImportProgressPhase,
-        unit: ImportProgressUnit,
-        completed: u64,
-        total: Option<u64>,
-    ) -> Result<(), ImportStoreHostError> {
-        self.try_outcome_owner()?
-            .producer_host()
-            .report_progress(phase, unit, completed, total)
-            .map_err(|cause| self.runtime_error(cause))
-    }
-
-    pub(crate) fn dimension_state(
-        &self,
-        dimension: ImportDimension,
-    ) -> Result<RetainedStoreDimensionState, ImportStoreHostError> {
-        let key = self.vocabulary.dimension(dimension);
-        self.try_outcome_owner()?
-            .producer_host()
-            .dimension_state(key)
-            .map_err(|cause| self.runtime_error(cause))
-    }
-
-    pub(crate) fn reserve(
-        &self,
-        phase: ImportLedgerPhase,
-        dimension: ImportDimension,
-        bytes: u64,
-    ) -> Result<ImportStoreReservation, ImportStoreHostError> {
-        let phase = self.vocabulary.phase(phase);
-        let dimension = self.vocabulary.dimension(dimension);
-        self.try_outcome_owner()?
-            .control_checkpoint()
-            .reserve(phase, dimension, bytes)
-            .map(|raw| ImportStoreReservation {
-                raw: Some(raw),
-                bytes,
-            })
-            .map_err(|cause| self.runtime_error(cause))
-    }
-
-    pub(crate) fn reserve_retained(
-        &self,
-        phase: ImportLedgerPhase,
-        dimension: ImportDimension,
-        bytes: u64,
-        allocations: u64,
-    ) -> Result<ImportStoreReservation, ImportStoreHostError> {
-        self.try_outcome_owner()?
-            .reserve_retained_storage(
-                self.vocabulary.phase(phase),
-                self.vocabulary.dimension(dimension),
-                bytes,
-                allocations,
-            )
-            .map(|raw| ImportStoreReservation {
-                raw: Some(raw),
-                bytes,
-            })
-            .map_err(|cause| self.runtime_error(cause))
-    }
-
-    pub(crate) fn resize(
-        &self,
-        reservation: &mut ImportStoreReservation,
-        bytes: u64,
-    ) -> Result<(), ImportStoreHostError> {
-        self.try_outcome_owner()?
-            .control_checkpoint()
-            .resize(reservation.raw.as_mut().expect("live reservation"), bytes)
-            .map_err(|cause| self.runtime_error(cause))?;
-        reservation.bytes = bytes;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn transition(
-        &self,
-        reservation: &mut ImportStoreReservation,
-        phase: ImportLedgerPhase,
-        dimension: ImportDimension,
-        bytes: u64,
-    ) -> Result<(), ImportStoreHostError> {
-        let phase = self.vocabulary.phase(phase);
-        let dimension = self.vocabulary.dimension(dimension);
-        self.try_outcome_owner()?
-            .control_checkpoint()
-            .transition(
-                reservation.raw.as_mut().expect("live reservation"),
-                phase,
-                dimension,
-                bytes,
-            )
-            .map_err(|cause| self.runtime_error(cause))?;
-        reservation.bytes = bytes;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn validate_live_owner(
-        &self,
-        reservation: &ImportStoreReservation,
-    ) -> Result<(), ImportStoreHostError> {
-        self.try_outcome_owner()?
-            .control_checkpoint()
-            .validate_live_owner(reservation.raw.as_ref().expect("live reservation"))
-            .map_err(|cause| self.runtime_error(cause))
-    }
-
-    pub(crate) fn tighten_dimension_policy(
-        &self,
-        dimension: ImportDimension,
-        upper_bound: DimensionPolicy,
-    ) -> Result<(), ImportStoreHostError> {
-        let dimension = self.vocabulary.dimension(dimension);
-        self.try_outcome_owner()?
-            .producer_host()
-            .tighten_dimension_policy(dimension, upper_bound)
-            .map_err(|cause| self.runtime_error(cause))
-    }
-
-    pub(crate) fn charge_attempted(
-        &self,
-        dimension: ImportDimension,
-        amount: u64,
-    ) -> Result<(), ImportStoreHostError> {
-        let dimension = self.vocabulary.dimension(dimension);
-        self.try_outcome_owner()?
-            .producer_host()
-            .charge_attempted(dimension, amount)
-            .map_err(|cause| self.runtime_error(cause))
-    }
-
-    pub(crate) fn charge_consumed(
-        &self,
-        dimension: ImportDimension,
-        amount: u64,
-    ) -> Result<(), ImportStoreHostError> {
-        let dimension = self.vocabulary.dimension(dimension);
-        self.try_outcome_owner()?
-            .producer_host()
-            .charge_consumed(dimension, amount)
-            .map_err(|cause| self.runtime_error(cause))
-    }
-
-    pub(crate) fn charge_observed_batch<const N: usize>(
-        &self,
-        charges: &[(ImportDimension, u64); N],
-    ) -> Result<(), ImportStoreHostError> {
-        let charges =
-            charges.map(|(dimension, amount)| (self.vocabulary.dimension(dimension), amount));
-        self.try_outcome_owner()?
-            .producer_host()
-            .charge_observed_batch(charges)
-            .map_err(|cause| self.runtime_error(cause))
-    }
-
-    pub(crate) fn charge_consumed_batch<const N: usize>(
-        &self,
-        charges: &[(ImportDimension, u64); N],
-    ) -> Result<(), ImportStoreHostError> {
-        let mut charges =
-            charges.map(|(dimension, amount)| (self.vocabulary.dimension(dimension), amount));
-        charges.sort_unstable_by_key(|(dimension, _)| *dimension);
-        self.try_outcome_owner()?
-            .producer_host()
-            .charge_consumed_batch(charges)
-            .map_err(|cause| self.runtime_error(cause))
-    }
-
-    pub(crate) fn with_observed_work<const N: usize, T, E>(
-        &self,
-        charges: [(ImportDimension, u64); N],
-        action: impl FnOnce(&mut ImportObservedWork<'_, N>) -> Result<T, E>,
-    ) -> Result<T, ImportObservedWorkFailure<E>> {
-        let charges =
-            charges.map(|(dimension, amount)| (self.vocabulary.dimension(dimension), amount));
-        let mut operation = self
-            .try_outcome_owner()
-            .map_err(ImportObservedWorkFailure::Store)?;
-        let mut producer = operation.producer_host();
-        let raw = producer
-            .try_begin_observed_work(charges)
-            .map_err(|cause| ImportObservedWorkFailure::Store(self.runtime_error(cause)))?;
-        let mut work = ImportObservedWork {
-            raw,
-            vocabulary: self.vocabulary,
-        };
-        match action(&mut work) {
-            Ok(value) => {
-                work.finish().map_err(ImportObservedWorkFailure::Store)?;
-                Ok(value)
-            }
-            Err(cause) => {
-                work.finish_partial();
-                Err(ImportObservedWorkFailure::Action(cause))
-            }
-        }
-    }
-}
-
-pub(crate) struct ImportObservedWork<'operation, const N: usize> {
-    raw: RetainedStoreObservedWork<
-        'operation,
-        ImportOperationOwner,
-        ImportProgressPhase,
-        ImportProgressUnit,
-        N,
-    >,
-    vocabulary: &'operation ImportStoreVocabulary,
-}
-
-#[allow(
-    clippy::result_large_err,
-    reason = "observed-work errors preserve exact ledger and control causes without boxing"
-)]
-impl<const N: usize> ImportObservedWork<'_, N> {
-    #[cfg(test)]
-    pub(crate) fn remaining(&self) -> [u64; N] {
-        self.raw.remaining()
-    }
-
-    pub(crate) fn complete(&mut self, amounts: [u64; N]) -> Result<(), ImportStoreHostError> {
-        self.raw
-            .complete(amounts)
-            .map_err(|cause| project_store_runtime_error(self.vocabulary, cause))
-    }
-
-    fn finish(self) -> Result<(), ImportStoreHostError> {
-        self.raw
-            .finish()
-            .map_err(|cause| project_store_runtime_error(self.vocabulary, cause))
-    }
-
-    fn finish_partial(self) {
-        self.raw.finish_partial();
-    }
-}
-
 #[derive(Debug)]
 pub(crate) enum ImportStoreHostError {
-    ReentrantBorrow,
     OperationConsumed,
     OperationContained,
     Control(ControlCause),
@@ -1662,9 +1379,6 @@ impl ImportStoreHostError {
         match self {
             Self::Control(cause) => ScopeAbortCause::Control(cause),
             Self::Ledger(cause) => ScopeAbortCause::Ledger(cause),
-            Self::ReentrantBorrow => ScopeAbortCause::DescriptorContract {
-                code: "import-store-host-reentered",
-            },
             Self::OperationConsumed => ScopeAbortCause::DescriptorContract {
                 code: "import-store-operation-consumed",
             },
@@ -1679,9 +1393,6 @@ impl ImportStoreHostError {
 impl fmt::Display for ImportStoreHostError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ReentrantBorrow => {
-                formatter.write_str("the import retained-store host was borrowed reentrantly")
-            }
             Self::OperationConsumed => {
                 formatter.write_str("the import retained-store operation was already consumed")
             }
@@ -1704,10 +1415,7 @@ impl std::error::Error for ImportStoreHostError {
         match self {
             Self::Control(cause) => Some(cause),
             Self::Ledger(cause) => Some(cause),
-            Self::ReentrantBorrow
-            | Self::OperationConsumed
-            | Self::OperationContained
-            | Self::Contract { .. } => None,
+            Self::OperationConsumed | Self::OperationContained | Self::Contract { .. } => None,
         }
     }
 }
@@ -2130,7 +1838,6 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use crate::SceneDraft;
     use crate::authoring::{
         AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoredTransform,
         DeformationAuthoringBatch, GeometryAuthoringBatch, LineageAuthoringBatch,
@@ -2139,7 +1846,7 @@ mod tests {
         ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring, ProvenanceOperationAuthoring,
         SceneAuthoringBatch, SceneSpace, SpatialAuthoringBatch,
     };
-    use baozi_core::__scene_integration::integration::SceneConstruction;
+    use baozi_core::__scene_integration::integration::{SceneConstruction, SceneParseOutcome};
     use baozi_core::SceneValidationLimits;
     use baozi_operation::{
         CancellationOrigin, CancellationSignal, PhysicalStorageAccountFactory,
@@ -2335,8 +2042,8 @@ mod tests {
         reason = "the integration helper preserves the exact allocation-free activation error chain"
     )]
     fn submit_two_node(
-        owner: &ImportStoreSessionOwner,
-    ) -> Result<SceneDraft, ImportStoreActivationError> {
+        owner: &mut ImportStoreSessionOwner,
+    ) -> Result<(), ImportStoreActivationError> {
         with_two_node_construction(|construction| owner.submit_scene(construction))
     }
 
@@ -2345,8 +2052,8 @@ mod tests {
         reason = "the integration helper preserves the exact allocation-free authoring rejection chain"
     )]
     fn submit_invalid_parent(
-        owner: &ImportStoreSessionOwner,
-    ) -> Result<SceneDraft, ImportStoreActivationError> {
+        owner: &mut ImportStoreSessionOwner,
+    ) -> Result<(), ImportStoreActivationError> {
         with_two_node_construction_parent(NodeLocalId::new(2), |construction| {
             owner.submit_scene(construction)
         })
@@ -2415,7 +2122,7 @@ mod tests {
         .expect("the bootstrap must start one dormant session outcome owner");
 
         let published = owner
-            .prepare_scene(None)
+            .prepare_scene(SceneParseOutcome::Rejected)
             .expect("the session failure baseline must prepare")
             .handoff();
         let published = published.expect("the terminal evidence must project");
@@ -2433,27 +2140,28 @@ mod tests {
 
     #[test]
     fn session_owner_drives_node_scene_success_on_the_same_import_ledger() {
-        let (owner, account) = start_store_owner_with_account();
-        let host = owner.host();
-        host.with_observed_work([(ImportDimension::DetectionWork, 1)], |work| {
+        let (mut owner, account) = start_store_owner_with_account();
+        let mut exec = owner
+            .execution()
+            .expect("the dormant owner must lend execution");
+        exec.with_observed_work([(ImportDimension::DetectionWork, 1)], |_, work| {
             work.complete([1])
                 .expect("the producer detection unit must complete");
             Ok::<_, ()>(())
         })
         .expect("producer work must remain on the sole import ledger");
-
-        let draft = submit_two_node(&owner)
+        submit_two_node(&mut owner)
             .expect("the import owner must activate the exact NodeScene request");
         owner
             .poll_parser_boundary()
             .expect("a submitted Scene already completed the transaction's final control poll");
         assert!(matches!(
-            host.poll(),
+            owner.execution(),
             Err(ImportStoreHostError::OperationConsumed)
         ));
         let terminal = owner
-            .prepare_scene(Some(draft))
-            .expect("the centrally validated draft must prepare")
+            .prepare_scene(SceneParseOutcome::Accepted)
+            .expect("the accepted centrally validated candidate must prepare")
             .handoff()
             .expect("the prepared Scene terminal must project");
         let terminal_evidence = terminal.ledger_evidence();
@@ -2512,9 +2220,10 @@ mod tests {
 
     #[test]
     fn session_owner_samples_its_activation_baseline_after_parser_reservations() {
-        let (owner, account) = start_store_owner_with_account();
+        let (mut owner, account) = start_store_owner_with_account();
         let parser_scratch = owner
-            .host()
+            .execution()
+            .expect("the dormant owner must lend execution")
             .reserve(
                 ImportLedgerPhase::FormatNormalization,
                 ImportDimension::ScratchBytes,
@@ -2522,13 +2231,13 @@ mod tests {
             )
             .expect("parser scratch must remain live until Scene submission returns");
 
-        let draft = submit_two_node(&owner)
+        submit_two_node(&mut owner)
             .expect("session-start reservations belong to the activation-entry baseline");
         assert!(account.snapshot().live_retained_bytes() >= 8);
         drop(parser_scratch);
 
         let terminal = owner
-            .prepare_scene(Some(draft))
+            .prepare_scene(SceneParseOutcome::Accepted)
             .expect("the quiescent validated Scene must prepare")
             .handoff()
             .expect("the prepared Scene terminal must project");
@@ -2543,12 +2252,12 @@ mod tests {
 
     #[test]
     fn consuming_finalization_preserves_scene_report_and_unique_terminal_evidence() {
-        let (owner, account) = start_store_owner_with_account();
-        let draft = submit_two_node(&owner)
+        let (mut owner, account) = start_store_owner_with_account();
+        submit_two_node(&mut owner)
             .expect("the import owner must activate the exact NodeScene request");
         let outcome = owner
-            .finish_scene(Some(draft))
-            .expect("the exact descriptor must finish through one consuming terminal seam");
+            .finish_scene(SceneParseOutcome::Accepted)
+            .expect("the accepted candidate must finish through one consuming terminal seam");
 
         let ImportStoreTerminalOutcome::Success {
             scene,
@@ -2556,7 +2265,7 @@ mod tests {
             evidence,
         } = &outcome
         else {
-            panic!("the exact descriptor must preserve the successful Scene owners")
+            panic!("the accepted candidate must preserve the successful Scene owners")
         };
         assert_eq!(evidence.cause(), ImportStoreTerminalCause::Success);
         assert_eq!(
@@ -2590,10 +2299,11 @@ mod tests {
 
     #[test]
     fn session_owner_without_scene_submission_prepares_requested_terminal_on_the_same_ledger() {
-        let (owner, account) = start_store_owner_with_account();
+        let (mut owner, account) = start_store_owner_with_account();
         owner
-            .host()
-            .with_observed_work([(ImportDimension::DetectionWork, 1)], |work| {
+            .execution()
+            .expect("the dormant owner must lend execution")
+            .with_observed_work([(ImportDimension::DetectionWork, 1)], |_, work| {
                 work.complete([1])
                     .expect("the producer detection unit must complete");
                 Ok::<_, ()>(())
@@ -2601,7 +2311,7 @@ mod tests {
             .expect("producer work must remain on the sole import ledger");
 
         let terminal = owner
-            .prepare_scene(None)
+            .prepare_scene(SceneParseOutcome::Accepted)
             .expect("an import without a Scene must prepare the pre-admitted fallback")
             .handoff()
             .expect("the unsubmitted Scene terminal must project");
@@ -2644,10 +2354,12 @@ mod tests {
         use crate::outcome::AccountedErrorContext;
         use baozi_operation::__retained_store_integration::activation::CanonicalActivationOutcome;
 
-        let (owner, account) = start_store_owner_with_account();
+        let (mut owner, account) = start_store_owner_with_account();
         let source = baozi_io::AssetPath::new("models/fallback.asset").unwrap();
         let (context, storage) = crate::DependencyFailureContext::try_capture(
-            owner.host(),
+            &mut owner
+                .execution()
+                .expect("the dormant owner must lend execution"),
             &baozi_io::AuthorityDomain::new(),
             &source,
             &crate::DependencyRoleId::new("test.fallback").unwrap(),
@@ -2700,12 +2412,12 @@ mod tests {
 
     #[test]
     fn terminal_projection_maps_the_complete_import_vocabulary() {
-        let owner = start_store_owner();
-        let draft = submit_two_node(&owner)
+        let mut owner = start_store_owner();
+        submit_two_node(&mut owner)
             .expect("the import owner must activate the exact NodeScene request");
         let terminal = owner
-            .prepare_scene(Some(draft))
-            .expect("the centrally validated draft must prepare")
+            .prepare_scene(SceneParseOutcome::Accepted)
+            .expect("the accepted centrally validated candidate must prepare")
             .handoff()
             .expect("the successful Scene terminal must project");
 
@@ -2771,20 +2483,19 @@ mod tests {
     }
 
     #[test]
-    fn terminal_projection_reads_requested_cause_from_missing_draft_terminal() {
-        let owner = start_store_owner();
-        let draft = submit_two_node(&owner)
+    fn terminal_projection_preserves_original_cause_authority_for_a_rejected_parser() {
+        let mut owner = start_store_owner();
+        submit_two_node(&mut owner)
             .expect("the import owner must activate the exact NodeScene request");
-        drop(draft);
         let terminal = owner
-            .prepare_scene(None)
-            .expect("a missing parser descriptor must prepare exact failure evidence")
+            .prepare_scene(SceneParseOutcome::Rejected)
+            .expect("a rejected parser must prepare its candidate as a failure")
             .handoff()
-            .expect("the missing-draft terminal must project");
+            .expect("the parser rejection terminal must project");
         let StoreTerminalCause::Failure(header_cause) =
             terminal.ledger_evidence().header().terminal_cause()
         else {
-            panic!("a missing parser descriptor must publish a failure cause")
+            panic!("a rejected parser must publish a failure cause")
         };
 
         let evidence = terminal.evidence();
@@ -2793,12 +2504,22 @@ mod tests {
             ImportStoreTerminalClass::Requested
         );
         assert_eq!(evidence.cause().code(), Some(header_cause.code()));
+        assert!(matches!(
+            &terminal,
+            ImportStoreTerminalOutcome::RichFailure {
+                cause_authority: ImportStoreFailureCauseAuthority::OriginalImport,
+                ..
+            } | ImportStoreTerminalOutcome::MinimalFallback {
+                cause_authority: ImportStoreFailureCauseAuthority::OriginalImport,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn terminal_projection_reads_requested_cause_from_authoring_rejection() {
-        let owner = start_store_owner();
-        let result = submit_invalid_parent(&owner);
+        let mut owner = start_store_owner();
+        let result = submit_invalid_parent(&mut owner);
         assert!(matches!(
             result,
             Err(ImportStoreActivationError::SceneValidation(
@@ -2810,7 +2531,7 @@ mod tests {
             ))
         ));
         let terminal = owner
-            .prepare_scene(None)
+            .prepare_scene(SceneParseOutcome::Rejected)
             .expect("the authoring rejection must retain its exact terminal")
             .handoff()
             .expect("the authoring rejection terminal must project");
@@ -2826,6 +2547,28 @@ mod tests {
             ImportStoreTerminalClass::Requested
         );
         assert_eq!(evidence.cause().code(), Some(header_cause.code()));
+        assert!(matches!(
+            &terminal,
+            ImportStoreTerminalOutcome::RichFailure {
+                cause_authority: ImportStoreFailureCauseAuthority::SceneValidation(
+                    baozi_core::SceneValidationError::ParentOutOfRange {
+                        node: 1,
+                        parent: 2,
+                        node_count: 2,
+                    }
+                ),
+                ..
+            } | ImportStoreTerminalOutcome::MinimalFallback {
+                cause_authority: ImportStoreFailureCauseAuthority::SceneValidation(
+                    baozi_core::SceneValidationError::ParentOutOfRange {
+                        node: 1,
+                        parent: 2,
+                        node_count: 2,
+                    }
+                ),
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2841,10 +2584,10 @@ mod tests {
         let cancellation = CancelOnSignalPoll::new();
         cancellation.cancel_after_additional_polls(1);
         let control = ImportOperationControl::default().with_cancellation(cancellation);
-        let (owner, _account) =
+        let (mut owner, _account) =
             start_store_owner_with_account_and_control(ResourceLimits::default(), control);
         assert!(matches!(
-            submit_two_node(&owner),
+            submit_two_node(&mut owner),
             Err(ImportStoreActivationError::Control(
                 ControlCause::Cancelled {
                     origin: CancellationOrigin::Signal
@@ -2852,7 +2595,7 @@ mod tests {
             ))
         ));
         let terminal = owner
-            .prepare_scene(None)
+            .prepare_scene(SceneParseOutcome::Rejected)
             .expect("cancelled authoring must retain its exact terminal")
             .handoff()
             .expect("the cancelled authoring terminal must project");
@@ -2881,14 +2624,14 @@ mod tests {
             max_work_units: 10,
             ..ResourceLimits::default()
         };
-        let (owner, _account) =
+        let (mut owner, _account) =
             start_store_owner_with_account_and_control(limits, ImportOperationControl::default());
         assert!(matches!(
-            submit_two_node(&owner),
+            submit_two_node(&mut owner),
             Err(ImportStoreActivationError::MaterializationFailed)
         ));
         let terminal = owner
-            .prepare_scene(None)
+            .prepare_scene(SceneParseOutcome::Rejected)
             .expect("work exhaustion must retain its exact terminal")
             .handoff()
             .expect("the work-exhaustion terminal must project");
@@ -2906,22 +2649,36 @@ mod tests {
     }
 
     #[test]
-    fn missing_scene_draft_cannot_reserve_or_publish_success() {
-        let (owner, account) = start_store_owner_with_account();
-        let draft = submit_two_node(&owner)
+    fn rejected_parser_cannot_commit_or_publish_its_validated_candidate() {
+        let (mut owner, account) = start_store_owner_with_account();
+        submit_two_node(&mut owner)
             .expect("the import owner must activate the exact NodeScene request");
-        drop(draft);
+        assert_eq!(
+            owner
+                .completed_scene_boundary()
+                .expect("the private candidate boundary must remain observable"),
+            Some(scene_activation::ImportStoreSceneBoundary::Validated)
+        );
 
         let terminal = owner
-            .prepare_scene(None)
-            .expect("a missing parser descriptor must prepare exact failure evidence")
+            .prepare_scene(SceneParseOutcome::Rejected)
+            .expect("a rejected parser must prepare its candidate as a failure")
             .handoff()
-            .expect("the missing-draft terminal must project");
+            .expect("the parser rejection terminal must project");
         assert!(!terminal.is_success());
+        assert_eq!(terminal.canonical_block_count(), None);
         assert!(matches!(
             terminal.ledger_evidence().header().terminal_cause(),
             StoreTerminalCause::Failure(_)
         ));
+        let evidence = terminal.evidence();
+        let canonical = evidence
+            .terminal_dimension(ImportStoreTerminalDimension::CanonicalRetainedMembers)
+            .expect("the rejected candidate must retain its canonical destination evidence");
+        assert_eq!(canonical.pending_publication(), 0);
+        assert_eq!(canonical.committed_canonical_output(), 0);
+        assert_eq!(evidence.current_live_bytes(), 0);
+        assert_eq!(evidence.active_reservations(), 0);
 
         drop(terminal);
         let released = account.snapshot();
@@ -2931,26 +2688,49 @@ mod tests {
     }
 
     #[test]
-    fn sibling_scene_drafts_cannot_be_substituted() {
-        let (left, left_account) = start_store_owner_with_account();
-        let (right, right_account) = start_store_owner_with_account();
-        let left_draft =
-            submit_two_node(&left).expect("the left import owner must activate its draft");
-        let right_draft =
-            submit_two_node(&right).expect("the right import owner must activate its draft");
+    fn independent_parser_outcomes_do_not_cross_pending_candidates() {
+        let (mut left, left_account) = start_store_owner_with_account();
+        let (mut right, right_account) = start_store_owner_with_account();
+        for (owner, amount) in [(&mut left, 1), (&mut right, 2)] {
+            owner
+                .execution()
+                .expect("each dormant owner must lend its own execution")
+                .charge_observed_batch(&[(ImportDimension::DetectionWork, amount)])
+                .expect("each operation must retain its own distinct producer prefix");
+            submit_two_node(owner).expect("each owner must retain its own validated candidate");
+        }
 
         let left_terminal = left
-            .prepare_scene(Some(right_draft))
-            .expect("the left owner must freeze a foreign-draft failure")
+            .prepare_scene(SceneParseOutcome::Accepted)
+            .expect("the left parser must accept only its own candidate")
             .handoff()
-            .expect("the left foreign-draft terminal must project");
+            .expect("the left accepted terminal must project");
         let right_terminal = right
-            .prepare_scene(Some(left_draft))
-            .expect("the right owner must freeze a foreign-draft failure")
+            .prepare_scene(SceneParseOutcome::Rejected)
+            .expect("the right parser must reject only its own candidate")
             .handoff()
-            .expect("the right foreign-draft terminal must project");
-        assert!(!left_terminal.is_success());
+            .expect("the right rejected terminal must project");
+        assert!(left_terminal.is_success());
         assert!(!right_terminal.is_success());
+        assert_eq!(right_terminal.canonical_block_count(), None);
+        assert!(matches!(
+            &right_terminal,
+            ImportStoreTerminalOutcome::RichFailure {
+                cause_authority: ImportStoreFailureCauseAuthority::OriginalImport,
+                ..
+            } | ImportStoreTerminalOutcome::MinimalFallback {
+                cause_authority: ImportStoreFailureCauseAuthority::OriginalImport,
+                ..
+            }
+        ));
+        for (terminal, amount) in [(&left_terminal, 1), (&right_terminal, 2)] {
+            let detection = terminal
+                .evidence()
+                .dimension(ImportDimension::DetectionWork)
+                .expect("each terminal must retain its own producer prefix");
+            assert_eq!(detection.attempted(), amount);
+            assert_eq!(detection.consumed(), amount);
+        }
 
         drop(left_terminal);
         drop(right_terminal);
@@ -2964,18 +2744,16 @@ mod tests {
 
     #[test]
     fn sibling_prepared_scene_owners_cannot_be_crossed_at_handoff() {
-        let (left, left_account) = start_store_owner_with_account();
-        let (right, right_account) = start_store_owner_with_account();
-        let left_draft =
-            submit_two_node(&left).expect("the left import owner must activate its draft");
-        let right_draft =
-            submit_two_node(&right).expect("the right import owner must activate its draft");
+        let (mut left, left_account) = start_store_owner_with_account();
+        let (mut right, right_account) = start_store_owner_with_account();
+        submit_two_node(&mut left).expect("the left owner must activate its candidate");
+        submit_two_node(&mut right).expect("the right owner must activate its candidate");
 
         let ImportStorePreparedScene::Success {
             token: left_token,
             store: left_store,
         } = left
-            .prepare_scene(Some(left_draft))
+            .prepare_scene(SceneParseOutcome::Accepted)
             .expect("the left Scene must prepare its exact success owners")
         else {
             panic!("the left Scene must prepare a success")
@@ -2984,7 +2762,7 @@ mod tests {
             token: right_token,
             store: right_store,
         } = right
-            .prepare_scene(Some(right_draft))
+            .prepare_scene(SceneParseOutcome::Accepted)
             .expect("the right Scene must prepare its exact success owners")
         else {
             panic!("the right Scene must prepare a success")
@@ -3002,21 +2780,30 @@ mod tests {
     }
 
     #[test]
-    fn second_scene_submission_cannot_replace_the_pending_owner() {
-        let (owner, account) = start_store_owner_with_account();
-        let draft = submit_two_node(&owner)
+    fn raw_second_scene_submission_preserves_the_first_pending_owner() {
+        let (mut owner, account) = start_store_owner_with_account();
+        submit_two_node(&mut owner)
             .expect("the first Scene request must install its pending owner");
-        let second = submit_two_node(&owner);
+        let first_pending = account.snapshot();
+        let second = submit_invalid_parent(&mut owner);
         assert!(matches!(
             second,
             Err(ImportStoreActivationError::StoreUnavailable(
                 ImportStoreHostError::OperationConsumed
             ))
         ));
+        assert_eq!(account.snapshot(), first_pending);
+        assert_eq!(
+            owner
+                .completed_scene_boundary()
+                .expect("the first candidate must retain its validation boundary"),
+            Some(scene_activation::ImportStoreSceneBoundary::Validated)
+        );
 
+        // The trusted raw caller selects acceptance; ParseContext latches duplicate-submit errors.
         let terminal = owner
-            .prepare_scene(Some(draft))
-            .expect("the first descriptor must remain paired after the rejected submission")
+            .prepare_scene(SceneParseOutcome::Accepted)
+            .expect("explicit raw acceptance must prepare the retained first candidate")
             .handoff()
             .expect("the retained first Scene terminal must project");
         assert!(terminal.is_success());
@@ -3030,16 +2817,17 @@ mod tests {
 
     #[test]
     fn authoring_rejection_defers_terminal_prepare_until_parser_storage_is_released() {
-        let (owner, account) = start_store_owner_with_account();
+        let (mut owner, account) = start_store_owner_with_account();
         let parser_scratch = owner
-            .host()
+            .execution()
+            .expect("the dormant owner must lend execution")
             .reserve(
                 ImportLedgerPhase::FormatNormalization,
                 ImportDimension::ScratchBytes,
                 8,
             )
             .expect("parser scratch must remain live across the synchronous Scene submission");
-        let result = submit_invalid_parent(&owner);
+        let result = submit_invalid_parent(&mut owner);
         assert!(matches!(
             result,
             Err(ImportStoreActivationError::SceneValidation(
@@ -3058,7 +2846,7 @@ mod tests {
         drop(parser_scratch);
 
         let terminal = owner
-            .prepare_scene(None)
+            .prepare_scene(SceneParseOutcome::Rejected)
             .expect("the quiescent session must prepare its deferred authoring failure")
             .handoff()
             .expect("the deferred authoring terminal must project");
@@ -3081,17 +2869,18 @@ mod tests {
             max_open_assets: 0,
             ..ResourceLimits::default()
         };
-        let (owner, account) =
+        let (mut owner, account) =
             start_store_owner_with_account_and_control(limits, ImportOperationControl::default());
         let failure = owner
-            .host()
+            .execution()
+            .expect("the dormant owner must lend execution")
             .charge_attempted(ImportDimension::AssetOpen, 1)
             .expect_err("the zero asset-open budget must latch one ledger failure");
         assert!(matches!(failure, ImportStoreHostError::Ledger(_)));
 
-        assert!(submit_invalid_parent(&owner).is_err());
+        assert!(submit_invalid_parent(&mut owner).is_err());
         let terminal = owner
-            .prepare_scene(None)
+            .prepare_scene(SceneParseOutcome::Rejected)
             .expect("a quiescent ledger rejection must still prepare its terminal evidence")
             .handoff()
             .expect("the deferred ledger terminal must project");
@@ -3108,12 +2897,11 @@ mod tests {
 
     #[test]
     fn dropping_a_pending_scene_owner_releases_unpublished_storage() {
-        let (owner, account) = start_store_owner_with_account();
-        let draft = submit_two_node(&owner)
-            .expect("the import owner must retain one unpublished Scene draft");
+        let (mut owner, account) = start_store_owner_with_account();
+        submit_two_node(&mut owner)
+            .expect("the import owner must retain one unpublished Scene candidate");
         assert!(account.snapshot().live_retained_allocations() > 0);
 
-        drop(draft);
         drop(owner);
         let released = account.snapshot();
         assert_eq!(released.live_retained_bytes(), 0);
@@ -3123,21 +2911,31 @@ mod tests {
 
     #[test]
     fn grouped_observed_work_uses_import_dimensions_on_the_same_operation() {
-        let owner = start_store_owner();
-        let host = owner.host();
+        let mut owner = start_store_owner();
+        let mut exec = owner
+            .execution()
+            .expect("the dormant owner must lend execution");
 
-        host.with_observed_work(
+        exec.with_observed_work(
             [
                 (ImportDimension::PrimaryBytes, 3),
                 (ImportDimension::TotalAssetBytes, 3),
             ],
-            |work| {
+            |exec, work| {
                 assert_eq!(work.remaining(), [3, 3]);
+                let scratch = exec
+                    .reserve(
+                        ImportLedgerPhase::PrimarySnapshot,
+                        ImportDimension::ScratchBytes,
+                        8,
+                    )
+                    .expect("the observed-work callback must use disjoint storage admission");
                 work.complete([1, 1])
                     .expect("the first physical prefix must complete atomically");
                 assert_eq!(work.remaining(), [2, 2]);
                 work.complete([2, 2])
                     .expect("the admitted suffix must complete atomically");
+                drop(scratch);
                 Ok::<_, ()>(())
             },
         )
@@ -3147,44 +2945,46 @@ mod tests {
             ImportDimension::PrimaryBytes,
             ImportDimension::TotalAssetBytes,
         ] {
-            let state = host
+            let state = exec
                 .dimension_state(dimension)
-                .expect("the import dimension must remain observable through the same host");
+                .expect("the import dimension must remain observable through the same execution");
             assert_eq!(state.attempted(), 3);
             assert_eq!(state.consumed(), 3);
         }
     }
 
     #[test]
-    fn split_parser_accounting_releases_the_session_borrow_between_actions() {
-        let (owner, account) = start_store_owner_with_account();
-        let host = owner.host();
-        let baseline = host
+    fn split_parser_accounting_and_storage_share_disjoint_execution_capabilities() {
+        let (mut owner, account) = start_store_owner_with_account();
+        let mut exec = owner
+            .execution()
+            .expect("the dormant owner must lend execution");
+        let baseline = exec
             .dimension_state(ImportDimension::ScratchBytes)
             .expect("startup scratch storage remains observable")
             .live_bytes();
 
-        host.charge_attempted(ImportDimension::DecodeWork, 2)
+        exec.charge_attempted(ImportDimension::DecodeWork, 2)
             .expect("the parser admits its exact decode envelope");
-        let reservation = host
+        let reservation = exec
             .reserve(
                 ImportLedgerPhase::BackendDecode,
                 ImportDimension::ScratchBytes,
                 8,
             )
-            .expect("metered storage can borrow the same session between work charges");
-        host.charge_consumed(ImportDimension::DecodeWork, 1)
+            .expect("metered storage uses the same operation between work charges");
+        exec.charge_consumed(ImportDimension::DecodeWork, 1)
             .expect("the first completed decode prefix is retained");
-        host.charge_consumed_batch(&[(ImportDimension::DecodeWork, 1)])
+        exec.charge_consumed_batch(&[(ImportDimension::DecodeWork, 1)])
             .expect("the final completed prefix is retained");
 
-        let decode = host
+        let decode = exec
             .dimension_state(ImportDimension::DecodeWork)
             .expect("decode work remains observable");
         assert_eq!(decode.attempted(), 2);
         assert_eq!(decode.consumed(), 2);
         assert_eq!(
-            host.dimension_state(ImportDimension::ScratchBytes)
+            exec.dimension_state(ImportDimension::ScratchBytes)
                 .expect("scratch storage remains on the same operation")
                 .live_bytes(),
             baseline + reservation.bytes()
@@ -3192,7 +2992,7 @@ mod tests {
 
         drop(reservation);
         assert_eq!(
-            host.dimension_state(ImportDimension::ScratchBytes)
+            exec.dimension_state(ImportDimension::ScratchBytes)
                 .expect("dropping the reservation updates the same operation")
                 .live_bytes(),
             baseline
@@ -3206,15 +3006,17 @@ mod tests {
 
     #[test]
     fn action_failure_resolves_observed_work_with_the_exact_completed_prefix() {
-        let owner = start_store_owner();
-        let host = owner.host();
+        let mut owner = start_store_owner();
+        let mut exec = owner
+            .execution()
+            .expect("the dormant owner must lend execution");
 
-        let result = host.with_observed_work(
+        let result = exec.with_observed_work(
             [
                 (ImportDimension::PrimaryBytes, 3),
                 (ImportDimension::TotalAssetBytes, 3),
             ],
-            |work| {
+            |_, work| {
                 work.complete([1, 1])
                     .expect("the completed physical prefix must be recorded");
                 Err::<(), _>("short-read")
@@ -3229,7 +3031,7 @@ mod tests {
             ImportDimension::PrimaryBytes,
             ImportDimension::TotalAssetBytes,
         ] {
-            let state = host
+            let state = exec
                 .dimension_state(dimension)
                 .expect("partial work remains observable on the sole operation");
             assert_eq!(state.attempted(), 3);
@@ -3238,35 +3040,37 @@ mod tests {
     }
 
     #[test]
-    fn host_reservations_remain_bound_to_the_import_operation() {
-        let owner = start_store_owner();
-        let host = owner.host();
-        let mut reservation = host
+    fn execution_reservations_remain_bound_to_the_import_operation() {
+        let mut owner = start_store_owner();
+        let mut exec = owner
+            .execution()
+            .expect("the dormant owner must lend execution");
+        let mut reservation = exec
             .reserve(
                 ImportLedgerPhase::Detection,
                 ImportDimension::ScratchBytes,
                 8,
             )
-            .expect("the host must reserve import scratch through the retained operation");
+            .expect("execution must reserve import scratch through the retained operation");
         assert_eq!(reservation.bytes(), 8);
-        host.validate_live_owner(&reservation)
+        exec.validate_live_owner(&reservation)
             .expect("the import wrapper must preserve the sole operation owner");
 
-        host.resize(&mut reservation, 16)
-            .expect("the same host must resize its reservation");
+        exec.resize(&mut reservation, 16)
+            .expect("the same execution must resize its reservation");
         assert_eq!(reservation.bytes(), 16);
-        host.transition(
+        exec.transition(
             &mut reservation,
             ImportLedgerPhase::DependencyAcquisition,
             ImportDimension::DependencyBytes,
             12,
         )
-        .expect("the same host must transition its reservation");
+        .expect("the same execution must transition its reservation");
         assert_eq!(reservation.bytes(), 12);
-        host.validate_live_owner(&reservation)
+        exec.validate_live_owner(&reservation)
             .expect("transition must preserve the sole operation owner");
         assert_eq!(
-            host.dimension_state(ImportDimension::DependencyBytes)
+            exec.dimension_state(ImportDimension::DependencyBytes)
                 .expect("the transitioned dimension must be observable")
                 .live_bytes(),
             12
@@ -3274,7 +3078,7 @@ mod tests {
 
         drop(reservation);
         assert_eq!(
-            host.dimension_state(ImportDimension::DependencyBytes)
+            exec.dimension_state(ImportDimension::DependencyBytes)
                 .expect("dropping the reservation must update the same operation")
                 .live_bytes(),
             0
@@ -3282,17 +3086,19 @@ mod tests {
     }
 
     #[test]
-    fn host_tightens_import_policy_without_exposing_store_keys() {
-        let owner = start_store_owner();
-        let host = owner.host();
+    fn execution_tightens_import_policy_without_exposing_store_keys() {
+        let mut owner = start_store_owner();
+        let mut exec = owner
+            .execution()
+            .expect("the dormant owner must lend execution");
 
-        host.tighten_dimension_policy(
+        exec.tighten_dimension_policy(
             ImportDimension::DetectionWork,
             DimensionPolicy::counter(3, 2, 0),
         )
-        .expect("the import host must tighten its own qualified dimension");
+        .expect("the import execution must tighten its own qualified dimension");
 
-        let result = host.with_observed_work([(ImportDimension::DetectionWork, 3)], |work| {
+        let result = exec.with_observed_work([(ImportDimension::DetectionWork, 3)], |_, work| {
             work.complete([3])
                 .expect("the completed prefix must be retained before projection fails");
             Ok::<_, ()>(())
@@ -3303,7 +3109,7 @@ mod tests {
                 ImportStoreHostError::Ledger(_)
             ))
         ));
-        let state = host
+        let state = exec
             .dimension_state(ImportDimension::DetectionWork)
             .expect("the tightened dimension must remain observable");
         assert_eq!(state.attempted(), 3);
@@ -3311,16 +3117,18 @@ mod tests {
     }
 
     #[test]
-    fn host_projects_runtime_ledger_keys_back_to_import_semantics() {
-        let owner = start_store_owner();
-        let host = owner.host();
-        host.tighten_dimension_policy(
+    fn execution_projects_runtime_ledger_keys_back_to_import_semantics() {
+        let mut owner = start_store_owner();
+        let exec = owner
+            .execution()
+            .expect("the dormant owner must lend execution");
+        exec.tighten_dimension_policy(
             ImportDimension::DetectionWork,
             DimensionPolicy::counter(1, 1, 0),
         )
         .expect("the detection policy must tighten before work");
 
-        let cause = host
+        let cause = exec
             .charge_attempted(ImportDimension::DetectionWork, 2)
             .expect_err("the attempted prefix crosses the tightened limit");
         assert!(matches!(
@@ -3346,33 +3154,21 @@ mod tests {
     }
 
     #[test]
-    fn host_rejects_reentrant_operation_borrows_without_panicking() {
-        let owner = start_store_owner();
-        let host = owner.host();
-        let _state = owner.state.borrow_mut();
-
-        assert!(matches!(
-            host.poll(),
-            Err(ImportStoreHostError::ReentrantBorrow)
-        ));
-    }
-
-    #[test]
     fn abandoned_scene_transition_quarantines_the_dormant_outcome_owner() {
-        let (owner, account) = start_store_owner_with_account();
-        let host = owner.host();
-        let (operation, transition) = ImportStoreActivationTransition::begin(&owner.state)
-            .expect("the active import operation must enter one Scene transition");
+        let (mut owner, account) = start_store_owner_with_account();
+        let (operation, transition) =
+            ImportStoreActivationTransition::begin(&mut owner.storage[0].state)
+                .expect("the active import operation must enter one Scene transition");
 
         drop(operation);
         drop(transition);
 
         assert!(matches!(
-            host.poll(),
+            owner.execution(),
             Err(ImportStoreHostError::OperationContained)
         ));
         assert!(matches!(
-            owner.prepare_scene(None),
+            owner.prepare_scene(SceneParseOutcome::Rejected),
             Err(ImportStoreActivationError::StoreUnavailable(
                 ImportStoreHostError::OperationContained
             ))

@@ -71,10 +71,7 @@ use crate::canonical_scene::store::typed_storage::{
 mod validation;
 #[cfg(test)]
 use super::NodeSceneBuildFaults;
-use super::{
-    NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneConstructionRejection, NodeSceneDraft,
-    SceneEvidenceCounts,
-};
+use super::{NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneConstructionRejection, SceneEvidenceCounts};
 #[cfg(test)]
 use super::{NodeSceneDraftBuild, PendingNodeSceneDraft, PendingNodeSceneFailure};
 use crate::canonical_scene::store::typed_storage::animation::{
@@ -737,10 +734,6 @@ impl NodeSceneLaneOutput {
     pub(in crate::canonical_scene::store) const fn inner(&self) -> &NodeSceneActivationOutput {
         &self.0
     }
-
-    pub(in crate::canonical_scene::store) const fn node_scene_draft(&self) -> NodeSceneDraft {
-        self.0.draft
-    }
 }
 
 impl NodeSceneEvidenceRecipe {
@@ -834,7 +827,7 @@ impl NodeSceneActivationPostflight {
             },
             |session, directory, evidence, scratch| {
                 let initialized = scratch.initialize(session, scratch_plan)?;
-                let proof = if initialized && output.draft.brand == self.brand {
+                let proof = if initialized && output.brand == self.brand {
                     let mut scratch = scratch.metered_view();
                     validate_node_scene_canonical_graph_metered(
                         session,
@@ -1097,7 +1090,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneMaterializedRefs {
 pub(in crate::canonical_scene::store) struct NodeSceneActivationOutput {
     pub(in crate::canonical_scene::store) tables:
         crate::canonical_scene::store::typed_storage::SceneTables,
-    pub(in crate::canonical_scene::store) draft: NodeSceneDraft,
+    pub(in crate::canonical_scene::store) brand: super::super::ConstructionBrand,
     pub(in crate::canonical_scene::store) refs: NodeSceneMaterializedRefs,
     pub(in crate::canonical_scene::store) evidence_counts: SceneEvidenceCounts,
     pub(in crate::canonical_scene::store) central_validation: NodeSceneCentralValidationPlan,
@@ -1534,7 +1527,6 @@ where
         #[cfg(test)]
         faults.directory_revision,
     ));
-    let draft = NodeSceneDraft { brand, directory };
     let output = NodeSceneActivationOutput {
         tables: SceneTables {
             nodes,
@@ -1545,7 +1537,7 @@ where
             appearance,
             profile,
         },
-        draft,
+        brand,
         refs: NodeSceneMaterializedRefs { directory },
         evidence_counts: plans.evidence_counts(),
         central_validation: *central_validation,
@@ -1697,16 +1689,12 @@ where
         },
     )?;
     match outcome {
-        CanonicalCentralValidationOutcome::Candidate(candidate) => {
-            let draft = candidate.output().node_scene_draft();
-            Ok(NodeSceneDraftBuild::Draft {
-                draft,
-                owner: PendingNodeSceneDraft {
-                    candidate,
-                    final_progress,
-                },
-            })
-        }
+        CanonicalCentralValidationOutcome::Candidate(candidate) => Ok(NodeSceneDraftBuild::Draft {
+            owner: PendingNodeSceneDraft {
+                candidate,
+                final_progress,
+            },
+        }),
         CanonicalCentralValidationOutcome::Rejected(rejected) => {
             prepare_node_scene_test_failure::<O, PP, U, L>(
                 PendingNodeSceneFailure::CentralRejected {

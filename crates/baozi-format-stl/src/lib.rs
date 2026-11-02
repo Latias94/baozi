@@ -10,10 +10,11 @@ pub use error::StlFailureCode;
 
 use baozi_import::authoring::FormatId;
 use baozi_import::{
-    CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
-    FormatDescriptor, FormatEncoding, FormatImporter, ParseResult, ParseScope, Probe, ReadHint,
-    RegistryBuilder, RegistryRegistrationError, SceneDraft, TextBomPolicy, TextControlPolicy,
-    TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding,
+    CapabilityStatus, CompiledOptions, DetectionOutcome, DetectionResult, DetectionScope, Format,
+    FormatCapability, FormatDescriptor, FormatEncoding, NoFormatOptions, OptionCompileError,
+    ParseContext, ParseResult, Probe, ReadHint, RegistryBuildScope, RegistryBuilder,
+    RegistryRegistrationError, TextBomPolicy, TextControlPolicy, TextDecodingMode, TextHardCaps,
+    TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding,
 };
 
 pub const FORMAT_ID: &str = "org.baozi.stl";
@@ -94,9 +95,18 @@ pub fn register(registry: &mut RegistryBuilder) -> Result<(), RegistryRegistrati
     registry.register(StlImporter)
 }
 
-impl FormatImporter for StlImporter {
+impl Format for StlImporter {
+    type Options = NoFormatOptions;
+
     fn descriptor(&self) -> FormatDescriptor {
         format_descriptor()
+    }
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
     }
 
     fn detect(
@@ -108,8 +118,8 @@ impl FormatImporter for StlImporter {
         detect::detect(probe, hint, scope)
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        parser::read_stl(scope)
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        parser::read_stl(context)
     }
 }
 

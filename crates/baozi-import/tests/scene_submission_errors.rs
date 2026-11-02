@@ -25,12 +25,13 @@ use baozi_import::authoring::{
     TextureLocalId, TextureRole, TextureStrength, TextureTransform,
 };
 use baozi_import::{
-    CapabilityStatus, CauseOwner, DetectionOutcome, DetectionResult, DetectionScope,
-    FormatCapability, FormatDescriptor, FormatEncoding, FormatImporter, ImportCause,
+    CapabilityStatus, CauseOwner, CompiledOptions, DetectionOutcome, DetectionResult,
+    DetectionScope, Format, FormatCapability, FormatDescriptor, FormatEncoding, ImportCause,
     ImportConfigOverlay, ImportFailure, ImportOperationControl, ImportRequest, ImportRequestLayer,
-    ImportTerminalCause, ImportTerminalFailureClass, OptionCompileLimits, ParseResult, ParseScope,
-    ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder, ResourceLimitsOverlay,
-    SceneDraft, SceneValidationDomain, SceneValidationError, SceneValidationLimit, import_bytes,
+    ImportTerminalCause, ImportTerminalFailureClass, NoFormatOptions, OptionCompileError,
+    OptionCompileLimits, ParseContext, ParseResult, ReadConfidence, ReadHint, RegistryBuildLimits,
+    RegistryBuildScope, RegistryBuilder, ResourceLimitsOverlay, SceneValidationDomain,
+    SceneValidationError, SceneValidationLimit,
 };
 use baozi_io::AssetPath;
 use baozi_operation::{CancellationToken, ControlCause};
@@ -62,7 +63,16 @@ struct CustomImporter {
     cancel_after_rejection: Option<CancellationToken>,
 }
 
-impl FormatImporter for CustomImporter {
+impl Format for CustomImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("dev.baozi.test.submission-errors").unwrap(),
@@ -84,7 +94,7 @@ impl FormatImporter for CustomImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
         let result = match self.input {
             Input::InvalidParent => support::submit_invalid_parent_scene(scope),
             _ => submit_triangle(scope, self.input),
@@ -98,7 +108,7 @@ impl FormatImporter for CustomImporter {
     }
 }
 
-fn submit_triangle(scope: &ParseScope<'_>, input: Input) -> ParseResult<SceneDraft> {
+fn submit_triangle(scope: &mut ParseContext<'_>, input: Input) -> ParseResult<()> {
     let roots = [NodeLocalId::new(0)];
     let nodes = [NodeAuthoringNode::new(
         Presence::Absent,
@@ -367,7 +377,7 @@ fn submit_triangle(scope: &ParseScope<'_>, input: Input) -> ParseResult<SceneDra
     if matches!(input, Input::InvalidSceneSpace) {
         scene_space.unit_scale_to_meters = Some(0.0);
     }
-    scope.submit_scene(SceneAuthoringBatch::new(
+    scope.submit_complete(SceneAuthoringBatch::new(
         SpatialAuthoringBatch::new(&scene_space, &[], &[]),
         NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
         appearance,
@@ -409,7 +419,7 @@ fn import_with(
         .unwrap();
     let registry = builder.freeze(RegistryBuildLimits::default()).unwrap();
     let request = registry
-        .compile_request(
+        .plan(
             &ImportRequest::from_layers(
                 ImportRequestLayer::default(),
                 ImportRequestLayer::new(
@@ -423,8 +433,7 @@ fn import_with(
         Some(cancellation) => ImportOperationControl::default().with_cancellation(cancellation),
         None => ImportOperationControl::default(),
     };
-    import_bytes(
-        &request,
+    request.read_bytes(
         AssetPath::new("asset.submission").unwrap(),
         b"input",
         control,

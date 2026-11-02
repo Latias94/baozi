@@ -1,14 +1,12 @@
-use baozi_format_gltf::{
-    FORMAT_ID, GltfImportOptions, GltfImporter, GltfSceneSelection, gltf_import_option_key,
-};
+use baozi_format_gltf::{FORMAT_ID, GltfImportOptions, GltfImporter, GltfSceneSelection};
 use baozi_import::authoring::FormatId;
 use baozi_import::{
-    DetectionOutcome, DetectionResult, DetectionScope, FormatDescriptor, FormatImporter,
-    FormatOptionCodec, FormatOptionEnvelope, FormatSelection, ImportConfigOverlay,
-    ImportOperationControl, ImportRequest, ImportRequestLayer, OptionBudget, OptionCompileError,
-    OptionCompileLimits, OptionRuntimeTypeKey, OptionScopeLimits, ParseResult, ParseScope,
-    PreparedImportRequest, Probe, ReadHint, RegistryBuildError, RegistryBuildLimits,
-    RegistryBuilder, RegistrySnapshot, RequestError, SceneDraft, import_bytes,
+    CompiledOptions, DetectionOutcome, DetectionResult, DetectionScope, Format, FormatDescriptor,
+    FormatOptionEnvelope, FormatOptionLayers, FormatOptionSchema, FormatSelection,
+    ImportConfigOverlay, ImportOperationControl, ImportPlan, ImportRequest, ImportRequestLayer,
+    OptionBudget, OptionCompileError, OptionCompileLimits, OptionCompileScope, OptionScopeLimits,
+    ParseContext, ParseResult, Probe, ReadHint, RegistryBuildError, RegistryBuildLimits,
+    RegistryBuildScope, RegistryBuilder, RegistrySnapshot, RequestError,
 };
 use baozi_io::AssetPath;
 use std::sync::{Arc, Mutex};
@@ -45,9 +43,8 @@ fn request_layers(
     Ok(ImportRequest::from_layers(preset_layer, caller_layer))
 }
 
-fn run_request(request: &PreparedImportRequest) -> TestResult<()> {
-    let report = import_bytes(
-        request,
+fn run_request(request: &ImportPlan) -> TestResult<()> {
+    let report = request.read_bytes(
         AssetPath::new("options.gltf")?,
         DOCUMENT,
         ImportOperationControl::default(),
@@ -58,17 +55,31 @@ fn run_request(request: &PreparedImportRequest) -> TestResult<()> {
 
 struct ObservingImporter(Arc<Mutex<Vec<GltfSceneSelection>>>);
 
-impl FormatImporter for ObservingImporter {
+impl Format for ObservingImporter {
+    type Options = GltfImportOptions;
+
     fn descriptor(&self) -> FormatDescriptor {
         GltfImporter.descriptor()
     }
 
-    fn option_codec(&self) -> Arc<dyn FormatOptionCodec> {
-        GltfImporter.option_codec()
+    fn option_schema(&self) -> Option<FormatOptionSchema> {
+        GltfImporter.option_schema()
     }
 
-    fn option_runtime_type_key(&self) -> OptionRuntimeTypeKey {
-        GltfImporter.option_runtime_type_key()
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        GltfImporter.compile_defaults(scope)
+    }
+
+    fn compile_options(
+        &self,
+        scope: &mut OptionCompileScope<'_>,
+        defaults: &Self::Options,
+        layers: FormatOptionLayers<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        GltfImporter.compile_options(scope, defaults, layers)
     }
 
     fn detect(
@@ -80,34 +91,28 @@ impl FormatImporter for ObservingImporter {
         GltfImporter.detect(probe, hint, scope)
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        let selection = scope.options(&gltf_import_option_key())?.scene_selection();
+    fn parse(
+        &self,
+        options: &GltfImportOptions,
+        context: &mut ParseContext<'_>,
+    ) -> ParseResult<()> {
+        let selection = options.scene_selection();
         self.0
             .lock()
             .expect("option observation mutex remains usable")
             .push(selection);
-        GltfImporter.parse(scope)
+        GltfImporter.parse(options, context)
     }
 }
 
 #[test]
 fn option_schema_and_complete_canonical_payloads_are_stable() -> TestResult<()> {
-    let key = gltf_import_option_key();
-    assert_eq!(key.schema().key().owner().as_str(), FORMAT_ID);
-    assert_eq!(key.schema().key().local().as_str(), "import-options");
-    assert_eq!(key.schema().version().get(), 1);
-    assert_eq!(
-        GltfImporter.option_codec().schema().as_ref(),
-        Some(key.schema())
-    );
-    assert_eq!(
-        GltfImporter.option_runtime_type_key(),
-        key.runtime_type_key()
-    );
-    assert_eq!(
-        GltfImporter.option_codec().runtime_type_key(),
-        key.runtime_type_key()
-    );
+    let schema = GltfImporter
+        .option_schema()
+        .expect("glTF declares its wire schema");
+    assert_eq!(schema.key().owner().as_str(), FORMAT_ID);
+    assert_eq!(schema.key().local().as_str(), "import-options");
+    assert_eq!(schema.version().get(), 1);
 
     let snapshot = snapshot()?;
     let defaults = GltfImportOptions::default();
@@ -127,9 +132,9 @@ fn option_schema_and_complete_canonical_payloads_are_stable() -> TestResult<()> 
         let options = defaults.with_scene_selection(selection);
         assert_eq!(options.scene_selection(), selection);
         let envelope = options.to_envelope()?;
-        assert_eq!(envelope, key.envelope_from_canonical_payload(payload)?);
+        assert_eq!(envelope, schema.envelope_from_canonical_payload(payload)?);
         let request = request_layers(None, Some(envelope))?;
-        snapshot.compile_request(&request, OptionCompileLimits::default())?;
+        snapshot.plan(&request, OptionCompileLimits::default())?;
     }
     assert_eq!(
         defaults.scene_selection(),
@@ -142,7 +147,9 @@ fn option_schema_and_complete_canonical_payloads_are_stable() -> TestResult<()> 
 #[test]
 fn malformed_layers_are_rejected_even_when_the_caller_overrides_them() -> TestResult<()> {
     let snapshot = snapshot()?;
-    let key = gltf_import_option_key();
+    let schema = GltfImporter
+        .option_schema()
+        .expect("glTF declares its wire schema");
     let explicit_default = GltfImportOptions::default().to_envelope()?;
     let cases: &[(&[u8], &str)] = &[
         (&[], "truncated"),
@@ -160,14 +167,14 @@ fn malformed_layers_are_rejected_even_when_the_caller_overrides_them() -> TestRe
         (&[1, 1, 0, 0, 0, 0, 0], "trailing-bytes"),
     ];
     for &(payload, expected_code) in cases {
-        let envelope = key.envelope_from_canonical_payload(payload)?;
+        let envelope = schema.envelope_from_canonical_payload(payload)?;
         for (preset, caller) in [
             (Some(envelope.clone()), Some(explicit_default.clone())),
             (None, Some(envelope)),
         ] {
             let request = request_layers(preset, caller)?;
             let error = snapshot
-                .compile_request(&request, OptionCompileLimits::default())
+                .plan(&request, OptionCompileLimits::default())
                 .expect_err("noncanonical glTF options must fail before import");
             let RequestError::CodecRejected {
                 format,
@@ -189,7 +196,10 @@ fn absent_fields_inherit_and_explicit_caller_selections_win() -> TestResult<()> 
     let mut registry = RegistryBuilder::new();
     registry.register(ObservingImporter(Arc::clone(&observed)))?;
     let snapshot = registry.freeze(RegistryBuildLimits::default())?;
-    let inherit = gltf_import_option_key().envelope_from_canonical_payload([0])?;
+    let inherit = GltfImporter
+        .option_schema()
+        .expect("glTF declares its wire schema")
+        .envelope_from_canonical_payload([0])?;
     let document_default = GltfImportOptions::default().to_envelope()?;
     let first = GltfImportOptions::default()
         .with_scene_selection(GltfSceneSelection::SceneIndex(1))
@@ -225,7 +235,7 @@ fn absent_fields_inherit_and_explicit_caller_selections_win() -> TestResult<()> 
     ];
     for (preset, caller, expected) in cases {
         let request = request_layers(preset, caller)?;
-        let request = snapshot.compile_request(&request, OptionCompileLimits::default())?;
+        let request = snapshot.plan(&request, OptionCompileLimits::default())?;
         run_request(&request)?;
         assert_eq!(
             observed
@@ -239,13 +249,12 @@ fn absent_fields_inherit_and_explicit_caller_selections_win() -> TestResult<()> 
 }
 
 #[test]
-fn prepared_requests_keep_independent_frozen_selections() -> TestResult<()> {
+fn import_plans_keep_independent_frozen_selections() -> TestResult<()> {
     let observed = Arc::new(Mutex::new(Vec::new()));
     let mut registry = RegistryBuilder::new();
     registry.register(ObservingImporter(Arc::clone(&observed)))?;
     let snapshot = registry.freeze(RegistryBuildLimits::default())?;
-    let defaults =
-        snapshot.compile_request(&request_layers(None, None)?, OptionCompileLimits::default())?;
+    let defaults = snapshot.plan(&request_layers(None, None)?, OptionCompileLimits::default())?;
     let mut submitted = request_layers(
         None,
         Some(
@@ -254,7 +263,7 @@ fn prepared_requests_keep_independent_frozen_selections() -> TestResult<()> {
                 .to_envelope()?,
         ),
     )?;
-    let first = snapshot.compile_request(&submitted, OptionCompileLimits::default())?;
+    let first = snapshot.plan(&submitted, OptionCompileLimits::default())?;
     submitted = request_layers(
         None,
         Some(
@@ -263,7 +272,7 @@ fn prepared_requests_keep_independent_frozen_selections() -> TestResult<()> {
                 .to_envelope()?,
         ),
     )?;
-    let second = snapshot.compile_request(&submitted, OptionCompileLimits::default())?;
+    let second = snapshot.plan(&submitted, OptionCompileLimits::default())?;
     drop(submitted);
     let first_clone = first.clone();
 
@@ -289,8 +298,8 @@ fn prepared_requests_keep_independent_frozen_selections() -> TestResult<()> {
 fn default_compilation_charges_the_actual_inline_option_size() -> TestResult<()> {
     let retained_bytes = size_of::<GltfImportOptions>() as u64;
     for maximum in [retained_bytes - 1, retained_bytes] {
-        let per_codec = OptionScopeLimits::new(1, 0, 0, 0, 0, 0, maximum);
-        let limits = RegistryBuildLimits::new(per_codec, 1, 0, retained_bytes);
+        let per_format = OptionScopeLimits::new(1, 0, 0, 0, 0, 0, maximum);
+        let limits = RegistryBuildLimits::new(per_format, 1, 0, retained_bytes);
         let mut registry = RegistryBuilder::new();
         registry.register(GltfImporter)?;
         let result = registry.freeze(limits);
@@ -332,7 +341,7 @@ fn request_compilation_meters_both_layers_and_retained_option_bytes() -> TestRes
     ] {
         let per_target = OptionScopeLimits::new(max_work, max_payload, 0, 0, 0, 0, max_result);
         let limits = OptionCompileLimits::new(per_target, 2, 8, 8, 0, retained_bytes);
-        let result = snapshot.compile_request(&request, limits);
+        let result = snapshot.plan(&request, limits);
         if let Some(expected) = expected_budget {
             assert!(matches!(
                 result,

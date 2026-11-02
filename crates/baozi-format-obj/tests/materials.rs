@@ -530,7 +530,7 @@ fn sidecar_byte_limit_warns_and_keeps_geometry() -> TestResult<()> {
 }
 
 #[test]
-fn sidecar_total_byte_limit_is_terminal_after_recording_optional_loss_evidence() -> TestResult<()> {
+fn sidecar_total_byte_limit_is_terminal_before_optional_loss_evidence() -> TestResult<()> {
     let obj = b"mtllib material.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
     let mtl = b"newmtl red\nKd 1 0 0\n";
     let mut limits = sidecar_limits();
@@ -545,15 +545,21 @@ fn sidecar_total_byte_limit_is_terminal_after_recording_optional_loss_evidence()
         limits,
         true,
     )?);
-    let terminal = match failure.cause() {
-        ImportCause::OperationTerminal(terminal) => *terminal,
-        cause => panic!("expected terminal ledger failure, got {cause:?}"),
-    };
-    assert_eq!(terminal.class(), ImportTerminalFailureClass::Ledger);
-    assert_eq!(
+    assert!(matches!(
+        failure.cause(),
+        ImportCause::Scope(abort)
+            if matches!(abort.cause(), ScopeAbortCause::Ledger(
+                baozi_operation::LedgerCause::LimitExceeded {
+                    dimension: ImportDimension::TotalAssetBytes,
+                    ..
+                }
+            ))
+    ));
+    assert!(matches!(
         failure.ledger().terminal_cause(),
         ImportTerminalCause::Failure(terminal)
-    );
+            if terminal.class() == ImportTerminalFailureClass::Ledger
+    ));
     let total = failure
         .ledger()
         .dimension(ImportDimension::TotalAssetBytes)
@@ -561,12 +567,8 @@ fn sidecar_total_byte_limit_is_terminal_after_recording_optional_loss_evidence()
     assert_eq!(total.attempted(), (obj.len() + mtl.len()) as u64);
     assert_eq!(total.consumed(), obj.len() as u64);
     assert_eq!(failure.ledger().committed_canonical_members(), 0);
-    assert_eq!(failure.optional_dependency_evidence().len(), 1);
-    assert_eq!(failure.diagnostics().len(), 2);
-    assert_eq!(
-        failure.diagnostics()[1].code().as_str(),
-        "obj.mtl_unavailable"
-    );
+    assert!(failure.optional_dependency_evidence().is_empty());
+    assert!(failure.diagnostics().is_empty());
     Ok(())
 }
 

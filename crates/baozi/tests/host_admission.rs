@@ -5,8 +5,8 @@ use baozi::{
     ReadConfidence,
 };
 use baozi_import::{
-    DetectionOutcome, DetectionResult, DetectionScope, FormatImporter, ParseResult, ParseScope,
-    Probe, ReadHint, SceneDraft,
+    CompiledOptions, DetectionOutcome, DetectionResult, DetectionScope, Format, NoFormatOptions,
+    OptionCompileError, ParseContext, ParseResult, Probe, ReadHint, RegistryBuildScope,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -139,7 +139,16 @@ struct AdmissionProbeImporter {
     probe: Arc<ParserProbe>,
 }
 
-impl FormatImporter for AdmissionProbeImporter {
+impl Format for AdmissionProbeImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> std::result::Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new(FORMAT_ID).expect("qualified host-admission format id"),
@@ -161,7 +170,7 @@ impl FormatImporter for AdmissionProbeImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
         let _permit = self.probe.enter();
         support::submit_minimal_scene(scope)
     }

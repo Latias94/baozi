@@ -1,3 +1,4 @@
+use crate::dependency::DependencyOriginIssuer;
 use crate::descriptor::{
     TextBomPolicy, TextControlPolicy, TextDecodingMode, TextLexicalMode, TextNewline, TextProfile,
     TextSourceEncoding,
@@ -9,8 +10,8 @@ use crate::diagnostic::{
 use crate::ledger::ImportProgressPhase;
 use crate::metered_storage::{MeteredDecodedText, MeteredVec, metered_vec_replacement_plans};
 use crate::scope::{
-    ImportStorageClass, ImportWorkClass, METERED_COPY_POLL_INTERVAL, ParseFailure, ParseResult,
-    ParseScope,
+    ImportStorageClass, ImportWorkClass, METERED_COPY_POLL_INTERVAL, ParseExecution, ParseFailure,
+    ParseResult,
 };
 use std::fmt;
 use std::marker::PhantomData;
@@ -164,9 +165,8 @@ impl<'scope> ConformedTextInput<'scope> {
 /// Reject-invalid ASCII profiles stop an overlong record after the first byte beyond the shared
 /// line limit. Aggregate decoded limits remain the format's responsibility when it intentionally
 /// consumes only a prefix of the selected source range.
-pub struct TextInputRecordCursor<'scope, 'session, 'source> {
-    scope: &'scope ParseScope<'session>,
-    profile: &'scope TextProfile,
+pub struct TextInputRecordCursor<'session, 'source> {
+    issuer: &'session DependencyOriginIssuer,
     facts: TextProfileFacts,
     source: DiagnosticSource<'source>,
     options: TextInputOptions,
@@ -208,10 +208,10 @@ impl From<ParseFailure> for TextInputRecordScanExit {
     }
 }
 
-impl<'scope, 'session, 'source> TextInputRecordCursor<'scope, 'session, 'source> {
+impl<'session, 'source> TextInputRecordCursor<'session, 'source> {
     pub(crate) fn new(
-        scope: &'scope ParseScope<'session>,
-        profile: Option<&'scope TextProfile>,
+        scope: &mut ParseExecution<'_, 'session>,
+        profile: Option<&TextProfile>,
         source: DiagnosticSource<'source>,
         options: TextInputOptions,
     ) -> ParseResult<TextConformanceResult<Self>> {
@@ -220,7 +220,6 @@ impl<'scope, 'session, 'source> TextInputRecordCursor<'scope, 'session, 'source>
             Ok(facts) => facts,
             Err(violation) => return Ok(Err(violation)),
         };
-        let profile = profile.expect("validated text profile must be present");
         let raw_len = usize_to_u64(scope, range.len(), options.resource)?;
         let raw_limit = options.raw_limit.unwrap_or(TextRawLimit {
             resource: options.resource,
@@ -230,8 +229,7 @@ impl<'scope, 'session, 'source> TextInputRecordCursor<'scope, 'session, 'source>
         let raw_offset = usize_to_u64(scope, range.start, options.resource)?;
         let raw_end = usize_to_u64(scope, range.end, options.resource)?;
         Ok(Ok(Self {
-            scope,
-            profile,
+            issuer: scope.session_issuer(),
             facts,
             source,
             options,
@@ -247,24 +245,27 @@ impl<'scope, 'session, 'source> TextInputRecordCursor<'scope, 'session, 'source>
     }
 
     /// Conforms and processes the next physical record without allowing decoded borrows to escape.
-    pub fn with_next_record<T>(
+    pub fn with_next_record<'region, T>(
         &mut self,
+        scope: &mut ParseExecution<'region, 'session>,
         action: impl for<'input> FnOnce(
-            &'input ConformedTextInput<'scope>,
+            &mut ParseExecution<'region, 'session>,
+            &'input ConformedTextInput<'session>,
             &mut TextInputRecoveryTracker<'input, 'session>,
         ) -> ParseResult<T>,
     ) -> ParseResult<TextConformanceResult<Option<T>>> {
-        let Some(boundary) = self.next_record_boundary()? else {
+        scope.check_session(self.issuer)?;
+        let Some(boundary) = self.next_record_boundary(scope)? else {
             return Ok(Ok(None));
         };
         let raw_end = match boundary {
             TextInputRecordBoundary::Complete(raw_end) => raw_end,
             TextInputRecordBoundary::Violation(violation) => return Ok(Err(violation)),
         };
-        let next_line_number = self.line_number.checked_add(1).ok_or_else(|| {
-            self.scope
-                .resource_limit_exceeded("text-input-line-number", u64::MAX)
-        })?;
+        let next_line_number = self
+            .line_number
+            .checked_add(1)
+            .ok_or_else(|| scope.resource_limit_exceeded("text-input-line-number", u64::MAX))?;
         let options = self
             .options
             .with_raw_base(self.raw_offset)
@@ -275,8 +276,7 @@ impl<'scope, 'session, 'source> TextInputRecordCursor<'scope, 'session, 'source>
             self.source.path(),
             self.source.bytes(),
         );
-        let conformed =
-            with_conformed_text_input(self.scope, Some(self.profile), source, options, action)?;
+        let conformed = with_conformed_text_facts(scope, self.facts, source, options, action)?;
         match conformed {
             Ok(value) => {
                 self.raw_offset = raw_end;
@@ -287,23 +287,23 @@ impl<'scope, 'session, 'source> TextInputRecordCursor<'scope, 'session, 'source>
         }
     }
 
-    fn next_record_boundary(&self) -> ParseResult<Option<TextInputRecordBoundary>> {
+    fn next_record_boundary(
+        &self,
+        scope: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<Option<TextInputRecordBoundary>> {
         if self.raw_offset == self.raw_end {
             return Ok(None);
         }
         let start = usize::try_from(self.raw_offset).map_err(|_| {
-            self.scope
-                .descriptor_contract_failure("text-input-source-offset-out-of-bounds")
+            scope.descriptor_contract_failure("text-input-source-offset-out-of-bounds")
         })?;
         let end = usize::try_from(self.raw_end).map_err(|_| {
-            self.scope
-                .descriptor_contract_failure("text-input-source-offset-out-of-bounds")
+            scope.descriptor_contract_failure("text-input-source-offset-out-of-bounds")
         })?;
         let bytes = self.source.bytes().get(start..end).ok_or_else(|| {
-            self.scope
-                .descriptor_contract_failure("text-input-source-offset-out-of-bounds")
+            scope.descriptor_contract_failure("text-input-source-offset-out-of-bounds")
         })?;
-        let scan_limit = self.record_scan_limit();
+        let scan_limit = self.record_scan_limit(scope);
         let bom_probe_len = self.bom_probe_len(bytes.len());
         let scan_end = scan_limit.map_or(bytes.len(), |limit| {
             limit
@@ -313,6 +313,7 @@ impl<'scope, 'session, 'source> TextInputRecordCursor<'scope, 'session, 'source>
         });
         let mut semantic_scan_end = None;
         let mut line_limit_reached = false;
+        let group = scope.bind_work_group([ImportWorkClass::DecodeWork])?;
         let mut chunk_start = 0usize;
         while chunk_start < scan_end {
             let chunk_end = if semantic_scan_end.is_none() && bom_probe_len != 0 {
@@ -323,14 +324,13 @@ impl<'scope, 'session, 'source> TextInputRecordCursor<'scope, 'session, 'source>
                     .map_or(scan_end, |candidate| candidate.min(scan_end))
             };
             let admitted_len = chunk_end.checked_sub(chunk_start).ok_or_else(|| {
-                self.scope
-                    .descriptor_contract_failure("text-input-record-scan-range-invalid")
+                scope.descriptor_contract_failure("text-input-record-scan-range-invalid")
             })?;
-            let admitted_work = usize_to_u64(self.scope, admitted_len, self.options.resource)?;
-            let scan = self.scope.with_work(
-                ImportWorkClass::DecodeWork,
-                admitted_work,
-                |work| -> Result<(), TextInputRecordScanExit> {
+            let admitted_work = usize_to_u64(scope, admitted_len, self.options.resource)?;
+            let scan = scope.with_work(
+                &group,
+                [admitted_work],
+                |scope, work| -> Result<(), TextInputRecordScanExit> {
                     let mut scan_start = chunk_start;
                     if semantic_scan_end.is_none() {
                         let has_bom = bom_probe_len == 3
@@ -340,10 +340,10 @@ impl<'scope, 'session, 'source> TextInputRecordCursor<'scope, 'session, 'source>
                         if has_bom {
                             work.complete([3])?;
                             if self.facts.bom_policy == TextBomPolicy::Forbidden {
-                                let raw_end = self.absolute_record_end(3)?;
+                                let raw_end = self.absolute_record_end(scope, 3)?;
                                 let raw_range = DiagnosticByteRange::new(self.raw_offset, raw_end)
                                     .map_err(|_| {
-                                        self.scope.descriptor_contract_failure(
+                                        scope.descriptor_contract_failure(
                                             "text-input-record-bom-range-invalid",
                                         )
                                     })?;
@@ -372,8 +372,7 @@ impl<'scope, 'session, 'source> TextInputRecordCursor<'scope, 'session, 'source>
 
                     let scanned_end = chunk_end.min(semantic_scan_end.unwrap_or(bytes.len()));
                     let chunk = bytes.get(scan_start..scanned_end).ok_or_else(|| {
-                        self.scope
-                            .descriptor_contract_failure("text-input-record-scan-range-invalid")
+                        scope.descriptor_contract_failure("text-input-record-scan-range-invalid")
                     })?;
                     for (relative, byte) in chunk.iter().copied().enumerate() {
                         let is_newline = matches!(byte, b'\r' | b'\n');
@@ -382,8 +381,7 @@ impl<'scope, 'session, 'source> TextInputRecordCursor<'scope, 'session, 'source>
                             continue;
                         }
                         let newline = scan_start.checked_add(relative).ok_or_else(|| {
-                            self.scope
-                                .resource_limit_exceeded(self.options.resource, u64::MAX)
+                            scope.resource_limit_exceeded(self.options.resource, u64::MAX)
                         })?;
                         if byte == b'\r' && newline.checked_add(1) == Some(scanned_end) {
                             return Err(TextInputRecordScanExit::PendingCr { newline });
@@ -398,10 +396,9 @@ impl<'scope, 'session, 'source> TextInputRecordCursor<'scope, 'session, 'source>
                             newline_len += usize::from(is_lf);
                         }
                         let record_len = newline.checked_add(newline_len).ok_or_else(|| {
-                            self.scope
-                                .resource_limit_exceeded(self.options.resource, u64::MAX)
+                            scope.resource_limit_exceeded(self.options.resource, u64::MAX)
                         })?;
-                        let raw_end = self.absolute_record_end(record_len)?;
+                        let raw_end = self.absolute_record_end(scope, record_len)?;
                         return Err(TextInputRecordScanExit::Boundary(
                             TextInputRecordBoundary::Complete(raw_end),
                         ));
@@ -418,8 +415,7 @@ impl<'scope, 'session, 'source> TextInputRecordCursor<'scope, 'session, 'source>
                                 limit,
                             });
                         }
-                        return Err(self
-                            .scope
+                        return Err(scope
                             .descriptor_contract_failure(
                                 "text-input-record-line-limit-state-invalid",
                             )
@@ -433,10 +429,12 @@ impl<'scope, 'session, 'source> TextInputRecordCursor<'scope, 'session, 'source>
                 Err(TextInputRecordScanExit::Scope(failure)) => return Err(failure),
                 Err(TextInputRecordScanExit::Boundary(boundary)) => return Ok(Some(boundary)),
                 Err(TextInputRecordScanExit::PendingCr { newline }) => {
-                    return self.record_boundary_after_cr(bytes, newline).map(Some);
+                    return self
+                        .record_boundary_after_cr(scope, bytes, newline)
+                        .map(Some);
                 }
                 Err(TextInputRecordScanExit::LineLimit { processed, limit }) => {
-                    return Err(self.line_limit_failure(processed, limit));
+                    return Err(self.line_limit_failure(scope, processed, limit));
                 }
             }
             chunk_start = chunk_end;
@@ -444,16 +442,19 @@ impl<'scope, 'session, 'source> TextInputRecordCursor<'scope, 'session, 'source>
         Ok(Some(TextInputRecordBoundary::Complete(self.raw_end)))
     }
 
-    fn record_scan_limit(&self) -> Option<TextInputRecordScanLimit> {
+    fn record_scan_limit(
+        &self,
+        scope: &ParseExecution<'_, '_>,
+    ) -> Option<TextInputRecordScanLimit> {
         if self.options.decoding_mode != TextDecodingMode::RejectInvalid
             || self.facts.lexical_mode != TextLexicalMode::AsciiOnly
         {
             return None;
         }
-        let probe_len = self.scope.limits().max_line_bytes.checked_add(1)?;
+        let probe_len = scope.limits().max_line_bytes.checked_add(1)?;
         Some(TextInputRecordScanLimit::LineBytes {
             probe_len,
-            limit: self.scope.limits().max_line_bytes,
+            limit: scope.limits().max_line_bytes,
         })
     }
 
@@ -463,62 +464,62 @@ impl<'scope, 'session, 'source> TextInputRecordCursor<'scope, 'session, 'source>
 
     fn record_boundary_after_cr(
         &self,
+        scope: &mut ParseExecution<'_, 'session>,
         bytes: &[u8],
         newline: usize,
     ) -> ParseResult<TextInputRecordBoundary> {
         let Some(next) = newline.checked_add(1) else {
-            return Err(self
-                .scope
-                .resource_limit_exceeded(self.options.resource, u64::MAX));
+            return Err(scope.resource_limit_exceeded(self.options.resource, u64::MAX));
         };
         let newline_len = if let Some(byte) = bytes.get(next) {
-            self.scope
-                .with_work(ImportWorkClass::DecodeWork, 1, |work| {
-                    let newline_len = if *byte == b'\n' { 2 } else { 1 };
-                    work.complete([1])?;
-                    Ok(newline_len)
-                })?
+            let group = scope.bind_work_group([ImportWorkClass::DecodeWork])?;
+            scope.with_work(&group, [1], |_scope, work| {
+                let newline_len = if *byte == b'\n' { 2 } else { 1 };
+                work.complete([1])?;
+                Ok(newline_len)
+            })?
         } else {
             1
         };
-        let record_len = newline.checked_add(newline_len).ok_or_else(|| {
-            self.scope
-                .resource_limit_exceeded(self.options.resource, u64::MAX)
-        })?;
-        self.absolute_record_end(record_len)
+        let record_len = newline
+            .checked_add(newline_len)
+            .ok_or_else(|| scope.resource_limit_exceeded(self.options.resource, u64::MAX))?;
+        self.absolute_record_end(scope, record_len)
             .map(TextInputRecordBoundary::Complete)
     }
 
-    fn line_limit_failure(&self, processed: usize, limit: usize) -> ParseFailure {
-        let processed = match usize_to_u64(self.scope, processed, self.options.resource) {
+    fn line_limit_failure(
+        &self,
+        scope: &mut ParseExecution<'_, '_>,
+        processed: usize,
+        limit: usize,
+    ) -> ParseFailure {
+        let processed = match usize_to_u64(scope, processed, self.options.resource) {
             Ok(processed) => processed,
             Err(failure) => return failure,
         };
-        let limit = match usize_to_u64(self.scope, limit, self.options.line_resource) {
+        let limit = match usize_to_u64(scope, limit, self.options.line_resource) {
             Ok(limit) => limit,
             Err(failure) => return failure,
         };
-        match self
-            .scope
-            .enforce_resource_limit(self.options.line_resource, processed, limit)
-        {
-            Ok(()) => self
-                .scope
-                .descriptor_contract_failure("text-input-line-limit-probe-accepted"),
+        match scope.enforce_resource_limit(self.options.line_resource, processed, limit) {
+            Ok(()) => scope.descriptor_contract_failure("text-input-line-limit-probe-accepted"),
             Err(failure) => failure,
         }
     }
 
-    fn absolute_record_end(&self, record_len: usize) -> ParseResult<u64> {
-        let record_len = usize_to_u64(self.scope, record_len, self.options.resource)?;
-        let end = self.raw_offset.checked_add(record_len).ok_or_else(|| {
-            self.scope
-                .resource_limit_exceeded(self.options.resource, u64::MAX)
-        })?;
+    fn absolute_record_end(
+        &self,
+        scope: &ParseExecution<'_, '_>,
+        record_len: usize,
+    ) -> ParseResult<u64> {
+        let record_len = usize_to_u64(scope, record_len, self.options.resource)?;
+        let end = self
+            .raw_offset
+            .checked_add(record_len)
+            .ok_or_else(|| scope.resource_limit_exceeded(self.options.resource, u64::MAX))?;
         if end > self.raw_end {
-            return Err(self
-                .scope
-                .descriptor_contract_failure("text-input-record-end-out-of-bounds"));
+            return Err(scope.descriptor_contract_failure("text-input-record-end-out-of-bounds"));
         }
         Ok(end)
     }
@@ -740,7 +741,7 @@ impl TextInputReplacement {
 /// [`Self::record_format_recovery`]. Diagnostics and recovery evidence always use the source bound
 /// to the conformance operation.
 pub struct TextInputRecoveryTracker<'input, 'session> {
-    scope: &'input ParseScope<'session>,
+    issuer: &'session DependencyOriginIssuer,
     source: DiagnosticSource<'input>,
     line_number_base: u64,
     line_starts: &'input [TextInputLineStart],
@@ -763,28 +764,26 @@ impl fmt::Debug for TextInputRecoveryTracker<'_, '_> {
     }
 }
 
-impl TextInputRecoveryTracker<'_, '_> {
+impl<'session> TextInputRecoveryTracker<'_, 'session> {
     pub fn record_bom_diagnostic(
         &mut self,
+        scope: &mut ParseExecution<'_, 'session>,
         bom: &TextInputBom,
         code: DiagnosticCode,
         message: fmt::Arguments<'_>,
     ) -> ParseResult<()> {
+        scope.check_session(self.issuer)?;
         let Some(expected) = self.pending_bom_diagnostic else {
-            return Err(self
-                .scope
-                .descriptor_contract_failure("text-input-bom-diagnostic-overclassified"));
+            return Err(
+                scope.descriptor_contract_failure("text-input-bom-diagnostic-overclassified")
+            );
         };
         if !std::ptr::eq(expected, bom) {
-            return Err(self
-                .scope
-                .descriptor_contract_failure("text-input-bom-diagnostic-mismatch"));
+            return Err(scope.descriptor_contract_failure("text-input-bom-diagnostic-mismatch"));
         }
-        let line_column = DiagnosticLineColumn::new(self.line_number_base, 1).map_err(|_| {
-            self.scope
-                .descriptor_contract_failure("text-input-bom-location-invalid")
-        })?;
-        self.scope.emit_diagnostic_with_location(
+        let line_column = DiagnosticLineColumn::new(self.line_number_base, 1)
+            .map_err(|_| scope.descriptor_contract_failure("text-input-bom-location-invalid"))?;
+        scope.emit_diagnostic_with_location(
             DiagnosticSeverity::Warning,
             code,
             ImportProgressPhase::Decode,
@@ -799,32 +798,32 @@ impl TextInputRecoveryTracker<'_, '_> {
         Ok(())
     }
 
-    pub fn discard_replacement(&mut self, replacement: &TextInputReplacement) -> ParseResult<()> {
-        self.classify_next(replacement)
+    pub fn discard_replacement(
+        &mut self,
+        scope: &mut ParseExecution<'_, 'session>,
+        replacement: &TextInputReplacement,
+    ) -> ParseResult<()> {
+        self.classify_next(scope, replacement)
     }
 
     pub fn discard_replacements(
         &mut self,
+        scope: &mut ParseExecution<'_, 'session>,
         replacements: &[TextInputReplacement],
     ) -> ParseResult<()> {
+        scope.check_session(self.issuer)?;
         if replacements.is_empty() {
             return Ok(());
         }
-        self.require_bom_diagnostic()?;
+        self.require_bom_diagnostic(scope)?;
         let Some(end) = self.next.checked_add(replacements.len()) else {
-            return Err(self
-                .scope
-                .descriptor_contract_failure("text-input-replacement-overclassified"));
+            return Err(scope.descriptor_contract_failure("text-input-replacement-overclassified"));
         };
         let Some(expected) = self.replacements.get(self.next..end) else {
-            return Err(self
-                .scope
-                .descriptor_contract_failure("text-input-replacement-overclassified"));
+            return Err(scope.descriptor_contract_failure("text-input-replacement-overclassified"));
         };
         if !std::ptr::eq(expected.as_ptr(), replacements.as_ptr()) {
-            return Err(self
-                .scope
-                .descriptor_contract_failure("text-input-replacement-out-of-order"));
+            return Err(scope.descriptor_contract_failure("text-input-replacement-out-of-order"));
         }
         self.next = end;
         Ok(())
@@ -832,16 +831,16 @@ impl TextInputRecoveryTracker<'_, '_> {
 
     pub fn record_format_recovery(
         &mut self,
+        scope: &mut ParseExecution<'_, 'session>,
         replacement: &TextInputReplacement,
         code: DiagnosticCode,
         message: fmt::Arguments<'_>,
     ) -> ParseResult<()> {
-        self.expect_next(replacement)?;
+        self.expect_next(scope, replacement)?;
         let line_column = self.line_column(replacement.raw_range()).map_err(|()| {
-            self.scope
-                .descriptor_contract_failure("text-input-recovery-location-invalid")
+            scope.descriptor_contract_failure("text-input-recovery-location-invalid")
         })?;
-        self.scope.record_format_recovery_with_location(
+        scope.record_format_recovery_with_location(
             code,
             self.bound_source(),
             replacement.raw_range(),
@@ -852,34 +851,37 @@ impl TextInputRecoveryTracker<'_, '_> {
         Ok(())
     }
 
-    fn classify_next(&mut self, replacement: &TextInputReplacement) -> ParseResult<()> {
-        self.expect_next(replacement)?;
+    fn classify_next(
+        &mut self,
+        scope: &mut ParseExecution<'_, 'session>,
+        replacement: &TextInputReplacement,
+    ) -> ParseResult<()> {
+        self.expect_next(scope, replacement)?;
         self.next += 1;
         Ok(())
     }
 
-    fn expect_next(&self, replacement: &TextInputReplacement) -> ParseResult<()> {
-        self.require_bom_diagnostic()?;
+    fn expect_next(
+        &self,
+        scope: &ParseExecution<'_, 'session>,
+        replacement: &TextInputReplacement,
+    ) -> ParseResult<()> {
+        self.require_bom_diagnostic(scope)?;
         let Some(expected) = self.replacements.get(self.next) else {
-            return Err(self
-                .scope
-                .descriptor_contract_failure("text-input-replacement-overclassified"));
+            return Err(scope.descriptor_contract_failure("text-input-replacement-overclassified"));
         };
         if !std::ptr::eq(expected, replacement) {
-            return Err(self
-                .scope
-                .descriptor_contract_failure("text-input-replacement-out-of-order"));
+            return Err(scope.descriptor_contract_failure("text-input-replacement-out-of-order"));
         }
         Ok(())
     }
 
-    fn require_bom_diagnostic(&self) -> ParseResult<()> {
+    fn require_bom_diagnostic(&self, scope: &ParseExecution<'_, 'session>) -> ParseResult<()> {
+        scope.check_session(self.issuer)?;
         if self.pending_bom_diagnostic.is_none() {
             return Ok(());
         }
-        Err(self
-            .scope
-            .descriptor_contract_failure("text-input-bom-diagnostic-unclassified"))
+        Err(scope.descriptor_contract_failure("text-input-bom-diagnostic-unclassified"))
     }
 
     fn bound_source(&self) -> DiagnosticSource<'_> {
@@ -909,14 +911,12 @@ impl TextInputRecoveryTracker<'_, '_> {
         DiagnosticLineColumn::new(line_number, column).map_err(|_| ())
     }
 
-    fn finish(self) -> ParseResult<()> {
-        self.require_bom_diagnostic()?;
+    fn finish(self, scope: &mut ParseExecution<'_, 'session>) -> ParseResult<()> {
+        self.require_bom_diagnostic(scope)?;
         if self.next == self.replacements.len() {
             return Ok(());
         }
-        Err(self
-            .scope
-            .descriptor_contract_failure("text-input-replacement-unclassified"))
+        Err(scope.descriptor_contract_failure("text-input-replacement-unclassified"))
     }
 }
 
@@ -963,24 +963,44 @@ impl TextConformanceViolation {
     }
 }
 
-pub(crate) fn with_conformed_text_input<'scope, 'session, 'source, T>(
-    scope: &'scope ParseScope<'session>,
+pub(crate) fn with_conformed_text_input<'region, 'session, 'source, T>(
+    scope: &mut ParseExecution<'region, 'session>,
     profile: Option<&TextProfile>,
     source: DiagnosticSource<'source>,
     options: TextInputOptions,
     action: impl for<'input> FnOnce(
-        &'input ConformedTextInput<'scope>,
+        &mut ParseExecution<'region, 'session>,
+        &'input ConformedTextInput<'session>,
+        &mut TextInputRecoveryTracker<'input, 'session>,
+    ) -> ParseResult<T>,
+) -> ParseResult<TextConformanceResult<T>> {
+    let _ = text_input_range(scope, &source, options)?;
+    let facts = match text_profile_facts(profile, options.decoding_mode) {
+        Ok(facts) => facts,
+        Err(violation) => return Ok(Err(violation)),
+    };
+    with_conformed_text_facts(scope, facts, source, options, action)
+}
+
+fn with_conformed_text_facts<'region, 'session, 'source, T>(
+    scope: &mut ParseExecution<'region, 'session>,
+    facts: TextProfileFacts,
+    source: DiagnosticSource<'source>,
+    options: TextInputOptions,
+    action: impl for<'input> FnOnce(
+        &mut ParseExecution<'region, 'session>,
+        &'input ConformedTextInput<'session>,
         &mut TextInputRecoveryTracker<'input, 'session>,
     ) -> ParseResult<T>,
 ) -> ParseResult<TextConformanceResult<T>> {
     let bytes = text_input_bytes(scope, &source, options)?;
     let primary_source = scope.diagnostic_source_is_primary(&source);
-    let input = match conform_text_input(scope, profile, bytes, options, primary_source)? {
+    let input = match conform_text_input(scope, &facts, bytes, options, primary_source)? {
         Ok(input) => input,
         Err(violation) => return Ok(Err(violation)),
     };
     let mut recoveries = TextInputRecoveryTracker {
-        scope,
+        issuer: scope.session_issuer(),
         source: DiagnosticSource::new(source.authority().clone(), source.path(), source.bytes()),
         line_number_base: input.line_number_base,
         line_starts: input.line_starts.as_slice(),
@@ -988,13 +1008,13 @@ pub(crate) fn with_conformed_text_input<'scope, 'session, 'source, T>(
         replacements: input.replacements.as_slice(),
         next: 0,
     };
-    let value = action(&input, &mut recoveries)?;
-    recoveries.finish()?;
+    let value = action(scope, &input, &mut recoveries)?;
+    recoveries.finish(scope)?;
     Ok(Ok(value))
 }
 
 fn text_input_bytes<'source>(
-    scope: &ParseScope<'_>,
+    scope: &ParseExecution<'_, '_>,
     source: &'source DiagnosticSource<'_>,
     options: TextInputOptions,
 ) -> ParseResult<&'source [u8]> {
@@ -1006,7 +1026,7 @@ fn text_input_bytes<'source>(
 }
 
 fn text_input_range(
-    scope: &ParseScope<'_>,
+    scope: &ParseExecution<'_, '_>,
     source: &DiagnosticSource<'_>,
     options: TextInputOptions,
 ) -> ParseResult<Range<usize>> {
@@ -1024,18 +1044,13 @@ fn text_input_range(
     Ok(start..end)
 }
 
-fn conform_text_input<'scope>(
-    scope: &'scope ParseScope<'_>,
-    profile: Option<&TextProfile>,
+fn conform_text_input<'session>(
+    scope: &mut ParseExecution<'_, 'session>,
+    facts: &TextProfileFacts,
     bytes: &[u8],
     options: TextInputOptions,
     primary_source: bool,
-) -> ParseResult<TextConformanceResult<ConformedTextInput<'scope>>> {
-    let facts = match text_profile_facts(profile, options.decoding_mode) {
-        Ok(facts) => facts,
-        Err(violation) => return Ok(Err(violation)),
-    };
-
+) -> ParseResult<TextConformanceResult<ConformedTextInput<'session>>> {
     let raw_len = usize_to_u64(scope, bytes.len(), options.resource)?;
     let raw_limit = options.raw_limit.unwrap_or(TextRawLimit {
         resource: options.resource,
@@ -1043,12 +1058,12 @@ fn conform_text_input<'scope>(
     });
     scope.enforce_resource_limit(raw_limit.resource, raw_len, raw_limit.limit)?;
 
-    let plan = match plan_text_input(scope, &facts, bytes, options) {
+    let plan = match plan_text_input(scope, facts, bytes, options) {
         Ok(plan) => plan,
         Err(TextInputScanError::Scope(failure)) => return Err(failure),
         Err(TextInputScanError::Violation(violation)) => return Ok(Err(violation)),
     };
-    build_text_input(scope, &facts, bytes, options, plan, primary_source).map(Ok)
+    build_text_input(scope, facts, bytes, options, plan, primary_source).map(Ok)
 }
 
 pub(crate) fn check_text_input_conformance(
@@ -1180,7 +1195,11 @@ struct InitialMeteredVecPlan {
 }
 
 impl InitialMeteredVecPlan {
-    fn add<T>(&mut self, scope: &ParseScope<'_>, resource: &'static str) -> ParseResult<bool> {
+    fn add<T>(
+        &mut self,
+        scope: &ParseExecution<'_, '_>,
+        resource: &'static str,
+    ) -> ParseResult<bool> {
         let len = checked_add_usize(scope, self.len, 1, resource)?;
         if len <= self.capacity {
             self.len = len;
@@ -1211,7 +1230,7 @@ impl From<ParseFailure> for TextInputScanError {
 }
 
 fn plan_text_input(
-    scope: &ParseScope<'_>,
+    scope: &mut ParseExecution<'_, '_>,
     facts: &TextProfileFacts,
     bytes: &[u8],
     options: TextInputOptions,
@@ -1225,7 +1244,8 @@ fn plan_text_input(
         bom: None,
     };
     let work_amount = usize_to_u64(scope, bytes.len(), options.resource)?;
-    scope.with_work(ImportWorkClass::DecodeWork, work_amount, |work| {
+    let group = scope.bind_work_group([ImportWorkClass::DecodeWork])?;
+    scope.with_work(&group, [work_amount], |scope, work| {
         let mut cursor = WorkCursor::new();
         if options.raw_base == 0 && bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
             work.complete([3])?;
@@ -1255,7 +1275,7 @@ fn plan_text_input(
         let mut offset = plan.input_start;
         let mut line_len = 0usize;
         while offset < bytes.len() {
-            cursor.poll_before_unit(work, facts, bytes, offset)?;
+            cursor.poll_before_unit(scope, facts, bytes, offset)?;
             let unit = classify_text_unit(facts, options.decoding_mode, bytes, offset);
             work.complete([unit.raw_len() as u64])?;
             let unit_end = checked_add_usize(scope, offset, unit.raw_len(), options.resource)?;
@@ -1320,7 +1340,7 @@ fn plan_text_input(
                 }
             }
             offset = unit_end;
-            cursor.poll_if_chunk_complete(work, offset)?;
+            cursor.poll_if_chunk_complete(scope, offset)?;
         }
         enforce_usize_limit(
             scope,
@@ -1333,106 +1353,104 @@ fn plan_text_input(
     })
 }
 
-fn build_text_input<'scope>(
-    scope: &'scope ParseScope<'_>,
+fn build_text_input<'session>(
+    scope: &mut ParseExecution<'_, 'session>,
     facts: &TextProfileFacts,
     bytes: &[u8],
     options: TextInputOptions,
     plan: TextInputPlan,
     primary_source: bool,
-) -> ParseResult<ConformedTextInput<'scope>> {
+) -> ParseResult<ConformedTextInput<'session>> {
     let mut line_starts =
         scope.metered_vec(ImportStorageClass::LineIndex, options.line_index_resource);
-    line_starts.try_reserve(plan.line_starts.len)?;
+    line_starts.try_reserve(scope, plan.line_starts.len)?;
     let mut replacements =
         scope.metered_vec(ImportStorageClass::LineIndex, options.line_index_resource);
-    replacements.try_reserve(plan.replacements.len)?;
+    replacements.try_reserve(scope, plan.replacements.len)?;
     let mut text = scope.metered_decoded_text(plan.decoded_len, options.decoded_resource)?;
     let raw_start = raw_offset(scope, options, plan.input_start)?;
     let raw_end = raw_offset(scope, options, bytes.len())?;
 
     let work_amount = usize_to_u64(scope, bytes.len(), options.resource)?;
-    scope.with_work(
-        ImportWorkClass::DecodeWork,
-        work_amount,
-        |work| -> ParseResult<()> {
-            let mut cursor = WorkCursor::new();
-            if plan.input_start != 0 {
-                let prefix = bytes.get(..3).ok_or_else(|| {
+    let group = scope.bind_work_group([ImportWorkClass::DecodeWork])?;
+    scope.with_work(&group, [work_amount], |scope, work| -> ParseResult<()> {
+        let mut cursor = WorkCursor::new();
+        if plan.input_start != 0 {
+            let prefix = bytes.get(..3).ok_or_else(|| {
+                scope.descriptor_contract_failure("text-input-plan-revalidation-failed")
+            })?;
+            let has_bom = prefix == [0xef, 0xbb, 0xbf];
+            work.complete([3])?;
+            if !has_bom || plan.input_start != 3 {
+                return Err(
                     scope.descriptor_contract_failure("text-input-plan-revalidation-failed")
-                })?;
-                let has_bom = prefix == [0xef, 0xbb, 0xbf];
-                work.complete([3])?;
-                if !has_bom || plan.input_start != 3 {
+                );
+            }
+        }
+        if plan.line_starts.len != 0 {
+            line_starts.try_push_reserved(TextInputLineStart {
+                raw_offset: raw_start,
+                decoded_offset: 0,
+                replacement_index: 0,
+            })?;
+        }
+        let mut offset = plan.input_start;
+        let mut valid_run_start = offset;
+        while offset < bytes.len() {
+            cursor.poll_before_unit(scope, facts, bytes, offset)?;
+            let unit = classify_text_unit(facts, options.decoding_mode, bytes, offset);
+            work.complete([unit.raw_len() as u64])?;
+            let unit_end = checked_add_usize(scope, offset, unit.raw_len(), options.resource)?;
+            match unit {
+                TextUnit::Valid { newline, .. } => {
+                    if unit_end.saturating_sub(valid_run_start) > TEXT_INPUT_WORK_CHUNK_BYTES {
+                        append_valid_run(scope, &mut text, bytes, valid_run_start, offset)?;
+                        valid_run_start = offset;
+                    }
+                    if newline.is_some() {
+                        append_valid_run(scope, &mut text, bytes, valid_run_start, unit_end)?;
+                        if unit_end < bytes.len() {
+                            line_starts.try_push_reserved(TextInputLineStart {
+                                raw_offset: raw_offset(scope, options, unit_end)?,
+                                decoded_offset: text.len(),
+                                replacement_index: replacements.len(),
+                            })?;
+                        }
+                        valid_run_start = unit_end;
+                    } else if unit_end.saturating_sub(valid_run_start)
+                        >= TEXT_INPUT_WORK_CHUNK_BYTES
+                    {
+                        append_valid_run(scope, &mut text, bytes, valid_run_start, unit_end)?;
+                        valid_run_start = unit_end;
+                    }
+                }
+                TextUnit::Replacement { .. } => {
+                    append_valid_run(scope, &mut text, bytes, valid_run_start, offset)?;
+                    let raw_range = raw_range_parse(scope, options, offset, unit_end)?;
+                    let decoded_start = text.len();
+                    text.try_push_str_reserved("\u{fffd}")?;
+                    let decoded_end = text.len();
+                    replacements.try_push_reserved(TextInputReplacement::new(
+                        raw_range,
+                        decoded_start,
+                        decoded_end,
+                    ))?;
+                    valid_run_start = unit_end;
+                }
+                TextUnit::Violation { .. } => {
                     return Err(
                         scope.descriptor_contract_failure("text-input-plan-revalidation-failed")
                     );
                 }
             }
-            if plan.line_starts.len != 0 {
-                line_starts.try_push_reserved(TextInputLineStart {
-                    raw_offset: raw_start,
-                    decoded_offset: 0,
-                    replacement_index: 0,
-                })?;
-            }
-            let mut offset = plan.input_start;
-            let mut valid_run_start = offset;
-            while offset < bytes.len() {
-                cursor.poll_before_unit(work, facts, bytes, offset)?;
-                let unit = classify_text_unit(facts, options.decoding_mode, bytes, offset);
-                work.complete([unit.raw_len() as u64])?;
-                let unit_end = checked_add_usize(scope, offset, unit.raw_len(), options.resource)?;
-                match unit {
-                    TextUnit::Valid { newline, .. } => {
-                        if unit_end.saturating_sub(valid_run_start) > TEXT_INPUT_WORK_CHUNK_BYTES {
-                            append_valid_run(scope, &mut text, bytes, valid_run_start, offset)?;
-                            valid_run_start = offset;
-                        }
-                        if newline.is_some() {
-                            append_valid_run(scope, &mut text, bytes, valid_run_start, unit_end)?;
-                            if unit_end < bytes.len() {
-                                line_starts.try_push_reserved(TextInputLineStart {
-                                    raw_offset: raw_offset(scope, options, unit_end)?,
-                                    decoded_offset: text.len(),
-                                    replacement_index: replacements.len(),
-                                })?;
-                            }
-                            valid_run_start = unit_end;
-                        } else if unit_end.saturating_sub(valid_run_start)
-                            >= TEXT_INPUT_WORK_CHUNK_BYTES
-                        {
-                            append_valid_run(scope, &mut text, bytes, valid_run_start, unit_end)?;
-                            valid_run_start = unit_end;
-                        }
-                    }
-                    TextUnit::Replacement { .. } => {
-                        append_valid_run(scope, &mut text, bytes, valid_run_start, offset)?;
-                        let raw_range = raw_range_parse(scope, options, offset, unit_end)?;
-                        let decoded_start = text.len();
-                        text.try_push_str_reserved("\u{fffd}")?;
-                        let decoded_end = text.len();
-                        replacements.try_push_reserved(TextInputReplacement::new(
-                            raw_range,
-                            decoded_start,
-                            decoded_end,
-                        ))?;
-                        valid_run_start = unit_end;
-                    }
-                    TextUnit::Violation { .. } => {
-                        return Err(scope
-                            .descriptor_contract_failure("text-input-plan-revalidation-failed"));
-                    }
-                }
-                offset = unit_end;
-                cursor.poll_if_chunk_complete(work, offset)?;
-            }
-            append_valid_run(scope, &mut text, bytes, valid_run_start, bytes.len())?;
-            Ok(())
-        },
-    )?;
+            offset = unit_end;
+            cursor.poll_if_chunk_complete(scope, offset)?;
+        }
+        append_valid_run(scope, &mut text, bytes, valid_run_start, bytes.len())?;
+        Ok(())
+    })?;
 
-    let text = text.finish_exact()?;
+    let text = text.finish_exact(scope)?;
     if line_starts.len() != plan.line_starts.len || replacements.len() != plan.replacements.len {
         return Err(scope.descriptor_contract_failure("text-input-plan-count-mismatch"));
     }
@@ -1449,7 +1467,7 @@ fn build_text_input<'scope>(
 }
 
 fn append_valid_run(
-    scope: &ParseScope<'_>,
+    scope: &ParseExecution<'_, '_>,
     text: &mut MeteredDecodedText<'_>,
     bytes: &[u8],
     start: usize,
@@ -1662,7 +1680,7 @@ impl WorkCursor {
 
     fn poll_before_unit(
         &mut self,
-        work: &mut crate::scope::ImportWorkScope<'_, '_, 1>,
+        scope: &mut ParseExecution<'_, '_>,
         facts: &TextProfileFacts,
         bytes: &[u8],
         offset: usize,
@@ -1673,7 +1691,7 @@ impl WorkCursor {
         // Only bounded width lookahead precedes the poll; semantic classification follows it.
         let raw_len = text_unit_raw_len(facts, bytes, offset);
         if offset.saturating_add(raw_len) > self.next_poll_at {
-            work.poll()?;
+            scope.poll()?;
             self.next_poll_at = offset.saturating_add(TEXT_INPUT_WORK_CHUNK_BYTES);
         }
         Ok(())
@@ -1681,11 +1699,11 @@ impl WorkCursor {
 
     fn poll_if_chunk_complete(
         &mut self,
-        work: &mut crate::scope::ImportWorkScope<'_, '_, 1>,
+        scope: &mut ParseExecution<'_, '_>,
         offset: usize,
     ) -> ParseResult<()> {
         if offset >= self.next_poll_at {
-            work.poll()?;
+            scope.poll()?;
             self.next_poll_at = offset.saturating_add(TEXT_INPUT_WORK_CHUNK_BYTES);
         }
         Ok(())
@@ -1706,7 +1724,7 @@ fn text_unit_raw_len(facts: &TextProfileFacts, bytes: &[u8], offset: usize) -> u
 }
 
 fn enforce_usize_limit(
-    scope: &ParseScope<'_>,
+    scope: &ParseExecution<'_, '_>,
     value: usize,
     resource: &'static str,
     limit: u64,
@@ -1718,7 +1736,7 @@ fn enforce_usize_limit(
 }
 
 fn enforce_line_index_limit(
-    scope: &ParseScope<'_>,
+    scope: &ParseExecution<'_, '_>,
     plan: &mut TextInputPlan,
     options: TextInputOptions,
 ) -> ParseResult<()> {
@@ -1741,7 +1759,7 @@ fn enforce_line_index_limit(
 }
 
 fn raw_range(
-    scope: &ParseScope<'_>,
+    scope: &ParseExecution<'_, '_>,
     options: TextInputOptions,
     start: usize,
     end: usize,
@@ -1750,7 +1768,7 @@ fn raw_range(
 }
 
 fn raw_range_parse(
-    scope: &ParseScope<'_>,
+    scope: &ParseExecution<'_, '_>,
     options: TextInputOptions,
     start: usize,
     end: usize,
@@ -1762,7 +1780,7 @@ fn raw_range_parse(
 }
 
 fn raw_offset(
-    scope: &ParseScope<'_>,
+    scope: &ParseExecution<'_, '_>,
     options: TextInputOptions,
     offset: usize,
 ) -> ParseResult<u64> {
@@ -1774,7 +1792,7 @@ fn raw_offset(
 }
 
 fn checked_add_usize(
-    scope: &ParseScope<'_>,
+    scope: &ParseExecution<'_, '_>,
     left: usize,
     right: usize,
     resource: &'static str,
@@ -1783,7 +1801,11 @@ fn checked_add_usize(
         .ok_or_else(|| scope.resource_limit_exceeded(resource, u64::MAX))
 }
 
-fn usize_to_u64(scope: &ParseScope<'_>, value: usize, resource: &'static str) -> ParseResult<u64> {
+fn usize_to_u64(
+    scope: &ParseExecution<'_, '_>,
+    value: usize,
+    resource: &'static str,
+) -> ParseResult<u64> {
     u64::try_from(value).map_err(|_| scope.resource_limit_exceeded(resource, u64::MAX))
 }
 
@@ -1791,17 +1813,26 @@ fn usize_to_u64(scope: &ParseScope<'_>, value: usize, resource: &'static str) ->
 mod tests {
     use super::*;
     use crate::{
-        CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
-        FormatDescriptor, FormatEncoding, FormatImporter, ImportCause, ImportDimension,
+        CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, Format,
+        FormatCapability, FormatDescriptor, FormatEncoding, ImportCause, ImportDimension,
         ImportOperationControl, ImportRequest, OptionCompileLimits, ReadConfidence, ReadHint,
-        RegistryBuildLimits, RegistryBuilder, SceneDraft, ScopeAbortCause, TextHardCaps,
+        RegistryBuildLimits, RegistryBuilder, ScopeAbortCause, TextHardCaps,
     };
     use baozi_core::FormatId;
     use baozi_io::AssetPath;
 
     struct AllocationFailureImporter;
 
-    impl FormatImporter for AllocationFailureImporter {
+    impl Format for AllocationFailureImporter {
+        type Options = crate::NoFormatOptions;
+
+        fn compile_defaults(
+            &self,
+            scope: &mut crate::RegistryBuildScope<'_>,
+        ) -> Result<crate::CompiledOptions<Self::Options>, crate::OptionCompileError> {
+            crate::NoFormatOptions::compile_defaults(scope)
+        }
+
         fn descriptor(&self) -> FormatDescriptor {
             FormatDescriptor::builder(
                 FormatId::new("dev.baozi.test.text-input-allocation")
@@ -1838,23 +1869,38 @@ mod tests {
             Ok(DetectionOutcome::Match(ReadConfidence::Certain))
         }
 
-        fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-            crate::scope::inject_next_metered_allocation_failure();
-            scope
-                .with_conformed_text_input(
-                    scope.diagnostic_source(),
+        fn parse(
+            &self,
+            _options: &Self::Options,
+            scope: &mut crate::ParseContext<'_>,
+        ) -> ParseResult<()> {
+            scope.with_execution(|exec| -> ParseResult<()> {
+                crate::scope::inject_next_metered_allocation_failure();
+                exec.with_conformed_text_input(
+                    exec.diagnostic_source(),
                     TextInputOptions::new(TextDecodingMode::RejectInvalid, "test-text")
                         .with_line_index_resource("test-text-line-index"),
-                    |_input, _recoveries| Ok(()),
+                    |_exec, _input, _recoveries| Ok(()),
                 )?
                 .expect("the allocation fixture must otherwise conform");
+                Ok(())
+            })?;
             panic!("injected allocation failure must stop text construction")
         }
     }
 
     struct CopyFailureImporter;
 
-    impl FormatImporter for CopyFailureImporter {
+    impl Format for CopyFailureImporter {
+        type Options = crate::NoFormatOptions;
+
+        fn compile_defaults(
+            &self,
+            scope: &mut crate::RegistryBuildScope<'_>,
+        ) -> Result<crate::CompiledOptions<Self::Options>, crate::OptionCompileError> {
+            crate::NoFormatOptions::compile_defaults(scope)
+        }
+
         fn descriptor(&self) -> FormatDescriptor {
             AllocationFailureImporter.descriptor()
         }
@@ -1868,20 +1914,27 @@ mod tests {
             AllocationFailureImporter.detect(probe, hint, scope)
         }
 
-        fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-            let descriptor = self.descriptor();
-            let facts = TextProfileFacts::new(descriptor.text_profile().unwrap());
-            let options = TextInputOptions::new(TextDecodingMode::RejectInvalid, "test-text");
-            let source = scope.diagnostic_source();
-            let bytes = source.bytes();
-            let mut plan = match plan_text_input(scope, &facts, bytes, options) {
-                Ok(plan) => plan,
-                Err(TextInputScanError::Scope(failure)) => return Err(failure),
-                Err(TextInputScanError::Violation(_)) => panic!("copy fixture must conform"),
-            };
-            // Fault the copy capacity after a valid plan so classification precedes rejection.
-            plan.decoded_len = 0;
-            let _ = build_text_input(scope, &facts, bytes, options, plan, true)?;
+        fn parse(
+            &self,
+            _options: &Self::Options,
+            scope: &mut crate::ParseContext<'_>,
+        ) -> ParseResult<()> {
+            scope.with_execution(|exec| -> ParseResult<()> {
+                let descriptor = self.descriptor();
+                let facts = TextProfileFacts::new(descriptor.text_profile().unwrap());
+                let options = TextInputOptions::new(TextDecodingMode::RejectInvalid, "test-text");
+                let source = exec.diagnostic_source();
+                let bytes = source.bytes();
+                let mut plan = match plan_text_input(exec, &facts, bytes, options) {
+                    Ok(plan) => plan,
+                    Err(TextInputScanError::Scope(failure)) => return Err(failure),
+                    Err(TextInputScanError::Violation(_)) => panic!("copy fixture must conform"),
+                };
+                // Fault the copy capacity after a valid plan so classification precedes rejection.
+                plan.decoded_len = 0;
+                let _ = build_text_input(exec, &facts, bytes, options, plan, true)?;
+                Ok(())
+            })?;
             panic!("the shortened decoded capacity must reject the first copy")
         }
     }
@@ -1933,15 +1986,15 @@ mod tests {
             let request = registry
                 .freeze(RegistryBuildLimits::default())
                 .unwrap()
-                .compile_request(&ImportRequest::new(), OptionCompileLimits::default())
+                .plan(&ImportRequest::new(), OptionCompileLimits::default())
                 .unwrap();
-            let error = crate::import_bytes(
-                &request,
-                AssetPath::new("copy.txt").unwrap(),
-                bytes,
-                ImportOperationControl::default(),
-            )
-            .expect_err("the first reserved decoded copy must fail");
+            let error = request
+                .read_bytes(
+                    AssetPath::new("copy.txt").unwrap(),
+                    bytes,
+                    ImportOperationControl::default(),
+                )
+                .expect_err("the first reserved decoded copy must fail");
             let failure = error
                 .into_operation_failure()
                 .unwrap_or_else(|source| panic!("test session must initialize: {source}"));
@@ -1984,15 +2037,15 @@ mod tests {
         let request = registry
             .freeze(RegistryBuildLimits::default())
             .expect("test registry must freeze")
-            .compile_request(&ImportRequest::new(), OptionCompileLimits::default())
+            .plan(&ImportRequest::new(), OptionCompileLimits::default())
             .expect("test request must compile");
-        let error = crate::import_bytes(
-            &request,
-            AssetPath::new("allocation.txt").expect("static source path must be valid"),
-            b"a",
-            ImportOperationControl::default(),
-        )
-        .expect_err("injected line-index allocation must fail");
+        let error = request
+            .read_bytes(
+                AssetPath::new("allocation.txt").expect("static source path must be valid"),
+                b"a",
+                ImportOperationControl::default(),
+            )
+            .expect_err("injected line-index allocation must fail");
         let failure = error
             .into_operation_failure()
             .unwrap_or_else(|source| panic!("test session must initialize: {source}"));

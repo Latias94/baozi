@@ -8,11 +8,11 @@ use baozi_import::authoring::{
     GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, Presence, StaticSceneBuilder,
 };
 use baozi_import::{
-    CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
-    FormatDescriptor, FormatEncoding, FormatImporter, FormatSelection, ImportConfigOverlay,
-    ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer, OptionCompileLimits,
-    ParseResult, ParseScope, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
-    SceneDraft, import_bytes,
+    CapabilityStatus, CompiledOptions, DetectionOutcome, DetectionResult, DetectionScope, Format,
+    FormatCapability, FormatDescriptor, FormatEncoding, FormatSelection, ImportConfigOverlay,
+    ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer, NoFormatOptions,
+    OptionCompileError, OptionCompileLimits, ParseContext, ParseResult, ReadConfidence, ReadHint,
+    RegistryBuildLimits, RegistryBuildScope, RegistryBuilder,
 };
 use baozi_io::AssetPath;
 use baozi_postprocess::{
@@ -51,7 +51,16 @@ impl Fixture {
     }
 }
 struct Importer(Fixture);
-impl FormatImporter for Importer {
+impl Format for Importer {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(FormatId::new(FORMAT).unwrap(), "Selected geometry fixture")
             .encoding(FormatEncoding::Binary)
@@ -67,7 +76,7 @@ impl FormatImporter for Importer {
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
         let f = self.0;
         let ids = if f.topology == TopologyKind::TriangleList {
             vec![0, 1, 2]
@@ -160,7 +169,7 @@ impl FormatImporter for Importer {
             front_face_winding: f.winding,
             ..SceneSpace::STANDARD_TARGET
         };
-        scope.submit_static_scene(
+        context.submit(
             StaticSceneBuilder::new(Presence::Present(&[]), &[])
                 .with_scene_space(&space)
                 .with_geometry(&meshes, &primitives, &attributes, &[]),
@@ -172,7 +181,7 @@ fn import(f: Fixture) -> ImportReport {
     registry.register(Importer(f)).unwrap();
     let registry = registry.freeze(RegistryBuildLimits::default()).unwrap();
     let request = registry
-        .compile_request(
+        .plan(
             &ImportRequest::new().with_caller_layer(ImportRequestLayer::new(
                 ImportConfigOverlay::default()
                     .with_format_selection(FormatSelection::Forced(FormatId::new(FORMAT).unwrap())),
@@ -180,13 +189,13 @@ fn import(f: Fixture) -> ImportReport {
             OptionCompileLimits::default(),
         )
         .unwrap();
-    import_bytes(
-        &request,
-        AssetPath::new("selected.fixture").unwrap(),
-        b"selected",
-        ImportOperationControl::default(),
-    )
-    .unwrap()
+    request
+        .read_bytes(
+            AssetPath::new("selected.fixture").unwrap(),
+            b"selected",
+            ImportOperationControl::default(),
+        )
+        .unwrap()
 }
 fn targets(scene: &baozi_core::ValidatedScene) -> Vec<baozi_core::PrimitiveId> {
     scene

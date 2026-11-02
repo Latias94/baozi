@@ -1,9 +1,9 @@
-use baozi_import::SceneDraft;
 use baozi_import::authoring::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, DeformationAuthoringBatch,
     GeometryAuthoringBatch, LineageAuthoringBatch, MetadataAuthoringBatch, NodeAuthoringBatch,
     Presence, ProfileAuthoringBatch, SceneAuthoringBatch, SceneSpace, SpatialAuthoringBatch,
 };
+use baozi_import::{ParseContext, ParseResult};
 
 #[test]
 fn custom_importers_receive_one_authority_free_authoring_surface() {
@@ -22,8 +22,13 @@ fn custom_importers_receive_one_authority_free_authoring_surface() {
     );
 
     fn accepts_input(_: SceneAuthoringBatch<'_>) {}
-    fn accepts_draft(_: SceneDraft) {}
+    fn submit_complete(
+        context: &mut ParseContext<'_>,
+        input: SceneAuthoringBatch<'_>,
+    ) -> ParseResult<()> {
+        context.submit_complete(input)
+    }
 
     accepts_input(input);
-    let _: fn(SceneDraft) = accepts_draft;
+    let _ = submit_complete;
 }

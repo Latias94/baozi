@@ -108,6 +108,55 @@ impl<'op, O: OperationOwner> StoreExecutionWork<'op, O> {
     pub fn finish_region(&self) -> Result<(), StoreRuntimeError> {
         self.raw.finish_region().map_err(map_execution_error)
     }
+
+    /// Observes a qualified ordinary dimension without allocating a complete snapshot.
+    pub fn dimension_state(
+        &self,
+        dimension: StoreDimensionKey,
+    ) -> Result<RetainedStoreDimensionState, StoreRuntimeError> {
+        if !self.domain.owns_dimension(dimension) {
+            self.raw.reject_binding();
+            return Err(StoreRuntimeError::ForeignDimensionDomain { dimension });
+        }
+        self.raw
+            .dimension_evidence(dimension)
+            .map(|snapshot| RetainedStoreDimensionState {
+                attempted: snapshot.attempted(),
+                consumed: snapshot.consumed(),
+                live_bytes: snapshot.current_live_bytes(),
+            })
+            .map_err(map_execution_error)
+    }
+
+    /// Borrows only storage evidence; the view cannot outlive or cross the invocation.
+    pub fn storage_observation(
+        &self,
+        dimension: StoreDimensionKey,
+    ) -> Result<StoreStorageObservation<'op>, StoreRuntimeError> {
+        if !self.domain.owns_dimension(dimension) {
+            self.raw.reject_binding();
+            return Err(StoreRuntimeError::ForeignDimensionDomain { dimension });
+        }
+        self.raw
+            .storage_observation(dimension)
+            .map(|raw| StoreStorageObservation { raw })
+            .map_err(map_execution_error)
+    }
+
+    /// Tightens the sole owner's current policy before selected execution begins.
+    pub fn tighten_dimension_policy(
+        &self,
+        dimension: StoreDimensionKey,
+        policy: DimensionPolicy,
+    ) -> Result<(), StoreRuntimeError> {
+        if !self.domain.owns_dimension(dimension) {
+            self.raw.reject_binding();
+            return Err(StoreRuntimeError::ForeignDimensionDomain { dimension });
+        }
+        self.raw
+            .tighten_policy(dimension, policy)
+            .map_err(map_execution_error)
+    }
 }
 
 impl<'op, const N: usize> StoreBoundWorkGroup<'op, N> {
@@ -176,6 +225,20 @@ impl<'op, const N: usize> StoreBoundWorkGroup<'op, N> {
     pub fn complete_direct(&self, amounts: [u64; N]) -> Result<(), StoreRuntimeError> {
         self.raw
             .complete_direct(amounts)
+            .map_err(map_execution_error)
+    }
+
+    /// Records observed physical prefixes in caller order, including applied failure.
+    pub fn complete_observed(&self, amounts: [u64; N]) -> Result<(), StoreRuntimeError> {
+        self.raw
+            .complete_observed(amounts)
+            .map_err(map_execution_error)
+    }
+
+    /// Records attempted and observed completion for an already performed bounded action.
+    pub fn charge_observed(&self, amounts: [u64; N]) -> Result<(), StoreRuntimeError> {
+        self.raw
+            .charge_observed(amounts)
             .map_err(map_execution_error)
     }
 }
@@ -267,6 +330,44 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreExecutionContro
 }
 
 impl<O: OperationOwner> StoreExecutionStorage<'_, O> {
+    /// Verifies a live reservation belongs to this invocation's shared storage owner.
+    pub fn validate_live_owner(
+        &self,
+        reservation: &RetainedStoreReservation<O>,
+    ) -> Result<(), StoreRuntimeError> {
+        self.raw
+            .validate_live_owner(&reservation.raw)
+            .map_err(map_execution_error)
+    }
+
+    /// Moves live attribution while preserving the existing reservation and physical backing.
+    pub fn transition(
+        &self,
+        reservation: &mut RetainedStoreReservation<O>,
+        phase: StorePhaseKey,
+        dimension: StoreDimensionKey,
+        bytes: u64,
+    ) -> Result<(), StoreRuntimeError> {
+        self.validate(phase, dimension)?;
+        if reservation
+            .physical
+            .as_ref()
+            .is_some_and(|lease| bytes > lease.admitted_bytes())
+        {
+            self.raw.reject_binding();
+            return Err(StoreRuntimeError::ConstructionInvariantUnverified);
+        }
+        self.raw
+            .transition(&mut reservation.raw, phase, dimension, bytes)
+            .map_err(map_execution_error)?;
+        if let Some(physical) = &mut reservation.physical {
+            physical
+                .shrink_to(bytes)
+                .map_err(|cause| map_writer_error(&RetainedWriterError::Physical(cause)))?;
+        }
+        Ok(())
+    }
+
     fn validate(
         &self,
         phase: StorePhaseKey,

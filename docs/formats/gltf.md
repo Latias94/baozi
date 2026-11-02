@@ -12,7 +12,7 @@
 - Extensions: `.gltf`, `.glb`
 - Media types: `model/gltf+json`, `model/gltf-binary`
 - Encoding: JSON plus binary buffers, base64 buffer data URIs, or GLB container
-- Sidecar policy: selected external buffers and images through the origin-qualified `ParseScope`
+- Sidecar policy: selected external buffers and images through the origin-qualified `ParseExecution`
   dependency resolver; base64 buffer data URIs and GLB BIN payloads remain embedded in the
   enclosing primary resource
 
@@ -201,12 +201,12 @@ document. Fresh target/sanitizer and archive-consumer evidence belongs to the
 ### Selecting one declared scene
 
 Enable the facade's `format-gltf` feature. The input type and locator belong to the glTF format;
-they use the same option envelopes, preset/caller precedence and immutable prepared requests as
+they use the same option envelopes, preset/caller precedence and immutable import plans as
 other format options:
 
 ```rust
 use baozi::{
-    GltfImportOptions, GltfSceneSelection, ImportConfigOverlay, ImportOperationControl,
+    AssetPath, GltfImportOptions, GltfSceneSelection, ImportConfigOverlay, ImportOperationControl,
     ImportReport, ImportRequest, ImportRequestLayer, Importer, OptionCompileLimits,
 };
 
@@ -218,22 +218,21 @@ fn import_preview(document: &[u8]) -> Result<ImportReport, Box<dyn std::error::E
                 .with_scene_selection(GltfSceneSelection::SceneIndex(1))
                 .to_envelope()?,
         )?;
-    let request = importer.prepare_request(
+    let plan = importer.plan(
         &ImportRequest::new().with_caller_layer(caller),
         OptionCompileLimits::default(),
     )?;
-    Ok(importer.read_bytes_with_request(
-        "preview.gltf",
+    Ok(plan.read_bytes(
+        AssetPath::new("preview.gltf")?,
         document,
-        &request,
         ImportOperationControl::default(),
     )?)
 }
 ```
 
-Use `read_asset_with_request` with an `AssetIo` namespace when the selected scene needs external
-buffers or images. The prepared request can be reused for multiple imports in its originating
-importer. A caller's explicit `DocumentDefault` overrides an explicit preset selection.
+Use `plan.read_asset` with an `AssetIo` namespace when the selected scene needs external buffers or
+images. The plan retains its registry and compiled options and can be reused after the creating
+importer is dropped. A caller's explicit `DocumentDefault` overrides an explicit preset selection.
 
 `SceneIndex` is a zero-based source index, independent of names and compact canonical IDs. It
 selects exactly one declared scene, including an empty scene. Explicit zero for a document with
@@ -436,7 +435,7 @@ These contracts are exercised by `crates/baozi-format-gltf/tests/text_preflight.
 ## Bounded Format Failure Evidence
 
 `GltfFailure` is a crate-private synchronous evidence producer. Its human reason uses a sanitized
-70-byte inline buffer rather than a heap-backed `String`. The selected `ParseScope` copies the stable
+70-byte inline buffer rather than a heap-backed `String`. The selected `ParseExecution` copies the stable
 code, detail keys, string values, and scalar details into Baozi-owned `FormatFailureEvidence`, then
 destroys the producer before returning the sealed envelope. A transient `std::str::Utf8Error` is used
 only to compute the container-relative offset and bounded reason; neither it nor a glTF wrapper is

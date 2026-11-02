@@ -24,12 +24,13 @@ use baozi_import::authoring::{
     TextureStrength, TextureTransform,
 };
 use baozi_import::{
-    CapabilityStatus, CauseOwner, DetectionOutcome, DetectionResult, DetectionScope,
-    FormatCapability, FormatDescriptor, FormatEncoding, FormatImporter, ImportCause,
+    CapabilityStatus, CauseOwner, CompiledOptions, DetectionOutcome, DetectionResult,
+    DetectionScope, Format, FormatCapability, FormatDescriptor, FormatEncoding, ImportCause,
     ImportConfigOverlay, ImportDimension, ImportOperationControl, ImportReport, ImportRequest,
-    ImportRequestLayer, ImportResult, OptionCompileLimits, ParseResult, ParseScope, ReadConfidence,
-    ReadHint, RegistryBuildLimits, RegistryBuilder, ResourceLimitsOverlay, SceneDraft,
-    SceneValidationDomain, SceneValidationError, SceneValidationLimit, import_bytes,
+    ImportRequestLayer, ImportResult, NoFormatOptions, OptionCompileError, OptionCompileLimits,
+    ParseContext, ParseResult, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuildScope,
+    RegistryBuilder, ResourceLimitsOverlay, SceneValidationDomain, SceneValidationError,
+    SceneValidationLimit,
 };
 use baozi_io::AssetPath;
 use sha2::{Digest, Sha256};
@@ -65,7 +66,16 @@ struct CustomImporter {
     expected: Option<ExpectedDocument>,
 }
 
-impl FormatImporter for CustomImporter {
+impl Format for CustomImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(FormatId::new(FORMAT).unwrap(), "Static Scene fixture")
             .extensions(["static"])
@@ -84,14 +94,14 @@ impl FormatImporter for CustomImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
         if matches!(self.input, Input::EmptyPresent | Input::EmptyAbsent) {
             let roots = if matches!(self.input, Input::EmptyPresent) {
                 Presence::Present(&[][..])
             } else {
                 Presence::Absent
             };
-            return scope.submit_static_scene(StaticSceneBuilder::new(roots, &[]));
+            return scope.submit(StaticSceneBuilder::new(roots, &[]));
         }
 
         let roots = [NodeLocalId::new(0), NodeLocalId::new(1)];
@@ -204,7 +214,7 @@ impl FormatImporter for CustomImporter {
             builder = builder.with_scene_space(&known_space);
         }
         if !has_appearance {
-            return scope.submit_static_scene(builder);
+            return scope.submit(builder);
         }
 
         let images = [if matches!(self.input, Input::PrimaryImage) {
@@ -244,20 +254,18 @@ impl FormatImporter for CustomImporter {
         )
         .unwrap()
         .with_name("paint")];
-        scope.submit_static_scene(
-            builder.with_appearance(&images, &samplers, &textures, &bindings, &materials),
-        )
+        scope.submit(builder.with_appearance(&images, &samplers, &textures, &bindings, &materials))
     }
 }
 
 // This deliberately spells out the existing full authoring contract only as a semantic oracle.
 // Expected identity allocation and hashing happen in the test harness before the session starts.
 fn submit_explicit_triangle(
-    scope: &ParseScope<'_>,
+    scope: &mut ParseContext<'_>,
     expected: &ExpectedDocument,
     nodes: NodeAuthoringBatch<'_>,
     geometry: GeometryAuthoringBatch<'_>,
-) -> ParseResult<SceneDraft> {
+) -> ParseResult<()> {
     let resources = [ObservedResourceAuthoring::session_opaque(
         &expected.resource,
         expected.reason,
@@ -293,7 +301,7 @@ fn submit_explicit_triangle(
         Presence::Absent,
     )];
     let space = SceneSpace::UNKNOWN;
-    scope.submit_scene(SceneAuthoringBatch::new(
+    scope.submit_complete(SceneAuthoringBatch::new(
         SpatialAuthoringBatch::new(&space, &[], &[]),
         nodes,
         AppearanceAuthoringBatch::empty(),
@@ -348,7 +356,7 @@ fn import_with(
         .unwrap();
     let registry = builder.freeze(RegistryBuildLimits::default()).unwrap();
     let request = registry
-        .compile_request(
+        .plan(
             &ImportRequest::from_layers(
                 ImportRequestLayer::default(),
                 ImportRequestLayer::new(
@@ -358,8 +366,7 @@ fn import_with(
             OptionCompileLimits::default(),
         )
         .unwrap();
-    import_bytes(
-        &request,
+    request.read_bytes(
         AssetPath::new(path).unwrap(),
         bytes,
         ImportOperationControl::default(),

@@ -32,16 +32,15 @@ fn import_success_and_failure_fit_a_one_mib_stack() {
                 assert!(report.scene().meshes().next().unwrap()
                     .primitives().next().unwrap().texcoords(0, AttributeDomain::Corner).is_some());
                 assert!(importer.read_bytes("broken.obj", b"f 1 2 3\n").is_err());
-                let request = importer.prepare_default_request().expect("default request compiles");
+                let request = importer.default_plan().expect("default request compiles");
                 let cancellation = CancellationToken::new();
                 cancellation.cancel();
-                let error = importer
-                    .read_bytes_with_request(
-                        "cancelled.obj",
+                let error = request
+                    .read_bytes(
+                        baozi::AssetPath::new("cancelled.obj").expect("valid source path"),
                         TRIANGLE,
-                        &request,
                         ImportOperationControl::default().with_cancellation(cancellation),
-                    )
+                    ).map_err(baozi::Error::from)
                     .expect_err("cancelled import returns a failure on the caller's stack");
                 let Error::Import(failure) = error else {
                     panic!("cancelled import must preserve its terminal failure");

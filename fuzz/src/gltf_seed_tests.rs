@@ -4,7 +4,7 @@ use baozi::{
 use baozi_format_gltf::{FORMAT_ID, GltfImporter};
 use baozi_import::{
     ImportDimension, ImportOperationControl, SourceScopeDisposition, SourceScopeEntityKind,
-    SourceScopeSelectionOutcome, SourceScopeSelectionRequest, import_asset,
+    SourceScopeSelectionOutcome, SourceScopeSelectionRequest,
 };
 use baozi_io::{AssetPath, MemoryAssetIo};
 use std::sync::Arc;
@@ -29,18 +29,14 @@ fn seed_io(data: &[u8]) -> MemoryAssetIo {
 
 #[test]
 fn default_scene_one_seed_selects_its_nodes_and_records_the_omission() {
-    let request = support::prepared_request(GltfImporter, FORMAT_ID);
+    let request = support::import_plan(GltfImporter, FORMAT_ID);
     let source = AssetPath::new("fuzz.gltf").unwrap();
     let io = seed_io(include_bytes!(
         "../corpus/gltf_import/scene_one_selection.gltf"
     ));
-    let report = import_asset(
-        &request,
-        &io,
-        source.clone(),
-        ImportOperationControl::default(),
-    )
-    .expect("the scene-selection seed must reach a successful import");
+    let report = request
+        .read_asset(&io, source.clone(), ImportOperationControl::default())
+        .expect("the scene-selection seed must reach a successful import");
     let scene = report.scene();
     assert_eq!(scene.node_count(), 2);
     assert_eq!(scene.root_count(), 1);
@@ -103,12 +99,13 @@ fn default_scene_one_seed_selects_its_nodes_and_records_the_omission() {
 
 #[test]
 fn material_and_light_seed_retains_authored_lobes_and_attached_emission() {
-    let request = support::prepared_request(GltfImporter, FORMAT_ID);
+    let request = support::import_plan(GltfImporter, FORMAT_ID);
     let source = AssetPath::new("fuzz.gltf").unwrap();
     let io = seed_io(include_bytes!(
         "../corpus/gltf_import/material_lobes_light.gltf"
     ));
-    let report = import_asset(&request, &io, source, ImportOperationControl::default())
+    let report = request
+        .read_asset(&io, source, ImportOperationControl::default())
         .expect("the material/light seed must reach a successful import");
     let scene = report.scene();
     assert_eq!(scene.node_count(), 1);
@@ -171,12 +168,13 @@ fn material_and_light_seed_retains_authored_lobes_and_attached_emission() {
 
 #[test]
 fn quantized_seed_decodes_three_vertices_with_explicit_four_byte_strides() {
-    let request = support::prepared_request(GltfImporter, FORMAT_ID);
+    let request = support::import_plan(GltfImporter, FORMAT_ID);
     let source = AssetPath::new("fuzz.gltf").unwrap();
     let io = seed_io(include_bytes!(
         "../corpus/gltf_import/quantized_attributes.gltfbin"
     ));
-    let report = import_asset(&request, &io, source, ImportOperationControl::default())
+    let report = request
+        .read_asset(&io, source, ImportOperationControl::default())
         .expect("the quantized seed must reach a successful import");
     let scene = report.scene();
     assert_eq!((scene.mesh_count(), scene.mesh_instance_count()), (1, 1));
@@ -231,12 +229,13 @@ fn quantized_seed_decodes_three_vertices_with_explicit_four_byte_strides() {
 
 #[test]
 fn implicit_zero_seed_materializes_attributes_and_indices_without_dependencies() {
-    let request = support::prepared_request(GltfImporter, FORMAT_ID);
+    let request = support::import_plan(GltfImporter, FORMAT_ID);
     let source = AssetPath::new("fuzz.gltf").unwrap();
     let io = seed_io(include_bytes!(
         "../corpus/gltf_import/implicit_zero_attributes.gltf"
     ));
-    let report = import_asset(&request, &io, source, ImportOperationControl::default())
+    let report = request
+        .read_asset(&io, source, ImportOperationControl::default())
         .expect("the implicit-zero seed must reach a successful import");
     let scene = report.scene();
     assert_eq!(scene.mesh_count(), 1);

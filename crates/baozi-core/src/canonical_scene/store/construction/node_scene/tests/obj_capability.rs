@@ -14,7 +14,7 @@ use crate::canonical_scene::store::construction::node_scene::snapshot::{
 };
 use crate::canonical_scene::store::construction::node_scene::{
     NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraftBuild,
-    NodeSceneSuccessParts, NodeSceneTestTransaction, SceneStorage,
+    NodeSceneSuccessParts, NodeSceneTestTransaction, SceneParseOutcome, SceneStorage,
 };
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, DeformationAuthoringBatch,
@@ -1210,14 +1210,17 @@ fn obj_cancellation_after_validation_publishes_only_rich_failure() {
         .expect("cancellable OBJ Scene input admission")
         .finish_draft()
         .expect("OBJ input must materialize and validate before cancellation");
-        let NodeSceneDraftBuild::Draft { draft, owner } = build else {
+        let NodeSceneDraftBuild::Draft { owner } = build else {
             panic!("valid OBJ input must retain its draft before cancellation");
         };
 
         cancellation.cancel();
         let failure = rich_failure(
             owner
-                .prepare_with_generation_source(draft, SceneGenerationId::reserve)
+                .prepare_with_generation_source(
+                    SceneParseOutcome::Accepted,
+                    SceneGenerationId::reserve,
+                )
                 .expect("cancelled OBJ construction must prepare rich failure")
                 .handoff(),
         );

@@ -132,6 +132,46 @@ fn assert_work(
 }
 
 #[test]
+fn borrowed_storage_observation_reads_logical_capacity_before_operation_detach() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (mut operation, keys) = operation(&account);
+    let physical = account.snapshot();
+    {
+        let (work, storage, mut control) = operation.execution().unwrap();
+        let baseline = work.dimension_state(keys.dimension).unwrap().live_bytes();
+        let observation = work.storage_observation(keys.dimension).unwrap();
+        let mut first = storage
+            .reserve(&mut control, keys.phase, keys.dimension, 17)
+            .unwrap();
+        let cloned = observation;
+        assert_eq!(observation.live_bytes(), baseline + 17);
+        storage.resize(&mut first, 9).unwrap();
+        assert_eq!(cloned.live_bytes(), baseline + 9);
+        let second = storage
+            .reserve(&mut control, keys.phase, keys.dimension, 31)
+            .unwrap();
+        assert_eq!(observation.live_bytes(), baseline + 40);
+        assert_eq!(account.snapshot(), physical);
+        drop(first);
+        assert_eq!(cloned.live_bytes(), baseline + 31);
+        drop(second);
+        assert_eq!(observation.live_bytes(), baseline);
+        work.finish_region().unwrap();
+    }
+    let prepared = operation
+        .prepare_evidence_only_success(final_progress())
+        .unwrap();
+    assert!(matches!(
+        prepared,
+        PreparedStoreEvidenceOnlyOutcome::Success(_)
+    ));
+    drop(prepared);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert!(!account.snapshot().poisoned());
+}
+
+#[test]
 fn group_and_partial_permit_survive_real_storage_and_progress() {
     let factory = factory(1);
     let account = Arc::new(account(&factory));
@@ -403,7 +443,15 @@ fn cancellation_is_observed_at_entry_or_within_the_explicit_action_bound() {
             work.finish_region().unwrap();
             assert!(matches!(
                 control.checkpoint(),
-                Err(StoreRuntimeError::FallbackOnly)
+                Err(StoreRuntimeError::Control(ControlCause::Cancelled {
+                    origin: CancellationOrigin::Signal,
+                }))
+            ));
+            assert!(matches!(
+                control.before_action(),
+                Err(StoreRuntimeError::Control(ControlCause::Cancelled {
+                    origin: CancellationOrigin::Signal,
+                }))
             ));
         }
         assert!(physical[..expected_actions].iter().all(|value| *value == 1));

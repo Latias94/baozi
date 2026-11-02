@@ -13,7 +13,7 @@ use crate::{
     json_syntax::{JsonIndex, ValueId},
     source_map::GltfSourceMap,
 };
-use baozi_import::{ParseResult, ParseScope};
+use baozi_import::{ParseExecution, ParseResult};
 use schema::Text;
 pub(crate) use schema::{
     AlphaMode, MagFilter, MinFilter, WrappingMode,
@@ -51,17 +51,16 @@ pub(crate) struct Document<'scope> {
 }
 
 impl<'scope> Document<'scope> {
-    pub(crate) fn decode(
-        ctx: &'scope ParseScope<'_>,
+    pub(crate) fn decode<'session: 'scope>(
+        ctx: &mut ParseExecution<'_, 'session>,
         surfaces: AdmittedSurfaces<'scope>,
     ) -> ParseResult<Self> {
         let (json, bin, source_map, index) = surfaces.into_parts();
         let tables = decode::Decoder {
-            ctx,
             bytes: json,
             index: &index,
         }
-        .root()?;
+        .root(ctx)?;
         let has_mesh_quantization = validate::validate(ctx, &tables)?;
         Ok(Self {
             tables,
@@ -85,45 +84,49 @@ impl<'scope> Document<'scope> {
     pub(crate) fn bin_bytes(&self) -> Option<&'scope [u8]> {
         self.bin
     }
-    pub(crate) fn texture_transform(
+    pub(crate) fn texture_transform<'session: 'scope>(
         &self,
-        ctx: &ParseScope<'_>,
+        ctx: &mut ParseExecution<'_, 'session>,
         id: ValueId,
     ) -> ParseResult<schema::extensions::texture::TextureTransform> {
         decode::Decoder {
-            ctx,
             bytes: self.json,
             index: &self.index,
         }
-        .transform(id)
+        .transform(id, ctx)
     }
-    pub(crate) fn emissive_strength(&self, ctx: &ParseScope<'_>, id: ValueId) -> ParseResult<f32> {
-        decode::Decoder {
-            ctx,
-            bytes: self.json,
-            index: &self.index,
-        }
-        .emissive_strength(id)
-    }
-    pub(crate) fn clearcoat(
+    pub(crate) fn emissive_strength<'session: 'scope>(
         &self,
-        ctx: &ParseScope<'_>,
+        ctx: &mut ParseExecution<'_, 'session>,
+        id: ValueId,
+    ) -> ParseResult<f32> {
+        decode::Decoder {
+            bytes: self.json,
+            index: &self.index,
+        }
+        .emissive_strength(id, ctx)
+    }
+    pub(crate) fn clearcoat<'session: 'scope>(
+        &self,
+        ctx: &mut ParseExecution<'_, 'session>,
         id: ValueId,
     ) -> ParseResult<schema::Clearcoat> {
         decode::Decoder {
-            ctx,
             bytes: self.json,
             index: &self.index,
         }
-        .clearcoat(id)
+        .clearcoat(id, ctx)
     }
-    pub(crate) fn sheen(&self, ctx: &ParseScope<'_>, id: ValueId) -> ParseResult<schema::Sheen> {
+    pub(crate) fn sheen<'session: 'scope>(
+        &self,
+        ctx: &mut ParseExecution<'_, 'session>,
+        id: ValueId,
+    ) -> ParseResult<schema::Sheen> {
         decode::Decoder {
-            ctx,
             bytes: self.json,
             index: &self.index,
         }
-        .sheen(id)
+        .sheen(id, ctx)
     }
     pub(crate) fn node(&self, index: usize) -> Option<Node<'_>> {
         self.tables
@@ -131,30 +134,28 @@ impl<'scope> Document<'scope> {
             .get(index)
             .map(|_| Node { doc: self, index })
     }
-    pub(crate) fn punctual_light_reference(
+    pub(crate) fn punctual_light_reference<'session: 'scope>(
         &self,
-        ctx: &ParseScope<'_>,
+        ctx: &mut ParseExecution<'_, 'session>,
         id: ValueId,
     ) -> ParseResult<schema::Index> {
         decode::Decoder {
-            ctx,
             bytes: self.json,
             index: &self.index,
         }
-        .punctual_light_reference(id)
+        .punctual_light_reference(id, ctx)
     }
 
-    pub(crate) fn light(
+    pub(crate) fn light<'session: 'scope>(
         &self,
-        ctx: &'scope ParseScope<'_>,
+        ctx: &mut ParseExecution<'_, 'session>,
         id: ValueId,
     ) -> ParseResult<schema::Light<'scope>> {
         decode::Decoder {
-            ctx,
             bytes: self.json,
             index: &self.index,
         }
-        .light(id)
+        .light(id, ctx)
     }
     pub(crate) fn default_scene(&self) -> Option<Scene<'_>> {
         self.tables.scene.map(|id| Scene {

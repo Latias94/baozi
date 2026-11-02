@@ -3,14 +3,14 @@
 mod support;
 
 use baozi_format_gltf::{FORMAT_ID, GltfImporter};
-use baozi_import::{ImportOperationControl, PreparedImportRequest, import_asset};
+use baozi_import::{ImportOperationControl, ImportPlan};
 use baozi_io::{AssetPath, MemoryAssetIo};
 use libfuzzer_sys::fuzz_target;
 use std::sync::{Arc, OnceLock};
 
 fuzz_target!(|data: &[u8]| {
-    static REQUEST: OnceLock<PreparedImportRequest> = OnceLock::new();
-    let request = REQUEST.get_or_init(|| support::prepared_request(GltfImporter, FORMAT_ID));
+    static REQUEST: OnceLock<ImportPlan> = OnceLock::new();
+    let request = REQUEST.get_or_init(|| support::import_plan(GltfImporter, FORMAT_ID));
     let (source_name, primary_bytes, buffer_bytes) = split_fuzz_input(data);
 
     let source_path = AssetPath::new(source_name).expect("the static fuzz path must be valid");
@@ -22,7 +22,7 @@ fuzz_target!(|data: &[u8]| {
     io.try_insert(buffer_path, Arc::<[u8]>::from(buffer_bytes))
         .expect("the dependency fuzz asset insertion must succeed");
 
-    if let Ok(report) = import_asset(request, &io, source_path, ImportOperationControl::default()) {
+    if let Ok(report) = request.read_asset(&io, source_path, ImportOperationControl::default()) {
         support::assert_validated_snapshot(report.scene());
     }
 });

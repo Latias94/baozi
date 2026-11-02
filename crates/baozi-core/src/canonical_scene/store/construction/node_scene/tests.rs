@@ -42,8 +42,9 @@ use super::publication::post_evidence_build_failure_code;
 use super::{
     NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_NODE_AUTHORING_REJECTION_CODE,
     NODE_SCENE_PLANNING_REJECTION_CODE, NODE_SCENE_STORAGE_REJECTION_CODE, NodeSceneBuildFaults,
-    NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraft,
-    NodeSceneDraftBuild, NodeSceneRichFailure, NodeSceneTestTransaction, PendingNodeSceneDraft,
+    NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraftBuild,
+    NodeSceneRichFailure, NodeSceneTestTransaction, PendingNodeSceneDraft,
+    PreparedNodeSceneConstruction, SceneParseOutcome,
 };
 
 mod gltf_capability;
@@ -569,13 +570,13 @@ fn finish_draft_from_local_authoring_vecs(
     )
 }
 
-fn exact_draft_pair_from_local_authoring_vecs(
+fn pending_candidate_from_local_authoring_vecs(
     account: &baozi_operation::PhysicalStorageAccount,
-) -> (NodeSceneDraft, PendingNodeSceneDraft) {
+) -> PendingNodeSceneDraft {
     match finish_draft_from_local_authoring_vecs(account) {
-        NodeSceneDraftBuild::Draft { draft, owner } => (draft, owner),
+        NodeSceneDraftBuild::Draft { owner } => owner,
         NodeSceneDraftBuild::Failure { .. } => {
-            panic!("valid materialization must preserve an exact canonical draft pair")
+            panic!("valid materialization must retain its canonical candidate")
         }
     }
 }
@@ -637,24 +638,31 @@ fn planning_rejections_preserve_rich_evidence_without_canonical_commitment() {
 }
 
 #[test]
-fn materialized_draft_outlives_source_buffers_before_generation_and_handoff() {
+fn accepted_parse_publishes_actual_root_and_generation_after_source_buffers_drop() {
     let factory = test_factory();
     let account = test_account(&factory, 256);
     let generation_source = AtomicU64::new(0);
+    let mut expected_generation = None;
 
     // The helper's Vec-backed authoring storage is gone before generation and joint publication.
-    let (draft, owner) = exact_draft_pair_from_local_authoring_vecs(&account);
+    let owner = pending_candidate_from_local_authoring_vecs(&account);
+    let expected_root = owner.candidate.output().inner().refs.directory.into_store();
     let prepared = owner
-        .prepare_with_generation_source(draft, || {
-            SceneGenerationId::reserve_from(&generation_source)
+        .prepare_with_generation_source(SceneParseOutcome::Accepted, || {
+            let generation = SceneGenerationId::reserve_from(&generation_source)?;
+            expected_generation = Some(generation.id());
+            Ok(generation)
         })
-        .expect("owned draft must centrally prepare without source buffers");
+        .expect("accepted candidate must prepare without source buffers");
     let parts = successful_parts(prepared.handoff());
     let semantic = parts
         .scene
         .semantic_view()
-        .expect("materialized draft semantic view");
+        .expect("accepted candidate semantic view");
 
+    assert_eq!(parts.scene.canonical.root_ref(), expected_root);
+    assert_eq!(parts.scene.proof.directory().into_store(), expected_root);
+    assert_eq!(Some(parts.scene.generation()), expected_generation);
     assert_eq!(semantic.node_count(), 1);
     assert_eq!(semantic.root_count(), 1);
     assert_eq!(generation_source.load(Ordering::Relaxed), 1);
@@ -664,59 +672,17 @@ fn materialized_draft_outlives_source_buffers_before_generation_and_handoff() {
 }
 
 #[test]
-fn dropping_draft_descriptor_does_not_release_its_retained_owner() {
+fn rejected_parse_discards_pending_candidate_without_reserving_generation() {
     let factory = test_factory();
     let account = test_account(&factory, 256);
-
-    let (draft, owner) = exact_draft_pair_from_local_authoring_vecs(&account);
-    let retained = account.snapshot();
-    assert!(retained.live_retained_bytes() > 0);
-    assert!(retained.live_retained_allocations() > 0);
-
-    {
-        let _descriptor = draft;
-    }
-
-    assert_eq!(account.snapshot(), retained);
-    drop(owner);
-
-    assert_eq!(account.snapshot().live_retained_bytes(), 0);
-    assert_eq!(account.snapshot().live_retained_allocations(), 0);
-}
-
-#[test]
-fn dropping_draft_owner_releases_storage_while_descriptor_remains_inert() {
-    let factory = test_factory();
-    let account = test_account(&factory, 256);
-
-    let (_descriptor, owner) = exact_draft_pair_from_local_authoring_vecs(&account);
-    assert!(account.snapshot().live_retained_bytes() > 0);
-    assert!(account.snapshot().live_retained_allocations() > 0);
-
-    drop(owner);
-
-    assert_eq!(account.snapshot().live_retained_bytes(), 0);
-    assert_eq!(account.snapshot().live_retained_allocations(), 0);
-}
-
-#[test]
-fn foreign_brand_descriptor_fails_before_generation_reservation() {
-    let factory = test_factory();
-    let account = test_account(&factory, 512);
-    let (local_draft, local_owner) = exact_draft_pair_from_local_authoring_vecs(&account);
-    let (foreign_draft, foreign_owner) = exact_draft_pair_from_local_authoring_vecs(&account);
-    let mismatched = NodeSceneDraft {
-        brand: foreign_draft.brand,
-        directory: local_draft.directory,
-    };
-    drop(foreign_owner);
+    let owner = pending_candidate_from_local_authoring_vecs(&account);
 
     let failure = rich_failure(
-        local_owner
-            .prepare_with_generation_source(mismatched, || {
-                panic!("foreign brand must fail before generation reservation")
+        owner
+            .prepare_with_generation_source(SceneParseOutcome::Rejected, || {
+                panic!("rejected parsing must not reserve a generation")
             })
-            .expect("foreign brand must preserve rich build-invariant evidence")
+            .expect("rejected parsing must preserve rich failure evidence")
             .handoff(),
     );
     assert_eq!(
@@ -727,7 +693,7 @@ fn foreign_brand_descriptor_fails_before_generation_reservation() {
         failure
             .ledger_evidence()
             .dimension_by_semantic(STORE_DIMENSION)
-            .expect("foreign-brand failure dimension")
+            .expect("rejected-parse failure dimension")
             .committed_canonical_output(),
         0
     );
@@ -735,38 +701,56 @@ fn foreign_brand_descriptor_fails_before_generation_reservation() {
 }
 
 #[test]
-fn foreign_directory_descriptor_fails_before_generation_reservation() {
+fn prepared_handoff_rejects_foreign_canonical_roots_and_proofs() {
     let factory = test_factory();
     let account = test_account(&factory, 512);
-    let (local_draft, local_owner) = exact_draft_pair_from_local_authoring_vecs(&account);
-    let (foreign_draft, foreign_owner) = exact_draft_pair_from_local_authoring_vecs(&account);
-    let mismatched = NodeSceneDraft {
-        brand: local_draft.brand,
-        directory: foreign_draft.directory,
-    };
-    drop(foreign_owner);
+    let generation_source = AtomicU64::new(0);
+    let local_owner = pending_candidate_from_local_authoring_vecs(&account);
+    let foreign_owner = pending_candidate_from_local_authoring_vecs(&account);
+    let local_root = local_owner
+        .candidate
+        .output()
+        .inner()
+        .refs
+        .directory
+        .into_store();
+    let foreign_root = foreign_owner
+        .candidate
+        .output()
+        .inner()
+        .refs
+        .directory
+        .into_store();
+    assert_ne!(local_root, foreign_root);
 
-    let failure = rich_failure(
-        local_owner
-            .prepare_with_generation_source(mismatched, || {
-                panic!("foreign directory must fail before generation reservation")
-            })
-            .expect("foreign directory must preserve rich build-invariant evidence")
-            .handoff(),
-    );
-    assert_eq!(
-        terminal_failure_code(failure.ledger_evidence()),
-        NODE_SCENE_BUILD_INVARIANT_CODE
-    );
-    assert_eq!(
-        failure
-            .ledger_evidence()
-            .dimension_by_semantic(STORE_DIMENSION)
-            .expect("foreign-directory failure dimension")
-            .committed_canonical_output(),
-        0
-    );
-    assert_released(failure, &account);
+    let PreparedNodeSceneConstruction::Success {
+        token: local_token,
+        store: local_store,
+    } = local_owner
+        .prepare_with_generation_source(SceneParseOutcome::Accepted, || {
+            SceneGenerationId::reserve_from(&generation_source)
+        })
+        .expect("local candidate must prepare")
+    else {
+        panic!("local candidate must retain its proven root")
+    };
+    let PreparedNodeSceneConstruction::Success {
+        token: foreign_token,
+        store: foreign_store,
+    } = foreign_owner
+        .prepare_with_generation_source(SceneParseOutcome::Accepted, || {
+            SceneGenerationId::reserve_from(&generation_source)
+        })
+        .expect("foreign candidate must prepare")
+    else {
+        panic!("foreign candidate must retain its proven root")
+    };
+
+    assert!(local_token.try_handoff_prepared(foreign_store).is_err());
+    assert!(foreign_token.try_handoff_prepared(local_store).is_err());
+    assert_eq!(generation_source.load(Ordering::Relaxed), 2);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
 
 #[test]
@@ -823,11 +807,11 @@ fn source_ordered_forest_materializes_canonical_graph_and_preserves_authored_bit
         NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
         SceneValidationLimits::default(),
     );
-    let NodeSceneDraftBuild::Draft { draft, owner } = build else {
+    let NodeSceneDraftBuild::Draft { owner } = build else {
         panic!("valid source-ordered forest must retain a draft before publication")
     };
     let prepared = owner
-        .prepare_with_generation_source(draft, || {
+        .prepare_with_generation_source(SceneParseOutcome::Accepted, || {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("valid source-ordered forest must prepare");

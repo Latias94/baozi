@@ -4,11 +4,11 @@ use baozi_import::authoring::{
     GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, Presence, StaticSceneBuilder,
 };
 use baozi_import::{
-    CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
-    FormatDescriptor, FormatEncoding, FormatImporter, FormatSelection, ImportConfigOverlay,
-    ImportOperationControl, ImportRequest, ImportRequestLayer, OptionCompileLimits, ParseResult,
-    ParseScope, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder, SceneDraft,
-    import_bytes,
+    CapabilityStatus, CompiledOptions, DetectionOutcome, DetectionResult, DetectionScope, Format,
+    FormatCapability, FormatDescriptor, FormatEncoding, FormatSelection, ImportConfigOverlay,
+    ImportOperationControl, ImportRequest, ImportRequestLayer, NoFormatOptions, OptionCompileError,
+    OptionCompileLimits, ParseContext, ParseResult, ReadConfidence, ReadHint, RegistryBuildLimits,
+    RegistryBuildScope, RegistryBuilder,
 };
 use baozi_io::AssetPath;
 use baozi_postprocess::{
@@ -24,7 +24,16 @@ enum MultipleFields {
 
 struct DomainImporter(MultipleFields);
 
-impl FormatImporter for DomainImporter {
+impl Format for DomainImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("org.baozi.multidomain").unwrap(),
@@ -45,7 +54,7 @@ impl FormatImporter for DomainImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
         let positions = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
         let normal = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
         let tangent = [1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0];
@@ -83,7 +92,7 @@ impl FormatImporter for DomainImporter {
             AuthoringRange::new(0, 3),
         )];
         let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
-        scope.submit_static_scene(
+        context.submit(
             StaticSceneBuilder::new(Presence::Present(&[]), &[]).with_geometry(
                 &meshes,
                 &primitives,
@@ -106,16 +115,16 @@ fn valid_multiple_attribute_domains_fail_with_a_capability_error_before_replacem
             )),
         ));
         let request = registry
-            .compile_request(&request, OptionCompileLimits::default())
+            .plan(&request, OptionCompileLimits::default())
             .unwrap();
-        let (scene, evidence) = import_bytes(
-            &request,
-            AssetPath::new("domain.fixture").unwrap(),
-            b"input",
-            ImportOperationControl::default(),
-        )
-        .expect("both domains are valid canonical input")
-        .into_parts();
+        let (scene, evidence) = request
+            .read_bytes(
+                AssetPath::new("domain.fixture").unwrap(),
+                b"input",
+                ImportOperationControl::default(),
+            )
+            .expect("both domains are valid canonical input")
+            .into_parts();
         let primitive = scene.meshes().next().unwrap().primitives().next().unwrap();
         let target = primitive.id();
         let semantic = match fields {

@@ -12,7 +12,7 @@ use baozi_import::{
     LossPolicy, OptionCompileLimits, RegistryBuildLimits, RegistryBuilder, ResourceLimits,
     ResourceLimitsOverlay, ScopeAbortCause, SourceObjectLocatorRef, SourceScopeDetailState,
     SourceScopeDisposition, SourceScopeEntityKind, SourceScopeSelectionOutcome,
-    SourceScopeSelectionRequest, import_asset, import_bytes,
+    SourceScopeSelectionRequest,
 };
 use baozi_io::{AssetPath, MemoryAssetIo};
 use common::{
@@ -63,16 +63,11 @@ fn import_with_config(
         config.with_format_selection(FormatSelection::Forced(FormatId::new(FORMAT_ID)?)),
     )
     .try_with_format_option(envelope)?;
-    let request = snapshot.compile_request(
+    let request = snapshot.plan(
         &ImportRequest::from_layers(ImportRequestLayer::default(), caller),
         OptionCompileLimits::default(),
     )?;
-    Ok(import_asset(
-        &request,
-        &io,
-        source,
-        ImportOperationControl::default(),
-    ))
+    Ok(request.read_asset(&io, source, ImportOperationControl::default()))
 }
 
 fn assert_selection(report: &ImportReport, selection: GltfSceneSelection, scene_index: u64) {
@@ -219,13 +214,12 @@ fn glb_uses_the_same_frozen_selector_and_records_its_container_identity() -> Tes
             .with_scene_selection(GltfSceneSelection::SceneIndex(1))
             .to_envelope()?,
     )?;
-    let request = snapshot.compile_request(
+    let request = snapshot.plan(
         &ImportRequest::new().with_caller_layer(caller),
         OptionCompileLimits::default(),
     )?;
     let source = AssetPath::new("models/explicit.glb")?;
-    let report = import_bytes(
-        &request,
+    let report = request.read_bytes(
         source.clone(),
         &glb_with_json(document),
         ImportOperationControl::default(),

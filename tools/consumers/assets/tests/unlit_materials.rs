@@ -485,19 +485,19 @@ fn unsupported_optional_selected_payload_stays_a_hard_failure_under_loss_opt_in(
         LossPolicy::preserve_or_fail(),
         LossPolicy::preserve_or_fail().allow(ImportLossKind::SourceSemanticLoss),
     ] {
-        let request = importer.prepare_request(
+        let request = importer.plan(
             &ImportRequest::new().with_caller_layer(ImportRequestLayer::new(
                 ImportConfigOverlay::default().with_loss_policy(policy),
             )),
             OptionCompileLimits::default(),
         )?;
-        let error = importer
-            .read_asset_with_request(
+        let error = request
+            .read_asset(
                 &io,
                 AssetPath::new(SOURCE)?,
-                &request,
                 ImportOperationControl::default(),
             )
+            .map_err(baozi::Error::from)
             .unwrap_err();
         let baozi::Error::Import(failure) = error else {
             panic!("unsupported selected payload must retain an import failure");

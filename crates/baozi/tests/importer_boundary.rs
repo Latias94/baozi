@@ -4,11 +4,12 @@ use baozi::{
     AssetIo, AssetLength, AssetOpenError, AssetOpenWorkError, AssetPath, AuthorityDomain,
     CapabilityStatus, Error, FormatCapability, FormatDescriptor, FormatEncoding, FormatId,
     ImportCause, ImportDimension, ImportOperationControl, ImportTerminalCause,
-    ImportTerminalFailureClass, Importer, ReadConfidence, RequestError, SceneSnapshotLimits,
+    ImportTerminalFailureClass, Importer, ReadConfidence, SceneSnapshotLimits,
 };
 use baozi_import::{
-    DenyDependencies, DetectionOutcome, DetectionResult, DetectionScope, FormatImporter,
-    ParseResult, ParseScope, Probe, ReadHint, SceneDraft,
+    CompiledOptions, DenyDependencies, DetectionOutcome, DetectionResult, DetectionScope, Format,
+    NoFormatOptions, OptionCompileError, ParseContext, ParseResult, Probe, ReadHint,
+    RegistryBuildScope,
 };
 use baozi_io::OpenedAsset;
 use std::io::Cursor;
@@ -33,7 +34,16 @@ fn descriptor(id: &str, extension: &str) -> FormatDescriptor {
 
 struct OpenOnceImporter;
 
-impl FormatImporter for OpenOnceImporter {
+impl Format for OpenOnceImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> std::result::Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         descriptor(ONCE_ID, "once")
     }
@@ -58,7 +68,7 @@ impl FormatImporter for OpenOnceImporter {
         }
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
         assert_eq!(scope.primary_bytes(), b"stable primary");
         support::submit_minimal_scene(scope)
     }
@@ -66,7 +76,16 @@ impl FormatImporter for OpenOnceImporter {
 
 struct InvalidDraftImporter;
 
-impl FormatImporter for InvalidDraftImporter {
+impl Format for InvalidDraftImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> std::result::Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         descriptor(INVALID_ID, "invalid")
     }
@@ -80,14 +99,23 @@ impl FormatImporter for InvalidDraftImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
         support::submit_invalid_parent_scene(scope)
     }
 }
 
 struct GeometryImporter;
 
-impl FormatImporter for GeometryImporter {
+impl Format for GeometryImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> std::result::Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         descriptor(GEOMETRY_ID, "geometry")
     }
@@ -101,7 +129,7 @@ impl FormatImporter for GeometryImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
         support::submit_point_geometry_scene(scope)
     }
 }
@@ -165,75 +193,97 @@ impl AssetIo for ChangingAssetIo {
     }
 }
 
-fn importer_with<I: FormatImporter>(format: I) -> Importer {
+fn importer_with<I: Format>(format: I) -> Importer {
     let mut builder = Importer::builder();
     builder.register(format).expect("fixture must register");
     builder.build().expect("fixture registry must freeze")
 }
 
-fn assert_registry_snapshot_mismatch(error: Error) {
-    let Error::Request(error @ RequestError::RegistrySnapshotMismatch) = error else {
-        panic!("expected a registry snapshot mismatch, got {error:?}");
-    };
-    assert_eq!(error.code(), "registry-snapshot-mismatch");
-}
-
 #[test]
-fn foreign_prepared_request_is_rejected_before_io_or_session() {
-    let owner = importer_with(OpenOnceImporter);
-    let foreign = importer_with(OpenOnceImporter);
-    let request = owner
-        .prepare_default_request()
-        .expect("owner request must compile");
+fn plan_executes_bytes_assets_and_resolver_after_importer_is_dropped() {
+    let plan = {
+        let importer = importer_with(OpenOnceImporter);
+        importer.default_plan().expect("default plan must compile")
+    };
 
-    let report = owner
-        .read_bytes_with_request(
-            "model.once",
+    let report = plan
+        .read_bytes(
+            AssetPath::new("model.once").expect("valid source path"),
             b"stable primary",
-            &request,
             ImportOperationControl::default(),
         )
-        .expect("the owner must accept its own request");
+        .expect("the plan retains its format and options after the importer is dropped");
     assert_eq!(report.format().id().as_str(), ONCE_ID);
 
-    let bytes_error = foreign
-        .read_bytes_with_request(
-            "../escape.once",
-            b"stable primary",
-            &request,
-            ImportOperationControl::default(),
-        )
-        .expect_err("foreign request must fail before source-path parsing");
-    assert_registry_snapshot_mismatch(bytes_error);
-
     let asset_io = ChangingAssetIo::new();
-    let asset_error = foreign
-        .read_asset_with_request(
+    let report = plan
+        .read_asset(
             &asset_io,
             AssetPath::new("model.once").expect("valid source path"),
-            &request,
             ImportOperationControl::default(),
         )
-        .expect_err("foreign request must fail before asset IO");
-    assert_registry_snapshot_mismatch(asset_error);
-    assert_eq!(asset_io.domain_lookup_count(), 0);
-    assert_eq!(asset_io.bound_lookup_count(), 0);
-    assert_eq!(asset_io.open_count(), 0);
+        .expect("the retained plan imports through the primary authority");
+    assert_eq!(report.format().id().as_str(), ONCE_ID);
+    assert!(asset_io.domain_lookup_count() > 0);
+    assert_eq!(asset_io.bound_lookup_count(), 1);
+    assert_eq!(asset_io.open_count(), 1);
 
     let resolver_io = ChangingAssetIo::new();
-    let resolver_error = foreign
+    let report = plan
         .read_asset_with_resolver(
             &resolver_io,
             AssetPath::new("model.once").expect("valid source path"),
-            &request,
             &DenyDependencies,
             ImportOperationControl::default(),
         )
-        .expect_err("foreign request must fail before resolver or asset IO");
-    assert_registry_snapshot_mismatch(resolver_error);
-    assert_eq!(resolver_io.domain_lookup_count(), 0);
-    assert_eq!(resolver_io.bound_lookup_count(), 0);
-    assert_eq!(resolver_io.open_count(), 0);
+        .expect("the retained plan accepts an explicit resolver");
+    assert_eq!(report.format().id().as_str(), ONCE_ID);
+    assert!(resolver_io.domain_lookup_count() > 0);
+    assert_eq!(resolver_io.bound_lookup_count(), 1);
+    assert_eq!(resolver_io.open_count(), 1);
+}
+
+#[test]
+fn cloned_plans_import_point_geometry_concurrently_without_an_importer() {
+    let plan = {
+        let importer = importer_with(GeometryImporter);
+        importer.default_plan().expect("default plan must compile")
+    };
+    let start = std::sync::Barrier::new(4);
+    std::thread::scope(|threads| {
+        let handles = (0..4)
+            .map(|_| {
+                let plan = plan.clone();
+                let start = &start;
+                threads.spawn(move || {
+                    start.wait();
+                    for _ in 0..2 {
+                        let report = plan
+                            .read_bytes(
+                                AssetPath::new("model.geometry").expect("valid source path"),
+                                b"geometry",
+                                ImportOperationControl::default(),
+                            )
+                            .expect("each cloned plan owns an independent import operation");
+                        assert_eq!(report.format().id().as_str(), GEOMETRY_ID);
+                        let snapshot = report
+                            .scene()
+                            .capture_snapshot(
+                                SceneSnapshotLimits::try_new(16 * 1024, 128, 16 * 1024)
+                                    .expect("valid snapshot limits"),
+                            )
+                            .expect("each imported point remains observable");
+                        assert_eq!(snapshot.node_count(), 1);
+                        assert_eq!(snapshot.primitive_count(), 1);
+                        assert_eq!(snapshot.f32_scalar_count(), 3);
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.join().expect("cloned-plan import completes");
+        }
+    });
 }
 
 #[test]

@@ -1,49 +1,69 @@
 use super::schema::*;
 use crate::GltfFailure;
 use crate::json_syntax::{DecodedScalars, IndexedValue, JsonIndex, ValueId, ValueKind};
-use baozi_import::{ImportStorageClass, ParseResult, ParseScope};
+use baozi_import::ImportWorkClass;
+use baozi_import::{ImportStorageClass, ParseExecution, ParseResult};
 
-pub(super) struct Decoder<'a, 'scope, 'session> {
-    pub(super) ctx: &'scope ParseScope<'session>,
+// Document views may be shorter than the session supplying admitted storage.
+// Keep execution explicit so decoded rows never retain an execution-region borrow.
+pub(super) struct Decoder<'a, 'scope> {
     pub(super) bytes: &'scope [u8],
     pub(super) index: &'a JsonIndex<'scope>,
 }
 
-impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
-    fn invalid(&self, reason: &'static str) -> baozi_import::ParseFailure {
-        self.ctx
-            .format_failure(GltfFailure::invalid_document(reason))
+impl<'a, 'scope> Decoder<'a, 'scope> {
+    fn invalid<'session: 'scope>(
+        &self,
+        reason: &'static str,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> baozi_import::ParseFailure {
+        ctx.format_failure(GltfFailure::invalid_document(reason))
     }
 
     fn value(&self, id: ValueId) -> &IndexedValue {
         &self.index.values.as_slice()[id]
     }
 
-    fn kind(&self, id: ValueId, kind: ValueKind, reason: &'static str) -> ParseResult<()> {
+    fn kind<'session: 'scope>(
+        &self,
+        id: ValueId,
+        kind: ValueKind,
+        reason: &'static str,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<()> {
         if self.value(id).kind == kind {
             Ok(())
         } else {
-            Err(self.invalid(reason))
+            Err(self.invalid(reason, ctx))
         }
     }
 
-    pub(super) fn object(&self, id: ValueId) -> ParseResult<()> {
+    pub(super) fn object<'session: 'scope>(
+        &self,
+        id: ValueId,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<()> {
         self.kind(
             id,
             ValueKind::Object,
             "glTF schema field requires an object",
+            ctx,
         )
     }
 
-    fn key_eq(&self, id: ValueId, key: &str) -> ParseResult<bool> {
+    fn key_eq<'session: 'scope>(
+        &self,
+        id: ValueId,
+        key: &str,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<bool> {
         let value = self.value(id);
-        self.ctx
-            .charge_work((value.key_end - value.key_start) as u64 + 1)?;
+        ctx.charge_work((value.key_end - value.key_start) as u64 + 1)?;
         let mut scalars = DecodedScalars::new(self.bytes, value.key_start + 1, value.key_end - 1);
         for expected in key.chars() {
             if scalars
                 .next_scalar()
-                .map_err(|()| self.invalid("invalid admitted key"))?
+                .map_err(|()| self.invalid("invalid admitted key", ctx))?
                 != Some(u32::from(expected))
             {
                 return Ok(false);
@@ -51,22 +71,33 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
         }
         Ok(scalars
             .next_scalar()
-            .map_err(|()| self.invalid("invalid admitted key"))?
+            .map_err(|()| self.invalid("invalid admitted key", ctx))?
             .is_none())
     }
 
-    pub(super) fn field(&self, object: ValueId, key: &str) -> ParseResult<Option<ValueId>> {
-        self.object(object)?;
+    pub(super) fn field<'session: 'scope>(
+        &self,
+        object: ValueId,
+        key: &str,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<Option<ValueId>> {
+        self.object(object, ctx)?;
         for id in self.children(object) {
-            if self.key_eq(id, key)? {
+            if self.key_eq(id, key, ctx)? {
                 return Ok(Some(id));
             }
         }
         Ok(None)
     }
 
-    fn required(&self, object: ValueId, key: &'static str) -> ParseResult<ValueId> {
-        self.field(object, key)?.ok_or_else(|| self.invalid(key))
+    fn required<'session: 'scope>(
+        &self,
+        object: ValueId,
+        key: &'static str,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<ValueId> {
+        self.field(object, key, ctx)?
+            .ok_or_else(|| self.invalid(key, ctx))
     }
 
     fn children(&self, id: ValueId) -> impl Iterator<Item = ValueId> + '_ {
@@ -75,22 +106,37 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
         })
     }
 
-    fn raw_str(&self, id: ValueId) -> ParseResult<&'scope str> {
+    fn raw_str<'session: 'scope>(
+        &self,
+        id: ValueId,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<&'scope str> {
         let value = self.value(id);
         std::str::from_utf8(&self.bytes[value.start..value.end])
-            .map_err(|_| self.invalid("invalid admitted UTF-8"))
+            .map_err(|_| self.invalid("invalid admitted UTF-8", ctx))
     }
 
-    fn text_range(&self, start: usize, end: usize) -> ParseResult<Text<'scope>> {
+    fn text_range<'session: 'scope>(
+        &self,
+        start: usize,
+        end: usize,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<Text<'scope>> {
         let bytes = &self.bytes[start..end];
         let mut escaped = false;
+        let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
         for chunk in bytes.chunks(4096) {
-            self.ctx.charge_work(chunk.len() as u64)?;
+            ctx.with_work(
+                &work_group,
+                [chunk.len() as u64],
+                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+            )?;
             escaped |= chunk.contains(&b'\\');
         }
         if !escaped {
             return Ok(Text::Borrowed(
-                std::str::from_utf8(bytes).map_err(|_| self.invalid("invalid admitted string"))?,
+                std::str::from_utf8(bytes)
+                    .map_err(|_| self.invalid("invalid admitted string", ctx))?,
             ));
         }
         let mut scalars = DecodedScalars::new(self.bytes, start, end);
@@ -98,189 +144,308 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
         let mut count = 0usize;
         while let Some(scalar) = scalars
             .next_scalar()
-            .map_err(|()| self.invalid("invalid admitted escape"))?
+            .map_err(|()| self.invalid("invalid admitted escape", ctx))?
         {
             if count.is_multiple_of(256) {
-                self.ctx.charge_work(1)?;
+                ctx.with_work(
+                    &work_group,
+                    [1],
+                    |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+                )?;
             }
-            let scalar =
-                char::from_u32(scalar).ok_or_else(|| self.invalid("invalid admitted scalar"))?;
+            let scalar = char::from_u32(scalar)
+                .ok_or_else(|| self.invalid("invalid admitted scalar", ctx))?;
             decoded_len = decoded_len
                 .checked_add(scalar.len_utf8())
-                .ok_or_else(|| self.ctx.allocation_failure("gltf-document-escaped-string"))?;
+                .ok_or_else(|| ctx.allocation_failure("gltf-document-escaped-string"))?;
             count += 1;
         }
         // Admit the decoded length before the first owned byte, including empty strings.
-        let mut decoded = self.ctx.metered_string(
+        let mut decoded = ctx.metered_string(
             ImportStorageClass::BackendDecode,
             "gltf-document-escaped-string",
         );
-        decoded.try_reserve(decoded_len)?;
+        decoded.try_reserve(ctx, decoded_len)?;
         let mut scalars = DecodedScalars::new(self.bytes, start, end);
         let mut count = 0usize;
         while let Some(scalar) = scalars
             .next_scalar()
-            .map_err(|()| self.invalid("invalid admitted escape"))?
+            .map_err(|()| self.invalid("invalid admitted escape", ctx))?
         {
             if count.is_multiple_of(256) {
-                self.ctx.charge_work(1)?;
+                ctx.with_work(
+                    &work_group,
+                    [1],
+                    |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+                )?;
             }
-            let scalar =
-                char::from_u32(scalar).ok_or_else(|| self.invalid("invalid admitted scalar"))?;
-            decoded.try_push_str(scalar.encode_utf8(&mut [0; 4]))?;
+            let scalar = char::from_u32(scalar)
+                .ok_or_else(|| self.invalid("invalid admitted scalar", ctx))?;
+            decoded.try_push_str(ctx, scalar.encode_utf8(&mut [0; 4]))?;
             count += 1;
         }
         Ok(Text::Decoded(decoded))
     }
 
-    fn text(&self, id: ValueId) -> ParseResult<Text<'scope>> {
-        self.kind(id, ValueKind::String, "glTF schema field requires a string")?;
+    fn text<'session: 'scope>(
+        &self,
+        id: ValueId,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<Text<'scope>> {
+        self.kind(
+            id,
+            ValueKind::String,
+            "glTF schema field requires a string",
+            ctx,
+        )?;
         let value = self.value(id);
-        self.text_range(value.start + 1, value.end - 1)
+        self.text_range(value.start + 1, value.end - 1, ctx)
     }
 
-    fn name(&self, id: ValueId) -> ParseResult<Option<Text<'scope>>> {
-        self.field(id, "name")?.map(|id| self.text(id)).transpose()
+    fn name<'session: 'scope>(
+        &self,
+        id: ValueId,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<Option<Text<'scope>>> {
+        self.field(id, "name", ctx)?
+            .map(|id| self.text(id, ctx))
+            .transpose()
     }
 
-    pub(super) fn uint(&self, id: ValueId) -> ParseResult<u64> {
+    pub(super) fn uint<'session: 'scope>(
+        &self,
+        id: ValueId,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<u64> {
         self.kind(
             id,
             ValueKind::Number,
             "glTF schema field requires an unsigned integer",
+            ctx,
         )?;
         let value = self.value(id);
         let bytes = self
             .bytes
             .get(value.start..value.end)
-            .ok_or_else(|| self.invalid("invalid admitted number range"))?;
-        super::integer::unsigned(self.ctx, bytes)
+            .ok_or_else(|| self.invalid("invalid admitted number range", ctx))?;
+        super::integer::unsigned(ctx, bytes)
     }
 
-    fn size(&self, id: ValueId) -> ParseResult<u64> {
-        let value = self.uint(id)?;
+    fn size<'session: 'scope>(
+        &self,
+        id: ValueId,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<u64> {
+        let value = self.uint(id, ctx)?;
         usize::try_from(value).map_err(|_| {
-            self.invalid("glTF byte length, count or offset exceeds the host index domain")
+            self.invalid(
+                "glTF byte length, count or offset exceeds the host index domain",
+                ctx,
+            )
         })?;
         Ok(value)
     }
 
-    fn id(&self, id: ValueId) -> ParseResult<Index> {
-        let value = self.uint(id)?;
+    fn id<'session: 'scope>(
+        &self,
+        id: ValueId,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<Index> {
+        let value = self.uint(id, ctx)?;
         Ok(Index(u32::try_from(value).map_err(|_| {
-            self.invalid("glTF reference exceeds the U32 domain")
+            self.invalid("glTF reference exceeds the U32 domain", ctx)
         })?))
     }
 
-    fn optional_id(&self, object: ValueId, key: &str) -> ParseResult<Option<Index>> {
-        self.field(object, key)?.map(|id| self.id(id)).transpose()
+    fn optional_id<'session: 'scope>(
+        &self,
+        object: ValueId,
+        key: &str,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<Option<Index>> {
+        self.field(object, key, ctx)?
+            .map(|id| self.id(id, ctx))
+            .transpose()
     }
 
-    fn required_id(&self, object: ValueId, key: &'static str) -> ParseResult<Index> {
-        self.id(self.required(object, key)?)
+    fn required_id<'session: 'scope>(
+        &self,
+        object: ValueId,
+        key: &'static str,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<Index> {
+        self.id(self.required(object, key, ctx)?, ctx)
     }
 
-    fn number(&self, id: ValueId) -> ParseResult<f64> {
-        self.kind(id, ValueKind::Number, "glTF schema field requires a number")?;
-        let text = self.raw_str(id)?;
-        self.ctx.charge_work(text.len() as u64)?;
+    fn number<'session: 'scope>(
+        &self,
+        id: ValueId,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<f64> {
+        self.kind(
+            id,
+            ValueKind::Number,
+            "glTF schema field requires a number",
+            ctx,
+        )?;
+        let text = self.raw_str(id, ctx)?;
+        ctx.charge_work(text.len() as u64)?;
         let value = text
             .parse::<f64>()
-            .map_err(|_| self.invalid("glTF number is invalid"))?;
+            .map_err(|_| self.invalid("glTF number is invalid", ctx))?;
         if !value.is_finite() {
-            return Err(self.invalid("glTF number exceeds the JSON number domain"));
+            return Err(self.invalid("glTF number exceeds the JSON number domain", ctx));
         }
         Ok(value)
     }
 
-    fn float(&self, id: ValueId) -> ParseResult<f32> {
-        Ok(self.number(id)? as f32)
+    fn float<'session: 'scope>(
+        &self,
+        id: ValueId,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<f32> {
+        Ok(self.number(id, ctx)? as f32)
     }
 
-    fn float_or(&self, object: ValueId, key: &str, default: f32) -> ParseResult<f32> {
-        self.field(object, key)?
-            .map_or(Ok(default), |id| self.float(id))
+    fn float_or<'session: 'scope>(
+        &self,
+        object: ValueId,
+        key: &str,
+        default: f32,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<f32> {
+        self.field(object, key, ctx)?
+            .map_or(Ok(default), |id| self.float(id, ctx))
     }
 
-    fn boolean_or(&self, object: ValueId, key: &str, default: bool) -> ParseResult<bool> {
-        let Some(id) = self.field(object, key)? else {
+    fn boolean_or<'session: 'scope>(
+        &self,
+        object: ValueId,
+        key: &str,
+        default: bool,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<bool> {
+        let Some(id) = self.field(object, key, ctx)? else {
             return Ok(default);
         };
-        self.kind(id, ValueKind::Bool, "glTF schema field requires a boolean")?;
-        Ok(self.raw_str(id)? == "true")
+        self.kind(
+            id,
+            ValueKind::Bool,
+            "glTF schema field requires a boolean",
+            ctx,
+        )?;
+        Ok(self.raw_str(id, ctx)? == "true")
     }
 
-    fn fixed<const N: usize>(&self, id: ValueId) -> ParseResult<[f32; N]> {
-        self.kind(id, ValueKind::Array, "glTF fixed vector requires an array")?;
+    fn fixed<'session: 'scope, const N: usize>(
+        &self,
+        id: ValueId,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<[f32; N]> {
+        self.kind(
+            id,
+            ValueKind::Array,
+            "glTF fixed vector requires an array",
+            ctx,
+        )?;
         if self.value(id).child_count != N {
-            return Err(self.invalid("glTF fixed vector has the wrong length"));
+            return Err(self.invalid("glTF fixed vector has the wrong length", ctx));
         }
         let mut result = [0.; N];
         for (value, id) in result.iter_mut().zip(self.children(id)) {
-            *value = self.float(id)?;
+            *value = self.float(id, ctx)?;
         }
         Ok(result)
     }
 
-    fn fixed_default<const N: usize>(
+    fn fixed_default<'session: 'scope, const N: usize>(
         &self,
         object: ValueId,
         key: &str,
         default: [f32; N],
+        ctx: &mut ParseExecution<'_, 'session>,
     ) -> ParseResult<[f32; N]> {
-        self.field(object, key)?
-            .map_or(Ok(default), |id| self.fixed(id))
+        self.field(object, key, ctx)?
+            .map_or(Ok(default), |id| self.fixed(id, ctx))
     }
 
-    fn list<T>(
+    fn list<'session: 'scope, T>(
         &self,
         id: Option<ValueId>,
-        decode: impl Fn(ValueId) -> ParseResult<T>,
+        decode: impl Fn(ValueId, &mut ParseExecution<'_, 'session>) -> ParseResult<T>,
+        ctx: &mut ParseExecution<'_, 'session>,
     ) -> ParseResult<List<'scope, T>> {
-        let mut list = self
-            .ctx
-            .metered_vec(ImportStorageClass::BackendDecode, "gltf-document-table");
+        let mut list = ctx.metered_vec(ImportStorageClass::BackendDecode, "gltf-document-table");
         if let Some(id) = id {
-            self.kind(id, ValueKind::Array, "glTF schema field requires an array")?;
+            self.kind(
+                id,
+                ValueKind::Array,
+                "glTF schema field requires an array",
+                ctx,
+            )?;
             let count = self.value(id).child_count;
-            u32::try_from(count).map_err(|_| self.invalid("glTF table exceeds the U32 domain"))?;
-            list.try_reserve(count)?;
+            u32::try_from(count)
+                .map_err(|_| self.invalid("glTF table exceeds the U32 domain", ctx))?;
+            list.try_reserve(ctx, count)?;
+            let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
             for id in self.children(id) {
-                self.ctx.charge_work(1)?;
-                list.try_push_reserved(decode(id)?)?;
+                ctx.with_work(
+                    &work_group,
+                    [1],
+                    |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+                )?;
+                list.try_push_reserved(decode(id, ctx)?)?;
             }
         }
         Ok(List(list))
     }
 
-    fn weights(&self, id: ValueId) -> ParseResult<Option<List<'scope, f32>>> {
-        self.field(id, "weights")?
-            .map(|id| self.list(Some(id), |id| self.float(id)))
+    fn weights<'session: 'scope>(
+        &self,
+        id: ValueId,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<Option<List<'scope, f32>>> {
+        self.field(id, "weights", ctx)?
+            .map(|id| self.list(Some(id), |id, ctx| self.float(id, ctx), ctx))
             .transpose()
     }
 
-    fn enum_text<T>(&self, id: ValueId, choices: &[(&str, T)]) -> ParseResult<T>
+    fn enum_text<'session: 'scope, T>(
+        &self,
+        id: ValueId,
+        choices: &[(&str, T)],
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<T>
     where
         T: Copy,
     {
-        let text = self.text(id)?;
+        let text = self.text(id, ctx)?;
         choices
             .iter()
             .find(|(key, _)| *key == text.as_str())
             .map(|(_, value)| *value)
-            .ok_or_else(|| self.invalid("glTF schema string enum is invalid"))
+            .ok_or_else(|| self.invalid("glTF schema string enum is invalid", ctx))
     }
 
-    fn enum_uint<T: Copy>(&self, id: ValueId, choices: &[(u64, T)]) -> ParseResult<T> {
-        let number = self.uint(id)?;
+    fn enum_uint<'session: 'scope, T: Copy>(
+        &self,
+        id: ValueId,
+        choices: &[(u64, T)],
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<T> {
+        let number = self.uint(id, ctx)?;
         choices
             .iter()
             .find(|(key, _)| *key == number)
             .map(|(_, value)| *value)
-            .ok_or_else(|| self.invalid("glTF schema numeric enum is invalid"))
+            .ok_or_else(|| self.invalid("glTF schema numeric enum is invalid", ctx))
     }
 
-    fn component(&self, id: ValueId) -> ParseResult<accessor::ComponentType> {
+    fn component<'session: 'scope>(
+        &self,
+        id: ValueId,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<accessor::ComponentType> {
         use accessor::ComponentType::*;
         self.enum_uint(
             id,
@@ -292,17 +457,24 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
                 (5125, U32),
                 (5126, F32),
             ],
+            ctx,
         )
     }
 
-    fn bounds(&self, object: ValueId, key: &str) -> ParseResult<Option<accessor::Bounds>> {
-        let Some(id) = self.field(object, key)? else {
+    fn bounds<'session: 'scope>(
+        &self,
+        object: ValueId,
+        key: &str,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<Option<accessor::Bounds>> {
+        let Some(id) = self.field(object, key, ctx)? else {
             return Ok(None);
         };
         self.kind(
             id,
             ValueKind::Array,
             "glTF accessor bounds require an array",
+            ctx,
         )?;
         let mut bounds = accessor::Bounds {
             values: [0.; 16],
@@ -315,26 +487,30 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
                     bounds.len = 0;
                     break;
                 }
-                *slot = self.number(child)?;
+                *slot = self.number(child, ctx)?;
             }
         }
         Ok(Some(bounds))
     }
 
-    fn accessor(&self, id: ValueId) -> ParseResult<accessor::Accessor> {
+    fn accessor<'session: 'scope>(
+        &self,
+        id: ValueId,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<accessor::Accessor> {
         use accessor::Type::*;
-        self.object(id)?;
-        let _name = self.name(id)?;
+        self.object(id, ctx)?;
+        let _name = self.name(id, ctx)?;
         Ok(accessor::Accessor {
-            buffer_view: self.optional_id(id, "bufferView")?,
+            buffer_view: self.optional_id(id, "bufferView", ctx)?,
             byte_offset: self
-                .field(id, "byteOffset")?
-                .map(|id| self.size(id))
+                .field(id, "byteOffset", ctx)?
+                .map(|id| self.size(id, ctx))
                 .transpose()?,
-            count: self.size(self.required(id, "count")?)?,
-            component_type: self.component(self.required(id, "componentType")?)?,
+            count: self.size(self.required(id, "count", ctx)?, ctx)?,
+            component_type: self.component(self.required(id, "componentType", ctx)?, ctx)?,
             type_: self.enum_text(
-                self.required(id, "type")?,
+                self.required(id, "type", ctx)?,
                 &[
                     ("SCALAR", Scalar),
                     ("VEC2", Vec2),
@@ -344,91 +520,115 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
                     ("MAT3", Mat3),
                     ("MAT4", Mat4),
                 ],
+                ctx,
             )?,
-            normalized: self.boolean_or(id, "normalized", false)?,
+            normalized: self.boolean_or(id, "normalized", false, ctx)?,
             sparse: self
-                .field(id, "sparse")?
-                .map(|id| self.sparse(id))
+                .field(id, "sparse", ctx)?
+                .map(|id| self.sparse(id, ctx))
                 .transpose()?,
-            min: self.bounds(id, "min")?,
-            max: self.bounds(id, "max")?,
+            min: self.bounds(id, "min", ctx)?,
+            max: self.bounds(id, "max", ctx)?,
         })
     }
 
-    fn sparse(&self, id: ValueId) -> ParseResult<accessor::Sparse> {
-        let indices = self.required(id, "indices")?;
-        let values = self.required(id, "values")?;
-        let component_type = self.component(self.required(indices, "componentType")?)?;
+    fn sparse<'session: 'scope>(
+        &self,
+        id: ValueId,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<accessor::Sparse> {
+        let indices = self.required(id, "indices", ctx)?;
+        let values = self.required(id, "values", ctx)?;
+        let component_type = self.component(self.required(indices, "componentType", ctx)?, ctx)?;
         if !matches!(
             component_type,
             accessor::ComponentType::U8
                 | accessor::ComponentType::U16
                 | accessor::ComponentType::U32
         ) {
-            return Err(self.invalid("glTF sparse indices must use unsigned integer components"));
+            return Err(self.invalid(
+                "glTF sparse indices must use unsigned integer components",
+                ctx,
+            ));
         }
         Ok(accessor::Sparse {
-            count: self.size(self.required(id, "count")?)?,
+            count: self.size(self.required(id, "count", ctx)?, ctx)?,
             indices: accessor::Indices {
-                buffer_view: self.required_id(indices, "bufferView")?,
+                buffer_view: self.required_id(indices, "bufferView", ctx)?,
                 byte_offset: self
-                    .field(indices, "byteOffset")?
-                    .map_or(Ok(0), |id| self.size(id))?,
+                    .field(indices, "byteOffset", ctx)?
+                    .map_or(Ok(0), |id| self.size(id, ctx))?,
                 component_type,
             },
             values: accessor::Values {
-                buffer_view: self.required_id(values, "bufferView")?,
+                buffer_view: self.required_id(values, "bufferView", ctx)?,
                 byte_offset: self
-                    .field(values, "byteOffset")?
-                    .map_or(Ok(0), |id| self.size(id))?,
+                    .field(values, "byteOffset", ctx)?
+                    .map_or(Ok(0), |id| self.size(id, ctx))?,
             },
         })
     }
 
-    fn semantic(&self, child: ValueId, ordinal: usize) -> ParseResult<mesh::Semantic> {
+    fn semantic<'session: 'scope>(
+        &self,
+        child: ValueId,
+        ordinal: usize,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<mesh::Semantic> {
         use mesh::Semantic::*;
         let value = self.value(child);
-        let key = self.text_range(value.key_start + 1, value.key_end - 1)?;
+        let key = self.text_range(value.key_start + 1, value.key_end - 1, ctx)?;
         Ok(match key.as_str() {
             "POSITION" => Positions,
             "NORMAL" => Normals,
             "TANGENT" => Tangents,
             key if key.starts_with('_') => Extras(
-                u32::try_from(ordinal).map_err(|_| self.invalid("too many custom semantics"))?,
+                u32::try_from(ordinal)
+                    .map_err(|_| self.invalid("too many custom semantics", ctx))?,
             ),
             key => {
                 let (name, set) = key
                     .rsplit_once('_')
-                    .ok_or_else(|| self.invalid("glTF attribute semantic is invalid"))?;
+                    .ok_or_else(|| self.invalid("glTF attribute semantic is invalid", ctx))?;
                 let set = set
                     .parse::<u32>()
-                    .map_err(|_| self.invalid("glTF attribute semantic set is invalid"))?;
+                    .map_err(|_| self.invalid("glTF attribute semantic set is invalid", ctx))?;
                 match name {
                     "COLOR" => Colors(set),
                     "TEXCOORD" => TexCoords(set),
                     "JOINTS" => Joints(set),
                     "WEIGHTS" => Weights(set),
-                    _ => return Err(self.invalid("glTF attribute semantic is invalid")),
+                    _ => return Err(self.invalid("glTF attribute semantic is invalid", ctx)),
                 }
             }
         })
     }
 
-    fn primitive(&self, id: ValueId) -> ParseResult<mesh::Primitive<'scope>> {
+    fn primitive<'session: 'scope>(
+        &self,
+        id: ValueId,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<mesh::Primitive<'scope>> {
         use mesh::Mode::*;
-        let attributes_id = self.required(id, "attributes")?;
-        self.object(attributes_id)?;
-        let mut attributes = self.ctx.metered_vec(
+        let attributes_id = self.required(id, "attributes", ctx)?;
+        self.object(attributes_id, ctx)?;
+        let mut attributes = ctx.metered_vec(
             ImportStorageClass::BackendDecode,
             "gltf-document-attributes",
         );
-        attributes.try_reserve(self.value(attributes_id).child_count)?;
+        attributes.try_reserve(ctx, self.value(attributes_id).child_count)?;
+        let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
         for (ordinal, child) in self.children(attributes_id).enumerate() {
-            self.ctx.charge_work(1)?;
-            attributes.try_push_reserved((self.semantic(child, ordinal)?, self.id(child)?))?;
+            ctx.with_work(
+                &work_group,
+                [1],
+                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+            )?;
+            attributes
+                .try_push_reserved((self.semantic(child, ordinal, ctx)?, self.id(child, ctx)?))?;
         }
         attributes.try_sort_unstable_by(|a, b| -> ParseResult<_> {
-            self.ctx.charge_work(1)?;
+            ctx.charge_work(1)?;
             Ok(a.0.cmp(&b.0))
         })?;
         if attributes
@@ -436,13 +636,13 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
             .windows(2)
             .any(|pair| pair[0].0 == pair[1].0)
         {
-            return Err(self.invalid("duplicate glTF attribute semantic"));
+            return Err(self.invalid("duplicate glTF attribute semantic", ctx));
         }
         Ok(mesh::Primitive {
             attributes: mesh::Attributes(List(attributes)),
-            indices: self.optional_id(id, "indices")?,
-            material: self.optional_id(id, "material")?,
-            mode: self.field(id, "mode")?.map_or(Ok(Triangles), |id| {
+            indices: self.optional_id(id, "indices", ctx)?,
+            material: self.optional_id(id, "material", ctx)?,
+            mode: self.field(id, "mode", ctx)?.map_or(Ok(Triangles), |id| {
                 self.enum_uint(
                     id,
                     &[
@@ -454,18 +654,23 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
                         (5, TriangleStrip),
                         (6, TriangleFan),
                     ],
+                    ctx,
                 )
             })?,
             targets: self
-                .field(id, "targets")?
-                .map(|id| self.list(Some(id), |id| self.morph_target(id)))
+                .field(id, "targets", ctx)?
+                .map(|id| self.list(Some(id), |id, ctx| self.morph_target(id, ctx), ctx))
                 .transpose()?,
         })
     }
 
-    fn morph_target(&self, id: ValueId) -> ParseResult<mesh::MorphTarget<'scope>> {
-        self.object(id)?;
-        let mut unknown = self.ctx.metered_vec(
+    fn morph_target<'session: 'scope>(
+        &self,
+        id: ValueId,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<mesh::MorphTarget<'scope>> {
+        self.object(id, ctx)?;
+        let mut unknown = ctx.metered_vec(
             ImportStorageClass::BackendDecode,
             "gltf-document-morph-semantics",
         );
@@ -474,17 +679,20 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
         let mut tangents = None;
         for child in self.children(id) {
             let value = self.value(child);
-            let key = self.text_range(value.key_start + 1, value.key_end - 1)?;
+            let key = self.text_range(value.key_start + 1, value.key_end - 1, ctx)?;
             let slot = match key.as_str() {
                 "POSITION" => &mut positions,
                 "NORMAL" => &mut normals,
                 "TANGENT" => &mut tangents,
                 _ => {
-                    unknown.try_push((key, self.id(child)?))?;
+                    {
+                        let value = (key, self.id(child, ctx)?);
+                        unknown.try_push(ctx, value)
+                    }?;
                     continue;
                 }
             };
-            *slot = Some(self.id(child)?);
+            *slot = Some(self.id(child, ctx)?);
         }
         Ok(mesh::MorphTarget {
             positions,
@@ -494,23 +702,32 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
         })
     }
 
-    fn texture_info(&self, id: ValueId, strength_key: Option<&str>) -> ParseResult<texture::Info> {
+    fn texture_info<'session: 'scope>(
+        &self,
+        id: ValueId,
+        strength_key: Option<&str>,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<texture::Info> {
         let transform = self
-            .field(id, "extensions")?
-            .map(|id| self.field(id, "KHR_texture_transform"))
+            .field(id, "extensions", ctx)?
+            .map(|id| self.field(id, "KHR_texture_transform", ctx))
             .transpose()?
             .flatten();
         Ok(texture::Info {
-            index: self.required_id(id, "index")?,
+            index: self.required_id(id, "index", ctx)?,
             tex_coord: self
-                .field(id, "texCoord")?
-                .map_or(Ok(0), |id| self.id(id).map(|id| id.0))?,
-            strength: strength_key.map_or(Ok(1.), |key| self.float_or(id, key, 1.))?,
+                .field(id, "texCoord", ctx)?
+                .map_or(Ok(0), |id| self.id(id, ctx).map(|id| id.0))?,
+            strength: strength_key.map_or(Ok(1.), |key| self.float_or(id, key, 1., ctx))?,
             transform,
         })
     }
 
-    fn pbr(&self, id: Option<ValueId>) -> ParseResult<Pbr> {
+    fn pbr<'session: 'scope>(
+        &self,
+        id: Option<ValueId>,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<Pbr> {
         let Some(id) = id else {
             return Ok(Pbr {
                 base_color_factor: [1.; 4],
@@ -521,27 +738,31 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
             });
         };
         Ok(Pbr {
-            base_color_factor: self.fixed_default(id, "baseColorFactor", [1.; 4])?,
-            metallic_factor: self.float_or(id, "metallicFactor", 1.)?,
-            roughness_factor: self.float_or(id, "roughnessFactor", 1.)?,
+            base_color_factor: self.fixed_default(id, "baseColorFactor", [1.; 4], ctx)?,
+            metallic_factor: self.float_or(id, "metallicFactor", 1., ctx)?,
+            roughness_factor: self.float_or(id, "roughnessFactor", 1., ctx)?,
             base_color_texture: self
-                .field(id, "baseColorTexture")?
-                .map(|id| self.texture_info(id, None))
+                .field(id, "baseColorTexture", ctx)?
+                .map(|id| self.texture_info(id, None, ctx))
                 .transpose()?,
             metallic_roughness_texture: self
-                .field(id, "metallicRoughnessTexture")?
-                .map(|id| self.texture_info(id, None))
+                .field(id, "metallicRoughnessTexture", ctx)?
+                .map(|id| self.texture_info(id, None, ctx))
                 .transpose()?,
         })
     }
 
-    fn material(&self, id: ValueId) -> ParseResult<Material<'scope>> {
+    fn material<'session: 'scope>(
+        &self,
+        id: ValueId,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<Material<'scope>> {
         Ok(Material {
-            name: self.name(id)?,
-            pbr_metallic_roughness: self.pbr(self.field(id, "pbrMetallicRoughness")?)?,
-            emissive_factor: self.fixed_default(id, "emissiveFactor", [0.; 3])?,
+            name: self.name(id, ctx)?,
+            pbr_metallic_roughness: self.pbr(self.field(id, "pbrMetallicRoughness", ctx)?, ctx)?,
+            emissive_factor: self.fixed_default(id, "emissiveFactor", [0.; 3], ctx)?,
             alpha_mode: self
-                .field(id, "alphaMode")?
+                .field(id, "alphaMode", ctx)?
                 .map_or(Ok(AlphaMode::Opaque), |id| {
                     self.enum_text(
                         id,
@@ -550,138 +771,165 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
                             ("MASK", AlphaMode::Mask),
                             ("BLEND", AlphaMode::Blend),
                         ],
+                        ctx,
                     )
                 })?,
             alpha_cutoff: self
-                .field(id, "alphaCutoff")?
-                .map(|id| self.float(id))
+                .field(id, "alphaCutoff", ctx)?
+                .map(|id| self.float(id, ctx))
                 .transpose()?,
-            double_sided: self.boolean_or(id, "doubleSided", false)?,
+            double_sided: self.boolean_or(id, "doubleSided", false, ctx)?,
             normal_texture: self
-                .field(id, "normalTexture")?
-                .map(|id| self.texture_info(id, Some("scale")))
+                .field(id, "normalTexture", ctx)?
+                .map(|id| self.texture_info(id, Some("scale"), ctx))
                 .transpose()?,
             occlusion_texture: self
-                .field(id, "occlusionTexture")?
-                .map(|id| self.texture_info(id, Some("strength")))
+                .field(id, "occlusionTexture", ctx)?
+                .map(|id| self.texture_info(id, Some("strength"), ctx))
                 .transpose()?,
             emissive_texture: self
-                .field(id, "emissiveTexture")?
-                .map(|id| self.texture_info(id, None))
+                .field(id, "emissiveTexture", ctx)?
+                .map(|id| self.texture_info(id, None, ctx))
                 .transpose()?,
             unlit: self
-                .field(id, "extensions")?
-                .map(|id| self.field(id, "KHR_materials_unlit"))
+                .field(id, "extensions", ctx)?
+                .map(|id| self.field(id, "KHR_materials_unlit", ctx))
                 .transpose()?
                 .flatten(),
             emissive_strength: self
-                .field(id, "extensions")?
-                .map(|id| self.field(id, super::KHR_MATERIALS_EMISSIVE_STRENGTH))
+                .field(id, "extensions", ctx)?
+                .map(|id| self.field(id, super::KHR_MATERIALS_EMISSIVE_STRENGTH, ctx))
                 .transpose()?
                 .flatten(),
             clearcoat: self
-                .field(id, "extensions")?
-                .map(|id| self.field(id, super::KHR_MATERIALS_CLEARCOAT))
+                .field(id, "extensions", ctx)?
+                .map(|id| self.field(id, super::KHR_MATERIALS_CLEARCOAT, ctx))
                 .transpose()?
                 .flatten(),
             sheen: self
-                .field(id, "extensions")?
-                .map(|id| self.field(id, super::KHR_MATERIALS_SHEEN))
+                .field(id, "extensions", ctx)?
+                .map(|id| self.field(id, super::KHR_MATERIALS_SHEEN, ctx))
                 .transpose()?
                 .flatten(),
         })
     }
 
-    fn camera(&self, id: ValueId) -> ParseResult<Camera<'scope>> {
+    fn camera<'session: 'scope>(
+        &self,
+        id: ValueId,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<Camera<'scope>> {
         let orthographic = self
-            .field(id, "orthographic")?
+            .field(id, "orthographic", ctx)?
             .map(|data| -> ParseResult<_> {
                 Ok(Projection::Orthographic {
-                    xmag: self.float(self.required(data, "xmag")?)?,
-                    ymag: self.float(self.required(data, "ymag")?)?,
-                    znear: self.float(self.required(data, "znear")?)?,
-                    zfar: self.float(self.required(data, "zfar")?)?,
+                    xmag: self.float(self.required(data, "xmag", ctx)?, ctx)?,
+                    ymag: self.float(self.required(data, "ymag", ctx)?, ctx)?,
+                    znear: self.float(self.required(data, "znear", ctx)?, ctx)?,
+                    zfar: self.float(self.required(data, "zfar", ctx)?, ctx)?,
                 })
             })
             .transpose()?;
         let perspective = self
-            .field(id, "perspective")?
+            .field(id, "perspective", ctx)?
             .map(|data| -> ParseResult<_> {
                 Ok(Projection::Perspective {
-                    yfov: self.float(self.required(data, "yfov")?)?,
-                    znear: self.float(self.required(data, "znear")?)?,
+                    yfov: self.float(self.required(data, "yfov", ctx)?, ctx)?,
+                    znear: self.float(self.required(data, "znear", ctx)?, ctx)?,
                     aspect_ratio: self
-                        .field(data, "aspectRatio")?
-                        .map(|id| self.float(id))
+                        .field(data, "aspectRatio", ctx)?
+                        .map(|id| self.float(id, ctx))
                         .transpose()?,
                     zfar: self
-                        .field(data, "zfar")?
-                        .map(|id| self.float(id))
+                        .field(data, "zfar", ctx)?
+                        .map(|id| self.float(id, ctx))
                         .transpose()?,
                 })
             })
             .transpose()?;
-        let kind = self.text(self.required(id, "type")?)?;
+        let kind = self.text(self.required(id, "type", ctx)?, ctx)?;
         let projection = match kind.as_str() {
             "orthographic" => orthographic,
             "perspective" => perspective,
-            _ => return Err(self.invalid("glTF camera type is invalid")),
+            _ => return Err(self.invalid("glTF camera type is invalid", ctx)),
         }
         .ok_or_else(|| {
-            self.invalid("glTF camera discriminator requires its matching projection object")
+            self.invalid(
+                "glTF camera discriminator requires its matching projection object",
+                ctx,
+            )
         })?;
         Ok(Camera {
-            name: self.name(id)?,
+            name: self.name(id, ctx)?,
             projection,
         })
     }
 
-    pub(super) fn emissive_strength(&self, id: ValueId) -> ParseResult<f32> {
-        self.object(id)?;
-        let Some(id) = self.field(id, "emissiveStrength")? else {
+    pub(super) fn emissive_strength<'session: 'scope>(
+        &self,
+        id: ValueId,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<f32> {
+        self.object(id, ctx)?;
+        let Some(id) = self.field(id, "emissiveStrength", ctx)? else {
             return Ok(1.0);
         };
-        let value = self.number(id)?;
+        let value = self.number(id, ctx)?;
         if value < 0.0 {
-            return Err(self.invalid("glTF emissiveStrength must be nonnegative"));
+            return Err(self.invalid("glTF emissiveStrength must be nonnegative", ctx));
         }
         let narrowed = value as f32;
         if !narrowed.is_finite() || (value != 0.0 && narrowed == 0.0) {
-            return Err(self.invalid("glTF emissiveStrength exceeds the canonical F32 domain"));
+            return Err(self.invalid(
+                "glTF emissiveStrength exceeds the canonical F32 domain",
+                ctx,
+            ));
         }
         // A nonzero JSON mantissa may already have underflowed while parsing f64.
         if value == 0.0 {
-            let text = self.raw_str(id)?;
-            self.ctx.charge_work(text.len() as u64)?;
+            let text = self.raw_str(id, ctx)?;
+            ctx.charge_work(text.len() as u64)?;
             if text
                 .bytes()
                 .take_while(|&byte| !matches!(byte, b'e' | b'E'))
                 .any(|byte| matches!(byte, b'1'..=b'9'))
             {
-                return Err(
-                    self.invalid("glTF emissiveStrength underflows the canonical F32 domain")
-                );
+                return Err(self.invalid(
+                    "glTF emissiveStrength underflows the canonical F32 domain",
+                    ctx,
+                ));
             }
         }
         Ok(narrowed)
     }
 
-    fn material_extension_float(&self, id: ValueId, unit: bool) -> ParseResult<f32> {
-        let value = self.number(id)?;
+    fn material_extension_float<'session: 'scope>(
+        &self,
+        id: ValueId,
+        unit: bool,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<f32> {
+        let value = self.number(id, ctx)?;
         if unit && !(0.0..=1.0).contains(&value) {
-            return Err(self.invalid("glTF material extension factor must be in [0,1]"));
+            return Err(self.invalid("glTF material extension factor must be in [0,1]", ctx));
         }
         let narrowed = value as f32;
         if !narrowed.is_finite() || (value != 0.0 && narrowed == 0.0) {
-            return Err(
-                self.invalid("glTF material extension number exceeds the canonical F32 domain")
-            );
+            return Err(self.invalid(
+                "glTF material extension number exceeds the canonical F32 domain",
+                ctx,
+            ));
         }
         if value == 0.0 {
             let token = self.value(id);
             let mut mantissa = true;
+            let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
             for chunk in self.bytes[token.start..token.end].chunks(4096) {
-                self.ctx.charge_work(chunk.len() as u64)?;
+                ctx.with_work(
+                    &work_group,
+                    [chunk.len() as u64],
+                    |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+                )?;
                 for &byte in chunk {
                     if matches!(byte, b'e' | b'E') {
                         mantissa = false;
@@ -689,6 +937,7 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
                     if mantissa && matches!(byte, b'1'..=b'9') {
                         return Err(self.invalid(
                             "glTF material extension number underflows the canonical F32 domain",
+                            ctx,
                         ));
                     }
                 }
@@ -697,412 +946,583 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
         Ok(narrowed)
     }
 
-    fn material_unit_or(&self, object: ValueId, key: &str, default: f32) -> ParseResult<f32> {
-        self.field(object, key)?
-            .map_or(Ok(default), |id| self.material_extension_float(id, true))
+    fn material_unit_or<'session: 'scope>(
+        &self,
+        object: ValueId,
+        key: &str,
+        default: f32,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<f32> {
+        self.field(object, key, ctx)?.map_or(Ok(default), |id| {
+            self.material_extension_float(id, true, ctx)
+        })
     }
 
-    fn material_extension_texture(
+    fn material_extension_texture<'session: 'scope>(
         &self,
         object: ValueId,
         key: &str,
         normal: bool,
+        ctx: &mut ParseExecution<'_, 'session>,
     ) -> ParseResult<Option<texture::Info>> {
-        self.field(object, key)?
+        self.field(object, key, ctx)?
             .map(|id| {
-                let mut info = self.texture_info(id, None)?;
+                let mut info = self.texture_info(id, None, ctx)?;
                 if normal {
                     info.strength = self
-                        .field(id, "scale")?
-                        .map_or(Ok(1.0), |id| self.material_extension_float(id, false))?;
+                        .field(id, "scale", ctx)?
+                        .map_or(Ok(1.0), |id| self.material_extension_float(id, false, ctx))?;
                 }
                 Ok(info)
             })
             .transpose()
     }
 
-    pub(super) fn clearcoat(&self, id: ValueId) -> ParseResult<Clearcoat> {
-        self.object(id)?;
+    pub(super) fn clearcoat<'session: 'scope>(
+        &self,
+        id: ValueId,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<Clearcoat> {
+        self.object(id, ctx)?;
         Ok(Clearcoat {
-            factor: self.material_unit_or(id, "clearcoatFactor", 0.0)?,
-            roughness: self.material_unit_or(id, "clearcoatRoughnessFactor", 0.0)?,
-            texture: self.material_extension_texture(id, "clearcoatTexture", false)?,
+            factor: self.material_unit_or(id, "clearcoatFactor", 0.0, ctx)?,
+            roughness: self.material_unit_or(id, "clearcoatRoughnessFactor", 0.0, ctx)?,
+            texture: self.material_extension_texture(id, "clearcoatTexture", false, ctx)?,
             roughness_texture: self.material_extension_texture(
                 id,
                 "clearcoatRoughnessTexture",
                 false,
+                ctx,
             )?,
-            normal_texture: self.material_extension_texture(id, "clearcoatNormalTexture", true)?,
+            normal_texture: self.material_extension_texture(
+                id,
+                "clearcoatNormalTexture",
+                true,
+                ctx,
+            )?,
         })
     }
 
-    pub(super) fn sheen(&self, id: ValueId) -> ParseResult<Sheen> {
-        self.object(id)?;
+    pub(super) fn sheen<'session: 'scope>(
+        &self,
+        id: ValueId,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<Sheen> {
+        self.object(id, ctx)?;
         let mut color = [0.0; 3];
-        if let Some(id) = self.field(id, "sheenColorFactor")? {
+        if let Some(id) = self.field(id, "sheenColorFactor", ctx)? {
             self.kind(
                 id,
                 ValueKind::Array,
                 "glTF sheenColorFactor requires an array",
+                ctx,
             )?;
             if self.value(id).child_count != 3 {
-                return Err(self.invalid("glTF sheenColorFactor requires three components"));
+                return Err(self.invalid("glTF sheenColorFactor requires three components", ctx));
             }
             for (lane, id) in color.iter_mut().zip(self.children(id)) {
-                *lane = self.material_extension_float(id, true)?;
+                *lane = self.material_extension_float(id, true, ctx)?;
             }
         }
         Ok(Sheen {
             color,
-            roughness: self.material_unit_or(id, "sheenRoughnessFactor", 0.0)?,
-            color_texture: self.material_extension_texture(id, "sheenColorTexture", false)?,
+            roughness: self.material_unit_or(id, "sheenRoughnessFactor", 0.0, ctx)?,
+            color_texture: self.material_extension_texture(id, "sheenColorTexture", false, ctx)?,
             roughness_texture: self.material_extension_texture(
                 id,
                 "sheenRoughnessTexture",
                 false,
+                ctx,
             )?,
         })
     }
 
-    pub(super) fn transform(
+    pub(super) fn transform<'session: 'scope>(
         &self,
         id: ValueId,
+        ctx: &mut ParseExecution<'_, 'session>,
     ) -> ParseResult<extensions::texture::TextureTransform> {
-        self.object(id)?;
+        self.object(id, ctx)?;
         Ok(extensions::texture::TextureTransform {
-            offset: self.fixed_default(id, "offset", [0.; 2])?,
-            rotation: self.float_or(id, "rotation", 0.)?,
-            scale: self.fixed_default(id, "scale", [1.; 2])?,
-            tex_coord: self.optional_id(id, "texCoord")?.map(|id| id.0),
+            offset: self.fixed_default(id, "offset", [0.; 2], ctx)?,
+            rotation: self.float_or(id, "rotation", 0., ctx)?,
+            scale: self.fixed_default(id, "scale", [1.; 2], ctx)?,
+            tex_coord: self.optional_id(id, "texCoord", ctx)?.map(|id| id.0),
         })
     }
 
-    pub(super) fn punctual_light_reference(&self, id: ValueId) -> ParseResult<Index> {
-        self.required_id(id, "light")
+    pub(super) fn punctual_light_reference<'session: 'scope>(
+        &self,
+        id: ValueId,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<Index> {
+        self.required_id(id, "light", ctx)
     }
 
-    fn light_number(&self, id: ValueId) -> ParseResult<f64> {
-        let value = self.number(id)?;
+    fn light_number<'session: 'scope>(
+        &self,
+        id: ValueId,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<f64> {
+        let value = self.number(id, ctx)?;
         if value == 0.0 {
-            let text = self.raw_str(id)?;
-            self.ctx.charge_work(text.len() as u64)?;
+            let text = self.raw_str(id, ctx)?;
+            ctx.charge_work(text.len() as u64)?;
             // Source signs and nonzero values must not disappear during binary64 parsing.
             if text
                 .bytes()
                 .take_while(|&byte| !matches!(byte, b'e' | b'E'))
                 .any(|byte| matches!(byte, b'1'..=b'9'))
             {
-                return Err(self.invalid("glTF light number underflows the binary64 source domain"));
+                return Err(self.invalid(
+                    "glTF light number underflows the binary64 source domain",
+                    ctx,
+                ));
             }
         }
         Ok(value)
     }
 
-    pub(super) fn light(&self, id: ValueId) -> ParseResult<Light<'scope>> {
-        self.object(id)?;
+    pub(super) fn light<'session: 'scope>(
+        &self,
+        id: ValueId,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<Light<'scope>> {
+        self.object(id, ctx)?;
         let mut color = [1.0; 3];
-        if let Some(id) = self.field(id, "color")? {
-            self.kind(id, ValueKind::Array, "glTF light color requires an array")?;
+        if let Some(id) = self.field(id, "color", ctx)? {
+            self.kind(
+                id,
+                ValueKind::Array,
+                "glTF light color requires an array",
+                ctx,
+            )?;
             if self.value(id).child_count != 3 {
-                return Err(self.invalid("glTF light color requires three components"));
+                return Err(self.invalid("glTF light color requires three components", ctx));
             }
             for (component, id) in color.iter_mut().zip(self.children(id)) {
-                *component = self.light_number(id)?;
+                *component = self.light_number(id, ctx)?;
             }
         }
         let spot = self
-            .field(id, "spot")?
+            .field(id, "spot", ctx)?
             .map(|id| -> ParseResult<LightSpot> {
-                self.object(id)?;
+                self.object(id, ctx)?;
                 Ok(LightSpot {
                     inner_cone_angle: self
-                        .field(id, "innerConeAngle")?
-                        .map_or(Ok(0.0), |id| self.light_number(id))?,
+                        .field(id, "innerConeAngle", ctx)?
+                        .map_or(Ok(0.0), |id| self.light_number(id, ctx))?,
                     outer_cone_angle: self
-                        .field(id, "outerConeAngle")?
-                        .map_or(Ok(std::f64::consts::FRAC_PI_4), |id| self.light_number(id))?,
+                        .field(id, "outerConeAngle", ctx)?
+                        .map_or(Ok(std::f64::consts::FRAC_PI_4), |id| {
+                            self.light_number(id, ctx)
+                        })?,
                 })
             })
             .transpose()?;
         Ok(Light {
             name: self
-                .field(id, "name")?
-                .map(|id| self.text(id))
+                .field(id, "name", ctx)?
+                .map(|id| self.text(id, ctx))
                 .transpose()?,
-            kind: self.text(self.required(id, "type")?)?,
+            kind: self.text(self.required(id, "type", ctx)?, ctx)?,
             color,
             intensity: self
-                .field(id, "intensity")?
-                .map_or(Ok(1.0), |id| self.light_number(id))?,
+                .field(id, "intensity", ctx)?
+                .map_or(Ok(1.0), |id| self.light_number(id, ctx))?,
             range: self
-                .field(id, "range")?
-                .map(|id| self.light_number(id))
+                .field(id, "range", ctx)?
+                .map(|id| self.light_number(id, ctx))
                 .transpose()?,
             spot,
         })
     }
 
-    fn lights(&self) -> ParseResult<List<'scope, ValueId>> {
+    fn lights<'session: 'scope>(
+        &self,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<List<'scope, ValueId>> {
         let payload = self
-            .field(0, "extensions")?
-            .map(|id| self.field(id, super::KHR_LIGHTS_PUNCTUAL))
+            .field(0, "extensions", ctx)?
+            .map(|id| self.field(id, super::KHR_LIGHTS_PUNCTUAL, ctx))
             .transpose()?
             .flatten();
-        let lights = payload.map(|id| self.required(id, "lights")).transpose()?;
+        let lights = payload
+            .map(|id| self.required(id, "lights", ctx))
+            .transpose()?;
         if lights.is_some_and(|id| {
             self.value(id).kind == ValueKind::Array && self.value(id).child_count == 0
         }) {
-            return Err(self.invalid("glTF punctual lights requires a nonempty lights array"));
+            return Err(self.invalid("glTF punctual lights requires a nonempty lights array", ctx));
         }
-        self.list(lights, |id| {
-            self.object(id)?;
-            Ok(id)
-        })
+        self.list(
+            lights,
+            |id, ctx| {
+                self.object(id, ctx)?;
+                Ok(id)
+            },
+            ctx,
+        )
     }
 
-    pub(super) fn root(&self) -> ParseResult<Tables<'scope>> {
-        self.object(0)?;
-        self.version()?;
+    pub(super) fn root<'session: 'scope>(
+        &self,
+        ctx: &mut ParseExecution<'_, 'session>,
+    ) -> ParseResult<Tables<'scope>> {
+        self.object(0, ctx)?;
+        self.version(ctx)?;
         Ok(Tables {
-            scene: self.optional_id(0, "scene")?,
-            scenes: self.list(self.field(0, "scenes")?, |id| {
-                let _name = self.name(id)?;
-                Ok(Scene {
-                    nodes: self.list(self.field(id, "nodes")?, |id| self.id(id))?,
-                })
-            })?,
-            nodes: self.list(self.field(0, "nodes")?, |id| {
-                let matrix_id = self.field(id, "matrix")?;
-                if matrix_id.is_some() {
-                    for property in ["translation", "rotation", "scale"] {
-                        if self.field(id, property)?.is_some() {
-                            return Err(self.invalid(
-                                "glTF node matrix and TRS properties are mutually exclusive",
-                            ));
+            scene: self.optional_id(0, "scene", ctx)?,
+            scenes: self.list(
+                self.field(0, "scenes", ctx)?,
+                |id, ctx| {
+                    let _name = self.name(id, ctx)?;
+                    Ok(Scene {
+                        nodes: self.list(
+                            self.field(id, "nodes", ctx)?,
+                            |id, ctx| self.id(id, ctx),
+                            ctx,
+                        )?,
+                    })
+                },
+                ctx,
+            )?,
+            nodes: self.list(
+                self.field(0, "nodes", ctx)?,
+                |id, ctx| {
+                    let matrix_id = self.field(id, "matrix", ctx)?;
+                    if matrix_id.is_some() {
+                        for property in ["translation", "rotation", "scale"] {
+                            if self.field(id, property, ctx)?.is_some() {
+                                return Err(self.invalid(
+                                    "glTF node matrix and TRS properties are mutually exclusive",
+                                    ctx,
+                                ));
+                            }
                         }
                     }
-                }
-                let matrix: Option<[f32; 16]> = matrix_id.map(|id| self.fixed(id)).transpose()?;
-                if let Some(cells) = matrix.as_ref() {
-                    let columns = std::array::from_fn(|column| {
-                        std::array::from_fn(|row| cells[column * 4 + row])
-                    });
-                    self.ctx.charge_work(22)?;
-                    super::transforms::node_matrix(&columns)
-                        .map_err(|reason| self.invalid(reason))?;
-                }
-                Ok(Node {
-                    name: self.name(id)?,
-                    children: self.list(self.field(id, "children")?, |id| self.id(id))?,
-                    mesh: self.optional_id(id, "mesh")?,
-                    skin: self.optional_id(id, "skin")?,
-                    camera: self.optional_id(id, "camera")?,
-                    punctual_light: self
-                        .field(id, "extensions")?
-                        .map(|id| self.field(id, super::KHR_LIGHTS_PUNCTUAL))
-                        .transpose()?
-                        .flatten(),
-                    matrix,
-                    translation: self.fixed_default(id, "translation", [0.; 3])?,
-                    rotation: self.fixed_default(id, "rotation", [0., 0., 0., 1.])?,
-                    scale: self.fixed_default(id, "scale", [1.; 3])?,
-                    weights: self.weights(id)?,
-                })
-            })?,
-            meshes: self.list(self.field(0, "meshes")?, |id| {
-                Ok(mesh::Mesh {
-                    name: self.name(id)?,
-                    primitives: self.list(Some(self.required(id, "primitives")?), |id| {
-                        self.primitive(id)
-                    })?,
-                    weights: self.weights(id)?,
-                })
-            })?,
-            accessors: self.list(self.field(0, "accessors")?, |id| self.accessor(id))?,
-            buffers: self.list(self.field(0, "buffers")?, |id| {
-                let _name = self.name(id)?;
-                Ok(Buffer {
-                    uri: self.field(id, "uri")?.map(|id| self.text(id)).transpose()?,
-                    byte_length: self
-                        .field(id, "byteLength")?
-                        .map_or(Ok(0), |id| self.size(id))?,
-                })
-            })?,
-            buffer_views: self.list(self.field(0, "bufferViews")?, |id| {
-                let _name = self.name(id)?;
-                let stride = self
-                    .field(id, "byteStride")?
-                    .map(|id| self.size(id))
-                    .transpose()?;
-                if stride.is_some_and(|size| !(4..=252).contains(&size)) {
-                    return Err(self.invalid("glTF byteStride must be in 4..=252"));
-                }
-                Ok(buffer::View {
-                    buffer: self.required_id(id, "buffer")?,
-                    byte_length: self.size(self.required(id, "byteLength")?)?,
-                    byte_offset: self
-                        .field(id, "byteOffset")?
-                        .map(|id| self.size(id))
-                        .transpose()?,
-                    byte_stride: stride.map(|size| size as usize),
-                    target: self
-                        .field(id, "target")?
-                        .map(|id| self.enum_uint(id, &[(34962, 34962), (34963, 34963)]))
-                        .transpose()?,
-                })
-            })?,
-            skins: self.list(self.field(0, "skins")?, |id| {
-                Ok(Skin {
-                    name: self.name(id)?,
-                    joints: self.list(Some(self.required(id, "joints")?), |id| self.id(id))?,
-                    skeleton: self.optional_id(id, "skeleton")?,
-                    inverse_bind_matrices: self.optional_id(id, "inverseBindMatrices")?,
-                })
-            })?,
-            images: self.list(self.field(0, "images")?, |id| {
-                Ok(Image {
-                    name: self.name(id)?,
-                    uri: self.field(id, "uri")?.map(|id| self.text(id)).transpose()?,
-                    mime_type: self
-                        .field(id, "mimeType")?
-                        .map(|id| self.text(id))
-                        .transpose()?,
-                    buffer_view: self.optional_id(id, "bufferView")?,
-                })
-            })?,
-            textures: self.list(self.field(0, "textures")?, |id| {
-                Ok(Texture {
-                    name: self.name(id)?,
-                    source: self.required_id(id, "source")?,
-                    sampler: self.optional_id(id, "sampler")?,
-                })
-            })?,
-            samplers: self.list(self.field(0, "samplers")?, |id| {
-                Ok(Sampler {
-                    name: self.name(id)?,
-                    mag_filter: self
-                        .field(id, "magFilter")?
-                        .map(|id| {
-                            self.enum_uint(
-                                id,
-                                &[(9728, MagFilter::Nearest), (9729, MagFilter::Linear)],
-                            )
-                        })
-                        .transpose()?,
-                    min_filter: self
-                        .field(id, "minFilter")?
-                        .map(|id| {
-                            self.enum_uint(
-                                id,
-                                &[
-                                    (9728, MinFilter::Nearest),
-                                    (9729, MinFilter::Linear),
-                                    (9984, MinFilter::NearestMipmapNearest),
-                                    (9985, MinFilter::LinearMipmapNearest),
-                                    (9986, MinFilter::NearestMipmapLinear),
-                                    (9987, MinFilter::LinearMipmapLinear),
-                                ],
-                            )
-                        })
-                        .transpose()?,
-                    wrap_s: self
-                        .field(id, "wrapS")?
-                        .map_or(Ok(WrappingMode::Repeat), |id| {
-                            self.enum_uint(
-                                id,
-                                &[
-                                    (33071, WrappingMode::ClampToEdge),
-                                    (33648, WrappingMode::MirroredRepeat),
-                                    (10497, WrappingMode::Repeat),
-                                ],
-                            )
-                        })?,
-                    wrap_t: self
-                        .field(id, "wrapT")?
-                        .map_or(Ok(WrappingMode::Repeat), |id| {
-                            self.enum_uint(
-                                id,
-                                &[
-                                    (33071, WrappingMode::ClampToEdge),
-                                    (33648, WrappingMode::MirroredRepeat),
-                                    (10497, WrappingMode::Repeat),
-                                ],
-                            )
-                        })?,
-                })
-            })?,
-            materials: self.list(self.field(0, "materials")?, |id| self.material(id))?,
-            cameras: self.list(self.field(0, "cameras")?, |id| self.camera(id))?,
-            lights: self.lights()?,
-            animations: self.list(self.field(0, "animations")?, |id| {
-                Ok(animation::Animation {
-                    name: self.name(id)?,
-                    channels: self.list(Some(self.required(id, "channels")?), |id| {
-                        let target = self.required(id, "target")?;
-                        Ok(animation::Channel {
-                            sampler: self.required_id(id, "sampler")?,
-                            target: animation::Target {
-                                node: self
-                                    .field(target, "node")?
-                                    .map(|id| self.id(id))
-                                    .transpose()?,
-                                path: self.enum_text(
-                                    self.required(target, "path")?,
+                    let matrix: Option<[f32; 16]> =
+                        matrix_id.map(|id| self.fixed(id, ctx)).transpose()?;
+                    if let Some(cells) = matrix.as_ref() {
+                        let columns = std::array::from_fn(|column| {
+                            std::array::from_fn(|row| cells[column * 4 + row])
+                        });
+                        ctx.charge_work(22)?;
+                        super::transforms::node_matrix(&columns)
+                            .map_err(|reason| self.invalid(reason, ctx))?;
+                    }
+                    Ok(Node {
+                        name: self.name(id, ctx)?,
+                        children: self.list(
+                            self.field(id, "children", ctx)?,
+                            |id, ctx| self.id(id, ctx),
+                            ctx,
+                        )?,
+                        mesh: self.optional_id(id, "mesh", ctx)?,
+                        skin: self.optional_id(id, "skin", ctx)?,
+                        camera: self.optional_id(id, "camera", ctx)?,
+                        punctual_light: self
+                            .field(id, "extensions", ctx)?
+                            .map(|id| self.field(id, super::KHR_LIGHTS_PUNCTUAL, ctx))
+                            .transpose()?
+                            .flatten(),
+                        matrix,
+                        translation: self.fixed_default(id, "translation", [0.; 3], ctx)?,
+                        rotation: self.fixed_default(id, "rotation", [0., 0., 0., 1.], ctx)?,
+                        scale: self.fixed_default(id, "scale", [1.; 3], ctx)?,
+                        weights: self.weights(id, ctx)?,
+                    })
+                },
+                ctx,
+            )?,
+            meshes: self.list(
+                self.field(0, "meshes", ctx)?,
+                |id, ctx| {
+                    Ok(mesh::Mesh {
+                        name: self.name(id, ctx)?,
+                        primitives: self.list(
+                            Some(self.required(id, "primitives", ctx)?),
+                            |id, ctx| self.primitive(id, ctx),
+                            ctx,
+                        )?,
+                        weights: self.weights(id, ctx)?,
+                    })
+                },
+                ctx,
+            )?,
+            accessors: self.list(
+                self.field(0, "accessors", ctx)?,
+                |id, ctx| self.accessor(id, ctx),
+                ctx,
+            )?,
+            buffers: self.list(
+                self.field(0, "buffers", ctx)?,
+                |id, ctx| {
+                    let _name = self.name(id, ctx)?;
+                    Ok(Buffer {
+                        uri: self
+                            .field(id, "uri", ctx)?
+                            .map(|id| self.text(id, ctx))
+                            .transpose()?,
+                        byte_length: self
+                            .field(id, "byteLength", ctx)?
+                            .map_or(Ok(0), |id| self.size(id, ctx))?,
+                    })
+                },
+                ctx,
+            )?,
+            buffer_views: self.list(
+                self.field(0, "bufferViews", ctx)?,
+                |id, ctx| {
+                    let _name = self.name(id, ctx)?;
+                    let stride = self
+                        .field(id, "byteStride", ctx)?
+                        .map(|id| self.size(id, ctx))
+                        .transpose()?;
+                    if stride.is_some_and(|size| !(4..=252).contains(&size)) {
+                        return Err(self.invalid("glTF byteStride must be in 4..=252", ctx));
+                    }
+                    Ok(buffer::View {
+                        buffer: self.required_id(id, "buffer", ctx)?,
+                        byte_length: self.size(self.required(id, "byteLength", ctx)?, ctx)?,
+                        byte_offset: self
+                            .field(id, "byteOffset", ctx)?
+                            .map(|id| self.size(id, ctx))
+                            .transpose()?,
+                        byte_stride: stride.map(|size| size as usize),
+                        target: self
+                            .field(id, "target", ctx)?
+                            .map(|id| self.enum_uint(id, &[(34962, 34962), (34963, 34963)], ctx))
+                            .transpose()?,
+                    })
+                },
+                ctx,
+            )?,
+            skins: self.list(
+                self.field(0, "skins", ctx)?,
+                |id, ctx| {
+                    Ok(Skin {
+                        name: self.name(id, ctx)?,
+                        joints: self.list(
+                            Some(self.required(id, "joints", ctx)?),
+                            |id, ctx| self.id(id, ctx),
+                            ctx,
+                        )?,
+                        skeleton: self.optional_id(id, "skeleton", ctx)?,
+                        inverse_bind_matrices: self.optional_id(id, "inverseBindMatrices", ctx)?,
+                    })
+                },
+                ctx,
+            )?,
+            images: self.list(
+                self.field(0, "images", ctx)?,
+                |id, ctx| {
+                    Ok(Image {
+                        name: self.name(id, ctx)?,
+                        uri: self
+                            .field(id, "uri", ctx)?
+                            .map(|id| self.text(id, ctx))
+                            .transpose()?,
+                        mime_type: self
+                            .field(id, "mimeType", ctx)?
+                            .map(|id| self.text(id, ctx))
+                            .transpose()?,
+                        buffer_view: self.optional_id(id, "bufferView", ctx)?,
+                    })
+                },
+                ctx,
+            )?,
+            textures: self.list(
+                self.field(0, "textures", ctx)?,
+                |id, ctx| {
+                    Ok(Texture {
+                        name: self.name(id, ctx)?,
+                        source: self.required_id(id, "source", ctx)?,
+                        sampler: self.optional_id(id, "sampler", ctx)?,
+                    })
+                },
+                ctx,
+            )?,
+            samplers: self.list(
+                self.field(0, "samplers", ctx)?,
+                |id, ctx| {
+                    Ok(Sampler {
+                        name: self.name(id, ctx)?,
+                        mag_filter: self
+                            .field(id, "magFilter", ctx)?
+                            .map(|id| {
+                                self.enum_uint(
+                                    id,
+                                    &[(9728, MagFilter::Nearest), (9729, MagFilter::Linear)],
+                                    ctx,
+                                )
+                            })
+                            .transpose()?,
+                        min_filter: self
+                            .field(id, "minFilter", ctx)?
+                            .map(|id| {
+                                self.enum_uint(
+                                    id,
                                     &[
-                                        ("translation", animation::Property::Translation),
-                                        ("rotation", animation::Property::Rotation),
-                                        ("scale", animation::Property::Scale),
-                                        ("weights", animation::Property::MorphTargetWeights),
+                                        (9728, MinFilter::Nearest),
+                                        (9729, MinFilter::Linear),
+                                        (9984, MinFilter::NearestMipmapNearest),
+                                        (9985, MinFilter::LinearMipmapNearest),
+                                        (9986, MinFilter::NearestMipmapLinear),
+                                        (9987, MinFilter::LinearMipmapLinear),
                                     ],
-                                )?,
+                                    ctx,
+                                )
+                            })
+                            .transpose()?,
+                        wrap_s: self.field(id, "wrapS", ctx)?.map_or(
+                            Ok(WrappingMode::Repeat),
+                            |id| {
+                                self.enum_uint(
+                                    id,
+                                    &[
+                                        (33071, WrappingMode::ClampToEdge),
+                                        (33648, WrappingMode::MirroredRepeat),
+                                        (10497, WrappingMode::Repeat),
+                                    ],
+                                    ctx,
+                                )
                             },
-                        })
-                    })?,
-                    samplers: self.list(Some(self.required(id, "samplers")?), |id| {
-                        Ok(animation::Sampler {
-                            input: self.required_id(id, "input")?,
-                            output: self.required_id(id, "output")?,
-                            interpolation: self.field(id, "interpolation")?.map_or(
-                                Ok(animation::Interpolation::Linear),
-                                |id| {
-                                    self.enum_text(
-                                        id,
-                                        &[
-                                            ("LINEAR", animation::Interpolation::Linear),
-                                            ("STEP", animation::Interpolation::Step),
-                                            ("CUBICSPLINE", animation::Interpolation::CubicSpline),
-                                        ],
-                                    )
-                                },
-                            )?,
-                        })
-                    })?,
-                })
-            })?,
-            extensions_used: self.list(self.field(0, "extensionsUsed")?, |id| self.text(id))?,
-            extensions_required: self
-                .list(self.field(0, "extensionsRequired")?, |id| self.text(id))?,
+                        )?,
+                        wrap_t: self.field(id, "wrapT", ctx)?.map_or(
+                            Ok(WrappingMode::Repeat),
+                            |id| {
+                                self.enum_uint(
+                                    id,
+                                    &[
+                                        (33071, WrappingMode::ClampToEdge),
+                                        (33648, WrappingMode::MirroredRepeat),
+                                        (10497, WrappingMode::Repeat),
+                                    ],
+                                    ctx,
+                                )
+                            },
+                        )?,
+                    })
+                },
+                ctx,
+            )?,
+            materials: self.list(
+                self.field(0, "materials", ctx)?,
+                |id, ctx| self.material(id, ctx),
+                ctx,
+            )?,
+            cameras: self.list(
+                self.field(0, "cameras", ctx)?,
+                |id, ctx| self.camera(id, ctx),
+                ctx,
+            )?,
+            lights: self.lights(ctx)?,
+            animations: self.list(
+                self.field(0, "animations", ctx)?,
+                |id, ctx| {
+                    Ok(animation::Animation {
+                        name: self.name(id, ctx)?,
+                        channels: self.list(
+                            Some(self.required(id, "channels", ctx)?),
+                            |id, ctx| {
+                                let target = self.required(id, "target", ctx)?;
+                                Ok(animation::Channel {
+                                    sampler: self.required_id(id, "sampler", ctx)?,
+                                    target: animation::Target {
+                                        node: self
+                                            .field(target, "node", ctx)?
+                                            .map(|id| self.id(id, ctx))
+                                            .transpose()?,
+                                        path: self.enum_text(
+                                            self.required(target, "path", ctx)?,
+                                            &[
+                                                ("translation", animation::Property::Translation),
+                                                ("rotation", animation::Property::Rotation),
+                                                ("scale", animation::Property::Scale),
+                                                (
+                                                    "weights",
+                                                    animation::Property::MorphTargetWeights,
+                                                ),
+                                            ],
+                                            ctx,
+                                        )?,
+                                    },
+                                })
+                            },
+                            ctx,
+                        )?,
+                        samplers: self.list(
+                            Some(self.required(id, "samplers", ctx)?),
+                            |id, ctx| {
+                                Ok(animation::Sampler {
+                                    input: self.required_id(id, "input", ctx)?,
+                                    output: self.required_id(id, "output", ctx)?,
+                                    interpolation: self.field(id, "interpolation", ctx)?.map_or(
+                                        Ok(animation::Interpolation::Linear),
+                                        |id| {
+                                            self.enum_text(
+                                                id,
+                                                &[
+                                                    ("LINEAR", animation::Interpolation::Linear),
+                                                    ("STEP", animation::Interpolation::Step),
+                                                    (
+                                                        "CUBICSPLINE",
+                                                        animation::Interpolation::CubicSpline,
+                                                    ),
+                                                ],
+                                                ctx,
+                                            )
+                                        },
+                                    )?,
+                                })
+                            },
+                            ctx,
+                        )?,
+                    })
+                },
+                ctx,
+            )?,
+            extensions_used: self.list(
+                self.field(0, "extensionsUsed", ctx)?,
+                |id, ctx| self.text(id, ctx),
+                ctx,
+            )?,
+            extensions_required: self.list(
+                self.field(0, "extensionsRequired", ctx)?,
+                |id, ctx| self.text(id, ctx),
+                ctx,
+            )?,
         })
     }
 
-    fn version(&self) -> ParseResult<()> {
-        let asset = self.required(0, "asset")?;
-        self.object(asset)?;
-        let version_id = self.required(asset, "version")?;
+    fn version<'session: 'scope>(&self, ctx: &mut ParseExecution<'_, 'session>) -> ParseResult<()> {
+        let asset = self.required(0, "asset", ctx)?;
+        self.object(asset, ctx)?;
+        let version_id = self.required(asset, "version", ctx)?;
         self.kind(
             version_id,
             ValueKind::String,
             "asset.version is required and must be a string",
+            ctx,
         )?;
-        let version_text = self.text(version_id)?;
+        let version_text = self.text(version_id, ctx)?;
         let version = parse_version(version_text.as_str()).ok_or_else(|| {
-            self.invalid("asset.version must be two decimal components without leading zeros")
+            self.invalid(
+                "asset.version must be two decimal components without leading zeros",
+                ctx,
+            )
         })?;
         let minimum_text = self
-            .field(asset, "minVersion")?
+            .field(asset, "minVersion", ctx)?
             .map(|id| {
-                self.kind(id, ValueKind::String, "asset.minVersion must be a string")?;
-                self.text(id)
+                self.kind(
+                    id,
+                    ValueKind::String,
+                    "asset.minVersion must be a string",
+                    ctx,
+                )?;
+                self.text(id, ctx)
             })
             .transpose()?;
         let minimum = minimum_text
@@ -1111,31 +1531,33 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
                 parse_version(text.as_str()).ok_or_else(|| {
                     self.invalid(
                         "asset.minVersion must be two decimal components without leading zeros",
+                        ctx,
                     )
                 })
             })
             .transpose()?;
         if minimum.is_some_and(|minimum| minimum > version) {
-            return Err(self.invalid("asset.minVersion must not exceed asset.version"));
+            return Err(self.invalid("asset.minVersion must not exceed asset.version", ctx));
         }
         if version.0 != 2 {
-            return Err(self.ctx.format_failure(GltfFailure::unsupported(
+            return Err(ctx.format_failure(GltfFailure::unsupported(
                 "asset.version",
                 "asset.version major version is outside the glTF 2.x profile",
             )));
         }
         if minimum.is_some_and(|minimum| minimum != (2, 0)) {
-            return Err(self.ctx.format_failure(GltfFailure::unsupported(
+            return Err(ctx.format_failure(GltfFailure::unsupported(
                 "asset.minVersion",
                 "asset.minVersion requires an unsupported glTF version; supported: 2.0",
             )));
         }
         for field in ["generator", "copyright"] {
-            if let Some(id) = self.field(asset, field)? {
+            if let Some(id) = self.field(asset, field, ctx)? {
                 self.kind(
                     id,
                     ValueKind::String,
                     "glTF asset descriptive field requires a string",
+                    ctx,
                 )?;
             }
         }

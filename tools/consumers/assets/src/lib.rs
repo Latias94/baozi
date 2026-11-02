@@ -88,19 +88,16 @@ pub fn process(io: &dyn AssetIo, source: AssetPath, options: Options) -> Result<
     let importer = Importer::new()?;
     let mut limits = ResourceLimitsOverlay::default();
     limits.max_work_units = Some(options.max_work_units);
-    let request = importer.prepare_request(
+    let request = importer.plan(
         &ImportRequest::new().with_caller_layer(ImportRequestLayer::new(
             ImportConfigOverlay::default().with_resource_limits(limits),
         )),
         OptionCompileLimits::default(),
     )?;
     let started = Instant::now();
-    let report = importer.read_asset_with_request(
-        io,
-        source,
-        &request,
-        ImportOperationControl::default(),
-    )?;
+    let report = request
+        .read_asset(io, source, ImportOperationControl::default())
+        .map_err(baozi::Error::from)?;
     let mut metrics = Metrics {
         import_micros: started.elapsed().as_micros(),
         import_peak_live_bytes: report.ledger().peak_live_bytes(),

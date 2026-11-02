@@ -225,19 +225,14 @@ pub(crate) fn with_execution<R, E: From<StoreRuntimeError>>(
         control,
         pending: None,
     };
-    let result = action(&mut runtime);
-    if let Some(pending) = runtime.pending.take() {
-        pending.finish_partial()?;
+    // Known errors return unchanged; trusted permit Drop also cleans up on unwind.
+    let value = action(&mut runtime)?;
+    if runtime.pending.is_some() {
         return Err(StoreRuntimeError::ObservedWorkIncomplete.into());
     }
     runtime.work.finish_region()?;
-    match result {
-        Ok(value) => {
-            runtime.control.checkpoint()?;
-            Ok(value)
-        }
-        Err(cause) => Err(cause),
-    }
+    runtime.control.checkpoint()?;
+    Ok(value)
 }
 
 #[allow(
@@ -263,10 +258,8 @@ impl ActiveRuntime<'_> {
             .pending
             .take()
             .ok_or(StoreRuntimeError::ObservedWorkIncomplete)?;
-        if let Err(cause) = work.complete([1]) {
-            work.finish_partial()?;
-            return Err(cause);
-        }
+        // Preserve completion failure; trusted Drop resolves any unfinished suffix.
+        work.complete([1])?;
         work.finish()?;
         self.control.completed_action();
         Ok(())
@@ -361,3 +354,7 @@ impl<T> Drop for ScratchVec<T> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "runtime/execution_tests.rs"]
+mod execution_tests;

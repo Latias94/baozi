@@ -6,11 +6,11 @@ use baozi_import::authoring::{
     GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, Presence, StaticSceneBuilder,
 };
 use baozi_import::{
-    CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
-    FormatDescriptor, FormatEncoding, FormatImporter, FormatSelection, ImportConfigOverlay,
-    ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer, OptionCompileLimits,
-    ParseResult, ParseScope, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
-    SceneDraft, import_bytes,
+    CapabilityStatus, CompiledOptions, DetectionOutcome, DetectionResult, DetectionScope, Format,
+    FormatCapability, FormatDescriptor, FormatEncoding, FormatSelection, ImportConfigOverlay,
+    ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer, NoFormatOptions,
+    OptionCompileError, OptionCompileLimits, ParseContext, ParseResult, ReadConfidence, ReadHint,
+    RegistryBuildLimits, RegistryBuildScope, RegistryBuilder,
 };
 use baozi_io::AssetPath;
 use baozi_postprocess::{
@@ -65,7 +65,16 @@ impl Fixture {
 
 struct PrecisionImporter(Fixture);
 
-impl FormatImporter for PrecisionImporter {
+impl Format for PrecisionImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(FormatId::new(FORMAT).unwrap(), "Normal precision fixture")
             .encoding(FormatEncoding::Binary)
@@ -83,7 +92,7 @@ impl FormatImporter for PrecisionImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
         let fixture = &self.0;
         let narrow: Vec<f32> = match fixture.width {
             Width::F32 => fixture
@@ -175,7 +184,7 @@ impl FormatImporter for PrecisionImporter {
             AuthoringRange::new(0, attributes.len() as u32),
         )];
         let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
-        scope.submit_static_scene(
+        context.submit(
             StaticSceneBuilder::new(Presence::Present(&[]), &[])
                 .with_scene_space(&SceneSpace::STANDARD_TARGET)
                 .with_geometry(&meshes, &primitives, &attributes, &[]),
@@ -194,15 +203,15 @@ fn import_fixture(fixture: &Fixture) -> ImportReport {
             .with_format_selection(FormatSelection::Forced(FormatId::new(FORMAT).unwrap())),
     ));
     let request = registry
-        .compile_request(&request, OptionCompileLimits::default())
+        .plan(&request, OptionCompileLimits::default())
         .unwrap();
-    import_bytes(
-        &request,
-        AssetPath::new("normals.fixture").unwrap(),
-        b"precision",
-        ImportOperationControl::default(),
-    )
-    .expect("finite positions must pass public authoring and import validation")
+    request
+        .read_bytes(
+            AssetPath::new("normals.fixture").unwrap(),
+            b"precision",
+            ImportOperationControl::default(),
+        )
+        .expect("finite positions must pass public authoring and import validation")
 }
 
 fn assert_f64_bits(actual: &[f64], expected: &[f64]) {

@@ -8,7 +8,8 @@ use baozi_core::{AttributeData, AttributeRef};
 use crate::TriangulationCause;
 use crate::operation::runtime::{ActiveRuntime, RuntimeKeys, ScratchVec, run_unit};
 use crate::triangulation::{
-    CornerScratch, TriangulationError, triangulate_polygon, validate_polygon_triangulation,
+    CornerScratch, TriangulationError, WorkEvent, triangulate_polygon,
+    validate_polygon_triangulation,
 };
 
 const MAX_SPARSE_COMPARISONS: u64 = 33;
@@ -108,7 +109,11 @@ pub(crate) fn build_origins(
                 Ok::<_, TriangulationCause>(())
             })??;
         }
-        let mut control = || run_unit(operation, || ());
+        let mut control = |event| match event {
+            WorkEvent::Begin => operation.begin_action(),
+            WorkEvent::Complete => operation.complete_action(),
+            WorkEvent::Checkpoint => operation.checkpoint(),
+        };
         triangulate_polygon(
             positions.values(),
             corners.values(),

@@ -179,6 +179,10 @@ where
     U: ProgressUnit,
     D: Copy + Ord + fmt::Debug,
 {
+    pub(crate) fn recorded_control_cause(&self) -> Option<ControlCause> {
+        self.terminal.clone()
+    }
+
     pub(crate) fn poll(&mut self) -> Result<(), ControlCause> {
         poll_operation_control(self.control, self.terminal)
     }

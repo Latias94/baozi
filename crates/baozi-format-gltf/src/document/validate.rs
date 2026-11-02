@@ -5,47 +5,62 @@ use super::mesh_encoding::{
 };
 use super::schema::{self as s};
 use crate::GltfFailure;
-use baozi_import::{ImportStorageClass, ImportWorkClass, MeteredVec, ParseResult, ParseScope};
+use baozi_import::{ImportStorageClass, ImportWorkClass, MeteredVec, ParseExecution, ParseResult};
 
-pub(super) fn validate(ctx: &ParseScope<'_>, root: &s::Tables<'_>) -> ParseResult<bool> {
+pub(super) fn validate(
+    ctx: &mut ParseExecution<'_, '_>,
+    root: &s::Tables<'_>,
+) -> ParseResult<bool> {
     let has_quantization = extensions(ctx, root)?;
-    let fail = |reason| ctx.format_failure(GltfFailure::invalid_document(reason));
-    let reference = |id: s::Index, count: usize| -> ParseResult<()> {
-        ctx.charge_work(1)?;
-        if id.value() < count {
-            Ok(())
-        } else {
-            Err(fail("glTF core reference is out of range"))
-        }
+    let fail = |reason, ctx: &mut ParseExecution<'_, '_>| {
+        ctx.format_failure(GltfFailure::invalid_document(reason))
     };
+    let reference =
+        |id: s::Index, count: usize, ctx: &mut ParseExecution<'_, '_>| -> ParseResult<()> {
+            ctx.charge_work(1)?;
+            if id.value() < count {
+                Ok(())
+            } else {
+                Err(fail("glTF core reference is out of range", ctx))
+            }
+        };
     if let Some(id) = root.scene {
-        reference(id, root.scenes.len())?;
+        reference(id, root.scenes.len(), ctx)?;
     }
     for scene in &root.scenes {
         for &id in &scene.nodes {
-            reference(id, root.nodes.len())?;
+            reference(id, root.nodes.len(), ctx)?;
         }
     }
+    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
     for node in &root.nodes {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         for &id in &node.children {
-            reference(id, root.nodes.len())?;
+            reference(id, root.nodes.len(), ctx)?;
         }
         if let Some(id) = node.mesh {
-            reference(id, root.meshes.len())?;
+            reference(id, root.meshes.len(), ctx)?;
         }
         if let Some(id) = node.skin {
-            reference(id, root.skins.len())?;
+            reference(id, root.skins.len(), ctx)?;
         }
         if let Some(id) = node.camera {
-            reference(id, root.cameras.len())?;
+            reference(id, root.cameras.len(), ctx)?;
         }
     }
     for view in &root.buffer_views {
-        reference(view.buffer, root.buffers.len())?;
+        reference(view.buffer, root.buffers.len(), ctx)?;
     }
     for (index, accessor) in root.accessors.iter().enumerate() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         if accessor.count == 0 {
             return Err(ctx.format_failure(GltfFailure::invalid_accessor(
                 Some(index),
@@ -59,18 +74,22 @@ pub(super) fn validate(ctx: &ParseScope<'_>, root: &s::Tables<'_>) -> ParseResul
             )));
         }
         if let Some(id) = accessor.buffer_view {
-            reference(id, root.buffer_views.len())?;
+            reference(id, root.buffer_views.len(), ctx)?;
         }
         if let Some(sparse) = &accessor.sparse {
-            reference(sparse.indices.buffer_view, root.buffer_views.len())?;
-            reference(sparse.values.buffer_view, root.buffer_views.len())?;
+            reference(sparse.indices.buffer_view, root.buffer_views.len(), ctx)?;
+            reference(sparse.values.buffer_view, root.buffer_views.len(), ctx)?;
         }
     }
     for mesh in &root.meshes {
         for primitive in &mesh.primitives {
-            ctx.charge_work(1)?;
+            ctx.with_work(
+                &work_group,
+                [1],
+                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+            )?;
             for (&semantic, &id) in &primitive.attributes {
-                reference(id, root.accessors.len())?;
+                reference(id, root.accessors.len(), ctx)?;
                 require_quantization(
                     ctx,
                     root,
@@ -80,15 +99,15 @@ pub(super) fn validate(ctx: &ParseScope<'_>, root: &s::Tables<'_>) -> ParseResul
                 )?;
             }
             if let Some(id) = primitive.indices {
-                reference(id, root.accessors.len())?;
+                reference(id, root.accessors.len(), ctx)?;
             }
             if let Some(id) = primitive.material {
-                reference(id, root.materials.len())?;
+                reference(id, root.materials.len(), ctx)?;
             }
             let position = primitive
                 .attributes
                 .get(&s::mesh::Semantic::Positions)
-                .ok_or_else(|| fail("glTF primitive requires POSITION"))?;
+                .ok_or_else(|| fail("glTF primitive requires POSITION", ctx))?;
             let accessor = &root.accessors[position.value()];
             if accessor.min.is_none_or(|bounds| bounds.len != 3)
                 || accessor.max.is_none_or(|bounds| bounds.len != 3)
@@ -100,14 +119,18 @@ pub(super) fn validate(ctx: &ParseScope<'_>, root: &s::Tables<'_>) -> ParseResul
             }
             if let Some(targets) = &primitive.targets {
                 for target in targets {
-                    ctx.charge_work(1)?;
+                    ctx.with_work(
+                        &work_group,
+                        [1],
+                        |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+                    )?;
                     for (semantic, id) in [
                         (s::mesh::Semantic::Positions, target.positions),
                         (s::mesh::Semantic::Normals, target.normals),
                         (s::mesh::Semantic::Tangents, target.tangents),
                     ] {
                         let Some(id) = id else { continue };
-                        reference(id, root.accessors.len())?;
+                        reference(id, root.accessors.len(), ctx)?;
                         require_quantization(
                             ctx,
                             root,
@@ -117,8 +140,12 @@ pub(super) fn validate(ctx: &ParseScope<'_>, root: &s::Tables<'_>) -> ParseResul
                         )?;
                     }
                     for (name, id) in &target.other_attributes.0 {
-                        reference(*id, root.accessors.len())?;
-                        ctx.charge_work(name.len() as u64)?;
+                        reference(*id, root.accessors.len(), ctx)?;
+                        ctx.with_work(
+                            &work_group,
+                            [name.len() as u64],
+                            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+                        )?;
                         if let Some(semantic) = optional_morph_semantic(name.as_str()) {
                             require_quantization(
                                 ctx,
@@ -134,19 +161,27 @@ pub(super) fn validate(ctx: &ParseScope<'_>, root: &s::Tables<'_>) -> ParseResul
         }
     }
     for skin in &root.skins {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         for &id in &skin.joints {
-            reference(id, root.nodes.len())?;
+            reference(id, root.nodes.len(), ctx)?;
         }
         if let Some(id) = skin.skeleton {
-            reference(id, root.nodes.len())?;
+            reference(id, root.nodes.len(), ctx)?;
         }
         if let Some(id) = skin.inverse_bind_matrices {
-            reference(id, root.accessors.len())?;
+            reference(id, root.accessors.len(), ctx)?;
         }
     }
     for material in &root.materials {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         for info in [
             &material.pbr_metallic_roughness.base_color_texture,
             &material.pbr_metallic_roughness.metallic_roughness_texture,
@@ -157,31 +192,39 @@ pub(super) fn validate(ctx: &ParseScope<'_>, root: &s::Tables<'_>) -> ParseResul
         .into_iter()
         .flatten()
         {
-            reference(info.index, root.textures.len())?;
+            reference(info.index, root.textures.len(), ctx)?;
         }
     }
     for texture in &root.textures {
-        reference(texture.source, root.images.len())?;
+        reference(texture.source, root.images.len(), ctx)?;
         if let Some(id) = texture.sampler {
-            reference(id, root.samplers.len())?;
+            reference(id, root.samplers.len(), ctx)?;
         }
     }
     for image in &root.images {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         if let Some(id) = image.buffer_view {
-            reference(id, root.buffer_views.len())?;
+            reference(id, root.buffer_views.len(), ctx)?;
         }
     }
     for animation in &root.animations {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         for sampler in &animation.samplers {
-            reference(sampler.input, root.accessors.len())?;
-            reference(sampler.output, root.accessors.len())?;
+            reference(sampler.input, root.accessors.len(), ctx)?;
+            reference(sampler.output, root.accessors.len(), ctx)?;
         }
         for channel in &animation.channels {
-            reference(channel.sampler, animation.samplers.len())?;
+            reference(channel.sampler, animation.samplers.len(), ctx)?;
             if let Some(node) = channel.target.node {
-                reference(node, root.nodes.len())?;
+                reference(node, root.nodes.len(), ctx)?;
                 if root.nodes[node.value()].matrix.is_some()
                     && !matches!(
                         channel.target.path,
@@ -199,7 +242,7 @@ pub(super) fn validate(ctx: &ParseScope<'_>, root: &s::Tables<'_>) -> ParseResul
 }
 
 fn require_quantization(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     root: &s::Tables<'_>,
     id: s::Index,
     usage: MeshAttributeUse,
@@ -221,11 +264,16 @@ fn require_quantization(
     Ok(())
 }
 
-fn extensions(ctx: &ParseScope<'_>, root: &s::Tables<'_>) -> ParseResult<bool> {
+fn extensions(ctx: &mut ParseExecution<'_, '_>, root: &s::Tables<'_>) -> ParseResult<bool> {
     let used = sorted_names(ctx, &root.extensions_used, "extensionsUsed")?;
     let required = sorted_names(ctx, &root.extensions_required, "extensionsRequired")?;
+    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
     for &name in required.as_slice() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         if used.as_slice().binary_search(&name).is_err() {
             return Err(
                 ctx.format_failure(GltfFailure::invalid_document(format_args!(
@@ -259,7 +307,7 @@ fn extensions(ctx: &ParseScope<'_>, root: &s::Tables<'_>) -> ParseResult<bool> {
 }
 
 fn sorted_names<'scope, 'document>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     names: &'document [s::Text<'_>],
     field: &'static str,
 ) -> ParseResult<MeteredVec<'scope, &'document str>> {
@@ -267,9 +315,14 @@ fn sorted_names<'scope, 'document>(
         ImportStorageClass::BackendDecode,
         "gltf-document-extension-names",
     );
-    sorted.try_reserve(names.len())?;
+    sorted.try_reserve(ctx, names.len())?;
+    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
     for (index, name) in names.iter().enumerate() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         if name.is_empty() {
             return Err(
                 ctx.format_failure(GltfFailure::invalid_document(format_args!(
@@ -283,14 +336,13 @@ fn sorted_names<'scope, 'document>(
         let levels = u64::from(usize::BITS - (sorted.len() - 1).leading_zeros());
         let bound =
             (sorted.len() as u64).saturating_mul(levels.saturating_mul(4).saturating_add(4));
-        ctx.with_work(
-            ImportWorkClass::WorkUnits,
-            bound,
-            |work| -> ParseResult<()> {
+        ctx.with_work_group(
+            [(ImportWorkClass::WorkUnits, bound)],
+            |ctx, work| -> ParseResult<()> {
                 let mut comparisons = 0usize;
                 sorted.try_sort_unstable_by(|a, b| -> ParseResult<_> {
                     if comparisons.is_multiple_of(4096) {
-                        work.poll()?;
+                        ctx.poll()?;
                     }
                     comparisons += 1;
                     Ok(a.cmp(b))
@@ -300,7 +352,11 @@ fn sorted_names<'scope, 'document>(
         )?;
     }
     for pair in sorted.as_slice().windows(2) {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         if pair[0] == pair[1] {
             return Err(
                 ctx.format_failure(GltfFailure::invalid_document(format_args!(

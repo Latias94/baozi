@@ -2,7 +2,7 @@ use baozi_format_obj::{FORMAT_ID, ObjImporter};
 use baozi_import::{
     DetectionInconclusive, DetectionOptions, DetectionOutcome, ImportConfigOverlay,
     ImportOperationControl, ImportRequest, ImportRequestLayer, OptionCompileLimits, ReadConfidence,
-    RegistryBuildLimits, RegistryBuilder, import_asset,
+    RegistryBuildLimits, RegistryBuilder,
 };
 use baozi_io::{AssetPath, MemoryAssetIo};
 use std::sync::Arc;
@@ -18,7 +18,7 @@ fn detect(source: &str, bytes: &[u8], max_probe_bytes: u64) -> DetectionOutcome 
         .freeze(RegistryBuildLimits::default())
         .expect("valid registry");
     let request = snapshot
-        .compile_request(
+        .plan(
             &ImportRequest::from_layers(
                 ImportRequestLayer::default(),
                 ImportRequestLayer::new(ImportConfigOverlay::default().with_detection_options(
@@ -28,7 +28,7 @@ fn detect(source: &str, bytes: &[u8], max_probe_bytes: u64) -> DetectionOutcome 
             OptionCompileLimits::default(),
         )
         .expect("valid request");
-    let evidence = match import_asset(&request, &io, source, ImportOperationControl::default()) {
+    let evidence = match request.read_asset(&io, source, ImportOperationControl::default()) {
         Ok(report) => report.detection_evidence().to_vec(),
         Err(error) => error
             .into_operation_failure()

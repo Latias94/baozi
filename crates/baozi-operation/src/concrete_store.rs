@@ -1834,6 +1834,50 @@ where
     physical: Option<crate::retained::RetainedStorageLease>,
 }
 
+/// Borrowed storage observation without work, control or reservation authority.
+///
+/// Logical live bytes are separate from physical retained storage. This view borrows the
+/// invocation, cannot cross threads and owns no `Arc` or `Weak` allocation header.
+///
+/// ```compile_fail,E0505
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit, StoreDimensionKey};
+/// use baozi_operation::__retained_store_integration::authority::RetainedStoreOperation;
+/// fn outlive<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     mut operation: RetainedStoreOperation<O, P, U>, dimension: StoreDimensionKey,
+/// ) {
+///     let (work, _, _) = operation.execution().unwrap();
+///     let observation = work.storage_observation(dimension).unwrap();
+///     drop(operation);
+///     let _ = observation.live_bytes();
+/// }
+/// ```
+///
+/// ```compile_fail,E0277
+/// use baozi_operation::__retained_store_integration::authority::StoreStorageObservation;
+/// fn cross_thread(observation: StoreStorageObservation<'_>) {
+///     std::thread::scope(|threads| {
+///         threads.spawn(move || observation.live_bytes());
+///     });
+/// }
+/// ```
+///
+/// ```compile_fail,E0277
+/// use baozi_operation::__retained_store_integration::authority::StoreStorageObservation;
+/// fn require_sync<T: Sync>() {}
+/// require_sync::<StoreStorageObservation<'static>>();
+/// ```
+#[derive(Clone, Copy)]
+pub struct StoreStorageObservation<'op> {
+    raw: crate::ledger::LedgerStorageObservation<'op, StorePhaseKey, StoreDimensionKey>,
+}
+
+impl StoreStorageObservation<'_> {
+    /// Returns the issuing dimension's logical live bytes within this execution region.
+    pub fn live_bytes(&self) -> u64 {
+        self.raw.live_bytes()
+    }
+}
+
 impl<O: OperationOwner> RetainedStoreReservation<O> {
     fn live(raw: LiveReservation<O, StorePhaseKey, StoreDimensionKey>) -> Self {
         Self {

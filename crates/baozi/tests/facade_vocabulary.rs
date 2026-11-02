@@ -181,7 +181,7 @@ fn registry_and_request_limits_can_be_constructed_from_facade_types() {
     let request = ImportRequest::new();
     let compile_limits = OptionCompileLimits::new(scope, 4, 1_000_000, 4096, 4096, 4096);
     let prepared = importer
-        .prepare_request(&request, compile_limits)
+        .plan(&request, compile_limits)
         .expect("empty request accepts explicit target limits");
 
     assert_eq!(prepared.overridden_formats().len(), 0);
@@ -247,21 +247,19 @@ fn custom_asset_io_imports_bytes_on_the_test_stack() {
 #[test]
 fn custom_dependency_resolver_acquires_a_required_dependency() {
     let importer = required_dependency_fixture::importer();
-    let request = importer
-        .prepare_default_request()
-        .expect("default request compiles");
+    let request = importer.default_plan().expect("default request compiles");
     let io = CustomAssetIo::new();
     let resolver = MaterialResolver {
         calls: AtomicUsize::new(0),
     };
-    let report = importer
+    let report = request
         .read_asset_with_resolver(
             &io,
             AssetPath::new("models/triangle.obj").expect("valid source path"),
-            &request,
             &resolver,
             baozi::ImportOperationControl::default(),
         )
+        .map_err(baozi::Error::from)
         .expect("the custom resolver authorizes the material library");
 
     assert_eq!(
@@ -282,22 +280,20 @@ fn custom_dependency_resolver_acquires_a_required_dependency() {
 #[test]
 fn missing_required_dependency_preserves_the_facade_io_error() {
     let importer = required_dependency_fixture::importer();
-    let request = importer
-        .prepare_default_request()
-        .expect("default request compiles");
+    let request = importer.default_plan().expect("default request compiles");
     let mut io = CustomAssetIo::new();
     io.material = None;
     let resolver = MaterialResolver {
         calls: AtomicUsize::new(0),
     };
-    let error = importer
+    let error = request
         .read_asset_with_resolver(
             &io,
             AssetPath::new("models/triangle.obj").expect("valid source path"),
-            &request,
             &resolver,
             baozi::ImportOperationControl::default(),
         )
+        .map_err(baozi::Error::from)
         .expect_err("a missing required dependency must reject the import");
 
     let baozi::Error::Import(failure) = error else {
@@ -325,16 +321,26 @@ fn missing_required_dependency_preserves_the_facade_io_error() {
 // custom IO/resolver implementations above name their public signatures through baozi alone.
 mod required_dependency_fixture {
     use baozi::{
-        DependencyRequirement, DependencyRoleId, DetectionOutcome, FormatDescriptor,
-        FormatEncoding, FormatId, FormatImporter, Importer, ReadConfidence,
+        DependencyRequirement, DependencyRoleId, DetectionOutcome, Format, FormatDescriptor,
+        FormatEncoding, FormatId, Importer, ReadConfidence,
     };
     use baozi_import::{
-        DetectionResult, DetectionScope, ParseResult, ParseScope, Probe, ReadHint, SceneDraft,
+        CompiledOptions, DetectionResult, DetectionScope, NoFormatOptions, OptionCompileError,
+        ParseContext, ParseResult, Probe, ReadHint, RegistryBuildScope,
     };
 
     struct RequiredMaterialImporter;
 
-    impl FormatImporter for RequiredMaterialImporter {
+    impl Format for RequiredMaterialImporter {
+        type Options = NoFormatOptions;
+
+        fn compile_defaults(
+            &self,
+            scope: &mut RegistryBuildScope<'_>,
+        ) -> std::result::Result<CompiledOptions<Self::Options>, OptionCompileError> {
+            NoFormatOptions::compile_defaults(scope)
+        }
+
         fn descriptor(&self) -> FormatDescriptor {
             FormatDescriptor::builder(
                 FormatId::new("org.example.required-material").expect("valid fixture format ID"),
@@ -359,12 +365,12 @@ mod required_dependency_fixture {
             Ok(DetectionOutcome::Match(ReadConfidence::Certain))
         }
 
-        fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-            {
-                let root = scope.root_origin();
+        fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
+            scope.with_execution(|exec| -> ParseResult<()> {
+                let root = exec.root_origin();
                 let role =
                     DependencyRoleId::new("material-library").expect("valid dependency role");
-                let outcome = scope.dependency(&root, &role, "./materials/triangle.mtl")?;
+                let outcome = exec.dependency(&root, &role, "./materials/triangle.mtl")?;
                 assert_eq!(
                     outcome
                         .snapshot()
@@ -372,7 +378,8 @@ mod required_dependency_fixture {
                         .bytes(),
                     super::MATERIAL
                 );
-            }
+                Ok(())
+            })?;
             super::support::submit_minimal_scene(scope)
         }
     }

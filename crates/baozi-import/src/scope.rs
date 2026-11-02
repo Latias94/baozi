@@ -1,4 +1,5 @@
 use crate::asset_open::OpenedAssetOwner;
+use crate::authoring::SceneAuthoringBatch;
 use crate::config::{ConformancePolicy, ImportLossKind, LossPolicy};
 use crate::dependency::{
     AuthorizedDependency, CachedDependencyFailure, DependencyCacheDisposition,
@@ -26,10 +27,9 @@ use crate::limits::ResourceLimits;
 use crate::loss::{ImportLossDisposition, ImportLossEvidence, ImportLossSubject};
 use crate::metered_storage::{
     AccountedVec, MeteredDecodedText, MeteredOpaqueAllowance, MeteredOrderedMap, MeteredString,
-    MeteredVec, StorageMeter, metered_replacement_plans_with_element_size,
+    MeteredVec, StorageIdentity, metered_replacement_plans_with_element_size,
     metered_vec_replacement_plans,
 };
-use crate::options::{CompiledFormatOptions, FormatOptionKey};
 use crate::registry::RegistryEntry;
 use crate::resource_graph::{
     AvailableResourceIdentity, PendingResourceRelation, ResourceAcquisitionState, ResourceGraph,
@@ -41,13 +41,13 @@ use crate::source_scope::{
     SourceScopeRecordBuilder, SourceScopeSelectionOutcome, SourceScopeSelectionRequest,
 };
 use crate::store::{
-    ImportObservedWorkFailure, ImportStoreHost, ImportStoreHostError, ImportStoreReservation,
+    ImportBoundWorkGroup, ImportObservedWorkFailure, ImportParserAdmissionError,
+    ImportParserWorkScope, ImportStoreExecution, ImportStoreHostError, ImportStoreReservation,
     ImportStoreSessionOwner, scene_validation_limits,
 };
 use crate::text_input::{
     ConformedTextInput, TextConformanceResult, TextInputOptions, TextInputRecoveryTracker,
 };
-use crate::{SceneDraft as CanonicalSceneDraft, authoring::SceneAuthoringBatch};
 use baozi_core::__scene_integration::integration::SceneConstruction;
 use baozi_core::{OrderedMap, OrderedMapError};
 use baozi_io::{
@@ -93,7 +93,7 @@ fn registered_negative_proof_error(cause: RegisteredNegativeProofError) -> Scope
     ScopeAbortCause::DescriptorContract { code }
 }
 
-/// Opaque parser transport. Only a selected [`ParseScope`] can create it.
+/// Opaque parser transport. Only a selected [`ParseContext`] can create it.
 #[derive(Debug)]
 pub struct ParseFailure {
     kind: ParseFailureKind,
@@ -220,121 +220,56 @@ impl ImportWorkClass {
     }
 }
 
-/// Callback-scoped completion capability for one admitted parser work group.
-///
-/// The scope has no public constructor and cannot outlive [`ParseScope::with_work`] or
-/// [`ParseScope::with_work_group`]. Each completion records one exact physical prefix across the
-/// complete dimension group.
+/// A fixed parser work layout borrowed from one execution region.
+pub struct ImportWorkGroup<'region, const N: usize> {
+    raw: ImportBoundWorkGroup<'region, N>,
+    issuer: &'region DependencyOriginIssuer,
+    item_limits: [Option<(&'static str, u64)>; N],
+}
+
+/// One actual parser channel; physical completion is recorded immediately.
 ///
 /// ```compile_fail
-/// use baozi_import::{ImportWorkClass, ParseResult, ParseScope};
-///
-/// fn escape(scope: &ParseScope<'_>) {
-///     let _escaped = scope.with_work(ImportWorkClass::WorkUnits, 1, |work| {
-///         Ok::<_, baozi_import::ParseFailure>(work)
+/// use baozi_import::{ImportWorkClass, ParseContext, ParseFailure};
+/// fn escape(context: &mut ParseContext<'_>) {
+///     let _group = context.with_execution::<_, ParseFailure>(|exec| {
+///         exec.bind_work_group([ImportWorkClass::WorkUnits])
 ///     });
 /// }
 /// ```
-///
-/// ```compile_fail
-/// use baozi_import::{ImportWorkClass, ParseScope};
-///
-/// fn legacy_permit(scope: &ParseScope<'_>) {
-///     let _permit = scope.begin_work(ImportWorkClass::WorkUnits, 1);
-/// }
-/// ```
-pub struct ImportWorkScope<'work, 'session, const N: usize> {
-    scope: &'work ParseScope<'session>,
-    dimensions: [ImportDimension; N],
-    item_limits: [Option<(&'static str, u64)>; N],
-    admitted: [u64; N],
-    completed: [u64; N],
-    parent: bool,
-    active: bool,
-    finished: bool,
+pub struct ImportWorkScope<'region, const N: usize> {
+    raw: ImportParserWorkScope<'region, N>,
+    terminal: &'region RefCell<Option<ScopeAbortCause>>,
 }
 
-impl ImportWorkScope<'_, '_, 1> {
-    /// Admits the next chunk after the current chunk has completed.
-    ///
-    /// This keeps runtime-sized parser loops inside one callback-scoped capability without
-    /// exposing an escaping permit or acquiring one ledger lock per physical unit.
+impl ImportWorkScope<'_, 1> {
     pub fn replenish(&mut self, amount: u64) -> ParseResult<()> {
-        self.scope.preflight_active()?;
-        if self.item_limits[0].is_some() {
-            return Err(self.scope.abort(ScopeAbortCause::DescriptorContract {
-                code: "parse-work-item-limit-replenish-unsupported",
-            }));
-        }
-        if self.remaining()[0] != 0 {
-            return Err(self.scope.abort(ScopeAbortCause::DescriptorContract {
-                code: "parse-work-replenish-before-completion",
-            }));
-        }
-        self.scope.poll_active()?;
-
-        let dimension = self.dimensions[0];
-        self.scope
-            .host
-            .charge_attempted(dimension, amount)
-            .map_err(|cause| self.scope.abort(cause.into_scope_abort_cause()))?;
-        if let Some((resource, limit)) = self.item_limits[0]
-            && amount > limit
-        {
-            return Err(self
-                .scope
-                .abort(ScopeAbortCause::ResourceLimit { resource, limit }));
-        }
-
-        self.admitted[0] = amount;
-        self.completed[0] = 0;
-        Ok(())
+        preflight_terminal(self.terminal)?;
+        self.raw
+            .replenish(amount)
+            .map_err(|cause| latch_abort(self.terminal, cause.into_scope_abort_cause()))
     }
 }
 
-impl<const N: usize> ImportWorkScope<'_, '_, N> {
-    /// Returns the unfinished admitted suffix for every work entry.
+impl<const N: usize> ImportWorkScope<'_, N> {
     pub fn remaining(&self) -> [u64; N] {
-        std::array::from_fn(|index| self.admitted[index] - self.completed[index])
+        self.raw.remaining()
     }
 
-    /// Records one physically completed prefix across the complete work group.
     pub fn complete(&mut self, amounts: [u64; N]) -> ParseResult<()> {
-        self.scope.preflight_active()?;
-        for (index, amount) in amounts.into_iter().enumerate() {
-            if amount > self.admitted[index] - self.completed[index] {
-                return Err(self.scope.abort(ScopeAbortCause::DescriptorContract {
-                    code: "parse-work-completion-exceeds-admitted",
-                }));
-            }
-        }
-        if amounts.into_iter().all(|amount| amount == 0) {
-            return Ok(());
-        }
-
-        let mut charges: [(ImportDimension, u64); N] =
-            std::array::from_fn(|index| (self.dimensions[index], amounts[index]));
-        charges.sort_unstable_by_key(|(dimension, _)| *dimension);
-        self.scope
-            .host
-            .charge_consumed_batch(&charges)
-            .map_err(|cause| self.scope.abort(cause.into_scope_abort_cause()))?;
-        for (completed, amount) in self.completed.iter_mut().zip(amounts) {
-            *completed = completed.checked_add(amount).ok_or_else(|| {
-                self.scope.abort(ScopeAbortCause::DescriptorContract {
-                    code: "parse-work-completion-overflow",
-                })
-            })?;
-        }
-        Ok(())
+        preflight_terminal(self.terminal)?;
+        self.raw
+            .complete(amounts)
+            .map_err(|cause| latch_abort(self.terminal, cause.into_scope_abort_cause()))
     }
 
-    /// Records the complete unfinished suffix.
     pub fn complete_all(&mut self) -> ParseResult<()> {
-        self.complete(self.remaining())
+        preflight_terminal(self.terminal)?;
+        self.raw
+            .complete_all()
+            .map_err(|cause| latch_abort(self.terminal, cause.into_scope_abort_cause()))
     }
 
-    /// Runs one fallible physical action and records its prefix only after normal completion.
     pub fn run<T, E>(
         &mut self,
         amounts: [u64; N],
@@ -348,55 +283,42 @@ impl<const N: usize> ImportWorkScope<'_, '_, N> {
         Ok(value)
     }
 
-    /// Runs one fallible physical action and records the complete unfinished suffix.
     pub fn run_all<T, E>(&mut self, action: impl FnOnce() -> Result<T, E>) -> Result<T, E>
     where
         E: From<ParseFailure>,
     {
-        let remaining = self.remaining();
-        self.run(remaining, action)
+        self.run(self.remaining(), action)
     }
 
-    /// Polls cancellation and deadline state while this work group remains active.
-    pub fn poll(&mut self) -> ParseResult<()> {
-        self.scope.poll_active()
+    fn finish_exact(self) -> ParseResult<()> {
+        self.raw
+            .finish_exact()
+            .map_err(|cause| latch_abort(self.terminal, cause.into_scope_abort_cause()))
     }
 
-    fn finish_exact(&mut self) -> ParseResult<()> {
-        self.release();
-        self.scope.poll_active()
-    }
-
-    fn finish_partial(&mut self) {
-        self.release();
-    }
-
-    fn release(&mut self) {
-        if self.active {
-            if self.parent {
-                self.scope.parent_work_outstanding.set(false);
-            } else {
-                self.scope.work_outstanding.set(false);
-            }
-            self.active = false;
-        }
-        self.finished = true;
+    fn finish_partial(self) -> ParseResult<()> {
+        self.raw
+            .finish_partial()
+            .map_err(|cause| latch_abort(self.terminal, cause.into_scope_abort_cause()))
     }
 }
 
-impl<const N: usize> Drop for ImportWorkScope<'_, '_, N> {
-    fn drop(&mut self) {
-        if !self.finished && self.active {
-            let was_outstanding = if self.parent {
-                self.scope.parent_work_outstanding.replace(false)
-            } else {
-                self.scope.work_outstanding.replace(false)
-            };
-            debug_assert!(
-                was_outstanding && std::thread::panicking(),
-                "the private parser work scope may only be abandoned by unwinding"
-            );
-        }
+fn latch_abort(
+    terminal: &RefCell<Option<ScopeAbortCause>>,
+    cause: ScopeAbortCause,
+) -> ParseFailure {
+    let mut slot = terminal.borrow_mut();
+    if slot.is_none() {
+        *slot = Some(cause);
+    }
+    ParseFailure::scope()
+}
+
+fn preflight_terminal(terminal: &RefCell<Option<ScopeAbortCause>>) -> ParseResult<()> {
+    if terminal.borrow().is_some() {
+        Err(ParseFailure::scope())
+    } else {
+        Ok(())
     }
 }
 
@@ -413,10 +335,9 @@ impl FailureEvidenceStorage {
     }
 }
 
-/// A capability-limited parser view valid only for one selected importer call.
-pub struct ParseScope<'session> {
+/// Exclusive outer parse authority. Scene submission occurs outside execution regions.
+pub struct ParseContext<'session> {
     entry: RegistryEntry,
-    options: Arc<CompiledFormatOptions>,
     primary_io: &'session dyn AssetIo,
     primary_authority: &'session AuthorityDomain,
     primary_source: &'session AssetPath,
@@ -426,8 +347,6 @@ pub struct ParseScope<'session> {
     conformance_policy: ConformancePolicy,
     loss_policy: LossPolicy,
     limits: &'session ResourceLimits,
-    store_owner: &'session ImportStoreSessionOwner,
-    host: ImportStoreHost<'session>,
     diagnostics: &'session RefCell<DiagnosticSink>,
     resource_graph: &'session RefCell<ResourceGraph>,
     optional_dependency_evidence: &'session RefCell<AccountedVec<OptionalDependencyEvidence>>,
@@ -437,15 +356,51 @@ pub struct ParseScope<'session> {
     dependency_failure: RefCell<Option<DependencyResolutionContext>>,
     dependency_failure_context: RefCell<Option<DependencyFailureContext>>,
     callback_active: Cell<bool>,
-    work_outstanding: Cell<bool>,
-    parent_work_outstanding: Cell<bool>,
+    terminal: &'session RefCell<Option<ScopeAbortCause>>,
+    store_owner: &'session mut ImportStoreSessionOwner,
+    not_send_or_sync: PhantomData<Rc<()>>,
+}
+
+/// Disjoint work, storage and control borrowed from the actual session owner.
+///
+/// ```compile_fail
+/// use baozi_import::{ParseContext, ParseResult};
+/// fn cross_thread(context: &mut ParseContext<'_>) -> ParseResult<()> {
+///     context.with_execution(|exec| {
+///         std::thread::scope(|threads| {
+///             threads.spawn(move || exec.poll());
+///         });
+///         Ok(())
+///     })
+/// }
+/// ```
+pub struct ParseExecution<'region, 'session: 'region> {
+    store: ImportStoreExecution<'region>,
+    entry: RegistryEntry,
+    primary_io: &'session dyn AssetIo,
+    primary_authority: &'session AuthorityDomain,
+    primary_source: &'session AssetPath,
+    primary_bytes: &'session [u8],
+    resolver: ResolverBinding<'session>,
+    dependency_origin_issuer: &'session DependencyOriginIssuer,
+    conformance_policy: ConformancePolicy,
+    loss_policy: LossPolicy,
+    limits: &'session ResourceLimits,
+    diagnostics: &'session RefCell<DiagnosticSink>,
+    resource_graph: &'session RefCell<ResourceGraph>,
+    optional_dependency_evidence: &'session RefCell<AccountedVec<OptionalDependencyEvidence>>,
+    loss_evidence: &'session RefCell<AccountedVec<ImportLossEvidence>>,
+    source_scope_record: &'session RefCell<Option<LiveSourceScopeRecord>>,
+    format_failure_storage: &'session RefCell<FailureEvidenceStorage>,
+    dependency_failure: &'region RefCell<Option<DependencyResolutionContext>>,
+    dependency_failure_context: &'region RefCell<Option<DependencyFailureContext>>,
+    callback_active: &'region Cell<bool>,
     terminal: &'session RefCell<Option<ScopeAbortCause>>,
     not_send_or_sync: PhantomData<Rc<()>>,
 }
 
-pub(crate) struct ParseScopeParts<'session> {
+pub(crate) struct ParseContextParts<'session> {
     pub entry: RegistryEntry,
-    pub options: Arc<CompiledFormatOptions>,
     pub primary_io: &'session dyn AssetIo,
     pub primary_authority: &'session AuthorityDomain,
     pub primary_source: &'session AssetPath,
@@ -455,8 +410,7 @@ pub(crate) struct ParseScopeParts<'session> {
     pub conformance_policy: ConformancePolicy,
     pub loss_policy: LossPolicy,
     pub limits: &'session ResourceLimits,
-    pub store_owner: &'session ImportStoreSessionOwner,
-    pub host: ImportStoreHost<'session>,
+    pub store_owner: &'session mut ImportStoreSessionOwner,
     pub diagnostics: &'session RefCell<DiagnosticSink>,
     pub resource_graph: &'session RefCell<ResourceGraph>,
     pub optional_dependency_evidence: &'session RefCell<AccountedVec<OptionalDependencyEvidence>>,
@@ -533,11 +487,10 @@ struct DiagnosticEventMetadata<'event> {
     object_path: Option<&'event str>,
 }
 
-impl<'session> ParseScope<'session> {
-    pub(crate) fn new(parts: ParseScopeParts<'session>) -> Self {
+impl<'session> ParseContext<'session> {
+    pub(crate) fn new(parts: ParseContextParts<'session>) -> Self {
         Self {
             entry: parts.entry,
-            options: parts.options,
             primary_io: parts.primary_io,
             primary_authority: parts.primary_authority,
             primary_source: parts.primary_source,
@@ -548,7 +501,6 @@ impl<'session> ParseScope<'session> {
             loss_policy: parts.loss_policy,
             limits: parts.limits,
             store_owner: parts.store_owner,
-            host: parts.host,
             diagnostics: parts.diagnostics,
             resource_graph: parts.resource_graph,
             optional_dependency_evidence: parts.optional_dependency_evidence,
@@ -558,14 +510,12 @@ impl<'session> ParseScope<'session> {
             dependency_failure: RefCell::new(None),
             dependency_failure_context: RefCell::new(None),
             callback_active: Cell::new(false),
-            work_outstanding: Cell::new(false),
-            parent_work_outstanding: Cell::new(false),
             terminal: parts.terminal,
             not_send_or_sync: PhantomData,
         }
     }
 
-    pub fn source(&self) -> &AssetPath {
+    pub fn source(&self) -> &'session AssetPath {
         self.primary_source
     }
 
@@ -577,49 +527,11 @@ impl<'session> ParseScope<'session> {
         self.loss_policy
     }
 
-    pub fn primary_bytes(&self) -> &[u8] {
+    pub fn primary_bytes(&self) -> &'session [u8] {
         self.primary_bytes
     }
 
-    /// Conforms the source suffix selected by `options` and runs a format-owned grammar action.
-    ///
-    /// The source capability is the sole byte authority. Recovery diagnostics cannot be rebound to
-    /// a separately supplied slice or a different dependency.
-    pub fn with_conformed_text_input<'scope, 'source, T>(
-        &'scope self,
-        source: DiagnosticSource<'source>,
-        options: TextInputOptions,
-        action: impl for<'input> FnOnce(
-            &'input ConformedTextInput<'scope>,
-            &mut TextInputRecoveryTracker<'input, 'session>,
-        ) -> ParseResult<T>,
-    ) -> ParseResult<TextConformanceResult<T>> {
-        crate::text_input::with_conformed_text_input(
-            self,
-            self.entry.descriptor().text_profile(),
-            source,
-            options,
-            action,
-        )
-    }
-
-    /// Creates a source-bound cursor that conforms one physical text record at a time.
-    pub fn text_input_record_cursor<'scope, 'source>(
-        &'scope self,
-        source: DiagnosticSource<'source>,
-        options: TextInputOptions,
-    ) -> ParseResult<
-        TextConformanceResult<crate::text_input::TextInputRecordCursor<'scope, 'session, 'source>>,
-    > {
-        crate::text_input::TextInputRecordCursor::new(
-            self,
-            self.entry.descriptor().text_profile(),
-            source,
-            options,
-        )
-    }
-
-    pub fn diagnostic_source(&self) -> DiagnosticSource<'_> {
+    pub fn diagnostic_source(&self) -> DiagnosticSource<'session> {
         DiagnosticSource::new(
             self.primary_authority.clone(),
             self.primary_source,
@@ -627,61 +539,109 @@ impl<'session> ParseScope<'session> {
         )
     }
 
-    pub(crate) fn diagnostic_source_is_primary(&self, source: &DiagnosticSource<'_>) -> bool {
-        source.authority() == self.primary_authority
-            && source.path() == self.primary_source
-            && std::ptr::eq(source.bytes(), self.primary_bytes)
-    }
-
-    pub fn limits(&self) -> &ResourceLimits {
+    pub fn limits(&self) -> &'session ResourceLimits {
         self.limits
     }
 
-    /// Submits borrowed static Scene input with automatic primary-document provenance.
-    ///
-    /// Geometry-aligned empty deformation rows and owner provenance use this session's metered
-    /// storage. Validation and publication follow the same boundary as [`Self::submit_scene`].
-    pub fn submit_static_scene(
-        &self,
-        input: crate::authoring::StaticSceneBuilder<'_>,
-    ) -> ParseResult<CanonicalSceneDraft> {
-        self.preflight_active()?;
+    pub fn root_origin(&self) -> DependencyOrigin<'session> {
+        DependencyOrigin::primary(self.dependency_origin_issuer, self.primary_io)
+    }
+
+    /// The result cannot borrow the execution region, while session-owned storage may leave it.
+    pub fn with_execution<R, E>(
+        &mut self,
+        action: impl for<'region> FnOnce(&mut ParseExecution<'region, 'session>) -> Result<R, E>,
+    ) -> Result<R, E>
+    where
+        E: From<ParseFailure>,
+    {
+        preflight_terminal(self.terminal).map_err(E::from)?;
+        let terminal = self.terminal;
+        let store = self
+            .store_owner
+            .execution()
+            .map_err(|cause| E::from(latch_abort(terminal, cause.into_scope_abort_cause())))?;
+        let mut exec = ParseExecution {
+            store,
+            entry: self.entry.clone(),
+            primary_io: self.primary_io,
+            primary_authority: self.primary_authority,
+            primary_source: self.primary_source,
+            primary_bytes: self.primary_bytes,
+            resolver: self.resolver,
+            dependency_origin_issuer: self.dependency_origin_issuer,
+            conformance_policy: self.conformance_policy,
+            loss_policy: self.loss_policy,
+            limits: self.limits,
+            diagnostics: self.diagnostics,
+            resource_graph: self.resource_graph,
+            optional_dependency_evidence: self.optional_dependency_evidence,
+            loss_evidence: self.loss_evidence,
+            source_scope_record: self.source_scope_record,
+            format_failure_storage: self.format_failure_storage,
+            dependency_failure: &self.dependency_failure,
+            dependency_failure_context: &self.dependency_failure_context,
+            callback_active: &self.callback_active,
+            terminal,
+            not_send_or_sync: PhantomData,
+        };
+        exec.poll().map_err(E::from)?;
+        match action(&mut exec) {
+            Ok(value) => {
+                exec.poll().map_err(E::from)?;
+                exec.store.finish_region().map_err(|cause| {
+                    E::from(latch_abort(terminal, cause.into_scope_abort_cause()))
+                })?;
+                Ok(value)
+            }
+            Err(failure) => {
+                let _ = exec.poll();
+                let _ = exec.store.finish_region();
+                Err(failure)
+            }
+        }
+    }
+
+    pub fn submit(&mut self, input: crate::authoring::StaticSceneBuilder<'_>) -> ParseResult<()> {
+        preflight_terminal(self.terminal)?;
         let content_digest = self
             .resource_graph
             .try_borrow()
-            .map_err(|_| self.reentrant_capability_failure())?
+            .map_err(|_| {
+                latch_abort(
+                    self.terminal,
+                    ScopeAbortCause::DescriptorContract {
+                        code: "parse-capability-reentered",
+                    },
+                )
+            })?
             .primary_content_digest()
-            .map_err(|cause| self.abort(cause.into_scope_cause()))?;
-        crate::authoring::static_scene::submit(
-            self,
-            input,
-            self.entry.descriptor().id(),
-            content_digest,
-        )
+            .map_err(|cause| latch_abort(self.terminal, cause.into_scope_cause()))?;
+        let format = self.entry.descriptor().id().clone();
+        crate::authoring::static_scene::submit(self, input, &format, content_digest)
     }
 
-    /// Submits one complete canonical Scene batch to this session's sole retained-store owner.
-    pub fn submit_scene<'input>(
-        &self,
-        input: SceneAuthoringBatch<'input>,
-    ) -> ParseResult<CanonicalSceneDraft> {
-        self.preflight_active()?;
-        self.store_owner
-            .poll_parser_boundary()
-            .map_err(|cause| self.abort(cause.into_scope_abort_cause()))?;
-        self.resource_graph
-            .try_borrow_mut()
-            .map_err(|_| self.reentrant_capability_failure())?
-            .seal(self.host)
-            .map_err(|cause| self.abort(cause.into_scope_cause()))?;
+    pub fn submit_complete(&mut self, input: SceneAuthoringBatch<'_>) -> ParseResult<()> {
+        preflight_terminal(self.terminal)?;
+        self.with_execution(|exec| {
+            exec.resource_graph
+                .try_borrow_mut()
+                .map_err(|_| exec.reentrant_capability_failure())?
+                .seal(&mut exec.store)
+                .map_err(|cause| exec.abort(cause.into_scope_cause()))
+        })?;
+        let terminal = self.terminal;
         let construction = SceneConstruction::try_new(input, scene_validation_limits(self.limits))
             .map_err(|cause| {
-                self.abort(match cause.scene_validation_error() {
-                    Some(detail) => ScopeAbortCause::SceneValidation(detail),
-                    None => ScopeAbortCause::DescriptorContract {
-                        code: "canonical-scene-request-rejected",
+                latch_abort(
+                    terminal,
+                    match cause.scene_validation_error() {
+                        Some(detail) => ScopeAbortCause::SceneValidation(detail),
+                        None => ScopeAbortCause::DescriptorContract {
+                            code: "canonical-scene-request-rejected",
+                        },
                     },
-                })
+                )
             })?;
         self.store_owner
             .submit_scene(construction)
@@ -691,10 +651,10 @@ impl<'session> ParseScope<'session> {
                         "canonical-scene-store-unavailable"
                     }
                     crate::store::ImportStoreActivationError::Control(cause) => {
-                        return self.abort(ScopeAbortCause::Control(cause));
+                        return latch_abort(terminal, ScopeAbortCause::Control(cause));
                     }
                     crate::store::ImportStoreActivationError::SceneValidation(detail) => {
-                        return self.abort(ScopeAbortCause::SceneValidation(detail));
+                        return latch_abort(terminal, ScopeAbortCause::SceneValidation(detail));
                     }
                     crate::store::ImportStoreActivationError::AuthoringRejected => {
                         "canonical-scene-authoring-rejected"
@@ -707,8 +667,108 @@ impl<'session> ParseScope<'session> {
                         "canonical-scene-activation-contained"
                     }
                 };
-                self.abort(ScopeAbortCause::DescriptorContract { code })
+                latch_abort(terminal, ScopeAbortCause::DescriptorContract { code })
             })
+    }
+
+    pub(crate) fn take_terminal_abort(&self) -> Option<ScopeAbort> {
+        self.terminal.borrow_mut().take().map(|cause| {
+            match self.dependency_failure_context.borrow_mut().take() {
+                Some(context) => ScopeAbort::with_dependency_context(cause, context),
+                None => ScopeAbort::new(cause),
+            }
+        })
+    }
+}
+
+impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
+    pub fn source(&self) -> &'session AssetPath {
+        self.primary_source
+    }
+
+    pub const fn conformance_policy(&self) -> ConformancePolicy {
+        self.conformance_policy
+    }
+
+    pub const fn loss_policy(&self) -> LossPolicy {
+        self.loss_policy
+    }
+
+    pub fn primary_bytes(&self) -> &'session [u8] {
+        self.primary_bytes
+    }
+
+    pub fn diagnostic_source(&self) -> DiagnosticSource<'session> {
+        DiagnosticSource::new(
+            self.primary_authority.clone(),
+            self.primary_source,
+            self.primary_bytes,
+        )
+    }
+
+    pub fn limits(&self) -> &'session ResourceLimits {
+        self.limits
+    }
+
+    pub fn root_origin(&self) -> DependencyOrigin<'session> {
+        DependencyOrigin::primary(self.dependency_origin_issuer, self.primary_io)
+    }
+
+    pub fn with_conformed_text_input<'source, T>(
+        &mut self,
+        source: DiagnosticSource<'source>,
+        options: TextInputOptions,
+        action: impl for<'input> FnOnce(
+            &mut ParseExecution<'region, 'session>,
+            &'input ConformedTextInput<'session>,
+            &mut TextInputRecoveryTracker<'input, 'session>,
+        ) -> ParseResult<T>,
+    ) -> ParseResult<TextConformanceResult<T>> {
+        let entry = self.entry.clone();
+        crate::text_input::with_conformed_text_input(
+            self,
+            entry.descriptor().text_profile(),
+            source,
+            options,
+            action,
+        )
+    }
+
+    pub fn text_input_record_cursor<'source>(
+        &mut self,
+        source: DiagnosticSource<'source>,
+        options: TextInputOptions,
+    ) -> ParseResult<
+        TextConformanceResult<crate::text_input::TextInputRecordCursor<'session, 'source>>,
+    > {
+        let entry = self.entry.clone();
+        crate::text_input::TextInputRecordCursor::new(
+            self,
+            entry.descriptor().text_profile(),
+            source,
+            options,
+        )
+    }
+
+    pub(crate) fn diagnostic_source_is_primary(&self, source: &DiagnosticSource<'_>) -> bool {
+        source.authority() == self.primary_authority
+            && source.path() == self.primary_source
+            && std::ptr::eq(source.bytes(), self.primary_bytes)
+    }
+
+    pub(crate) fn session_issuer(&self) -> &'session DependencyOriginIssuer {
+        self.dependency_origin_issuer
+    }
+
+    pub(crate) fn check_session(&self, issuer: &DependencyOriginIssuer) -> ParseResult<()> {
+        self.preflight_active()?;
+        if std::ptr::eq(self.dependency_origin_issuer, issuer) {
+            Ok(())
+        } else {
+            Err(self.abort(ScopeAbortCause::DescriptorContract {
+                code: "parse-storage-foreign-session",
+            }))
+        }
     }
 
     /// Starts one incremental source-selection and closure evidence record.
@@ -716,10 +776,10 @@ impl<'session> ParseScope<'session> {
     /// The outcome must identify this document. An explicit request must resolve
     /// to the same declared source scene before any evidence storage is adopted.
     pub fn source_scope_builder(
-        &self,
+        &mut self,
         selection_request: SourceScopeSelectionRequest,
         selection_outcome: SourceScopeSelectionOutcome,
-    ) -> ParseResult<SourceScopeRecordBuilder<'_, 'session>> {
+    ) -> ParseResult<SourceScopeRecordBuilder<'session>> {
         self.preflight_active()?;
         if selection_outcome.document().asset_path() != self.source() {
             return Err(self.abort(ScopeAbortCause::DescriptorContract {
@@ -738,14 +798,14 @@ impl<'session> ParseScope<'session> {
 
     /// Creates vector storage whose backing allocation cannot outlive this parse capability.
     pub fn metered_vec<T>(
-        &self,
+        &mut self,
         class: ImportStorageClass,
         resource: &'static str,
-    ) -> MeteredVec<'_, T> {
+    ) -> MeteredVec<'session, T> {
         MeteredVec {
             values: Vec::new(),
             capacity: None,
-            meter: self.storage_meter(),
+            identity: self.storage_identity(),
             class,
             resource,
         }
@@ -753,14 +813,14 @@ impl<'session> ParseScope<'session> {
 
     /// Creates string storage whose backing allocation cannot outlive this parse capability.
     pub fn metered_string(
-        &self,
+        &mut self,
         class: ImportStorageClass,
         resource: &'static str,
-    ) -> MeteredString<'_> {
+    ) -> MeteredString<'session> {
         MeteredString {
             value: String::new(),
             capacity: None,
-            meter: self.storage_meter(),
+            identity: self.storage_identity(),
             class,
             resource,
         }
@@ -768,14 +828,14 @@ impl<'session> ParseScope<'session> {
 
     /// Creates ordered-map storage whose backing allocation cannot outlive this parse capability.
     pub fn metered_ordered_map<K, V>(
-        &self,
+        &mut self,
         class: ImportStorageClass,
         resource: &'static str,
-    ) -> MeteredOrderedMap<'_, K, V> {
+    ) -> MeteredOrderedMap<'session, K, V> {
         MeteredOrderedMap {
             value: OrderedMap::new(),
             capacity: None,
-            meter: self.storage_meter(),
+            identity: self.storage_identity(),
             class,
             resource,
         }
@@ -783,10 +843,10 @@ impl<'session> ParseScope<'session> {
 
     /// Reserves an opaque backend allowance that cannot be transferred into a Scene value.
     pub fn metered_opaque_allowance(
-        &self,
+        &mut self,
         class: ImportStorageClass,
         bytes: u64,
-    ) -> ParseResult<MeteredOpaqueAllowance<'_>> {
+    ) -> ParseResult<MeteredOpaqueAllowance<'session>> {
         self.preflight_active()?;
         let reservation = if bytes == 0 {
             None
@@ -804,10 +864,10 @@ impl<'session> ParseScope<'session> {
 
     /// Creates a decoded text owner with separate logical-length and allocator-slack accounting.
     pub fn metered_decoded_text(
-        &self,
+        &mut self,
         decoded_len: usize,
         resource: &'static str,
-    ) -> ParseResult<MeteredDecodedText<'_>> {
+    ) -> ParseResult<MeteredDecodedText<'session>> {
         self.preflight_active()?;
         let plan = CapacityPlan::with_element_size(0, 0, decoded_len, 1)
             .map_err(|cause| self.capacity_plan_error(resource, cause))?;
@@ -868,190 +928,180 @@ impl<'session> ParseScope<'session> {
             decoded_len,
             decoded,
             allocator_slack,
-            meter: self.storage_meter(),
+            identity: self.storage_identity(),
             resource,
         })
     }
 
-    fn storage_meter(&self) -> StorageMeter<'_> {
-        StorageMeter {
-            host: self.host,
-            callback_active: &self.callback_active,
+    fn storage_identity(&self) -> StorageIdentity<'session> {
+        StorageIdentity {
+            issuer: self.dependency_origin_issuer,
             terminal: self.terminal,
         }
     }
 
-    pub fn options<T: std::any::Any + Send + Sync + std::panic::RefUnwindSafe>(
-        &self,
-        key: &FormatOptionKey<T>,
-    ) -> ParseResult<&T> {
-        self.preflight_active()?;
-        self.options
-            .downcast_ref(key)
-            .ok_or_else(|| self.abort(ScopeAbortCause::OptionTypeMismatch))
-    }
-
-    pub fn poll(&self) -> ParseResult<()> {
+    pub fn poll(&mut self) -> ParseResult<()> {
         self.poll_active()
     }
 
-    fn poll_active(&self) -> ParseResult<()> {
+    fn poll_active(&mut self) -> ParseResult<()> {
         self.preflight_active()?;
-        self.host
+        self.store
             .poll()
             .map_err(|cause| self.abort(cause.into_scope_abort_cause()))
     }
 
-    pub fn charge_work(&self, amount: u64) -> ParseResult<()> {
-        self.with_work(ImportWorkClass::WorkUnits, amount, |work| {
-            work.complete_all()
+    pub fn charge_work(&mut self, amount: u64) -> ParseResult<()> {
+        let group = self.bind_work_group([ImportWorkClass::WorkUnits])?;
+        self.with_work(&group, [amount], |_exec, work| work.complete_all())
+    }
+
+    pub fn bind_work_group<const N: usize>(
+        &mut self,
+        classes: [ImportWorkClass; N],
+    ) -> ParseResult<ImportWorkGroup<'region, N>> {
+        self.preflight_active()?;
+        let lanes = classes.map(|class| class.accounting(self.limits));
+        let raw = self
+            .store
+            .bind_group(lanes.map(|(dimension, _)| dimension))
+            .map_err(|cause| self.abort(cause.into_scope_abort_cause()))?;
+        Ok(ImportWorkGroup {
+            raw,
+            issuer: self.dependency_origin_issuer,
+            item_limits: lanes.map(|(_, limit)| limit),
         })
     }
 
-    /// Runs one callback-scoped parser work action.
-    pub fn with_work<T, E>(
-        &self,
-        class: ImportWorkClass,
-        amount: u64,
-        action: impl FnOnce(&mut ImportWorkScope<'_, 'session, 1>) -> Result<T, E>,
+    pub fn with_work<const N: usize, T, E>(
+        &mut self,
+        group: &ImportWorkGroup<'region, N>,
+        amounts: [u64; N],
+        action: impl FnOnce(&mut Self, &mut ImportWorkScope<'region, N>) -> Result<T, E>,
     ) -> Result<T, E>
     where
         E: From<ParseFailure>,
     {
-        self.with_work_group([(class, amount)], action)
-    }
-
-    /// Runs a semantic parent action whose callback may admit sequential child work.
-    ///
-    /// The parent amount is attempted before the callback starts and remains incomplete when any
-    /// child decode, token, allocation, cancellation, or format action fails. Ordinary work scopes
-    /// remain non-nestable. Parent completion is sealed inside this method so callers cannot publish
-    /// it before every child action succeeds.
-    pub fn with_parent_work<T, E>(
-        &self,
-        class: ImportWorkClass,
-        amount: u64,
-        action: impl FnOnce() -> Result<T, E>,
-    ) -> Result<T, E>
-    where
-        E: From<ParseFailure>,
-    {
-        self.with_parent_work_group([(class, amount)], action)
-    }
-
-    /// Runs a semantic parent action spanning an exact fixed work group.
-    ///
-    /// Every parent amount is attempted before the callback starts. The group remains incomplete
-    /// when any child decode, token, allocation, cancellation, or format action fails, and completes
-    /// atomically only after the callback and final cancellation check both succeed.
-    pub fn with_parent_work_group<const N: usize, T, E>(
-        &self,
-        charges: [(ImportWorkClass, u64); N],
-        action: impl FnOnce() -> Result<T, E>,
-    ) -> Result<T, E>
-    where
-        E: From<ParseFailure>,
-    {
-        let mut work = self.begin_work_group(charges, true).map_err(E::from)?;
-        match action() {
-            Ok(value) => {
-                if let Err(failure) = self.poll_active() {
-                    work.finish_partial();
-                    return Err(E::from(failure));
-                }
-                if let Err(failure) = work.complete_all() {
-                    work.finish_partial();
-                    return Err(E::from(failure));
-                }
-                work.finish_exact().map_err(E::from)?;
-                Ok(value)
-            }
-            Err(cause) => {
-                work.finish_partial();
-                let _ = self.poll_active();
-                Err(cause)
-            }
-        }
-    }
-
-    /// Runs one callback-scoped parser action across an exact fixed work group.
-    pub fn with_work_group<const N: usize, T, E>(
-        &self,
-        charges: [(ImportWorkClass, u64); N],
-        action: impl FnOnce(&mut ImportWorkScope<'_, 'session, N>) -> Result<T, E>,
-    ) -> Result<T, E>
-    where
-        E: From<ParseFailure>,
-    {
-        let mut work = self.begin_work_group(charges, false).map_err(E::from)?;
-        match action(&mut work) {
+        let mut work = self
+            .begin_work_group(group, amounts, false)
+            .map_err(E::from)?;
+        match action(self, &mut work) {
             Ok(value) => {
                 if work.remaining().into_iter().any(|amount| amount != 0) {
-                    work.finish_partial();
+                    let _ = work.finish_partial();
                     self.poll_active().map_err(E::from)?;
                     return Err(E::from(self.abort(ScopeAbortCause::DescriptorContract {
                         code: "parse-work-callback-incomplete",
                     })));
                 }
                 work.finish_exact().map_err(E::from)?;
+                self.store.completed_action();
+                self.poll_active().map_err(E::from)?;
                 Ok(value)
             }
             Err(cause) => {
-                work.finish_partial();
+                let _ = work.finish_partial();
                 let _ = self.poll_active();
                 Err(cause)
             }
         }
     }
 
-    fn begin_work_group<const N: usize>(
-        &self,
-        charges: [(ImportWorkClass, u64); N],
-        parent: bool,
-    ) -> ParseResult<ImportWorkScope<'_, 'session, N>> {
-        self.preflight_active()?;
-        if self.work_outstanding.get() || (parent && self.parent_work_outstanding.get()) {
-            return Err(self.abort(ScopeAbortCause::DescriptorContract {
-                code: "parse-work-already-in-progress",
-            }));
-        }
-        self.poll_active()?;
-
-        let accounted = charges.map(|(class, amount)| {
-            let (dimension, item_limit) = class.accounting(self.limits);
-            (dimension, item_limit, amount)
-        });
-        let mut item_limit_failure = None;
-        for (dimension, item_limit, amount) in accounted {
-            self.host
-                .charge_attempted(dimension, amount)
-                .map_err(|cause| self.abort(cause.into_scope_abort_cause()))?;
-            if let Some((resource, limit)) = item_limit
-                && amount > limit
-            {
-                item_limit_failure = Some((resource, limit));
-                break;
+    pub fn with_parent_work<const N: usize, T, E>(
+        &mut self,
+        group: &ImportWorkGroup<'region, N>,
+        amounts: [u64; N],
+        action: impl FnOnce(&mut Self, &ImportWorkScope<'region, N>) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<ParseFailure>,
+    {
+        let mut work = self
+            .begin_work_group(group, amounts, true)
+            .map_err(E::from)?;
+        match action(self, &work) {
+            Ok(value) => {
+                if let Err(failure) = self.poll_active().and_then(|()| work.complete_all()) {
+                    let _ = work.finish_partial();
+                    return Err(E::from(failure));
+                }
+                work.finish_exact().map_err(E::from)?;
+                self.store.completed_action();
+                self.poll_active().map_err(E::from)?;
+                Ok(value)
+            }
+            Err(cause) => {
+                let _ = work.finish_partial();
+                let _ = self.poll_active();
+                Err(cause)
             }
         }
-        if let Some((resource, limit)) = item_limit_failure {
-            return Err(self.abort(ScopeAbortCause::ResourceLimit { resource, limit }));
-        }
+    }
 
-        let admitted = accounted.map(|(_, _, amount)| amount);
-        if parent {
-            self.parent_work_outstanding.set(true);
+    /// Cold convenience adapter. Repeated parser loops should bind their group once.
+    pub fn with_work_group<const N: usize, T, E>(
+        &mut self,
+        charges: [(ImportWorkClass, u64); N],
+        action: impl FnOnce(&mut Self, &mut ImportWorkScope<'region, N>) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<ParseFailure>,
+    {
+        let group = self
+            .bind_work_group(charges.map(|(class, _)| class))
+            .map_err(E::from)?;
+        self.with_work(&group, charges.map(|(_, amount)| amount), action)
+    }
+
+    pub fn with_parent_work_group<const N: usize, T, E>(
+        &mut self,
+        charges: [(ImportWorkClass, u64); N],
+        action: impl FnOnce(&mut Self, &ImportWorkScope<'region, N>) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<ParseFailure>,
+    {
+        let group = self
+            .bind_work_group(charges.map(|(class, _)| class))
+            .map_err(E::from)?;
+        self.with_parent_work(&group, charges.map(|(_, amount)| amount), action)
+    }
+
+    fn begin_work_group<const N: usize>(
+        &mut self,
+        group: &ImportWorkGroup<'region, N>,
+        amounts: [u64; N],
+        parent: bool,
+    ) -> ParseResult<ImportWorkScope<'region, N>> {
+        self.check_session(group.issuer)?;
+        self.store
+            .before_action()
+            .map_err(|cause| self.abort(cause.into_scope_abort_cause()))?;
+        let limits = group.item_limits.map(|limit| limit.map(|(_, limit)| limit));
+        let result = if parent {
+            group.raw.begin_parser_parent(amounts, limits)
         } else {
-            self.work_outstanding.set(true);
-        }
+            group.raw.begin_parser_child(amounts, limits)
+        };
+        let raw = result.map_err(|cause| match cause {
+            ImportParserAdmissionError::Store(cause) => self.abort(cause.into_scope_abort_cause()),
+            ImportParserAdmissionError::ItemLimit {
+                index,
+                value,
+                limit,
+            } => {
+                debug_assert!(value > limit);
+                match group.item_limits.get(index).copied().flatten() {
+                    Some((resource, _)) => {
+                        self.abort(ScopeAbortCause::ResourceLimit { resource, limit })
+                    }
+                    None => self.descriptor_contract_failure("parse-work-item-limit-lane-invalid"),
+                }
+            }
+        })?;
         Ok(ImportWorkScope {
-            scope: self,
-            dimensions: accounted.map(|(dimension, _, _)| dimension),
-            item_limits: accounted.map(|(_, item_limit, _)| item_limit),
-            admitted,
-            completed: [0; N],
-            parent,
-            active: true,
-            finished: false,
+            raw,
+            terminal: self.terminal,
         })
     }
 
@@ -1093,37 +1143,37 @@ impl<'session> ParseScope<'session> {
     }
 
     pub fn report_progress(
-        &self,
+        &mut self,
         phase: ImportProgressPhase,
         unit: ImportProgressUnit,
         completed: u64,
         total: Option<u64>,
     ) -> ParseResult<()> {
         self.preflight_active()?;
-        self.host
+        self.store
             .report_progress(phase, unit, completed, total)
             .map_err(|cause| self.abort(cause.into_scope_abort_cause()))
     }
 
     pub(crate) fn reserve_storage_cause(
-        &self,
+        &mut self,
         storage: ImportStorageClass,
         bytes: u64,
     ) -> Result<ImportStoreReservation, ScopeAbortCause> {
         let (phase, dimension) = storage.accounting();
-        self.host
+        self.store
             .reserve(phase, dimension, bytes)
             .map_err(|cause| cause.into_scope_abort_cause())
     }
 
     pub(crate) fn reserve_retained_storage_cause(
-        &self,
+        &mut self,
         storage: ImportStorageClass,
         bytes: u64,
         allocations: u64,
     ) -> Result<ImportStoreReservation, ScopeAbortCause> {
         let (phase, dimension) = storage.accounting();
-        self.host
+        self.store
             .reserve_retained(phase, dimension, bytes, allocations)
             .map_err(|cause| cause.into_scope_abort_cause())
     }
@@ -1133,7 +1183,7 @@ impl<'session> ParseScope<'session> {
         reservation: &mut ImportStoreReservation,
         bytes: u64,
     ) -> Result<(), ScopeAbortCause> {
-        self.host
+        self.store
             .resize(reservation, bytes)
             .map_err(|cause| cause.into_scope_abort_cause())
     }
@@ -1144,7 +1194,7 @@ impl<'session> ParseScope<'session> {
         bytes: u64,
     ) -> ParseResult<()> {
         self.preflight_active()?;
-        self.host
+        self.store
             .resize(&mut reservation.reservation, bytes)
             .map_err(|cause| self.abort(cause.into_scope_abort_cause()))
     }
@@ -1179,7 +1229,7 @@ impl<'session> ParseScope<'session> {
     /// The loss kind, disposition, diagnostic severity, and retained source identity are
     /// session-owned so a format extension cannot forge arbitrary loss evidence.
     pub fn record_format_recovery(
-        &self,
+        &mut self,
         code: DiagnosticCode,
         source: DiagnosticSource<'_>,
         raw_range: DiagnosticByteRange,
@@ -1189,7 +1239,7 @@ impl<'session> ParseScope<'session> {
     }
 
     pub(crate) fn record_format_recovery_with_location(
-        &self,
+        &mut self,
         code: DiagnosticCode,
         source: DiagnosticSource<'_>,
         raw_range: DiagnosticByteRange,
@@ -1209,15 +1259,18 @@ impl<'session> ParseScope<'session> {
         }
         let raw_bytes = raw_range.end().saturating_sub(raw_range.start());
         let charge = self
-            .host
+            .store
             .charge_attempted(ImportDimension::RecoveryCount, 1)
-            .and_then(|()| self.host.charge_consumed(ImportDimension::RecoveryCount, 1))
             .and_then(|()| {
-                self.host
+                self.store
+                    .charge_consumed(ImportDimension::RecoveryCount, 1)
+            })
+            .and_then(|()| {
+                self.store
                     .charge_attempted(ImportDimension::RecoveryRawBytes, raw_bytes)
             })
             .and_then(|()| {
-                self.host
+                self.store
                     .charge_consumed(ImportDimension::RecoveryRawBytes, raw_bytes)
             });
         if let Err(cause) = charge {
@@ -1277,7 +1330,7 @@ impl<'session> ParseScope<'session> {
     /// queryable even when the diagnostic message is truncated.
     #[allow(clippy::too_many_arguments)]
     pub fn record_source_semantic_loss(
-        &self,
+        &mut self,
         code: DiagnosticCode,
         subject: SourceScopeEntityKind,
         object_path: &str,
@@ -1326,17 +1379,20 @@ impl<'session> ParseScope<'session> {
 
     /// Submits one finalized source-scope record to this parse session's sealed slot.
     pub fn record_source_scope(
-        &self,
-        finalized: FinalizedSourceScopeRecord<'_, 'session>,
+        &mut self,
+        finalized: FinalizedSourceScopeRecord<'session>,
     ) -> ParseResult<()> {
+        let diagnostics = self.diagnostics;
+        let loss_evidence = self.loss_evidence;
+        let source_scope_record = self.source_scope_record;
+
         self.preflight_active()?;
-        if !finalized.belongs_to(self) {
+        if !finalized.is_issued_by(self.dependency_origin_issuer) {
             return Err(self.abort(ScopeAbortCause::DescriptorContract {
                 code: "source-scope-record-owner-mismatch",
             }));
         }
-        let mut source_scope_slot = self
-            .source_scope_record
+        let mut source_scope_slot = source_scope_record
             .try_borrow_mut()
             .map_err(|_| self.reentrant_capability_failure())?;
         if source_scope_slot.is_some() {
@@ -1399,7 +1455,7 @@ impl<'session> ParseScope<'session> {
             return Err(self.abort(ScopeAbortCause::ResourceLimit { resource, limit }));
         }
 
-        let mut loss_evidence = match self.loss_evidence.try_borrow_mut() {
+        let mut loss_evidence = match loss_evidence.try_borrow_mut() {
             Ok(evidence) => evidence,
             Err(_) => {
                 self.discard_diagnostic_event(diagnostic)?;
@@ -1407,7 +1463,7 @@ impl<'session> ParseScope<'session> {
                 return Err(self.reentrant_capability_failure());
             }
         };
-        let mut diagnostics = match self.diagnostics.try_borrow_mut() {
+        let mut diagnostics = match diagnostics.try_borrow_mut() {
             Ok(diagnostics) => diagnostics,
             Err(_) => {
                 drop(loss_evidence);
@@ -1437,7 +1493,7 @@ impl<'session> ParseScope<'session> {
     }
 
     fn retain_loss_evidence(
-        &self,
+        &mut self,
         kind: ImportLossKind,
         subject: ImportLossSubject,
         code: DiagnosticCode,
@@ -1451,7 +1507,7 @@ impl<'session> ParseScope<'session> {
     }
 
     fn prepare_loss_evidence(
-        &self,
+        &mut self,
         kind: ImportLossKind,
         subject: ImportLossSubject,
         code: DiagnosticCode,
@@ -1459,7 +1515,9 @@ impl<'session> ParseScope<'session> {
         raw_range: Option<DiagnosticByteRange>,
         disposition: ImportLossDisposition,
     ) -> ParseResult<PreparedLossEvidence> {
-        self.host
+        let loss_evidence = self.loss_evidence;
+
+        self.store
             .charge_attempted(ImportDimension::LossEvidenceCount, 1)
             .map_err(|cause| self.abort(cause.into_scope_abort_cause()))?;
         let source_plan = CapacityPlan::for_type::<u8>(0, 0, source.path().as_str().len())
@@ -1468,7 +1526,7 @@ impl<'session> ParseScope<'session> {
             .envelope_delta_bytes()
             .map_err(|cause| self.capacity_plan_error("loss-evidence-source", cause))?;
         let mut reservation = self
-            .host
+            .store
             .reserve_retained(
                 ImportLedgerPhase::FormatNormalization,
                 ImportDimension::LossEvidenceBytes,
@@ -1487,19 +1545,18 @@ impl<'session> ParseScope<'session> {
             .finish(0, retained_source.capacity_bytes())
             .map_err(|cause| self.capacity_plan_error("loss-evidence-source", cause))?;
         if source_bytes != source_envelope {
-            self.host
+            self.store
                 .resize(&mut reservation, source_bytes)
                 .map_err(|cause| self.abort(cause.into_scope_abort_cause()))?;
         }
 
         let (prior_capacity_bytes, capacity_result) = {
-            let mut evidence = self
-                .loss_evidence
+            let mut evidence = loss_evidence
                 .try_borrow_mut()
                 .map_err(|_| self.reentrant_capability_failure())?;
             let prior_capacity_bytes = evidence.capacity_bytes();
             let result = evidence.try_reserve(1, "loss-evidence-capacity", |capacity_bytes| {
-                self.host
+                self.store
                     .reserve_retained(
                         ImportLedgerPhase::FormatNormalization,
                         ImportDimension::LossEvidenceBytes,
@@ -1511,8 +1568,7 @@ impl<'session> ParseScope<'session> {
             (prior_capacity_bytes, result)
         };
         capacity_result.map_err(|cause| self.abort(cause))?;
-        let capacity_bytes = self
-            .loss_evidence
+        let capacity_bytes = loss_evidence
             .try_borrow()
             .map_err(|_| self.reentrant_capability_failure())?
             .capacity_bytes()
@@ -1521,7 +1577,7 @@ impl<'session> ParseScope<'session> {
             .checked_add(capacity_bytes)
             .ok_or_else(|| self.resource_limit_exceeded("loss-evidence-bytes", u64::MAX))?;
         let charge = self
-            .host
+            .store
             .charge_attempted(ImportDimension::LossEvidenceBytes, actual_bytes);
         if let Err(cause) = charge {
             return Err(self.abort(cause.into_scope_abort_cause()));
@@ -1542,9 +1598,10 @@ impl<'session> ParseScope<'session> {
         })
     }
 
-    fn commit_loss_evidence(&self, prepared: PreparedLossEvidence) -> ParseResult<()> {
-        let mut loss_evidence = self
-            .loss_evidence
+    fn commit_loss_evidence(&mut self, prepared: PreparedLossEvidence) -> ParseResult<()> {
+        let loss_evidence = self.loss_evidence;
+
+        let mut loss_evidence = loss_evidence
             .try_borrow_mut()
             .map_err(|_| self.reentrant_capability_failure())?;
         if !loss_evidence.has_slots(1) {
@@ -1558,7 +1615,7 @@ impl<'session> ParseScope<'session> {
     }
 
     fn charge_loss_evidence_consumed(&self, stored_bytes: u64) -> ParseResult<()> {
-        self.host
+        self.store
             .charge_consumed_batch(&[
                 (ImportDimension::LossEvidenceCount, 1),
                 (ImportDimension::LossEvidenceBytes, stored_bytes),
@@ -1567,7 +1624,7 @@ impl<'session> ParseScope<'session> {
     }
 
     pub fn emit_diagnostic(
-        &self,
+        &mut self,
         severity: DiagnosticSeverity,
         code: DiagnosticCode,
         message: fmt::Arguments<'_>,
@@ -1590,7 +1647,7 @@ impl<'session> ParseScope<'session> {
 
     #[allow(clippy::too_many_arguments)]
     pub fn emit_diagnostic_with(
-        &self,
+        &mut self,
         severity: DiagnosticSeverity,
         code: DiagnosticCode,
         phase: ImportProgressPhase,
@@ -1615,7 +1672,7 @@ impl<'session> ParseScope<'session> {
 
     #[allow(clippy::too_many_arguments)]
     pub fn emit_text_diagnostic_with(
-        &self,
+        &mut self,
         severity: DiagnosticSeverity,
         code: DiagnosticCode,
         phase: ImportProgressPhase,
@@ -1644,7 +1701,7 @@ impl<'session> ParseScope<'session> {
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn emit_diagnostic_with_location(
-        &self,
+        &mut self,
         severity: DiagnosticSeverity,
         code: DiagnosticCode,
         phase: ImportProgressPhase,
@@ -1700,7 +1757,7 @@ impl<'session> ParseScope<'session> {
     }
 
     fn emit_diagnostic_event(
-        &self,
+        &mut self,
         metadata: DiagnosticEventMetadata<'_>,
         details: impl FnOnce(&mut dyn DiagnosticDetailSink),
         message: fmt::Arguments<'_>,
@@ -1710,11 +1767,13 @@ impl<'session> ParseScope<'session> {
     }
 
     fn prepare_diagnostic_event(
-        &self,
+        &mut self,
         metadata: DiagnosticEventMetadata<'_>,
         details: impl FnOnce(&mut dyn DiagnosticDetailSink),
         message: fmt::Arguments<'_>,
     ) -> ParseResult<PreparedDiagnosticEvent> {
+        let diagnostics = self.diagnostics;
+
         let DiagnosticEventMetadata {
             severity,
             code,
@@ -1725,27 +1784,26 @@ impl<'session> ParseScope<'session> {
             object_path,
         } = metadata;
         self.preflight_active()?;
-        let admission = self
-            .diagnostics
+        let admission = diagnostics
             .try_borrow_mut()
             .map_err(|_| self.reentrant_capability_failure())?
             .begin(code, source, byte_range, line_column, object_path);
         let initial_failure = admission.failure().cloned();
         let initial_charge = self
-            .host
+            .store
             .charge_attempted(ImportDimension::DiagnosticCount, 1)
             .and_then(|()| {
-                self.host.charge_attempted(
+                self.store.charge_attempted(
                     ImportDimension::DiagnosticBytes,
                     admission.fixed_attempted_bytes(),
                 )
             });
         if let Err(cause) = initial_charge {
-            self.diagnostics.borrow_mut().discard_admission();
+            diagnostics.borrow_mut().discard_admission();
             return Err(self.abort(cause.into_scope_abort_cause()));
         }
         if let Some(cause) = initial_failure {
-            self.diagnostics.borrow_mut().discard_admission();
+            diagnostics.borrow_mut().discard_admission();
             return Err(self.abort(ScopeAbortCause::Diagnostic(cause)));
         }
 
@@ -1754,7 +1812,7 @@ impl<'session> ParseScope<'session> {
             None
         } else {
             Some(
-                self.host
+                self.store
                     .reserve_retained(
                         ImportLedgerPhase::FormatNormalization,
                         ImportDimension::DiagnosticBytes,
@@ -1777,8 +1835,7 @@ impl<'session> ParseScope<'session> {
             None
         };
         if reservation.is_some() {
-            let mut diagnostics = self
-                .diagnostics
+            let mut diagnostics = diagnostics
                 .try_borrow_mut()
                 .map_err(|_| self.reentrant_capability_failure())?;
             diagnostics
@@ -1793,8 +1850,7 @@ impl<'session> ParseScope<'session> {
                 .map_err(|cause| self.abort(cause))?;
         }
 
-        let prepared = self
-            .diagnostics
+        let prepared = diagnostics
             .try_borrow_mut()
             .map_err(|_| self.reentrant_capability_failure())?
             .prepare(
@@ -1812,7 +1868,7 @@ impl<'session> ParseScope<'session> {
         let prepared = match prepared {
             Ok(prepared) => prepared,
             Err(failure) => {
-                if let Err(cause) = self.host.charge_attempted(
+                if let Err(cause) = self.store.charge_attempted(
                     ImportDimension::DiagnosticBytes,
                     failure.additional_attempted_bytes,
                 ) {
@@ -1832,17 +1888,17 @@ impl<'session> ParseScope<'session> {
             }
         };
 
-        if let Err(cause) = self.host.charge_attempted(
+        if let Err(cause) = self.store.charge_attempted(
             ImportDimension::DiagnosticBytes,
             prepared.additional_attempted_bytes(),
         ) {
-            self.diagnostics.borrow_mut().discard_prepared(prepared);
+            diagnostics.borrow_mut().discard_prepared(prepared);
             return Err(self.abort(cause.into_scope_abort_cause()));
         }
 
         let (payload_reservation, structural_reservation) = if prepared.is_stored() {
             let Some(upper_bound) = reservation.take() else {
-                self.diagnostics.borrow_mut().discard_prepared(prepared);
+                diagnostics.borrow_mut().discard_prepared(prepared);
                 return Err(self.abort(ScopeAbortCause::DescriptorContract {
                     code: "stored-diagnostic-without-reservation",
                 }));
@@ -1851,16 +1907,16 @@ impl<'session> ParseScope<'session> {
             let structural_bytes = prepared.structural_bytes();
             let mut exact = upper_bound;
             let payload_resize = self
-                .host
+                .store
                 .resize(&mut exact, payload_capacity_bytes)
                 .map_err(|cause| cause.into_scope_abort_cause());
             if let Err(cause) = payload_resize {
-                self.diagnostics.borrow_mut().discard_prepared(prepared);
+                diagnostics.borrow_mut().discard_prepared(prepared);
                 drop(exact);
                 return Err(self.abort(cause));
             }
             let Some(structural_upper_bound) = structural_reservation.take() else {
-                self.diagnostics.borrow_mut().discard_prepared(prepared);
+                diagnostics.borrow_mut().discard_prepared(prepared);
                 drop(exact);
                 return Err(self.abort(ScopeAbortCause::DescriptorContract {
                     code: "stored-diagnostic-without-structural-reservation",
@@ -1868,11 +1924,11 @@ impl<'session> ParseScope<'session> {
             };
             let mut structural_exact = structural_upper_bound;
             let structural_resize = self
-                .host
+                .store
                 .resize(&mut structural_exact, structural_bytes)
                 .map_err(|cause| cause.into_scope_abort_cause());
             if let Err(cause) = structural_resize {
-                self.diagnostics.borrow_mut().discard_prepared(prepared);
+                diagnostics.borrow_mut().discard_prepared(prepared);
                 drop(exact);
                 drop(structural_exact);
                 return Err(self.abort(cause));
@@ -1888,11 +1944,13 @@ impl<'session> ParseScope<'session> {
         })
     }
 
-    fn commit_diagnostic_event(&self, event: PreparedDiagnosticEvent) -> ParseResult<()> {
+    fn commit_diagnostic_event(&mut self, event: PreparedDiagnosticEvent) -> ParseResult<()> {
+        let diagnostics = self.diagnostics;
+
         if !event.is_stored() {
             return Ok(());
         }
-        let mut diagnostics = match self.diagnostics.try_borrow_mut() {
+        let mut diagnostics = match diagnostics.try_borrow_mut() {
             Ok(diagnostics) => diagnostics,
             Err(_) => {
                 drop(event);
@@ -1914,7 +1972,7 @@ impl<'session> ParseScope<'session> {
     }
 
     fn charge_diagnostic_consumed(&self, stored_bytes: u64) -> ParseResult<()> {
-        self.host
+        self.store
             .charge_consumed_batch(&[
                 (ImportDimension::DiagnosticCount, 1),
                 (ImportDimension::DiagnosticBytes, stored_bytes),
@@ -1923,8 +1981,9 @@ impl<'session> ParseScope<'session> {
     }
 
     fn discard_diagnostic_event(&self, event: PreparedDiagnosticEvent) -> ParseResult<()> {
-        let mut diagnostics = self
-            .diagnostics
+        let diagnostics = self.diagnostics;
+
+        let mut diagnostics = diagnostics
             .try_borrow_mut()
             .map_err(|_| self.reentrant_capability_failure())?;
         event.discard(&mut diagnostics);
@@ -1932,10 +1991,10 @@ impl<'session> ParseScope<'session> {
     }
 
     fn reserve_diagnostic_scratch_cause(
-        &self,
+        &mut self,
         capacity_bytes: u64,
     ) -> Result<ImportStoreReservation, ScopeAbortCause> {
-        self.host
+        self.store
             .reserve_retained(
                 ImportLedgerPhase::FormatNormalization,
                 ImportDimension::ScratchBytes,
@@ -1945,20 +2004,17 @@ impl<'session> ParseScope<'session> {
             .map_err(|cause| cause.into_scope_abort_cause())
     }
 
-    /// Returns the opaque origin capability for references authored by the primary resource.
-    pub fn root_origin(&self) -> DependencyOrigin<'_> {
-        DependencyOrigin::primary(self.dependency_origin_issuer, self.primary_io)
-    }
-
     /// Acquires one dependency relative to the resource that authored its hostile reference.
     ///
     /// Requiredness is derived exclusively from the selected format's frozen role declaration.
-    pub fn dependency<'scope>(
-        &'scope self,
-        origin: &DependencyOrigin<'scope>,
+    pub fn dependency(
+        &mut self,
+        origin: &DependencyOrigin<'session>,
         role: &DependencyRoleId,
         raw_reference: &str,
-    ) -> ParseResult<DependencyOutcome<'scope>> {
+    ) -> ParseResult<DependencyOutcome<'session>> {
+        let resource_graph = self.resource_graph;
+
         self.poll_active()?;
         if !origin.is_issued_by(self.dependency_origin_issuer) {
             return Err(self.abort(ScopeAbortCause::DescriptorContract {
@@ -1974,14 +2030,13 @@ impl<'session> ParseScope<'session> {
                         code: "dependency-origin-primary-backend-mismatch",
                     }));
                 }
-                self.resource_graph
+                resource_graph
                     .try_borrow()
                     .map_err(|_| self.reentrant_capability_failure())?
                     .source_for_primary()
                     .map_err(|cause| self.abort(cause.into_scope_cause()))?
             }
-            DependencyOriginNode::Dependency(index) => self
-                .resource_graph
+            DependencyOriginNode::Dependency(index) => resource_graph
                 .try_borrow()
                 .map_err(|_| self.reentrant_capability_failure())?
                 .source_for_cache(index)
@@ -1993,11 +2048,10 @@ impl<'session> ParseScope<'session> {
         };
         self.charge_logical_reference()
             .map_err(|failure| self.abort_dependency_failure(failure))?;
-        let pending = self
-            .resource_graph
+        let pending = resource_graph
             .try_borrow_mut()
             .map_err(|_| self.reentrant_capability_failure())?
-            .begin_relation(self.host, source, role, requirement, raw_reference)
+            .begin_relation(&mut self.store, source, role, requirement, raw_reference)
             .map_err(|cause| self.abort(cause.into_scope_cause()))?;
 
         let authorized = match origin.node() {
@@ -2010,8 +2064,7 @@ impl<'session> ParseScope<'session> {
                 raw_reference,
             ),
             DependencyOriginNode::Dependency(index) => {
-                let cache = self
-                    .resource_graph
+                let cache = resource_graph
                     .try_borrow()
                     .map_err(|_| self.reentrant_capability_failure())?;
                 let Some(identity) = cache.origin_identity(index) else {
@@ -2039,11 +2092,11 @@ impl<'session> ParseScope<'session> {
             });
         match (requirement, acquired) {
             (_, Ok((snapshot, pending, normalized, cache_index))) => {
-                self.resource_graph
+                resource_graph
                     .try_borrow_mut()
                     .map_err(|_| self.reentrant_capability_failure())?
                     .complete_available(
-                        self.host,
+                        &mut self.store,
                         pending,
                         cache_index,
                         snapshot.bytes(),
@@ -2081,10 +2134,10 @@ impl<'session> ParseScope<'session> {
 
     /// Extracts an admitted dependency, failing closed when the caller expected availability but
     /// the frozen descriptor allowed an unavailable outcome.
-    pub fn into_available_dependency<'scope>(
-        &'scope self,
-        outcome: DependencyOutcome<'scope>,
-    ) -> ParseResult<DependencySnapshot<'scope>> {
+    pub fn into_available_dependency(
+        &mut self,
+        outcome: DependencyOutcome<'session>,
+    ) -> ParseResult<DependencySnapshot<'session>> {
         match outcome.into_result() {
             Ok(snapshot) => Ok(snapshot),
             Err(evidence) => {
@@ -2096,14 +2149,16 @@ impl<'session> ParseScope<'session> {
         }
     }
 
-    pub fn format_failure<P>(&self, producer: P) -> ParseFailure
+    pub fn format_failure<P>(&mut self, producer: P) -> ParseFailure
     where
         P: FormatFailureEvidenceProducer,
     {
+        let format_failure_storage = self.format_failure_storage;
+
         let mut producer = Some(producer);
         let captured = (|| -> ParseResult<(FormatFailureEnvelope, FormatFailureEvidence)> {
             self.preflight_active()?;
-            let failure_storage_is_active = match self.format_failure_storage.try_borrow() {
+            let failure_storage_is_active = match format_failure_storage.try_borrow() {
                 Ok(storage) => storage.is_active(),
                 Err(_) => return Err(self.reentrant_capability_failure()),
             };
@@ -2151,7 +2206,7 @@ impl<'session> ParseScope<'session> {
                 })?;
             self.resize_live(&mut storage, actual_storage_bytes)?;
             {
-                let mut failure_storage = match self.format_failure_storage.try_borrow_mut() {
+                let mut failure_storage = match format_failure_storage.try_borrow_mut() {
                     Ok(storage) => storage,
                     Err(_) => return Err(self.reentrant_capability_failure()),
                 };
@@ -2232,7 +2287,7 @@ impl<'session> ParseScope<'session> {
         match captured {
             Ok((envelope, evidence)) => match self.preflight_active() {
                 Ok(()) => {
-                    let storage = self.format_failure_storage.borrow_mut().reservation.take();
+                    let storage = format_failure_storage.borrow_mut().reservation.take();
                     if storage.is_none() {
                         return self.abort(ScopeAbortCause::DescriptorContract {
                             code: "format-failure-without-storage-reservation",
@@ -2244,15 +2299,6 @@ impl<'session> ParseScope<'session> {
             },
             Err(failure) => failure,
         }
-    }
-
-    pub(crate) fn take_terminal_abort(&self) -> Option<ScopeAbort> {
-        self.terminal.borrow_mut().take().map(|cause| {
-            match self.dependency_failure_context.borrow_mut().take() {
-                Some(context) => ScopeAbort::with_dependency_context(cause, context),
-                None => ScopeAbort::new(cause),
-            }
-        })
     }
 
     fn dependency_failure(
@@ -2321,7 +2367,9 @@ impl<'session> ParseScope<'session> {
         &self,
         context: DependencyResolutionContext,
     ) -> DependencyResolutionFailure {
-        let mut stored = self.dependency_failure.borrow_mut();
+        let dependency_failure = self.dependency_failure;
+
+        let mut stored = dependency_failure.borrow_mut();
         if stored.is_none() {
             *stored = Some(context);
         }
@@ -2332,7 +2380,9 @@ impl<'session> ParseScope<'session> {
         &self,
         _failure: DependencyResolutionFailure,
     ) -> DependencyResolutionContext {
-        self.dependency_failure
+        let dependency_failure = self.dependency_failure;
+
+        dependency_failure
             .borrow_mut()
             .take()
             .unwrap_or(DependencyResolutionContext {
@@ -2347,7 +2397,7 @@ impl<'session> ParseScope<'session> {
     }
 
     fn normalize_dependency_path_from(
-        &self,
+        &mut self,
         origin: &AssetPath,
         raw_reference: &str,
     ) -> Result<MeteredDependencyPath, ScopeAbortCause> {
@@ -2360,7 +2410,7 @@ impl<'session> ParseScope<'session> {
     }
 
     fn clone_metered_dependency_path(
-        &self,
+        &mut self,
         source: &AssetPath,
         resource: &'static str,
     ) -> Result<MeteredDependencyPath, ScopeAbortCause> {
@@ -2377,7 +2427,7 @@ impl<'session> ParseScope<'session> {
     }
 
     fn finish_metered_dependency_path(
-        &self,
+        &mut self,
         path: AssetPath,
         mut reservation: ImportStoreReservation,
         resource: &'static str,
@@ -2396,10 +2446,10 @@ impl<'session> ParseScope<'session> {
         Ok(MeteredDependencyPath::new(path, reservation))
     }
 
-    fn authorize_dependency<'scope>(
-        &'scope self,
+    fn authorize_dependency(
+        &mut self,
         pending: PendingResourceRelation,
-        origin_io: &'scope dyn AssetIo,
+        origin_io: &'session dyn AssetIo,
         origin_authority: &AuthorityDomain,
         origin_source: &AssetPath,
         role: &DependencyRoleId,
@@ -2408,7 +2458,7 @@ impl<'session> ParseScope<'session> {
         (
             PendingResourceRelation,
             MeteredDependencyPath,
-            AuthorizedDependency<'scope>,
+            AuthorizedDependency<'session>,
         ),
         DependencyResolutionFailure,
     > {
@@ -2579,22 +2629,24 @@ impl<'session> ParseScope<'session> {
         Ok((pending, normalized, authorized))
     }
 
-    fn prepare_authorized_target<'scope>(
-        &'scope self,
+    fn prepare_authorized_target(
+        &mut self,
         mut pending: PendingResourceRelation,
         normalized: MeteredDependencyPath,
-        authorized: AuthorizedDependency<'scope>,
+        authorized: AuthorizedDependency<'session>,
     ) -> Result<
         (
             PendingResourceRelation,
             MeteredDependencyPath,
-            AuthorizedDependency<'scope>,
+            AuthorizedDependency<'session>,
         ),
         DependencyResolutionFailure,
     > {
-        let prepared = match self.resource_graph.try_borrow_mut() {
+        let resource_graph = self.resource_graph;
+
+        let prepared = match resource_graph.try_borrow_mut() {
             Ok(mut graph) => graph
-                .prepare_target(self.host, &mut pending, authorized.identity())
+                .prepare_target(&mut self.store, &mut pending, authorized.identity())
                 .map_err(|cause| cause.into_scope_cause()),
             Err(_) => Err(ScopeAbortCause::DescriptorContract {
                 code: "parse-capability-reentered",
@@ -2606,20 +2658,22 @@ impl<'session> ParseScope<'session> {
         }
     }
 
-    fn acquire_authorized<'scope>(
-        &'scope self,
+    fn acquire_authorized(
+        &mut self,
         pending: PendingResourceRelation,
         normalized: MeteredDependencyPath,
-        authorized: AuthorizedDependency<'scope>,
+        authorized: AuthorizedDependency<'session>,
     ) -> Result<
         (
-            DependencySnapshot<'scope>,
+            DependencySnapshot<'session>,
             PendingResourceRelation,
             MeteredDependencyPath,
             usize,
         ),
         DependencyResolutionFailure,
     > {
+        let resource_graph = self.resource_graph;
+
         let (io, identity, stable_identity_schema, registered_resolver) = authorized.into_parts();
         let backend_authority = if std::ptr::eq(io, self.primary_io) {
             self.primary_authority.clone()
@@ -2652,8 +2706,8 @@ impl<'session> ParseScope<'session> {
             ));
         }
         let cached = {
-            let graph = self.resource_graph.borrow();
-            match graph.acquisition_state(self.host, &identity) {
+            let graph = resource_graph.borrow();
+            match graph.acquisition_state(&mut self.store, &identity) {
                 Ok(Some(ResourceAcquisitionState::Available {
                     cache_index,
                     bytes,
@@ -2744,8 +2798,8 @@ impl<'session> ParseScope<'session> {
             ));
         }
 
-        let capacity = match self.resource_graph.try_borrow_mut() {
-            Ok(mut graph) => graph.reserve_acquisition_capacity(self.host),
+        let capacity = match resource_graph.try_borrow_mut() {
+            Ok(mut graph) => graph.reserve_acquisition_capacity(&mut self.store),
             Err(_) => Err(ResourceGraphError::Scope(
                 ScopeAbortCause::DescriptorContract {
                     code: "parse-capability-reentered",
@@ -2785,8 +2839,8 @@ impl<'session> ParseScope<'session> {
                 ));
             }
         };
-        let marked = match self.resource_graph.borrow_mut().begin_acquisition(
-            self.host,
+        let marked = match resource_graph.borrow_mut().begin_acquisition(
+            &mut self.store,
             cache_identity,
             cache_identity_path_reservation,
         ) {
@@ -2821,8 +2875,8 @@ impl<'session> ParseScope<'session> {
             });
         match acquired {
             Ok((snapshot_bytes, snapshot_identity)) => {
-                let completed = self.resource_graph.borrow_mut().complete_acquisition(
-                    self.host,
+                let completed = resource_graph.borrow_mut().complete_acquisition(
+                    &mut self.store,
                     &identity,
                     Arc::clone(&snapshot_bytes),
                     stable_identity_schema,
@@ -2832,10 +2886,9 @@ impl<'session> ParseScope<'session> {
                     Err(cause) => {
                         // Preserve the original admission/control failure. Cleanup is metered too;
                         // a denied cleanup leaves the session-owned resolving row for terminal drop.
-                        let _ = self
-                            .resource_graph
+                        let _ = resource_graph
                             .borrow_mut()
-                            .abandon_acquisition(self.host, &identity);
+                            .abandon_acquisition(&mut self.store, &identity);
                         return Err(self.dependency_failure(
                             Some(pending),
                             Some(identity),
@@ -2873,13 +2926,15 @@ impl<'session> ParseScope<'session> {
     }
 
     fn finish_dependency_resolution_failure(
-        &self,
+        &mut self,
         pending: PendingResourceRelation,
         identity: DependencyIdentity,
         observation_context: DependencyFailureObservationContext<'_>,
         normalized: MeteredDependencyPath,
         cause: ScopeAbortCause,
     ) -> DependencyResolutionFailure {
+        let resource_graph = self.resource_graph;
+
         // Operation-terminal failures must not be replaced by another probe admission while
         // trying to cache an unavailable input. Only acquisition-local budgets with authorized
         // optional fallback keep the cache/evidence path; refused cleanup stays session-owned.
@@ -2893,10 +2948,9 @@ impl<'session> ParseScope<'session> {
             ScopeAbortCause::Control(_) | ScopeAbortCause::TrustedExtension { .. }
         ) || (matches!(&cause, ScopeAbortCause::Ledger(_)) && !optional_fallback)
         {
-            let _ = self
-                .resource_graph
+            let _ = resource_graph
                 .borrow_mut()
-                .abandon_acquisition(self.host, &identity);
+                .abandon_acquisition(&mut self.store, &identity);
             return self.dependency_failure(Some(pending), Some(identity), normalized, cause);
         }
         let observation = match self.registered_negative_observation(
@@ -2908,10 +2962,9 @@ impl<'session> ParseScope<'session> {
         ) {
             Ok(observation) => observation,
             Err(proof_cause) => {
-                let _ = self
-                    .resource_graph
+                let _ = resource_graph
                     .borrow_mut()
-                    .abandon_acquisition(self.host, &identity);
+                    .abandon_acquisition(&mut self.store, &identity);
                 return self.dependency_failure(
                     Some(pending),
                     Some(identity),
@@ -2920,16 +2973,13 @@ impl<'session> ParseScope<'session> {
                 );
             }
         };
-        let cached_index = self
-            .resource_graph
-            .borrow_mut()
-            .complete_failed_acquisition(
-                self.host,
-                &identity,
-                cause,
-                observation_context.stable_identity_schema,
-                observation,
-            );
+        let cached_index = resource_graph.borrow_mut().complete_failed_acquisition(
+            &mut self.store,
+            &identity,
+            cause,
+            observation_context.stable_identity_schema,
+            observation,
+        );
         match cached_index {
             Ok(index) => self.cached_dependency_failure(
                 pending,
@@ -2939,17 +2989,16 @@ impl<'session> ParseScope<'session> {
                 DependencyCacheDisposition::Fresh,
             ),
             Err(cause) => {
-                let _ = self
-                    .resource_graph
+                let _ = resource_graph
                     .borrow_mut()
-                    .abandon_acquisition(self.host, &identity);
+                    .abandon_acquisition(&mut self.store, &identity);
                 self.dependency_failure(Some(pending), Some(identity), normalized, cause)
             }
         }
     }
 
     fn registered_negative_observation<'target>(
-        &self,
+        &mut self,
         registered_resolver: Option<&'static RegisteredResolverProfile>,
         io: &'target dyn AssetIo,
         identity: &'target DependencyIdentity,
@@ -3008,7 +3057,7 @@ impl<'session> ParseScope<'session> {
                 caps.verification_work(),
             ),
         ];
-        let proof = self.host.with_observed_work(charges, |work| {
+        let proof = self.store.with_observed_work(charges, |_store, work| {
             let proof = plan
                 .verify(identity.path(), registered_cause)
                 .map_err(NegativeProofActionError::Proof)?;
@@ -3034,14 +3083,14 @@ impl<'session> ParseScope<'session> {
     }
 
     fn open_and_read_dependency(
-        &self,
+        &mut self,
         io: &dyn AssetIo,
         identity: &DependencyIdentity,
     ) -> AssetSnapshotResult {
         self.poll_cause()?;
         self.charge_open_attempt()?;
         let opened = crate::asset_open::open_asset(
-            self.host,
+            &mut self.store,
             io,
             identity.path(),
             crate::asset_open::AssetOpenContext::Dependency,
@@ -3058,7 +3107,7 @@ impl<'session> ParseScope<'session> {
         self.charge_open_consumed()?;
         self.admit_dependency_acquisition_work()?;
         let bytes = read_opened_asset(
-            self.host,
+            &mut self.store,
             opened,
             ImportLedgerPhase::DependencyAcquisition,
             ImportProgressPhase::AcquireDependency,
@@ -3071,7 +3120,7 @@ impl<'session> ParseScope<'session> {
     }
 
     fn share_dependency_snapshot(
-        &self,
+        &mut self,
         bytes: AccountedVec<u8>,
     ) -> Result<Arc<SharedDependencySnapshot>, ScopeAbortCause> {
         share_dependency_snapshot_with(bytes, |control_bytes| {
@@ -3080,7 +3129,7 @@ impl<'session> ParseScope<'session> {
     }
 
     fn clone_dependency_snapshot_identity(
-        &self,
+        &mut self,
         source: &DependencyIdentity,
         stable_schema: Option<&'static StableResourceIdentitySchema>,
     ) -> Result<DependencySnapshotIdentity, ScopeAbortCause> {
@@ -3098,12 +3147,12 @@ impl<'session> ParseScope<'session> {
         ))
     }
 
-    fn charge_logical_reference(&self) -> Result<(), DependencyResolutionFailure> {
+    fn charge_logical_reference(&mut self) -> Result<(), DependencyResolutionFailure> {
         let result = self
-            .host
+            .store
             .charge_attempted(ImportDimension::DependencyReference, 1)
             .and_then(|()| {
-                self.host
+                self.store
                     .charge_consumed(ImportDimension::DependencyReference, 1)
             });
         let Err(cause) = result else {
@@ -3112,24 +3161,24 @@ impl<'session> ParseScope<'session> {
         Err(self.dependency_failure_without_path(None, cause.into_scope_abort_cause()))
     }
 
-    fn charge_open_attempt(&self) -> Result<(), ScopeAbortCause> {
-        self.host
+    fn charge_open_attempt(&mut self) -> Result<(), ScopeAbortCause> {
+        self.store
             .charge_attempted(ImportDimension::AssetOpen, 1)
             .map_err(|cause| cause.into_scope_abort_cause())
     }
 
-    fn charge_open_consumed(&self) -> Result<(), ScopeAbortCause> {
-        self.host
+    fn charge_open_consumed(&mut self) -> Result<(), ScopeAbortCause> {
+        self.store
             .charge_consumed(ImportDimension::AssetOpen, 1)
             .map_err(|cause| cause.into_scope_abort_cause())
     }
 
-    fn admit_dependency_acquisition_work(&self) -> Result<(), ScopeAbortCause> {
-        self.host
+    fn admit_dependency_acquisition_work(&mut self) -> Result<(), ScopeAbortCause> {
+        self.store
             .charge_attempted(ImportDimension::DependencyAcquisitionWork, 1)
             .map_err(|cause| cause.into_scope_abort_cause())?;
         let state = self
-            .host
+            .store
             .dimension_state(ImportDimension::DependencyAcquisitionWork)
             .map_err(|cause| cause.into_scope_abort_cause())?;
         let value = state.consumed().checked_add(1).ok_or({
@@ -3149,27 +3198,29 @@ impl<'session> ParseScope<'session> {
         Ok(())
     }
 
-    fn charge_dependency_acquisition_work_consumed(&self) -> Result<(), ScopeAbortCause> {
-        self.host
+    fn charge_dependency_acquisition_work_consumed(&mut self) -> Result<(), ScopeAbortCause> {
+        self.store
             .charge_consumed(ImportDimension::DependencyAcquisitionWork, 1)
             .map_err(|cause| cause.into_scope_abort_cause())
     }
 
-    fn poll_cause(&self) -> Result<(), ScopeAbortCause> {
-        self.host
+    fn poll_cause(&mut self) -> Result<(), ScopeAbortCause> {
+        self.store
             .poll()
             .map_err(|cause| cause.into_scope_abort_cause())
     }
 
     fn resolve_optional_failure(
-        &self,
+        &mut self,
         role: &DependencyRoleId,
         failure: DependencyResolutionFailure,
-    ) -> ParseResult<DependencyOutcome<'_>> {
+    ) -> ParseResult<DependencyOutcome<'session>> {
+        let resource_graph = self.resource_graph;
+        let optional_dependency_evidence = self.optional_dependency_evidence;
+
         let mut failure = self.take_dependency_failure(failure);
         let (eligible, owner, disposition) = {
-            let cache = self
-                .resource_graph
+            let cache = resource_graph
                 .try_borrow()
                 .map_err(|_| self.reentrant_capability_failure())?;
             let cause = failure.cause(&cache).map_err(|cause| self.abort(cause))?;
@@ -3201,8 +3252,7 @@ impl<'session> ParseScope<'session> {
             failure.cache_disposition,
         )?;
         {
-            let mut retained = self
-                .optional_dependency_evidence
+            let mut retained = optional_dependency_evidence
                 .try_borrow_mut()
                 .map_err(|_| self.reentrant_capability_failure())?;
             retained
@@ -3230,21 +3280,23 @@ impl<'session> ParseScope<'session> {
     }
 
     fn complete_unavailable_relation(
-        &self,
+        &mut self,
         failure: &mut DependencyResolutionContext,
         disposition: ResourceUnavailableDisposition,
     ) -> ParseResult<()> {
+        let resource_graph = self.resource_graph;
+
         let relation = failure.relation.take().ok_or_else(|| {
             self.abort(ScopeAbortCause::DescriptorContract {
                 code: "dependency-terminal-relation-missing",
             })
         })?;
         let normalized_reference = failure.normalized_manifest_reference();
-        self.resource_graph
+        resource_graph
             .try_borrow_mut()
             .map_err(|_| self.reentrant_capability_failure())?
             .complete_unavailable(
-                self.host,
+                &mut self.store,
                 relation,
                 normalized_reference,
                 failure.identity.as_ref(),
@@ -3253,24 +3305,30 @@ impl<'session> ParseScope<'session> {
             .map_err(|cause| self.abort(cause.into_scope_cause()))
     }
 
-    fn abort_dependency_failure(&self, failure: DependencyResolutionFailure) -> ParseFailure {
-        self.abort_dependency_context(self.take_dependency_failure(failure))
+    fn abort_dependency_failure(&mut self, failure: DependencyResolutionFailure) -> ParseFailure {
+        let context = self.take_dependency_failure(failure);
+        self.abort_dependency_context(context)
     }
 
     fn abort_required_dependency_failure(
-        &self,
+        &mut self,
         origin: &DependencyOrigin<'_>,
         role: &DependencyRoleId,
         raw_reference: &str,
         failure: DependencyResolutionFailure,
     ) -> ParseFailure {
+        let resource_graph = self.resource_graph;
+        let format_failure_storage = self.format_failure_storage;
+        let dependency_failure_context = self.dependency_failure_context;
+
         let failure = self.take_dependency_failure(failure);
         let captured = (|| {
-            let graph = self.resource_graph.try_borrow().map_err(|_| {
-                ScopeAbortCause::DescriptorContract {
-                    code: "parse-capability-reentered",
-                }
-            })?;
+            let graph =
+                resource_graph
+                    .try_borrow()
+                    .map_err(|_| ScopeAbortCause::DescriptorContract {
+                        code: "parse-capability-reentered",
+                    })?;
             // A ledger/control terminal may prohibit further admission. Preserve that original
             // failure without attempting an allocation or weakening requiredness.
             if !matches!(
@@ -3282,7 +3340,7 @@ impl<'session> ParseScope<'session> {
             ) {
                 return Ok(None);
             }
-            if self.format_failure_storage.borrow().is_active() {
+            if format_failure_storage.borrow().is_active() {
                 return Err(ScopeAbortCause::DescriptorContract {
                     code: "failure-evidence-storage-already-active",
                 });
@@ -3299,7 +3357,7 @@ impl<'session> ParseScope<'session> {
                 }
             };
             DependencyFailureContext::try_capture(
-                self.host,
+                &mut self.store,
                 origin_authority,
                 origin_path,
                 role,
@@ -3313,8 +3371,8 @@ impl<'session> ParseScope<'session> {
             Ok(Some((context, reservation))) => {
                 // The single failure slot keeps this physical lease coupled to the cause until
                 // the terminal owner destroys it, including rich and minimal outcomes.
-                self.format_failure_storage.borrow_mut().reservation = Some(reservation);
-                *self.dependency_failure_context.borrow_mut() = Some(context);
+                format_failure_storage.borrow_mut().reservation = Some(reservation);
+                *dependency_failure_context.borrow_mut() = Some(context);
             }
             Ok(None) => {}
             Err(cause) => return self.abort(cause),
@@ -3322,9 +3380,11 @@ impl<'session> ParseScope<'session> {
         self.abort_dependency_context(failure)
     }
 
-    fn abort_dependency_context(&self, failure: DependencyResolutionContext) -> ParseFailure {
+    fn abort_dependency_context(&mut self, failure: DependencyResolutionContext) -> ParseFailure {
+        let resource_graph = self.resource_graph;
+
         let (disposition, mut cause, relation, identity, evidence) = {
-            let graph = match self.resource_graph.try_borrow() {
+            let graph = match resource_graph.try_borrow() {
                 Ok(graph) => graph,
                 Err(_) => {
                     let parse_failure = self.abort(ScopeAbortCause::DescriptorContract {
@@ -3340,14 +3400,13 @@ impl<'session> ParseScope<'session> {
             let (cause, relation, identity, evidence) = failure.into_parts(&graph);
             (disposition, cause, relation, identity, evidence)
         };
-        let mut graph = self
-            .resource_graph
+        let mut graph = resource_graph
             .try_borrow_mut()
             .expect("resource graph borrow was released before mutation");
         let normalized_reference = evidence.manifest_reference();
         if let Some(relation) = relation
             && let Err(graph_cause) = graph.complete_unavailable(
-                self.host,
+                &mut self.store,
                 relation,
                 normalized_reference,
                 identity.as_ref(),
@@ -3373,7 +3432,7 @@ impl<'session> ParseScope<'session> {
     }
 
     fn clone_optional_dependency_evidence(
-        &self,
+        &mut self,
         identity: Option<&DependencyIdentity>,
         normalized_path: &AssetPath,
         owner: &crate::CauseOwner,
@@ -3403,7 +3462,7 @@ impl<'session> ParseScope<'session> {
     }
 
     fn clone_retained_dependency_path(
-        &self,
+        &mut self,
         path: &AssetPath,
         resource: &'static str,
     ) -> ParseResult<(AssetPath, ImportStoreReservation)> {
@@ -3427,10 +3486,10 @@ impl<'session> ParseScope<'session> {
     }
 
     fn reserve_dependency_storage_cause(
-        &self,
+        &mut self,
         bytes: u64,
     ) -> Result<ImportStoreReservation, ScopeAbortCause> {
-        self.host
+        self.store
             .reserve_retained(
                 ImportLedgerPhase::DependencyAcquisition,
                 ImportDimension::ScratchBytes,
@@ -3445,17 +3504,13 @@ impl<'session> ParseScope<'session> {
         reservation: &mut ImportStoreReservation,
         bytes: u64,
     ) -> Result<(), ScopeAbortCause> {
-        self.host
+        self.store
             .resize(reservation, bytes)
             .map_err(|cause| cause.into_scope_abort_cause())
     }
 
     fn abort(&self, cause: ScopeAbortCause) -> ParseFailure {
-        let mut terminal = self.terminal.borrow_mut();
-        if terminal.is_none() {
-            *terminal = Some(cause);
-        }
-        ParseFailure::scope()
+        latch_abort(self.terminal, cause)
     }
 
     fn preflight_active(&self) -> ParseResult<()> {
@@ -3469,10 +3524,6 @@ impl<'session> ParseScope<'session> {
         }
     }
 
-    pub(crate) fn source_scope_preflight(&self) -> ParseResult<()> {
-        self.preflight_active()
-    }
-
     pub(crate) fn source_scope_abort(&self, cause: ScopeAbortCause) -> ParseFailure {
         self.abort(cause)
     }
@@ -3482,7 +3533,7 @@ impl<'session> ParseScope<'session> {
         charges: &[(ImportDimension, u64); 2],
     ) -> ParseResult<()> {
         self.preflight_active()?;
-        self.host
+        self.store
             .charge_observed_batch(charges)
             .map_err(|cause| self.abort(cause.into_scope_abort_cause()))
     }
@@ -3493,7 +3544,7 @@ impl<'session> ParseScope<'session> {
         amount: u64,
     ) -> ParseResult<()> {
         self.preflight_active()?;
-        self.host
+        self.store
             .charge_attempted(dimension, amount)
             .map_err(|cause| self.abort(cause.into_scope_abort_cause()))
     }
@@ -3504,7 +3555,7 @@ impl<'session> ParseScope<'session> {
         amount: u64,
     ) -> ParseResult<()> {
         self.preflight_active()?;
-        self.host
+        self.store
             .charge_consumed(dimension, amount)
             .map_err(|cause| self.abort(cause.into_scope_abort_cause()))
     }
@@ -3515,7 +3566,7 @@ impl<'session> ParseScope<'session> {
         diagnostic_bytes: u64,
     ) -> ParseResult<()> {
         self.preflight_active()?;
-        self.host
+        self.store
             .charge_consumed_batch(&[
                 (ImportDimension::DiagnosticCount, 1),
                 (ImportDimension::DiagnosticBytes, diagnostic_bytes),
@@ -3532,12 +3583,12 @@ impl<'session> ParseScope<'session> {
         })
     }
 
-    fn enter_parse_callback(&self) -> ParseResult<ParseCallbackGuard<'_>> {
+    fn enter_parse_callback(&self) -> ParseResult<ParseCallbackGuard<'region>> {
         if self.callback_active.replace(true) {
             return Err(self.reentrant_capability_failure());
         }
         Ok(ParseCallbackGuard {
-            active: &self.callback_active,
+            active: self.callback_active,
         })
     }
 }
@@ -3618,14 +3669,14 @@ fn metered_copy_chunk_len<T>() -> usize {
         .max(1)
 }
 
-fn append_metered_string_with_meter(
-    meter: &StorageMeter<'_>,
+fn append_metered_string(
+    exec: &mut ParseExecution<'_, '_>,
     output: &mut String,
     value: &str,
 ) -> ParseResult<()> {
     let mut start = 0usize;
     while start < value.len() {
-        meter.poll()?;
+        exec.poll()?;
         let mut end = start
             .checked_add(METERED_COPY_POLL_INTERVAL)
             .map_or(value.len(), |end| end.min(value.len()));
@@ -3638,66 +3689,50 @@ fn append_metered_string_with_meter(
     Ok(())
 }
 
-impl StorageMeter<'_> {
+impl StorageIdentity<'_> {
     fn abort(&self, cause: ScopeAbortCause) -> ParseFailure {
-        let mut terminal = self.terminal.borrow_mut();
-        if terminal.is_none() {
-            *terminal = Some(cause);
-        }
-        ParseFailure::scope()
+        latch_abort(self.terminal, cause)
     }
 
     fn preflight_active(&self) -> ParseResult<()> {
-        if self.callback_active.get() {
-            return Err(self.abort(ScopeAbortCause::DescriptorContract {
-                code: "parse-capability-reentered",
-            }));
-        }
-        if self.terminal.borrow().is_some() {
-            Err(ParseFailure::scope())
-        } else {
-            Ok(())
-        }
+        preflight_terminal(self.terminal)
     }
 
-    fn poll(&self) -> ParseResult<()> {
-        self.preflight_active()?;
-        self.host
-            .poll()
-            .map_err(|cause| self.abort(cause.into_scope_abort_cause()))
+    fn check(&self, exec: &ParseExecution<'_, '_>) -> ParseResult<()> {
+        exec.check_session(self.issuer)?;
+        self.preflight_active()
     }
 
     fn reserve(
         &self,
+        exec: &mut ParseExecution<'_, '_>,
         class: ImportStorageClass,
         bytes: u64,
     ) -> ParseResult<Option<ImportStoreReservation>> {
-        self.preflight_active()?;
+        self.check(exec)?;
         if bytes == 0 {
             return Ok(None);
         }
-        let (phase, dimension) = class.accounting();
-        self.host
-            .reserve(phase, dimension, bytes)
+        exec.reserve_storage_cause(class, bytes)
             .map(Some)
-            .map_err(|cause| self.abort(cause.into_scope_abort_cause()))
+            .map_err(|cause| self.abort(cause))
     }
 
     fn resize_exact(
         &self,
+        exec: &mut ParseExecution<'_, '_>,
         reservation: &mut Option<ImportStoreReservation>,
         bytes: u64,
     ) -> ParseResult<()> {
-        self.preflight_active()?;
+        self.check(exec)?;
         match (reservation.as_mut(), bytes) {
             (None, 0) => Ok(()),
             (Some(_), 0) => Err(self.abort(ScopeAbortCause::DescriptorContract {
                 code: "metered-storage-unused-capacity-reservation",
             })),
-            (Some(token), bytes) => self
-                .host
-                .resize(token, bytes)
-                .map_err(|cause| self.abort(cause.into_scope_abort_cause())),
+            (Some(token), bytes) => exec
+                .resize_storage_reservation(token, bytes)
+                .map_err(|cause| self.abort(cause)),
             (None, _) => Err(self.abort(ScopeAbortCause::DescriptorContract {
                 code: "metered-storage-capacity-without-reservation",
             })),
@@ -3725,47 +3760,54 @@ impl StorageMeter<'_> {
     }
 }
 
-impl<T> MeteredVec<'_, T> {
-    pub fn try_reserve(&mut self, additional: usize) -> ParseResult<()> {
-        self.meter.poll()?;
+impl<'session, T> MeteredVec<'session, T> {
+    pub fn try_reserve(
+        &mut self,
+        exec: &mut ParseExecution<'_, 'session>,
+        additional: usize,
+    ) -> ParseResult<()> {
+        self.identity.check(exec)?;
+        exec.poll()?;
         let required = self
             .values
             .len()
             .checked_add(additional)
-            .ok_or_else(|| self.meter.allocation_failure(self.resource))?;
+            .ok_or_else(|| self.identity.allocation_failure(self.resource))?;
         if required <= self.values.capacity() {
             return Ok(());
         }
 
         let (plan, replacement_plan) =
             metered_vec_replacement_plans::<T>(self.values.len(), self.values.capacity(), required)
-                .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
+                .map_err(|cause| self.identity.capacity_error(self.resource, cause))?;
         let admitted = replacement_plan
             .envelope_delta_bytes()
-            .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
-        let mut token = self.meter.reserve(self.class, admitted)?;
+            .map_err(|cause| self.identity.capacity_error(self.resource, cause))?;
+        let mut token = self.identity.reserve(exec, self.class, admitted)?;
         plan.verify_preflight(self.values.len(), self.values.capacity())
-            .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
+            .map_err(|cause| self.identity.capacity_error(self.resource, cause))?;
         replacement_plan
             .verify_preflight(0, 0)
-            .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
+            .map_err(|cause| self.identity.capacity_error(self.resource, cause))?;
         let mut replacement = Vec::new();
         if fail_next_metered_allocation() {
-            return Err(self.meter.allocation_failure(self.resource));
+            return Err(self.identity.allocation_failure(self.resource));
         }
         replacement
             .try_reserve_exact(replacement_plan.allocator_additional())
-            .map_err(|_| self.meter.allocation_failure(self.resource))?;
+            .map_err(|_| self.identity.allocation_failure(self.resource))?;
         let complete_bytes = replacement_plan
             .finish(replacement.len(), replacement.capacity())
-            .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
+            .map_err(|cause| self.identity.capacity_error(self.resource, cause))?;
         plan.finish(self.values.len(), replacement.capacity())
-            .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
-        self.meter.resize_exact(&mut token, complete_bytes)?;
+            .map_err(|cause| self.identity.capacity_error(self.resource, cause))?;
+        self.identity
+            .resize_exact(exec, &mut token, complete_bytes)?;
         if fail_next_metered_qualification() {
-            return Err(self.meter.qualification_failure(self.resource));
+            return Err(self.identity.qualification_failure(self.resource));
         }
-        self.meter.poll()?;
+        self.identity.check(exec)?;
+        exec.poll()?;
 
         assert!(
             replacement.capacity() >= self.values.len(),
@@ -3779,17 +3821,21 @@ impl<T> MeteredVec<'_, T> {
         Ok(())
     }
 
-    pub fn try_push(&mut self, value: T) -> ParseResult<()> {
-        self.try_reserve(1)?;
+    pub fn try_push(
+        &mut self,
+        exec: &mut ParseExecution<'_, 'session>,
+        value: T,
+    ) -> ParseResult<()> {
+        self.try_reserve(exec, 1)?;
         self.values.push(value);
         Ok(())
     }
 
     /// Pushes into a slot admitted by an earlier reserve without polling or entering the allocator.
     pub fn try_push_reserved(&mut self, value: T) -> ParseResult<()> {
-        self.meter.preflight_active()?;
+        self.identity.preflight_active()?;
         if self.values.len() == self.values.capacity() {
-            return Err(self.meter.abort(ScopeAbortCause::DescriptorContract {
+            return Err(self.identity.abort(ScopeAbortCause::DescriptorContract {
                 code: "metered-vector-capacity-not-reserved",
             }));
         }
@@ -3797,13 +3843,18 @@ impl<T> MeteredVec<'_, T> {
         Ok(())
     }
 
-    pub fn try_extend_from_slice(&mut self, values: &[T]) -> ParseResult<()>
+    pub fn try_extend_from_slice(
+        &mut self,
+        exec: &mut ParseExecution<'_, 'session>,
+        values: &[T],
+    ) -> ParseResult<()>
     where
         T: Copy,
     {
-        self.try_reserve(values.len())?;
+        self.try_reserve(exec, values.len())?;
         for chunk in values.chunks(metered_copy_chunk_len::<T>()) {
-            self.meter.poll()?;
+            self.identity.check(exec)?;
+            exec.poll()?;
             self.values.extend_from_slice(chunk);
         }
         Ok(())
@@ -3817,19 +3868,19 @@ impl<T> MeteredVec<'_, T> {
     where
         T: Copy,
     {
-        self.meter.preflight_active()?;
+        self.identity.preflight_active()?;
         let required = self
             .values
             .len()
             .checked_add(values.len())
-            .ok_or_else(|| self.meter.allocation_failure(self.resource))?;
+            .ok_or_else(|| self.identity.allocation_failure(self.resource))?;
         if required > self.values.capacity() {
-            return Err(self.meter.abort(ScopeAbortCause::DescriptorContract {
+            return Err(self.identity.abort(ScopeAbortCause::DescriptorContract {
                 code: "metered-vector-capacity-not-reserved",
             }));
         }
         if values.len() > metered_copy_chunk_len::<T>() {
-            return Err(self.meter.abort(ScopeAbortCause::DescriptorContract {
+            return Err(self.identity.abort(ScopeAbortCause::DescriptorContract {
                 code: "metered-vector-copy-chunk-too-large",
             }));
         }
@@ -3837,14 +3888,20 @@ impl<T> MeteredVec<'_, T> {
         Ok(())
     }
 
-    pub fn try_resize(&mut self, len: usize, value: T) -> ParseResult<()>
+    pub fn try_resize(
+        &mut self,
+        exec: &mut ParseExecution<'_, 'session>,
+        len: usize,
+        value: T,
+    ) -> ParseResult<()>
     where
         T: Copy,
     {
         let additional = len.saturating_sub(self.values.len());
-        self.try_reserve(additional)?;
+        self.try_reserve(exec, additional)?;
         while self.values.len() < len {
-            self.meter.poll()?;
+            self.identity.check(exec)?;
+            exec.poll()?;
             let chunk_end = self
                 .values
                 .len()
@@ -3939,14 +3996,19 @@ fn sift_down_fallible<T, E>(
     Ok(())
 }
 
-impl<K: Ord, V> MeteredOrderedMap<'_, K, V> {
-    pub fn try_reserve(&mut self, additional: usize) -> ParseResult<()> {
-        self.meter.poll()?;
+impl<'session, K: Ord, V> MeteredOrderedMap<'session, K, V> {
+    pub fn try_reserve(
+        &mut self,
+        exec: &mut ParseExecution<'_, 'session>,
+        additional: usize,
+    ) -> ParseResult<()> {
+        self.identity.check(exec)?;
+        exec.poll()?;
         let required = self
             .value
             .len()
             .checked_add(additional)
-            .ok_or_else(|| self.meter.allocation_failure(self.resource))?;
+            .ok_or_else(|| self.identity.allocation_failure(self.resource))?;
         if required <= self.value.capacity() {
             return Ok(());
         }
@@ -3954,21 +4016,23 @@ impl<K: Ord, V> MeteredOrderedMap<'_, K, V> {
         let plan = self
             .value
             .capacity_plan(additional)
-            .map_err(|cause| metered_map_error(&self.meter, self.resource, cause))?;
+            .map_err(|cause| metered_map_error(&self.identity, self.resource, cause))?;
         let admitted = plan
             .replacement_envelope_bytes()
-            .map_err(|cause| metered_map_error(&self.meter, self.resource, cause))?;
-        let mut token = self.meter.reserve(self.class, admitted)?;
+            .map_err(|cause| metered_map_error(&self.identity, self.resource, cause))?;
+        let mut token = self.identity.reserve(exec, self.class, admitted)?;
         let replacement = self
             .value
             .prepare_capacity_replacement(plan)
-            .map_err(|cause| metered_map_error(&self.meter, self.resource, cause))?;
+            .map_err(|cause| metered_map_error(&self.identity, self.resource, cause))?;
         let complete_bytes = replacement.allocation_bytes();
-        self.meter.resize_exact(&mut token, complete_bytes)?;
+        self.identity
+            .resize_exact(exec, &mut token, complete_bytes)?;
         if fail_next_metered_qualification() {
-            return Err(self.meter.qualification_failure(self.resource));
+            return Err(self.identity.qualification_failure(self.resource));
         }
-        self.meter.poll()?;
+        self.identity.check(exec)?;
+        exec.poll()?;
 
         replacement.commit();
         let retired_token = std::mem::replace(&mut self.capacity, token);
@@ -3976,17 +4040,22 @@ impl<K: Ord, V> MeteredOrderedMap<'_, K, V> {
         Ok(())
     }
 
-    pub fn try_insert(&mut self, key: K, value: V) -> ParseResult<Option<V>> {
+    pub fn try_insert(
+        &mut self,
+        exec: &mut ParseExecution<'_, 'session>,
+        key: K,
+        value: V,
+    ) -> ParseResult<Option<V>> {
         let additional = usize::from(!self.value.contains_key(&key));
-        self.try_reserve(additional)?;
+        self.try_reserve(exec, additional)?;
         self.value
             .insert_reserved(key, value)
-            .map_err(|cause| metered_map_error(&self.meter, self.resource, cause))
+            .map_err(|cause| metered_map_error(&self.identity, self.resource, cause))
     }
 }
 
 fn metered_map_error(
-    meter: &StorageMeter<'_>,
+    meter: &StorageIdentity<'_>,
     resource: &'static str,
     cause: OrderedMapError,
 ) -> ParseFailure {
@@ -4006,14 +4075,19 @@ fn metered_map_error(
     }
 }
 
-impl MeteredString<'_> {
-    pub fn try_reserve(&mut self, additional: usize) -> ParseResult<()> {
-        self.meter.poll()?;
+impl<'session> MeteredString<'session> {
+    pub fn try_reserve(
+        &mut self,
+        exec: &mut ParseExecution<'_, 'session>,
+        additional: usize,
+    ) -> ParseResult<()> {
+        self.identity.check(exec)?;
+        exec.poll()?;
         let required = self
             .value
             .len()
             .checked_add(additional)
-            .ok_or_else(|| self.meter.allocation_failure(self.resource))?;
+            .ok_or_else(|| self.identity.allocation_failure(self.resource))?;
         if required <= self.value.capacity() {
             return Ok(());
         }
@@ -4024,31 +4098,33 @@ impl MeteredString<'_> {
             required,
             1,
         )
-        .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
+        .map_err(|cause| self.identity.capacity_error(self.resource, cause))?;
         let admitted = replacement_plan
             .envelope_delta_bytes()
-            .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
-        let mut token = self.meter.reserve(self.class, admitted)?;
+            .map_err(|cause| self.identity.capacity_error(self.resource, cause))?;
+        let mut token = self.identity.reserve(exec, self.class, admitted)?;
         plan.verify_preflight(self.value.len(), self.value.capacity())
-            .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
+            .map_err(|cause| self.identity.capacity_error(self.resource, cause))?;
         replacement_plan
             .verify_preflight(0, 0)
-            .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
+            .map_err(|cause| self.identity.capacity_error(self.resource, cause))?;
         let mut replacement = String::new();
         replacement
             .try_reserve_exact(replacement_plan.allocator_additional())
-            .map_err(|_| self.meter.allocation_failure(self.resource))?;
+            .map_err(|_| self.identity.allocation_failure(self.resource))?;
         let complete_bytes = replacement_plan
             .finish(replacement.len(), replacement.capacity())
-            .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
+            .map_err(|cause| self.identity.capacity_error(self.resource, cause))?;
         plan.finish(self.value.len(), replacement.capacity())
-            .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
-        self.meter.resize_exact(&mut token, complete_bytes)?;
+            .map_err(|cause| self.identity.capacity_error(self.resource, cause))?;
+        self.identity
+            .resize_exact(exec, &mut token, complete_bytes)?;
         if fail_next_metered_qualification() {
-            return Err(self.meter.qualification_failure(self.resource));
+            return Err(self.identity.qualification_failure(self.resource));
         }
-        append_metered_string_with_meter(&self.meter, &mut replacement, &self.value)?;
-        self.meter.poll()?;
+        append_metered_string(exec, &mut replacement, &self.value)?;
+        self.identity.check(exec)?;
+        exec.poll()?;
 
         let retired_value = std::mem::replace(&mut self.value, replacement);
         let retired_token = std::mem::replace(&mut self.capacity, token);
@@ -4057,9 +4133,13 @@ impl MeteredString<'_> {
         Ok(())
     }
 
-    pub fn try_push_str(&mut self, value: &str) -> ParseResult<()> {
-        self.try_reserve(value.len())?;
-        append_metered_string_with_meter(&self.meter, &mut self.value, value)
+    pub fn try_push_str(
+        &mut self,
+        exec: &mut ParseExecution<'_, 'session>,
+        value: &str,
+    ) -> ParseResult<()> {
+        self.try_reserve(exec, value.len())?;
+        append_metered_string(exec, &mut self.value, value)
     }
 
     /// Appends bytes admitted by an earlier reserve without polling or entering the allocator.
@@ -4067,19 +4147,19 @@ impl MeteredString<'_> {
     /// A caller-owned work boundary must cover the copy. The fixed chunk ceiling prevents one
     /// call from weakening cancellation latency.
     pub fn try_push_str_reserved(&mut self, value: &str) -> ParseResult<()> {
-        self.meter.preflight_active()?;
+        self.identity.preflight_active()?;
         let required = self
             .value
             .len()
             .checked_add(value.len())
-            .ok_or_else(|| self.meter.allocation_failure(self.resource))?;
+            .ok_or_else(|| self.identity.allocation_failure(self.resource))?;
         if required > self.value.capacity() {
-            return Err(self.meter.abort(ScopeAbortCause::DescriptorContract {
+            return Err(self.identity.abort(ScopeAbortCause::DescriptorContract {
                 code: "metered-string-capacity-not-reserved",
             }));
         }
         if value.len() > METERED_COPY_POLL_INTERVAL {
-            return Err(self.meter.abort(ScopeAbortCause::DescriptorContract {
+            return Err(self.identity.abort(ScopeAbortCause::DescriptorContract {
                 code: "metered-string-copy-chunk-too-large",
             }));
         }
@@ -4093,20 +4173,33 @@ impl MeteredString<'_> {
         self.try_push_str_reserved(value.encode_utf8(&mut encoded))
     }
 
-    pub fn try_push_char(&mut self, value: char) -> ParseResult<()> {
+    pub fn try_push_char(
+        &mut self,
+        exec: &mut ParseExecution<'_, 'session>,
+        value: char,
+    ) -> ParseResult<()> {
         let mut encoded = [0_u8; 4];
         let encoded = value.encode_utf8(&mut encoded);
-        self.try_push_str(encoded)
+        self.try_push_str(exec, encoded)
     }
 
-    pub fn try_push_usize(&mut self, value: usize) -> ParseResult<()> {
-        self.try_write_fmt(format_args!("{value}"))
+    pub fn try_push_usize(
+        &mut self,
+        exec: &mut ParseExecution<'_, 'session>,
+        value: usize,
+    ) -> ParseResult<()> {
+        self.try_write_fmt(exec, format_args!("{value}"))
     }
 
-    pub fn try_write_fmt(&mut self, arguments: fmt::Arguments<'_>) -> ParseResult<()> {
-        self.meter.preflight_active()?;
+    pub fn try_write_fmt(
+        &mut self,
+        exec: &mut ParseExecution<'_, 'session>,
+        arguments: fmt::Arguments<'_>,
+    ) -> ParseResult<()> {
+        self.identity.check(exec)?;
         let mut writer = MeteredStringWriter {
             value: self,
+            exec,
             failure: None,
         };
         let result = fmt::write(&mut writer, arguments);
@@ -4116,7 +4209,7 @@ impl MeteredString<'_> {
             (Err(fmt::Error), None) => {
                 Err(writer
                     .value
-                    .meter
+                    .identity
                     .abort(ScopeAbortCause::DescriptorContract {
                         code: "metered-string-format-failed",
                     }))
@@ -4125,14 +4218,15 @@ impl MeteredString<'_> {
     }
 }
 
-struct MeteredStringWriter<'a, 'scope> {
-    value: &'a mut MeteredString<'scope>,
+struct MeteredStringWriter<'a, 'region, 'session> {
+    value: &'a mut MeteredString<'session>,
+    exec: &'a mut ParseExecution<'region, 'session>,
     failure: Option<ParseFailure>,
 }
 
-impl fmt::Write for MeteredStringWriter<'_, '_> {
+impl fmt::Write for MeteredStringWriter<'_, '_, '_> {
     fn write_str(&mut self, value: &str) -> fmt::Result {
-        match self.value.try_push_str(value) {
+        match self.value.try_push_str(self.exec, value) {
             Ok(()) => Ok(()),
             Err(failure) => {
                 self.failure = Some(failure);
@@ -4142,19 +4236,23 @@ impl fmt::Write for MeteredStringWriter<'_, '_> {
     }
 }
 
-impl MeteredDecodedText<'_> {
-    pub fn try_push_str(&mut self, value: &str) -> ParseResult<()> {
-        self.meter.preflight_active()?;
+impl<'session> MeteredDecodedText<'session> {
+    pub fn try_push_str(
+        &mut self,
+        exec: &mut ParseExecution<'_, 'session>,
+        value: &str,
+    ) -> ParseResult<()> {
+        self.identity.check(exec)?;
         self.validate_append(value.len())?;
-        append_metered_string_with_meter(&self.meter, &mut self.value, value)
+        append_metered_string(exec, &mut self.value, value)
     }
 
     /// Appends decoded bytes under a caller-owned bounded work chunk without polling again.
     pub fn try_push_str_reserved(&mut self, value: &str) -> ParseResult<()> {
-        self.meter.preflight_active()?;
+        self.identity.preflight_active()?;
         self.validate_append(value.len())?;
         if value.len() > METERED_COPY_POLL_INTERVAL {
-            return Err(self.meter.abort(ScopeAbortCause::DescriptorContract {
+            return Err(self.identity.abort(ScopeAbortCause::DescriptorContract {
                 code: "decoded-text-copy-chunk-too-large",
             }));
         }
@@ -4167,19 +4265,20 @@ impl MeteredDecodedText<'_> {
             .value
             .len()
             .checked_add(additional)
-            .ok_or_else(|| self.meter.allocation_failure(self.resource))?;
+            .ok_or_else(|| self.identity.allocation_failure(self.resource))?;
         if required > self.decoded_len || required > self.value.capacity() {
-            return Err(self.meter.abort(ScopeAbortCause::DescriptorContract {
+            return Err(self.identity.abort(ScopeAbortCause::DescriptorContract {
                 code: "decoded-text-length-exhausted",
             }));
         }
         Ok(())
     }
 
-    pub fn finish_exact(self) -> ParseResult<Self> {
-        self.meter.poll()?;
+    pub fn finish_exact(self, exec: &mut ParseExecution<'_, 'session>) -> ParseResult<Self> {
+        self.identity.check(exec)?;
+        exec.poll()?;
         if self.value.len() != self.decoded_len {
-            return Err(self.meter.abort(ScopeAbortCause::DescriptorContract {
+            return Err(self.identity.abort(ScopeAbortCause::DescriptorContract {
                 code: "decoded-text-length-mismatch",
             }));
         }
@@ -4335,10 +4434,7 @@ fn optional_eligible(cause: &ScopeAbortCause) -> bool {
             ..
         }
         | ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
-            dimension:
-                ImportDimension::DependencyBytes
-                | ImportDimension::TotalAssetBytes
-                | ImportDimension::DependencyAcquisitionWork,
+            dimension: ImportDimension::DependencyBytes | ImportDimension::DependencyAcquisitionWork,
             ..
         }) => true,
         _ => false,
@@ -4364,7 +4460,7 @@ fn share_dependency_snapshot_with(
 }
 
 pub(crate) fn read_opened_asset(
-    host: ImportStoreHost<'_>,
+    exec: &mut ImportStoreExecution<'_>,
     mut opened: OpenedAssetOwner,
     ledger_phase: ImportLedgerPhase,
     progress_phase: ImportProgressPhase,
@@ -4373,7 +4469,7 @@ pub(crate) fn read_opened_asset(
     aggregate_limit: u64,
 ) -> AssetSnapshotResult {
     let result = read_asset_snapshot(
-        host,
+        exec,
         opened.asset_mut(),
         ledger_phase,
         progress_phase,
@@ -4385,7 +4481,7 @@ pub(crate) fn read_opened_asset(
 }
 
 fn read_asset_snapshot(
-    host: ImportStoreHost<'_>,
+    exec: &mut ImportStoreExecution<'_>,
     opened: &mut OpenedAsset,
     ledger_phase: ImportLedgerPhase,
     progress_phase: ImportProgressPhase,
@@ -4393,7 +4489,7 @@ fn read_asset_snapshot(
     per_resource_limit: u64,
     aggregate_limit: u64,
 ) -> AssetSnapshotResult {
-    host.poll()
+    exec.poll()
         .map_err(|cause| cause.into_scope_abort_cause())?;
     let effective_limit = opened
         .backend_hard_limit()
@@ -4410,7 +4506,7 @@ fn read_asset_snapshot(
     };
     let mut attempted_precharged = 0_u64;
     if let Some(length) = exact_length {
-        admit_asset_bytes(host, dimension, length, per_resource_limit, aggregate_limit)?;
+        admit_asset_bytes(exec, dimension, length, per_resource_limit, aggregate_limit)?;
         attempted_precharged = length;
         if length > effective_limit {
             return Err(ScopeAbortCause::ResourceLimit {
@@ -4424,7 +4520,7 @@ fn read_asset_snapshot(
     let aggregate_capacity_limit = if exact_length.is_some() {
         u64::MAX
     } else {
-        remaining_asset_bytes(host, ImportDimension::TotalAssetBytes, aggregate_limit)?
+        remaining_asset_bytes(exec, ImportDimension::TotalAssetBytes, aggregate_limit)?
     };
     let capacity_hint = observed_length
         .map(AssetLength::bytes)
@@ -4436,14 +4532,14 @@ fn read_asset_snapshot(
             resource: "asset-snapshot",
         })?;
         bytes.try_reserve_capacity(capacity, "asset-snapshot", |capacity_bytes| {
-            host.reserve(ledger_phase, dimension, capacity_bytes)
+            exec.reserve(ledger_phase, dimension, capacity_bytes)
                 .map_err(|cause| cause.into_scope_abort_cause())
         })?;
     }
 
     let mut chunk = [0_u8; 16 * 1024];
     loop {
-        host.poll()
+        exec.poll()
             .map_err(|cause| cause.into_scope_abort_cause())?;
         // Attempted bytes admit payload capacity once. A short read keeps the unused
         // allowance for the next call; it does not refund or readmit that capacity.
@@ -4451,13 +4547,13 @@ fn read_asset_snapshot(
         if allowance == 0 && exact_length.is_none() {
             let resource_remaining = effective_limit.saturating_sub(attempted_precharged);
             let aggregate_remaining =
-                remaining_asset_bytes(host, ImportDimension::TotalAssetBytes, aggregate_limit)?;
+                remaining_asset_bytes(exec, ImportDimension::TotalAssetBytes, aggregate_limit)?;
             allowance = resource_remaining
                 .min(aggregate_remaining)
                 .min(chunk.len() as u64);
             if allowance != 0 {
                 admit_asset_bytes(
-                    host,
+                    exec,
                     dimension,
                     allowance,
                     per_resource_limit,
@@ -4475,7 +4571,7 @@ fn read_asset_snapshot(
             allowance.min(chunk.len() as u64) as usize
         };
         let before = opened.bytes_read();
-        let read = read_asset_chunk(host, opened, &mut chunk[..requested]);
+        let read = read_asset_chunk(exec, opened, &mut chunk[..requested]);
         let after = opened.bytes_read();
         let observed = after.checked_sub(before).ok_or({
             ScopeAbortCause::TrustedExtension {
@@ -4487,7 +4583,7 @@ fn read_asset_snapshot(
             // Retain truthful observed excess in attempted evidence when the existing
             // counters permit it. Failed admission never fabricates consumed bytes.
             admit_asset_bytes(
-                host,
+                exec,
                 dimension,
                 observed,
                 per_resource_limit,
@@ -4495,7 +4591,7 @@ fn read_asset_snapshot(
             )?;
         }
         if observed != 0 {
-            charge_asset_consumed(host, dimension, observed)?;
+            charge_asset_consumed(exec, dimension, observed)?;
         }
         let count = read?.map_err(ScopeAbortCause::AssetRead)?;
         let count_u64 = count as u64;
@@ -4518,7 +4614,7 @@ fn read_asset_snapshot(
             return Err(ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
                 class: CounterClass::Attempted,
                 dimension: ImportDimension::TotalAssetBytes,
-                value: host
+                value: exec
                     .dimension_state(ImportDimension::TotalAssetBytes)
                     .map_err(|cause| cause.into_scope_abort_cause())?
                     .attempted(),
@@ -4534,7 +4630,7 @@ fn read_asset_snapshot(
         }
         if bytes.capacity().saturating_sub(bytes.len()) < count {
             bytes.try_reserve(count, "asset-snapshot", |capacity_bytes| {
-                host.reserve(ledger_phase, dimension, capacity_bytes)
+                exec.reserve(ledger_phase, dimension, capacity_bytes)
                     .map_err(|cause| cause.into_scope_abort_cause())
             })?;
         }
@@ -4543,11 +4639,11 @@ fn read_asset_snapshot(
             .map_err(|()| ScopeAbortCause::DescriptorContract {
                 code: "asset-snapshot-slots-not-admitted",
             })?;
-        let completed = host
+        let completed = exec
             .dimension_state(dimension)
             .map_err(|cause| cause.into_scope_abort_cause())?
             .consumed();
-        host.report_progress(
+        exec.report_progress(
             progress_phase,
             ImportProgressUnit::Bytes,
             completed,
@@ -4560,11 +4656,11 @@ fn read_asset_snapshot(
 }
 
 fn read_asset_chunk(
-    host: ImportStoreHost<'_>,
+    exec: &mut ImportStoreExecution<'_>,
     opened: &mut OpenedAsset,
     buffer: &mut [u8],
 ) -> Result<Result<usize, baozi_io::AssetReadError>, ScopeAbortCause> {
-    host.with_observed_work([(ImportDimension::WorkUnits, 1)], |work| {
+    exec.with_observed_work([(ImportDimension::WorkUnits, 1)], |_store, work| {
         match catch_unwind(AssertUnwindSafe(|| opened.read_chunk(buffer))) {
             Ok(read) => {
                 // EOF and returned read errors complete a call; a panic does not.
@@ -4588,7 +4684,7 @@ fn read_asset_chunk(
 }
 
 fn admit_asset_bytes(
-    host: ImportStoreHost<'_>,
+    exec: &mut ImportStoreExecution<'_>,
     dimension: ImportDimension,
     amount: u64,
     per_resource_limit: u64,
@@ -4608,7 +4704,7 @@ fn admit_asset_bytes(
         ),
         (ImportDimension::TotalAssetBytes, aggregate_limit),
     ] {
-        let state = host
+        let state = exec
             .dimension_state(dimension)
             .map_err(|cause| cause.into_scope_abort_cause())?;
         if state.attempted() > limit {
@@ -4621,7 +4717,7 @@ fn admit_asset_bytes(
         }
         let unused = state.attempted().saturating_sub(state.consumed());
         if amount > unused {
-            host.charge_attempted(dimension, amount - unused)
+            exec.charge_attempted(dimension, amount - unused)
                 .map_err(|cause| cause.into_scope_abort_cause())?;
         }
     }
@@ -4629,11 +4725,11 @@ fn admit_asset_bytes(
 }
 
 fn remaining_asset_bytes(
-    host: ImportStoreHost<'_>,
+    exec: &mut ImportStoreExecution<'_>,
     dimension: ImportDimension,
     limit: u64,
 ) -> Result<u64, ScopeAbortCause> {
-    let state = host
+    let state = exec
         .dimension_state(dimension)
         .map_err(|cause| cause.into_scope_abort_cause())?;
     if state.attempted() > limit {
@@ -4648,11 +4744,11 @@ fn remaining_asset_bytes(
 }
 
 fn charge_asset_consumed(
-    host: ImportStoreHost<'_>,
+    exec: &mut ImportStoreExecution<'_>,
     dimension: ImportDimension,
     amount: u64,
 ) -> Result<(), ScopeAbortCause> {
-    host.charge_consumed_batch(&[
+    exec.charge_consumed_batch(&[
         (dimension, amount),
         (ImportDimension::TotalAssetBytes, amount),
     ])
@@ -4773,6 +4869,12 @@ fn stable_identity_matches(
 }
 
 #[cfg(test)]
+pub(crate) mod testing;
+
+#[cfg(test)]
+mod ownership_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::ledger::ImportOperationControl;
@@ -4795,8 +4897,10 @@ mod tests {
     }
 
     impl TestStore {
-        fn host(&self) -> ImportStoreHost<'_> {
-            self.owner.host()
+        fn execution(&mut self) -> ImportStoreExecution<'_> {
+            self.owner
+                .execution()
+                .expect("test execution must be available")
         }
 
         fn assert_released(self) {
@@ -4837,7 +4941,7 @@ mod tests {
         TestStore { owner, account }
     }
 
-    fn current_live_bytes(host: ImportStoreHost<'_>) -> u64 {
+    fn current_live_bytes(host: &ImportStoreExecution<'_>) -> u64 {
         ImportDimension::ALL
             .into_iter()
             .map(|dimension| {
@@ -4851,8 +4955,8 @@ mod tests {
 
     #[test]
     fn completed_dependency_bytes_drop_when_snapshot_sharing_reservation_fails() {
-        let store = test_store(&ResourceLimits::default());
-        let host = store.host();
+        let mut store = test_store(&ResourceLimits::default());
+        let host = &mut store.execution();
         let baseline = current_live_bytes(host);
         let payload = vec![0x5a; 64 * 1024];
         let mut bytes = AccountedVec::new();
@@ -4890,13 +4994,73 @@ mod tests {
         assert_eq!(current_live_bytes(host), baseline);
     }
 
-    fn assert_not_send_sync<T: ?Sized>() {
-        let _ = std::any::type_name::<T>();
+    #[test]
+    fn session_storage_crosses_regions_with_real_parent_and_child_channels() {
+        let mut store = test_store(&ResourceLimits::default());
+        testing::with_context(&mut store.owner, |context| {
+            let mut values = context
+                .with_execution(|exec| -> ParseResult<_> {
+                    let parent = exec.bind_work_group([ImportWorkClass::Records])?;
+                    let child = exec
+                        .bind_work_group([ImportWorkClass::Tokens, ImportWorkClass::DecodeWork])?;
+                    let mut values = exec.metered_vec(
+                        ImportStorageClass::FormatNormalization,
+                        "region-owned-values",
+                    );
+                    exec.with_parent_work(&parent, [2], |exec, work| -> ParseResult<()> {
+                        assert_eq!(work.remaining(), [2]);
+                        for value in [3_u32, 5] {
+                            exec.with_work(&child, [1, 1], |exec, work| -> ParseResult<()> {
+                                values.try_push(exec, value)?;
+                                work.complete([1, 1])
+                            })?;
+                        }
+                        Ok(())
+                    })?;
+                    Ok(values)
+                })
+                .unwrap();
+            context
+                .with_execution(|exec| -> ParseResult<()> {
+                    values.try_extend_from_slice(exec, &[7, 11, 13])?;
+                    assert_eq!(values.as_slice(), &[3, 5, 7, 11, 13]);
+                    for (dimension, amount) in [
+                        (ImportDimension::Records, 2),
+                        (ImportDimension::Tokens, 2),
+                        (ImportDimension::DecodeWork, 2),
+                    ] {
+                        let state = exec.store.dimension_state(dimension).unwrap();
+                        assert_eq!((state.attempted(), state.consumed()), (amount, amount));
+                    }
+                    Ok(())
+                })
+                .unwrap();
+        });
+        store.assert_released();
     }
 
     #[test]
-    fn parse_scope_is_intentionally_session_local() {
-        assert_not_send_sync::<ParseScope<'_>>();
+    fn incomplete_callback_keeps_the_exact_completed_prefix_and_latches_failure() {
+        let mut store = test_store(&ResourceLimits::default());
+        testing::with_context(&mut store.owner, |context| {
+            let result = context.with_execution(|exec| -> ParseResult<()> {
+                let group = exec.bind_work_group([ImportWorkClass::Tokens])?;
+                exec.with_work(&group, [3], |_exec, work| work.complete([1]))
+            });
+            assert!(result.is_err());
+            assert!(matches!(
+                context.take_terminal_abort().unwrap().cause(),
+                ScopeAbortCause::DescriptorContract {
+                    code: "parse-work-callback-incomplete"
+                },
+            ));
+        });
+        let state = store
+            .execution()
+            .dimension_state(ImportDimension::Tokens)
+            .unwrap();
+        assert_eq!((state.attempted(), state.consumed()), (3, 1));
+        store.assert_released();
     }
 
     #[test]
@@ -4939,7 +5103,17 @@ mod tests {
 
         struct BudgetImporter;
 
-        impl crate::FormatImporter for BudgetImporter {
+        impl crate::Format for BudgetImporter {
+            type Options = crate::NoFormatOptions;
+
+            fn compile_defaults(
+                &self,
+                scope: &mut crate::RegistryBuildScope<'_>,
+            ) -> Result<crate::CompiledOptions<Self::Options>, crate::OptionCompileError>
+            {
+                crate::NoFormatOptions::compile_defaults(scope)
+            }
+
             fn descriptor(&self) -> crate::FormatDescriptor {
                 crate::FormatDescriptor::builder(
                     baozi_core::FormatId::new("org.baozi.test.cache-completion").unwrap(),
@@ -4970,8 +5144,12 @@ mod tests {
                 Ok(crate::DetectionOutcome::NoMatch)
             }
 
-            fn parse(&self, _scope: &mut ParseScope<'_>) -> ParseResult<CanonicalSceneDraft> {
-                unreachable!("this test exercises the selected ParseScope directly")
+            fn parse(
+                &self,
+                _options: &Self::Options,
+                _scope: &mut ParseContext<'_>,
+            ) -> ParseResult<()> {
+                unreachable!("this test exercises the selected ParseContext directly")
             }
         }
 
@@ -5014,9 +5192,9 @@ mod tests {
             if acquisition_denied {
                 limits.max_dependency_acquisition_work = 0;
             }
-            let store = test_store(&limits);
-            let host = store.host();
-            let baseline = current_live_bytes(host);
+            let mut store = test_store(&limits);
+            let baseline = store.account.snapshot().live_retained_bytes();
+            let host = &mut store.execution();
             {
                 let io = baozi_io::MemoryAssetIo::new();
                 let dependency_path = AssetPath::new("dependency.bin").unwrap();
@@ -5045,9 +5223,8 @@ mod tests {
                 } else {
                     LossPolicy::preserve_or_fail()
                 };
-                let scope = ParseScope::new(ParseScopeParts {
+                let mut context = ParseContext::new(ParseContextParts {
                     entry: entry.clone(),
-                    options: entry.default_options(),
                     primary_io: &io,
                     primary_authority: &authority,
                     primary_source: &source,
@@ -5059,8 +5236,7 @@ mod tests {
                     conformance_policy: ConformancePolicy::Strict,
                     loss_policy,
                     limits: &limits,
-                    store_owner: &store.owner,
-                    host,
+                    store_owner: &mut store.owner,
                     diagnostics: &diagnostics,
                     resource_graph: &graph,
                     optional_dependency_evidence: &optional_evidence,
@@ -5069,205 +5245,239 @@ mod tests {
                     format_failure_storage: &format_failure_storage,
                     terminal: &terminal,
                 });
-                let role = DependencyRoleId::new(match requirement {
-                    DependencyRequirement::Required => "required",
-                    DependencyRequirement::Optional => "optional",
-                })
-                .unwrap();
-                assert_eq!(
-                    scope.frozen_dependency_requirement(&role).unwrap(),
-                    requirement
-                );
-                scope.charge_logical_reference().unwrap_or_else(|_| {
-                    panic!("logical reference must fit before the injected limit")
-                });
-                let source_node = graph.borrow().source_for_primary().unwrap();
-                let pending = graph
-                    .borrow_mut()
-                    .begin_relation(host, source_node, &role, requirement, "dependency.bin")
+                let _ = context.with_execution(|scope| -> ParseResult<()> {
+                    let role = DependencyRoleId::new(match requirement {
+                        DependencyRequirement::Required => "required",
+                        DependencyRequirement::Optional => "optional",
+                    })
                     .unwrap();
-                let (pending, normalized, authorized) = scope
-                    .authorize_dependency(
-                        pending,
-                        &io,
-                        &authority,
-                        &source,
-                        &role,
-                        "dependency.bin",
-                    )
-                    .unwrap_or_else(|_| panic!("dependency authorization must succeed"));
-                let (pending, normalized, authorized) = scope
-                    .prepare_authorized_target(pending, normalized, authorized)
-                    .unwrap_or_else(|_| panic!("dependency target planning must succeed"));
-                graph
-                    .borrow_mut()
-                    .reserve_acquisition_capacity(host)
-                    .unwrap();
-                let (failure, dimension, class, value, limit) =
-                    if matches!(failure_point, FailurePoint::SnapshotSharing) {
-                        let (io, identity, stable_identity_schema, registered_resolver) =
-                            authorized.into_parts();
-                        let identity_storage = scope
-                            .reserve_dependency_storage_cause(identity.path().as_str().len() as u64)
-                            .unwrap();
-                        assert!(
-                            graph
-                                .borrow_mut()
-                                .begin_acquisition(
-                                    host,
-                                    identity.try_clone().unwrap(),
-                                    identity_storage
-                                )
-                                .unwrap()
-                        );
-                        let bytes = scope.open_and_read_dependency(io, &identity).unwrap();
-                        assert_eq!(&*bytes, payload.as_slice());
-                        let scratch = host.dimension_state(ImportDimension::ScratchBytes).unwrap();
-                        host.tighten_dimension_policy(
-                            ImportDimension::ScratchBytes,
-                            DimensionPolicy::reservable_bytes(
-                                u64::MAX,
-                                u64::MAX,
-                                0,
-                                scratch.live_bytes(),
-                            ),
+                    assert_eq!(
+                        scope.frozen_dependency_requirement(&role).unwrap(),
+                        requirement
+                    );
+                    scope.charge_logical_reference().unwrap_or_else(|_| {
+                        panic!("logical reference must fit before the injected limit")
+                    });
+                    let source_node = graph.borrow().source_for_primary().unwrap();
+                    let pending = graph
+                        .borrow_mut()
+                        .begin_relation(
+                            &mut scope.store,
+                            source_node,
+                            &role,
+                            requirement,
+                            "dependency.bin",
                         )
                         .unwrap();
-                        let cause = match scope.share_dependency_snapshot(bytes) {
-                            Err(cause) => cause,
-                            Ok(_) => panic!("snapshot sharing must exceed the live scratch limit"),
-                        };
-                        let graph_work = host
-                            .dimension_state(ImportDimension::ResourceGraphWork)
-                            .unwrap();
-                        host.tighten_dimension_policy(
-                            ImportDimension::ResourceGraphWork,
-                            DimensionPolicy::counter(u64::MAX, graph_work.consumed(), 0),
-                        )
-                        .unwrap();
-                        let failure = scope.finish_dependency_resolution_failure(
+                    let (pending, normalized, authorized) = scope
+                        .authorize_dependency(
                             pending,
-                            identity,
-                            DependencyFailureObservationContext {
-                                stable_identity_schema,
-                                registered_resolver,
-                                io,
-                            },
-                            normalized,
-                            cause,
-                        );
-                        (
-                            failure,
-                            ImportDimension::ScratchBytes,
-                            CounterClass::Live,
-                            scratch.live_bytes()
-                                + shared_dependency_snapshot_allocation_bytes().unwrap() as u64,
-                            scratch.live_bytes(),
-                        )
-                    } else {
-                        let before = host
-                            .dimension_state(ImportDimension::ResourceGraphWork)
-                            .unwrap();
-                        // Get and mark_resolving examine one slot each; the completion probe must fail.
-                        let limit = before.consumed() + 2;
-                        host.tighten_dimension_policy(
-                            ImportDimension::ResourceGraphWork,
-                            DimensionPolicy::counter(u64::MAX, limit, 0),
-                        )
-                        .unwrap();
-                        let failure =
-                            match scope.acquire_authorized(pending, normalized, authorized) {
-                                Err(failure) => failure,
-                                Ok(_) => panic!(
-                                    "cache completion must reject its first unadmitted probe"
-                                ),
-                            };
-                        if acquisition_denied {
-                            (
-                                failure,
-                                ImportDimension::DependencyAcquisitionWork,
-                                CounterClass::Consumed,
-                                1,
-                                0,
-                            )
-                        } else {
-                            (
-                                failure,
-                                ImportDimension::ResourceGraphWork,
-                                CounterClass::Consumed,
-                                limit + 1,
-                                limit,
-                            )
-                        }
-                    };
-                let is_original_cause = |cause: &ScopeAbortCause| {
-                    matches!(
-                        cause,
-                        ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
-                            class: actual_class,
-                            dimension: actual_dimension,
-                            value: actual_value,
-                            limit: actual_limit,
-                        }) if *actual_dimension == dimension && *actual_class == class
-                            && *actual_value == value && *actual_limit == limit
-                    )
-                };
-                assert!(is_original_cause(
-                    scope
-                        .dependency_failure
-                        .borrow()
-                        .as_ref()
-                        .unwrap()
-                        .cause(&graph.borrow())
-                        .unwrap()
-                ));
-                let opened = host.dimension_state(ImportDimension::AssetOpen).unwrap();
-                assert_eq!(opened.attempted(), 1);
-                assert_eq!(opened.consumed(), u64::from(available));
-                assert_eq!(
-                    host.dimension_state(ImportDimension::DependencyBytes)
-                        .unwrap()
-                        .consumed(),
-                    if available && !acquisition_denied {
-                        payload.len() as u64
-                    } else {
-                        0
-                    }
-                );
-                assert_eq!(
-                    host.dimension_state(ImportDimension::DependencyAcquisitionWork)
-                        .unwrap()
-                        .consumed(),
-                    u64::from(available && !acquisition_denied)
-                );
-                match requirement {
-                    DependencyRequirement::Required => {
-                        let origin = scope.root_origin();
-                        let _ = scope.abort_required_dependency_failure(
-                            &origin,
+                            &io,
+                            &authority,
+                            &source,
                             &role,
                             "dependency.bin",
-                            failure,
-                        );
+                        )
+                        .unwrap_or_else(|_| panic!("dependency authorization must succeed"));
+                    let (pending, normalized, authorized) = scope
+                        .prepare_authorized_target(pending, normalized, authorized)
+                        .unwrap_or_else(|_| panic!("dependency target planning must succeed"));
+                    graph
+                        .borrow_mut()
+                        .reserve_acquisition_capacity(&mut scope.store)
+                        .unwrap();
+                    let (failure, dimension, class, value, limit) =
+                        if matches!(failure_point, FailurePoint::SnapshotSharing) {
+                            let (io, identity, stable_identity_schema, registered_resolver) =
+                                authorized.into_parts();
+                            let identity_storage = scope
+                                .reserve_dependency_storage_cause(
+                                    identity.path().as_str().len() as u64
+                                )
+                                .unwrap();
+                            assert!(
+                                graph
+                                    .borrow_mut()
+                                    .begin_acquisition(
+                                        &mut scope.store,
+                                        identity.try_clone().unwrap(),
+                                        identity_storage
+                                    )
+                                    .unwrap()
+                            );
+                            let bytes = scope.open_and_read_dependency(io, &identity).unwrap();
+                            assert_eq!(&*bytes, payload.as_slice());
+                            let scratch = scope
+                                .store
+                                .dimension_state(ImportDimension::ScratchBytes)
+                                .unwrap();
+                            scope
+                                .store
+                                .tighten_dimension_policy(
+                                    ImportDimension::ScratchBytes,
+                                    DimensionPolicy::reservable_bytes(
+                                        u64::MAX,
+                                        u64::MAX,
+                                        0,
+                                        scratch.live_bytes(),
+                                    ),
+                                )
+                                .unwrap();
+                            let graph_work = scope
+                                .store
+                                .dimension_state(ImportDimension::ResourceGraphWork)
+                                .unwrap();
+                            scope
+                                .store
+                                .tighten_dimension_policy(
+                                    ImportDimension::ResourceGraphWork,
+                                    DimensionPolicy::counter(u64::MAX, graph_work.consumed(), 0),
+                                )
+                                .unwrap();
+                            let cause = match scope.share_dependency_snapshot(bytes) {
+                                Err(cause) => cause,
+                                Ok(_) => {
+                                    panic!("snapshot sharing must exceed the live scratch limit")
+                                }
+                            };
+                            let failure = scope.finish_dependency_resolution_failure(
+                                pending,
+                                identity,
+                                DependencyFailureObservationContext {
+                                    stable_identity_schema,
+                                    registered_resolver,
+                                    io,
+                                },
+                                normalized,
+                                cause,
+                            );
+                            (
+                                failure,
+                                ImportDimension::ScratchBytes,
+                                CounterClass::Live,
+                                scratch.live_bytes()
+                                    + shared_dependency_snapshot_allocation_bytes().unwrap() as u64,
+                                scratch.live_bytes(),
+                            )
+                        } else {
+                            let before = scope
+                                .store
+                                .dimension_state(ImportDimension::ResourceGraphWork)
+                                .unwrap();
+                            // Get and mark_resolving examine one slot each; the completion probe must fail.
+                            let limit = before.consumed() + 2;
+                            scope
+                                .store
+                                .tighten_dimension_policy(
+                                    ImportDimension::ResourceGraphWork,
+                                    DimensionPolicy::counter(u64::MAX, limit, 0),
+                                )
+                                .unwrap();
+                            let failure =
+                                match scope.acquire_authorized(pending, normalized, authorized) {
+                                    Err(failure) => failure,
+                                    Ok(_) => panic!(
+                                        "cache completion must reject its first unadmitted probe"
+                                    ),
+                                };
+                            if acquisition_denied {
+                                (
+                                    failure,
+                                    ImportDimension::DependencyAcquisitionWork,
+                                    CounterClass::Consumed,
+                                    1,
+                                    0,
+                                )
+                            } else {
+                                (
+                                    failure,
+                                    ImportDimension::ResourceGraphWork,
+                                    CounterClass::Consumed,
+                                    limit + 1,
+                                    limit,
+                                )
+                            }
+                        };
+                    let is_original_cause = |cause: &ScopeAbortCause| {
+                        matches!(
+                            cause,
+                            ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                                class: actual_class,
+                                dimension: actual_dimension,
+                                value: actual_value,
+                                limit: actual_limit,
+                            }) if *actual_dimension == dimension && *actual_class == class
+                                && *actual_value == value && *actual_limit == limit
+                        )
+                    };
+                    assert!(is_original_cause(
+                        scope
+                            .dependency_failure
+                            .borrow()
+                            .as_ref()
+                            .unwrap()
+                            .cause(&graph.borrow())
+                            .unwrap()
+                    ));
+                    let opened = scope
+                        .store
+                        .dimension_state(ImportDimension::AssetOpen)
+                        .unwrap();
+                    assert_eq!(opened.attempted(), 1);
+                    assert_eq!(opened.consumed(), u64::from(available));
+                    assert_eq!(
+                        scope
+                            .store
+                            .dimension_state(ImportDimension::DependencyBytes)
+                            .unwrap()
+                            .consumed(),
+                        if available && !acquisition_denied {
+                            payload.len() as u64
+                        } else {
+                            0
+                        }
+                    );
+                    assert_eq!(
+                        scope
+                            .store
+                            .dimension_state(ImportDimension::DependencyAcquisitionWork)
+                            .unwrap()
+                            .consumed(),
+                        u64::from(available && !acquisition_denied)
+                    );
+                    match requirement {
+                        DependencyRequirement::Required => {
+                            let origin = scope.root_origin();
+                            let _ = scope.abort_required_dependency_failure(
+                                &origin,
+                                &role,
+                                "dependency.bin",
+                                failure,
+                            );
+                        }
+                        DependencyRequirement::Optional => {
+                            assert!(scope.resolve_optional_failure(&role, failure).is_err());
+                        }
                     }
-                    DependencyRequirement::Optional => {
-                        assert!(scope.resolve_optional_failure(&role, failure).is_err());
-                    }
-                }
-                let abort = scope.take_terminal_abort().unwrap();
-                assert!(is_original_cause(abort.cause()));
+                    assert!(is_original_cause(terminal.borrow().as_ref().unwrap()));
+                    assert_eq!(
+                        scope
+                            .store
+                            .dimension_state(ImportDimension::CanonicalOutputBytes)
+                            .unwrap()
+                            .live_bytes(),
+                        0,
+                    );
+                    Ok(())
+                });
+                let _abort = context.take_terminal_abort().unwrap();
                 assert!(optional_evidence.borrow().is_empty());
                 assert!(loss_evidence.borrow().is_empty());
+                drop(context);
                 assert!(store.owner.completed_scene_boundary().unwrap().is_none());
-                assert_eq!(
-                    host.dimension_state(ImportDimension::CanonicalOutputBytes)
-                        .unwrap()
-                        .live_bytes(),
-                    0
-                );
                 assert!(!store.account.snapshot().poisoned());
             }
-            assert_eq!(current_live_bytes(host), baseline);
+            assert_eq!(store.account.snapshot().live_retained_bytes(), baseline);
             store.assert_released();
         }
     }
@@ -5275,8 +5485,8 @@ mod tests {
     #[test]
     fn opened_asset_snapshot_is_unique_metered_vec_storage() {
         let limits = ResourceLimits::default();
-        let store = test_store(&limits);
-        let host = store.host();
+        let mut store = test_store(&limits);
+        let host = &mut store.execution();
         let baseline = current_live_bytes(host);
         let payload = b"metered snapshot".to_vec();
         let opened = OpenedAsset::new(
@@ -5316,8 +5526,8 @@ mod tests {
                 max_total_asset_bytes: 2,
                 ..ResourceLimits::default()
             };
-            let store = test_store(&limits);
-            let host = store.host();
+            let mut store = test_store(&limits);
+            let host = &mut store.execution();
             let baseline = current_live_bytes(host);
             for (dimension, ledger_phase, progress_phase) in [
                 (
@@ -5389,8 +5599,8 @@ mod tests {
                 max_total_asset_bytes: 0,
                 ..ResourceLimits::default()
             };
-            let store = test_store(&limits);
-            let host = store.host();
+            let mut store = test_store(&limits);
+            let host = &mut store.execution();
             let opened = OpenedAsset::new(
                 AuthorityDomain::new(),
                 AssetPath::new("empty.bin").unwrap(),
@@ -5432,8 +5642,8 @@ mod tests {
     fn opened_assets_preserve_exact_length_truncation_and_overrun_evidence() {
         for payload in [b"abc".as_slice(), b"abcde".as_slice()] {
             let limits = ResourceLimits::default();
-            let store = test_store(&limits);
-            let host = store.host();
+            let mut store = test_store(&limits);
+            let host = &mut store.execution();
             let baseline = current_live_bytes(host);
             let opened = OpenedAsset::new(
                 AuthorityDomain::new(),
@@ -5504,8 +5714,8 @@ mod tests {
     #[test]
     fn interrupted_asset_reads_preserve_only_completed_byte_and_call_prefixes() {
         for panics in [false, true] {
-            let store = test_store(&ResourceLimits::default());
-            let host = store.host();
+            let mut store = test_store(&ResourceLimits::default());
+            let host = &mut store.execution();
             let baseline = current_live_bytes(host);
             let calls = Arc::new(AtomicU64::new(0));
             let opened = OpenedAsset::new(
@@ -5575,8 +5785,8 @@ mod tests {
             } else {
                 ImportOperationControl::default()
             };
-            let store = test_store_with_control(&limits, control);
-            let host = store.host();
+            let mut store = test_store_with_control(&limits, control);
+            let host = &mut store.execution();
             let baseline = current_live_bytes(host);
             let calls = Arc::new(AtomicU64::new(0));
             let opened = OpenedAsset::new(
@@ -5635,279 +5845,215 @@ mod tests {
 
     struct OwnedIterationDropProbe<'a> {
         id: u8,
-        host: ImportStoreHost<'a>,
+        storage:
+            baozi_operation::__retained_store_integration::authority::StoreStorageObservation<'a>,
         observations: &'a RefCell<Vec<(u8, bool)>>,
         expected_live_bytes: u64,
     }
 
     impl Drop for OwnedIterationDropProbe<'_> {
         fn drop(&mut self) {
-            let capacity_is_live = self
-                .host
-                .dimension_state(ImportDimension::CanonicalOutputBytes)
-                .expect("canonical-output dimension")
-                .live_bytes()
-                == self.expected_live_bytes;
-            self.observations
-                .borrow_mut()
-                .push((self.id, capacity_is_live));
+            self.observations.borrow_mut().push((
+                self.id,
+                self.storage.live_bytes() == self.expected_live_bytes,
+            ));
         }
     }
 
     fn assert_owned_iteration_drop_observations(
         observations: &RefCell<Vec<(u8, bool)>>,
-        host: ImportStoreHost<'_>,
+        storage: &baozi_operation::__retained_store_integration::authority::StoreStorageObservation<
+            '_,
+        >,
         baseline: u64,
     ) {
         let mut observations = observations.borrow().clone();
         observations.sort_unstable_by_key(|(id, _)| *id);
-        assert_eq!(
-            observations,
-            vec![(0, true), (1, true), (2, true)],
-            "the current and remaining elements must all drop under the live capacity reservation"
-        );
-        assert_eq!(current_live_bytes(host), baseline);
+        assert_eq!(observations, vec![(0, true), (1, true), (2, true)]);
+        assert_eq!(storage.live_bytes(), baseline);
     }
 
     #[test]
     fn owned_iteration_error_drops_current_and_remaining_elements_before_capacity() {
-        let limits = ResourceLimits::default();
-        let store = test_store(&limits);
-        let host = store.host();
-        let baseline = current_live_bytes(host);
-        let canonical_baseline = host
-            .dimension_state(ImportDimension::CanonicalOutputBytes)
-            .unwrap()
-            .live_bytes();
-        let callback_active = Cell::new(false);
-        let terminal = RefCell::new(None);
-        let meter = StorageMeter {
-            host,
-            callback_active: &callback_active,
-            terminal: &terminal,
-        };
-        let observations = RefCell::new(Vec::new());
-        let mut values = MeteredVec {
-            values: Vec::new(),
-            capacity: None,
-            meter,
-            class: ImportStorageClass::SceneConstruction,
-            resource: "owned-iteration-error",
-        };
-        values
-            .try_reserve(3)
-            .expect("owned-iteration fixture capacity");
-        let expected_live_bytes = canonical_baseline
-            + values
-                .capacity
-                .as_ref()
-                .expect("owned capacity token")
-                .bytes();
-        assert_eq!(
-            host.dimension_state(ImportDimension::CanonicalOutputBytes)
-                .unwrap()
-                .live_bytes(),
-            expected_live_bytes
-        );
-        for id in 0..3 {
-            values
-                .try_push(OwnedIterationDropProbe {
-                    id,
-                    host,
-                    observations: &observations,
-                    expected_live_bytes,
+        let mut store = test_store(&ResourceLimits::default());
+        testing::with_context(&mut store.owner, |context| {
+            let observations = RefCell::new(Vec::new());
+            context
+                .with_execution(|exec| -> ParseResult<_> {
+                    let baseline = exec
+                        .store
+                        .dimension_state(ImportDimension::CanonicalOutputBytes)
+                        .unwrap()
+                        .live_bytes();
+                    let mut values = exec.metered_vec(
+                        ImportStorageClass::SceneConstruction,
+                        "owned-iteration-error",
+                    );
+                    values.try_reserve(exec, 3)?;
+                    let storage = exec
+                        .store
+                        .storage_observation(ImportDimension::CanonicalOutputBytes);
+                    let expected_live_bytes = baseline + values.capacity.as_ref().unwrap().bytes();
+                    for id in 0..3 {
+                        values.try_push(
+                            exec,
+                            OwnedIterationDropProbe {
+                                id,
+                                storage,
+                                observations: &observations,
+                                expected_live_bytes,
+                            },
+                        )?;
+                    }
+                    let result = values.try_for_each_owned(|probe| {
+                        assert_eq!(probe.id, 0);
+                        Err::<(), _>("injected visitor failure")
+                    });
+                    assert_eq!(result, Err("injected visitor failure"));
+                    assert_owned_iteration_drop_observations(&observations, &storage, baseline);
+                    Ok(())
                 })
-                .expect("owned-iteration fixture capacity");
-        }
-
-        let result = values.try_for_each_owned(|probe| {
-            assert_eq!(probe.id, 0, "the first visitor call must inject failure");
-            Err::<(), _>("injected visitor failure")
+                .unwrap();
         });
-
-        assert_eq!(result, Err("injected visitor failure"));
-        assert_owned_iteration_drop_observations(&observations, host, baseline);
         store.assert_released();
     }
 
     #[test]
     fn owned_iteration_panic_drops_current_and_remaining_elements_before_capacity() {
-        let limits = ResourceLimits::default();
-        let store = test_store(&limits);
-        let host = store.host();
-        let baseline = current_live_bytes(host);
-        let canonical_baseline = host
-            .dimension_state(ImportDimension::CanonicalOutputBytes)
-            .unwrap()
-            .live_bytes();
-        let callback_active = Cell::new(false);
-        let terminal = RefCell::new(None);
-        let meter = StorageMeter {
-            host,
-            callback_active: &callback_active,
-            terminal: &terminal,
-        };
-        let observations = RefCell::new(Vec::new());
-        let mut values = MeteredVec {
-            values: Vec::new(),
-            capacity: None,
-            meter,
-            class: ImportStorageClass::SceneConstruction,
-            resource: "owned-iteration-panic",
-        };
-        values
-            .try_reserve(3)
-            .expect("owned-iteration fixture capacity");
-        let expected_live_bytes = canonical_baseline
-            + values
-                .capacity
-                .as_ref()
-                .expect("owned capacity token")
-                .bytes();
-        assert_eq!(
-            host.dimension_state(ImportDimension::CanonicalOutputBytes)
-                .unwrap()
-                .live_bytes(),
-            expected_live_bytes
-        );
-        for id in 0..3 {
-            values
-                .try_push(OwnedIterationDropProbe {
-                    id,
-                    host,
-                    observations: &observations,
-                    expected_live_bytes,
+        let mut store = test_store(&ResourceLimits::default());
+        testing::with_context(&mut store.owner, |context| {
+            let observations = RefCell::new(Vec::new());
+            context
+                .with_execution(|exec| -> ParseResult<_> {
+                    let baseline = exec
+                        .store
+                        .dimension_state(ImportDimension::CanonicalOutputBytes)
+                        .unwrap()
+                        .live_bytes();
+                    let mut values = exec.metered_vec(
+                        ImportStorageClass::SceneConstruction,
+                        "owned-iteration-panic",
+                    );
+                    values.try_reserve(exec, 3)?;
+                    let storage = exec
+                        .store
+                        .storage_observation(ImportDimension::CanonicalOutputBytes);
+                    let expected_live_bytes = baseline + values.capacity.as_ref().unwrap().bytes();
+                    for id in 0..3 {
+                        values.try_push(
+                            exec,
+                            OwnedIterationDropProbe {
+                                id,
+                                storage,
+                                observations: &observations,
+                                expected_live_bytes,
+                            },
+                        )?;
+                    }
+                    let result = catch_unwind(AssertUnwindSafe(|| {
+                        let _ = values.try_for_each_owned(|probe| -> Result<(), ()> {
+                            assert_eq!(probe.id, 0);
+                            panic!("injected owned-iteration visitor panic");
+                        });
+                    }));
+                    assert!(result.is_err());
+                    assert_owned_iteration_drop_observations(&observations, &storage, baseline);
+                    Ok(())
                 })
-                .expect("owned-iteration fixture capacity");
-        }
-
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            let _ = values.try_for_each_owned(|probe| -> Result<(), ()> {
-                assert_eq!(probe.id, 0, "the first visitor call must inject panic");
-                panic!("injected owned-iteration visitor panic");
-            });
-        }));
-
-        assert!(result.is_err(), "the visitor panic must be observed");
-        assert_owned_iteration_drop_observations(&observations, host, baseline);
+                .unwrap();
+        });
         store.assert_released();
     }
 
     #[test]
     fn reserved_vector_copy_rejects_an_unbounded_chunk_without_mutation() {
-        let limits = ResourceLimits::default();
-        let store = test_store(&limits);
-        let host = store.host();
-        let callback_active = Cell::new(false);
-        let terminal = RefCell::new(None);
-        let meter = StorageMeter {
-            host,
-            callback_active: &callback_active,
-            terminal: &terminal,
-        };
-        let mut values = MeteredVec {
-            values: Vec::new(),
-            capacity: None,
-            meter,
-            class: ImportStorageClass::FormatNormalization,
-            resource: "reserved-vector-copy-bound",
-        };
-        let source = vec![0_u8; METERED_COPY_POLL_INTERVAL + 1];
-        values
-            .try_reserve(source.len())
-            .expect("copy fixture capacity must be admitted");
-
-        assert!(values.try_extend_from_slice_reserved(&source).is_err());
-        assert!(values.is_empty(), "a rejected copy must be atomic");
-        assert!(matches!(
-            terminal.borrow().as_ref(),
-            Some(ScopeAbortCause::DescriptorContract {
-                code: "metered-vector-copy-chunk-too-large",
-            })
-        ));
+        let mut store = test_store(&ResourceLimits::default());
+        testing::with_context(&mut store.owner, |context| {
+            let source = vec![0_u8; METERED_COPY_POLL_INTERVAL + 1];
+            let mut values = context
+                .with_execution(|exec| -> ParseResult<_> {
+                    let mut values = exec.metered_vec(
+                        ImportStorageClass::FormatNormalization,
+                        "reserved-vector-copy-bound",
+                    );
+                    values.try_reserve(exec, source.len())?;
+                    Ok(values)
+                })
+                .unwrap();
+            assert!(values.try_extend_from_slice_reserved(&source).is_err());
+            assert!(values.is_empty());
+            assert!(matches!(
+                context.take_terminal_abort().unwrap().cause(),
+                ScopeAbortCause::DescriptorContract {
+                    code: "metered-vector-copy-chunk-too-large"
+                },
+            ));
+        });
+        store.assert_released();
     }
 
     #[test]
     fn reserved_string_copy_rejects_an_unbounded_chunk_without_mutation() {
-        let limits = ResourceLimits::default();
-        let store = test_store(&limits);
-        let host = store.host();
-        let callback_active = Cell::new(false);
-        let terminal = RefCell::new(None);
-        let meter = StorageMeter {
-            host,
-            callback_active: &callback_active,
-            terminal: &terminal,
-        };
-        let mut value = MeteredString {
-            value: String::new(),
-            capacity: None,
-            meter,
-            class: ImportStorageClass::FormatNormalization,
-            resource: "reserved-string-copy-bound",
-        };
-        let source = "x".repeat(METERED_COPY_POLL_INTERVAL + 1);
-        value
-            .try_reserve(source.len())
-            .expect("copy fixture capacity must be admitted");
-
-        assert!(value.try_push_str_reserved(&source).is_err());
-        assert!(value.is_empty(), "a rejected copy must be atomic");
-        assert!(matches!(
-            terminal.borrow().as_ref(),
-            Some(ScopeAbortCause::DescriptorContract {
-                code: "metered-string-copy-chunk-too-large",
-            })
-        ));
+        let mut store = test_store(&ResourceLimits::default());
+        testing::with_context(&mut store.owner, |context| {
+            let source = "x".repeat(METERED_COPY_POLL_INTERVAL + 1);
+            let mut value = context
+                .with_execution(|exec| -> ParseResult<_> {
+                    let mut value = exec.metered_string(
+                        ImportStorageClass::FormatNormalization,
+                        "reserved-string-copy-bound",
+                    );
+                    value.try_reserve(exec, source.len())?;
+                    Ok(value)
+                })
+                .unwrap();
+            assert!(value.try_push_str_reserved(&source).is_err());
+            assert!(value.is_empty());
+            assert!(matches!(
+                context.take_terminal_abort().unwrap().cause(),
+                ScopeAbortCause::DescriptorContract {
+                    code: "metered-string-copy-chunk-too-large"
+                },
+            ));
+        });
+        store.assert_released();
     }
 
     #[test]
     fn dedup_partition_defers_duplicate_drops_to_the_caller() {
         struct DedupDropProbe<'a> {
             key: u8,
-            drops: &'a std::cell::Cell<usize>,
+            drops: &'a Cell<usize>,
         }
-
         impl Drop for DedupDropProbe<'_> {
             fn drop(&mut self) {
                 self.drops.set(self.drops.get() + 1);
             }
         }
-
-        let limits = ResourceLimits::default();
-        let store = test_store(&limits);
-        let host = store.host();
-        let callback_active = Cell::new(false);
-        let terminal = RefCell::new(None);
-        let meter = StorageMeter {
-            host,
-            callback_active: &callback_active,
-            terminal: &terminal,
-        };
-        let drops = std::cell::Cell::new(0usize);
-        let mut values = MeteredVec {
-            values: Vec::new(),
-            capacity: None,
-            meter,
-            class: ImportStorageClass::FormatNormalization,
-            resource: "dedup-partition",
-        };
-        for key in [1, 1, 2, 2] {
-            values
-                .try_push(DedupDropProbe { key, drops: &drops })
-                .expect("dedup fixture capacity");
-        }
-
-        let retained = values
-            .try_partition_dedup_by(|left, right| Ok::<_, ()>(left.key == right.key))
-            .expect("dedup comparison");
-        assert_eq!(retained, 2);
-        assert_eq!(values.len(), 4);
-        assert_eq!(drops.get(), 0, "partitioning must not run destructors");
-
-        values.truncate(retained);
-        assert_eq!(drops.get(), 2);
-        drop(values);
-        assert_eq!(drops.get(), 4);
+        let mut store = test_store(&ResourceLimits::default());
+        testing::with_context(&mut store.owner, |context| {
+            let drops = Cell::new(0);
+            let mut values = context
+                .with_execution(|exec| -> ParseResult<_> {
+                    let mut values = exec
+                        .metered_vec(ImportStorageClass::FormatNormalization, "dedup-drop-order");
+                    for key in [1, 1, 2, 2] {
+                        values.try_push(exec, DedupDropProbe { key, drops: &drops })?;
+                    }
+                    Ok(values)
+                })
+                .unwrap();
+            let retained = values
+                .try_partition_dedup_by(|left, right| Ok::<_, ParseFailure>(left.key == right.key))
+                .unwrap();
+            assert_eq!(retained, 2);
+            assert_eq!(values.len(), 4);
+            assert_eq!(drops.get(), 0);
+            values.truncate(retained);
+            assert_eq!(drops.get(), 2);
+            drop(values);
+            assert_eq!(drops.get(), 4);
+        });
+        store.assert_released();
     }
 }

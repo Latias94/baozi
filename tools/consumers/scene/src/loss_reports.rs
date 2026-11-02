@@ -39,13 +39,14 @@ pub(super) fn verify(importer: &Importer) -> Result<(), Box<dyn std::error::Erro
             LossPolicy::preserve_or_fail().allow(ImportLossKind::SourceSemanticLoss),
         ),
     ));
-    let prepared = importer.prepare_request(&request, OptionCompileLimits::default())?;
-    let report = importer.read_bytes_with_request(
-        SOURCE,
-        PARTIAL_UV,
-        &prepared,
-        ImportOperationControl::default(),
-    )?;
+    let prepared = importer.plan(&request, OptionCompileLimits::default())?;
+    let report = prepared
+        .read_bytes(
+            baozi::AssetPath::new(SOURCE).expect("valid source path"),
+            PARTIAL_UV,
+            ImportOperationControl::default(),
+        )
+        .map_err(baozi::Error::from)?;
     let (scene, evidence): (ValidatedScene, ImportEvidence) = report.into_parts();
     assert!(evidence.matches_scene(&scene));
     assert_eq!(evidence.source().as_str(), SOURCE);

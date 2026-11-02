@@ -1,15 +1,14 @@
-use crate::SceneDraft;
 use crate::descriptor::FormatDescriptor;
 use crate::detection::{DetectionResult, DetectionScope};
 use crate::options::{
-    FormatOptionCodec, OptionRuntimeTypeKey, no_options_codec, no_options_runtime_type_key,
+    CompiledOptions, FormatOptionLayers, FormatOptionSchema, OptionCompileError,
+    OptionCompileScope, RegistryBuildScope,
 };
-use crate::scope::{ParseResult, ParseScope};
+use crate::scope::{ParseContext, ParseResult};
 use crate::session::ReadHint;
 use std::any::Any;
 use std::fmt;
 use std::panic::RefUnwindSafe;
-use std::sync::Arc;
 
 const MAX_DETECTION_FAULT_DETAIL_BYTES: usize = 96;
 const MAX_EXTENSION_PANIC_DETAIL_BYTES: usize = 512;
@@ -172,18 +171,44 @@ impl<'a> Probe<'a> {
 ///
 /// Implementations may not retain per-session parse or option state. An unwind
 /// poisons the registration and every snapshot that shares it.
-pub trait FormatImporter: Send + Sync + RefUnwindSafe + 'static {
-    /// Returns immutable claims captured exactly once when the importer is registered.
+///
+/// The associated options type is checked before a format can be registered or invoked.
+///
+/// ```compile_fail,E0308
+/// use baozi_import::{Format, ParseContext, ParseResult};
+///
+/// fn parse_wrong_options<F: Format<Options = u8>>(
+///     format: &F,
+///     context: &mut ParseContext<'_>,
+/// ) -> ParseResult<()> {
+///     format.parse(&false, context)
+/// }
+/// ```
+pub trait Format: Send + Sync + RefUnwindSafe + 'static {
+    type Options: Send + Sync + RefUnwindSafe + 'static;
+
+    /// Returns immutable claims captured exactly once when the format is registered.
     fn descriptor(&self) -> FormatDescriptor;
 
-    /// Returns the object-safe format-owned option codec captured at registration.
-    fn option_codec(&self) -> Arc<dyn FormatOptionCodec> {
-        no_options_codec()
+    /// Returns immutable wire-schema metadata captured once at registration.
+    fn option_schema(&self) -> Option<FormatOptionSchema> {
+        None
     }
 
-    /// Declares the concrete options type expected by this parser.
-    fn option_runtime_type_key(&self) -> OptionRuntimeTypeKey {
-        no_options_runtime_type_key()
+    /// Compiles the defaults once per frozen snapshot through the bounded host scope.
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError>;
+
+    /// Compiles the submitted layers against this snapshot's typed defaults.
+    fn compile_options(
+        &self,
+        _scope: &mut OptionCompileScope<'_>,
+        _defaults: &Self::Options,
+        _layers: FormatOptionLayers<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        Err(OptionCompileError::OptionsUnsupported)
     }
 
     fn detect(
@@ -195,7 +220,7 @@ pub trait FormatImporter: Send + Sync + RefUnwindSafe + 'static {
         Ok(DetectionOutcome::NoMatch)
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft>;
+    fn parse(&self, options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()>;
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -315,8 +340,6 @@ pub(crate) fn detection_fault_from_panic(payload: Box<dyn Any + Send>) -> Detect
 mod tests {
     use super::*;
 
-    fn assert_object_safe(_: &dyn FormatImporter) {}
-
     #[test]
     fn detection_fault_detail_is_bounded_and_sanitized() {
         let detail = format!("{}\nsecret", "x".repeat(MAX_DETECTION_FAULT_DETAIL_BYTES));
@@ -350,11 +373,6 @@ mod tests {
             bounded_panic_detail(opaque_payload).as_ref(),
             "extension panicked with a non-string payload"
         );
-    }
-
-    #[test]
-    fn trait_remains_object_safe() {
-        let _ = assert_object_safe as fn(&dyn FormatImporter);
     }
 
     #[test]

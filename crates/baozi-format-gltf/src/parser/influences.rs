@@ -33,7 +33,7 @@ struct InfluenceWeights {
 }
 
 pub(super) fn preflight(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     primitive: &json::mesh::Primitive<'_>,
     vertex_count: usize,
     owner: AccessorOwner,
@@ -42,30 +42,31 @@ pub(super) fn preflight(
     // Count actual keys instead of reserving storage indexed by an untrusted suffix.
     let mut joints = 0u32;
     let mut weights = 0u32;
+    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
     for semantic in primitive.attributes.keys() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         let (set, expected, label) = match semantic {
             json::mesh::Semantic::Joints(set) => (*set, &mut joints, "JOINTS"),
             json::mesh::Semantic::Weights(set) => (*set, &mut weights, "WEIGHTS"),
             _ => continue,
         };
         if set != *expected {
-            return Err(gltf_parse_error(
-                ctx,
-                format_args!("{owner} has non-contiguous {label} sets"),
-            ));
+            return Err(gltf_parse_error(format_args!(
+                "{owner} has non-contiguous {label} sets"
+            )));
         }
         *expected = expected
             .checked_add(1)
             .ok_or_else(|| ctx.allocation_failure("gltf-influence-set-count"))?;
     }
     if joints != weights {
-        return Err(gltf_parse_error(
-            ctx,
-            format_args!(
-                "{owner} JOINTS and WEIGHTS attributes must be provided together for every set"
-            ),
-        ));
+        return Err(gltf_parse_error(format_args!(
+            "{owner} JOINTS and WEIGHTS attributes must be provided together for every set"
+        )));
     }
     let row_width = joints
         .checked_mul(4)
@@ -103,7 +104,7 @@ pub(super) fn preflight(
 }
 
 pub(super) fn build_rows<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     buffers: &[Option<BufferData<'_>>],
     primitive: &crate::document::Primitive<'_>,
     contract: InfluenceContract,
@@ -129,22 +130,22 @@ pub(super) fn build_rows<'scope>(
         ImportStorageClass::FormatNormalization,
         "gltf-influence-set-readers",
     );
-    sets.try_reserve(contract.set_count as usize)?;
+    sets.try_reserve(ctx, contract.set_count as usize)?;
     let mut quantized = true;
     for set in 0..contract.set_count {
         poll_parser_loop(ctx, set as usize)?;
         let joint_source = primitive
             .get(&Semantic::Joints(set))
-            .ok_or_else(|| gltf_parse_error(ctx, "glTF joint accessor disappeared"))?;
+            .ok_or_else(|| gltf_parse_error("glTF joint accessor disappeared"))?;
         let weight_source = primitive
             .get(&Semantic::Weights(set))
-            .ok_or_else(|| gltf_parse_error(ctx, "glTF weight accessor disappeared"))?;
+            .ok_or_else(|| gltf_parse_error("glTF weight accessor disappeared"))?;
         let joints = accessor::bind(ctx, joint_source, buffers)?
             .joints()
-            .ok_or_else(|| gltf_parse_error(ctx, "glTF joint accessor encoding is invalid"))?;
+            .ok_or_else(|| gltf_parse_error("glTF joint accessor encoding is invalid"))?;
         let weights = accessor::bind(ctx, weight_source, buffers)?
             .weights()
-            .ok_or_else(|| gltf_parse_error(ctx, "glTF weight accessor encoding is invalid"))?;
+            .ok_or_else(|| gltf_parse_error("glTF weight accessor encoding is invalid"))?;
         let joint_bounds =
             accessor::MeshAccessorBounds::new(joint_source.row(), joint_source.index(), false)?;
         let weight_bounds =
@@ -178,10 +179,10 @@ pub(super) fn build_rows<'scope>(
             let (joints, weights, raw_sum) = {
                 let mut readers = readers.borrow_mut();
                 let joints = readers.joints.next().ok_or_else(|| {
-                    gltf_parse_error(ctx, "glTF joint stream is shorter than its admitted count")
+                    gltf_parse_error("glTF joint stream is shorter than its admitted count")
                 })?;
                 let weights = next_weights(&mut readers.weights).ok_or_else(|| {
-                    gltf_parse_error(ctx, "glTF weight stream is shorter than its admitted count")
+                    gltf_parse_error("glTF weight stream is shorter than its admitted count")
                 })?;
                 if weights
                     .decoded
@@ -189,7 +190,6 @@ pub(super) fn build_rows<'scope>(
                     .any(|weight| !weight.is_finite() || *weight < 0.0)
                 {
                     return Err(gltf_parse_error(
-                        ctx,
                         "glTF influence weights must be finite and non-negative",
                     ));
                 }
@@ -216,7 +216,6 @@ pub(super) fn build_rows<'scope>(
         }
         if quantized && integer_sum != 65_535 {
             return Err(gltf_parse_error(
-                ctx,
                 "glTF quantized influence weights must sum to one across all sets",
             ));
         }
@@ -236,7 +235,6 @@ pub(super) fn build_rows<'scope>(
             poll_parser_loop(ctx, index)?;
             if pair[0] == pair[1] {
                 return Err(gltf_parse_error(
-                    ctx,
                     "glTF nonzero influence joint indices must be unique per vertex",
                 ));
             }
@@ -252,7 +250,6 @@ pub(super) fn build_rows<'scope>(
         let mut readers = readers.borrow_mut();
         if readers.joints.next().is_some() || next_weights(&mut readers.weights).is_some() {
             return Err(gltf_parse_error(
-                ctx,
                 "glTF influence stream exceeds its admitted count",
             ));
         }

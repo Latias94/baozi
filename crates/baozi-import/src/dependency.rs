@@ -4,7 +4,7 @@ use crate::ledger::{ImportDimension, ImportLedgerPhase};
 use crate::metered_storage::AccountedVec;
 use crate::resource_graph::ManifestDigest;
 use crate::resource_hash::chunked_sha256;
-use crate::store::{ImportStoreHost, ImportStoreReservation};
+use crate::store::{ImportBoundWorkGroup, ImportStoreExecution, ImportStoreReservation};
 use baozi_io::__semantic_identity::{
     RegisteredAssetResolution, RegisteredResolverProfile, RegisteredUnavailableCause,
     StableResourceIdentitySchema, VerifiedNegativeInputProof, VerifiedNegativeInputProofBinding,
@@ -230,7 +230,7 @@ impl DependencyFailureContext {
     }
 
     pub(crate) fn try_capture(
-        host: ImportStoreHost<'_>,
+        exec: &mut ImportStoreExecution<'_>,
         origin_authority: &AuthorityDomain,
         origin_path: &AssetPath,
         role: &DependencyRoleId,
@@ -271,7 +271,7 @@ impl DependencyFailureContext {
         }
         // One terminal-failure owner retains every backing allocation, including paths. Admission
         // precedes allocation and the lease moves with the actual terminal cause.
-        let mut reservation = host
+        let mut reservation = exec
             .reserve_retained(
                 ImportLedgerPhase::DependencyAcquisition,
                 ImportDimension::ScratchBytes,
@@ -323,7 +323,7 @@ impl DependencyFailureContext {
                 .checked_add(capacity as u64)
                 .ok_or_else(|| capacity_error(CapacityPlanError::CapacityOverflow))?;
         }
-        host.resize(&mut reservation, actual)
+        exec.resize(&mut reservation, actual)
             .map_err(|cause| cause.into_scope_abort_cause())?;
         details.push(DependencyFailureDetails {
             origin,
@@ -656,14 +656,14 @@ impl SharedDependencySnapshot {
 
     pub(crate) fn content_digest(
         &self,
-        host: ImportStoreHost<'_>,
+        exec: &mut ImportStoreExecution<'_>,
     ) -> Result<ManifestDigest, ScopeAbortCause> {
         if let Some(digest) = self.content_digest.get() {
             return Ok(*digest);
         }
         // ResourceGraph serializes access to this session's immutable snapshots. Publish only a
         // complete digest; cancellation or rejected work admission must not seal a partial hash.
-        let digest = chunked_sha256(host, self.bytes(), ImportDimension::WorkUnits)
+        let digest = chunked_sha256(exec, self.bytes(), ImportDimension::WorkUnits)
             .map(ManifestDigest::from_bytes)?;
         Ok(*self.content_digest.get_or_init(|| digest))
     }
@@ -793,12 +793,18 @@ const DEPENDENCY_INDEX_TOMBSTONE: usize = usize::MAX - 1;
 const MIN_DEPENDENCY_INDEX_SLOTS: usize = 8;
 const DEPENDENCY_INDEX_INIT_CHUNK_SLOTS: usize = 256;
 
-fn charge_cache_work(host: ImportStoreHost<'_>, amount: u64) -> Result<(), ScopeAbortCause> {
-    host.poll()
+fn charge_cache_work(
+    exec: &mut ImportStoreExecution<'_>,
+    group: &ImportBoundWorkGroup<'_, 1>,
+    amount: u64,
+) -> Result<(), ScopeAbortCause> {
+    exec.poll()
         .map_err(|cause| cause.into_scope_abort_cause())?;
-    host.charge_attempted(ImportDimension::ResourceGraphWork, amount)
+    group
+        .charge_attempted([amount])
         .map_err(|cause| cause.into_scope_abort_cause())?;
-    host.charge_consumed(ImportDimension::ResourceGraphWork, amount)
+    group
+        .complete_observed([amount])
         .map_err(|cause| cause.into_scope_abort_cause())
 }
 
@@ -823,10 +829,10 @@ impl DependencyCache {
 
     pub(crate) fn get(
         &self,
-        host: ImportStoreHost<'_>,
+        exec: &mut ImportStoreExecution<'_>,
         identity: &DependencyIdentity,
     ) -> Result<Option<(usize, &DependencyCacheEntry)>, ScopeAbortCause> {
-        let Some(index) = self.controlled_record_index(host, identity)? else {
+        let Some(index) = self.controlled_record_index(exec, identity)? else {
             return Ok(None);
         };
         let Some(DependencyCacheRecordSlot::Occupied(record)) = self.entries.get(index) else {
@@ -840,10 +846,10 @@ impl DependencyCache {
     /// Callers still decide whether the record's acquisition state is usable.
     pub(crate) fn controlled_record_index(
         &self,
-        host: ImportStoreHost<'_>,
+        exec: &mut ImportStoreExecution<'_>,
         identity: &DependencyIdentity,
     ) -> Result<Option<usize>, ScopeAbortCause> {
-        Ok(self.probe_identity(host, identity)?.record_index)
+        Ok(self.probe_identity(exec, identity)?.record_index)
     }
 
     pub(crate) fn capacity_plan(
@@ -899,11 +905,14 @@ impl DependencyCache {
 
     pub(crate) fn apply_capacity_plan(
         &mut self,
-        host: ImportStoreHost<'_>,
+        exec: &mut ImportStoreExecution<'_>,
         plan: DependencyCacheCapacityPlan,
     ) -> Result<DependencyCacheCapacityActual, DependencyCacheCapacityError> {
         plan.verify(self)?;
-        host.poll()
+        exec.poll()
+            .map_err(|cause| DependencyCacheCapacityError::Work(cause.into_scope_abort_cause()))?;
+        let group = exec
+            .bind_group([ImportDimension::ResourceGraphWork])
             .map_err(|cause| DependencyCacheCapacityError::Work(cause.into_scope_abort_cause()))?;
 
         // Qualify complete replacements before mutating either live container.
@@ -932,7 +941,7 @@ impl DependencyCache {
                 })?;
             while slots.len() < index_plan.slots {
                 let count = (index_plan.slots - slots.len()).min(DEPENDENCY_INDEX_INIT_CHUNK_SLOTS);
-                charge_cache_work(host, count as u64)
+                charge_cache_work(exec, &group, count as u64)
                     .map_err(DependencyCacheCapacityError::Work)?;
                 slots.resize(slots.len() + count, DEPENDENCY_INDEX_EMPTY);
             }
@@ -974,7 +983,7 @@ impl DependencyCache {
             };
 
         if let Some(slots) = replacement_index.as_mut() {
-            self.rebuild_index(host, slots)?;
+            self.rebuild_index(exec, &group, slots)?;
         }
         if replacement_entries.is_some() {
             let moved_records = u64::try_from(self.entries.len()).map_err(|_| {
@@ -984,9 +993,10 @@ impl DependencyCache {
                 }
             })?;
             // The known-length bulk move has no fallible step once the live records move.
-            charge_cache_work(host, moved_records).map_err(DependencyCacheCapacityError::Work)?;
+            charge_cache_work(exec, &group, moved_records)
+                .map_err(DependencyCacheCapacityError::Work)?;
         }
-        host.poll()
+        exec.poll()
             .map_err(|cause| DependencyCacheCapacityError::Work(cause.into_scope_abort_cause()))?;
 
         // Candidate initialization, reinsertion, and move admission all precede this commit.
@@ -1028,11 +1038,11 @@ impl DependencyCache {
 
     pub(crate) fn mark_resolving(
         &mut self,
-        host: ImportStoreHost<'_>,
+        exec: &mut ImportStoreExecution<'_>,
         identity: DependencyIdentity,
         identity_path_reservation: ImportStoreReservation,
     ) -> Result<bool, ScopeAbortCause> {
-        let probe = self.probe_identity(host, &identity)?;
+        let probe = self.probe_identity(exec, &identity)?;
         if probe.record_index.is_some() {
             return Ok(false);
         }
@@ -1078,12 +1088,12 @@ impl DependencyCache {
 
     pub(crate) fn store_available(
         &mut self,
-        host: ImportStoreHost<'_>,
+        exec: &mut ImportStoreExecution<'_>,
         identity: &DependencyIdentity,
         bytes: Arc<SharedDependencySnapshot>,
         stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
     ) -> Result<Option<usize>, ScopeAbortCause> {
-        let Some(index) = self.controlled_record_index(host, identity)? else {
+        let Some(index) = self.controlled_record_index(exec, identity)? else {
             return Ok(None);
         };
         let Some(DependencyCacheRecordSlot::Occupied(record)) = self.entries.get_mut(index) else {
@@ -1119,13 +1129,13 @@ impl DependencyCache {
 
     pub(crate) fn store_failed(
         &mut self,
-        host: ImportStoreHost<'_>,
+        exec: &mut ImportStoreExecution<'_>,
         identity: &DependencyIdentity,
         cause: ScopeAbortCause,
         stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
         observation: PendingNegativeObservation<'_>,
     ) -> Result<usize, ScopeAbortCause> {
-        let Some(index) = self.controlled_record_index(host, identity)? else {
+        let Some(index) = self.controlled_record_index(exec, identity)? else {
             return Err(ScopeAbortCause::DescriptorContract {
                 code: "dependency-cache-transition-missing",
             });
@@ -1159,10 +1169,10 @@ impl DependencyCache {
 
     pub(crate) fn remove_resolving(
         &mut self,
-        host: ImportStoreHost<'_>,
+        exec: &mut ImportStoreExecution<'_>,
         identity: &DependencyIdentity,
     ) -> Result<bool, ScopeAbortCause> {
-        let probe = self.probe_identity(host, identity)?;
+        let probe = self.probe_identity(exec, identity)?;
         let (Some(record_index), Some(index_slot)) = (probe.record_index, probe.matched_slot)
         else {
             return Ok(false);
@@ -1187,9 +1197,15 @@ impl DependencyCache {
 
     fn probe_identity(
         &self,
-        host: ImportStoreHost<'_>,
+        exec: &mut ImportStoreExecution<'_>,
         identity: &DependencyIdentity,
     ) -> Result<DependencyIndexProbe, ScopeAbortCause> {
+        if self.index.slots.is_empty() {
+            return Ok(DependencyIndexProbe::empty());
+        }
+        let group = exec
+            .bind_group([ImportDimension::ResourceGraphWork])
+            .map_err(|cause| cause.into_scope_abort_cause())?;
         DependencyIndex::try_probe_slots(
             &self.index.slots,
             &self.index.hash_builder,
@@ -1200,7 +1216,7 @@ impl DependencyCache {
                     .and_then(DependencyCacheRecordSlot::record)
                     .is_some_and(|record| &record.identity == identity)
             },
-            || charge_cache_work(host, 1),
+            || charge_cache_work(exec, &group, 1),
         )
     }
 
@@ -1243,11 +1259,12 @@ impl DependencyCache {
 
     fn rebuild_index(
         &self,
-        host: ImportStoreHost<'_>,
+        exec: &mut ImportStoreExecution<'_>,
+        group: &ImportBoundWorkGroup<'_, 1>,
         slots: &mut [usize],
     ) -> Result<(), DependencyCacheCapacityError> {
         for (record_index, slot) in self.entries.iter().enumerate() {
-            charge_cache_work(host, 1).map_err(DependencyCacheCapacityError::Work)?;
+            charge_cache_work(exec, group, 1).map_err(DependencyCacheCapacityError::Work)?;
             let DependencyCacheRecordSlot::Occupied(record) = slot else {
                 continue;
             };
@@ -1256,7 +1273,7 @@ impl DependencyCache {
                 &self.index.hash_builder,
                 &record.identity,
                 |_| false,
-                || charge_cache_work(host, 1),
+                || charge_cache_work(exec, group, 1),
             )
             .map_err(DependencyCacheCapacityError::Work)?;
             let Some(index_slot) = probe.insertion_slot else {
@@ -1694,7 +1711,7 @@ mod tests {
     use crate::ledger::{ImportDimension, ImportLedgerPhase, ImportOperationControl};
     use crate::limits::ResourceLimits;
     use crate::store::{
-        ImportStoreBootstrapRequirements, ImportStoreHost, ImportStoreSessionOwner,
+        ImportStoreBootstrapRequirements, ImportStoreExecution, ImportStoreSessionOwner,
         try_import_store_bootstrap,
     };
     use baozi_io::__semantic_identity::same_authority_resolver_v1;
@@ -1753,51 +1770,6 @@ mod tests {
             Self { owner, account }
         }
 
-        fn host(&self) -> ImportStoreHost<'_> {
-            self.owner.host()
-        }
-
-        fn reserve_scratch(&self, bytes: u64) -> ImportStoreReservation {
-            self.host()
-                .reserve(
-                    ImportLedgerPhase::DependencyAcquisition,
-                    ImportDimension::ScratchBytes,
-                    bytes,
-                )
-                .expect("test scratch reservation must be admitted")
-        }
-
-        fn live_scratch_bytes(&self) -> u64 {
-            self.host()
-                .dimension_state(ImportDimension::ScratchBytes)
-                .expect("test scratch dimension must remain observable")
-                .live_bytes()
-        }
-
-        fn prepare_cache_capacity(&self, cache: &mut DependencyCache) {
-            let plan = cache.capacity_plan().unwrap();
-            if !plan.requires_apply() {
-                return;
-            }
-            // Existing reservations stay attached while replacement buffers are admitted.
-            let mut candidates = [
-                DependencyCacheStorage::Entries,
-                DependencyCacheStorage::Index,
-            ]
-            .map(|storage| {
-                let bytes = plan.temporary_envelope_bytes(storage).unwrap();
-                (storage, (bytes != 0).then(|| self.reserve_scratch(bytes)))
-            });
-            let actual = cache.apply_capacity_plan(self.host(), plan).unwrap();
-            for (storage, candidate) in &mut candidates {
-                if let Some(bytes) = actual.retained_bytes(*storage) {
-                    let mut reservation = candidate.take().unwrap();
-                    self.host().resize(&mut reservation, bytes).unwrap();
-                    cache.retain_capacity_reservation(*storage, Some(reservation));
-                }
-            }
-        }
-
         fn assert_released(self) {
             let Self { owner, account } = self;
             drop(owner);
@@ -1805,6 +1777,45 @@ mod tests {
             assert_eq!(released.live_retained_bytes(), 0);
             assert_eq!(released.live_retained_allocations(), 0);
             assert!(!released.poisoned());
+        }
+    }
+
+    fn reserve_scratch(exec: &mut ImportStoreExecution<'_>, bytes: u64) -> ImportStoreReservation {
+        exec.reserve(
+            ImportLedgerPhase::DependencyAcquisition,
+            ImportDimension::ScratchBytes,
+            bytes,
+        )
+        .expect("test scratch reservation must be admitted")
+    }
+
+    fn live_scratch_bytes(exec: &ImportStoreExecution<'_>) -> u64 {
+        exec.dimension_state(ImportDimension::ScratchBytes)
+            .expect("test scratch dimension must remain observable")
+            .live_bytes()
+    }
+
+    fn prepare_cache_capacity(exec: &mut ImportStoreExecution<'_>, cache: &mut DependencyCache) {
+        let plan = cache.capacity_plan().unwrap();
+        if !plan.requires_apply() {
+            return;
+        }
+        // Existing reservations stay attached while replacement buffers are admitted.
+        let mut candidates = [
+            DependencyCacheStorage::Entries,
+            DependencyCacheStorage::Index,
+        ]
+        .map(|storage| {
+            let bytes = plan.temporary_envelope_bytes(storage).unwrap();
+            (storage, (bytes != 0).then(|| reserve_scratch(exec, bytes)))
+        });
+        let actual = cache.apply_capacity_plan(exec, plan).unwrap();
+        for (storage, candidate) in &mut candidates {
+            if let Some(bytes) = actual.retained_bytes(*storage) {
+                let mut reservation = candidate.take().unwrap();
+                exec.resize(&mut reservation, bytes).unwrap();
+                cache.retain_capacity_reservation(*storage, Some(reservation));
+            }
         }
     }
 
@@ -1826,7 +1837,7 @@ mod tests {
     }
 
     fn cache_with_records(
-        store: &StoreHarness,
+        exec: &mut ImportStoreExecution<'_>,
         count: usize,
         authority: &AuthorityDomain,
         hash_builder: &RandomState,
@@ -1837,25 +1848,25 @@ mod tests {
         let mut cache = DependencyCache::new();
         cache.index.hash_builder = hash_builder.clone();
         for identity in &identities {
-            store.prepare_cache_capacity(&mut cache);
+            prepare_cache_capacity(exec, &mut cache);
+            let reservation = reserve_scratch(exec, identity.path().as_str().len() as u64);
             assert!(
                 cache
-                    .mark_resolving(
-                        store.host(),
-                        identity.try_clone().unwrap(),
-                        store.reserve_scratch(identity.path().as_str().len() as u64),
-                    )
+                    .mark_resolving(exec, identity.try_clone().unwrap(), reservation,)
                     .unwrap()
             );
         }
         // An available origin must survive every subsequent candidate failure unchanged.
         let snapshot = Arc::new(SharedDependencySnapshot::new(
             AccountedVec::new(),
-            store.reserve_scratch(shared_dependency_snapshot_allocation_bytes().unwrap() as u64),
+            reserve_scratch(
+                exec,
+                shared_dependency_snapshot_allocation_bytes().unwrap() as u64,
+            ),
         ));
         assert_eq!(
             cache
-                .store_available(store.host(), &identities[0], snapshot, None)
+                .store_available(exec, &identities[0], snapshot, None)
                 .unwrap(),
             Some(0)
         );
@@ -1869,16 +1880,17 @@ mod tests {
                 for operation in ["get", "insert", "available", "failed", "remove"] {
                     let calls = Arc::new(AtomicUsize::new(0));
                     let cancel_at = Arc::new(AtomicUsize::new(usize::MAX));
-                    let store = StoreHarness::with_control(
+                    let mut store = StoreHarness::with_control(
                         ImportOperationControl::default().with_cancellation(CancelOnPoll {
                             calls: Arc::clone(&calls),
                             cancel_at: Arc::clone(&cancel_at),
                         }),
                     );
-                    let host = store.host();
+                    let exec = &mut store.owner.execution().unwrap();
+
                     let authority = AuthorityDomain::new();
                     let mut cache = DependencyCache::new();
-                    store.prepare_cache_capacity(&mut cache);
+                    prepare_cache_capacity(exec, &mut cache);
                     let mask = cache.index.slots.len() - 1;
                     // Four real keys with one home slot make early and late failures
                     // deterministic after key selection, regardless of RandomState's seed.
@@ -1891,20 +1903,31 @@ mod tests {
                         .collect::<Vec<_>>();
                     assert_eq!(identities.len(), 4);
                     for identity in &identities[..3] {
-                        store.prepare_cache_capacity(&mut cache);
+                        prepare_cache_capacity(exec, &mut cache);
+                        let reservation =
+                            reserve_scratch(exec, identity.path().as_str().len() as u64);
                         assert!(
                             cache
-                                .mark_resolving(
-                                    host,
-                                    identity.try_clone().unwrap(),
-                                    store.reserve_scratch(identity.path().as_str().len() as u64),
-                                )
+                                .mark_resolving(exec, identity.try_clone().unwrap(), reservation,)
                                 .unwrap()
                         );
                     }
                     let original_slots = cache.index.slots.clone();
-                    let baseline = store.live_scratch_bytes();
-                    let before = host
+                    let baseline = live_scratch_bytes(exec);
+                    // Fixture allocations must finish before cancellation is armed. The cache
+                    // operation, rather than its independent input preparation, is the frontier.
+                    let mut insertion_reservation = (operation == "insert")
+                        .then(|| reserve_scratch(exec, identities[3].path().as_str().len() as u64));
+                    let mut available_snapshot = (operation == "available").then(|| {
+                        Arc::new(SharedDependencySnapshot::new(
+                            AccountedVec::new(),
+                            reserve_scratch(
+                                exec,
+                                shared_dependency_snapshot_allocation_bytes().unwrap() as u64,
+                            ),
+                        ))
+                    });
+                    let before = exec
                         .dimension_state(ImportDimension::ResourceGraphWork)
                         .unwrap();
                     if cancel {
@@ -1913,45 +1936,39 @@ mod tests {
                             Ordering::Release,
                         );
                     } else {
-                        host.tighten_dimension_policy(
+                        exec.tighten_dimension_policy(
                             ImportDimension::ResourceGraphWork,
                             DimensionPolicy::counter(u64::MAX, before.consumed() + completed, 0),
                         )
                         .unwrap();
                     }
                     let result = match operation {
-                        "get" => cache.get(host, &identities[2]).map(|_| ()),
+                        "get" => cache.get(exec, &identities[2]).map(|_| ()),
                         "insert" => cache
                             .mark_resolving(
-                                host,
+                                exec,
                                 identities[3].try_clone().unwrap(),
-                                store.reserve_scratch(identities[3].path().as_str().len() as u64),
+                                insertion_reservation.take().unwrap(),
                             )
                             .map(|_| ()),
                         "available" => cache
                             .store_available(
-                                host,
+                                exec,
                                 &identities[2],
-                                Arc::new(SharedDependencySnapshot::new(
-                                    AccountedVec::new(),
-                                    store.reserve_scratch(
-                                        shared_dependency_snapshot_allocation_bytes().unwrap()
-                                            as u64,
-                                    ),
-                                )),
+                                available_snapshot.take().unwrap(),
                                 None,
                             )
                             .map(|_| ()),
                         "failed" => cache
                             .store_failed(
-                                host,
+                                exec,
                                 &identities[2],
                                 missing_dependency_cause(),
                                 None,
                                 PendingNegativeObservation::None,
                             )
                             .map(|_| ()),
-                        "remove" => cache.remove_resolving(host, &identities[2]).map(|_| ()),
+                        "remove" => cache.remove_resolving(exec, &identities[2]).map(|_| ()),
                         _ => unreachable!(),
                     };
                     if cancel {
@@ -1969,7 +1986,7 @@ mod tests {
                         })) if value == before.consumed() + completed + 1 && limit == before.consumed() + completed)
                         );
                     }
-                    let work = host
+                    let work = exec
                         .dimension_state(ImportDimension::ResourceGraphWork)
                         .unwrap();
                     let charged = completed + u64::from(!cancel);
@@ -1993,7 +2010,7 @@ mod tests {
                         assert_eq!(&record.identity, identity);
                         assert!(matches!(record.entry, DependencyCacheEntry::Resolving));
                     }
-                    assert_eq!(store.live_scratch_bytes(), baseline);
+                    assert_eq!(live_scratch_bytes(exec), baseline);
                     drop(cache);
                     store.assert_released();
                 }
@@ -2009,13 +2026,14 @@ mod tests {
             let mut succeeded = false;
             let mut failures = 0;
             for quota in 0..=128_u64 {
-                let store = StoreHarness::new();
-                let host = store.host();
+                let mut store = StoreHarness::new();
+                let exec = &mut store.owner.execution().unwrap();
+
                 let (mut cache, identities) =
-                    cache_with_records(&store, 4, &authority, &hash_builder);
+                    cache_with_records(exec, 4, &authority, &hash_builder);
                 if tombstones {
-                    assert!(cache.remove_resolving(host, &identities[1]).unwrap());
-                    assert!(cache.remove_resolving(host, &identities[2]).unwrap());
+                    assert!(cache.remove_resolving(exec, &identities[1]).unwrap());
+                    assert!(cache.remove_resolving(exec, &identities[2]).unwrap());
                 }
                 let original_slots = cache.index.slots.clone();
                 let original_entries = cache.entries.as_ptr();
@@ -2032,23 +2050,25 @@ mod tests {
                     if tombstones { 8 } else { 16 }
                 );
                 assert_eq!(plan.entry_replacement.is_some(), !tombstones);
-                let entry_candidate = store.reserve_scratch(
+                let entry_candidate = reserve_scratch(
+                    exec,
                     plan.temporary_envelope_bytes(DependencyCacheStorage::Entries)
                         .unwrap(),
                 );
-                let index_candidate = store.reserve_scratch(
+                let index_candidate = reserve_scratch(
+                    exec,
                     plan.temporary_envelope_bytes(DependencyCacheStorage::Index)
                         .unwrap(),
                 );
-                let before = host
+                let before = exec
                     .dimension_state(ImportDimension::ResourceGraphWork)
                     .unwrap();
-                host.tighten_dimension_policy(
+                exec.tighten_dimension_policy(
                     ImportDimension::ResourceGraphWork,
                     DimensionPolicy::counter(u64::MAX, before.consumed() + quota, 0),
                 )
                 .unwrap();
-                match cache.apply_capacity_plan(host, plan) {
+                match cache.apply_capacity_plan(exec, plan) {
                     Err(DependencyCacheCapacityError::Work(ScopeAbortCause::Ledger(
                         LedgerCause::LimitExceeded {
                             dimension: ImportDimension::ResourceGraphWork,
@@ -2081,7 +2101,7 @@ mod tests {
                             (DependencyCacheStorage::Index, index_candidate),
                         ] {
                             if let Some(bytes) = actual.retained_bytes(storage) {
-                                host.resize(&mut reservation, bytes).unwrap();
+                                exec.resize(&mut reservation, bytes).unwrap();
                                 cache.retain_capacity_reservation(storage, Some(reservation));
                             }
                         }
@@ -2117,28 +2137,31 @@ mod tests {
         for cancel_after in 1..=64 {
             let calls = Arc::new(AtomicUsize::new(0));
             let cancel_at = Arc::new(AtomicUsize::new(usize::MAX));
-            let store = StoreHarness::with_control(
+            let mut store = StoreHarness::with_control(
                 ImportOperationControl::default().with_cancellation(CancelOnPoll {
                     calls: Arc::clone(&calls),
                     cancel_at: Arc::clone(&cancel_at),
                 }),
             );
-            let host = store.host();
-            let (mut cache, identities) = cache_with_records(&store, 4, &authority, &hash_builder);
+            let exec = &mut store.owner.execution().unwrap();
+
+            let (mut cache, identities) = cache_with_records(exec, 4, &authority, &hash_builder);
             let original_slots = cache.index.slots.clone();
             let original_entries = cache.entries.as_ptr();
             let plan = cache.capacity_plan().unwrap();
-            let entry_candidate = store.reserve_scratch(
+            let entry_candidate = reserve_scratch(
+                exec,
                 plan.temporary_envelope_bytes(DependencyCacheStorage::Entries)
                     .unwrap(),
             );
-            let index_candidate = store.reserve_scratch(
+            let index_candidate = reserve_scratch(
+                exec,
                 plan.temporary_envelope_bytes(DependencyCacheStorage::Index)
                     .unwrap(),
             );
             let before = calls.load(Ordering::Acquire);
             cancel_at.store(before + cancel_after, Ordering::Release);
-            match cache.apply_capacity_plan(host, plan) {
+            match cache.apply_capacity_plan(exec, plan) {
                 Err(DependencyCacheCapacityError::Work(ScopeAbortCause::Control(
                     ControlCause::Cancelled { .. },
                 ))) => {
@@ -2154,7 +2177,7 @@ mod tests {
                         (DependencyCacheStorage::Index, index_candidate),
                     ] {
                         if let Some(bytes) = actual.retained_bytes(storage) {
-                            host.resize(&mut reservation, bytes).unwrap();
+                            exec.resize(&mut reservation, bytes).unwrap();
                             cache.retain_capacity_reservation(storage, Some(reservation));
                         }
                     }
@@ -2178,31 +2201,34 @@ mod tests {
 
     #[test]
     fn cache_candidate_initialization_admits_only_one_bounded_chunk_at_a_time() {
-        let store = StoreHarness::new();
-        let host = store.host();
+        let mut store = StoreHarness::new();
+        let exec = &mut store.owner.execution().unwrap();
+
         let (mut cache, identities) =
-            cache_with_records(&store, 128, &AuthorityDomain::new(), &RandomState::new());
+            cache_with_records(exec, 128, &AuthorityDomain::new(), &RandomState::new());
         let original_slots = cache.index.slots.clone();
         let plan = cache.capacity_plan().unwrap();
         assert_eq!(plan.index_replacement.unwrap().slots, 512);
-        let entry_candidate = store.reserve_scratch(
+        let entry_candidate = reserve_scratch(
+            exec,
             plan.temporary_envelope_bytes(DependencyCacheStorage::Entries)
                 .unwrap(),
         );
-        let index_candidate = store.reserve_scratch(
+        let index_candidate = reserve_scratch(
+            exec,
             plan.temporary_envelope_bytes(DependencyCacheStorage::Index)
                 .unwrap(),
         );
-        let before = host
+        let before = exec
             .dimension_state(ImportDimension::ResourceGraphWork)
             .unwrap();
-        host.tighten_dimension_policy(
+        exec.tighten_dimension_policy(
             ImportDimension::ResourceGraphWork,
             DimensionPolicy::counter(u64::MAX, before.consumed() + 256, 0),
         )
         .unwrap();
         assert!(
-            matches!(cache.apply_capacity_plan(host, plan), Err(DependencyCacheCapacityError::Work(ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+            matches!(cache.apply_capacity_plan(exec, plan), Err(DependencyCacheCapacityError::Work(ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
             dimension: ImportDimension::ResourceGraphWork,
             class: CounterClass::Consumed,
             value,
@@ -2220,20 +2246,15 @@ mod tests {
 
     #[test]
     fn failure_context_bounds_utf8_and_keeps_all_owned_storage_admitted() {
-        let store = StoreHarness::new();
-        let baseline = store.live_scratch_bytes();
+        let mut store = StoreHarness::new();
+        let exec = &mut store.owner.execution().unwrap();
+        let baseline = live_scratch_bytes(exec);
         let authority = AuthorityDomain::new();
         let source = AssetPath::new("models/materials/library.side").unwrap();
         let role = DependencyRoleId::new("payload.required").unwrap();
         let reference = "界".repeat(AssetPath::MAX_BYTES);
         let (context, reservation) = DependencyFailureContext::try_capture(
-            store.host(),
-            &authority,
-            &source,
-            &role,
-            &reference,
-            None,
-            None,
+            exec, &authority, &source, &role, &reference, None, None,
         )
         .unwrap();
         assert_eq!(context.origin().path(), &source);
@@ -2243,11 +2264,11 @@ mod tests {
         assert!(context.requested_reference_is_truncated());
         assert_eq!(context.requested_reference().len(), 4095);
         assert!(reference.starts_with(context.requested_reference()));
-        assert_eq!(store.live_scratch_bytes(), baseline + reservation.bytes());
+        assert_eq!(live_scratch_bytes(exec), baseline + reservation.bytes());
         assert!(reservation.bytes() >= context.requested_reference().len() as u64);
         drop(context);
         drop(reservation);
-        assert_eq!(store.live_scratch_bytes(), baseline);
+        assert_eq!(live_scratch_bytes(exec), baseline);
         store.assert_released();
     }
 
@@ -2308,26 +2329,21 @@ mod tests {
         assert!(entry_envelope > 0);
         assert!(index_envelope > 0);
 
-        let store = StoreHarness::new();
-        let baseline = store.live_scratch_bytes();
-        let mut entry_reservation = store.reserve_scratch(entry_envelope);
-        let mut index_reservation = store.reserve_scratch(index_envelope);
+        let mut store = StoreHarness::new();
+        let exec = &mut store.owner.execution().unwrap();
+        let baseline = live_scratch_bytes(exec);
+        let mut entry_reservation = reserve_scratch(exec, entry_envelope);
+        let mut index_reservation = reserve_scratch(exec, index_envelope);
 
-        let actual = cache.apply_capacity_plan(store.host(), plan).unwrap();
+        let actual = cache.apply_capacity_plan(exec, plan).unwrap();
         let entry_bytes = actual
             .retained_bytes(DependencyCacheStorage::Entries)
             .unwrap();
         let index_bytes = actual
             .retained_bytes(DependencyCacheStorage::Index)
             .unwrap();
-        store
-            .host()
-            .resize(&mut entry_reservation, entry_bytes)
-            .unwrap();
-        store
-            .host()
-            .resize(&mut index_reservation, index_bytes)
-            .unwrap();
+        exec.resize(&mut entry_reservation, entry_bytes).unwrap();
+        exec.resize(&mut index_reservation, index_bytes).unwrap();
         assert_eq!(
             entry_bytes,
             u64::try_from(
@@ -2355,14 +2371,14 @@ mod tests {
         cache.retain_capacity_reservation(DependencyCacheStorage::Index, Some(index_reservation));
 
         assert_eq!(
-            store.live_scratch_bytes(),
+            live_scratch_bytes(exec),
             baseline
                 .checked_add(entry_bytes)
                 .and_then(|bytes| bytes.checked_add(index_bytes))
                 .unwrap()
         );
         drop(cache);
-        assert_eq!(store.live_scratch_bytes(), baseline);
+        assert_eq!(live_scratch_bytes(exec), baseline);
         store.assert_released();
     }
 
@@ -2418,9 +2434,10 @@ mod tests {
         }
 
         for completed in [0_u64, 1, 2] {
-            let store = StoreHarness::new();
-            let host = store.host();
-            host.tighten_dimension_policy(
+            let mut store = StoreHarness::new();
+            let exec = &mut store.owner.execution().unwrap();
+
+            exec.tighten_dimension_policy(
                 ImportDimension::ResourceGraphWork,
                 baozi_operation::DimensionPolicy::counter(u64::MAX, completed, 0),
             )
@@ -2435,9 +2452,9 @@ mod tests {
                     false
                 },
                 || {
-                    host.charge_attempted(ImportDimension::ResourceGraphWork, 1)
+                    exec.charge_attempted(ImportDimension::ResourceGraphWork, 1)
                         .map_err(|cause| cause.into_scope_abort_cause())?;
-                    host.charge_consumed(ImportDimension::ResourceGraphWork, 1)
+                    exec.charge_consumed(ImportDimension::ResourceGraphWork, 1)
                         .map_err(|cause| cause.into_scope_abort_cause())
                 },
             );
@@ -2451,7 +2468,7 @@ mod tests {
                 })) if value == completed + 1 && limit == completed
             ));
             assert_eq!(comparisons, completed);
-            let work = host
+            let work = exec
                 .dimension_state(ImportDimension::ResourceGraphWork)
                 .unwrap();
             assert_eq!(work.attempted(), completed + 1);
@@ -2526,7 +2543,8 @@ mod tests {
 
     #[test]
     fn dependency_cache_reuses_vacant_resolving_records_without_moving_live_indices() {
-        let store = StoreHarness::new();
+        let mut store = StoreHarness::new();
+        let exec = &mut store.owner.execution().unwrap();
         let authority = AuthorityDomain::new();
         let identities = (0..3)
             .map(|record_index| indexed_identity(&authority, "record", record_index))
@@ -2534,64 +2552,60 @@ mod tests {
         let mut cache = DependencyCache::new();
 
         for identity in &identities {
-            store.prepare_cache_capacity(&mut cache);
-            let reservation = store.reserve_scratch(1);
+            prepare_cache_capacity(exec, &mut cache);
+            let reservation = reserve_scratch(exec, 1);
             assert!(
                 cache
-                    .mark_resolving(store.host(), identity.try_clone().unwrap(), reservation)
+                    .mark_resolving(exec, identity.try_clone().unwrap(), reservation)
                     .unwrap()
             );
         }
         assert_eq!(
             cache
-                .get(store.host(), &identities[0])
+                .get(exec, &identities[0])
                 .unwrap()
                 .map(|(index, _)| index),
             Some(0)
         );
         assert_eq!(
             cache
-                .get(store.host(), &identities[1])
+                .get(exec, &identities[1])
                 .unwrap()
                 .map(|(index, _)| index),
             Some(1)
         );
         assert_eq!(
             cache
-                .get(store.host(), &identities[2])
+                .get(exec, &identities[2])
                 .unwrap()
                 .map(|(index, _)| index),
             Some(2)
         );
 
-        assert!(
-            cache
-                .remove_resolving(store.host(), &identities[1])
-                .unwrap()
-        );
-        assert!(cache.get(store.host(), &identities[1]).unwrap().is_none());
+        assert!(cache.remove_resolving(exec, &identities[1]).unwrap());
+        assert!(cache.get(exec, &identities[1]).unwrap().is_none());
         assert_eq!(
             cache
-                .get(store.host(), &identities[0])
+                .get(exec, &identities[0])
                 .unwrap()
                 .map(|(index, _)| index),
             Some(0)
         );
         assert_eq!(
             cache
-                .get(store.host(), &identities[2])
+                .get(exec, &identities[2])
                 .unwrap()
                 .map(|(index, _)| index),
             Some(2)
         );
 
         let replacement = indexed_identity(&authority, "record-replacement", 0);
-        store.prepare_cache_capacity(&mut cache);
-        let replacement_reservation = store.reserve_scratch(1);
+        prepare_cache_capacity(exec, &mut cache);
+        let replacement_reservation = reserve_scratch(exec, 1);
         assert!(
             cache
                 .mark_resolving(
-                    store.host(),
+                    exec,
                     replacement.try_clone().unwrap(),
                     replacement_reservation,
                 )
@@ -2599,14 +2613,14 @@ mod tests {
         );
         assert_eq!(
             cache
-                .get(store.host(), &replacement)
+                .get(exec, &replacement)
                 .unwrap()
                 .map(|(index, _)| index),
             Some(1)
         );
         assert_eq!(
             cache
-                .get(store.host(), &identities[2])
+                .get(exec, &identities[2])
                 .unwrap()
                 .map(|(index, _)| index),
             Some(2)
@@ -2615,55 +2629,49 @@ mod tests {
 
     #[test]
     fn dependency_cache_never_reuses_an_available_origin_node() {
-        let store = StoreHarness::new();
+        let mut store = StoreHarness::new();
+        let exec = &mut store.owner.execution().unwrap();
         let authority = AuthorityDomain::new();
         let identity = indexed_identity(&authority, "available", 0);
         let mut cache = DependencyCache::new();
-        store.prepare_cache_capacity(&mut cache);
+        prepare_cache_capacity(exec, &mut cache);
 
+        let reservation = reserve_scratch(exec, 1);
         assert!(
             cache
-                .mark_resolving(
-                    store.host(),
-                    identity.try_clone().unwrap(),
-                    store.reserve_scratch(1),
-                )
+                .mark_resolving(exec, identity.try_clone().unwrap(), reservation,)
                 .unwrap()
         );
         let bytes = Arc::new(SharedDependencySnapshot::new(
             AccountedVec::new(),
-            store.reserve_scratch(1),
+            reserve_scratch(exec, 1),
         ));
         assert_eq!(
-            cache
-                .store_available(store.host(), &identity, bytes, None)
-                .unwrap(),
+            cache.store_available(exec, &identity, bytes, None).unwrap(),
             Some(0)
         );
 
-        assert!(!cache.remove_resolving(store.host(), &identity).unwrap());
+        assert!(!cache.remove_resolving(exec, &identity).unwrap());
         assert_eq!(cache.available_identity(0), Some(&identity));
     }
 
     #[test]
     fn dependency_failure_cache_replays_one_immutable_negative_observation() {
-        let store = StoreHarness::new();
+        let mut store = StoreHarness::new();
+        let exec = &mut store.owner.execution().unwrap();
         let authority = AuthorityDomain::new();
         let identity = indexed_identity(&authority, "missing", 0);
         let mut cache = DependencyCache::new();
-        store.prepare_cache_capacity(&mut cache);
+        prepare_cache_capacity(exec, &mut cache);
+        let reservation = reserve_scratch(exec, 1);
         assert!(
             cache
-                .mark_resolving(
-                    store.host(),
-                    identity.try_clone().unwrap(),
-                    store.reserve_scratch(1),
-                )
+                .mark_resolving(exec, identity.try_clone().unwrap(), reservation,)
                 .unwrap()
         );
         let cache_index = cache
             .store_failed(
-                store.host(),
+                exec,
                 &identity,
                 ScopeAbortCause::AssetOpen(AssetOpenError::new(
                     AssetOpenStage::Open,
@@ -2693,7 +2701,7 @@ mod tests {
             ));
         }
         assert!(matches!(
-            cache.get(store.host(), &identity).unwrap(),
+            cache.get(exec, &identity).unwrap(),
             Some((index, DependencyCacheEntry::Failed(_))) if index == cache_index
         ));
 
@@ -2707,19 +2715,16 @@ mod tests {
             AssetPath::new("missing.bin").unwrap(),
         );
         let mut replacement_cache = DependencyCache::new();
-        store.prepare_cache_capacity(&mut replacement_cache);
+        prepare_cache_capacity(exec, &mut replacement_cache);
+        let reservation = reserve_scratch(exec, 1);
         assert!(
             replacement_cache
-                .mark_resolving(
-                    store.host(),
-                    replacement_identity.try_clone().unwrap(),
-                    store.reserve_scratch(1),
-                )
+                .mark_resolving(exec, replacement_identity.try_clone().unwrap(), reservation,)
                 .unwrap()
         );
         let replacement_index = replacement_cache
             .store_failed(
-                store.host(),
+                exec,
                 &replacement_identity,
                 missing_dependency_cause(),
                 Some(same_authority_resolver_v1().identity_schema()),
@@ -2740,7 +2745,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             replacement_cache.store_failed(
-                store.host(),
+                exec,
                 &replacement_identity,
                 missing_dependency_cause(),
                 Some(same_authority_resolver_v1().identity_schema()),
@@ -2786,21 +2791,19 @@ mod tests {
             foreign_namespace.authority_domain(),
             AssetPath::new("authority-mismatch.bin").unwrap(),
         );
-        let store = StoreHarness::new();
+        let mut store = StoreHarness::new();
+        let exec = &mut store.owner.execution().unwrap();
         let mut cache = DependencyCache::new();
         for identity in [
             &proved_identity,
             &foreign_identity,
             &foreign_authority_identity,
         ] {
-            store.prepare_cache_capacity(&mut cache);
+            prepare_cache_capacity(exec, &mut cache);
+            let reservation = reserve_scratch(exec, 1);
             assert!(
                 cache
-                    .mark_resolving(
-                        store.host(),
-                        identity.try_clone().unwrap(),
-                        store.reserve_scratch(1)
-                    )
+                    .mark_resolving(exec, identity.try_clone().unwrap(), reservation,)
                     .unwrap()
             );
         }
@@ -2815,7 +2818,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             cache.store_failed(
-                store.host(),
+                exec,
                 &foreign_identity,
                 missing_dependency_cause(),
                 Some(resolver.identity_schema()),
@@ -2826,7 +2829,7 @@ mod tests {
             })
         ));
         assert!(matches!(
-            cache.get(store.host(), &foreign_identity).unwrap(),
+            cache.get(exec, &foreign_identity).unwrap(),
             Some((_, DependencyCacheEntry::Resolving))
         ));
 
@@ -2844,7 +2847,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             cache.store_failed(
-                store.host(),
+                exec,
                 &foreign_authority_identity,
                 missing_dependency_cause(),
                 Some(resolver.identity_schema()),
@@ -2855,9 +2858,7 @@ mod tests {
             })
         ));
         assert!(matches!(
-            cache
-                .get(store.host(), &foreign_authority_identity)
-                .unwrap(),
+            cache.get(exec, &foreign_authority_identity).unwrap(),
             Some((_, DependencyCacheEntry::Resolving))
         ));
 
@@ -2872,7 +2873,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             cache.store_failed(
-                store.host(),
+                exec,
                 &proved_identity,
                 ScopeAbortCause::AssetOpen(AssetOpenError::new(
                     AssetOpenStage::Open,
@@ -2897,7 +2898,7 @@ mod tests {
             .unwrap();
         let proof_index = cache
             .store_failed(
-                store.host(),
+                exec,
                 &proved_identity,
                 missing_dependency_cause(),
                 Some(resolver.identity_schema()),
@@ -2911,7 +2912,7 @@ mod tests {
 
         assert!(matches!(
             cache.store_failed(
-                store.host(),
+                exec,
                 &proved_identity,
                 missing_dependency_cause(),
                 Some(resolver.identity_schema()),
@@ -2940,7 +2941,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             cache.store_failed(
-                store.host(),
+                exec,
                 &proved_identity,
                 missing_dependency_cause(),
                 Some(resolver.identity_schema()),
@@ -2990,35 +2991,33 @@ mod tests {
 
     #[test]
     fn dependency_origin_remains_session_bound_after_snapshot_drop() {
-        let store = StoreHarness::new();
+        let mut store = StoreHarness::new();
+        let exec = &mut store.owner.execution().unwrap();
         let issuer = DependencyOriginIssuer::new();
         let io = MemoryAssetIo::new();
         let authority = io.authority_domain();
         let identity = indexed_identity(&authority, "origin", 0);
         let mut cache = DependencyCache::new();
-        store.prepare_cache_capacity(&mut cache);
+        prepare_cache_capacity(exec, &mut cache);
+        let reservation = reserve_scratch(exec, 1);
         assert!(
             cache
-                .mark_resolving(
-                    store.host(),
-                    identity.try_clone().unwrap(),
-                    store.reserve_scratch(1),
-                )
+                .mark_resolving(exec, identity.try_clone().unwrap(), reservation,)
                 .unwrap()
         );
         let bytes = Arc::new(SharedDependencySnapshot::new(
             AccountedVec::new(),
-            store.reserve_scratch(1),
+            reserve_scratch(exec, 1),
         ));
         let origin_node = cache
-            .store_available(store.host(), &identity, Arc::clone(&bytes), None)
+            .store_available(exec, &identity, Arc::clone(&bytes), None)
             .unwrap()
             .expect("the resolving dependency must become available");
         let snapshot = DependencySnapshot::new(
             &issuer,
             &io,
             origin_node,
-            DependencySnapshotIdentity::new(identity, None, store.reserve_scratch(1)),
+            DependencySnapshotIdentity::new(identity, None, reserve_scratch(exec, 1)),
             bytes,
             DependencyCacheDisposition::Fresh,
         );

@@ -1,6 +1,6 @@
 use baozi::{
-    AssetPath, Error, ImmutableMemoryAssetIo, ImportFailure, ImportReport, ImportRequest,
-    ImportRunError, Importer, ImporterBuilder, MemoryAssetIo, PreparedImportRequest, SceneSnapshot,
+    AssetPath, Error, ImmutableMemoryAssetIo, ImportFailure, ImportPlan, ImportReport,
+    ImportRequest, ImportRunError, Importer, ImporterBuilder, MemoryAssetIo, SceneSnapshot,
     SceneSnapshotError, SceneSnapshotLimits, ValidatedScene,
 };
 
@@ -23,7 +23,7 @@ fn frozen_import_surfaces_are_send_sync() {
     assert_send_sync::<Importer>();
     assert_send_sync::<ImporterBuilder>();
     assert_send_sync::<ImportRequest>();
-    assert_send_sync::<PreparedImportRequest>();
+    assert_send_sync::<ImportPlan>();
 }
 
 #[test]

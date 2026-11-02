@@ -88,6 +88,35 @@ where
         preserve_ledger(self.failure, self.ledger.check_work_quiescent())
     }
 
+    pub(crate) fn dimension_evidence(
+        &self,
+        dimension: D,
+    ) -> Result<DimensionSnapshot, ExecutionError<D>> {
+        preserve_ledger(self.failure, self.ledger.bind_work([dimension]))?;
+        preserve_ledger(self.failure, self.ledger.dimension_evidence(dimension))
+    }
+
+    pub(crate) fn storage_observation(
+        &self,
+        dimension: D,
+    ) -> Result<crate::ledger::LedgerStorageObservation<'op, P, D>, ExecutionError<D>> {
+        preserve_ledger(self.failure, self.ledger.bind_work([dimension]))?;
+        preserve_ledger(self.failure, self.ledger.storage_observation(dimension))
+    }
+
+    pub(crate) fn tighten_policy(
+        &self,
+        dimension: D,
+        policy: DimensionPolicy,
+    ) -> Result<(), ExecutionError<D>> {
+        ensure_running(self.failure)?;
+        preserve_ledger(self.failure, self.ledger.bind_work([dimension]))?;
+        preserve_ledger(
+            self.failure,
+            self.ledger.tighten_dimension_policy(dimension, policy),
+        )
+    }
+
     pub(crate) fn reject_binding(&self) {
         record_terminal_cause_with_precedence(self.failure, PreparationFailureCode::ledger());
     }
@@ -145,6 +174,14 @@ impl<'op, D: Copy, const N: usize> ExecutionGroup<'op, D, N> {
 
     pub(crate) fn complete_direct(&self, amounts: [u64; N]) -> Result<(), ExecutionError<D>> {
         preserve_ledger(self.failure, self.bound.consume_direct_atomic(amounts))
+    }
+
+    pub(crate) fn complete_observed(&self, amounts: [u64; N]) -> Result<(), ExecutionError<D>> {
+        preserve_ledger(self.failure, self.bound.consume_observed_in_order(amounts))
+    }
+
+    pub(crate) fn charge_observed(&self, amounts: [u64; N]) -> Result<(), ExecutionError<D>> {
+        preserve_ledger(self.failure, self.bound.charge_observed_ordered(amounts))
     }
 }
 
@@ -236,6 +273,12 @@ where
 {
     /// Entry, allocation, IO, external callback and region completion use this full checkpoint.
     pub(crate) fn checkpoint(&mut self) -> Result<(), ExecutionError<D>> {
+        if self.failure.get().is_some() {
+            return Err(self
+                .progress
+                .recorded_control_cause()
+                .map_or(ExecutionError::Stopped, ExecutionError::Control));
+        }
         ensure_running(self.failure)?;
         self.progress.poll().map_err(|cause| {
             record_terminal_cause_with_precedence(
@@ -249,6 +292,12 @@ where
     }
 
     pub(crate) fn before_action(&mut self) -> Result<(), ExecutionError<D>> {
+        if self.failure.get().is_some() {
+            return Err(self
+                .progress
+                .recorded_control_cause()
+                .map_or(ExecutionError::Stopped, ExecutionError::Control));
+        }
         ensure_running(self.failure)?;
         if self.actions_since_poll.get() >= MAX_ACTIONS_BETWEEN_POLLS {
             self.checkpoint()?;
@@ -381,6 +430,30 @@ where
         preserve_ledger(
             self.failure,
             self.ledger.resize_reservation(reservation, bytes),
+        )
+    }
+
+    pub(crate) fn validate_live_owner(
+        &self,
+        reservation: &LiveReservation<O, P, D>,
+    ) -> Result<(), ExecutionError<D>> {
+        preserve_ledger(
+            self.failure,
+            self.ledger.validate_live_reservation(reservation),
+        )
+    }
+
+    pub(crate) fn transition(
+        &self,
+        reservation: &mut LiveReservation<O, P, D>,
+        phase: P,
+        dimension: D,
+        bytes: u64,
+    ) -> Result<(), ExecutionError<D>> {
+        preserve_ledger(
+            self.failure,
+            self.ledger
+                .transition_reservation(reservation, phase, dimension, bytes),
         )
     }
 }

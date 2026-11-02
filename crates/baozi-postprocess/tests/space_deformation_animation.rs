@@ -25,11 +25,11 @@ use baozi_import::authoring::{
     UvOrigin,
 };
 use baozi_import::{
-    CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
-    FormatDescriptor, FormatEncoding, FormatImporter, FormatSelection, ImportConfigOverlay,
-    ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer, OptionCompileLimits,
-    ParseResult, ParseScope, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
-    SceneDraft, import_bytes,
+    CapabilityStatus, CompiledOptions, DetectionOutcome, DetectionResult, DetectionScope, Format,
+    FormatCapability, FormatDescriptor, FormatEncoding, FormatSelection, ImportConfigOverlay,
+    ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer, NoFormatOptions,
+    OptionCompileError, OptionCompileLimits, ParseContext, ParseResult, ReadConfidence, ReadHint,
+    RegistryBuildLimits, RegistryBuildScope, RegistryBuilder,
 };
 use baozi_io::AssetPath;
 use baozi_postprocess::{
@@ -136,7 +136,16 @@ struct DeformationAnimationImporter {
     resource: ResourceIdentity,
 }
 
-impl FormatImporter for DeformationAnimationImporter {
+impl Format for DeformationAnimationImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             self.format.clone(),
@@ -162,7 +171,7 @@ impl FormatImporter for DeformationAnimationImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
         let mut inverse_binds = INVERSE_BINDS;
         let mut correction = CORRECTION;
         let mut dense_position = DENSE_POSITION;
@@ -532,7 +541,7 @@ impl FormatImporter for DeformationAnimationImporter {
             .map(|owner| OwnerProvenanceAuthoring::new(owner, &attachments))
             .collect();
         let snapshots = [ResourceSnapshotAuthoring::snapshotted(
-            scope.primary_bytes(),
+            context.primary_bytes(),
         )];
         let space = SceneSpace {
             uv_origin: UvOrigin::LowerLeft,
@@ -541,7 +550,7 @@ impl FormatImporter for DeformationAnimationImporter {
         space
             .validate_complete()
             .expect("fixture space must declare complete spatial and UV conventions");
-        scope.submit_scene(SceneAuthoringBatch::new(
+        context.submit_complete(SceneAuthoringBatch::new(
             SpatialAuthoringBatch::new(&space, &[], &[]),
             NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
             AppearanceAuthoringBatch::empty(),
@@ -578,15 +587,15 @@ fn import_fixture(fixture: Fixture) -> ImportReport {
             .with_format_selection(FormatSelection::Forced(FormatId::new(FORMAT).unwrap())),
     ));
     let request = registry
-        .compile_request(&request, OptionCompileLimits::default())
+        .plan(&request, OptionCompileLimits::default())
         .unwrap();
-    import_bytes(
-        &request,
-        AssetPath::new(PATH).unwrap(),
-        SOURCE,
-        ImportOperationControl::default(),
-    )
-    .expect("the complete public authoring fixture must pass central import validation")
+    request
+        .read_bytes(
+            AssetPath::new(PATH).unwrap(),
+            SOURCE,
+            ImportOperationControl::default(),
+        )
+        .expect("the complete public authoring fixture must pass central import validation")
 }
 
 fn mixed_options(units: f64) -> SpaceConversionOptions {

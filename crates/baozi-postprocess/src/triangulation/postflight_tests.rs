@@ -1,3 +1,4 @@
+use super::action_tests::record_event;
 use super::*;
 
 const SQUARE: [[f64; 3]; 4] = [
@@ -13,7 +14,24 @@ fn validate(
     triangles: &[[usize; 3]],
 ) -> Result<(), TriangulationError<()>> {
     let mut scratch = vec![CornerScratch::default(); positions.len()];
-    validate_polygon_triangulation(positions, sources, triangles, &mut scratch, &mut || Ok(()))
+    let mut events = Vec::new();
+    let result =
+        validate_polygon_triangulation(positions, sources, triangles, &mut scratch, &mut |event| {
+            record_event(&mut events, event);
+            Ok(())
+        });
+    if !events.is_empty() {
+        assert_eq!(events.first(), Some(&WorkEvent::Checkpoint));
+        assert_eq!(
+            events.last(),
+            Some(&if result.is_ok() {
+                WorkEvent::Checkpoint
+            } else {
+                WorkEvent::Complete
+            }),
+        );
+    }
+    result
 }
 
 #[test]
@@ -124,7 +142,7 @@ fn directed_incidence_rejects_an_unpaired_diagonal_without_geometry_heuristics()
     // Diagonal 2->0 has no 0->2 partner; this is a combinatorial rejection even
     // without projected points, area arithmetic, or intersection tests.
     assert_eq!(
-        validate_edge_incidence(&mut scratch, 2, &mut || Ok::<_, ()>(())),
+        validate_edge_incidence(&mut scratch, 2, &mut |_| Ok::<_, ()>(())),
         Err(PolygonError::InvalidTriangulation.into())
     );
 }
@@ -135,7 +153,7 @@ fn connectivity_requires_a_single_disk_instead_of_disjoint_triangle_islands() {
     scratch[0].triangle = [0, 1, 2];
     scratch[1].triangle = [3, 4, 5];
     assert_eq!(
-        validate_disk_connectivity(&mut scratch, 2, &mut || Ok::<_, ()>(())),
+        validate_disk_connectivity(&mut scratch, 2, &mut |_| Ok::<_, ()>(())),
         Err(PolygonError::InvalidTriangulation.into())
     );
 }
@@ -157,7 +175,7 @@ fn strictly_nested_triangles_are_overlap_even_without_edge_crossings() {
     scratch[0].triangle = [0, 1, 2];
     scratch[1].triangle = [3, 4, 5];
     assert_eq!(
-        validate_output_geometry(&scratch, 2, 1.0, &mut || Ok::<_, ()>(())),
+        validate_output_geometry(&scratch, 2, 1.0, &mut |_| Ok::<_, ()>(())),
         Err(PolygonError::InvalidTriangulation.into())
     );
 }
@@ -178,12 +196,12 @@ fn contact_in_edge_interior_and_partial_shared_edges_are_rejected() {
     scratch[0].triangle = [0, 1, 2];
     scratch[1].triangle = [3, 4, 1];
     assert_eq!(
-        validate_output_geometry(&scratch, 2, 1.0, &mut || Ok::<_, ()>(())),
+        validate_output_geometry(&scratch, 2, 1.0, &mut |_| Ok::<_, ()>(())),
         Err(PolygonError::InvalidTriangulation.into())
     );
     scratch[1].triangle = [0, 4, 3];
     assert_eq!(
-        validate_output_geometry(&scratch, 2, 1.0, &mut || Ok::<_, ()>(())),
+        validate_output_geometry(&scratch, 2, 1.0, &mut |_| Ok::<_, ()>(())),
         Err(PolygonError::InvalidTriangulation.into())
     );
 }
@@ -193,34 +211,37 @@ fn independent_postflight_abort_never_changes_the_candidate_or_scratch_tail() {
     let triangles = [[0, 1, 2], [0, 2, 3]];
     let mut scratch = [CornerScratch::default(); 5];
     scratch[4].point = [42.0; 3];
-    let mut checkpoints = 0_usize;
+    let mut baseline = Vec::new();
     validate_polygon_triangulation(
         &SQUARE,
         &[0, 1, 2, 3],
         &triangles,
         &mut scratch,
-        &mut || {
-            checkpoints += 1;
+        &mut |event| {
+            record_event(&mut baseline, event);
             Ok::<_, usize>(())
         },
     )
     .unwrap();
-    for stop in 0..checkpoints {
+    for stop in 0..baseline.len() {
         let candidate = triangles;
-        let mut visited = 0;
+        let mut events = Vec::new();
         let result = validate_polygon_triangulation(
             &SQUARE,
             &[0, 1, 2, 3],
             &candidate,
             &mut scratch,
-            &mut || {
-                let current = visited;
-                visited += 1;
-                if current == stop { Err(stop) } else { Ok(()) }
+            &mut |event| {
+                record_event(&mut events, event);
+                if events.len() == stop + 1 {
+                    Err(stop)
+                } else {
+                    Ok(())
+                }
             },
         );
         assert_eq!(result, Err(TriangulationError::Control(stop)));
-        assert_eq!(visited, stop + 1);
+        assert_eq!(events, baseline[..=stop], "exact admitted/completed prefix");
         assert_eq!(candidate, triangles);
         assert_eq!(scratch[4].point, [42.0; 3]);
     }

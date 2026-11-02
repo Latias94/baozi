@@ -39,41 +39,37 @@ pub(super) struct MorphStorage<'scope> {
     pub(super) deltas: MeteredVec<'scope, MorphDeltaStorage<'scope>>,
 }
 
-fn add_cells(ctx: &ParseScope<'_>, cells: &mut usize, count: usize) -> Result<()> {
-    *cells = checked_add_with_limit(
-        ctx,
-        "max_morph_cells",
-        *cells,
-        count,
-        ctx.limits().max_morph_cells,
-    )?;
+fn add_cells(ctx: &mut ParseExecution<'_, '_>, cells: &mut usize, count: usize) -> Result<()> {
+    *cells = {
+        let argument_0 = ctx.limits().max_morph_cells;
+        checked_add_with_limit(ctx, "max_morph_cells", *cells, count, argument_0)
+    }?;
     Ok(())
 }
 
 pub(super) fn target_count(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     mesh_index: usize,
     mesh: &json::mesh::Mesh<'_>,
 ) -> Result<usize> {
     let mut count = None;
+    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
     for (primitive_index, primitive) in mesh.primitives.iter().enumerate() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         if let Some(targets) = &primitive.targets {
             if targets.is_empty() {
-                return Err(gltf_parse_error(
-                    ctx,
-                    format_args!(
-                        "glTF mesh {mesh_index} primitive {primitive_index} has an empty targets array"
-                    ),
-                ));
+                return Err(gltf_parse_error(format_args!(
+                    "glTF mesh {mesh_index} primitive {primitive_index} has an empty targets array"
+                )));
             }
             if count.is_some_and(|count| count != targets.len()) {
-                return Err(gltf_parse_error(
-                    ctx,
-                    format_args!(
-                        "glTF mesh {mesh_index} primitives disagree on morph target count"
-                    ),
-                ));
+                return Err(gltf_parse_error(format_args!(
+                    "glTF mesh {mesh_index} primitives disagree on morph target count"
+                )));
             }
             count = Some(targets.len());
         }
@@ -82,24 +78,27 @@ pub(super) fn target_count(
 }
 
 fn validate_weights(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     weights: &[f32],
     expected: usize,
     owner: impl fmt::Display,
 ) -> Result<()> {
     if weights.is_empty() || weights.len() != expected {
-        return Err(gltf_parse_error(
-            ctx,
-            format_args!("{owner} morph weight count must equal {expected}"),
-        ));
+        return Err(gltf_parse_error(format_args!(
+            "{owner} morph weight count must equal {expected}"
+        )));
     }
+    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
     for chunk in weights.chunks(PARSER_POLL_INTERVAL) {
-        ctx.charge_work(to_u64(chunk.len()))?;
+        ctx.with_work(
+            &work_group,
+            [to_u64(chunk.len())],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         if chunk.iter().any(|value| !value.is_finite()) {
-            return Err(gltf_parse_error(
-                ctx,
-                format_args!("{owner} morph weights must be finite"),
-            ));
+            return Err(gltf_parse_error(format_args!(
+                "{owner} morph weights must be finite"
+            )));
         }
     }
     Ok(())
@@ -128,7 +127,7 @@ fn target_accessors(target: &json::mesh::MorphTarget<'_>) -> [MorphAccessor; 3] 
 }
 
 pub(super) fn preflight<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     document: &crate::document::Document<'_>,
     closure: &ResourceClosure<'_>,
     geometry: &GeometryContracts<'_>,
@@ -150,8 +149,13 @@ pub(super) fn preflight<'scope>(
         deltas: 0,
         sample_work: 0,
     };
+    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
     for (mesh_index, mesh) in root.meshes.iter().enumerate() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         if !closure.meshes.as_slice()[mesh_index] {
             contracts.meshes.try_push_reserved(None)?;
             continue;
@@ -161,22 +165,25 @@ pub(super) fn preflight<'scope>(
         if let Some(weights) = &mesh.weights {
             validate_weights(ctx, weights, width, format_args!("glTF mesh {mesh_index}"))?;
         }
-        add_cells(
-            ctx,
-            &mut contracts.cells,
-            width
+        {
+            let argument_0 = width
                 .checked_mul(2)
-                .ok_or_else(|| ctx.allocation_failure("gltf-morph-definition-count"))?,
-        )?;
+                .ok_or_else(|| ctx.allocation_failure("gltf-morph-definition-count"))?;
+            add_cells(ctx, &mut contracts.cells, argument_0)
+        }?;
         contracts.definitions = contracts
             .definitions
             .checked_add(width)
             .ok_or_else(|| ctx.allocation_failure("gltf-morph-definition-count"))?;
         let geometry = geometry.meshes.as_slice()[mesh_index]
             .as_ref()
-            .ok_or_else(|| gltf_parse_error(ctx, "glTF morph geometry contracts are missing"))?;
+            .ok_or_else(|| gltf_parse_error("glTF morph geometry contracts are missing"))?;
         for (primitive_index, primitive) in mesh.primitives.iter().enumerate() {
-            ctx.charge_work(1)?;
+            ctx.with_work(
+                &work_group,
+                [1],
+                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+            )?;
             contracts.primitives = contracts
                 .primitives
                 .checked_add(1)
@@ -188,20 +195,25 @@ pub(super) fn preflight<'scope>(
             add_cells(ctx, &mut contracts.cells, width)?;
             let vertex_count = geometry.primitives.as_slice()[primitive_index].position_count;
             for target in primitive.targets.iter().flatten() {
-                ctx.charge_work(1)?;
+                ctx.with_work(
+                    &work_group,
+                    [1],
+                    |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+                )?;
                 if let Some((semantic, _)) = target.other_attributes.first_key_value() {
                     return Err(GltfFailure::unsupported("morph target attribute", format_args!("morph attribute {semantic} is outside the POSITION/NORMAL/TANGENT profile")).into());
                 }
                 for (semantic, kind, accessor) in target_accessors(target) {
                     let Some(accessor) = accessor else { continue };
-                    ctx.charge_work(1)?;
+                    ctx.with_work(
+                        &work_group,
+                        [1],
+                        |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+                    )?;
                     if !primitive.attributes.contains_key(&semantic) {
-                        return Err(gltf_parse_error(
-                            ctx,
-                            format_args!(
-                                "glTF mesh {mesh_index} primitive {primitive_index} morph {kind:?} has no corresponding base attribute"
-                            ),
-                        ));
+                        return Err(gltf_parse_error(format_args!(
+                            "glTF mesh {mesh_index} primitive {primitive_index} morph {kind:?} has no corresponding base attribute"
+                        )));
                     }
                     let info = accessor::validate_mesh_attribute(
                         ctx,
@@ -214,12 +226,9 @@ pub(super) fn preflight<'scope>(
                         MeshAttributeUse::Morph(semantic),
                     )?;
                     if info.count != vertex_count {
-                        return Err(gltf_parse_error(
-                            ctx,
-                            format_args!(
-                                "glTF mesh {mesh_index} primitive {primitive_index} morph accessor count must equal {vertex_count}"
-                            ),
-                        ));
+                        return Err(gltf_parse_error(format_args!(
+                            "glTF mesh {mesh_index} primitive {primitive_index} morph accessor count must equal {vertex_count}"
+                        )));
                     }
                     let scalars = vertex_count
                         .checked_mul(3)
@@ -241,16 +250,19 @@ pub(super) fn preflight<'scope>(
     // Overrides borrow the admitted backend's immutable arrays. Count them before any resource IO.
     let mut override_cells = 0;
     for (node_index, node) in root.nodes.iter().enumerate() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         if !selected_nodes[node_index] {
             continue;
         }
         if let Some(weights) = &node.weights {
             let mesh = node.mesh.ok_or_else(|| {
-                gltf_parse_error(
-                    ctx,
-                    format_args!("glTF node {node_index} has morph weights without a mesh"),
-                )
+                gltf_parse_error(format_args!(
+                    "glTF node {node_index} has morph weights without a mesh"
+                ))
             })?;
             let width = contracts
                 .meshes
@@ -258,7 +270,7 @@ pub(super) fn preflight<'scope>(
                 .get(mesh.value())
                 .copied()
                 .flatten()
-                .ok_or_else(|| gltf_parse_error(ctx, "glTF morph mesh was not selected"))?;
+                .ok_or_else(|| gltf_parse_error("glTF morph mesh was not selected"))?;
             validate_weights(ctx, weights, width, format_args!("glTF node {node_index}"))?;
             add_cells(ctx, &mut override_cells, weights.len())?;
         }
@@ -269,7 +281,7 @@ pub(super) fn preflight<'scope>(
 }
 
 pub(super) fn build_storage<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     document: &crate::document::Document<'_>,
     buffers: &[Option<BufferData<'_>>],
     geometry: &GeometryContracts<'_>,
@@ -294,7 +306,7 @@ pub(super) fn build_storage<'scope>(
             (ImportWorkClass::WorkUnits, work_units),
             (ImportWorkClass::MorphCells, to_u64(contracts.cells)),
         ],
-        |work| -> Result<_> {
+        |ctx, work| -> Result<_> {
             let class = ImportStorageClass::SceneConstruction;
             let mut storage = MorphStorage {
                 definitions: try_vec_capacity(
@@ -319,7 +331,7 @@ pub(super) fn build_storage<'scope>(
                 deltas: try_vec_capacity(ctx, class, contracts.deltas, "gltf-morph-deltas")?,
             };
             for mesh in document.meshes() {
-                work.poll()?;
+                ctx.poll()?;
                 work.complete([1, 0])?;
                 let Some(width) = contracts.meshes.as_slice()[mesh.index()] else {
                     continue;
@@ -333,7 +345,7 @@ pub(super) fn build_storage<'scope>(
                     try_vec_capacity(ctx, class, width, "gltf-morph-default-weights")?;
                 for index in 0..width {
                     if index.is_multiple_of(PARSER_POLL_INTERVAL) {
-                        work.poll()?;
+                        ctx.poll()?;
                     }
                     storage
                         .definitions
@@ -360,9 +372,9 @@ pub(super) fn build_storage<'scope>(
                     })?;
                 let mesh_geometry = geometry.meshes.as_slice()[mesh.index()]
                     .as_ref()
-                    .ok_or_else(|| gltf_parse_error(ctx, "glTF morph geometry is missing"))?;
+                    .ok_or_else(|| gltf_parse_error("glTF morph geometry is missing"))?;
                 for primitive in mesh.primitives() {
-                    work.poll()?;
+                    ctx.poll()?;
                     work.complete([1, 0])?;
                     let start = storage.targets.len();
                     let source_targets =
@@ -374,7 +386,7 @@ pub(super) fn build_storage<'scope>(
                         mesh_geometry.primitives.as_slice()[primitive.index()].position_count;
                     for target_index in 0..width {
                         if target_index.is_multiple_of(PARSER_POLL_INTERVAL) {
-                            work.poll()?;
+                            ctx.poll()?;
                         }
                         let delta_start = storage.deltas.len();
                         if let Some(target) = source_targets.get(target_index) {
@@ -383,7 +395,7 @@ pub(super) fn build_storage<'scope>(
                                 let Some(accessor) = accessor else { continue };
                                 let accessor =
                                     document.accessors().nth(accessor.value()).ok_or_else(
-                                        || gltf_parse_error(ctx, "glTF morph accessor disappeared"),
+                                        || gltf_parse_error("glTF morph accessor disappeared"),
                                     )?;
                                 let mut bounds = accessor::MeshAccessorBounds::<3>::new(
                                     accessor.row(),
@@ -406,7 +418,7 @@ pub(super) fn build_storage<'scope>(
                                     try_vec_capacity(ctx, class, count, "gltf-morph-delta-values")?;
                                 for sample in values {
                                     if output.len().is_multiple_of(PARSER_POLL_INTERVAL) {
-                                        work.poll()?;
+                                        ctx.poll()?;
                                     }
                                     if output.len() >= count {
                                         return Err(GltfFailure::invalid_accessor(
@@ -424,7 +436,6 @@ pub(super) fn build_storage<'scope>(
                                 }
                                 if output.len() != count {
                                     return Err(gltf_parse_error(
-                                        ctx,
                                         "glTF morph delta value count changed after preflight",
                                     ));
                                 }

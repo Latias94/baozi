@@ -1,6 +1,6 @@
 //! Descriptive source extras, preserved as exact JSON values without a second JSON model.
 
-use baozi_import::ParseScope;
+use baozi_import::ParseExecution;
 use baozi_import::authoring::NamespacedName;
 
 use super::{Result, checked_add_with_limit, enforce_usize_limit, gltf_parse_error};
@@ -15,23 +15,23 @@ pub(super) struct SourceExtras {
 }
 
 impl SourceExtras {
-    pub(super) fn new(ctx: &ParseScope<'_>, payload: &SourcePayload) -> Result<Self> {
+    pub(super) fn new(_ctx: &mut ParseExecution<'_, '_>, payload: &SourcePayload) -> Result<Self> {
         Ok(Self {
             source: payload.owner,
             key: NamespacedName::new(key(payload.site))
-                .map_err(|_| gltf_parse_error(ctx, "static glTF extras key is invalid"))?,
+                .map_err(|_| gltf_parse_error("static glTF extras key is invalid"))?,
             range: payload.value_range,
         })
     }
 
-    pub(super) fn bytes<'a>(&self, ctx: &'a ParseScope<'_>) -> Result<&'a [u8]> {
+    pub(super) fn bytes<'a>(&self, ctx: &mut ParseExecution<'_, 'a>) -> Result<&'a [u8]> {
         let start = usize::try_from(self.range.byte_offset).ok();
         let length = usize::try_from(self.range.byte_length).ok();
         start
             .zip(length)
             .and_then(|(start, length)| start.checked_add(length).map(|end| start..end))
             .and_then(|range| ctx.primary_bytes().get(range))
-            .ok_or_else(|| gltf_parse_error(ctx, "glTF extras range exceeds the primary snapshot"))
+            .ok_or_else(|| gltf_parse_error("glTF extras range exceeds the primary snapshot"))
     }
 }
 
@@ -44,31 +44,33 @@ pub(super) struct ExtrasPreflight {
 }
 
 impl ExtrasPreflight {
-    pub(super) fn add(&mut self, ctx: &ParseScope<'_>, payload: &SourcePayload) -> Result<()> {
+    pub(super) fn add(
+        &mut self,
+        ctx: &mut ParseExecution<'_, '_>,
+        payload: &SourcePayload,
+    ) -> Result<()> {
         let name = key(payload.site);
-        enforce_usize_limit(
-            ctx,
-            "max_string_bytes",
-            name.len(),
-            ctx.limits().max_string_bytes,
-        )?;
-        self.entries = checked_add_with_limit(
-            ctx,
-            "max_records",
-            self.entries,
-            1,
-            ctx.limits().max_records,
-        )?;
+        {
+            let argument_0 = ctx.limits().max_string_bytes;
+            enforce_usize_limit(ctx, "max_string_bytes", name.len(), argument_0)
+        }?;
+        self.entries = {
+            let argument_0 = ctx.limits().max_records;
+            checked_add_with_limit(ctx, "max_records", self.entries, 1, argument_0)
+        }?;
         let payload_bytes = usize::try_from(payload.value_range.byte_length)
             .map_err(|_| ctx.allocation_failure("gltf-extras-length"))?;
         for bytes in [name.len(), MEDIA_TYPE.len(), payload_bytes] {
-            self.bytes = checked_add_with_limit(
-                ctx,
-                "max_canonical_string_bytes",
-                self.bytes,
-                bytes,
-                ctx.limits().max_canonical_string_bytes,
-            )?;
+            self.bytes = {
+                let argument_0 = ctx.limits().max_canonical_string_bytes;
+                checked_add_with_limit(
+                    ctx,
+                    "max_canonical_string_bytes",
+                    self.bytes,
+                    bytes,
+                    argument_0,
+                )
+            }?;
         }
         Ok(())
     }

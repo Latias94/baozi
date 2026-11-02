@@ -1,9 +1,9 @@
 //! Canonical Scene authoring values for custom format importers.
 //!
 //! These values describe canonical input without carrying storage, ledger, activation, or
-//! publication authority. Submit a complete batch through [`crate::ParseScope::submit_scene`].
+//! publication authority. Submit a complete batch through [`crate::ParseContext::submit_complete`].
 //! Static plugins can submit [`StaticSceneBuilder`] through
-//! [`crate::ParseScope::submit_static_scene`] to receive document provenance automatically.
+//! [`crate::ParseContext::submit`] to receive document provenance automatically.
 //!
 //! The vocabulary intentionally has no duplicate crate-root facade.
 //!

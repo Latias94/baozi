@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use baozi::{
     AssetPath, GltfImportOptions, GltfSceneSelection, ImmutableMemoryAssetIo, ImportCause,
-    ImportConfigOverlay, ImportDimension, ImportEvidence, ImportOperationControl, ImportPreset,
-    ImportRequest, ImportRequestLayer, Importer, OptionCompileLimits, PreparedImportRequest,
+    ImportConfigOverlay, ImportDimension, ImportEvidence, ImportOperationControl, ImportPlan,
+    ImportPreset, ImportRequest, ImportRequestLayer, Importer, OptionCompileLimits,
     SourceScopeDisposition, SourceScopeEntityKind, SourceScopeSelectionOutcome,
     SourceScopeSelectionRequest, TopologyKind,
 };
@@ -98,11 +98,11 @@ fn scene_selection_io(selected_scene: Option<usize>) -> Result<ImmutableMemoryAs
     Ok(ImmutableMemoryAssetIo::try_from_entries(entries)?)
 }
 
-fn prepared_request(
+fn import_plan(
     importer: &Importer,
     preset_selection: GltfSceneSelection,
     caller_selection: GltfSceneSelection,
-) -> Result<PreparedImportRequest> {
+) -> Result<ImportPlan> {
     let preset = ImportPreset::new(ImportConfigOverlay::default()).try_with_format_option(
         GltfImportOptions::default()
             .with_scene_selection(preset_selection)
@@ -117,7 +117,7 @@ fn prepared_request(
         .try_with_preset(&preset)?
         .with_caller_layer(caller);
     // The uncompiled request, preset, and envelopes all die before the first import.
-    Ok(importer.prepare_request(&request, OptionCompileLimits::default())?)
+    Ok(importer.plan(&request, OptionCompileLimits::default())?)
 }
 
 fn assert_scope(
@@ -296,7 +296,7 @@ fn assert_owned_projection(asset: &ApplicationAsset, scene_index: usize) -> Resu
 fn explicit_caller_selection_reuses_a_frozen_request_and_owns_only_its_projection() -> Result<()> {
     let outputs = {
         let importer = Importer::new()?;
-        let prepared_request = prepared_request(
+        let import_plan = import_plan(
             &importer,
             GltfSceneSelection::DocumentDefault,
             GltfSceneSelection::SceneIndex(1),
@@ -304,12 +304,13 @@ fn explicit_caller_selection_reuses_a_frozen_request_and_owns_only_its_projectio
         let io = scene_selection_io(Some(1))?;
         let mut outputs = Vec::new();
         for _ in 0..2 {
-            let report = importer.read_asset_with_request(
-                &io,
-                AssetPath::new(SOURCE)?,
-                &prepared_request,
-                ImportOperationControl::default(),
-            )?;
+            let report = import_plan
+                .read_asset(
+                    &io,
+                    AssetPath::new(SOURCE)?,
+                    ImportOperationControl::default(),
+                )
+                .map_err(baozi::Error::from)?;
             let (scene, evidence) = report.into_parts();
             let asset = ApplicationAsset::from_scene(&scene)?;
             outputs.push((asset, evidence));
@@ -345,18 +346,19 @@ fn explicit_caller_selection_reuses_a_frozen_request_and_owns_only_its_projectio
 fn document_default_caller_overrides_explicit_preset_and_owns_default_projection() -> Result<()> {
     let (asset, evidence) = {
         let importer = Importer::new()?;
-        let prepared_request = prepared_request(
+        let import_plan = import_plan(
             &importer,
             GltfSceneSelection::SceneIndex(1),
             GltfSceneSelection::DocumentDefault,
         )?;
         let io = scene_selection_io(Some(0))?;
-        let report = importer.read_asset_with_request(
-            &io,
-            AssetPath::new(SOURCE)?,
-            &prepared_request,
-            ImportOperationControl::default(),
-        )?;
+        let report = import_plan
+            .read_asset(
+                &io,
+                AssetPath::new(SOURCE)?,
+                ImportOperationControl::default(),
+            )
+            .map_err(baozi::Error::from)?;
         let (scene, evidence) = report.into_parts();
         (ApplicationAsset::from_scene(&scene)?, evidence)
     };
@@ -369,20 +371,20 @@ fn document_default_caller_overrides_explicit_preset_and_owns_default_projection
 #[test]
 fn out_of_range_selection_is_rejected_before_opening_any_dependency() -> Result<()> {
     let importer = Importer::new()?;
-    let prepared_request = prepared_request(
+    let import_plan = import_plan(
         &importer,
         GltfSceneSelection::DocumentDefault,
         GltfSceneSelection::SceneIndex(3),
     )?;
     // All four declared buffers are absent, so dependency IO would mask a late range check.
     let io = scene_selection_io(None)?;
-    let error = importer
-        .read_asset_with_request(
+    let error = import_plan
+        .read_asset(
             &io,
             AssetPath::new(SOURCE)?,
-            &prepared_request,
             ImportOperationControl::default(),
         )
+        .map_err(baozi::Error::from)
         .expect_err("scene index three is outside the three-scene document");
     let baozi::Error::Import(failure) = error else {
         panic!("scene selection must retain a complete public import failure");

@@ -32,14 +32,13 @@ f 1 2 3
             .expect("static OBJ option envelope is valid"),
     )
     .expect("one OBJ option fits the request");
-    let request = importer.prepare_request(
+    let plan = importer.plan(
         &ImportRequest::new().with_caller_layer(layer),
         OptionCompileLimits::default(),
     )?;
-    let report = importer.read_bytes_with_request(
-        "triangle.obj",
+    let report = plan.read_bytes(
+        baozi::AssetPath::new("triangle.obj")?,
         bytes,
-        &request,
         ImportOperationControl::default(),
     )?;
     let scene = report.scene();

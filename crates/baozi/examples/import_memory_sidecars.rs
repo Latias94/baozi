@@ -69,16 +69,11 @@ map_Kd textures/red.png
             .expect("static OBJ options are valid"),
     )
     .expect("one OBJ option fits the request");
-    let request = importer.prepare_request(
+    let plan = importer.plan(
         &ImportRequest::new().with_caller_layer(layer),
         OptionCompileLimits::default(),
     )?;
-    let report = importer.read_asset_with_request(
-        &io,
-        model_path,
-        &request,
-        ImportOperationControl::default(),
-    )?;
+    let report = plan.read_asset(&io, model_path, ImportOperationControl::default())?;
     let scene = report.scene();
     let opened_assets = report
         .ledger()

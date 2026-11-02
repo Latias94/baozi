@@ -7,14 +7,14 @@ mod support;
 
 use baozi_core::FormatId;
 use baozi_import::{
-    CapabilityStatus, DetectionEvidence, DetectionFailure, DetectionInconclusive, DetectionOptions,
-    DetectionOutcome, DetectionResult, DetectionScope, FormatCapability, FormatDescriptor,
-    FormatEncoding, FormatFailureEvidenceProducer, FormatImporter, FormatSelection, ImportCause,
-    ImportConfigOverlay, ImportFailure, ImportOperationControl, ImportPhase, ImportProgressPhase,
-    ImportProgressUnit, ImportRequest, ImportRequestLayer, ImportRunError, ImportTerminalCause,
-    ImportTerminalFailureClass, OptionCompileLimits, ParseResult, ParseScope,
-    PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
-    SceneDraft, SceneValidationError, import_bytes,
+    CapabilityStatus, CompiledOptions, DetectionEvidence, DetectionFailure, DetectionInconclusive,
+    DetectionOptions, DetectionOutcome, DetectionResult, DetectionScope, Format, FormatCapability,
+    FormatDescriptor, FormatEncoding, FormatFailureEvidenceProducer, FormatSelection, ImportCause,
+    ImportConfigOverlay, ImportFailure, ImportOperationControl, ImportPhase, ImportPlan,
+    ImportProgressPhase, ImportProgressUnit, ImportRequest, ImportRequestLayer, ImportRunError,
+    ImportTerminalCause, ImportTerminalFailureClass, NoFormatOptions, OptionCompileError,
+    OptionCompileLimits, ParseContext, ParseResult, ReadConfidence, ReadHint, RegistryBuildLimits,
+    RegistryBuildScope, RegistryBuilder, SceneValidationError,
 };
 use baozi_io::AssetPath;
 use baozi_operation::{CancellationToken, ProgressDecision, ProgressEvent};
@@ -87,7 +87,16 @@ impl TestImporter {
     }
 }
 
-impl FormatImporter for TestImporter {
+impl Format for TestImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new(self.id).expect("qualified test format id"),
@@ -115,14 +124,16 @@ impl FormatImporter for TestImporter {
         }
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
         match &self.parser {
             ParseBehavior::Success => support::submit_minimal_scene(scope),
-            ParseBehavior::FormatFailure => Err(scope.format_failure(TestFormatCause)),
+            ParseBehavior::FormatFailure => {
+                scope.with_execution(|exec| Err(exec.format_failure(TestFormatCause)))
+            }
             ParseBehavior::RejectedScene => support::submit_invalid_parent_scene(scope),
             ParseBehavior::Cancel(token) => {
                 token.cancel();
-                scope.poll()?;
+                scope.with_execution(|exec| exec.poll())?;
                 support::submit_minimal_scene(scope)
             }
         }
@@ -153,7 +164,7 @@ fn format_id(value: &str) -> FormatId {
 fn compile_request(
     importers: impl IntoIterator<Item = TestImporter>,
     config: ImportConfigOverlay,
-) -> PreparedImportRequest {
+) -> ImportPlan {
     let mut registry = RegistryBuilder::new();
     for importer in importers {
         registry
@@ -164,7 +175,7 @@ fn compile_request(
         .freeze(RegistryBuildLimits::default())
         .expect("valid frozen test registry");
     snapshot
-        .compile_request(
+        .plan(
             &ImportRequest::from_layers(
                 ImportRequestLayer::default(),
                 ImportRequestLayer::new(config),
@@ -257,13 +268,13 @@ fn preferred_and_extension_confidence_order_is_exhaustive_and_registration_indep
                 ImportConfigOverlay::default()
                     .with_format_selection(FormatSelection::Preferred(format_id(PREFERRED_ID))),
             );
-            let report = import_bytes(
-                &request,
-                AssetPath::new("asset.mesh").expect("valid source"),
-                b"primary",
-                ImportOperationControl::default(),
-            )
-            .expect("the fully ordered policy must select one candidate");
+            let report = request
+                .read_bytes(
+                    AssetPath::new("asset.mesh").expect("valid source"),
+                    b"primary",
+                    ImportOperationControl::default(),
+                )
+                .expect("the fully ordered policy must select one candidate");
 
             assert_eq!(report.format().id().as_str(), expected_format);
             assert_evidence(
@@ -314,8 +325,7 @@ fn forced_selection_only_consults_the_forced_detector_and_classifies_every_outco
             ImportConfigOverlay::default()
                 .with_format_selection(FormatSelection::Forced(format_id(forced_id))),
         );
-        let result = import_bytes(
-            &request,
+        let result = request.read_bytes(
             AssetPath::new("asset.forced").expect("valid source"),
             b"primary",
             ImportOperationControl::default(),
@@ -396,13 +406,13 @@ fn automatic_selection_keeps_complete_sorted_evidence_while_choosing_the_stronge
         ],
         ImportConfigOverlay::default(),
     );
-    let report = import_bytes(
-        &request,
-        AssetPath::new("asset.unhinted").expect("valid source"),
-        b"primary",
-        ImportOperationControl::default(),
-    )
-    .expect("the unique strongest automatic match must win");
+    let report = request
+        .read_bytes(
+            AssetPath::new("asset.unhinted").expect("valid source"),
+            b"primary",
+            ImportOperationControl::default(),
+        )
+        .expect("the unique strongest automatic match must win");
 
     assert_eq!(report.format().id().as_str(), selected_id);
     assert_evidence(
@@ -444,13 +454,13 @@ fn automatic_no_selection_distinguishes_clean_absence_from_degraded_evidence() {
         ImportConfigOverlay::default(),
     );
     let clean = operation_failure(
-        import_bytes(
-            &clean_request,
-            AssetPath::new("asset.unknown").expect("valid source"),
-            b"primary",
-            ImportOperationControl::default(),
-        )
-        .expect_err("clean no-match evidence is unsupported format"),
+        clean_request
+            .read_bytes(
+                AssetPath::new("asset.unknown").expect("valid source"),
+                b"primary",
+                ImportOperationControl::default(),
+            )
+            .expect_err("clean no-match evidence is unsupported format"),
     );
     assert!(matches!(clean.cause(), ImportCause::UnsupportedFormat));
     assert_evidence(
@@ -474,13 +484,13 @@ fn automatic_no_selection_distinguishes_clean_absence_from_degraded_evidence() {
         ImportConfigOverlay::default(),
     );
     let degraded = operation_failure(
-        import_bytes(
-            &degraded_request,
-            AssetPath::new("asset.unknown").expect("valid source"),
-            b"primary",
-            ImportOperationControl::default(),
-        )
-        .expect_err("fault and inconclusive evidence must not become unsupported format"),
+        degraded_request
+            .read_bytes(
+                AssetPath::new("asset.unknown").expect("valid source"),
+                b"primary",
+                ImportOperationControl::default(),
+            )
+            .expect_err("fault and inconclusive evidence must not become unsupported format"),
     );
     assert!(matches!(
         degraded.cause(),
@@ -500,13 +510,13 @@ fn automatic_no_selection_distinguishes_clean_absence_from_degraded_evidence() {
         ImportConfigOverlay::default(),
     );
     let unhinted_maybe = operation_failure(
-        import_bytes(
-            &unhinted_maybe_request,
-            AssetPath::new("asset.unknown").expect("valid source"),
-            b"primary",
-            ImportOperationControl::default(),
-        )
-        .expect_err("an unhinted maybe match is not selectable automatically"),
+        unhinted_maybe_request
+            .read_bytes(
+                AssetPath::new("asset.unknown").expect("valid source"),
+                b"primary",
+                ImportOperationControl::default(),
+            )
+            .expect_err("an unhinted maybe match is not selectable automatically"),
     );
     assert!(matches!(
         unhinted_maybe.cause(),
@@ -549,13 +559,13 @@ fn automatic_ambiguity_and_evidence_are_registration_independent() {
             ImportConfigOverlay::default(),
         );
         let failure = operation_failure(
-            import_bytes(
-                &request,
-                AssetPath::new("asset.unhinted").expect("valid source"),
-                b"primary",
-                ImportOperationControl::default(),
-            )
-            .expect_err("equal strong unhinted candidates are ambiguous"),
+            request
+                .read_bytes(
+                    AssetPath::new("asset.unhinted").expect("valid source"),
+                    b"primary",
+                    ImportOperationControl::default(),
+                )
+                .expect_err("equal strong unhinted candidates are ambiguous"),
         );
 
         let ImportCause::Detection(DetectionFailure::Ambiguous { candidates }) = failure.cause()
@@ -598,13 +608,13 @@ fn probe_budget_boundary_preserves_typed_inconclusive_evidence() {
             ),
         );
         let failure = operation_failure(
-            import_bytes(
-                &request,
-                AssetPath::new("asset.unknown").expect("valid source"),
-                b"baozi payload",
-                ImportOperationControl::default(),
-            )
-            .expect_err("an exhausted signature probe remains inconclusive"),
+            request
+                .read_bytes(
+                    AssetPath::new("asset.unknown").expect("valid source"),
+                    b"baozi payload",
+                    ImportOperationControl::default(),
+                )
+                .expect_err("an exhausted signature probe remains inconclusive"),
         );
         assert!(matches!(
             failure.cause(),
@@ -634,13 +644,13 @@ fn probe_budget_boundary_preserves_typed_inconclusive_evidence() {
                 DetectionOptions::new(budget).expect("bounded detector budget"),
             ),
         );
-        let report = import_bytes(
-            &request,
-            AssetPath::new("asset.unknown").expect("valid source"),
-            b"baozi payload",
-            ImportOperationControl::default(),
-        )
-        .expect("an exact or larger probe reveals the signature");
+        let report = request
+            .read_bytes(
+                AssetPath::new("asset.unknown").expect("valid source"),
+                b"baozi payload",
+                ImportOperationControl::default(),
+            )
+            .expect("an exact or larger probe reveals the signature");
         assert_eq!(report.format().id().as_str(), prefix_id);
         assert_evidence(
             report.detection_evidence(),
@@ -720,13 +730,13 @@ fn ordered_detection_evidence_survives_every_post_selection_terminal_failure() {
             }
         };
         let failure = operation_failure(
-            import_bytes(
-                &request,
-                AssetPath::new("asset.unhinted").expect("valid source"),
-                b"primary",
-                control,
-            )
-            .expect_err("the injected post-selection terminal branch must fail"),
+            request
+                .read_bytes(
+                    AssetPath::new("asset.unhinted").expect("valid source"),
+                    b"primary",
+                    control,
+                )
+                .expect_err("the injected post-selection terminal branch must fail"),
         );
 
         assert_eq!(

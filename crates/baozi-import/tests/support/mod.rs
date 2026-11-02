@@ -12,53 +12,51 @@ use baozi_import::authoring::{
     SceneAuthoringBatch, SceneSpace, SpatialAuthoringBatch,
 };
 use baozi_import::{
-    DependencyOutcome, DependencyRoleId, DependencySnapshot, ParseResult, ParseScope, SceneDraft,
+    DependencyOutcome, DependencyRoleId, DependencySnapshot, ParseContext, ParseExecution,
+    ParseResult,
 };
 
-pub(crate) fn root_dependency<'scope>(
-    scope: &'scope ParseScope<'_>,
+pub(crate) fn root_dependency<'session>(
+    scope: &mut ParseExecution<'_, 'session>,
     role: &DependencyRoleId,
     hostile_reference: &str,
-) -> ParseResult<DependencyOutcome<'scope>> {
+) -> ParseResult<DependencyOutcome<'session>> {
     let origin = scope.root_origin();
     scope.dependency(&origin, role, hostile_reference)
 }
 
-pub(crate) fn required_root_dependency<'scope>(
-    scope: &'scope ParseScope<'_>,
+pub(crate) fn required_root_dependency<'session>(
+    scope: &mut ParseExecution<'_, 'session>,
     role: &DependencyRoleId,
     hostile_reference: &str,
-) -> ParseResult<DependencySnapshot<'scope>> {
+) -> ParseResult<DependencySnapshot<'session>> {
     let outcome = root_dependency(scope, role, hostile_reference)?;
     scope.into_available_dependency(outcome)
 }
 
 /// Submits the smallest complete canonical Scene accepted by the production import rail.
-pub(crate) fn submit_minimal_scene(scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+pub(crate) fn submit_minimal_scene(scope: &mut ParseContext<'_>) -> ParseResult<()> {
     submit_scene_with_space(scope, SceneSpace::UNKNOWN)
 }
 
 /// Submits a complete node-only Scene large enough for validation-stage control tests.
 pub(crate) fn submit_node_scene(
-    scope: &mut ParseScope<'_>,
+    scope: &mut ParseContext<'_>,
     node_count: usize,
-) -> ParseResult<SceneDraft> {
+) -> ParseResult<()> {
     submit_node_scene_with_name(scope, node_count, None)
 }
 
 /// Submits one complete node-only Scene with a nonempty canonical node name.
-pub(crate) fn submit_named_scene(
-    scope: &mut ParseScope<'_>,
-    name: &str,
-) -> ParseResult<SceneDraft> {
+pub(crate) fn submit_named_scene(scope: &mut ParseContext<'_>, name: &str) -> ParseResult<()> {
     submit_node_scene_with_name(scope, 1, Some(name))
 }
 
 fn submit_node_scene_with_name(
-    scope: &mut ParseScope<'_>,
+    scope: &mut ParseContext<'_>,
     node_count: usize,
     name: Option<&str>,
-) -> ParseResult<SceneDraft> {
+) -> ParseResult<()> {
     let provenance_ids = [ProvenanceLocalId::new(0)];
     let operation_kind = OperationKind::Generated;
     let provenance_nodes = [ProvenanceNodeAuthoring::operation(
@@ -93,7 +91,7 @@ fn submit_node_scene_with_name(
         .collect::<Vec<_>>();
     let scene_space = SceneSpace::UNKNOWN;
 
-    scope.submit_scene(SceneAuthoringBatch::new(
+    scope.submit_complete(SceneAuthoringBatch::new(
         SpatialAuthoringBatch::new(&scene_space, &[], &[]),
         NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
         AppearanceAuthoringBatch::empty(),
@@ -108,7 +106,7 @@ fn submit_node_scene_with_name(
 }
 
 /// Submits a complete Scene whose node-parent relation must be rejected by canonical preflight.
-pub(crate) fn submit_invalid_parent_scene(scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+pub(crate) fn submit_invalid_parent_scene(scope: &mut ParseContext<'_>) -> ParseResult<()> {
     let provenance_ids = [ProvenanceLocalId::new(0)];
     let operation_kind = OperationKind::Generated;
     let provenance_nodes = [ProvenanceNodeAuthoring::operation(
@@ -142,7 +140,7 @@ pub(crate) fn submit_invalid_parent_scene(scope: &mut ParseScope<'_>) -> ParseRe
     ];
     let scene_space = SceneSpace::UNKNOWN;
 
-    scope.submit_scene(SceneAuthoringBatch::new(
+    scope.submit_complete(SceneAuthoringBatch::new(
         SpatialAuthoringBatch::new(&scene_space, &[], &[]),
         NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
         AppearanceAuthoringBatch::empty(),
@@ -158,9 +156,9 @@ pub(crate) fn submit_invalid_parent_scene(scope: &mut ParseScope<'_>) -> ParseRe
 
 /// Submits the minimal complete Scene with a caller-selected coordinate profile.
 pub(crate) fn submit_scene_with_space(
-    scope: &mut ParseScope<'_>,
+    scope: &mut ParseContext<'_>,
     scene_space: SceneSpace,
-) -> ParseResult<SceneDraft> {
+) -> ParseResult<()> {
     let provenance_ids = [ProvenanceLocalId::new(0)];
     let operation_kind = OperationKind::Generated;
     let provenance_nodes = [ProvenanceNodeAuthoring::operation(
@@ -177,7 +175,7 @@ pub(crate) fn submit_scene_with_space(
     ];
     let roots = [];
     let nodes = [];
-    scope.submit_scene(SceneAuthoringBatch::new(
+    scope.submit_complete(SceneAuthoringBatch::new(
         SpatialAuthoringBatch::new(&scene_space, &[], &[]),
         NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
         AppearanceAuthoringBatch::empty(),

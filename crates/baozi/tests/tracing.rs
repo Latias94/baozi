@@ -7,8 +7,8 @@ use baozi::{
     SceneSnapshotLimits, ValidatedScene,
 };
 use baozi_import::{
-    DetectionOutcome, DetectionResult, DetectionScope, FormatImporter, ParseResult, ParseScope,
-    Probe, ReadHint, SceneDraft,
+    CompiledOptions, DetectionOutcome, DetectionResult, DetectionScope, Format, NoFormatOptions,
+    OptionCompileError, ParseContext, ParseResult, Probe, ReadHint, RegistryBuildScope,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,7 +18,16 @@ use tracing::{Event, Metadata, Subscriber};
 
 struct TracingImporter;
 
-impl FormatImporter for TracingImporter {
+impl Format for TracingImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> std::result::Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("org.example.tracing-test").expect("qualified tracing format id"),
@@ -39,7 +48,7 @@ impl FormatImporter for TracingImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
         support::submit_minimal_scene(scope)
     }
 }

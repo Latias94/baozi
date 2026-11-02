@@ -25,7 +25,7 @@ use super::super::materialization::{
     NodeSceneActivationOutput, NodeSceneActivationPostflight, NodeSceneFailureEvidencePlan,
     NodeSceneLaneOutput, NodeSceneLaneRejection, node_scene_activation_roles,
 };
-use super::super::{NodeSceneConstructionRejection, NodeSceneDraft, PendingNodeSceneFailure};
+use super::super::{NodeSceneConstructionRejection, PendingNodeSceneFailure};
 use super::graph::try_rewrite_node_scene;
 use super::plan::{BoundPendingNodeSceneEdit, NodeSceneEditPlanError, PendingNodeSceneEdit};
 use super::publication::{
@@ -387,10 +387,7 @@ where
     };
     let output = NodeSceneActivationOutput {
         tables: graph.tables,
-        draft: NodeSceneDraft {
-            brand,
-            directory: graph.directory,
-        },
+        brand,
         refs: graph.refs,
         evidence_counts: pending.counts.evidence,
         central_validation: pending.counts.central_validation_plan,

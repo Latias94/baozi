@@ -1,10 +1,9 @@
 use crate::error::Result;
 use baozi_core::FormatId;
 use baozi_import::{
-    DependencyResolver, FormatDescriptor, FormatImporter, FormatUnavailability,
-    ImportOperationControl, ImportReport, ImportRequest, OptionCompileLimits,
-    PreparedImportRequest, RegistryBuildLimits, RegistryBuilder, RegistrySnapshot, RequestError,
-    import_asset, import_asset_with_resolver, import_bytes,
+    Format, FormatDescriptor, FormatUnavailability, ImportOperationControl, ImportPlan,
+    ImportReport, ImportRequest, OptionCompileLimits, RegistryBuildLimits, RegistryBuilder,
+    RegistrySnapshot,
 };
 use baozi_io::{AssetIo, AssetPath};
 
@@ -41,7 +40,7 @@ impl ImporterBuilder {
 
     pub fn register<I>(&mut self, importer: I) -> Result<&mut Self>
     where
-        I: FormatImporter,
+        I: Format,
     {
         self.registry.register(importer)?;
         Ok(self)
@@ -128,77 +127,34 @@ impl Importer {
         self.registry.descriptor(id)
     }
 
-    /// Compiles caller-submitted format envelopes before any session or asset IO exists.
-    pub fn prepare_request(
-        &self,
-        request: &ImportRequest,
-        limits: OptionCompileLimits,
-    ) -> Result<PreparedImportRequest> {
-        Ok(self.registry.compile_request(request, limits)?)
+    /// Compiles typed format invocations before any session or asset IO exists.
+    pub fn plan(&self, request: &ImportRequest, limits: OptionCompileLimits) -> Result<ImportPlan> {
+        Ok(self.registry.plan(request, limits)?)
     }
 
-    /// Compiles the empty option request against cached registry defaults.
-    pub fn prepare_default_request(&self) -> Result<PreparedImportRequest> {
-        self.prepare_request(&ImportRequest::new(), OptionCompileLimits::default())
+    /// Compiles an empty request using the registry's cached defaults.
+    pub fn default_plan(&self) -> Result<ImportPlan> {
+        self.plan(&ImportRequest::new(), OptionCompileLimits::default())
     }
 
+    /// Imports bytes with a new default plan. Repeated or controlled imports can retain a plan.
     pub fn read_bytes(
         &self,
         source: impl AsRef<str>,
         bytes: impl AsRef<[u8]>,
     ) -> Result<ImportReport> {
-        let request = self.prepare_default_request()?;
-        self.read_bytes_with_request(source, bytes, &request, ImportOperationControl::default())
-    }
-
-    pub fn read_bytes_with_request(
-        &self,
-        source: impl AsRef<str>,
-        bytes: impl AsRef<[u8]>,
-        request: &PreparedImportRequest,
-        control: ImportOperationControl,
-    ) -> Result<ImportReport> {
-        self.validate_request(request)?;
-        let source = AssetPath::new(source.as_ref())?;
-        Ok(import_bytes(request, source, bytes.as_ref(), control)?)
-    }
-
-    pub fn read_asset(&self, io: &dyn AssetIo, source: AssetPath) -> Result<ImportReport> {
-        let request = self.prepare_default_request()?;
-        self.read_asset_with_request(io, source, &request, ImportOperationControl::default())
-    }
-
-    pub fn read_asset_with_request(
-        &self,
-        io: &dyn AssetIo,
-        source: AssetPath,
-        request: &PreparedImportRequest,
-        control: ImportOperationControl,
-    ) -> Result<ImportReport> {
-        self.validate_request(request)?;
-        Ok(import_asset(request, io, source, control)?)
-    }
-
-    pub fn read_asset_with_resolver(
-        &self,
-        io: &dyn AssetIo,
-        source: AssetPath,
-        request: &PreparedImportRequest,
-        resolver: &dyn DependencyResolver,
-        control: ImportOperationControl,
-    ) -> Result<ImportReport> {
-        self.validate_request(request)?;
-        Ok(import_asset_with_resolver(
-            request, io, source, resolver, control,
+        Ok(self.default_plan()?.read_bytes(
+            AssetPath::new(source.as_ref())?,
+            bytes.as_ref(),
+            ImportOperationControl::default(),
         )?)
     }
 
-    fn validate_request(&self, request: &PreparedImportRequest) -> Result<()> {
-        if request.belongs_to(&self.registry) {
-            Ok(())
-        } else {
-            Err(RequestError::RegistrySnapshotMismatch.into())
-        }
+    /// Imports one authorized asset using a new default plan.
+    pub fn read_asset(&self, io: &dyn AssetIo, source: AssetPath) -> Result<ImportReport> {
+        Ok(self
+            .default_plan()?
+            .read_asset(io, source, ImportOperationControl::default())?)
     }
 }
 

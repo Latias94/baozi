@@ -15,8 +15,9 @@ use baozi_import::authoring::{
     MaterialAssignment, NodeAuthoringNode, NodeLocalId, NodeParent, Presence, SceneSpace,
 };
 use baozi_import::{
-    DetectionOutcome, DetectionResult, DetectionScope, FormatDescriptor, FormatImporter,
-    ParseResult, ParseScope, Probe, ReadConfidence, ReadHint, SceneDraft,
+    CompiledOptions, DetectionOutcome, DetectionResult, DetectionScope, Format, FormatDescriptor,
+    NoFormatOptions, OptionCompileError, ParseContext, ParseResult, Probe, ReadConfidence,
+    ReadHint, RegistryBuildScope,
 };
 use baozi_native_io_candidate::{FileSystemAssetIo, NativeDirectoryCapability};
 
@@ -26,7 +27,16 @@ fn limits() -> SpatialQueryLimits {
 
 struct WorldBoundsFixture;
 
-impl FormatImporter for WorldBoundsFixture {
+impl Format for WorldBoundsFixture {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> std::result::Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new("org.baozi.test.world-bounds").unwrap(),
@@ -55,7 +65,7 @@ impl FormatImporter for WorldBoundsFixture {
         })
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
         // A canonical affine fixture deliberately exercises shear. glTF node matrices
         // cannot author it; the public custom-producer seam can retain this meaning.
         let positions = [
@@ -126,7 +136,7 @@ impl FormatImporter for WorldBoundsFixture {
             uv_origin: baozi::UvOrigin::UpperLeft,
             ..SceneSpace::STANDARD_TARGET
         };
-        scope.submit_static_scene(
+        scope.submit(
             baozi_import::authoring::StaticSceneBuilder::new(Presence::Present(&roots), &nodes)
                 .with_scene_space(&space)
                 .with_geometry(&meshes, &primitives, &attributes, &instances),

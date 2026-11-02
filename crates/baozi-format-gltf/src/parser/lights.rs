@@ -6,8 +6,9 @@ use super::{
 };
 use crate::document::Document;
 use crate::source_map::{SourceEntityId, SourceEntityKind};
+use baozi_import::ImportWorkClass;
 use baozi_import::authoring::{Color, LightDefinition, LightKind, LightLocalId, LocalAxes};
-use baozi_import::{ImportStorageClass, MeteredString, MeteredVec, ParseScope};
+use baozi_import::{ImportStorageClass, MeteredString, MeteredVec, ParseExecution};
 
 pub(super) struct LightStorage<'scope> {
     pub(super) authored: MeteredVec<'scope, LightDefinition>,
@@ -16,7 +17,7 @@ pub(super) struct LightStorage<'scope> {
 }
 
 pub(super) fn prepare<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     document: &Document<'scope>,
     selected: &[bool],
 ) -> Result<LightStorage<'scope>> {
@@ -24,7 +25,10 @@ pub(super) fn prepare<'scope>(
         return Err(GltfFailure::internal("glTF light selection length changed").into());
     }
     let count = selected_count(ctx, selected)?;
-    enforce_usize_limit(ctx, "max_records", count, ctx.limits().max_records)?;
+    {
+        let argument_0 = ctx.limits().max_records;
+        enforce_usize_limit(ctx, "max_records", count, argument_0)
+    }?;
     let mut storage = LightStorage {
         authored: try_vec_capacity(
             ctx,
@@ -46,8 +50,13 @@ pub(super) fn prepare<'scope>(
             "gltf-light-id-map",
         )?,
     };
+    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
     for (index, &selected) in selected.iter().enumerate() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         if !selected {
             continue;
         }
@@ -71,7 +80,11 @@ pub(super) fn prepare<'scope>(
         };
         let comparisons =
             u64::from(usize::BITS - document.source_map().entities().len().leading_zeros()) + 1;
-        ctx.charge_work(comparisons)?;
+        ctx.with_work(
+            &work_group,
+            [comparisons],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         if !matches!(source.kind.as_str(), "directional" | "point" | "spot") {
             return Err(unsupported(
                 "glTF light type is outside the admitted profile",
@@ -85,23 +98,20 @@ pub(super) fn prepare<'scope>(
         let mut color = [0.0; 3];
         for (component, value) in color.iter_mut().zip(source.color) {
             if !(0.0..=1.0).contains(&value) {
-                return Err(gltf_parse_error(ctx, "glTF light color must be in [0, 1]"));
+                return Err(gltf_parse_error("glTF light color must be in [0, 1]"));
             }
             *component = narrow(ctx, value)?;
         }
         let [red, green, blue] = color;
         if source.intensity < 0.0 {
-            return Err(gltf_parse_error(
-                ctx,
-                "glTF light intensity must be nonnegative",
-            ));
+            return Err(gltf_parse_error("glTF light intensity must be nonnegative"));
         }
         let intensity = narrow(ctx, source.intensity)?;
         let range = source
             .range
             .map(|range| {
                 if range <= 0.0 {
-                    return Err(gltf_parse_error(ctx, "glTF light range must be positive"));
+                    return Err(gltf_parse_error("glTF light range must be positive"));
                 }
                 narrow(ctx, range)
             })
@@ -110,24 +120,22 @@ pub(super) fn prepare<'scope>(
             "directional" => {
                 if range.is_some() {
                     return Err(gltf_parse_error(
-                        ctx,
                         "glTF directional light cannot have a range",
                     ));
                 }
                 LightKind::directional()
             }
             "point" => LightKind::point(range)
-                .map_err(|_| gltf_parse_error(ctx, "glTF light range is invalid"))?,
+                .map_err(|_| gltf_parse_error("glTF light range is invalid"))?,
             "spot" => {
-                let spot = source.spot.ok_or_else(|| {
-                    gltf_parse_error(ctx, "glTF spot light requires a spot object")
-                })?;
+                let spot = source
+                    .spot
+                    .ok_or_else(|| gltf_parse_error("glTF spot light requires a spot object"))?;
                 if spot.inner_cone_angle < 0.0
                     || spot.inner_cone_angle >= spot.outer_cone_angle
                     || spot.outer_cone_angle > std::f64::consts::FRAC_PI_2
                 {
                     return Err(gltf_parse_error(
-                        ctx,
                         "glTF spot requires 0 <= inner < outer <= pi/2",
                     ));
                 }
@@ -135,16 +143,19 @@ pub(super) fn prepare<'scope>(
                 let outer = narrow(ctx, spot.outer_cone_angle)?;
                 if inner >= outer {
                     return Err(gltf_parse_error(
-                        ctx,
                         "glTF spot cone angles collapse in canonical F32",
                     ));
                 }
                 LightKind::spot(range, inner, outer)
-                    .map_err(|_| gltf_parse_error(ctx, "glTF spot cone is invalid"))?
+                    .map_err(|_| gltf_parse_error("glTF spot cone is invalid"))?
             }
             _ => return Err(GltfFailure::internal("checked glTF light kind changed").into()),
         };
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         let definition = LightDefinition::try_from_scaled_linear_srgb(
             kind,
             LocalAxes::STANDARD,
@@ -152,19 +163,14 @@ pub(super) fn prepare<'scope>(
             intensity,
         )
         .map_err(|_| {
-            gltf_parse_error(
-                ctx,
-                "glTF light emission is not representable in canonical F32",
-            )
+            gltf_parse_error("glTF light emission is not representable in canonical F32")
         })?;
         let name = source.name.as_ref().map(|name| name.as_str());
         if let Some(name) = name {
-            enforce_usize_limit(
-                ctx,
-                "max_string_bytes",
-                name.len(),
-                ctx.limits().max_string_bytes,
-            )?;
+            {
+                let argument_0 = ctx.limits().max_string_bytes;
+                enforce_usize_limit(ctx, "max_string_bytes", name.len(), argument_0)
+            }?;
             complete_canonical_string_work(ctx, name.len())?;
         }
         let id = LightLocalId::new(authoring_u32(
@@ -182,11 +188,10 @@ pub(super) fn prepare<'scope>(
 }
 
 /// Validate source bounds first; narrowing must not erase positive source values.
-fn narrow(ctx: &ParseScope<'_>, value: f64) -> Result<f32> {
+fn narrow(_ctx: &mut ParseExecution<'_, '_>, value: f64) -> Result<f32> {
     let narrowed = value as f32;
     if !value.is_finite() || !narrowed.is_finite() || (value > 0.0 && narrowed == 0.0) {
         return Err(gltf_parse_error(
-            ctx,
             "glTF light value exceeds the canonical F32 domain",
         ));
     }

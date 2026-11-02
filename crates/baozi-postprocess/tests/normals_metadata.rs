@@ -23,11 +23,11 @@ use baozi_import::authoring::{
     SourceObjectKind, SourceObjectLocator, SpatialAuthoringBatch,
 };
 use baozi_import::{
-    CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
-    FormatDescriptor, FormatEncoding, FormatImporter, FormatSelection, ImportConfigOverlay,
-    ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer, OptionCompileLimits,
-    ParseResult, ParseScope, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
-    SceneDraft, import_bytes,
+    CapabilityStatus, CompiledOptions, DetectionOutcome, DetectionResult, DetectionScope, Format,
+    FormatCapability, FormatDescriptor, FormatEncoding, FormatSelection, ImportConfigOverlay,
+    ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer, NoFormatOptions,
+    OptionCompileError, OptionCompileLimits, ParseContext, ParseResult, ReadConfidence, ReadHint,
+    RegistryBuildLimits, RegistryBuildScope, RegistryBuilder,
 };
 use baozi_io::AssetPath;
 use baozi_postprocess::{
@@ -63,7 +63,16 @@ struct MetadataImporter {
     format: FormatId,
 }
 
-impl FormatImporter for MetadataImporter {
+impl Format for MetadataImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(self.format.clone(), "Normal metadata fixture")
             .extensions(["nmfixture"])
@@ -82,9 +91,9 @@ impl FormatImporter for MetadataImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        assert_eq!(scope.source().as_str(), PATH);
-        assert_eq!(scope.primary_bytes(), SOURCE);
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        assert_eq!(context.source().as_str(), PATH);
+        assert_eq!(context.primary_bytes(), SOURCE);
         let roots = [NodeLocalId::new(0)];
         let nodes = [NodeAuthoringNode::new(
             Presence::Absent,
@@ -283,9 +292,9 @@ impl FormatImporter for MetadataImporter {
         ]);
         let space = SceneSpace::UNKNOWN;
         let snapshots = [ResourceSnapshotAuthoring::snapshotted(
-            scope.primary_bytes(),
+            context.primary_bytes(),
         )];
-        scope.submit_scene(SceneAuthoringBatch::new(
+        context.submit_complete(SceneAuthoringBatch::new(
             SpatialAuthoringBatch::new(&space, &[], &[]),
             NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
             AppearanceAuthoringBatch::empty(),
@@ -325,15 +334,15 @@ fn import_fixture(authored_normals: bool) -> ImportReport {
         )),
     ));
     let request = registry
-        .compile_request(&request, OptionCompileLimits::default())
+        .plan(&request, OptionCompileLimits::default())
         .expect("fixture import request");
-    let report = import_bytes(
-        &request,
-        AssetPath::new(PATH).expect("fixture asset path"),
-        SOURCE,
-        ImportOperationControl::default(),
-    )
-    .expect("explicit metadata Scene must satisfy the import resource/source closure");
+    let report = request
+        .read_bytes(
+            AssetPath::new(PATH).expect("fixture asset path"),
+            SOURCE,
+            ImportOperationControl::default(),
+        )
+        .expect("explicit metadata Scene must satisfy the import resource/source closure");
     assert_eq!(report.ledger().current_live_bytes(), 0);
     assert_eq!(report.ledger().active_reservations(), 0);
     report

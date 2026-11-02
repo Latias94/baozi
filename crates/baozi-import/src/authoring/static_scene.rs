@@ -15,7 +15,9 @@ use super::{
     SourceObjectLocator, SpatialAuthoringBatch, TextureAuthoring,
 };
 use crate::metered_storage::capacity_plan_cause;
-use crate::{ImportStorageClass, ManifestDigest, MeteredOpaqueAllowance, ParseResult, ParseScope};
+use crate::{
+    ImportStorageClass, ManifestDigest, MeteredOpaqueAllowance, ParseContext, ParseResult,
+};
 use baozi_operation::CapacityPlan;
 
 static UNKNOWN_SPACE: SceneSpace = SceneSpace::UNKNOWN;
@@ -30,10 +32,10 @@ static UNKNOWN_SPACE: SceneSpace = SceneSpace::UNKNOWN;
 ///
 /// Images may carry encoded bytes or reference primary-document resource zero. Importers that
 /// need other resource identities, metadata, deformation, animation, or more
-/// precise provenance should use [`ParseScope::submit_scene`] with [`SceneAuthoringBatch`].
+/// precise provenance should use [`ParseContext::submit_complete`] with [`SceneAuthoringBatch`].
 /// All input still passes through the same central Scene validation and publication boundary.
 #[derive(Debug, Clone, Copy)]
-#[must_use = "submit borrowed static Scene input through ParseScope::submit_static_scene"]
+#[must_use = "submit borrowed static Scene input through ParseContext::submit"]
 pub struct StaticSceneBuilder<'input> {
     scene_space: &'input SceneSpace,
     cameras: &'input [CameraProjection],
@@ -126,13 +128,12 @@ impl<'input> StaticSceneBuilder<'input> {
 }
 
 pub(crate) fn submit(
-    scope: &ParseScope<'_>,
+    scope: &mut ParseContext<'_>,
     input: StaticSceneBuilder<'_>,
     format: &FormatId,
     content_digest: ManifestDigest,
-) -> ParseResult<crate::SceneDraft> {
-    scope.poll()?;
-    let document = document_resource(scope, content_digest)?;
+) -> ParseResult<()> {
+    let document = scope.with_execution(|exec| document_resource(exec, content_digest))?;
     let locator = SourceObjectLocator::indexed(SourceObjectKind::Document, 0);
     let resources = [ObservedResourceAuthoring::session_opaque(
         &document.identity,
@@ -147,79 +148,98 @@ pub(crate) fn submit(
     ))];
     let source_provenance = [ProvenanceLocalId::new(0)];
 
-    let mut logical_morphs = scope.metered_vec(
-        ImportStorageClass::FormatNormalization,
-        "static-scene-logical-morphs",
-    );
-    logical_morphs.try_resize(
-        input.logical_meshes.len(),
-        LogicalMorphAuthoring::new(AuthoringRange::new(0, 0), &[]),
-    )?;
-    let mut primitive_deformations = scope.metered_vec(
-        ImportStorageClass::FormatNormalization,
-        "static-scene-primitive-deformations",
-    );
-    primitive_deformations.try_resize(
-        input.primitives.len(),
-        PrimitiveDeformationAuthoring::new(Presence::Absent, &[]),
-    )?;
-    let mut instance_deformations = scope.metered_vec(
-        ImportStorageClass::FormatNormalization,
-        "static-scene-instance-deformations",
-    );
-    instance_deformations.try_resize(
-        input.mesh_instances.len(),
-        MeshInstanceDeformationAuthoring::new(Presence::Absent, Presence::Absent),
-    )?;
+    let (logical_morphs, primitive_deformations, instance_deformations, owners) = scope
+        .with_execution(|exec| -> ParseResult<_> {
+            let mut logical_morphs = exec.metered_vec(
+                ImportStorageClass::FormatNormalization,
+                "static-scene-logical-morphs",
+            );
+            logical_morphs.try_resize(
+                exec,
+                input.logical_meshes.len(),
+                LogicalMorphAuthoring::new(AuthoringRange::new(0, 0), &[]),
+            )?;
+            let mut primitive_deformations = exec.metered_vec(
+                ImportStorageClass::FormatNormalization,
+                "static-scene-primitive-deformations",
+            );
+            primitive_deformations.try_resize(
+                exec,
+                input.primitives.len(),
+                PrimitiveDeformationAuthoring::new(Presence::Absent, &[]),
+            )?;
+            let mut instance_deformations = exec.metered_vec(
+                ImportStorageClass::FormatNormalization,
+                "static-scene-instance-deformations",
+            );
+            instance_deformations.try_resize(
+                exec,
+                input.mesh_instances.len(),
+                MeshInstanceDeformationAuthoring::new(Presence::Absent, Presence::Absent),
+            )?;
 
-    type OwnerConstructor = fn(u32) -> ProfileOwner;
-    let owner_domains: [(usize, OwnerConstructor); 12] = [
-        (input.nodes.len(), |index| {
-            ProfileOwner::Node(NodeLocalId::new(index))
-        }),
-        (input.cameras.len(), ProfileOwner::Camera),
-        (input.lights.len(), ProfileOwner::Light),
-        (input.images.len(), ProfileOwner::Image),
-        (input.samplers.len(), ProfileOwner::Sampler),
-        (input.textures.len(), ProfileOwner::Texture),
-        (input.bindings.len(), ProfileOwner::TextureBinding),
-        (input.materials.len(), ProfileOwner::Material),
-        (input.logical_meshes.len(), ProfileOwner::LogicalMesh),
-        (input.primitives.len(), ProfileOwner::Primitive),
-        (input.attributes.len(), ProfileOwner::Attribute),
-        (input.mesh_instances.len(), ProfileOwner::MeshInstance),
-    ];
-    let owner_count = owner_domains
-        .iter()
-        .try_fold(2_usize, |total, (count, _)| {
-            total
-                .checked_add(*count)
-                .ok_or_else(|| scope.resource_limit_exceeded("static-scene-owner-count", u64::MAX))
+            type OwnerConstructor = fn(u32) -> ProfileOwner;
+            let owner_domains: [(usize, OwnerConstructor); 12] = [
+                (input.nodes.len(), |index| {
+                    ProfileOwner::Node(NodeLocalId::new(index))
+                }),
+                (input.cameras.len(), ProfileOwner::Camera),
+                (input.lights.len(), ProfileOwner::Light),
+                (input.images.len(), ProfileOwner::Image),
+                (input.samplers.len(), ProfileOwner::Sampler),
+                (input.textures.len(), ProfileOwner::Texture),
+                (input.bindings.len(), ProfileOwner::TextureBinding),
+                (input.materials.len(), ProfileOwner::Material),
+                (input.logical_meshes.len(), ProfileOwner::LogicalMesh),
+                (input.primitives.len(), ProfileOwner::Primitive),
+                (input.attributes.len(), ProfileOwner::Attribute),
+                (input.mesh_instances.len(), ProfileOwner::MeshInstance),
+            ];
+            let owner_count = owner_domains
+                .iter()
+                .try_fold(2_usize, |total, (count, _)| {
+                    total.checked_add(*count).ok_or_else(|| {
+                        exec.resource_limit_exceeded("static-scene-owner-count", u64::MAX)
+                    })
+                })?;
+            let mut owners = exec.metered_vec(
+                ImportStorageClass::FormatNormalization,
+                "static-scene-owner-provenance",
+            );
+            owners.try_reserve(exec, owner_count)?;
+            for owner in [ProfileOwner::Scene, ProfileOwner::SyntheticRoot] {
+                owners.try_push(
+                    exec,
+                    OwnerProvenanceAuthoring::new(owner, &source_provenance),
+                )?;
+            }
+            for (count, owner) in owner_domains {
+                for index in 0..count {
+                    let index = u32::try_from(index).map_err(|_| {
+                        exec.resource_limit_exceeded(
+                            "static-scene-owner-index",
+                            u64::from(u32::MAX),
+                        )
+                    })?;
+                    owners.try_push(
+                        exec,
+                        OwnerProvenanceAuthoring::new(owner(index), &source_provenance),
+                    )?;
+                }
+            }
+
+            Ok((
+                logical_morphs,
+                primitive_deformations,
+                instance_deformations,
+                owners,
+            ))
         })?;
-    let mut owners = scope.metered_vec(
-        ImportStorageClass::FormatNormalization,
-        "static-scene-owner-provenance",
-    );
-    owners.try_reserve(owner_count)?;
-    for owner in [ProfileOwner::Scene, ProfileOwner::SyntheticRoot] {
-        owners.try_push(OwnerProvenanceAuthoring::new(owner, &source_provenance))?;
-    }
-    for (count, owner) in owner_domains {
-        for index in 0..count {
-            let index = u32::try_from(index).map_err(|_| {
-                scope.resource_limit_exceeded("static-scene-owner-index", u64::from(u32::MAX))
-            })?;
-            owners.try_push(OwnerProvenanceAuthoring::new(
-                owner(index),
-                &source_provenance,
-            ))?;
-        }
-    }
 
     let snapshots = [ResourceSnapshotAuthoring::snapshotted(
         scope.primary_bytes(),
     )];
-    scope.submit_scene(SceneAuthoringBatch::new(
+    scope.submit_complete(SceneAuthoringBatch::new(
         SpatialAuthoringBatch::new(input.scene_space, input.cameras, input.lights),
         NodeAuthoringBatch::new(input.roots, input.nodes),
         AppearanceAuthoringBatch::new(
@@ -258,11 +278,31 @@ struct DocumentResource<'scope> {
     reason: SessionOpaqueReason,
 }
 
-fn document_resource<'scope>(
-    scope: &'scope ParseScope<'_>,
+fn document_resource<'session>(
+    scope: &mut crate::ParseExecution<'_, 'session>,
     digest: ManifestDigest,
-) -> ParseResult<DocumentResource<'scope>> {
-    let try_identity = |value: &str, reason| -> ParseResult<Option<DocumentResource<'scope>>> {
+) -> ParseResult<DocumentResource<'session>> {
+    // A logical AssetPath can exceed ResourceIdentity's bound or contain '#'. Use the actual
+    // document digest as its bounded fallback identity, without truncating or inventing a path.
+    const PREFIX: &[u8] = b"document/sha256/";
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut fallback = [0_u8; PREFIX.len() + DIGEST_LEN * 2];
+    fallback[..PREFIX.len()].copy_from_slice(PREFIX);
+    for (byte, pair) in digest
+        .as_bytes()
+        .into_iter()
+        .zip(fallback[PREFIX.len()..].as_chunks_mut::<2>().0.iter_mut())
+    {
+        pair[0] = HEX[usize::from(byte >> 4)];
+        pair[1] = HEX[usize::from(byte & 0x0f)];
+    }
+    let source = scope.source();
+    let fallback = std::str::from_utf8(&fallback).map_err(|_| {
+        scope.descriptor_contract_failure("static-scene-document-identity-encoding")
+    })?;
+    let mut try_identity = |value: &str,
+                            reason|
+     -> ParseResult<Option<DocumentResource<'session>>> {
         if value.len() > MAX_RESOURCE_IDENTITY_LEN {
             return Ok(None);
         }
@@ -291,28 +331,10 @@ fn document_resource<'scope>(
         }))
     };
 
-    if let Some(document) = try_identity(scope.source().as_str(), SessionOpaqueReason::CallerLabel)?
-    {
+    if let Some(document) = try_identity(source.as_str(), SessionOpaqueReason::CallerLabel)? {
         return Ok(document);
     }
 
-    // A logical AssetPath can exceed ResourceIdentity's bound or contain '#'. Use the actual
-    // document digest as its bounded fallback identity, without truncating or inventing a path.
-    const PREFIX: &[u8] = b"document/sha256/";
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut fallback = [0_u8; PREFIX.len() + DIGEST_LEN * 2];
-    fallback[..PREFIX.len()].copy_from_slice(PREFIX);
-    for (byte, pair) in digest
-        .as_bytes()
-        .into_iter()
-        .zip(fallback[PREFIX.len()..].as_chunks_mut::<2>().0.iter_mut())
-    {
-        pair[0] = HEX[usize::from(byte >> 4)];
-        pair[1] = HEX[usize::from(byte & 0x0f)];
-    }
-    let fallback = std::str::from_utf8(&fallback).map_err(|_| {
-        scope.descriptor_contract_failure("static-scene-document-identity-encoding")
-    })?;
     try_identity(fallback, SessionOpaqueReason::SessionFallback)?
         .ok_or_else(|| scope.descriptor_contract_failure("static-scene-document-identity-rejected"))
 }

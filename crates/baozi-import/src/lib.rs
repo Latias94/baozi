@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! Import registry, request, session, and format capability contracts.
+//! Typed format registration, import plans, and exclusive parse-context contracts.
 //!
 //! The retired pre-release request serialization protocol is not part of the package interface:
 //!
@@ -42,17 +42,6 @@ mod source_scope;
 mod store;
 mod text_input;
 
-/// Opaque descriptor returned after a parser submits one complete canonical Scene batch.
-///
-/// The descriptor cannot be cloned or constructed by importer code. Its matching retained owner
-/// remains inside the import session and is consumed when parsing finishes.
-///
-/// ```compile_fail,E0599
-/// fn clone_draft(draft: baozi_import::SceneDraft) -> baozi_import::SceneDraft {
-///     draft.clone()
-/// }
-/// ```
-pub use baozi_core::__scene_integration::integration::SceneDraft;
 pub use baozi_core::{
     AnimationInterpolation, AnimationTarget, AppearanceBuildResource, AppearanceLimitDimension,
     EntityNameError, MaterialFactorGroup, SceneAnimationRateKind, SceneAnimationSamplePart,
@@ -99,7 +88,7 @@ pub use error::{
 };
 pub use format::{
     BoundedFaultDetail, DetectionFault, DetectionFaultCode, DetectionInconclusive,
-    DetectionOutcome, FormatImporter, Probe, ReadConfidence,
+    DetectionOutcome, Format, Probe, ReadConfidence,
 };
 pub use ledger::{
     ImportDimension, ImportDimensionSnapshot, ImportLedgerPhase, ImportLedgerSnapshot,
@@ -112,12 +101,11 @@ pub use metered_storage::{
     MeteredDecodedText, MeteredOpaqueAllowance, MeteredOrderedMap, MeteredString, MeteredVec,
 };
 pub use options::{
-    CompiledFormatOptions, FormatOptionCodec, FormatOptionEnvelope, FormatOptionEnvelopeError,
-    FormatOptionKey, FormatOptionLayers, FormatOptionPayload, FormatOptionReader,
-    FormatOptionSchema, FormatOptionSchemaId, FormatOptionSchemaIdError, FormatOptionSchemaKey,
-    NoFormatOptions, OptionBudget, OptionCompileError, OptionCompileLimits, OptionCompileScope,
-    OptionErrorCode, OptionLiveReservation, OptionRuntimeTypeKey, OptionScopeLimits,
-    RegistryBuildLimits, RegistryBuildScope,
+    CompiledOptions, FormatOptionEnvelope, FormatOptionEnvelopeError, FormatOptionLayers,
+    FormatOptionPayload, FormatOptionReader, FormatOptionSchema, FormatOptionSchemaId,
+    FormatOptionSchemaIdError, FormatOptionSchemaKey, NoFormatOptions, OptionBudget,
+    OptionCompileError, OptionCompileLimits, OptionCompileScope, OptionErrorCode,
+    OptionLiveReservation, OptionScopeLimits, RegistryBuildLimits, RegistryBuildScope,
 };
 pub use outcome::{
     DetectionEvidence, ImportEvidence, ImportFailure, ImportInitializationError, ImportPhase,
@@ -127,7 +115,7 @@ pub use registry::{
     FormatUnavailability, RegistryBuildError, RegistryBuilder, RegistryRegistrationError,
     RegistrySnapshot,
 };
-pub use request::{PreparedImportRequest, RequestError};
+pub use request::{ImportPlan, RequestError};
 pub use resource_graph::{
     InputReplayStatus, ManifestDigest, ManifestNamespaceSnapshotProof, ManifestNodeClass,
     ManifestObservedOnlyReason, ManifestObservedOnlyReasons, ManifestPerReferenceProof,
@@ -137,9 +125,10 @@ pub use resource_graph::{
     ManifestUnavailableReplay, ResourceManifestCounts, SuccessfulInputManifest,
 };
 pub use scope::{
-    ImportStorageClass, ImportWorkClass, ImportWorkScope, ParseFailure, ParseResult, ParseScope,
+    ImportStorageClass, ImportWorkClass, ImportWorkGroup, ImportWorkScope, ParseContext,
+    ParseExecution, ParseFailure, ParseResult,
 };
-pub use session::{ReadHint, import_asset, import_asset_with_resolver, import_bytes};
+pub use session::ReadHint;
 pub use source_scope::{
     FinalizedSourceScopeRecord, SourceScopeCounts, SourceScopeDetail, SourceScopeDetailState,
     SourceScopeDetails, SourceScopeDigest, SourceScopeDisposition, SourceScopeDocumentIdentity,

@@ -1,13 +1,18 @@
 use crate::config::{FormatSelection, ImportConfig, ImportRequest};
+use crate::dependency::DependencyResolver;
 use crate::format::BoundedFaultDetail;
+use crate::ledger::ImportOperationControl;
 use crate::options::{
-    CompileAggregate, CompiledFormatOptions, FormatOptionEnvelope, FormatOptionLayers,
-    FormatOptionSchemaId, OptionCompileError, OptionCompileLimits, OptionCompileScope,
+    CompileAggregate, FormatOptionEnvelope, FormatOptionLayers, FormatOptionSchemaId,
+    OptionCompileError, OptionCompileLimits, OptionCompileScope,
 };
+use crate::outcome::{ImportReport, ImportResult};
 use crate::registry::{
-    FormatUnavailability, RegistrationInvocationError, RegistryEntry, RegistrySnapshot,
+    FormatUnavailability, PreparedInvocation, RegistrationInvocationError, RegistryEntry,
+    RegistrySnapshot,
 };
 use baozi_core::FormatId;
+use baozi_io::{AssetIo, AssetPath};
 use baozi_operation::{
     PhysicalStorageAccount, PhysicalStorageAccountCreateError, PhysicalStorageAccountFactory,
     PhysicalStorageAccountLimits,
@@ -16,21 +21,23 @@ use std::collections::{HashMap, hash_map::Entry};
 use std::fmt;
 use std::hash::Hash;
 use std::num::{NonZeroU32, NonZeroU64};
-use std::sync::Arc;
 
-const MAX_LIVE_STORAGE_ACCOUNTS_PER_PREPARED_REQUEST: u64 = 1024;
+const MAX_LIVE_STORAGE_ACCOUNTS_PER_PLAN: u64 = 1024;
 
 /// Immutable, snapshot-bound result of complete pre-session request compilation.
+///
+/// A plan owns its registry and can execute after the builder or facade that created it is
+/// dropped. Clones share compiled invocations and the live storage-account limit.
 #[derive(Clone)]
-pub struct PreparedImportRequest {
+pub struct ImportPlan {
     snapshot: RegistrySnapshot,
     config: ImportConfig,
-    overrides: HashMap<usize, Arc<CompiledFormatOptions>>,
+    overrides: HashMap<usize, PreparedInvocation>,
     override_order: Vec<usize>,
     account_factory: PhysicalStorageAccountFactory,
 }
 
-impl PreparedImportRequest {
+impl ImportPlan {
     pub fn snapshot(&self) -> &RegistrySnapshot {
         &self.snapshot
     }
@@ -43,9 +50,47 @@ impl PreparedImportRequest {
         self.config.resource_limits()
     }
 
-    /// Returns whether this request was compiled against `snapshot`'s publication.
-    pub fn belongs_to(&self, snapshot: &RegistrySnapshot) -> bool {
-        self.snapshot.has_same_identity(snapshot)
+    /// Imports an immutable caller-owned byte slice without secondary asset authority.
+    #[allow(
+        clippy::result_large_err,
+        reason = "terminal import failures retain complete bounded session evidence without heap indirection"
+    )]
+    pub fn read_bytes(
+        &self,
+        source: AssetPath,
+        bytes: &[u8],
+        control: ImportOperationControl,
+    ) -> ImportResult<ImportReport> {
+        crate::session::import_bytes(self, source, bytes, control)
+    }
+
+    /// Imports an asset using the primary authority for dependencies.
+    #[allow(
+        clippy::result_large_err,
+        reason = "terminal import failures retain complete bounded session evidence without heap indirection"
+    )]
+    pub fn read_asset(
+        &self,
+        io: &dyn AssetIo,
+        source: AssetPath,
+        control: ImportOperationControl,
+    ) -> ImportResult<ImportReport> {
+        crate::session::import_asset(self, io, source, control)
+    }
+
+    /// Imports an asset using an explicit dependency authority policy.
+    #[allow(
+        clippy::result_large_err,
+        reason = "terminal import failures retain complete bounded session evidence without heap indirection"
+    )]
+    pub fn read_asset_with_resolver(
+        &self,
+        io: &dyn AssetIo,
+        source: AssetPath,
+        resolver: &dyn DependencyResolver,
+        control: ImportOperationControl,
+    ) -> ImportResult<ImportReport> {
+        crate::session::import_asset_with_resolver(self, io, source, resolver, control)
     }
 
     /// Returns overridden formats in stable `FormatId` order.
@@ -59,7 +104,7 @@ impl PreparedImportRequest {
         self.snapshot.entry(id)
     }
 
-    pub(crate) fn options_for(&self, entry: &RegistryEntry) -> Option<Arc<CompiledFormatOptions>> {
+    pub(crate) fn invocation_for(&self, entry: &RegistryEntry) -> Option<PreparedInvocation> {
         if !entry.belongs_to(&self.snapshot) {
             return None;
         }
@@ -67,7 +112,7 @@ impl PreparedImportRequest {
             self.overrides
                 .get(&entry.index())
                 .cloned()
-                .unwrap_or_else(|| entry.default_options()),
+                .unwrap_or_else(|| entry.default_invocation()),
         )
     }
 
@@ -81,10 +126,10 @@ impl PreparedImportRequest {
     }
 }
 
-impl fmt::Debug for PreparedImportRequest {
+impl fmt::Debug for ImportPlan {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("PreparedImportRequest")
+            .debug_struct("ImportPlan")
             .field("snapshot", &self.snapshot)
             .field("config", &self.config)
             .field("overrides", &OverriddenFormatsDebug(self))
@@ -92,7 +137,7 @@ impl fmt::Debug for PreparedImportRequest {
     }
 }
 
-struct OverriddenFormatsDebug<'a>(&'a PreparedImportRequest);
+struct OverriddenFormatsDebug<'a>(&'a ImportPlan);
 
 impl fmt::Debug for OverriddenFormatsDebug<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -122,12 +167,12 @@ struct ValidatedTarget<'a> {
 
 impl RegistrySnapshot {
     /// Resolves common configuration and compiles every submitted format target before session or IO.
-    pub fn compile_request(
+    pub fn plan(
         &self,
         request: &ImportRequest,
         limits: OptionCompileLimits,
-    ) -> Result<PreparedImportRequest, RequestError> {
-        self.compile_request_layers(
+    ) -> Result<ImportPlan, RequestError> {
+        self.plan_layers(
             request.resolved_config(),
             request.preset().format_options(),
             request.caller().format_options(),
@@ -135,13 +180,13 @@ impl RegistrySnapshot {
         )
     }
 
-    fn compile_request_layers(
+    fn plan_layers(
         &self,
         config: ImportConfig,
         preset: &[FormatOptionEnvelope],
         caller: &[FormatOptionEnvelope],
         limits: OptionCompileLimits,
-    ) -> Result<PreparedImportRequest, RequestError> {
+    ) -> Result<ImportPlan, RequestError> {
         self.validate_format_selection(config.format_selection())?;
         let envelope_count =
             preset
@@ -250,7 +295,7 @@ impl RegistrySnapshot {
         for target in work {
             let format = target.entry.format_id();
             let mut scope = OptionCompileScope::new(format, limits, &mut aggregate);
-            let compiled = match target.entry.compile_layers(&mut scope, target.layers) {
+            let compiled = match target.entry.compile_overrides(&mut scope, target.layers) {
                 Ok(Ok(compiled)) => compiled,
                 Ok(Err(cause)) => {
                     return Err(RequestError::CodecRejected {
@@ -270,24 +315,19 @@ impl RegistrySnapshot {
                     });
                 }
             };
-            if compiled.runtime_type_key() != target.entry.expected_runtime_type_key() {
-                return Err(RequestError::RuntimeTypeMismatch {
-                    format: format.clone(),
-                });
-            }
             let index = target.entry.index();
-            let replaced = overrides.insert(index, Arc::new(compiled));
+            let replaced = overrides.insert(index, compiled);
             debug_assert!(replaced.is_none());
             override_order.push(index);
         }
 
         let account_factory = PhysicalStorageAccountFactory::try_new_for_live_accounts(
-            NonZeroU64::new(MAX_LIVE_STORAGE_ACCOUNTS_PER_PREPARED_REQUEST)
-                .expect("the prepared-request account limit is nonzero"),
+            NonZeroU64::new(MAX_LIVE_STORAGE_ACCOUNTS_PER_PLAN)
+                .expect("the import-plan account limit is nonzero"),
         )
         .map_err(|_| RequestError::AllocationFailed)?;
 
-        Ok(PreparedImportRequest {
+        Ok(ImportPlan {
             snapshot: self.clone(),
             config,
             overrides,
@@ -363,7 +403,6 @@ fn reserve_vec<T>(values: &mut Vec<T>, additional: usize) -> Result<(), RequestE
 #[non_exhaustive]
 pub enum RequestError {
     AllocationFailed,
-    RegistrySnapshotMismatch,
     EnvelopeCountExceeded {
         maximum: usize,
     },
@@ -403,9 +442,6 @@ pub enum RequestError {
     ExtensionPoisoned {
         format: FormatId,
     },
-    RuntimeTypeMismatch {
-        format: FormatId,
-    },
 }
 
 const _: () = assert!(std::mem::size_of::<RequestError>() < 128);
@@ -414,7 +450,6 @@ impl RequestError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::AllocationFailed => "allocation-failed",
-            Self::RegistrySnapshotMismatch => "registry-snapshot-mismatch",
             Self::EnvelopeCountExceeded { .. } => "envelope-count-exceeded",
             Self::PayloadBytesExceeded { .. } => "payload-bytes-exceeded",
             Self::WrongSchemaOwner { .. } => "wrong-schema-owner",
@@ -426,7 +461,6 @@ impl RequestError {
             Self::CodecRejected { .. } => "codec-rejected",
             Self::CodecPanicked { .. } => "codec-panicked",
             Self::ExtensionPoisoned { .. } => "extension-poisoned",
-            Self::RuntimeTypeMismatch { .. } => "option-runtime-type-mismatch",
         }
     }
 }
@@ -437,8 +471,6 @@ impl fmt::Display for RequestError {
             Self::AllocationFailed => {
                 formatter.write_str("format option request allocation failed")
             }
-            Self::RegistrySnapshotMismatch => formatter
-                .write_str("prepared import request belongs to a different registry snapshot"),
             Self::EnvelopeCountExceeded { maximum } => {
                 write!(formatter, "format option envelope count exceeds {maximum}")
             }
@@ -474,12 +506,6 @@ impl fmt::Display for RequestError {
             Self::ExtensionPoisoned { format } => {
                 write!(formatter, "format registration {format} is poisoned")
             }
-            Self::RuntimeTypeMismatch { format } => {
-                write!(
-                    formatter,
-                    "compiled option type does not match importer {format}"
-                )
-            }
         }
     }
 }
@@ -496,6 +522,240 @@ impl std::error::Error for RequestError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{ImportConfigOverlay, ImportRequestLayer};
+    use crate::descriptor::{FormatDescriptor, FormatEncoding};
+    use crate::format::Format;
+    use crate::options::{
+        CompiledOptions, FormatOptionSchema, FormatOptionSchemaKey, RegistryBuildLimits,
+        RegistryBuildScope,
+    };
+    use crate::registry::RegistryBuilder;
+    use crate::scope::{ParseContext, ParseResult};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct CompilationLog {
+        defaults: AtomicUsize,
+        overrides: Mutex<Vec<(FormatId, u8)>>,
+    }
+
+    struct CountingFormat {
+        schema: FormatOptionSchema,
+        log: Arc<CompilationLog>,
+    }
+
+    impl Format for CountingFormat {
+        type Options = u8;
+
+        fn descriptor(&self) -> FormatDescriptor {
+            FormatDescriptor::builder(self.schema.key().owner().clone(), "Counting format")
+                .encoding(FormatEncoding::Binary)
+                .build()
+                .unwrap()
+        }
+
+        fn option_schema(&self) -> Option<FormatOptionSchema> {
+            Some(self.schema.clone())
+        }
+
+        fn compile_defaults(
+            &self,
+            scope: &mut RegistryBuildScope<'_>,
+        ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+            self.log.defaults.fetch_add(1, Ordering::SeqCst);
+            scope.charge_work(1)?;
+            scope.finish(7, 1)
+        }
+
+        fn compile_options(
+            &self,
+            scope: &mut OptionCompileScope<'_>,
+            defaults: &Self::Options,
+            layers: FormatOptionLayers<'_>,
+        ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+            assert_eq!(*defaults, 7);
+            let mut value = *defaults;
+            for payload in [layers.preset(), layers.caller()].into_iter().flatten() {
+                let bytes = scope.reader(payload).read_remaining()?;
+                let [submitted] = bytes else {
+                    return Err(OptionCompileError::invalid_payload(
+                        "one-byte",
+                        "expected exactly one byte",
+                    ));
+                };
+                value = *submitted;
+            }
+            let compiled = scope.finish(value, 1)?;
+            self.log
+                .overrides
+                .lock()
+                .unwrap()
+                .push((scope.format().clone(), *compiled.value()));
+            Ok(compiled)
+        }
+
+        fn parse(
+            &self,
+            _options: &Self::Options,
+            _context: &mut ParseContext<'_>,
+        ) -> ParseResult<()> {
+            unreachable!("request compilation tests do not parse")
+        }
+    }
+
+    fn counting_schema(format: &str) -> FormatOptionSchema {
+        FormatOptionSchema::new(
+            FormatOptionSchemaKey::new(
+                FormatId::new(format).unwrap(),
+                FormatOptionSchemaId::new("import-options").unwrap(),
+            ),
+            NonZeroU32::new(1).unwrap(),
+        )
+    }
+
+    fn counting_snapshot(
+        schemas: &[FormatOptionSchema],
+        log: &Arc<CompilationLog>,
+    ) -> RegistrySnapshot {
+        let mut builder = RegistryBuilder::new();
+        for schema in schemas {
+            builder
+                .register(CountingFormat {
+                    schema: schema.clone(),
+                    log: Arc::clone(log),
+                })
+                .unwrap();
+        }
+        builder.freeze(RegistryBuildLimits::default()).unwrap()
+    }
+
+    #[test]
+    fn later_invalid_metadata_prevents_every_target_compiler() {
+        let first = counting_schema("org.example.first");
+        let last = counting_schema("org.example.last");
+        let log = Arc::new(CompilationLog::default());
+        let snapshot = counting_snapshot(&[last.clone(), first.clone()], &log);
+        let caller = ImportRequestLayer::default()
+            .try_with_format_option(first.envelope_from_canonical_payload([11]).unwrap())
+            .unwrap()
+            .try_with_format_option(
+                FormatOptionEnvelope::new(
+                    last.key().owner().clone(),
+                    last.key().clone(),
+                    NonZeroU32::new(2).unwrap(),
+                    [29],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let request = ImportRequest::new().with_caller_layer(caller);
+
+        assert!(matches!(
+            snapshot.plan(&request, OptionCompileLimits::default()),
+            Err(RequestError::UnsupportedVersion { format, .. })
+                if &format == last.key().owner()
+        ));
+        assert!(log.overrides.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn plans_reuse_snapshot_defaults_and_clones_reuse_compiled_overrides() {
+        let schema = counting_schema("org.example.cached");
+        let log = Arc::new(CompilationLog::default());
+        let snapshot = counting_snapshot(std::slice::from_ref(&schema), &log);
+        for _ in 0..2 {
+            let plan = snapshot
+                .plan(&ImportRequest::new(), OptionCompileLimits::default())
+                .unwrap();
+            let cloned = plan.clone();
+            assert_eq!(cloned.overridden_formats().len(), 0);
+        }
+        let caller = ImportRequestLayer::default()
+            .try_with_format_option(schema.envelope_from_canonical_payload([11]).unwrap())
+            .unwrap();
+        let plan = snapshot
+            .plan(
+                &ImportRequest::new().with_caller_layer(caller),
+                OptionCompileLimits::default(),
+            )
+            .unwrap();
+        let cloned = plan.clone();
+
+        assert_eq!(cloned.overridden_formats().len(), 1);
+        assert_eq!(log.defaults.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            log.overrides.lock().unwrap().as_slice(),
+            &[(schema.key().owner().clone(), 11)]
+        );
+    }
+
+    #[test]
+    fn cloned_plans_share_the_live_account_limit_and_released_capacity() {
+        let schema = counting_schema("org.example.account-limit");
+        let log = Arc::new(CompilationLog::default());
+        let snapshot = counting_snapshot(&[schema], &log);
+        let plan = snapshot
+            .plan(&ImportRequest::new(), OptionCompileLimits::default())
+            .unwrap();
+        let cloned = plan.clone();
+        let mut accounts = Vec::new();
+        for index in 0..MAX_LIVE_STORAGE_ACCOUNTS_PER_PLAN {
+            let selected = if index % 2 == 0 { &plan } else { &cloned };
+            accounts.push(selected.try_create_storage_account().unwrap());
+        }
+        let full = plan.account_factory.snapshot();
+        assert_eq!(full.live_accounts(), MAX_LIVE_STORAGE_ACCOUNTS_PER_PLAN);
+        for selected in [&plan, &cloned, &cloned.clone()] {
+            assert!(matches!(
+                selected.try_create_storage_account(),
+                Err(PhysicalStorageAccountCreateError::LiveAccountLimitExceeded { requested, limit }
+                    | PhysicalStorageAccountCreateError::ControlByteLimitExceeded { requested, limit })
+                    if requested > limit
+            ));
+            assert_eq!(selected.account_factory.snapshot(), full);
+        }
+        drop(accounts.pop().unwrap());
+        let replacement = cloned.try_create_storage_account().unwrap();
+        assert!(plan.try_create_storage_account().is_err());
+        drop(replacement);
+        drop(accounts);
+        assert!(plan.try_create_storage_account().is_ok());
+    }
+
+    #[test]
+    fn plan_compilation_preserves_layer_presence_and_stable_target_order() {
+        let first = counting_schema("org.example.first");
+        let last = counting_schema("org.example.last");
+        let log = Arc::new(CompilationLog::default());
+        let snapshot = counting_snapshot(&[last.clone(), first.clone()], &log);
+        let preset = ImportRequestLayer::new(ImportConfigOverlay::default())
+            .try_with_format_option(last.envelope_from_canonical_payload([9]).unwrap())
+            .unwrap()
+            .try_with_format_option(first.envelope_from_canonical_payload([11]).unwrap())
+            .unwrap();
+        let caller = ImportRequestLayer::default()
+            .try_with_format_option(first.envelope_from_canonical_payload([7]).unwrap())
+            .unwrap();
+        let plan = snapshot
+            .plan(
+                &ImportRequest::from_layers(preset, caller),
+                OptionCompileLimits::default(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            plan.overridden_formats().collect::<Vec<_>>(),
+            [first.key().owner(), last.key().owner()]
+        );
+        assert_eq!(
+            log.overrides.lock().unwrap().as_slice(),
+            &[
+                (first.key().owner().clone(), 7),
+                (last.key().owner().clone(), 9)
+            ]
+        );
+    }
 
     #[test]
     fn collection_capacity_overflow_is_a_typed_request_error() {

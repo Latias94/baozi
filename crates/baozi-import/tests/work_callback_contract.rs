@@ -2,15 +2,16 @@ mod support;
 
 use baozi_core::FormatId;
 use baozi_import::{
-    CapabilityStatus, CauseOwner, DetectionOutcome, DetectionResult, DetectionScope,
-    FormatCapability, FormatDescriptor, FormatEncoding, FormatImporter, ImportCause,
-    ImportDimension, ImportFailure, ImportOperationControl, ImportRequest, ImportResult,
-    ImportWorkClass, OptionCompileLimits, ParseFailure, ParseResult, ParseScope,
-    PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
-    SceneDraft, ScopeAbortCause, TrustedExtensionBoundary, import_bytes,
+    CapabilityStatus, CauseOwner, CompiledOptions, DetectionOutcome, DetectionResult,
+    DetectionScope, Format, FormatCapability, FormatDescriptor, FormatEncoding, ImportCause,
+    ImportDimension, ImportFailure, ImportOperationControl, ImportPlan, ImportRequest,
+    ImportResult, ImportWorkClass, NoFormatOptions, OptionCompileError, OptionCompileLimits,
+    ParseContext, ParseFailure, ParseResult, ReadConfidence, ReadHint, RegistryBuildLimits,
+    RegistryBuildScope, RegistryBuilder, ScopeAbortCause, TrustedExtensionBoundary,
 };
 use baozi_io::AssetPath;
 use baozi_operation::CancellationToken;
+use baozi_operation::LedgerCause;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 #[allow(
@@ -116,7 +117,16 @@ impl WorkImporter {
     }
 }
 
-impl FormatImporter for WorkImporter {
+impl Format for WorkImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
             FormatId::new(self.id()).expect("qualified work callback format id"),
@@ -138,256 +148,220 @@ impl FormatImporter for WorkImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        match self.case {
-            WorkCase::EntryFailure => {
-                return Err(scope.resource_limit_exceeded("work-callback-entry", 0));
-            }
-            WorkCase::ExactGroup => {
-                scope.with_work_group(
-                    [
-                        (ImportWorkClass::Tokens, 3),
-                        (ImportWorkClass::WorkUnits, 2),
-                    ],
-                    |work| {
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        context.with_execution(|exec| -> ParseResult<()> {
+            let work_units = exec.bind_work_group([ImportWorkClass::WorkUnits])?;
+            let tokens = exec.bind_work_group([ImportWorkClass::Tokens])?;
+            let records = exec.bind_work_group([ImportWorkClass::Records])?;
+            let string_bytes = exec.bind_work_group([ImportWorkClass::StringBytes])?;
+            let tokens_work =
+                exec.bind_work_group([ImportWorkClass::Tokens, ImportWorkClass::WorkUnits])?;
+            let work_tokens =
+                exec.bind_work_group([ImportWorkClass::WorkUnits, ImportWorkClass::Tokens])?;
+            let record_attributes =
+                exec.bind_work_group([ImportWorkClass::Records, ImportWorkClass::AttributeCells])?;
+            let line_tokens =
+                exec.bind_work_group([ImportWorkClass::LineBytes, ImportWorkClass::Tokens])?;
+            let duplicate_work =
+                exec.bind_work_group([ImportWorkClass::WorkUnits, ImportWorkClass::WorkUnits])?;
+            match self.case {
+                WorkCase::EntryFailure => {
+                    return Err(exec.resource_limit_exceeded("work-callback-entry", 0));
+                }
+                WorkCase::ExactGroup => {
+                    exec.with_work(&tokens_work, [3, 2], |_exec, work| {
                         assert_eq!(work.remaining(), [3, 2]);
                         work.complete([1, 1])?;
                         work.run([2, 1], || Ok(()))?;
                         assert_eq!(work.remaining(), [0, 0]);
                         Ok(())
-                    },
-                )?;
-            }
-            WorkCase::ZeroGroup => {
-                scope.with_work_group(
-                    [
-                        (ImportWorkClass::WorkUnits, 0),
-                        (ImportWorkClass::Tokens, 0),
-                    ],
-                    |work| {
+                    })?;
+                }
+                WorkCase::ZeroGroup => {
+                    exec.with_work(&work_tokens, [0, 0], |_exec, work| {
                         assert_eq!(work.remaining(), [0, 0]);
                         work.complete_all()
-                    },
-                )?;
-            }
-            WorkCase::DynamicChunks => {
-                scope.with_work(ImportWorkClass::WorkUnits, 0, |work| {
-                    work.replenish(4)?;
-                    work.complete_all()?;
-                    work.replenish(4)?;
-                    work.complete_all()
-                })?;
-            }
-            WorkCase::CallbackError => {
-                scope.with_work_group(
-                    [
-                        (ImportWorkClass::WorkUnits, 2),
-                        (ImportWorkClass::Tokens, 2),
-                    ],
-                    |work| {
+                    })?;
+                }
+                WorkCase::DynamicChunks => {
+                    exec.with_work(&work_units, [0], |_exec, work| {
+                        work.replenish(4)?;
+                        work.complete_all()?;
+                        work.replenish(4)?;
+                        work.complete_all()
+                    })?;
+                }
+                WorkCase::CallbackError => {
+                    exec.with_work(&work_tokens, [2, 2], |exec, work| {
                         work.complete([1, 1])?;
-                        scope.enforce_resource_limit("work-callback-error", 2, 1)?;
+                        exec.enforce_resource_limit("work-callback-error", 2, 1)?;
                         Ok(())
-                    },
-                )?;
-            }
-            WorkCase::Incomplete => {
-                scope.with_work_group(
-                    [
-                        (ImportWorkClass::WorkUnits, 2),
-                        (ImportWorkClass::Tokens, 2),
-                    ],
-                    |work| {
+                    })?;
+                }
+                WorkCase::Incomplete => {
+                    exec.with_work(&work_tokens, [2, 2], |_exec, work| {
                         work.complete([1, 1])?;
                         Ok(())
-                    },
-                )?;
-            }
-            WorkCase::Nested => {
-                scope.with_work(ImportWorkClass::WorkUnits, 0, |work| {
-                    work.replenish(4)?;
-                    assert!(
-                        scope
-                            .with_work(ImportWorkClass::Tokens, 1, |nested| {
-                                nested.complete_all()
-                            })
-                            .is_err()
-                    );
-                    work.complete_all()
-                })?;
-            }
-            WorkCase::ParentNestedSuccess => {
-                scope.with_parent_work(ImportWorkClass::Records, 1, || {
-                    scope.with_work(ImportWorkClass::Tokens, 2, |child| child.complete_all())
-                })?;
-            }
-            WorkCase::ParentChildFailure => {
-                scope.with_parent_work(ImportWorkClass::Records, 1, || {
-                    scope.with_work(ImportWorkClass::WorkUnits, 2, |child| {
-                        child.complete([1])?;
-                        scope.enforce_resource_limit("parent-child-failure", 2, 1)
-                    })
-                })?;
-            }
-            WorkCase::ParentGroupNestedSuccess => {
-                scope.with_parent_work_group(
-                    [
-                        (ImportWorkClass::Records, 1),
-                        (ImportWorkClass::AttributeCells, 2),
-                    ],
-                    || scope.with_work(ImportWorkClass::Tokens, 3, |child| child.complete_all()),
-                )?;
-            }
-            WorkCase::ParentGroupChildFailure => {
-                scope.with_parent_work_group(
-                    [
-                        (ImportWorkClass::Records, 1),
-                        (ImportWorkClass::AttributeCells, 2),
-                    ],
-                    || {
-                        scope.with_work(ImportWorkClass::WorkUnits, 2, |child| {
+                    })?;
+                }
+                WorkCase::Nested => {
+                    exec.with_work(&work_units, [0], |exec, work| {
+                        work.replenish(4)?;
+                        assert!(
+                            exec.with_work(&tokens, [1], |_exec, nested| { nested.complete_all() })
+                                .is_err()
+                        );
+                        work.complete_all()
+                    })?;
+                }
+                WorkCase::ParentNestedSuccess => {
+                    exec.with_parent_work(&records, [1], |exec, _parent| {
+                        exec.with_work(&tokens, [2], |_exec, child| child.complete_all())
+                    })?;
+                }
+                WorkCase::ParentChildFailure => {
+                    exec.with_parent_work(&records, [1], |exec, _parent| {
+                        exec.with_work(&work_units, [2], |exec, child| {
                             child.complete([1])?;
-                            scope.enforce_resource_limit("parent-group-child-failure", 2, 1)
+                            exec.enforce_resource_limit("parent-child-failure", 2, 1)
                         })
-                    },
-                )?;
-            }
-            WorkCase::CaughtParentPanic => {
-                let caught = catch_unwind(AssertUnwindSafe(|| {
-                    scope.with_parent_work(ImportWorkClass::Records, 1, || -> ParseResult<()> {
-                        panic!("caught parent work panic")
-                    })
-                }));
-                assert!(caught.is_err());
-                scope.with_parent_work(ImportWorkClass::Records, 1, || {
-                    scope.with_work(ImportWorkClass::Tokens, 1, |child| child.complete_all())
-                })?;
-            }
-            WorkCase::ParentCancelBeforeCompletion => {
-                let cancellation = self
-                    .cancellation
-                    .as_ref()
-                    .expect("parent cancellation case owns a token");
-                scope.with_parent_work(ImportWorkClass::Records, 1, || {
-                    cancellation.cancel();
-                    Ok(())
-                })?;
-            }
-            WorkCase::PrematureReplenish => {
-                scope.with_work(ImportWorkClass::WorkUnits, 2, |work| {
-                    work.replenish(1)?;
-                    Ok(())
-                })?;
-            }
-            WorkCase::ItemLimitedReplenish => {
-                scope.with_work(ImportWorkClass::StringBytes, 0, |work| {
-                    work.replenish(1)?;
-                    Ok(())
-                })?;
-            }
-            WorkCase::GroupItemLimit => {
-                let line_bytes = u64::try_from(scope.limits().max_line_bytes)
-                    .expect("line-byte limit fits the import counter")
-                    .checked_add(1)
-                    .expect("test line-byte excess fits the import counter");
-                scope.with_work_group(
-                    [
-                        (ImportWorkClass::LineBytes, line_bytes),
-                        (ImportWorkClass::Tokens, 1),
-                    ],
-                    |work| work.complete_all(),
-                )?;
-            }
-            WorkCase::CallbackPanic => {
-                scope.with_work_group(
-                    [
-                        (ImportWorkClass::WorkUnits, 2),
-                        (ImportWorkClass::Tokens, 2),
-                    ],
-                    |work| -> ParseResult<()> {
+                    })?;
+                }
+                WorkCase::ParentGroupNestedSuccess => {
+                    exec.with_parent_work(&record_attributes, [1, 2], |exec, _parent| {
+                        exec.with_work(&tokens, [3], |_exec, child| child.complete_all())
+                    })?;
+                }
+                WorkCase::ParentGroupChildFailure => {
+                    exec.with_parent_work(&record_attributes, [1, 2], |exec, _parent| {
+                        exec.with_work(&work_units, [2], |exec, child| {
+                            child.complete([1])?;
+                            exec.enforce_resource_limit("parent-group-child-failure", 2, 1)
+                        })
+                    })?;
+                }
+                WorkCase::CaughtParentPanic => {
+                    let caught = catch_unwind(AssertUnwindSafe(|| {
+                        exec.with_parent_work(&records, [1], |_exec, _parent| -> ParseResult<()> {
+                            panic!("caught parent work panic")
+                        })
+                    }));
+                    assert!(caught.is_err());
+                    exec.with_parent_work(&records, [1], |exec, _parent| {
+                        exec.with_work(&tokens, [1], |_exec, child| child.complete_all())
+                    })?;
+                }
+                WorkCase::ParentCancelBeforeCompletion => {
+                    let cancellation = self
+                        .cancellation
+                        .as_ref()
+                        .expect("parent cancellation case owns a token");
+                    exec.with_parent_work(&records, [1], |_exec, _parent| {
+                        cancellation.cancel();
+                        Ok(())
+                    })?;
+                }
+                WorkCase::PrematureReplenish => {
+                    exec.with_work(&work_units, [2], |_exec, work| {
+                        work.replenish(1)?;
+                        Ok(())
+                    })?;
+                }
+                WorkCase::ItemLimitedReplenish => {
+                    exec.with_work(&string_bytes, [0], |_exec, work| {
+                        work.replenish(1)?;
+                        Ok(())
+                    })?;
+                }
+                WorkCase::GroupItemLimit => {
+                    let line_bytes = u64::try_from(exec.limits().max_line_bytes)
+                        .expect("line-byte limit fits the import counter")
+                        .checked_add(1)
+                        .expect("test line-byte excess fits the import counter");
+                    exec.with_work(&line_tokens, [line_bytes, 1], |_exec, work| {
+                        work.complete_all()
+                    })?;
+                }
+                WorkCase::CallbackPanic => {
+                    exec.with_work(&work_tokens, [2, 2], |_exec, work| -> ParseResult<()> {
                         work.complete([1, 1])?;
                         panic!("work callback panic")
-                    },
-                )?;
-            }
-            WorkCase::CaughtCallbackPanic => {
-                let caught = catch_unwind(AssertUnwindSafe(|| {
-                    scope.with_work(ImportWorkClass::WorkUnits, 2, |work| -> ParseResult<()> {
-                        work.complete([1])?;
-                        panic!("caught work callback panic")
-                    })
-                }));
-                assert!(caught.is_err());
-                scope.with_work(ImportWorkClass::Tokens, 1, |work| work.complete_all())?;
-            }
-            WorkCase::DuplicateDimension => {
-                scope.with_work_group(
-                    [
-                        (ImportWorkClass::WorkUnits, 2),
-                        (ImportWorkClass::WorkUnits, 3),
-                    ],
-                    |work| {
+                    })?;
+                }
+                WorkCase::CaughtCallbackPanic => {
+                    let caught = catch_unwind(AssertUnwindSafe(|| {
+                        exec.with_work(&work_units, [2], |_exec, work| -> ParseResult<()> {
+                            work.complete([1])?;
+                            panic!("caught work callback panic")
+                        })
+                    }));
+                    assert!(caught.is_err());
+                    exec.with_work(&tokens, [1], |_exec, work| work.complete_all())?;
+                }
+                WorkCase::DuplicateDimension => {
+                    exec.with_work(&duplicate_work, [2, 3], |_exec, work| {
                         work.complete([1, 2])?;
                         work.complete_all()
-                    },
-                )?;
-            }
-            WorkCase::CallbackErrorCancel => {
-                enum CallbackError {
-                    Parse,
-                    Requested,
+                    })?;
                 }
-
-                impl From<ParseFailure> for CallbackError {
-                    fn from(_value: ParseFailure) -> Self {
-                        Self::Parse
+                WorkCase::CallbackErrorCancel => {
+                    enum CallbackError {
+                        Parse,
+                        Requested,
                     }
-                }
 
-                let cancellation = self
-                    .cancellation
-                    .as_ref()
-                    .expect("callback error cancellation case owns a token");
-                let result = scope.with_work(
-                    ImportWorkClass::WorkUnits,
-                    2,
-                    |work| -> Result<(), CallbackError> {
+                    impl From<ParseFailure> for CallbackError {
+                        fn from(_value: ParseFailure) -> Self {
+                            Self::Parse
+                        }
+                    }
+
+                    let cancellation = self
+                        .cancellation
+                        .as_ref()
+                        .expect("callback error cancellation case owns a token");
+                    let result = exec.with_work(
+                        &work_units,
+                        [2],
+                        |_exec, work| -> Result<(), CallbackError> {
+                            work.complete([1])?;
+                            cancellation.cancel();
+                            Err(CallbackError::Requested)
+                        },
+                    );
+                    assert!(matches!(result, Err(CallbackError::Requested)));
+                    exec.poll()?;
+                }
+                WorkCase::IncompleteCancel => {
+                    let cancellation = self
+                        .cancellation
+                        .as_ref()
+                        .expect("incomplete cancellation case owns a token");
+                    exec.with_work(&work_units, [2], |_exec, work| {
                         work.complete([1])?;
                         cancellation.cancel();
-                        Err(CallbackError::Requested)
-                    },
-                );
-                assert!(matches!(result, Err(CallbackError::Requested)));
-                scope.poll()?;
+                        Ok(())
+                    })?;
+                }
+                WorkCase::CancelAfterCompletion => {
+                    let cancellation = self
+                        .cancellation
+                        .as_ref()
+                        .expect("cancellation case owns a token");
+                    exec.with_work(&work_units, [2], |_exec, work| {
+                        work.complete_all()?;
+                        cancellation.cancel();
+                        Ok(())
+                    })?;
+                }
             }
-            WorkCase::IncompleteCancel => {
-                let cancellation = self
-                    .cancellation
-                    .as_ref()
-                    .expect("incomplete cancellation case owns a token");
-                scope.with_work(ImportWorkClass::WorkUnits, 2, |work| {
-                    work.complete([1])?;
-                    cancellation.cancel();
-                    Ok(())
-                })?;
-            }
-            WorkCase::CancelAfterCompletion => {
-                let cancellation = self
-                    .cancellation
-                    .as_ref()
-                    .expect("cancellation case owns a token");
-                scope.with_work(ImportWorkClass::WorkUnits, 2, |work| {
-                    work.complete_all()?;
-                    cancellation.cancel();
-                    Ok(())
-                })?;
-            }
-        }
-        support::submit_minimal_scene(scope)
+            Ok(())
+        })?;
+        support::submit_minimal_scene(context)
     }
 }
 
-fn request_for(importer: WorkImporter) -> PreparedImportRequest {
+fn request_for(importer: WorkImporter) -> ImportPlan {
     let mut builder = RegistryBuilder::new();
     builder
         .register(importer)
@@ -396,7 +370,7 @@ fn request_for(importer: WorkImporter) -> PreparedImportRequest {
         .freeze(RegistryBuildLimits::default())
         .expect("work callback registry freezes");
     registry
-        .compile_request(&ImportRequest::new(), OptionCompileLimits::default())
+        .plan(&ImportRequest::new(), OptionCompileLimits::default())
         .expect("work callback request compiles")
 }
 
@@ -414,8 +388,7 @@ fn run_case(
     }
     .extension();
     let request = request_for(WorkImporter { case, cancellation });
-    operation_result(import_bytes(
-        &request,
+    operation_result(request.read_bytes(
         AssetPath::new(format!("asset.{extension}")).expect("valid work callback source"),
         b"fixture",
         ImportOperationControl::default(),
@@ -555,9 +528,7 @@ fn nested_work_is_rejected_before_inner_admission() {
         ImportCause::Scope(abort)
             if matches!(
                 abort.cause(),
-                ScopeAbortCause::DescriptorContract {
-                    code: "parse-work-already-in-progress",
-                }
+                ScopeAbortCause::Ledger(LedgerCause::InactiveLinearWorkPermit)
             )
     ));
     assert_dimension(&failure, ImportDimension::WorkUnits, 4, 0);
@@ -664,9 +635,7 @@ fn a_dynamic_chunk_cannot_replace_unfinished_work() {
         ImportCause::Scope(abort)
             if matches!(
                 abort.cause(),
-                ScopeAbortCause::DescriptorContract {
-                    code: "parse-work-replenish-before-completion",
-                }
+                ScopeAbortCause::Ledger(LedgerCause::InactiveLinearWorkPermit)
             )
     ));
     assert_dimension(&failure, ImportDimension::WorkUnits, 2, 0);
@@ -681,9 +650,7 @@ fn item_limited_work_cannot_be_split_across_dynamic_chunks() {
         ImportCause::Scope(abort)
             if matches!(
                 abort.cause(),
-                ScopeAbortCause::DescriptorContract {
-                    code: "parse-work-item-limit-replenish-unsupported",
-                }
+                ScopeAbortCause::Ledger(LedgerCause::InactiveLinearWorkPermit)
             )
     ));
     assert_dimension(&failure, ImportDimension::CanonicalStringBytes, 0, 0);
@@ -783,8 +750,7 @@ fn callback_error_reconciles_a_same_action_cancel_to_control() {
         case: WorkCase::CallbackErrorCancel,
         cancellation: Some(cancellation.clone()),
     });
-    let failure = operation_result(import_bytes(
-        &request,
+    let failure = operation_result(request.read_bytes(
         AssetPath::new("asset.work-error-cancel").expect("valid cancellation source"),
         b"fixture",
         ImportOperationControl::default().with_cancellation(cancellation),
@@ -805,8 +771,7 @@ fn cancellation_after_the_last_action_reconciles_to_control() {
         case: WorkCase::CancelAfterCompletion,
         cancellation: Some(cancellation.clone()),
     });
-    let failure = operation_result(import_bytes(
-        &request,
+    let failure = operation_result(request.read_bytes(
         AssetPath::new("asset.work-cancel").expect("valid cancellation source"),
         b"fixture",
         ImportOperationControl::default().with_cancellation(cancellation),
@@ -827,8 +792,7 @@ fn parent_cancellation_precedes_automatic_parent_completion() {
         case: WorkCase::ParentCancelBeforeCompletion,
         cancellation: Some(cancellation.clone()),
     });
-    let failure = operation_result(import_bytes(
-        &request,
+    let failure = operation_result(request.read_bytes(
         AssetPath::new("asset.work-parent-cancel").expect("valid cancellation source"),
         b"fixture",
         ImportOperationControl::default().with_cancellation(cancellation),
@@ -849,8 +813,7 @@ fn incomplete_success_reconciles_a_final_cancel_before_contract_failure() {
         case: WorkCase::IncompleteCancel,
         cancellation: Some(cancellation.clone()),
     });
-    let failure = operation_result(import_bytes(
-        &request,
+    let failure = operation_result(request.read_bytes(
         AssetPath::new("asset.work-incomplete-cancel").expect("valid cancellation source"),
         b"fixture",
         ImportOperationControl::default().with_cancellation(cancellation),

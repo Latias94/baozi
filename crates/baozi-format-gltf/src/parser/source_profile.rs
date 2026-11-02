@@ -8,11 +8,12 @@ use crate::document::schema as json;
 use crate::source_map::{
     GltfSourceMap, SourceEntity, SourceEntityId, SourceEntityKind, SourcePayloadKind,
 };
+use baozi_import::ImportWorkClass;
 use baozi_import::authoring::{
     AttributeSemantic, ExtensionSchemaId, ProfileOwner, SourceLocatorValue, SourceObjectLocator,
 };
 use baozi_import::{
-    CapacityPlan, ImportStorageClass, MeteredOpaqueAllowance, MeteredVec, ParseScope,
+    CapacityPlan, ImportStorageClass, MeteredOpaqueAllowance, MeteredVec, ParseExecution,
 };
 
 const SOURCE_SCHEMA: &str = "org.baozi.gltf:source-object";
@@ -58,7 +59,7 @@ pub(super) const DOCUMENT: SourceEntityId = entity(SourceEntityKind::Document, N
 
 impl<'scope> SelectedSourceProfile<'scope> {
     pub(super) fn from_source_map(
-        ctx: &'scope ParseScope<'_>,
+        ctx: &mut ParseExecution<'_, 'scope>,
         map: &GltfSourceMap<'_>,
         selected: impl Fn(SourceEntityId) -> bool,
     ) -> Result<Self> {
@@ -70,15 +71,33 @@ impl<'scope> SelectedSourceProfile<'scope> {
             ImportStorageClass::FormatNormalization,
             "gltf-selected-source-extras",
         );
+        let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
         for &source in map.entities() {
-            ctx.charge_work(1)?;
+            ctx.with_work(
+                &work_group,
+                [1],
+                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+            )?;
             if selected(source.id) {
-                entries.try_push(source_locator(ctx, source)?)?;
-                charge_lookup(ctx, ctx.primary_bytes().len(), 2)?;
+                {
+                    let value = source_locator(ctx, source)?;
+                    entries.try_push(ctx, value)
+                }?;
+                {
+                    let argument_0 = ctx.primary_bytes().len();
+                    charge_lookup(ctx, argument_0, 2)
+                }?;
                 for payload in map.payloads_for(source.id) {
-                    ctx.charge_work(1)?;
+                    ctx.with_work(
+                        &work_group,
+                        [1],
+                        |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+                    )?;
                     if payload.kind == SourcePayloadKind::Extras {
-                        extras.try_push(SourceExtras::new(ctx, payload)?)?;
+                        {
+                            let value = SourceExtras::new(ctx, payload)?;
+                            extras.try_push(ctx, value)
+                        }?;
                     }
                 }
             }
@@ -116,7 +135,7 @@ impl<'scope> SelectedSourceProfile<'scope> {
 
     pub(super) fn required(
         &self,
-        ctx: &ParseScope<'_>,
+        ctx: &mut ParseExecution<'_, '_>,
         id: SourceEntityId,
     ) -> Result<&SelectedSource<'scope>> {
         charge_lookup(ctx, self.entries.len(), 1)?;
@@ -134,17 +153,18 @@ impl<'scope> SelectedSourceProfile<'scope> {
 
     pub(super) fn link(
         &mut self,
-        ctx: &ParseScope<'_>,
+        ctx: &mut ParseExecution<'_, 'scope>,
         owner: ProfileOwner,
         source: SourceEntityId,
     ) -> Result<()> {
         ctx.charge_work(1)?;
         self.required(ctx, source)?;
-        self.links.try_push(OwnerSourceLink { owner, source })?;
+        self.links
+            .try_push(ctx, OwnerSourceLink { owner, source })?;
         Ok(())
     }
 
-    pub(super) fn finish(&mut self, ctx: &ParseScope<'_>) -> Result<()> {
+    pub(super) fn finish(&mut self, ctx: &mut ParseExecution<'_, '_>) -> Result<()> {
         self.links
             .try_sort_unstable_by(|left, right| -> Result<_> {
                 ctx.charge_work(1)?;
@@ -162,7 +182,7 @@ impl<'scope> SelectedSourceProfile<'scope> {
 
     pub(super) fn for_owner(
         &self,
-        ctx: &ParseScope<'_>,
+        ctx: &mut ParseExecution<'_, '_>,
         owner: ProfileOwner,
     ) -> Result<&[OwnerSourceLink]> {
         let links = self.links.as_slice();
@@ -180,7 +200,7 @@ impl<'scope> SelectedSourceProfile<'scope> {
     /// same order, while metadata explicitly references a SourceIdentityLocalId.
     pub(super) fn source_index(
         &self,
-        ctx: &ParseScope<'_>,
+        ctx: &mut ParseExecution<'_, '_>,
         resource_count: usize,
         id: SourceEntityId,
     ) -> Result<u32> {
@@ -205,14 +225,14 @@ impl<'scope> SelectedSourceProfile<'scope> {
 
 /// Binary search and partition_point perform at most bit_length(len) + 1 comparisons.
 /// Charge that bound before entering the bounded, allocation-free standard-library search.
-fn charge_lookup(ctx: &ParseScope<'_>, length: usize, searches: u64) -> Result<()> {
+fn charge_lookup(ctx: &mut ParseExecution<'_, '_>, length: usize, searches: u64) -> Result<()> {
     let comparisons = u64::from(usize::BITS - length.leading_zeros()) + 1;
     ctx.charge_work(comparisons * searches)?;
     Ok(())
 }
 
 fn source_locator<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     source: SourceEntity,
 ) -> Result<SelectedSource<'scope>> {
     let end = source
@@ -223,7 +243,6 @@ fn source_locator<'scope>(
         || end.is_none_or(|end| end > super::to_u64(ctx.primary_bytes().len()))
     {
         return Err(gltf_parse_error(
-            ctx,
             "selected glTF source range is outside primary bytes",
         ));
     }
@@ -251,15 +270,18 @@ fn source_locator<'scope>(
         ImportStorageClass::FormatNormalization,
         "gltf-source-object-locator-label",
     );
-    label.try_write_fmt(format_args!("kind={kind};parent="))?;
+    label.try_write_fmt(ctx, format_args!("kind={kind};parent="))?;
     match source.id.parent_index {
-        Some(index) => label.try_push_usize(index)?,
-        None => label.try_push_str("-")?,
+        Some(index) => label.try_push_usize(ctx, index)?,
+        None => label.try_push_str(ctx, "-")?,
     }
-    label.try_write_fmt(format_args!(
-        ";index={};offset={};length={}",
-        source.id.source_index, source.range.byte_offset, source.range.byte_length,
-    ))?;
+    label.try_write_fmt(
+        ctx,
+        format_args!(
+            ";index={};offset={};length={}",
+            source.id.source_index, source.range.byte_offset, source.range.byte_length,
+        ),
+    )?;
     let plan = CapacityPlan::for_type::<u8>(0, 0, label.len())
         .map_err(|_| ctx.allocation_failure("gltf-source-object-locator"))?;
     let envelope = plan
@@ -275,9 +297,9 @@ fn source_locator<'scope>(
         ))
     })?;
     let schema = ExtensionSchemaId::new(SOURCE_SCHEMA, 1)
-        .map_err(|_| gltf_parse_error(ctx, "static glTF source locator schema is invalid"))?;
+        .map_err(|_| gltf_parse_error("static glTF source locator schema is invalid"))?;
     let locator = SourceObjectLocator::try_namespaced(Some(schema), value)
-        .map_err(|_| gltf_parse_error(ctx, "static glTF source locator schema is missing"))?;
+        .map_err(|_| gltf_parse_error("static glTF source locator schema is missing"))?;
     Ok(SelectedSource {
         entity: source,
         locator,
@@ -287,11 +309,11 @@ fn source_locator<'scope>(
 
 /// Called before decoder teardown. Only source ordinals, raw ranges, and canonical local owner
 /// IDs cross this boundary; no JSON or backend object is retained by the normalized model.
-pub(super) fn associate(
-    ctx: &ParseScope<'_>,
+pub(super) fn associate<'session>(
+    ctx: &mut ParseExecution<'_, 'session>,
     document: &crate::document::Document<'_>,
     prepared: &PreparedDocument<'_, '_>,
-    model: &mut NormalizedGltf<'_>,
+    model: &mut NormalizedGltf<'session>,
 ) -> Result<()> {
     let profile = &mut model.sources;
     let root = document.tables();
@@ -305,8 +327,13 @@ pub(super) fn associate(
     profile.link(ctx, ProfileOwner::Scene, scene_source)?;
     profile.link(ctx, ProfileOwner::SyntheticRoot, scene_source)?;
 
+    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
     for (index, id) in model.nodes.node_ids.as_slice().iter().enumerate() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         if let Some(id) = id {
             profile.link(
                 ctx,
@@ -316,7 +343,11 @@ pub(super) fn associate(
         }
     }
     for (index, id) in model.cameras.camera_ids.as_slice().iter().enumerate() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         if let Some(id) = id {
             profile.link(
                 ctx,
@@ -326,7 +357,11 @@ pub(super) fn associate(
         }
     }
     for (index, id) in model.lights.light_ids.as_slice().iter().enumerate() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         if let Some(id) = id {
             profile.link(
                 ctx,
@@ -347,7 +382,7 @@ pub(super) fn associate(
             .nodes
             .get(instance.source_node_index)
             .and_then(|node| node.mesh)
-            .ok_or_else(|| gltf_parse_error(ctx, "glTF instance source mesh is missing"))?;
+            .ok_or_else(|| gltf_parse_error("glTF instance source mesh is missing"))?;
         profile.link(
             ctx,
             owner,
@@ -356,7 +391,11 @@ pub(super) fn associate(
     }
 
     for (index, id) in model.appearance.image_ids.as_slice().iter().enumerate() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         let Some(id) = id else { continue };
         let owner = ProfileOwner::Image(id.index());
         profile.link(ctx, owner, entity(SourceEntityKind::Image, None, index))?;
@@ -365,7 +404,11 @@ pub(super) fn associate(
         }
     }
     for (index, id) in model.appearance.sampler_ids.as_slice().iter().enumerate() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         if let Some(id) = id {
             profile.link(
                 ctx,
@@ -375,7 +418,11 @@ pub(super) fn associate(
         }
     }
     for (index, id) in model.appearance.texture_ids.as_slice().iter().enumerate() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         let Some(id) = id else { continue };
         let source = entity(SourceEntityKind::Texture, None, index);
         profile.link(ctx, ProfileOwner::Texture(id.index()), source)?;
@@ -387,7 +434,7 @@ pub(super) fn associate(
             let sampler = model
                 .appearance
                 .default_sampler
-                .ok_or_else(|| gltf_parse_error(ctx, "glTF implicit sampler source is missing"))?;
+                .ok_or_else(|| gltf_parse_error("glTF implicit sampler source is missing"))?;
             profile.link(ctx, ProfileOwner::Sampler(sampler.index()), source)?;
         }
     }
@@ -396,12 +443,20 @@ pub(super) fn associate(
     }
     let mut binding_index = 0;
     for (index, id) in model.appearance.material_ids.as_slice().iter().enumerate() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         let Some(id) = id else { continue };
         let source = entity(SourceEntityKind::Material, None, index);
         profile.link(ctx, ProfileOwner::Material(id.index()), source)?;
         for binding in prepared.material_contracts.bindings(ctx, index)? {
-            ctx.charge_work(1)?;
+            ctx.with_work(
+                &work_group,
+                [1],
+                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+            )?;
             let texture = binding.source_texture;
             let owner = ProfileOwner::TextureBinding(authoring_u32(
                 ctx,
@@ -414,10 +469,7 @@ pub(super) fn associate(
         }
     }
     if binding_index != model.appearance.bindings.len() {
-        return Err(gltf_parse_error(
-            ctx,
-            "glTF binding source map is incomplete",
-        ));
+        return Err(gltf_parse_error("glTF binding source map is incomplete"));
     }
 
     let mut primitive_index = 0;
@@ -432,30 +484,38 @@ pub(super) fn associate(
         .iter()
         .enumerate()
     {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         if selected.is_none() {
             continue;
         }
         let mesh = root
             .meshes
             .get(source_index)
-            .ok_or_else(|| gltf_parse_error(ctx, "glTF mesh source is missing"))?;
+            .ok_or_else(|| gltf_parse_error("glTF mesh source is missing"))?;
         let normalized = model
             .geometry
             .logical_meshes
             .as_slice()
             .get(mesh_index)
-            .ok_or_else(|| gltf_parse_error(ctx, "glTF normalized mesh is missing"))?;
+            .ok_or_else(|| gltf_parse_error("glTF normalized mesh is missing"))?;
         let source = entity(SourceEntityKind::Mesh, None, source_index);
-        profile.link(
-            ctx,
-            ProfileOwner::LogicalMesh(authoring_u32(ctx, mesh_index, "gltf-source-mesh")?),
-            source,
-        )?;
+        {
+            let argument_0 =
+                ProfileOwner::LogicalMesh(authoring_u32(ctx, mesh_index, "gltf-source-mesh")?);
+            profile.link(ctx, argument_0, source)
+        }?;
         mesh_index += 1;
         let mut width = 0;
         for primitive in &mesh.primitives {
-            ctx.charge_work(1)?;
+            ctx.with_work(
+                &work_group,
+                [1],
+                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+            )?;
             if let Some(targets) = &primitive.targets {
                 width = targets.len();
                 break;
@@ -471,10 +531,7 @@ pub(super) fn associate(
             definition_index += 1;
         }
         if mesh.primitives.len() != normalized.primitives.len() {
-            return Err(gltf_parse_error(
-                ctx,
-                "glTF primitive source map is incomplete",
-            ));
+            return Err(gltf_parse_error("glTF primitive source map is incomplete"));
         }
         for (index, (primitive, normalized)) in mesh
             .primitives
@@ -508,15 +565,15 @@ pub(super) fn associate(
                     AttributeSemantic::Color(set) => json::mesh::Semantic::Colors(*set),
                     _ => {
                         return Err(gltf_parse_error(
-                            ctx,
                             "glTF attribute source semantic is missing",
                         ));
                     }
                 };
                 charge_lookup(ctx, primitive.attributes.len(), 1)?;
-                let accessor = primitive.attributes.get(&semantic).ok_or_else(|| {
-                    gltf_parse_error(ctx, "glTF attribute source accessor is missing")
-                })?;
+                let accessor = primitive
+                    .attributes
+                    .get(&semantic)
+                    .ok_or_else(|| gltf_parse_error("glTF attribute source accessor is missing"))?;
                 let owner = ProfileOwner::Attribute(authoring_u32(
                     ctx,
                     attribute_index,
@@ -527,7 +584,11 @@ pub(super) fn associate(
                 attribute_index += 1;
             }
             for target in primitive.targets.iter().flatten() {
-                ctx.charge_work(1)?;
+                ctx.with_work(
+                    &work_group,
+                    [1],
+                    |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+                )?;
                 for accessor in [target.positions, target.normals, target.tangents]
                     .into_iter()
                     .flatten()
@@ -548,15 +609,16 @@ pub(super) fn associate(
         || definition_index != model.morphs.definitions.len()
         || delta_index != model.morphs.deltas.len()
     {
-        return Err(gltf_parse_error(
-            ctx,
-            "glTF geometry source map is incomplete",
-        ));
+        return Err(gltf_parse_error("glTF geometry source map is incomplete"));
     }
 
     let mut skin_index = 0;
     for (index, selected) in model.skins.skin_ids.as_slice().iter().enumerate() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         if selected.is_none() {
             continue;
         }
@@ -566,7 +628,7 @@ pub(super) fn associate(
         let skin = root
             .skins
             .get(index)
-            .ok_or_else(|| gltf_parse_error(ctx, "glTF skin source is missing"))?;
+            .ok_or_else(|| gltf_parse_error("glTF skin source is missing"))?;
         if let Some(accessor) = skin.inverse_bind_matrices {
             link_accessor(ctx, profile, root, owner, accessor.value())?;
         }
@@ -583,14 +645,18 @@ pub(super) fn associate(
     let mut channel_index = 0;
     let mut source_channel_index = 0;
     for (index, animation) in root.animations.iter().enumerate() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         let selected = prepared
             .animation_contracts
             .selected_animations
             .as_slice()
             .get(index)
             .copied()
-            .ok_or_else(|| gltf_parse_error(ctx, "glTF animation source selection is missing"))?;
+            .ok_or_else(|| gltf_parse_error("glTF animation source selection is missing"))?;
         let owner =
             ProfileOwner::AnimationClip(authoring_u32(ctx, clip_index, "gltf-source-animation")?);
         if selected {
@@ -598,7 +664,11 @@ pub(super) fn associate(
             clip_index += 1;
         }
         for (local_channel, channel) in animation.channels.iter().enumerate() {
-            ctx.charge_work(1)?;
+            ctx.with_work(
+                &work_group,
+                [1],
+                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+            )?;
             let retained = prepared
                 .animation_contracts
                 .source_channels
@@ -617,7 +687,7 @@ pub(super) fn associate(
             let sampler = animation
                 .samplers
                 .get(channel.sampler.value())
-                .ok_or_else(|| gltf_parse_error(ctx, "glTF animation source sampler is missing"))?;
+                .ok_or_else(|| gltf_parse_error("glTF animation source sampler is missing"))?;
             // Omitted targets may contribute duration, but never receive a canonical channel owner.
             profile.link(ctx, owner, sampler_id)?;
             link_accessor(ctx, profile, root, owner, sampler.input.value())?;
@@ -647,17 +717,14 @@ pub(super) fn associate(
         || channel_index != model.animations.channel_count()
         || source_channel_index != prepared.animation_contracts.source_channels.len()
     {
-        return Err(gltf_parse_error(
-            ctx,
-            "glTF animation source map is incomplete",
-        ));
+        return Err(gltf_parse_error("glTF animation source map is incomplete"));
     }
     profile.finish(ctx)
 }
 
-fn link_accessor(
-    ctx: &ParseScope<'_>,
-    profile: &mut SelectedSourceProfile<'_>,
+fn link_accessor<'session>(
+    ctx: &mut ParseExecution<'_, 'session>,
+    profile: &mut SelectedSourceProfile<'session>,
     root: &json::Tables<'_>,
     owner: ProfileOwner,
     index: usize,
@@ -666,7 +733,7 @@ fn link_accessor(
     let accessor = root
         .accessors
         .get(index)
-        .ok_or_else(|| gltf_parse_error(ctx, "glTF source accessor is missing"))?;
+        .ok_or_else(|| gltf_parse_error("glTF source accessor is missing"))?;
     if let Some(view) = accessor.buffer_view {
         link_view(ctx, profile, root, owner, view.value())?;
     }
@@ -683,9 +750,9 @@ fn link_accessor(
     Ok(())
 }
 
-fn link_view(
-    ctx: &ParseScope<'_>,
-    profile: &mut SelectedSourceProfile<'_>,
+fn link_view<'session>(
+    ctx: &mut ParseExecution<'_, 'session>,
+    profile: &mut SelectedSourceProfile<'session>,
     root: &json::Tables<'_>,
     owner: ProfileOwner,
     index: usize,
@@ -698,7 +765,7 @@ fn link_view(
     let view = root
         .buffer_views
         .get(index)
-        .ok_or_else(|| gltf_parse_error(ctx, "glTF source buffer view is missing"))?;
+        .ok_or_else(|| gltf_parse_error("glTF source buffer view is missing"))?;
     profile.link(
         ctx,
         owner,

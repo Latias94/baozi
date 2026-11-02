@@ -20,11 +20,11 @@ use baozi_import::authoring::{
     StaticSceneBuilder,
 };
 use baozi_import::{
-    CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
-    FormatDescriptor, FormatEncoding, FormatImporter, FormatSelection, ImportConfigOverlay,
-    ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer, OptionCompileLimits,
-    ParseResult, ParseScope, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
-    SceneDraft, import_bytes,
+    CapabilityStatus, CompiledOptions, DetectionOutcome, DetectionResult, DetectionScope, Format,
+    FormatCapability, FormatDescriptor, FormatEncoding, FormatSelection, ImportConfigOverlay,
+    ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer, NoFormatOptions,
+    OptionCompileError, OptionCompileLimits, ParseContext, ParseResult, ReadConfidence, ReadHint,
+    RegistryBuildLimits, RegistryBuildScope, RegistryBuilder,
 };
 use baozi_io::AssetPath;
 use baozi_postprocess::{
@@ -75,7 +75,16 @@ enum Fixture {
 
 struct TupleImporter(Fixture);
 
-impl FormatImporter for TupleImporter {
+impl Format for TupleImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(FormatId::new(FORMAT).unwrap(), "Triangle tuple fixture")
             .encoding(FormatEncoding::Binary)
@@ -97,18 +106,18 @@ impl FormatImporter for TupleImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
         match self.0 {
-            Fixture::Rich => submit_rich(scope),
-            Fixture::Deformed => submit_deformed(scope, GeometryTopologyAuthoring::TriangleList),
-            Fixture::DeformedAssembly(topology) => submit_deformed(scope, topology),
+            Fixture::Rich => submit_rich(context),
+            Fixture::Deformed => submit_deformed(context, GeometryTopologyAuthoring::TriangleList),
+            Fixture::DeformedAssembly(topology) => submit_deformed(context, topology),
             Fixture::Assembly {
                 topology,
                 corners,
                 indexed,
                 repeated_end,
-            } => lists::submit(scope, topology, corners, indexed, repeated_end),
-            fixture => submit_simple(scope, fixture),
+            } => lists::submit(context, topology, corners, indexed, repeated_end),
+            fixture => submit_simple(context, fixture),
         }
     }
 }
@@ -117,7 +126,7 @@ fn custom(name: &str) -> AttributeSemantic {
     AttributeSemantic::Custom(CustomAttributeSemantic::new(name).unwrap())
 }
 
-fn submit_rich(scope: &ParseScope<'_>) -> ParseResult<SceneDraft> {
+fn submit_rich(context: &mut ParseContext<'_>) -> ParseResult<()> {
     let roots = [NodeLocalId::new(0)];
     let nodes = [NodeAuthoringNode::new(
         Presence::Absent,
@@ -223,14 +232,14 @@ fn submit_rich(scope: &ParseScope<'_>) -> ParseResult<SceneDraft> {
         NodeLocalId::new(0),
         LogicalMeshLocalId::new(0),
     )];
-    scope.submit_static_scene(
+    context.submit(
         StaticSceneBuilder::new(Presence::Present(&roots), &nodes)
             .with_scene_space(&SceneSpace::STANDARD_TARGET)
             .with_geometry(&meshes, &primitives, &attributes, &instances),
     )
 }
 
-fn submit_simple(scope: &ParseScope<'_>, fixture: Fixture) -> ParseResult<SceneDraft> {
+fn submit_simple(context: &mut ParseContext<'_>, fixture: Fixture) -> ParseResult<()> {
     let positions = [
         0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 3.0, 0.0, 0.0, 2.0, 1.0, 0.0,
     ];
@@ -276,7 +285,7 @@ fn submit_simple(scope: &ParseScope<'_>, fixture: Fixture) -> ParseResult<SceneD
         AuthoringRange::new(0, 1),
     )];
     let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
-    scope.submit_static_scene(
+    context.submit(
         StaticSceneBuilder::new(Presence::Present(&[]), &[])
             .with_scene_space(&SceneSpace::STANDARD_TARGET)
             .with_geometry(&meshes, &primitives, &attributes, &[]),
@@ -284,9 +293,9 @@ fn submit_simple(scope: &ParseScope<'_>, fixture: Fixture) -> ParseResult<SceneD
 }
 
 fn submit_deformed(
-    scope: &ParseScope<'_>,
+    context: &mut ParseContext<'_>,
     topology: GeometryTopologyAuthoring<'static>,
-) -> ParseResult<SceneDraft> {
+) -> ParseResult<()> {
     let roots = [
         NodeLocalId::new(0),
         NodeLocalId::new(1),
@@ -514,9 +523,9 @@ fn submit_deformed(
         .map(|owner| OwnerProvenanceAuthoring::new(owner, &attachment))
         .collect();
     let snapshots = [ResourceSnapshotAuthoring::snapshotted(
-        scope.primary_bytes(),
+        context.primary_bytes(),
     )];
-    scope.submit_scene(SceneAuthoringBatch::new(
+    context.submit_complete(SceneAuthoringBatch::new(
         SpatialAuthoringBatch::new(&SceneSpace::STANDARD_TARGET, &[], &[]),
         NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
         AppearanceAuthoringBatch::empty(),
@@ -546,15 +555,15 @@ fn import_fixture(fixture: Fixture) -> ImportReport {
             .with_format_selection(FormatSelection::Forced(FormatId::new(FORMAT).unwrap())),
     ));
     let request = registry
-        .compile_request(&request, OptionCompileLimits::default())
+        .plan(&request, OptionCompileLimits::default())
         .unwrap();
-    import_bytes(
-        &request,
-        AssetPath::new(PATH).unwrap(),
-        b"abc",
-        ImportOperationControl::default(),
-    )
-    .expect("tuple fixture must pass public central import validation")
+    request
+        .read_bytes(
+            AssetPath::new(PATH).unwrap(),
+            b"abc",
+            ImportOperationControl::default(),
+        )
+        .expect("tuple fixture must pass public central import validation")
 }
 
 fn f32_values(element: AttributeElement<'_>) -> &[f32] {

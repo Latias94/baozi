@@ -6,7 +6,7 @@ use baozi_import::{
     ConformancePolicy, FormatSelection, ImportConfigOverlay, ImportFailure, ImportLossKind,
     ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer, ImportResult,
     LossPolicy, OptionCompileLimits, RegistryBuildLimits, RegistryBuilder, ResourceLimits,
-    ResourceLimitsOverlay, SceneSnapshot, SceneSnapshotError, SceneSnapshotLimits, import_asset,
+    ResourceLimitsOverlay, SceneSnapshot, SceneSnapshotError, SceneSnapshotLimits,
 };
 use baozi_io::{AssetPath, MemoryAssetIo};
 use std::error::Error;
@@ -182,9 +182,9 @@ pub fn import_assets_result_with_policies<'asset>(
         caller = caller.try_with_format_option(options.to_envelope()?)?;
     }
     let request = ImportRequest::new().with_caller_layer(caller);
-    let request = snapshot.compile_request(&request, OptionCompileLimits::default())?;
+    let request = snapshot.plan(&request, OptionCompileLimits::default())?;
 
-    operation_result(import_asset(&request, &io, source_path, control))
+    operation_result(request.read_asset(&io, source_path, control))
 }
 
 pub fn operation_result(

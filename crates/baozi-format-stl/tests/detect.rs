@@ -4,7 +4,7 @@ use baozi_format_stl::StlImporter;
 use baozi_import::{
     DetectionOptions, DetectionOutcome, ImportCause, ImportConfigOverlay, ImportOperationControl,
     ImportRequest, ImportRequestLayer, OptionCompileLimits, ReadConfidence, RegistryBuildLimits,
-    RegistryBuilder, import_asset,
+    RegistryBuilder,
 };
 use baozi_io::{AssetPath, MemoryAssetIo};
 use common::{BinaryFacet, TestImportOutcome, ascii_triangle, binary_stl};
@@ -17,7 +17,7 @@ fn detect(source: &str, bytes: Vec<u8>, max_probe_bytes: u64) -> TestImportOutco
         .freeze(RegistryBuildLimits::default())
         .expect("valid registry");
     let request = snapshot
-        .compile_request(
+        .plan(
             &ImportRequest::from_layers(
                 ImportRequestLayer::default(),
                 ImportRequestLayer::new(
@@ -35,16 +35,18 @@ fn detect(source: &str, bytes: Vec<u8>, max_probe_bytes: u64) -> TestImportOutco
     io.try_insert(path.clone(), Arc::<[u8]>::from(bytes))
         .expect("test asset insertion must succeed");
     TestImportOutcome::new(
-        import_asset(&request, &io, path, ImportOperationControl::default()).map(|report| {
-            let evidence = report
-                .detection_evidence()
-                .first()
-                .expect("STL detector evidence");
-            match evidence.outcome() {
-                DetectionOutcome::Match(confidence) => *confidence,
-                outcome => panic!("expected matching detector outcome, got {outcome:?}"),
-            }
-        }),
+        request
+            .read_asset(&io, path, ImportOperationControl::default())
+            .map(|report| {
+                let evidence = report
+                    .detection_evidence()
+                    .first()
+                    .expect("STL detector evidence");
+                match evidence.outcome() {
+                    DetectionOutcome::Match(confidence) => *confidence,
+                    outcome => panic!("expected matching detector outcome, got {outcome:?}"),
+                }
+            }),
     )
 }
 

@@ -1,11 +1,13 @@
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use baozi_core::SceneValidationLimits;
 use baozi_operation::{
-    AccountPoisonReason, CancellationSignal, PhysicalStorageAccount, PhysicalStorageAccountFactory,
-    PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits,
+    AccountPoisonReason, CancellationSignal, CancellationToken, PhysicalStorageAccount,
+    PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryLimits,
+    PhysicalStorageAccountLimits,
 };
 
 use super::super::{ImportStoreBootstrapRequirements, try_import_store_bootstrap};
@@ -43,6 +45,52 @@ fn start_session(
     let session = ImportStoreSessionOwner::try_start(control, &account, bootstrap)
         .expect("the transition fixture must start");
     (session, account)
+}
+
+#[test]
+fn a_late_terminal_cancellation_preserves_the_already_selected_ledger_failure() {
+    let cancellation = CancellationToken::new();
+    let (mut session, account) =
+        start_session(ImportOperationControl::default().with_cancellation(cancellation.clone()));
+    {
+        let execution = session.execution().unwrap();
+        execution
+            .tighten_dimension_policy(
+                crate::ImportDimension::Records,
+                baozi_operation::DimensionPolicy::counter(0, 0, 0),
+            )
+            .unwrap();
+        assert!(matches!(
+            execution.charge_attempted(crate::ImportDimension::Records, 1),
+            Err(ImportStoreHostError::Ledger(
+                baozi_operation::LedgerCause::LimitExceeded {
+                    dimension: crate::ImportDimension::Records,
+                    ..
+                }
+            ))
+        ));
+    }
+    cancellation.cancel();
+    let terminal = session.finish_scene(SceneParseOutcome::Rejected).unwrap();
+    assert_eq!(
+        terminal.evidence().cause().class(),
+        ImportStoreTerminalClass::Ledger
+    );
+    assert!(matches!(
+        terminal.control_cause(),
+        Some(ControlCause::Cancelled {
+            origin: baozi_operation::CancellationOrigin::Signal
+        })
+    ));
+    let records = terminal
+        .evidence()
+        .dimension(crate::ImportDimension::Records)
+        .unwrap();
+    assert_eq!((records.attempted(), records.consumed()), (1, 0));
+    assert_eq!(terminal.canonical_block_count(), None);
+    drop(terminal);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert!(!account.snapshot().poisoned());
 }
 
 fn with_two_node_construction<R>(
@@ -96,37 +144,41 @@ fn with_two_node_construction<R>(
     action(construction)
 }
 
-fn assert_transitioning_slot_available(state: &RefCell<ImportStoreSessionState>) {
-    let slot = state
-        .try_borrow_mut()
-        .expect("the transition must not retain a state-slot guard across a callback");
-    assert!(matches!(*slot, ImportStoreSessionState::Transitioning));
+fn assert_account_accessible(account: &PhysicalStorageAccount) {
+    let snapshot = account.snapshot();
+    assert!(!snapshot.poisoned());
+    assert!(snapshot.live_retained_bytes() > 0);
+    assert!(snapshot.live_retained_allocations() > 0);
 }
 
 struct CaptureDropProbe<'probe> {
-    state: &'probe RefCell<ImportStoreSessionState>,
+    account: &'probe PhysicalStorageAccount,
     drops: &'probe Cell<usize>,
 }
 
 impl Drop for CaptureDropProbe<'_> {
     fn drop(&mut self) {
-        assert_transitioning_slot_available(self.state);
+        assert_account_accessible(self.account);
         self.drops.set(self.drops.get() + 1);
     }
 }
 
-fn candidate_scene(
-    session: &ImportStoreSessionOwner,
-) -> (ImportStoreActivationTransition<'_>, ImportPendingScene) {
-    let (owner, transition) = ImportStoreActivationTransition::begin(&session.state)
+fn candidate_scene<'session>(
+    session: &'session mut ImportStoreSessionOwner,
+    account: &PhysicalStorageAccount,
+) -> (
+    ImportStoreActivationTransition<'session>,
+    ImportPendingScene,
+) {
+    let (owner, transition) = ImportStoreActivationTransition::begin(&mut session.storage[0].state)
         .expect("the dormant owner must enter its single activation transition");
     let capture_drops = Cell::new(0);
     let evidence_probe = CaptureDropProbe {
-        state: &session.state,
+        account,
         drops: &capture_drops,
     };
     let validation_probe = CaptureDropProbe {
-        state: &session.state,
+        account,
         drops: &capture_drops,
     };
     let pending = with_two_node_construction(|construction| {
@@ -144,7 +196,7 @@ fn candidate_scene(
                 ),
                 move |lane, _output| {
                     let _capture = &evidence_probe;
-                    assert_transitioning_slot_available(&session.state);
+                    assert_account_accessible(account);
                     match lane.try_retain_records(
                         evidence.record_plan(),
                         SceneOutcomeEvidenceTag,
@@ -156,7 +208,7 @@ fn candidate_scene(
                 },
                 move |planning, output| {
                     let _capture = &validation_probe;
-                    assert_transitioning_slot_available(&session.state);
+                    assert_account_accessible(account);
                     postflight.validate_candidate(planning, output)
                 },
             )
@@ -171,17 +223,17 @@ fn candidate_scene(
 }
 
 #[test]
-fn activation_callbacks_and_capture_drop_can_borrow_the_transitioning_slot() {
-    let (session, account) = start_session(ImportOperationControl::default());
-    let (owner, transition) = ImportStoreActivationTransition::begin(&session.state)
+fn activation_callbacks_and_capture_drop_can_access_the_physical_account() {
+    let (mut session, account) = start_session(ImportOperationControl::default());
+    let evidence = session.unsubmitted_evidence;
+    let (owner, transition) = ImportStoreActivationTransition::begin(&mut session.storage[0].state)
         .expect("the dormant owner must enter activation");
     let capture_drops = Cell::new(0);
     let probe = CaptureDropProbe {
-        state: &session.state,
+        account: &account,
         drops: &capture_drops,
     };
-    let state = &session.state;
-    let host = session.host();
+    let callback_account = &account;
     let outcome = owner
         .plan_and_activate_scoped::<
             SceneActivationOutput,
@@ -190,15 +242,7 @@ fn activation_callbacks_and_capture_drop_can_borrow_the_transitioning_slot() {
             SceneCanonicalRootTag,
         >(move |planning| {
             let _capture = &probe;
-            assert_transitioning_slot_available(state);
-            assert!(matches!(
-                ImportStoreActivationTransition::begin(state),
-                Err(ImportStoreHostError::OperationConsumed)
-            ));
-            assert!(matches!(
-                host.poll(),
-                Err(ImportStoreHostError::OperationConsumed)
-            ));
+            assert_account_accessible(callback_account);
             planning.reject(
                 SceneActivationRejection::construction_invariant(),
                 IMPORT_SCENE_NOT_SUBMITTED_CODE,
@@ -206,117 +250,129 @@ fn activation_callbacks_and_capture_drop_can_borrow_the_transitioning_slot() {
         })
         .expect("rejecting the scoped request must retain its exact owner");
     assert_eq!(capture_drops.get(), 1);
-    assert_transitioning_slot_available(state);
     let CanonicalActivationOutcome::NeverActivated(owner) = outcome else {
         panic!("an explicit rejection must never activate the Scene");
     };
     transition
-        .install(ImportPendingScene::NeverActivated {
-            owner,
-            evidence: session.unsubmitted_evidence,
-        })
-        .expect("rejected reentry must not replace the outer transition");
+        .install(ImportPendingScene::NeverActivated { owner, evidence })
+        .expect("the scoped rejection must install its exact pending owner");
     assert!(matches!(
-        ImportStoreActivationTransition::begin(state),
+        ImportStoreActivationTransition::begin(&mut session.storage[0].state),
         Err(ImportStoreHostError::OperationConsumed)
     ));
     assert!(!account.snapshot().poisoned());
+
+    let terminal = session
+        .finish_scene(SceneParseOutcome::Rejected)
+        .expect("the installed rejection must finish without losing its retained owners");
+    assert!(!terminal.is_success());
+    drop(terminal);
+    let released = account.snapshot();
+    assert_eq!(released.live_retained_bytes(), 0);
+    assert_eq!(released.live_retained_allocations(), 0);
+    assert!(!released.poisoned());
 }
 
-thread_local! {
-    static CONTROL_SESSION: RefCell<Option<Rc<ImportStoreSessionOwner>>> = const { RefCell::new(None) };
-    static CONTROL_POLLS: Cell<usize> = const { Cell::new(0) };
+#[derive(Clone, Default)]
+struct AccountCheckingCancellation {
+    account: Arc<OnceLock<PhysicalStorageAccount>>,
+    polls: Arc<AtomicUsize>,
+    cancelled: Arc<AtomicBool>,
 }
 
-struct SlotCheckingCancellation;
-
-impl CancellationSignal for SlotCheckingCancellation {
+impl CancellationSignal for AccountCheckingCancellation {
     fn is_cancelled(&self) -> bool {
-        CONTROL_SESSION.with(|session| {
-            if let Some(session) = session.borrow().as_ref() {
-                assert_transitioning_slot_available(&session.state);
-                CONTROL_POLLS.with(|polls| polls.set(polls.get() + 1));
-            }
-        });
-        false
+        if let Some(account) = self.account.get() {
+            assert_account_accessible(account);
+            self.polls.fetch_add(1, Ordering::AcqRel);
+        }
+        self.cancelled.load(Ordering::Acquire)
     }
 }
 
 #[test]
-fn control_and_central_validation_callbacks_leave_the_state_slot_available() {
-    let (session, account) = start_session(
-        ImportOperationControl::default().with_cancellation(SlotCheckingCancellation),
-    );
-    let session = Rc::new(session);
-    CONTROL_POLLS.with(|polls| polls.set(0));
-    CONTROL_SESSION.with(|slot| *slot.borrow_mut() = Some(Rc::clone(&session)));
+fn control_and_central_validation_callbacks_can_access_the_physical_account() {
+    let cancellation = AccountCheckingCancellation::default();
+    let (mut session, account) =
+        start_session(ImportOperationControl::default().with_cancellation(cancellation.clone()));
+    cancellation
+        .account
+        .set(account)
+        .expect("the callback probe must retain only the independent physical account");
+    let account = cancellation.account.get().unwrap();
 
-    let (transition, pending) = candidate_scene(&session);
-    CONTROL_POLLS.with(|polls| assert!(polls.get() > 0));
+    let (transition, pending) = candidate_scene(&mut session, account);
+    assert!(cancellation.polls.load(Ordering::Acquire) > 0);
     transition
         .install(pending)
         .expect("the validated candidate must install once");
-    let probe_owner = CONTROL_SESSION.with(|slot| slot.borrow_mut().take());
-    drop(probe_owner);
-
     assert_eq!(
         session
             .completed_scene_boundary()
-            .expect("the slot must be readable"),
+            .expect("the completed boundary must remain observable"),
         Some(ImportStoreSceneBoundary::Validated)
     );
     assert!(!account.snapshot().poisoned());
+
+    let terminal = session
+        .finish_scene(SceneParseOutcome::Accepted)
+        .expect("the validated candidate must preserve its successful publication path");
+    assert!(terminal.is_success());
+    drop(terminal);
+    let released = account.snapshot();
+    assert_eq!(released.live_retained_bytes(), 0);
+    assert_eq!(released.live_retained_allocations(), 0);
+    assert!(!released.poisoned());
 }
 
 #[test]
-fn begin_borrow_conflict_does_not_extract_or_poison_the_dormant_owner() {
-    let (session, account) = start_session(ImportOperationControl::default());
-    let slot = session.state.borrow_mut();
-    assert!(matches!(
-        ImportStoreActivationTransition::begin(&session.state),
-        Err(ImportStoreHostError::ReentrantBorrow)
-    ));
-    assert!(matches!(*slot, ImportStoreSessionState::Dormant(_)));
-    assert!(!account.snapshot().poisoned());
-}
+fn cancellation_during_activation_preserves_control_failure_and_releases_storage() {
+    let cancellation = AccountCheckingCancellation::default();
+    let (mut session, account) =
+        start_session(ImportOperationControl::default().with_cancellation(cancellation.clone()));
+    cancellation
+        .account
+        .set(account)
+        .expect("the callback probe must retain only the independent physical account");
+    let account = cancellation.account.get().unwrap();
+    cancellation.cancelled.store(true, Ordering::Release);
 
-#[test]
-fn install_borrow_conflict_retains_the_complete_candidate_graph() {
-    let (session, account) = start_session(ImportOperationControl::default());
-    let (transition, pending) = candidate_scene(&session);
-    let before = account.snapshot();
-    assert!(before.live_retained_bytes() > 0);
-    assert!(before.live_retained_allocations() > 0);
-    let slot = session.state.borrow_mut();
-
+    with_two_node_construction(|construction| {
+        assert!(matches!(
+            session.submit_scene(construction),
+            Err(ImportStoreActivationError::Control(
+                ControlCause::Cancelled {
+                    origin: baozi_operation::CancellationOrigin::Signal,
+                }
+            ))
+        ));
+    });
+    assert!(cancellation.polls.load(Ordering::Acquire) > 0);
+    let terminal = session
+        .finish_scene(SceneParseOutcome::Rejected)
+        .expect("the cancelled transition must retain its exact terminal owner");
     assert!(matches!(
-        transition.install(pending),
-        Err(ImportStoreActivationError::Containment(_))
+        terminal.control_cause(),
+        Some(ControlCause::Cancelled {
+            origin: baozi_operation::CancellationOrigin::Signal,
+        })
     ));
-    assert!(matches!(*slot, ImportStoreSessionState::Transitioning));
-    let contained = account.snapshot();
-    assert!(contained.poisoned());
     assert_eq!(
-        contained.live_retained_bytes(),
-        before.live_retained_bytes()
+        terminal.evidence().cause().class(),
+        ImportStoreTerminalClass::Control
     );
-    assert_eq!(
-        contained.live_retained_allocations(),
-        before.live_retained_allocations()
-    );
-    drop(slot);
-    assert!(matches!(
-        session.prepare_scene(None),
-        Err(ImportStoreActivationError::StoreUnavailable(
-            ImportStoreHostError::OperationContained
-        ))
-    ));
+    assert_eq!(terminal.canonical_block_count(), None);
+    drop(terminal);
+    let released = account.snapshot();
+    assert_eq!(released.live_retained_bytes(), 0);
+    assert_eq!(released.live_retained_allocations(), 0);
+    assert!(!released.poisoned());
 }
 
 #[test]
 fn poisoned_install_retains_the_candidate_and_the_first_containment() {
-    let (session, account) = start_session(ImportOperationControl::default());
-    let (transition, pending) = candidate_scene(&session);
+    let (mut session, account) = start_session(ImportOperationControl::default());
+    let (transition, pending) = candidate_scene(&mut session, &account);
     let first_cause = transition.containment.contain();
     let before = account.snapshot();
 
@@ -325,10 +381,7 @@ fn poisoned_install_retains_the_candidate_and_the_first_containment() {
         result,
         Err(ImportStoreActivationError::Containment(cause)) if cause == first_cause
     ));
-    assert!(matches!(
-        *session.state.borrow(),
-        ImportStoreSessionState::Contained
-    ));
+    assert!(matches!(session.state, ImportStoreSessionState::Contained));
     let contained = account.snapshot();
     assert_eq!(
         contained.first_poison_evidence(),
@@ -343,59 +396,92 @@ fn poisoned_install_retains_the_candidate_and_the_first_containment() {
         contained.live_retained_allocations(),
         before.live_retained_allocations()
     );
+    assert!(matches!(
+        session.prepare_scene(SceneParseOutcome::Rejected),
+        Err(ImportStoreActivationError::StoreUnavailable(
+            ImportStoreHostError::OperationContained
+        ))
+    ));
 }
 
 #[test]
-fn install_rejects_a_foreign_owner_without_overwriting_or_dropping_it() {
-    let (session, account) = start_session(ImportOperationControl::default());
-    let (transition, pending) = candidate_scene(&session);
+fn poisoned_install_contains_a_foreign_pending_owner_without_dropping_either_graph() {
+    let (mut session, account) = start_session(ImportOperationControl::default());
+    let session_cell_bytes = session.storage.capacity_bytes();
+    let (transition, pending) = candidate_scene(&mut session, &account);
+    let (mut foreign, foreign_account) = start_session(ImportOperationControl::default());
+    let foreign_cell_bytes = foreign.storage.capacity_bytes();
+    let (foreign_transition, foreign_pending) = candidate_scene(&mut foreign, &foreign_account);
+    let first_cause = transition.containment.retain(pending);
     let before = account.snapshot();
-    let (foreign, foreign_account) = start_session(ImportOperationControl::default());
-    let foreign_state = foreign.into_terminal_state().0;
     let foreign_before = foreign_account.snapshot();
-    let displaced = {
-        let mut slot = session.state.borrow_mut();
-        std::mem::replace(&mut *slot, foreign_state)
-    };
-    assert!(matches!(displaced, ImportStoreSessionState::Transitioning));
-    drop(displaced);
+    assert!(before.live_retained_bytes() > 0);
+    assert!(before.live_retained_allocations() > 0);
+    assert!(foreign_before.live_retained_bytes() > 0);
+    assert!(foreign_before.live_retained_allocations() > 0);
+    assert!(!foreign_before.poisoned());
 
     assert!(matches!(
-        transition.install(pending),
-        Err(ImportStoreActivationError::Containment(_))
+        transition.install(foreign_pending),
+        Err(ImportStoreActivationError::Containment(cause)) if cause == first_cause
     ));
-    assert!(matches!(
-        *session.state.borrow(),
-        ImportStoreSessionState::Dormant(_)
-    ));
+    assert!(matches!(session.state, ImportStoreSessionState::Contained));
+    assert_eq!(account.snapshot(), before);
+    assert_eq!(foreign_account.snapshot(), foreign_before);
+
+    drop(foreign_transition);
+    assert!(matches!(foreign.state, ImportStoreSessionState::Contained));
     let foreign_after = foreign_account.snapshot();
-    assert_eq!(foreign_after, foreign_before);
-    let contained = account.snapshot();
-    assert!(contained.poisoned());
+    assert!(foreign_after.poisoned());
     assert_eq!(
-        contained.live_retained_bytes(),
-        before.live_retained_bytes()
+        foreign_after.live_retained_bytes(),
+        foreign_before.live_retained_bytes()
     );
     assert_eq!(
-        contained.live_retained_allocations(),
-        before.live_retained_allocations()
+        foreign_after.live_retained_allocations(),
+        foreign_before.live_retained_allocations()
+    );
+    for owner in [session, foreign] {
+        assert!(matches!(
+            owner.prepare_scene(SceneParseOutcome::Rejected),
+            Err(ImportStoreActivationError::StoreUnavailable(
+                ImportStoreHostError::OperationContained
+            ))
+        ));
+    }
+    // Consuming the session destroys its known startup cell. Both uncertain candidate graphs
+    // remain contained; their physical charges must not be refunded with that independent cell.
+    assert_eq!(
+        account.snapshot().live_retained_bytes(),
+        before.live_retained_bytes() - session_cell_bytes
+    );
+    assert_eq!(
+        account.snapshot().live_retained_allocations(),
+        before.live_retained_allocations() - u64::from(session_cell_bytes != 0)
+    );
+    assert_eq!(
+        foreign_account.snapshot().live_retained_bytes(),
+        foreign_before.live_retained_bytes() - foreign_cell_bytes
+    );
+    assert_eq!(
+        foreign_account.snapshot().live_retained_allocations(),
+        foreign_before.live_retained_allocations() - u64::from(foreign_cell_bytes != 0)
     );
 }
 
 #[test]
-fn guard_unwind_with_a_borrowed_slot_latches_containment_without_resetting_state() {
-    let (session, account) = start_session(ImportOperationControl::default());
-    let (owner, transition) = ImportStoreActivationTransition::begin(&session.state)
+fn armed_transition_drop_on_unwind_latches_physical_containment() {
+    let (mut session, account) = start_session(ImportOperationControl::default());
+    let (owner, transition) = ImportStoreActivationTransition::begin(&mut session.storage[0].state)
         .expect("the dormant owner must enter activation");
     let before = account.snapshot();
-    let slot = session.state.borrow_mut();
     let unwound = catch_unwind(AssertUnwindSafe(move || {
         let _transition = transition;
         panic!("leave an armed activation transition during host unwind");
     }));
 
     assert!(unwound.is_err());
-    assert!(matches!(*slot, ImportStoreSessionState::Transitioning));
+    assert!(matches!(session.state, ImportStoreSessionState::Contained));
     let contained = account.snapshot();
     assert!(contained.poisoned());
     assert_eq!(
@@ -412,10 +498,9 @@ fn guard_unwind_with_a_borrowed_slot_latches_containment_without_resetting_state
         contained.live_retained_allocations(),
         before.live_retained_allocations()
     );
-    drop(slot);
     drop(owner);
     assert!(matches!(
-        session.prepare_scene(None),
+        session.prepare_scene(SceneParseOutcome::Rejected),
         Err(ImportStoreActivationError::StoreUnavailable(
             ImportStoreHostError::OperationContained
         ))
@@ -423,7 +508,7 @@ fn guard_unwind_with_a_borrowed_slot_latches_containment_without_resetting_state
 }
 
 #[test]
-fn install_during_unwind_with_a_borrowed_slot_retains_the_candidate() {
+fn poisoned_install_during_unwind_retains_the_candidate() {
     struct InstallOnUnwind<'session> {
         pending: Option<(
             ImportStoreActivationTransition<'session>,
@@ -443,15 +528,15 @@ fn install_during_unwind_with_a_borrowed_slot_retains_the_candidate() {
         }
     }
 
-    let (session, account) = start_session(ImportOperationControl::default());
-    let (transition, pending) = candidate_scene(&session);
+    let (mut session, account) = start_session(ImportOperationControl::default());
+    let (transition, pending) = candidate_scene(&mut session, &account);
+    let _first_cause = transition.containment.contain();
     let before = account.snapshot();
     let contained = Cell::new(false);
     let cleanup = InstallOnUnwind {
         pending: Some((transition, pending)),
         contained: &contained,
     };
-    let slot = session.state.borrow_mut();
     let unwound = catch_unwind(AssertUnwindSafe(move || {
         let _cleanup = cleanup;
         panic!("install the activation result from a host unwind cleanup");
@@ -459,12 +544,23 @@ fn install_during_unwind_with_a_borrowed_slot_retains_the_candidate() {
 
     assert!(unwound.is_err());
     assert!(contained.get());
-    assert!(matches!(*slot, ImportStoreSessionState::Transitioning));
+    assert!(matches!(session.state, ImportStoreSessionState::Contained));
     let after = account.snapshot();
     assert!(after.poisoned());
+    assert_eq!(
+        after.first_poison_evidence(),
+        before.first_poison_evidence()
+    );
+    assert_eq!(after.poison_event_count(), before.poison_event_count());
     assert_eq!(after.live_retained_bytes(), before.live_retained_bytes());
     assert_eq!(
         after.live_retained_allocations(),
         before.live_retained_allocations()
     );
+    assert!(matches!(
+        session.prepare_scene(SceneParseOutcome::Rejected),
+        Err(ImportStoreActivationError::StoreUnavailable(
+            ImportStoreHostError::OperationContained
+        ))
+    ));
 }

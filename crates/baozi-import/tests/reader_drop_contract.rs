@@ -8,13 +8,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use baozi_core::FormatId;
 use baozi_import::{
-    DependencyCacheDisposition, DependencyRequirement, DependencyRoleId, DetectionOutcome,
-    DetectionResult, DetectionScope, FormatDescriptor, FormatEncoding, FormatImporter, ImportCause,
-    ImportConfigOverlay, ImportDimension, ImportFailure, ImportLossKind, ImportOperationControl,
-    ImportReport, ImportRequest, ImportRequestLayer, LossPolicy, ManifestRelationOutcome,
-    OptionCompileLimits, ParseResult, ParseScope, PreparedImportRequest, Probe, ReadConfidence,
-    ReadHint, RegistryBuildLimits, RegistryBuilder, ResourceLimits, ResourceLimitsOverlay,
-    SceneDraft, ScopeAbortCause, TrustedExtensionBoundary, import_asset,
+    CompiledOptions, DependencyCacheDisposition, DependencyRequirement, DependencyRoleId,
+    DetectionOutcome, DetectionResult, DetectionScope, Format, FormatDescriptor, FormatEncoding,
+    ImportCause, ImportConfigOverlay, ImportDimension, ImportFailure, ImportLossKind,
+    ImportOperationControl, ImportPlan, ImportReport, ImportRequest, ImportRequestLayer,
+    LossPolicy, ManifestRelationOutcome, NoFormatOptions, OptionCompileError, OptionCompileLimits,
+    ParseContext, ParseResult, Probe, ReadConfidence, ReadHint, RegistryBuildLimits,
+    RegistryBuildScope, RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, ScopeAbortCause,
+    TrustedExtensionBoundary,
 };
 use baozi_io::{
     AssetIo, AssetLength, AssetOpenError, AssetOpenWorkError, AssetPath, AssetReadError,
@@ -50,7 +51,16 @@ struct TestImporter {
     available_snapshots: Arc<AtomicUsize>,
 }
 
-impl FormatImporter for TestImporter {
+impl Format for TestImporter {
+    type Options = NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledOptions<Self::Options>, OptionCompileError> {
+        NoFormatOptions::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         let builder = FormatDescriptor::builder(
             FormatId::new("dev.baozi.test.reader-drop").unwrap(),
@@ -81,22 +91,25 @@ impl FormatImporter for TestImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        assert_eq!(scope.primary_bytes(), PAYLOAD);
-        if !matches!(self.lane, Lane::Primary) {
-            let role = DependencyRoleId::new("test.sidecar").unwrap();
-            for _ in 0..2 {
-                let outcome = support::root_dependency(scope, &role, DEPENDENCY)?;
-                if let Some(snapshot) = outcome.snapshot() {
-                    assert_eq!(snapshot.bytes(), PAYLOAD);
-                    self.available_snapshots.fetch_add(1, Ordering::AcqRel);
-                } else {
-                    assert!(matches!(self.lane, Lane::Optional));
-                    assert!(outcome.unavailable_evidence().is_some());
+    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        context.with_execution(|exec| -> ParseResult<()> {
+            assert_eq!(exec.primary_bytes(), PAYLOAD);
+            if !matches!(self.lane, Lane::Primary) {
+                let role = DependencyRoleId::new("test.sidecar").unwrap();
+                for _ in 0..2 {
+                    let outcome = support::root_dependency(exec, &role, DEPENDENCY)?;
+                    if let Some(snapshot) = outcome.snapshot() {
+                        assert_eq!(snapshot.bytes(), PAYLOAD);
+                        self.available_snapshots.fetch_add(1, Ordering::AcqRel);
+                    } else {
+                        assert!(matches!(self.lane, Lane::Optional));
+                        assert!(outcome.unavailable_evidence().is_some());
+                    }
                 }
             }
-        }
-        support::submit_minimal_scene(scope)
+            Ok(())
+        })?;
+        support::submit_minimal_scene(context)
     }
 }
 
@@ -271,14 +284,7 @@ impl AssetIo for TestIo {
     }
 }
 
-fn requests(
-    lane: Lane,
-    limits: ResourceLimits,
-) -> (
-    PreparedImportRequest,
-    PreparedImportRequest,
-    Arc<AtomicUsize>,
-) {
+fn requests(lane: Lane, limits: ResourceLimits) -> (ImportPlan, ImportPlan, Arc<AtomicUsize>) {
     let available = Arc::new(AtomicUsize::new(0));
     let mut registry = RegistryBuilder::new();
     registry
@@ -301,10 +307,10 @@ fn requests(
     );
     (
         registry
-            .compile_request(&request, OptionCompileLimits::default())
+            .plan(&request, OptionCompileLimits::default())
             .unwrap(),
         registry
-            .compile_request(&ImportRequest::new(), OptionCompileLimits::default())
+            .plan(&ImportRequest::new(), OptionCompileLimits::default())
             .unwrap(),
         available,
     )
@@ -314,9 +320,9 @@ fn requests(
     clippy::result_large_err,
     reason = "contract assertions retain the public terminal evidence"
 )]
-fn run(request: &PreparedImportRequest, io: &TestIo) -> Result<ImportReport, ImportFailure> {
+fn run(request: &ImportPlan, io: &TestIo) -> Result<ImportReport, ImportFailure> {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        import_asset(request, io, AssetPath::new(PRIMARY).unwrap(), io.control())
+        request.read_asset(io, AssetPath::new(PRIMARY).unwrap(), io.control())
     }));
     match result {
         Ok(result) => result.map_err(|error| error.into_operation_failure().unwrap()),
@@ -356,7 +362,7 @@ fn scope_cause(failure: &ImportFailure) -> &ScopeAbortCause {
     abort.cause()
 }
 
-fn assert_healthy_retry(request: &PreparedImportRequest, lane: Lane) {
+fn assert_healthy_retry(request: &ImportPlan, lane: Lane) {
     let io = TestIo::new(lane, Fault::Eof, DropFault::None);
     let report =
         run(request, &io).expect("the same registry must remain healthy after an IO fault");

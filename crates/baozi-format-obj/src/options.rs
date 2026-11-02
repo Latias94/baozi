@@ -1,13 +1,11 @@
 use crate::FORMAT_ID;
 use baozi_import::authoring::FormatId;
 use baozi_import::{
-    CompiledFormatOptions, FormatOptionCodec, FormatOptionEnvelope, FormatOptionEnvelopeError,
-    FormatOptionKey, FormatOptionLayers, FormatOptionPayload, FormatOptionReader,
-    FormatOptionSchema, FormatOptionSchemaId, FormatOptionSchemaKey, OptionCompileError,
-    OptionCompileScope, OptionRuntimeTypeKey, RegistryBuildScope,
+    CompiledOptions, FormatOptionEnvelope, FormatOptionEnvelopeError, FormatOptionLayers,
+    FormatOptionPayload, FormatOptionReader, FormatOptionSchema, FormatOptionSchemaId,
+    FormatOptionSchemaKey, OptionCompileError, OptionCompileScope, RegistryBuildScope,
 };
 use std::num::NonZeroU32;
-use std::sync::Arc;
 
 const PRESENCE_TEXT_DECODING_MODE: u8 = 1 << 0;
 const KNOWN_PRESENCE_BITS: u8 = PRESENCE_TEXT_DECODING_MODE;
@@ -41,23 +39,14 @@ impl ObjImportOptions {
 
     /// Encodes this complete option value into the version-one canonical envelope.
     pub fn to_envelope(self) -> Result<FormatOptionEnvelope, FormatOptionEnvelopeError> {
-        obj_import_option_key().envelope_from_canonical_payload([
+        option_schema().envelope_from_canonical_payload([
             PRESENCE_TEXT_DECODING_MODE,
             encode_mode(self.text_decoding_mode),
         ])
     }
 }
 
-/// Returns the stable serialized and process-local key for OBJ import options.
-pub fn obj_import_option_key() -> FormatOptionKey<ObjImportOptions> {
-    FormatOptionKey::new(option_schema())
-}
-
-pub(crate) fn option_codec() -> Arc<dyn FormatOptionCodec> {
-    Arc::new(ObjOptionCodec)
-}
-
-fn option_schema() -> FormatOptionSchema {
+pub(crate) fn option_schema() -> FormatOptionSchema {
     FormatOptionSchema::new(
         FormatOptionSchemaKey::new(
             FormatId::new(FORMAT_ID).expect("static OBJ format id must be valid"),
@@ -68,48 +57,26 @@ fn option_schema() -> FormatOptionSchema {
     )
 }
 
-#[derive(Debug)]
-struct ObjOptionCodec;
+pub(crate) fn compile_defaults(
+    scope: &mut RegistryBuildScope<'_>,
+) -> Result<CompiledOptions<ObjImportOptions>, OptionCompileError> {
+    scope.charge_work(1)?;
+    scope.finish(ObjImportOptions::default(), RETAINED_OPTION_BYTES)
+}
 
-impl FormatOptionCodec for ObjOptionCodec {
-    fn schema(&self) -> Option<FormatOptionSchema> {
-        Some(option_schema())
+pub(crate) fn compile_options(
+    scope: &mut OptionCompileScope<'_>,
+    defaults: &ObjImportOptions,
+    layers: FormatOptionLayers<'_>,
+) -> Result<CompiledOptions<ObjImportOptions>, OptionCompileError> {
+    let mut options = *defaults;
+    if let Some(payload) = layers.preset() {
+        apply_layer(scope, payload, &mut options)?;
     }
-
-    fn runtime_type_key(&self) -> OptionRuntimeTypeKey {
-        OptionRuntimeTypeKey::of::<ObjImportOptions>()
+    if let Some(payload) = layers.caller() {
+        apply_layer(scope, payload, &mut options)?;
     }
-
-    fn compile_defaults(
-        &self,
-        scope: &mut RegistryBuildScope<'_>,
-    ) -> Result<CompiledFormatOptions, OptionCompileError> {
-        scope.charge_work(1)?;
-        scope.finish(ObjImportOptions::default(), RETAINED_OPTION_BYTES)
-    }
-
-    fn compile_layers(
-        &self,
-        scope: &mut OptionCompileScope<'_>,
-        defaults: &CompiledFormatOptions,
-        layers: FormatOptionLayers<'_>,
-    ) -> Result<CompiledFormatOptions, OptionCompileError> {
-        let key = obj_import_option_key();
-        let mut options = *defaults.downcast_ref(&key).ok_or_else(|| {
-            OptionCompileError::invalid_payload(
-                "default-type",
-                "registry supplied an incompatible OBJ option default",
-            )
-        })?;
-
-        if let Some(payload) = layers.preset() {
-            apply_layer(scope, payload, &mut options)?;
-        }
-        if let Some(payload) = layers.caller() {
-            apply_layer(scope, payload, &mut options)?;
-        }
-        scope.finish(options, RETAINED_OPTION_BYTES)
-    }
+    scope.finish(options, RETAINED_OPTION_BYTES)
 }
 
 fn apply_layer(

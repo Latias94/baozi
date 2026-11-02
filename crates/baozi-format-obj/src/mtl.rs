@@ -1,12 +1,12 @@
-use crate::material_library_role;
 use crate::parser;
+use crate::{ObjImportOptions, material_library_role};
 use baozi_import::authoring::{
     Color, SamplerState, TextureAddressMode, TextureTransform, Vec2, Vec3,
 };
 use baozi_import::{
     ConformedTextInput, DependencyOrigin, DependencySnapshot, DiagnosticCode, DiagnosticSeverity,
     ImportProgressPhase, ImportStorageClass, ImportWorkClass, ImportWorkScope, MeteredOrderedMap,
-    MeteredString, MeteredVec, ParseFailure, ParseResult, ParseScope, SourceScopeEntityKind,
+    MeteredString, MeteredVec, ParseExecution, ParseFailure, ParseResult, SourceScopeEntityKind,
     TextInputLine,
 };
 use std::cmp::Ordering;
@@ -17,14 +17,14 @@ use parser::usize_amount;
 const INTERRUPTIBLE_WORK_CHUNK: u64 = 64;
 const MAX_NUMERIC_LITERAL_BYTES: usize = 128;
 
-pub(crate) struct ComparisonWork<'meter, 'work, 'session> {
-    work: &'meter mut ImportWorkScope<'work, 'session, 1>,
+pub(crate) struct ComparisonWork<'meter, 'region> {
+    work: &'meter mut ImportWorkScope<'region, 1>,
     admitted: bool,
     remaining: u64,
 }
 
-impl<'meter, 'work, 'session> ComparisonWork<'meter, 'work, 'session> {
-    fn new(work: &'meter mut ImportWorkScope<'work, 'session, 1>) -> Self {
+impl<'meter, 'region> ComparisonWork<'meter, 'region> {
+    fn new(work: &'meter mut ImportWorkScope<'region, 1>) -> Self {
         Self {
             work,
             admitted: false,
@@ -32,11 +32,12 @@ impl<'meter, 'work, 'session> ComparisonWork<'meter, 'work, 'session> {
         }
     }
 
-    fn step(&mut self) -> ParseResult<()> {
+    fn step(&mut self, exec: &mut ParseExecution<'region, '_>) -> ParseResult<()> {
         if self.remaining == 0 {
             if self.admitted {
                 self.work.complete_all()?;
             }
+            exec.poll()?;
             self.work.replenish(INTERRUPTIBLE_WORK_CHUNK)?;
             self.admitted = true;
             self.remaining = INTERRUPTIBLE_WORK_CHUNK;
@@ -45,15 +46,20 @@ impl<'meter, 'work, 'session> ComparisonWork<'meter, 'work, 'session> {
         Ok(())
     }
 
-    pub(crate) fn compare_str(&mut self, left: &str, right: &str) -> ParseResult<Ordering> {
+    pub(crate) fn compare_str(
+        &mut self,
+        exec: &mut ParseExecution<'region, '_>,
+        left: &str,
+        right: &str,
+    ) -> ParseResult<Ordering> {
         for (left, right) in left.as_bytes().iter().zip(right.as_bytes()) {
-            self.step()?;
+            self.step(exec)?;
             match left.cmp(right) {
                 Ordering::Equal => {}
                 ordering => return Ok(ordering),
             }
         }
-        self.step()?;
+        self.step(exec)?;
         Ok(left.len().cmp(&right.len()))
     }
 
@@ -65,11 +71,12 @@ impl<'meter, 'work, 'session> ComparisonWork<'meter, 'work, 'session> {
     }
 }
 
-pub(crate) fn interruptible_sort_by<'scope, 'session, T>(
-    scope: &'scope ParseScope<'session>,
+pub(crate) fn interruptible_sort_by<'region, 'session, T>(
+    exec: &mut ParseExecution<'region, 'session>,
     values: &mut MeteredVec<'_, T>,
-    mut compare: impl for<'meter, 'work> FnMut(
-        &mut ComparisonWork<'meter, 'work, 'session>,
+    mut compare: impl FnMut(
+        &mut ParseExecution<'region, 'session>,
+        &mut ComparisonWork<'_, 'region>,
         &T,
         &T,
     ) -> ParseResult<Ordering>,
@@ -77,23 +84,23 @@ pub(crate) fn interruptible_sort_by<'scope, 'session, T>(
     if values.len() <= 1 {
         return Ok(());
     }
-
-    scope.with_work(ImportWorkClass::WorkUnits, 0, |ledger_work| {
+    let comparison_work = exec.bind_work_group([ImportWorkClass::WorkUnits])?;
+    exec.with_work(&comparison_work, [0], |exec, ledger_work| {
         let mut work = ComparisonWork::new(ledger_work);
-        let result: Result<(), ParseFailure> = values.try_sort_unstable_by(|left, right| {
-            work.step()?;
-            compare(&mut work, left, right)
-        });
-        result?;
+        values.try_sort_unstable_by(|left, right| {
+            work.step(exec)?;
+            compare(exec, &mut work, left, right)
+        })?;
         work.finish()
     })
 }
 
-pub(crate) fn interruptible_dedup_by<'scope, 'session, T>(
-    scope: &'scope ParseScope<'session>,
+pub(crate) fn interruptible_dedup_by<'region, 'session, T>(
+    exec: &mut ParseExecution<'region, 'session>,
     values: &mut MeteredVec<'_, T>,
-    mut equivalent: impl for<'meter, 'work> FnMut(
-        &mut ComparisonWork<'meter, 'work, 'session>,
+    mut equivalent: impl FnMut(
+        &mut ParseExecution<'region, 'session>,
+        &mut ComparisonWork<'_, 'region>,
         &T,
         &T,
     ) -> ParseResult<bool>,
@@ -101,51 +108,50 @@ pub(crate) fn interruptible_dedup_by<'scope, 'session, T>(
     if values.len() <= 1 {
         return Ok(());
     }
-
     let previous_len = values.len();
-    let retained_len = scope.with_work(ImportWorkClass::WorkUnits, 0, |ledger_work| {
+    let comparison_work = exec.bind_work_group([ImportWorkClass::WorkUnits])?;
+    let retained_len = exec.with_work(&comparison_work, [0], |exec, ledger_work| {
         let mut work = ComparisonWork::new(ledger_work);
-        let result: Result<usize, ParseFailure> =
-            values.try_partition_dedup_by(|previous, current| {
-                work.step()?;
-                equivalent(&mut work, previous, current)
-            });
-        let retained_len = result?;
+        let retained_len = values.try_partition_dedup_by(|previous, current| {
+            work.step(exec)?;
+            equivalent(exec, &mut work, previous, current)
+        })?;
         work.finish()?;
-        Ok(retained_len)
+        Ok::<_, ParseFailure>(retained_len)
     })?;
     for_work_chunks(
-        scope,
+        exec,
         previous_len - retained_len,
         "obj-dedup-drop-work",
-        |range| {
+        |_exec, range| {
             values.truncate(values.len() - range.len());
             Ok(())
         },
     )
 }
 
-pub(crate) fn interruptible_binary_search_by<'scope, 'session, T>(
-    scope: &'scope ParseScope<'session>,
+pub(crate) fn interruptible_binary_search_by<'region, 'session, T>(
+    exec: &mut ParseExecution<'region, 'session>,
     values: &[T],
-    mut compare: impl for<'meter, 'work> FnMut(
-        &mut ComparisonWork<'meter, 'work, 'session>,
+    mut compare: impl FnMut(
+        &mut ParseExecution<'region, 'session>,
+        &mut ComparisonWork<'_, 'region>,
         &T,
     ) -> ParseResult<Ordering>,
 ) -> ParseResult<Option<usize>> {
     if values.is_empty() {
         return Ok(None);
     }
-
-    scope.with_work(ImportWorkClass::WorkUnits, 0, |ledger_work| {
+    let comparison_work = exec.bind_work_group([ImportWorkClass::WorkUnits])?;
+    exec.with_work(&comparison_work, [0], |exec, ledger_work| {
         let mut work = ComparisonWork::new(ledger_work);
         let mut left = 0usize;
         let mut right = values.len();
         let mut found = None;
         while left < right {
             let middle = left + (right - left) / 2;
-            work.step()?;
-            match compare(&mut work, &values[middle])? {
+            work.step(exec)?;
+            match compare(exec, &mut work, &values[middle])? {
                 Ordering::Less => left = middle + 1,
                 Ordering::Greater => right = middle,
                 Ordering::Equal => {
@@ -159,22 +165,26 @@ pub(crate) fn interruptible_binary_search_by<'scope, 'session, T>(
     })
 }
 
-pub(crate) fn for_work_chunks(
-    scope: &ParseScope<'_>,
+pub(crate) fn for_work_chunks<'region, 'session>(
+    exec: &mut ParseExecution<'region, 'session>,
     len: usize,
     resource: &'static str,
-    mut visit: impl FnMut(std::ops::Range<usize>) -> ParseResult<()>,
+    mut visit: impl FnMut(
+        &mut ParseExecution<'region, 'session>,
+        std::ops::Range<usize>,
+    ) -> ParseResult<()>,
 ) -> ParseResult<()> {
+    let work_group = exec.bind_work_group([ImportWorkClass::WorkUnits])?;
     let mut start = 0usize;
     while start < len {
         let end = start
             .checked_add(INTERRUPTIBLE_WORK_CHUNK as usize)
             .map_or(len, |end| end.min(len));
-        scope.with_work(
-            ImportWorkClass::WorkUnits,
-            usize_amount(scope, end - start, resource)?,
-            |work| {
-                visit(start..end)?;
+        exec.with_work(
+            &work_group,
+            [usize_amount(exec, end - start, resource)?],
+            |exec, work| {
+                visit(exec, start..end)?;
                 work.complete_all()
             },
         )?;
@@ -184,7 +194,7 @@ pub(crate) fn for_work_chunks(
 }
 
 pub(crate) fn interruptible_str_eq(
-    scope: &ParseScope<'_>,
+    exec: &mut ParseExecution<'_, '_>,
     left: &str,
     right: &str,
     resource: &'static str,
@@ -195,7 +205,7 @@ pub(crate) fn interruptible_str_eq(
     let left = left.as_bytes();
     let right = right.as_bytes();
     let mut equal = true;
-    for_work_chunks(scope, left.len(), resource, |range| {
+    for_work_chunks(exec, left.len(), resource, |_exec, range| {
         if left[range.clone()] != right[range] {
             equal = false;
         }
@@ -204,44 +214,44 @@ pub(crate) fn interruptible_str_eq(
     Ok(equal)
 }
 
-pub(crate) struct MaterialLibrary<'scope> {
-    materials: MeteredVec<'scope, ParsedMaterial<'scope>>,
-    origins: MeteredVec<'scope, DependencyOrigin<'scope>>,
+pub(crate) struct MaterialLibrary<'session> {
+    materials: MeteredVec<'session, ParsedMaterial<'session>>,
+    origins: MeteredVec<'session, DependencyOrigin<'session>>,
     next_order: usize,
 }
 
-pub(crate) struct ParsedMaterial<'scope> {
-    pub name: MeteredString<'scope>,
+pub(crate) struct ParsedMaterial<'session> {
+    pub name: MeteredString<'session>,
     order: usize,
     pub base_color: Color,
     pub ambient: Vec3,
     pub specular: Vec3,
     pub emissive: Color,
-    pub metadata: ParsedMetadata<'scope>,
-    pub diffuse_texture: Option<ParsedTexture<'scope>>,
+    pub metadata: ParsedMetadata<'session>,
+    pub diffuse_texture: Option<ParsedTexture<'session>>,
 }
 
-pub(crate) struct ParsedTexture<'scope> {
-    pub reference: MeteredString<'scope>,
+pub(crate) struct ParsedTexture<'session> {
+    pub reference: MeteredString<'session>,
     pub origin: usize,
     pub transform: TextureTransform,
     pub sampler: SamplerState,
 }
 
-pub(crate) struct ParsedMetadata<'scope> {
-    entries: MeteredOrderedMap<'scope, ParsedString<'scope>, ParsedMetadataValue<'scope>>,
+pub(crate) struct ParsedMetadata<'session> {
+    entries: MeteredOrderedMap<'session, ParsedString<'session>, ParsedMetadataValue<'session>>,
 }
 
-struct ParsedString<'scope>(MeteredString<'scope>);
+struct ParsedString<'session>(MeteredString<'session>);
 
 #[allow(
     clippy::large_enum_variant,
     reason = "text metadata keeps its admitted session buffer and lease together without a second allocation"
 )]
-pub(crate) enum ParsedMetadataValue<'scope> {
+pub(crate) enum ParsedMetadataValue<'session> {
     I64(i64),
     F64(f64),
-    String(MeteredString<'scope>),
+    String(MeteredString<'session>),
 }
 
 impl PartialEq for ParsedString<'_> {
@@ -264,8 +274,12 @@ impl Ord for ParsedString<'_> {
     }
 }
 
-impl<'scope> ParsedMaterial<'scope> {
-    fn new(scope: &'scope ParseScope<'_>, name: MeteredString<'scope>, order: usize) -> Self {
+impl<'session> ParsedMaterial<'session> {
+    fn new(
+        exec: &mut ParseExecution<'_, 'session>,
+        name: MeteredString<'session>,
+        order: usize,
+    ) -> Self {
         Self {
             name,
             order,
@@ -274,7 +288,7 @@ impl<'scope> ParsedMaterial<'scope> {
             specular: Vec3::ZERO,
             emissive: Color::linear_rgba(0.0, 0.0, 0.0, 1.0),
             metadata: ParsedMetadata {
-                entries: scope.metered_ordered_map(
+                entries: exec.metered_ordered_map(
                     ImportStorageClass::FormatNormalization,
                     "obj-mtl-metadata-entries",
                 ),
@@ -292,41 +306,44 @@ impl ParsedMetadata<'_> {
     }
 }
 
-pub(crate) fn load_libraries<'scope>(
-    scope: &'scope ParseScope<'_>,
-    mtllibs: &[MeteredString<'scope>],
-) -> ParseResult<MaterialLibrary<'scope>> {
+pub(crate) fn load_libraries<'session>(
+    exec: &mut ParseExecution<'_, 'session>,
+    options: &ObjImportOptions,
+    mtllibs: &[MeteredString<'session>],
+) -> ParseResult<MaterialLibrary<'session>> {
     let role = material_library_role();
     let mut library = MaterialLibrary {
-        materials: scope.metered_vec(ImportStorageClass::FormatNormalization, "obj-mtl-materials"),
-        origins: scope.metered_vec(
+        materials: exec.metered_vec(ImportStorageClass::FormatNormalization, "obj-mtl-materials"),
+        origins: exec.metered_vec(
             ImportStorageClass::FormatNormalization,
             "obj-mtl-resource-origins",
         ),
         next_order: 0,
     };
-    library.origins.try_reserve(mtllibs.len())?;
-    let root = scope.root_origin();
+    library.origins.try_reserve(exec, mtllibs.len())?;
+    let root = exec.root_origin();
     for mtllib in mtllibs {
-        let outcome = scope.dependency(&root, &role, mtllib.as_str())?;
+        let outcome = exec.dependency(&root, &role, mtllib.as_str())?;
         match outcome.into_result() {
             Ok(snapshot) => {
                 let origin = library.origins.len();
                 let dependency_origin = snapshot.origin();
+                let raw_limit = exec.limits().max_dependency_asset_bytes;
                 parser::with_obj_dependency_text_limit(
-                    scope,
+                    exec,
+                    options,
                     snapshot.diagnostic_source(),
                     "obj-mtl-text",
-                    scope.limits().max_dependency_asset_bytes,
-                    |text, recoveries| {
-                        parse_mtl(scope, &snapshot, text, recoveries, origin, &mut library)
+                    raw_limit,
+                    |exec, text, recoveries| {
+                        parse_mtl(exec, &snapshot, text, recoveries, origin, &mut library)
                     },
                 )?;
                 drop(snapshot);
                 library.origins.try_push_reserved(dependency_origin)?;
             }
             Err(evidence) => push_warning(
-                scope,
+                exec,
                 None,
                 "obj.mtl_unavailable",
                 format_args!(
@@ -338,58 +355,60 @@ pub(crate) fn load_libraries<'scope>(
             )?,
         }
     }
-    finalize_materials(scope, &mut library)?;
+    finalize_materials(exec, &mut library)?;
     Ok(library)
 }
 
-impl<'scope> MaterialLibrary<'scope> {
+impl<'session> MaterialLibrary<'session> {
     pub(crate) fn find<'library>(
         &'library self,
-        scope: &ParseScope<'_>,
+        exec: &mut ParseExecution<'_, '_>,
         name: &str,
-    ) -> ParseResult<Option<&'library ParsedMaterial<'scope>>> {
-        let index =
-            interruptible_binary_search_by(scope, self.materials.as_slice(), |work, material| {
-                work.compare_str(material.name.as_str(), name)
-            })?;
+    ) -> ParseResult<Option<&'library ParsedMaterial<'session>>> {
+        let index = interruptible_binary_search_by(
+            exec,
+            self.materials.as_slice(),
+            |exec, work, material| work.compare_str(exec, material.name.as_str(), name),
+        )?;
         Ok(index.map(|index| &self.materials.as_slice()[index]))
     }
 
-    pub(crate) fn origin(&self, index: usize) -> Option<&DependencyOrigin<'scope>> {
+    pub(crate) fn origin(&self, index: usize) -> Option<&DependencyOrigin<'session>> {
         self.origins.as_slice().get(index)
     }
 }
 
-fn parse_mtl<'scope>(
-    scope: &'scope ParseScope<'_>,
+fn parse_mtl<'session>(
+    exec: &mut ParseExecution<'_, 'session>,
     snapshot: &DependencySnapshot<'_>,
     text: &ConformedTextInput<'_>,
-    recoveries: &mut baozi_import::TextInputRecoveryTracker<'_, '_>,
+    recoveries: &mut baozi_import::TextInputRecoveryTracker<'_, 'session>,
     origin: usize,
-    library: &mut MaterialLibrary<'scope>,
+    library: &mut MaterialLibrary<'session>,
 ) -> ParseResult<()> {
     let mut current = None;
     let mut scan_scratch = parser::TokenScanScratch::new();
 
+    let record_work = exec.bind_work_group([ImportWorkClass::Records])?;
     for decoded_line in text.lines() {
         let line_number = u32::try_from(decoded_line.number())
-            .map_err(|_| scope.resource_limit_exceeded("line-count", u64::from(u32::MAX)))?;
+            .map_err(|_| exec.resource_limit_exceeded("line-count", u64::from(u32::MAX)))?;
         // A decoded line becomes a consumed record as soon as this parser admits it for
         // processing. Child token, string, and resolution work starts only after that admission.
-        let raw_line = scope.with_work(ImportWorkClass::Records, 1, |work| {
+        let raw_line = exec.with_work(&record_work, [1], |_exec, work| {
             let raw_line = decoded_line.text();
             work.complete_all()?;
-            Ok(raw_line)
+            Ok::<_, ParseFailure>(raw_line)
         })?;
-        let tokens = tokenize_mtl(scope, &mut scan_scratch, &decoded_line)?;
+        let tokens = tokenize_mtl(exec, &mut scan_scratch, &decoded_line)?;
         let keyword = tokens.first().map(|token| token.text);
         let allowed_value = match keyword {
             Some("newmtl") => trailing_mtl_token_range(&tokens),
-            Some("map_Kd") => recovery_map_path_range(scope, &tokens[1..])?,
+            Some("map_Kd") => recovery_map_path_range(exec, &tokens[1..])?,
             _ => None,
         };
         parser::authorize_line_recoveries(
-            scope,
+            exec,
             recoveries,
             &decoded_line,
             allowed_value,
@@ -401,19 +420,19 @@ fn parse_mtl<'scope>(
 
         match keyword {
             "newmtl" => {
-                flush_material(scope, library, current.take())?;
+                flush_material(exec, library, current.take())?;
                 let name = trailing_text_after_keyword(raw_line, &tokens).unwrap_or_default();
                 if name.is_empty() {
                     push_dependency_warning(
-                        scope,
+                        exec,
                         snapshot,
                         Some((line_number, 1)),
                         "obj.mtl_empty_name",
                         format_args!("MTL newmtl has no material name"),
                     )?;
-                } else if name.len() > parser::max_text_value_bytes(scope) {
+                } else if name.len() > parser::max_text_value_bytes(exec) {
                     push_dependency_warning(
-                        scope,
+                        exec,
                         snapshot,
                         Some((line_number, 1)),
                         "obj.mtl_name_limit",
@@ -424,14 +443,14 @@ fn parse_mtl<'scope>(
                     library.next_order = library
                         .next_order
                         .checked_add(1)
-                        .ok_or_else(|| scope.allocation_failure("obj-mtl-material-order"))?;
-                    let name = owned_string(scope, name, "obj-mtl-material-name")?;
-                    current = Some(ParsedMaterial::new(scope, name, order));
+                        .ok_or_else(|| exec.allocation_failure("obj-mtl-material-order"))?;
+                    let name = owned_string(exec, name, "obj-mtl-material-name")?;
+                    current = Some(ParsedMaterial::new(exec, name, order));
                 }
             }
             "Kd" => {
                 if let Some(material) = current.as_mut()
-                    && let Some(color) = parse_color(scope, snapshot, &tokens, line_number, "Kd")?
+                    && let Some(color) = parse_color(exec, snapshot, &tokens, line_number, "Kd")?
                 {
                     material.base_color.r = color.r;
                     material.base_color.g = color.g;
@@ -440,7 +459,7 @@ fn parse_mtl<'scope>(
             }
             "d" => {
                 if let Some(material) = current.as_mut()
-                    && let Some(alpha) = parse_scalar(scope, snapshot, &tokens, line_number, "d")?
+                    && let Some(alpha) = parse_scalar(exec, snapshot, &tokens, line_number, "d")?
                 {
                     material.base_color.a = alpha;
                 }
@@ -448,14 +467,14 @@ fn parse_mtl<'scope>(
             "Tr" => {
                 if let Some(material) = current.as_mut()
                     && let Some(transparency) =
-                        parse_scalar(scope, snapshot, &tokens, line_number, "Tr")?
+                        parse_scalar(exec, snapshot, &tokens, line_number, "Tr")?
                 {
                     material.base_color.a = 1.0 - transparency;
                 }
             }
             "Ke" => {
                 if let Some(material) = current.as_mut()
-                    && let Some(color) = parse_color(scope, snapshot, &tokens, line_number, "Ke")?
+                    && let Some(color) = parse_color(exec, snapshot, &tokens, line_number, "Ke")?
                 {
                     material.emissive = color;
                 }
@@ -463,11 +482,11 @@ fn parse_mtl<'scope>(
             "Ns" | "Ni" => {
                 if let Some(material) = current.as_mut()
                     && let Some(value) =
-                        parse_scalar(scope, snapshot, &tokens, line_number, keyword)?
+                        parse_scalar(exec, snapshot, &tokens, line_number, keyword)?
                 {
                     let metadata_key = if keyword == "Ns" { "obj:ns" } else { "obj:ni" };
                     insert_metadata(
-                        scope,
+                        exec,
                         material,
                         metadata_key,
                         ParsedMetadataValue::F64(value as f64),
@@ -476,27 +495,22 @@ fn parse_mtl<'scope>(
             }
             "illum" => {
                 if let Some(material) = current.as_mut()
-                    && let Some(value) = parse_i64(scope, snapshot, &tokens, line_number, "illum")?
+                    && let Some(value) = parse_i64(exec, snapshot, &tokens, line_number, "illum")?
                 {
-                    insert_metadata(
-                        scope,
-                        material,
-                        "obj:illum",
-                        ParsedMetadataValue::I64(value),
-                    )?;
+                    insert_metadata(exec, material, "obj:illum", ParsedMetadataValue::I64(value))?;
                 }
             }
             "Ka" | "Ks" => {
                 if let Some(material) = current.as_mut() {
-                    let color = parse_legacy_color(scope, &tokens, line_number)?;
+                    let color = parse_legacy_color(exec, &tokens, line_number)?;
                     let metadata_key = if keyword == "Ka" { "obj:ka" } else { "obj:ks" };
                     let value = owned_string(
-                        scope,
+                        exec,
                         trailing_text_after_keyword(raw_line, &tokens).unwrap_or_default(),
                         "obj-mtl-color-source",
                     )?;
                     insert_metadata(
-                        scope,
+                        exec,
                         material,
                         metadata_key,
                         ParsedMetadataValue::String(value),
@@ -504,7 +518,7 @@ fn parse_mtl<'scope>(
                     let mut factor = Vec3::new(color.r, color.g, color.b);
                     if color.r < 0.0 || color.g < 0.0 || color.b < 0.0 {
                         record_material_loss(
-                            scope,
+                            exec,
                             snapshot,
                             line_number,
                             tokens[0],
@@ -526,25 +540,20 @@ fn parse_mtl<'scope>(
             }
             "map_Kd" => {
                 // Validate the complete option prefix before consulting omission authority.
-                let arguments = parse_map_arguments(scope, &tokens[1..], line_number)?;
+                let arguments = parse_map_arguments(exec, &tokens[1..], line_number)?;
                 if let Some(material) = current.as_mut() {
-                    let (transform, sampler) = map_texture_options(
-                        scope,
-                        snapshot,
-                        &tokens[1..],
-                        &arguments,
-                        line_number,
-                    )?;
+                    let (transform, sampler) =
+                        map_texture_options(exec, snapshot, &tokens[1..], &arguments, line_number)?;
                     let path = &tokens[1 + arguments.path_index..];
-                    match texture_path_from_tokens(scope, raw_line, path)? {
+                    match texture_path_from_tokens(exec, raw_line, path)? {
                         TexturePathOutcome::Value(texture_path) => {
                             let source = owned_string(
-                                scope,
+                                exec,
                                 trailing_text_after_keyword(raw_line, &tokens).unwrap_or_default(),
                                 "obj-mtl-map-source",
                             )?;
                             insert_metadata(
-                                scope,
+                                exec,
                                 material,
                                 "obj:map_kd",
                                 ParsedMetadataValue::String(source),
@@ -557,7 +566,7 @@ fn parse_mtl<'scope>(
                             });
                         }
                         TexturePathOutcome::TooLong => push_dependency_warning(
-                            scope,
+                            exec,
                             snapshot,
                             Some((line_number, 1)),
                             "obj.mtl_texture_path_limit",
@@ -567,7 +576,7 @@ fn parse_mtl<'scope>(
                 }
             }
             keyword => push_dependency_warning(
-                scope,
+                exec,
                 snapshot,
                 Some((line_number, 1)),
                 "obj.mtl_unknown_statement",
@@ -576,59 +585,64 @@ fn parse_mtl<'scope>(
         }
     }
 
-    flush_material(scope, library, current)
+    flush_material(exec, library, current)
 }
 
-fn flush_material<'scope>(
-    _scope: &'scope ParseScope<'_>,
-    library: &mut MaterialLibrary<'scope>,
-    material: Option<ParsedMaterial<'scope>>,
+fn flush_material<'session>(
+    exec: &mut ParseExecution<'_, 'session>,
+    library: &mut MaterialLibrary<'session>,
+    material: Option<ParsedMaterial<'session>>,
 ) -> ParseResult<()> {
     let Some(material) = material else {
         return Ok(());
     };
-    library.materials.try_push(material)
+    library.materials.try_push(exec, material)
 }
 
 fn finalize_materials(
-    scope: &ParseScope<'_>,
+    exec: &mut ParseExecution<'_, '_>,
     library: &mut MaterialLibrary<'_>,
 ) -> ParseResult<()> {
     if library.materials.len() <= 1 {
         return Ok(());
     }
 
-    interruptible_sort_by(scope, &mut library.materials, |work, left, right| {
+    interruptible_sort_by(exec, &mut library.materials, |exec, work, left, right| {
         Ok(work
-            .compare_str(left.name.as_str(), right.name.as_str())?
+            .compare_str(exec, left.name.as_str(), right.name.as_str())?
             .then_with(|| right.order.cmp(&left.order)))
     })?;
-    interruptible_dedup_by(scope, &mut library.materials, |work, previous, current| {
-        let duplicate =
-            work.compare_str(previous.name.as_str(), current.name.as_str())? == Ordering::Equal;
-        if duplicate {
-            push_warning(
-                scope,
-                None,
-                "obj.mtl_duplicate_material",
-                format_args!(
-                    "MTL material '{}' was redefined; using the last definition",
-                    previous.name.as_str()
-                ),
-            )?;
-        }
-        Ok(duplicate)
-    })
+    interruptible_dedup_by(
+        exec,
+        &mut library.materials,
+        |exec, work, previous, current| {
+            let duplicate =
+                work.compare_str(exec, previous.name.as_str(), current.name.as_str())?
+                    == Ordering::Equal;
+            if duplicate {
+                push_warning(
+                    exec,
+                    None,
+                    "obj.mtl_duplicate_material",
+                    format_args!(
+                        "MTL material '{}' was redefined; using the last definition",
+                        previous.name.as_str()
+                    ),
+                )?;
+            }
+            Ok(duplicate)
+        },
+    )
 }
 
-fn insert_metadata<'scope>(
-    scope: &'scope ParseScope<'_>,
-    material: &mut ParsedMaterial<'scope>,
+fn insert_metadata<'session>(
+    exec: &mut ParseExecution<'_, 'session>,
+    material: &mut ParsedMaterial<'session>,
     key: &'static str,
-    value: ParsedMetadataValue<'scope>,
+    value: ParsedMetadataValue<'session>,
 ) -> ParseResult<()> {
-    let key = ParsedString(owned_string(scope, key, "obj-mtl-metadata-key")?);
-    drop(material.metadata.entries.try_insert(key, value)?);
+    let key = ParsedString(owned_string(exec, key, "obj-mtl-metadata-key")?);
+    drop(material.metadata.entries.try_insert(exec, key, value)?);
     Ok(())
 }
 
@@ -640,8 +654,8 @@ struct MtlToken<'line> {
     column: u32,
 }
 
-struct MtlTokenBuffer<'scope, 'line> {
-    values: MeteredVec<'scope, MtlToken<'line>>,
+struct MtlTokenBuffer<'session, 'line> {
+    values: MeteredVec<'session, MtlToken<'line>>,
     comment_start: Option<usize>,
 }
 
@@ -653,42 +667,42 @@ impl<'line> std::ops::Deref for MtlTokenBuffer<'_, 'line> {
     }
 }
 
-fn tokenize_mtl<'scope, 'line>(
-    scope: &'scope ParseScope<'_>,
+fn tokenize_mtl<'session, 'line>(
+    exec: &mut ParseExecution<'_, 'session>,
     scan_scratch: &mut parser::TokenScanScratch,
     decoded_line: &'line TextInputLine<'_, '_>,
-) -> ParseResult<MtlTokenBuffer<'scope, 'line>> {
+) -> ParseResult<MtlTokenBuffer<'session, 'line>> {
     let line = decoded_line.text();
+    let token_work =
+        exec.bind_work_group([ImportWorkClass::Tokens, ImportWorkClass::TokenBytes])?;
     let mut tokens = MtlTokenBuffer {
-        values: scope.metered_vec(ImportStorageClass::FormatNormalization, "obj-mtl-tokens"),
+        values: exec.metered_vec(ImportStorageClass::FormatNormalization, "obj-mtl-tokens"),
         comment_start: None,
     };
     tokens.comment_start = parser::scan_token_ranges(
-        scope,
+        exec,
         scan_scratch,
         line,
         "obj-mtl-token-scan-work",
-        |_, _| Ok(()),
-        |start, end| {
-            scope.with_work_group(
-                [
-                    (ImportWorkClass::Tokens, 1),
-                    (
-                        ImportWorkClass::TokenBytes,
-                        usize_amount(scope, end - start, "obj-mtl-token-bytes")?,
-                    ),
-                ],
-                |work| {
+        |_, _, _| Ok(()),
+        |exec, start, end| {
+            exec.with_work(
+                &token_work,
+                [1, usize_amount(exec, end - start, "obj-mtl-token-bytes")?],
+                |exec, work| {
                     let column = start
                         .checked_add(1)
                         .and_then(|column| u32::try_from(column).ok())
-                        .ok_or_else(|| scope.resource_limit_exceeded("line-columns", u64::MAX))?;
-                    tokens.values.try_push(MtlToken {
-                        text: &line[start..end],
-                        start,
-                        end,
-                        column,
-                    })?;
+                        .ok_or_else(|| exec.resource_limit_exceeded("line-columns", u64::MAX))?;
+                    tokens.values.try_push(
+                        exec,
+                        MtlToken {
+                            text: &line[start..end],
+                            start,
+                            end,
+                            column,
+                        },
+                    )?;
                     work.complete_all()
                 },
             )
@@ -698,7 +712,7 @@ fn tokenize_mtl<'scope, 'line>(
 }
 
 fn parse_color(
-    scope: &ParseScope<'_>,
+    exec: &mut ParseExecution<'_, '_>,
     snapshot: &DependencySnapshot<'_>,
     tokens: &[MtlToken<'_>],
     line_number: u32,
@@ -706,7 +720,7 @@ fn parse_color(
 ) -> ParseResult<Option<Color>> {
     if tokens.len() < 4 {
         push_dependency_warning(
-            scope,
+            exec,
             snapshot,
             Some((line_number, 1)),
             "obj.mtl_bad_color",
@@ -714,15 +728,14 @@ fn parse_color(
         )?;
         return Ok(None);
     }
-    let Some(red) = parse_f32_warning(scope, snapshot, tokens[1].text, line_number, keyword)?
+    let Some(red) = parse_f32_warning(exec, snapshot, tokens[1].text, line_number, keyword)? else {
+        return Ok(None);
+    };
+    let Some(green) = parse_f32_warning(exec, snapshot, tokens[2].text, line_number, keyword)?
     else {
         return Ok(None);
     };
-    let Some(green) = parse_f32_warning(scope, snapshot, tokens[2].text, line_number, keyword)?
-    else {
-        return Ok(None);
-    };
-    let Some(blue) = parse_f32_warning(scope, snapshot, tokens[3].text, line_number, keyword)?
+    let Some(blue) = parse_f32_warning(exec, snapshot, tokens[3].text, line_number, keyword)?
     else {
         return Ok(None);
     };
@@ -730,7 +743,7 @@ fn parse_color(
 }
 
 fn parse_scalar(
-    scope: &ParseScope<'_>,
+    exec: &mut ParseExecution<'_, '_>,
     snapshot: &DependencySnapshot<'_>,
     tokens: &[MtlToken<'_>],
     line_number: u32,
@@ -738,7 +751,7 @@ fn parse_scalar(
 ) -> ParseResult<Option<f32>> {
     if tokens.len() < 2 {
         push_dependency_warning(
-            scope,
+            exec,
             snapshot,
             Some((line_number, 1)),
             "obj.mtl_bad_scalar",
@@ -746,11 +759,11 @@ fn parse_scalar(
         )?;
         return Ok(None);
     }
-    parse_f32_warning(scope, snapshot, tokens[1].text, line_number, keyword)
+    parse_f32_warning(exec, snapshot, tokens[1].text, line_number, keyword)
 }
 
 fn parse_i64(
-    scope: &ParseScope<'_>,
+    exec: &mut ParseExecution<'_, '_>,
     snapshot: &DependencySnapshot<'_>,
     tokens: &[MtlToken<'_>],
     line_number: u32,
@@ -758,7 +771,7 @@ fn parse_i64(
 ) -> ParseResult<Option<i64>> {
     if tokens.len() < 2 {
         push_dependency_warning(
-            scope,
+            exec,
             snapshot,
             Some((line_number, 1)),
             "obj.mtl_bad_integer",
@@ -768,7 +781,7 @@ fn parse_i64(
     }
     if tokens[1].text.len() > MAX_NUMERIC_LITERAL_BYTES {
         push_dependency_warning(
-            scope,
+            exec,
             snapshot,
             Some((line_number, 1)),
             "obj.mtl_bad_integer",
@@ -780,7 +793,7 @@ fn parse_i64(
         Ok(value) => Ok(Some(value)),
         Err(_) => {
             push_dependency_warning(
-                scope,
+                exec,
                 snapshot,
                 Some((line_number, 1)),
                 "obj.mtl_bad_integer",
@@ -792,32 +805,32 @@ fn parse_i64(
 }
 
 fn parse_legacy_color(
-    scope: &ParseScope<'_>,
+    exec: &mut ParseExecution<'_, '_>,
     tokens: &[MtlToken<'_>],
     line_number: u32,
 ) -> ParseResult<Color> {
     if !(2..=4).contains(&tokens.len()) {
         return Err(map_syntax_failure(
-            scope,
+            exec,
             tokens[0],
             line_number,
             "legacy-color-component-count",
         ));
     }
-    let red = parse_required_map_number(scope, tokens[1], line_number)?;
+    let red = parse_required_map_number(exec, tokens[1], line_number)?;
     let green = match tokens.get(2) {
-        Some(token) => parse_required_map_number(scope, *token, line_number)?,
+        Some(token) => parse_required_map_number(exec, *token, line_number)?,
         None => red,
     };
     let blue = match tokens.get(3) {
-        Some(token) => parse_required_map_number(scope, *token, line_number)?,
+        Some(token) => parse_required_map_number(exec, *token, line_number)?,
         None => red,
     };
     Ok(Color::linear_rgba(red, green, blue, 1.0))
 }
 
 fn parse_f32_warning(
-    scope: &ParseScope<'_>,
+    exec: &mut ParseExecution<'_, '_>,
     snapshot: &DependencySnapshot<'_>,
     text: &str,
     line_number: u32,
@@ -825,7 +838,7 @@ fn parse_f32_warning(
 ) -> ParseResult<Option<f32>> {
     if text.len() > MAX_NUMERIC_LITERAL_BYTES {
         push_dependency_warning(
-            scope,
+            exec,
             snapshot,
             Some((line_number, 1)),
             "obj.mtl_bad_float",
@@ -835,7 +848,7 @@ fn parse_f32_warning(
     }
     let Ok(value) = text.parse::<f32>() else {
         push_dependency_warning(
-            scope,
+            exec,
             snapshot,
             Some((line_number, 1)),
             "obj.mtl_bad_float",
@@ -845,7 +858,7 @@ fn parse_f32_warning(
     };
     if !value.is_finite() {
         push_dependency_warning(
-            scope,
+            exec,
             snapshot,
             Some((line_number, 1)),
             "obj.mtl_bad_float",
@@ -866,7 +879,7 @@ struct MapArguments {
 }
 
 fn parse_map_arguments(
-    scope: &ParseScope<'_>,
+    exec: &mut ParseExecution<'_, '_>,
     tokens: &[MtlToken<'_>],
     line_number: u32,
 ) -> ParseResult<MapArguments> {
@@ -880,12 +893,12 @@ fn parse_map_arguments(
     };
     let mut index = 0;
     while let Some(option) = tokens.get(index).copied() {
-        scope.poll()?;
+        exec.poll()?;
         // A stray negative number is an extra operand, not an unknown map option.
         // Numeric filenames can be disambiguated with a prefix such as ./.
         if option.text.parse::<f32>().is_ok() {
             return Err(map_syntax_failure(
-                scope,
+                exec,
                 option,
                 line_number,
                 "unexpected-numeric-operand",
@@ -905,7 +918,7 @@ fn parse_map_arguments(
                 };
                 if following.len() < minimum {
                     return Err(map_syntax_failure(
-                        scope,
+                        exec,
                         option,
                         line_number,
                         "missing-option-operand",
@@ -918,7 +931,7 @@ fn parse_map_arguments(
                 };
                 let count = numeric_option_arity(following, maximum).max(minimum);
                 for (value, token) in values.iter_mut().zip(following).take(count) {
-                    *value = parse_required_map_number(scope, *token, line_number)?;
+                    *value = parse_required_map_number(exec, *token, line_number)?;
                 }
                 match option.text {
                     "-o" => {
@@ -931,7 +944,7 @@ fn parse_map_arguments(
                     }
                     "-boost" if values[0] < 0.0 => {
                         return Err(map_syntax_failure(
-                            scope,
+                            exec,
                             option,
                             line_number,
                             "negative-boost",
@@ -943,7 +956,7 @@ fn parse_map_arguments(
             }
             "-clamp" | "-type" | "-texres" => {
                 let operand = following.first().copied().ok_or_else(|| {
-                    map_syntax_failure(scope, option, line_number, "missing-option-operand")
+                    map_syntax_failure(exec, option, line_number, "missing-option-operand")
                 })?;
                 let valid = match option.text {
                     "-clamp" => {
@@ -961,14 +974,14 @@ fn parse_map_arguments(
                             | "cube_right"
                     ),
                     "-texres" => {
-                        enforce_map_numeric_limit(scope, operand.text)?;
+                        enforce_map_numeric_limit(exec, operand.text)?;
                         operand.text.parse::<u32>().is_ok_and(|value| value > 0)
                     }
                     _ => false,
                 };
                 if !valid {
                     return Err(map_syntax_failure(
-                        scope,
+                        exec,
                         operand,
                         line_number,
                         "invalid-option-operand",
@@ -984,7 +997,7 @@ fn parse_map_arguments(
                     .is_none_or(|token| token.text.starts_with('-'))
                 {
                     return Err(map_syntax_failure(
-                        scope,
+                        exec,
                         option,
                         line_number,
                         "missing-option-operand",
@@ -995,7 +1008,7 @@ fn parse_map_arguments(
         };
         index += 1 + consumed;
     }
-    Err(scope.format_failure(crate::ObjFailure::statement(
+    Err(exec.format_failure(crate::ObjFailure::statement(
         "map_Kd",
         "missing-texture-path",
         line_number,
@@ -1003,27 +1016,27 @@ fn parse_map_arguments(
     )))
 }
 
-fn enforce_map_numeric_limit(scope: &ParseScope<'_>, text: &str) -> ParseResult<()> {
-    scope.enforce_resource_limit(
+fn enforce_map_numeric_limit(exec: &mut ParseExecution<'_, '_>, text: &str) -> ParseResult<()> {
+    exec.enforce_resource_limit(
         "obj-mtl-number-bytes",
-        usize_amount(scope, text.len(), "obj-mtl-number-bytes")?,
+        usize_amount(exec, text.len(), "obj-mtl-number-bytes")?,
         MAX_NUMERIC_LITERAL_BYTES as u64,
     )
 }
 
 fn parse_required_map_number(
-    scope: &ParseScope<'_>,
+    exec: &mut ParseExecution<'_, '_>,
     token: MtlToken<'_>,
     line_number: u32,
 ) -> ParseResult<f32> {
-    enforce_map_numeric_limit(scope, token.text)?;
+    enforce_map_numeric_limit(exec, token.text)?;
     let value = token
         .text
         .parse::<f32>()
-        .map_err(|_| map_syntax_failure(scope, token, line_number, "invalid-numeric-operand"))?;
+        .map_err(|_| map_syntax_failure(exec, token, line_number, "invalid-numeric-operand"))?;
     if !value.is_finite() {
         return Err(map_syntax_failure(
-            scope,
+            exec,
             token,
             line_number,
             "non-finite-numeric-operand",
@@ -1033,12 +1046,12 @@ fn parse_required_map_number(
 }
 
 fn map_syntax_failure(
-    scope: &ParseScope<'_>,
+    exec: &mut ParseExecution<'_, '_>,
     token: MtlToken<'_>,
     line_number: u32,
     reason: &'static str,
 ) -> ParseFailure {
-    scope.format_failure(crate::ObjFailure::statement(
+    exec.format_failure(crate::ObjFailure::statement(
         "mtl-material",
         reason,
         line_number,
@@ -1047,7 +1060,7 @@ fn map_syntax_failure(
 }
 
 fn map_texture_options(
-    scope: &ParseScope<'_>,
+    exec: &mut ParseExecution<'_, '_>,
     snapshot: &DependencySnapshot<'_>,
     tokens: &[MtlToken<'_>],
     arguments: &MapArguments,
@@ -1055,7 +1068,7 @@ fn map_texture_options(
 ) -> ParseResult<(TextureTransform, SamplerState)> {
     let mut index = 0;
     while index < arguments.path_index {
-        scope.poll()?;
+        exec.poll()?;
         let option = tokens[index];
         let code = match option.text {
             "-t" => Some("obj.mtl_texture_turbulence_omitted"),
@@ -1068,7 +1081,7 @@ fn map_texture_options(
         };
         if let Some(code) = code {
             record_material_loss(
-                scope,
+                exec,
                 snapshot,
                 line_number,
                 option,
@@ -1077,7 +1090,7 @@ fn map_texture_options(
             )?;
         } else if !is_known_map_option(option.text) {
             push_dependency_warning(
-                scope,
+                exec,
                 snapshot,
                 Some((line_number, option.column)),
                 "obj.mtl_unsupported_texture_option",
@@ -1101,7 +1114,7 @@ fn map_texture_options(
     ] {
         if nonneutral && let Some(index) = option_index {
             record_material_loss(
-                scope,
+                exec,
                 snapshot,
                 line_number,
                 tokens[index],
@@ -1116,7 +1129,7 @@ fn map_texture_options(
     let scale = Vec2::new(arguments.scale[0], arguments.scale[1]);
     let offset = Vec2::new(arguments.offset[0], arguments.offset[1]);
     let transform = TextureTransform::try_new(offset, 0.0, scale).map_err(|_| {
-        scope.format_failure(crate::ObjFailure::internal("invalid-texture-transform"))
+        exec.format_failure(crate::ObjFailure::internal("invalid-texture-transform"))
     })?;
     let default = SamplerState::CANONICAL_DEFAULT;
     let address = if arguments.clamp {
@@ -1137,7 +1150,7 @@ fn map_texture_options(
 }
 
 fn record_material_loss(
-    scope: &ParseScope<'_>,
+    exec: &mut ParseExecution<'_, '_>,
     snapshot: &DependencySnapshot<'_>,
     line_number: u32,
     token: MtlToken<'_>,
@@ -1146,7 +1159,7 @@ fn record_material_loss(
 ) -> ParseResult<()> {
     let source = snapshot.diagnostic_source();
     let path = owned_format(
-        scope,
+        exec,
         format_args!(
             "/dependencies/{}/records/{line_number}/{}",
             source.path().as_str(),
@@ -1154,7 +1167,7 @@ fn record_material_loss(
         ),
     )?;
     let code = DiagnosticCode::new(code).expect("static OBJ diagnostic code must be valid");
-    scope.record_source_semantic_loss(
+    exec.record_source_semantic_loss(
         code,
         SourceScopeEntityKind::Material,
         path.as_str(),
@@ -1172,73 +1185,78 @@ fn record_material_loss(
     )
 }
 
-fn texture_path_from_tokens<'scope>(
-    scope: &'scope ParseScope<'_>,
+fn texture_path_from_tokens<'session>(
+    exec: &mut ParseExecution<'_, 'session>,
     raw_line: &str,
     tokens: &[MtlToken<'_>],
-) -> ParseResult<TexturePathOutcome<'scope>> {
+) -> ParseResult<TexturePathOutcome<'session>> {
     let first = tokens.first().ok_or_else(|| {
-        scope.format_failure(crate::ObjFailure::internal("missing-map-path-token"))
+        exec.format_failure(crate::ObjFailure::internal("missing-map-path-token"))
     })?;
     let last = tokens.last().ok_or_else(|| {
-        scope.format_failure(crate::ObjFailure::internal("missing-map-path-token"))
+        exec.format_failure(crate::ObjFailure::internal("missing-map-path-token"))
     })?;
     let path = &raw_line[first.start..last.end];
-    if path.len() > parser::max_text_value_bytes(scope) {
+    if path.len() > parser::max_text_value_bytes(exec) {
         return Ok(TexturePathOutcome::TooLong);
     }
-    owned_string(scope, path, "obj-mtl-texture-path").map(TexturePathOutcome::Value)
+    owned_string(exec, path, "obj-mtl-texture-path").map(TexturePathOutcome::Value)
 }
 
 #[allow(
     clippy::large_enum_variant,
     reason = "the metered string retains its reservation inline; boxing would add unmetered allocation"
 )]
-enum TexturePathOutcome<'scope> {
+enum TexturePathOutcome<'session> {
     TooLong,
-    Value(MeteredString<'scope>),
+    Value(MeteredString<'session>),
 }
 
-fn owned_string<'scope>(
-    scope: &'scope ParseScope<'_>,
+fn owned_string<'session>(
+    exec: &mut ParseExecution<'_, 'session>,
     value: &str,
     resource: &'static str,
-) -> ParseResult<MeteredString<'scope>> {
-    parser::enforce_text_value_limit(scope, value.len(), resource)?;
-    scope.with_work(
-        ImportWorkClass::StringBytes,
-        usize_amount(scope, value.len(), resource)?,
-        |work| {
-            let mut output =
-                scope.metered_string(ImportStorageClass::FormatNormalization, resource);
-            output.try_push_str(value)?;
+) -> ParseResult<MeteredString<'session>> {
+    parser::enforce_text_value_limit(exec, value.len(), resource)?;
+    let string_work = exec.bind_work_group([ImportWorkClass::StringBytes])?;
+    exec.with_work(
+        &string_work,
+        [usize_amount(exec, value.len(), resource)?],
+        |exec, work| {
+            let mut output = exec.metered_string(ImportStorageClass::FormatNormalization, resource);
+            output.try_push_str(exec, value)?;
             work.complete_all()?;
             Ok(output)
         },
     )
 }
 
-fn owned_format<'scope>(
-    scope: &'scope ParseScope<'_>,
+fn owned_format<'session>(
+    exec: &mut ParseExecution<'_, 'session>,
     arguments: fmt::Arguments<'_>,
-) -> ParseResult<MeteredString<'scope>> {
+) -> ParseResult<MeteredString<'session>> {
     use fmt::Write as _;
 
     let mut counter = FormatByteCounter::default();
     counter
         .write_fmt(arguments)
-        .map_err(|_| scope.allocation_failure("obj-mtl-formatted-string-length"))?;
-    parser::enforce_text_value_limit(scope, counter.bytes, "obj-mtl-formatted-string-bytes")?;
-    scope.with_work(
-        ImportWorkClass::StringBytes,
-        usize_amount(scope, counter.bytes, "obj-mtl-formatted-string-bytes")?,
-        |work| {
-            let mut output = scope.metered_string(
+        .map_err(|_| exec.allocation_failure("obj-mtl-formatted-string-length"))?;
+    parser::enforce_text_value_limit(exec, counter.bytes, "obj-mtl-formatted-string-bytes")?;
+    let string_work = exec.bind_work_group([ImportWorkClass::StringBytes])?;
+    exec.with_work(
+        &string_work,
+        [usize_amount(
+            exec,
+            counter.bytes,
+            "obj-mtl-formatted-string-bytes",
+        )?],
+        |exec, work| {
+            let mut output = exec.metered_string(
                 ImportStorageClass::FormatNormalization,
                 "obj-mtl-formatted-string",
             );
-            output.try_reserve(counter.bytes)?;
-            output.try_write_fmt(arguments)?;
+            output.try_reserve(exec, counter.bytes)?;
+            output.try_write_fmt(exec, arguments)?;
             work.complete_all()?;
             Ok(output)
         },
@@ -1299,15 +1317,15 @@ fn trailing_mtl_token_range(tokens: &[MtlToken<'_>]) -> Option<std::ops::Range<u
 }
 
 fn recovery_map_path_range(
-    scope: &ParseScope<'_>,
+    exec: &mut ParseExecution<'_, '_>,
     tokens: &[MtlToken<'_>],
 ) -> ParseResult<Option<std::ops::Range<usize>>> {
     let mut index = 0usize;
     while let Some(token) = tokens.get(index) {
-        scope.poll()?;
+        exec.poll()?;
         if !token.text.starts_with('-') {
             let last = tokens.last().ok_or_else(|| {
-                scope.format_failure(crate::ObjFailure::internal("missing-map-path-token"))
+                exec.format_failure(crate::ObjFailure::internal("missing-map-path-token"))
             })?;
             return Ok(Some(token.start..last.end));
         }
@@ -1335,7 +1353,7 @@ fn recovery_map_path_range(
         index = index
             .checked_add(1)
             .and_then(|value| value.checked_add(consumed))
-            .ok_or_else(|| scope.allocation_failure("obj-mtl-map-option-index"))?;
+            .ok_or_else(|| exec.allocation_failure("obj-mtl-map-option-index"))?;
     }
     Ok(None)
 }
@@ -1364,24 +1382,24 @@ fn map_option_recovery_arity(option: &str) -> MapOptionRecoveryArity {
 }
 
 pub(crate) fn push_warning(
-    scope: &ParseScope<'_>,
+    exec: &mut ParseExecution<'_, '_>,
     location: Option<(u32, u32)>,
     code: &'static str,
     message: fmt::Arguments<'_>,
 ) -> ParseResult<()> {
     let code = DiagnosticCode::new(code).expect("static OBJ diagnostic code must be valid");
     match location {
-        Some((line, column)) => scope.emit_diagnostic(
+        Some((line, column)) => exec.emit_diagnostic(
             DiagnosticSeverity::Warning,
             code,
             format_args!("line {line}, column {column}: {message}"),
         ),
-        None => scope.emit_diagnostic(DiagnosticSeverity::Warning, code, message),
+        None => exec.emit_diagnostic(DiagnosticSeverity::Warning, code, message),
     }
 }
 
 fn push_dependency_warning(
-    scope: &ParseScope<'_>,
+    exec: &mut ParseExecution<'_, '_>,
     snapshot: &DependencySnapshot<'_>,
     location: Option<(u32, u32)>,
     code: &'static str,
@@ -1389,7 +1407,7 @@ fn push_dependency_warning(
 ) -> ParseResult<()> {
     let code = DiagnosticCode::new(code).expect("static OBJ diagnostic code must be valid");
     match location {
-        Some((line, column)) => scope.emit_diagnostic_with(
+        Some((line, column)) => exec.emit_diagnostic_with(
             DiagnosticSeverity::Warning,
             code,
             ImportProgressPhase::Decode,
@@ -1399,7 +1417,7 @@ fn push_dependency_warning(
             |_| {},
             format_args!("line {line}, column {column}: {message}"),
         ),
-        None => scope.emit_diagnostic_with(
+        None => exec.emit_diagnostic_with(
             DiagnosticSeverity::Warning,
             code,
             ImportProgressPhase::Decode,

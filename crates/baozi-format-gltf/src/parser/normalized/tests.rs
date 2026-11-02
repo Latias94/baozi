@@ -3,10 +3,10 @@ use crate::parser::model::{AttributeStorage, LogicalMeshStorage, PrimitiveStorag
 use crate::parser::{ContentError, owned_name};
 use crate::source_map::{GltfSourceMap, SourceEntityKind};
 use baozi_import::{
-    DetectionOutcome, DetectionResult, DetectionScope, FormatDescriptor, FormatImporter,
-    FormatSelection, ImportConfigOverlay, ImportOperationControl, ImportRequest,
-    ImportRequestLayer, OptionCompileLimits, ParseResult, Probe, ReadConfidence, ReadHint,
-    RegistryBuildLimits, RegistryBuilder, import_asset,
+    DetectionOutcome, DetectionResult, DetectionScope, Format, FormatDescriptor, FormatSelection,
+    ImportConfigOverlay, ImportOperationControl, ImportRequest, ImportRequestLayer,
+    OptionCompileLimits, ParseResult, Probe, ReadConfidence, ReadHint, RegistryBuildLimits,
+    RegistryBuilder,
 };
 use baozi_io::{AssetPath, MemoryAssetIo};
 use std::sync::Arc;
@@ -26,7 +26,19 @@ enum FixtureFault {
 
 struct HandBuiltModel(FixtureFault);
 
-impl FormatImporter for HandBuiltModel {
+impl Format for HandBuiltModel {
+    type Options = baozi_import::NoFormatOptions;
+
+    fn compile_defaults(
+        &self,
+        scope: &mut baozi_import::RegistryBuildScope<'_>,
+    ) -> std::result::Result<
+        baozi_import::CompiledOptions<Self::Options>,
+        baozi_import::OptionCompileError,
+    > {
+        Self::Options::compile_defaults(scope)
+    }
+
     fn descriptor(&self) -> FormatDescriptor {
         crate::format_descriptor()
     }
@@ -40,39 +52,45 @@ impl FormatImporter for HandBuiltModel {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        build_fixture(scope, self.0)
-            .and_then(|model| submit(scope, &model))
-            .map_err(|error| match error {
-                ContentError::Scope(failure) => failure,
-                error => scope.format_failure(error.into_format_failure()),
-            })
+    fn parse(&self, _: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        let result = context
+            .with_execution(|scope| build_fixture(scope, self.0))
+            .and_then(|model| submit(context, &model));
+        match result {
+            Ok(()) => Ok(()),
+            Err(ContentError::Scope(failure)) => Err(failure),
+            Err(error) => context
+                .with_execution(|scope| Err(scope.format_failure(error.into_format_failure()))),
+        }
     }
 }
 
 fn values<'scope, T: Copy>(
-    scope: &'scope ParseScope<'_>,
+    scope: &mut ParseExecution<'_, 'scope>,
     values: &[T],
 ) -> Result<MeteredVec<'scope, T>> {
     let mut output = scope.metered_vec(
         ImportStorageClass::FormatNormalization,
         "normalized-fixture",
     );
-    output.try_extend_from_slice(values)?;
+    output.try_extend_from_slice(scope, values)?;
     Ok(output)
 }
 
-fn one<'scope, T>(scope: &'scope ParseScope<'_>, value: T) -> Result<MeteredVec<'scope, T>> {
+fn one<'scope, T>(
+    scope: &mut ParseExecution<'_, 'scope>,
+    value: T,
+) -> Result<MeteredVec<'scope, T>> {
     let mut output = scope.metered_vec(
         ImportStorageClass::FormatNormalization,
         "normalized-fixture",
     );
-    output.try_push(value)?;
+    output.try_push(scope, value)?;
     Ok(output)
 }
 
 fn build_fixture<'scope>(
-    scope: &'scope ParseScope<'_>,
+    scope: &mut ParseExecution<'_, 'scope>,
     fault: FixtureFault,
 ) -> Result<NormalizedGltf<'scope>> {
     use source_profile::{DOCUMENT, SelectedSourceProfile, entity};
@@ -195,10 +213,10 @@ fn build_fixture<'scope>(
                 },
             )],
         )?,
-        names: one(
-            scope,
-            owned_name(scope, Some("手工节点"), "fixture-node-name")?,
-        )?,
+        names: {
+            let argument_0 = owned_name(scope, Some("手工节点"), "fixture-node-name")?;
+            one(scope, argument_0)
+        }?,
         node_ids: values(scope, &[Some(node_id)])?,
         mesh_instances: one(
             scope,
@@ -217,23 +235,23 @@ fn build_fixture<'scope>(
                 Presence::Absent,
             )],
         )?,
-        logical_meshes: one(
-            scope,
-            morph::LogicalMorphStorage {
+        logical_meshes: {
+            let argument_0 = morph::LogicalMorphStorage {
                 definitions: AuthoringRange::new(0, 1),
                 weights: values(scope, &[0.5])?,
-            },
-        )?,
+            };
+            one(scope, argument_0)
+        }?,
         primitives: one(scope, 0..1)?,
         targets: one(scope, morph::MorphTargetStorage { deltas: 0..1 })?,
-        deltas: one(
-            scope,
-            morph::MorphDeltaStorage {
+        deltas: {
+            let argument_0 = morph::MorphDeltaStorage {
                 semantic: MorphDeltaSemantic::Position,
                 values: values(scope, &[0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0, 3.0])?,
                 provenance: AccessorSources::ROOT,
-            },
-        )?,
+            };
+            one(scope, argument_0)
+        }?,
     };
     Ok(NormalizedGltf {
         selection_request: SourceScopeSelectionRequest::DocumentDefault,
@@ -260,10 +278,11 @@ fn build_fixture<'scope>(
                     )
                     .unwrap(),
                 )?,
-                names: one(
-                    scope,
-                    owned_name(scope, Some("Hand-built light"), "fixture-light-name")?,
-                )?,
+                names: {
+                    let argument_0 =
+                        owned_name(scope, Some("Hand-built light"), "fixture-light-name")?;
+                    one(scope, argument_0)
+                }?,
                 light_ids: values(scope, &[Some(LightLocalId::new(0))])?,
             }
         } else {
@@ -281,13 +300,13 @@ fn build_fixture<'scope>(
             skins: scope.metered_vec(ImportStorageClass::FormatNormalization, "fixture-skins"),
             skin_ids: values(scope, &[])?,
         },
-        instance_deformations: one(
-            scope,
-            InstanceDeformationStorage {
+        instance_deformations: {
+            let argument_0 = InstanceDeformationStorage {
                 skin: Presence::Absent,
                 weights: Some(values(scope, &[0.75])?),
-            },
-        )?,
+            };
+            one(scope, argument_0)
+        }?,
         buffers: BufferResources {
             values: scope.metered_vec(ImportStorageClass::FormatNormalization, "fixture-buffers"),
         },
@@ -309,27 +328,20 @@ fn import_fixture(
 > {
     let mut registry = RegistryBuilder::new();
     registry.register(HandBuiltModel(fault))?;
-    let request = registry
-        .freeze(RegistryBuildLimits::default())?
-        .compile_request(
-            &ImportRequest::from_layers(
-                ImportRequestLayer::default(),
-                ImportRequestLayer::new(
-                    ImportConfigOverlay::default()
-                        .with_format_selection(FormatSelection::Forced(FormatId::new(FORMAT_ID)?)),
-                ),
+    let request = registry.freeze(RegistryBuildLimits::default())?.plan(
+        &ImportRequest::from_layers(
+            ImportRequestLayer::default(),
+            ImportRequestLayer::new(
+                ImportConfigOverlay::default()
+                    .with_format_selection(FormatSelection::Forced(FormatId::new(FORMAT_ID)?)),
             ),
-            OptionCompileLimits::default(),
-        )?;
+        ),
+        OptionCompileLimits::default(),
+    )?;
     let io = MemoryAssetIo::new();
     let path = AssetPath::new("hand-built.gltf")?;
     io.try_insert(path.clone(), Arc::<[u8]>::from(primary))?;
-    Ok(import_asset(
-        &request,
-        &io,
-        path,
-        ImportOperationControl::default(),
-    ))
+    Ok(request.read_asset(&io, path, ImportOperationControl::default()))
 }
 
 #[test]
@@ -445,7 +457,10 @@ fn normalized_authoring_rejects_missing_required_source_ranges_and_owner_links()
     Ok(())
 }
 
-fn inspect_source_inventory(scope: &ParseScope<'_>, map: &GltfSourceMap<'_>) -> Result<()> {
+fn inspect_source_inventory(
+    scope: &mut ParseExecution<'_, '_>,
+    map: &GltfSourceMap<'_>,
+) -> Result<()> {
     use source_profile::{DOCUMENT, SelectedSourceProfile, entity};
     let mut sources = SelectedSourceProfile::from_source_map(scope, map, |id| {
         id.kind != SourceEntityKind::Node || id.source_index < 2

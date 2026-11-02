@@ -1,7 +1,7 @@
 use crate::GltfFailure;
 use crate::json_syntax;
 use crate::source_map::GltfSourceMap;
-use baozi_import::{ImportWorkClass, ParseResult, ParseScope};
+use baozi_import::{ImportWorkClass, ParseExecution, ParseResult};
 
 const GLB_MAGIC: &[u8; 4] = b"glTF";
 const GLB_VERSION: u32 = 2;
@@ -34,7 +34,9 @@ impl<'scope> AdmittedSurfaces<'scope> {
     }
 }
 
-pub(crate) fn admit<'scope>(ctx: &'scope ParseScope<'_>) -> ParseResult<AdmittedSurfaces<'scope>> {
+pub(crate) fn admit<'scope>(
+    ctx: &mut ParseExecution<'_, 'scope>,
+) -> ParseResult<AdmittedSurfaces<'scope>> {
     let document_bytes = ctx.primary_bytes();
     let (surface, is_glb) = if document_bytes.starts_with(GLB_MAGIC) {
         (locate_glb_surfaces(ctx, document_bytes)?, true)
@@ -65,7 +67,7 @@ struct LocatedSurfaces<'bytes> {
 }
 
 fn locate_glb_surfaces<'bytes>(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     document_bytes: &'bytes [u8],
 ) -> ParseResult<LocatedSurfaces<'bytes>> {
     if document_bytes.len() < GLB_HEADER_BYTES || !document_bytes.len().is_multiple_of(4) {
@@ -99,35 +101,38 @@ fn locate_glb_surfaces<'bytes>(
     let mut chunk_index = 0usize;
     let mut json_range = None;
     let mut bin_range = None;
-    ctx.with_work(ImportWorkClass::WorkUnits, 1, |work| -> ParseResult<()> {
-        while cursor < declared_length {
-            let chunk = read_glb_chunk(ctx, document_bytes, cursor, declared_length)?;
-            // Unknown chunk types are extension points. JSON stays first and BIN, when
-            // present, stays second; every remaining header is still range-checked.
-            if chunk_index == 0 {
-                if chunk.chunk_type != GLB_JSON_CHUNK {
-                    return Err(invalid_glb(ctx, "the first GLB chunk is not JSON"));
+    ctx.with_work_group(
+        [(ImportWorkClass::WorkUnits, 1)],
+        |ctx, work| -> ParseResult<()> {
+            while cursor < declared_length {
+                let chunk = read_glb_chunk(ctx, document_bytes, cursor, declared_length)?;
+                // Unknown chunk types are extension points. JSON stays first and BIN, when
+                // present, stays second; every remaining header is still range-checked.
+                if chunk_index == 0 {
+                    if chunk.chunk_type != GLB_JSON_CHUNK {
+                        return Err(invalid_glb(ctx, "the first GLB chunk is not JSON"));
+                    }
+                    json_range = Some((chunk.data_start, chunk.end));
+                } else if chunk_index == 1 && chunk.chunk_type == GLB_BIN_CHUNK {
+                    bin_range = Some((chunk.data_start, chunk.end));
+                } else if chunk.chunk_type == GLB_JSON_CHUNK {
+                    return Err(invalid_glb(ctx, "GLB contains more than one JSON chunk"));
+                } else if chunk.chunk_type == GLB_BIN_CHUNK && chunk_index != 1 {
+                    return Err(invalid_glb(ctx, "the GLB BIN chunk is not second"));
                 }
-                json_range = Some((chunk.data_start, chunk.end));
-            } else if chunk_index == 1 && chunk.chunk_type == GLB_BIN_CHUNK {
-                bin_range = Some((chunk.data_start, chunk.end));
-            } else if chunk.chunk_type == GLB_JSON_CHUNK {
-                return Err(invalid_glb(ctx, "GLB contains more than one JSON chunk"));
-            } else if chunk.chunk_type == GLB_BIN_CHUNK && chunk_index != 1 {
-                return Err(invalid_glb(ctx, "the GLB BIN chunk is not second"));
-            }
 
-            cursor = chunk.end;
-            chunk_index = chunk_index
-                .checked_add(1)
-                .ok_or_else(|| ctx.allocation_failure("gltf-glb-chunk-count"))?;
-            work.complete([1])?;
-            if cursor < declared_length {
-                work.replenish(1)?;
+                cursor = chunk.end;
+                chunk_index = chunk_index
+                    .checked_add(1)
+                    .ok_or_else(|| ctx.allocation_failure("gltf-glb-chunk-count"))?;
+                work.complete([1])?;
+                if cursor < declared_length {
+                    work.replenish(1)?;
+                }
             }
-        }
-        Ok(())
-    })?;
+            Ok(())
+        },
+    )?;
 
     let (json_start, json_end) =
         json_range.ok_or_else(|| invalid_glb(ctx, "GLB does not contain a JSON chunk"))?;
@@ -157,7 +162,7 @@ struct GlbChunk<'bytes> {
 }
 
 fn read_glb_chunk<'bytes>(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     document_bytes: &'bytes [u8],
     cursor: usize,
     declared_length: usize,
@@ -201,7 +206,10 @@ fn read_glb_chunk<'bytes>(
     })
 }
 
-fn invalid_glb(ctx: &ParseScope<'_>, reason: &'static str) -> baozi_import::ParseFailure {
+fn invalid_glb(
+    ctx: &mut ParseExecution<'_, '_>,
+    reason: &'static str,
+) -> baozi_import::ParseFailure {
     ctx.format_failure(GltfFailure::invalid_document(reason))
 }
 

@@ -1,28 +1,28 @@
 use baozi_import::authoring::FormatId;
 use baozi_import::{
-    FormatImporter, FormatSelection, ImportConfigOverlay, ImportRequest, ImportRequestLayer,
-    OptionCompileLimits, PreparedImportRequest, RegistryBuildLimits, RegistryBuilder,
-    ResourceLimits, ResourceLimitsOverlay, SceneSnapshot, SceneSnapshotLimits, ValidatedScene,
+    Format, FormatSelection, ImportConfigOverlay, ImportPlan, ImportRequest, ImportRequestLayer,
+    OptionCompileLimits, RegistryBuildLimits, RegistryBuilder, ResourceLimits,
+    ResourceLimitsOverlay, SceneSnapshot, SceneSnapshotLimits, ValidatedScene,
 };
 
 const SNAPSHOT_PREVIEW_BYTES: usize = 64 * 1024;
 const SNAPSHOT_COLLECTION_ITEMS: usize = 256;
 const SNAPSHOT_WORK: u64 = 4_000_000;
 
-pub fn prepared_request<I>(importer: I, format_id: &str) -> PreparedImportRequest
+pub fn import_plan<I>(importer: I, format_id: &str) -> ImportPlan
 where
-    I: FormatImporter,
+    I: Format,
 {
-    prepared_request_with_limits(importer, format_id, ResourceLimits::default())
+    import_plan_with_limits(importer, format_id, ResourceLimits::default())
 }
 
-pub fn prepared_request_with_limits<I>(
+pub fn import_plan_with_limits<I>(
     importer: I,
     format_id: &str,
     limits: ResourceLimits,
-) -> PreparedImportRequest
+) -> ImportPlan
 where
-    I: FormatImporter,
+    I: Format,
 {
     let mut registry = RegistryBuilder::new();
     registry
@@ -33,7 +33,7 @@ where
         .expect("the statically configured fuzz registry must freeze");
     let format = FormatId::new(format_id).expect("the static fuzz format id must be valid");
     snapshot
-        .compile_request(
+        .plan(
             &ImportRequest::from_layers(
                 ImportRequestLayer::default(),
                 ImportRequestLayer::new(

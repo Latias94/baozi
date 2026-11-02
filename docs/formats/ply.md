@@ -124,7 +124,7 @@ and non-support policy; this change does not classify unknown PLY semantics.
 - The format-private `PlyFailure.byte_offset` and packed `byte_offset` detail are source-global raw
   offsets taken from shared line and violation ranges. Format grammar errors remain anchored at the
   physical line start, while text-profile failures use the exact offending byte.
-- `ParseScope` copies the stable code plus bounded `reason`, `context`, and `byte_offset` details into
+- `ParseExecution` copies the stable code plus bounded `reason`, `context`, and `byte_offset` details into
   Baozi-owned `FormatFailureEvidence`, then destroys `PlyFailure` and any transient parser error. The
   public error chain terminates at that host-owned evidence and exposes no PLY/backend downcast.
 

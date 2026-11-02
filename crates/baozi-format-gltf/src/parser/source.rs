@@ -1,7 +1,7 @@
 //! Selection-aware checks over the existing admission scanner's raw source map.
 
 use super::{
-    GltfFailure, NodeGraph, ParseScope, ResourceClosure, Result, animation, gltf_parse_error,
+    GltfFailure, NodeGraph, ParseExecution, ResourceClosure, Result, animation, gltf_parse_error,
 };
 use crate::document::{
     KHR_LIGHTS_PUNCTUAL, KHR_MATERIALS_CLEARCOAT, KHR_MATERIALS_EMISSIVE_STRENGTH,
@@ -11,17 +11,23 @@ use crate::source_map::{
     GltfSourceMap, SourceEntityId, SourceEntityKind, SourceExtensionKind, SourcePayload,
     SourcePayloadKind, SourcePayloadSite,
 };
+use baozi_import::ImportWorkClass;
 
 pub(super) fn preflight(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     map: &GltfSourceMap<'_>,
     document: &crate::document::Document<'_>,
     graph: &NodeGraph<'_, '_>,
     closure: &ResourceClosure<'_>,
     animations: &animation::AnimationContracts<'_, '_>,
 ) -> Result<()> {
+    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
     for (index, image) in document.tables().images.iter().enumerate() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         if !closure.images.as_slice()[index] {
             continue;
         }
@@ -38,20 +44,21 @@ pub(super) fn preflight(
             .into());
         }
     }
-    let required = |kind, parent_index, source_index| -> Result<()> {
-        let comparisons = u64::from(usize::BITS - map.entities().len().leading_zeros()) + 1;
-        ctx.charge_work(comparisons)?;
-        map.get(SourceEntityId {
-            kind,
-            parent_index,
-            source_index,
-        })
-        .ok_or_else(|| gltf_parse_error(ctx, "selected glTF entity has no raw source range"))?;
-        Ok(())
-    };
-    required(SourceEntityKind::Document, None, 0)?;
+    let required =
+        |kind, parent_index, source_index, ctx: &mut ParseExecution<'_, '_>| -> Result<()> {
+            let comparisons = u64::from(usize::BITS - map.entities().len().leading_zeros()) + 1;
+            ctx.charge_work(comparisons)?;
+            map.get(SourceEntityId {
+                kind,
+                parent_index,
+                source_index,
+            })
+            .ok_or_else(|| gltf_parse_error("selected glTF entity has no raw source range"))?;
+            Ok(())
+        };
+    required(SourceEntityKind::Document, None, 0, ctx)?;
     if let Some(index) = graph.selection_outcome.selected_scene_index() {
-        required(SourceEntityKind::Scene, None, index)?;
+        required(SourceEntityKind::Scene, None, index, ctx)?;
     }
     for (kind, selection) in [
         (SourceEntityKind::Node, graph.selected.as_slice()),
@@ -75,33 +82,59 @@ pub(super) fn preflight(
         ),
     ] {
         for (index, selected) in selection.iter().enumerate() {
-            ctx.charge_work(1)?;
+            ctx.with_work(
+                &work_group,
+                [1],
+                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+            )?;
             if *selected {
-                required(kind, None, index)?;
+                required(kind, None, index, ctx)?;
             }
         }
     }
     for (index, mesh) in document.tables().meshes.iter().enumerate() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         if closure.meshes.as_slice()[index] {
             for primitive in 0..mesh.primitives.len() {
-                required(SourceEntityKind::Primitive, Some(index), primitive)?;
+                required(SourceEntityKind::Primitive, Some(index), primitive, ctx)?;
             }
         }
     }
     for (index, clip) in document.tables().animations.iter().enumerate() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         if !animations.selected_animations.as_slice()[index] {
             continue;
         }
         for channel in 0..clip.channels.len() {
-            required(SourceEntityKind::AnimationChannel, Some(index), channel)?;
+            required(
+                SourceEntityKind::AnimationChannel,
+                Some(index),
+                channel,
+                ctx,
+            )?;
         }
         let range = &closure.animation_sampler_ranges.as_slice()[index];
         for sampler in 0..clip.samplers.len() {
-            ctx.charge_work(1)?;
+            ctx.with_work(
+                &work_group,
+                [1],
+                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+            )?;
             if closure.animation_samplers.as_slice()[range.start + sampler] {
-                required(SourceEntityKind::AnimationSampler, Some(index), sampler)?;
+                required(
+                    SourceEntityKind::AnimationSampler,
+                    Some(index),
+                    sampler,
+                    ctx,
+                )?;
             }
         }
     }
@@ -114,7 +147,11 @@ pub(super) fn preflight(
     let mut transform_declared = false;
     let mut lights_declared = false;
     for name in &document.tables().extensions_used {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         match name.as_str() {
             KHR_MATERIALS_UNLIT => unlit_declared = true,
             KHR_MATERIALS_EMISSIVE_STRENGTH => strength_declared = true,
@@ -127,7 +164,11 @@ pub(super) fn preflight(
     }
     let mut extras = super::extras::ExtrasPreflight::default();
     for entity in map.entities() {
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         let entity_selected = selected(entity.id, document, graph, closure, animations);
         // Node absence only permits the core ignore rule. Inspect this channel's extension
         // containers and members even in an omitted clip, without retaining its extras.
@@ -144,9 +185,17 @@ pub(super) fn preflight(
         // Every payload occupies primary bytes, so the byte length bounds both searches even
         // though the scanner intentionally keeps its payload storage private.
         let comparisons = u64::from(usize::BITS - ctx.primary_bytes().len().leading_zeros()) + 1;
-        ctx.charge_work(2 * comparisons)?;
+        ctx.with_work(
+            &work_group,
+            [2 * comparisons],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         for payload in map.payloads_for(entity.id) {
-            ctx.charge_work(1)?;
+            ctx.with_work(
+                &work_group,
+                [1],
+                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+            )?;
             let range = payload.value_range;
             let fail = |subject, reason| {
                 GltfFailure::unsupported_at(subject, range.byte_offset, range.byte_length, reason)
@@ -248,7 +297,7 @@ pub(super) fn preflight(
 }
 
 fn validate_extension_payload(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     payload: &SourcePayload,
     name: &'static str,
     declared: bool,

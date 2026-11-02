@@ -293,14 +293,14 @@ fn detached_static_controls_keep_decode_leaf_mesh_sharing_and_selected_source_cl
         )?;
         io.try_insert(AssetPath::new(BINARY)?, Arc::from(binary))?;
         let importer = Importer::new()?;
-        let request =
-            importer.prepare_request(&ImportRequest::new(), OptionCompileLimits::default())?;
-        let report = importer.read_asset_with_request(
-            &io,
-            AssetPath::new(SOURCE)?,
-            &request,
-            ImportOperationControl::default(),
-        )?;
+        let request = importer.plan(&ImportRequest::new(), OptionCompileLimits::default())?;
+        let report = request
+            .read_asset(
+                &io,
+                AssetPath::new(SOURCE)?,
+                ImportOperationControl::default(),
+            )
+            .map_err(baozi::Error::from)?;
         assert!(report.diagnostics().is_empty());
         assert!(report.loss_evidence().is_empty());
         let (scene, evidence) = report.into_parts();

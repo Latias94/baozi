@@ -40,7 +40,7 @@ use super::materialization::{
 };
 #[cfg(test)]
 use super::materialization::{NodeSceneLaneRejection, write_node_scene_evidence_row};
-use super::{NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneDraft, SceneEvidenceCounts, SceneStorage};
+use super::{NODE_SCENE_BUILD_INVARIANT_CODE, SceneEvidenceCounts, SceneStorage};
 #[cfg(test)]
 use super::{
     NODE_SCENE_STORAGE_REJECTION_CODE, NodeSceneConstructionRejection, PendingNodeSceneFailure,
@@ -52,30 +52,35 @@ use super::{
     NodeSceneSuccessReport, PendingNodeSceneDraft, PreparedNodeSceneConstruction,
 };
 
+/// Host-selected parser disposition for the pending canonical candidate.
+///
+/// Acceptance is separate from submission and grants no publication authority. Rejection closes
+/// the candidate through the existing frozen failure path; the host retains its original cause.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SceneParseOutcome {
+    /// The parser and scope completed successfully after candidate submission.
+    Accepted,
+    /// The parser or scope failed after candidate submission.
+    Rejected,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NodeSceneLaneGenerationRejectionKind {
-    MissingDraft,
-    DraftMismatch,
+    ParseRejected,
     Exhausted,
 }
 
-/// Stable generation-admission rejection produced only by core descriptor validation.
+/// Stable rejection of parser acceptance or core generation admission.
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-#[error("canonical Scene generation admission rejected the parser descriptor")]
+#[error("canonical Scene parser acceptance or generation admission rejected the candidate")]
 pub struct NodeSceneLaneGenerationRejection {
     kind: NodeSceneLaneGenerationRejectionKind,
 }
 
 impl NodeSceneLaneGenerationRejection {
-    const fn missing_draft() -> Self {
+    const fn parse_rejected() -> Self {
         Self {
-            kind: NodeSceneLaneGenerationRejectionKind::MissingDraft,
-        }
-    }
-
-    const fn draft_mismatch() -> Self {
-        Self {
-            kind: NodeSceneLaneGenerationRejectionKind::DraftMismatch,
+            kind: NodeSceneLaneGenerationRejectionKind::ParseRejected,
         }
     }
 
@@ -87,10 +92,7 @@ impl NodeSceneLaneGenerationRejection {
 
     pub const fn stable_code(&self) -> u32 {
         match self.kind {
-            NodeSceneLaneGenerationRejectionKind::MissingDraft
-            | NodeSceneLaneGenerationRejectionKind::DraftMismatch => {
-                NODE_SCENE_BUILD_INVARIANT_CODE
-            }
+            NodeSceneLaneGenerationRejectionKind::ParseRejected => NODE_SCENE_BUILD_INVARIANT_CODE,
             NodeSceneLaneGenerationRejectionKind::Exhausted => GENERATION_EXHAUSTED_CODE,
         }
     }
@@ -206,13 +208,13 @@ pub type NodeSceneLaneJointCommit<'joint, O, PP, U> = CanonicalJointCommit<
 
 /// Consumes core's freeze permit without retaining or preparing the operation contribution.
 ///
-/// Missing/foreign drafts and generation exhaustion remain ordinary frozen rejections. On
+/// Parser rejection and generation exhaustion remain ordinary frozen rejections. On
 /// success the HRTB callback receives the owner-free core token together with the matching scoped
 /// joint contribution and seal, so neither branded operation capability can escape this call.
 #[allow(clippy::type_complexity)]
 pub fn consume_node_scene_freeze_permit<O, PP, U, R>(
     permit: NodeSceneLaneFreezePermit<O, PP, U>,
-    parser_draft: Option<NodeSceneDraft>,
+    parse_outcome: SceneParseOutcome,
     reject: impl FnOnce(NodeSceneFrozenGenerationRejection<O, PP, U>) -> R,
     prepare: impl for<'joint> FnOnce(
         NodeSceneHandoffToken,
@@ -227,7 +229,7 @@ where
 {
     consume_node_scene_freeze_permit_with_generation_source(
         permit,
-        parser_draft,
+        parse_outcome,
         crate::identity::SceneGenerationId::reserve,
         reject,
         prepare,
@@ -237,7 +239,7 @@ where
 #[allow(clippy::type_complexity)]
 fn consume_node_scene_freeze_permit_with_generation_source<O, PP, U, R, ReserveGeneration>(
     permit: NodeSceneLaneFreezePermit<O, PP, U>,
-    parser_draft: Option<NodeSceneDraft>,
+    parse_outcome: SceneParseOutcome,
     reserve_generation: ReserveGeneration,
     reject: impl FnOnce(NodeSceneFrozenGenerationRejection<O, PP, U>) -> R,
     prepare: impl for<'joint> FnOnce(
@@ -252,15 +254,8 @@ where
     U: ProgressUnit,
     ReserveGeneration: FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
 {
-    let expected_draft = permit.output().inner().draft;
-    let pairing_rejection = match parser_draft {
-        None => Some(NodeSceneLaneGenerationRejection::missing_draft()),
-        Some(draft) if !node_scene_draft_matches(draft, expected_draft) => {
-            Some(NodeSceneLaneGenerationRejection::draft_mismatch())
-        }
-        Some(_) => None,
-    };
-    if let Some(cause) = pairing_rejection {
+    if parse_outcome == SceneParseOutcome::Rejected {
+        let cause = NodeSceneLaneGenerationRejection::parse_rejected();
         let stable_code = cause.stable_code();
         return permit.reject_generation(cause, stable_code).map(reject);
     }
@@ -363,10 +358,10 @@ where
 {
     pub(in crate::canonical_scene::store) fn prepare_with_generation_source(
         self,
-        draft: NodeSceneDraft,
+        parse_outcome: SceneParseOutcome,
         reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
     ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
-        prepare_pending_node_scene_draft(self, Some(draft), Some(reserve_generation))
+        prepare_pending_node_scene_draft(self, parse_outcome, reserve_generation)
             .map(|(prepared, _)| prepared)
     }
 }
@@ -384,8 +379,8 @@ impl NodeSceneDraftBuild {
         reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
     ) -> Result<NodeSceneConstructionTerminal, SceneConstructionError> {
         match self {
-            Self::Draft { draft, owner } => owner
-                .prepare_with_generation_source(draft, reserve_generation)
+            Self::Draft { owner } => owner
+                .prepare_with_generation_source(SceneParseOutcome::Accepted, reserve_generation)
                 .map(PreparedNodeSceneConstruction::handoff),
             Self::Failure { prepared, .. } => Ok(prepared.handoff_for_test()),
         }
@@ -395,8 +390,8 @@ impl NodeSceneDraftBuild {
 #[cfg(test)]
 fn prepare_pending_node_scene_draft<O, PP, U, ReserveGeneration>(
     owner: PendingNodeSceneDraft<O, PP, U>,
-    parser_draft: Option<NodeSceneDraft>,
-    reserve_generation: Option<ReserveGeneration>,
+    parse_outcome: SceneParseOutcome,
+    reserve_generation: ReserveGeneration,
 ) -> Result<(PreparedNodeSceneConstruction, Option<ControlCause>), SceneConstructionError>
 where
     O: OperationOwner,
@@ -412,11 +407,9 @@ where
     let evidence_counts = output.evidence_counts;
     match candidate.try_issue_freeze_permit(final_progress)? {
         CanonicalFreezePermitIssue::Ready(permit) => {
-            let reserve_generation = reserve_generation
-                .expect("a matching parser draft retains the generation admission callback");
             consume_node_scene_freeze_permit_with_generation_source(
                 permit,
-                parser_draft,
+                parse_outcome,
                 reserve_generation,
                 |rejected| prepare_frozen_node_failure!(rejected, evidence_counts),
                 prepare_node_scene_test_joint,
@@ -436,10 +429,6 @@ where
                 .map(|prepared| (prepared, None))
         }
     }
-}
-
-fn node_scene_draft_matches(parser: NodeSceneDraft, activated: NodeSceneDraft) -> bool {
-    parser.brand == activated.brand && parser.directory == activated.directory
 }
 
 #[cfg(test)]
@@ -904,13 +893,9 @@ mod lane_only_tests {
     use super::*;
 
     #[test]
-    fn generation_rejections_keep_descriptor_and_exhaustion_codes_distinct() {
+    fn generation_rejections_keep_parse_and_exhaustion_codes_distinct() {
         assert_eq!(
-            NodeSceneLaneGenerationRejection::missing_draft().stable_code(),
-            NODE_SCENE_BUILD_INVARIANT_CODE,
-        );
-        assert_eq!(
-            NodeSceneLaneGenerationRejection::draft_mismatch().stable_code(),
+            NodeSceneLaneGenerationRejection::parse_rejected().stable_code(),
             NODE_SCENE_BUILD_INVARIANT_CODE,
         );
         assert_eq!(

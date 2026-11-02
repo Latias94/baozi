@@ -24,6 +24,9 @@ evidence:
   - crates/baozi-core/src/canonical_scene/store/typed_storage/appearance.rs
   - crates/baozi-core/src/lib.rs
   - crates/baozi-core/tests/public_api.rs
+  - docs/research/2026-11-02-typed-format-context-design.md
+  - crates/baozi-core/src/canonical_scene/store/api/integration.rs
+  - crates/baozi-core/src/canonical_scene/store/construction/node_scene/publication.rs
 related:
   - docs/adr/0008-math-coordinate-units-and-numeric-policy.md
   - docs/adr/0009-data-ownership-zero-copy-lifetimes-and-memory-layout.md
@@ -67,9 +70,10 @@ the internal activation state machine.
 
 ### One Opaque Construction Description
 
-`baozi-core` owns one opaque, single-use Scene construction description. Format and import code may
-submit complete typed authoring values through the approved authoring interface, but cannot own,
-inspect, replace, serialize, clone, or reactivate unpublished canonical storage.
+`baozi-core` owns one opaque, single-use Scene construction description, `SceneConstruction`, at the
+hidden integration seam. Format code submits borrowed typed authoring values through the outer
+`ParseContext`; import creates and consumes that description with its sole operation owner. Format
+code cannot own, inspect, replace, serialize, clone, or reactivate unpublished canonical storage.
 
 The same sealed description determines:
 
@@ -85,23 +89,31 @@ construction-description mismatch is a contract failure, never a recoverable for
 ### Mandatory Construction Sequence
 
 ```mermaid
-flowchart LR
-    Producer[Typed authoring producer] --> Description[Opaque complete Scene description]
+flowchart TB
+    Producer[Typed authoring producer] --> Submit[ParseContext submission after execution regions end]
+    Submit --> Description[Core-owned SceneConstruction]
     Description --> Preflight[Bounded preflight and admission]
     Preflight --> Materialize[Canonical materialization]
     Materialize --> Validate[Mandatory central validation]
-    Validate -->|valid| Generation[Reserve one generation]
-    Generation --> Publish[Publish ValidatedScene]
+    Validate -->|valid| Candidate[Session-private validated candidate]
+    Candidate --> Accept{Parser and session accepted?}
+    Accept -->|yes| Generation[Reserve one generation at freeze]
+    Generation --> Pair[Match prepared root and core handoff token]
+    Pair --> Publish[Publish ValidatedScene]
     Preflight -->|reject or contain| Failure[No published Scene]
     Materialize -->|reject or contain| Failure
     Validate -->|reject or contain| Failure
+    Accept -->|no| Failure
     Generation -->|reject or contain| Failure
+    Pair -->|mismatch| Failure
 ```
 
 Preflight is authority-free with respect to publication. Materialization cannot expose a public
 Scene. Central validation is non-bypassable and uses the materialized canonical root plus the sealed
-description's exact evidence. Generation reservation occurs only after validation succeeds and
-before the infallible public handoff.
+description's exact evidence. Submission retains the validated candidate privately; parser success
+is a separate fact reconciled by ADR 0046. Generation reservation occurs only after validation and
+session acceptance succeed, at the existing freeze boundary. The core token must match the prepared
+canonical root before the infallible public result handoff.
 
 Construction must work on the caller's normal platform stack in debug and release builds. Large
 execution plans belong in fallible, metered preflight storage and are borrowed by materialization;
@@ -109,12 +121,20 @@ they must not be copied through each activation wrapper. This storage is release
 reservation and before the operation verifies that scoped planning work has ended. No terminal
 transition needs to allocate a replacement plan or require a larger host stack.
 
-### Descriptor and Owner Separation
+### Submission and Pending Owner Separation
 
-`SceneDraft` is a non-owning, non-cloneable descriptor paired with exactly one pending construction
-owner. It contains no public canonical storage, generation, validation proof, or publication
-authority. Only the matching owner may consume it. Missing, duplicate, stale, or foreign descriptors
-cannot publish.
+The public parser contract is `Format::parse(...) -> ParseResult<()>`. The outer
+`ParseContext::submit(StaticSceneBuilder<'_>)` and `submit_complete(SceneAuthoringBatch<'_>)` also
+return `ParseResult<()>`; they install the session's private pending owner rather than returning a
+descriptor. There is no public `SceneDraft` or parser-held candidate to return, clone, or pair later.
+Execution regions end before submission consumes the dormant construction authority. Parser-local
+storage may remain alive to supply borrowed authoring input and is released before terminal freeze.
+
+Submission and parser acceptance remain independent. Missing or repeated submission, a latched
+failure, parser error or panic after submission, and extension poison cannot publish. The core
+construction brand, sealed request identity, central validation proof, generation admission, and
+prepared-root/handoff pairing remain mandatory inside the existing integration seam. Removing the
+parser descriptor round trip creates no alternative validation or publication path.
 
 Cross-crate construction and edit adapters use one unconditional, documentation-hidden
 `baozi_core::__scene_integration` namespace. It exposes the authority-free authoring vocabulary
@@ -123,11 +143,12 @@ use `baozi_import::authoring`. The former `_scene-integration` Cargo feature and
 are removed. Feature union is not a visibility or authority mechanism, and core no longer needs
 two compilation modes to decide whether its adapters can name the same transaction.
 
-Private fields prevent extraction or forgery of construction requests, drafts, and semantic
-validation proofs. The handoff token owns the actual tables and remains single-use. Positive
-external API tests establish that these names exist even in a default core build; compile-fail
-examples exercise actual field privacy and moved ownership through that available namespace.
-An absent-module import failure is not evidence for those constructor or publication guarantees.
+Private fields prevent extraction or forgery of construction requests and semantic validation
+proofs. The handoff token owns the actual tables and remains single-use; parser acceptance alone
+carries none of those owners. External API coverage must exercise the hidden integration namespace
+in a default core build, and compile-fail coverage must exercise actual field privacy and moved
+ownership through that available namespace. An absent-module import failure is not evidence for
+those constructor or publication guarantees.
 
 `ValidatedScene` is the opaque owner of one centrally validated canonical generation. It owns the
 retained storage transitively, exposes only bounded semantic observation, and releases its ownership
@@ -311,10 +332,10 @@ the cutover is reported as accepted; the storage design and this ADR alone are n
 | Interface | Owner | Guarantee |
 | --- | --- | --- |
 | Typed authoring values | `baozi-core` semantic domains | Describe canonical meaning without storage or publication authority |
-| Construction continuation | `baozi-core` | Owns one complete unpublished construction and consumes it once |
-| Draft descriptor | `baozi-core` | Identifies the matching pending construction without owning it |
+| Construction description and continuation | `baozi-core` | Binds one complete authoring input to its sealed construction and consumes it once |
+| Pending canonical candidate | `baozi-import` session with core proof | Keeps unpublished ownership private and separate from parser acceptance |
 | Validated Scene | `baozi-core` | Owns one immutable, centrally validated generation |
-| Import orchestration | ADR 0046 | Holds the import outcome owner and pairs parser result with construction |
+| Import orchestration | ADR 0046 | Holds the sole outcome owner and reconciles `ParseResult<()>` before freeze/handoff |
 | Ledger accounting | ADR 0047 | Admits and records work, temporary storage, and committed output |
 | Physical retained storage | ADR 0044 | Owns allocation lifetime and cross-generation lineage |
 
@@ -356,7 +377,7 @@ Negative:
 | Risk | Severity | Mitigation |
 | --- | --- | --- |
 | Description, work, and execution drift | Critical | derive all three from one opaque sealed description and contain mismatches |
-| Parser obtains publication authority | Critical | expose only typed authoring values and a non-owning draft descriptor |
+| Parser obtains publication authority | Critical | expose outer submission of typed authoring values; keep the candidate and freeze/handoff owners private |
 | Validation becomes optional | Critical | make publication consume the central validation result structurally |
 | Generation is burned on ordinary rejection | High | reserve only after validation and preserve zero-publication failure paths |
 | Public inspection leaks raw storage | High | expose bounded semantic methods and typed views, never retained blocks |
@@ -368,7 +389,8 @@ Negative:
 | --- | --- | --- |
 | Production Scene rails | exactly one canonical construction/publication path | workspace source and package-surface review |
 | Validation bypass | zero public path from authoring input to `ValidatedScene` without central validation | construction and negative API tests |
-| Descriptor pairing | missing, duplicate, stale, and foreign descriptors publish zero Scenes | import/core contract tests |
+| Candidate acceptance | missing or duplicate submission, latched failure, post-submission parser failure, and poison publish zero Scenes | import contract tests |
+| Candidate pairing | mismatched construction brand, proof, or prepared root publishes zero Scenes | core construction and handoff tests |
 | Failure generation use | ordinary pre-publication failures commit zero generations | generation and terminal evidence tests |
 | Raw storage exposure | zero public retained-block or mutable-table type | rustdoc and packaged-consumer checks |
 | Drop correctness | all retained live storage reaches zero after final owner drop | account and multi-generation lifetime tests |
@@ -376,8 +398,10 @@ Negative:
 ## Acceptance Criteria
 
 - One opaque complete description determines work, shape, validation, and execution.
-- `SceneDraft` remains non-owning and can publish only with its exact pending owner.
-- Central validation is mandatory and precedes generation reservation.
+- Only outer `ParseContext` submission accepts parser authoring input; it returns `ParseResult<()>`
+  and retains the candidate privately without a public `SceneDraft` descriptor.
+- Central validation and session acceptance are mandatory and precede generation reservation.
+- Construction brand, proof, and prepared-root/handoff pairing cannot be bypassed by parser success.
 - `ValidatedScene` is immutable, owns one generation, and exposes no raw retained storage.
 - Failure or containment exposes no partial Scene and cannot be relabeled as success.
 - Edits publish a new generation transactionally and never mutate the source generation.
@@ -394,3 +418,18 @@ canonical record block and the current typed owner model remain unchanged. Core 
 Scene snapshot encoder through `ValidatedScene`; it retains current material, light and tangent
 semantics. [ADR 0026](0026-validation-snapshot-and-fuzz-gates.md#snapshot-schema-lifecycle) defines
 the exact source-closure and vector-set identity required for draft evidence.
+
+### 2026-11-02: Keep candidate ownership private across typed parser submission
+
+- Affected: `Decision / Mandatory Construction Sequence`, `Submission and Pending Owner Separation`,
+  interface ownership, risks, success metrics, and acceptance criteria.
+- Previous: the parser returned a non-owning `SceneDraft` for pairing with the session-held owner.
+- New: outer `ParseContext` submission and `Format::parse` return `ParseResult<()>`; the session
+  retains the candidate and reconciles parser acceptance before the existing core freeze/handoff.
+- Impact: this is a breaking parser API replacement. Single submission, sticky failures, central
+  validation, private construction brands, generation admission, and root/proof pairing still apply.
+- Review basis: the [typed-format/context design](../research/2026-11-02-typed-format-context-design.md),
+  including its independent feasibility review, and the construction/integration sources above.
+  This amendment records no compiler, runtime, performance, or release acceptance result.
+- Rationale: core still owns the same single-use construction and validated generation; import still
+  owns its sole outcome. Removing a redundant parser descriptor preserves that ownership decision.

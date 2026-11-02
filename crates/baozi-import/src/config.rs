@@ -330,6 +330,9 @@ impl ImportPreset {
 }
 
 /// Uncompiled import request with separate preset and caller precedence layers.
+///
+/// [`RegistrySnapshot::plan`](crate::RegistrySnapshot::plan) validates every submitted format
+/// target and compiles its options before the resulting plan can create a session or perform IO.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ImportRequest {
     preset: ImportRequestLayer,

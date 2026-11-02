@@ -1,21 +1,23 @@
 use crate::GltfFailure;
-use baozi_import::{ImportWorkClass, ParseResult, ParseScope};
+use baozi_import::{ImportWorkClass, ParseExecution, ParseResult};
 
 /// Interprets a number whose kind and complete JSON grammar were already admitted.
-pub(super) fn unsigned(ctx: &ParseScope<'_>, bytes: &[u8]) -> ParseResult<u64> {
-    let unsupported_length = || {
+pub(super) fn unsigned(ctx: &mut ParseExecution<'_, '_>, bytes: &[u8]) -> ParseResult<u64> {
+    let unsupported_length = |ctx: &mut ParseExecution<'_, '_>| {
         ctx.format_failure(GltfFailure::invalid_document(
             "glTF integer token exceeds the supported length domain",
         ))
     };
-    let length = i128::try_from(bytes.len()).map_err(|_| unsupported_length())?;
-    let exponent_bound = length.checked_add(21).ok_or_else(unsupported_length)?;
-    let out_of_range = || {
+    let length = i128::try_from(bytes.len()).map_err(|_| unsupported_length(ctx))?;
+    let exponent_bound = length
+        .checked_add(21)
+        .ok_or_else(|| unsupported_length(ctx))?;
+    let out_of_range = |ctx: &mut ParseExecution<'_, '_>| {
         ctx.format_failure(GltfFailure::invalid_document(
             "glTF integer exceeds the U64 domain",
         ))
     };
-    let fractional = || {
+    let fractional = |ctx: &mut ParseExecution<'_, '_>| {
         ctx.format_failure(GltfFailure::invalid_document(
             "glTF unsigned integer has a nonzero fractional part",
         ))
@@ -34,9 +36,10 @@ pub(super) fn unsigned(ctx: &ParseScope<'_>, bytes: &[u8]) -> ParseResult<u64> {
     let mut last_nonzero_digit = 0_i128;
     let mut chunk_start = 0;
 
+    let integer_work = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
     for chunk in bytes.chunks(4096) {
         ctx.poll()?;
-        ctx.with_work(ImportWorkClass::WorkUnits, chunk.len() as u64, |work| {
+        ctx.with_work(&integer_work, [chunk.len() as u64], |ctx, work| {
             for (offset, &byte) in chunk.iter().enumerate() {
                 match byte {
                     b'-' => {
@@ -94,9 +97,9 @@ pub(super) fn unsigned(ctx: &ParseScope<'_>, bytes: &[u8]) -> ParseResult<u64> {
     }
     if exponent_over_bound {
         return Err(if exponent_negative {
-            fractional()
+            fractional(ctx)
         } else {
-            out_of_range()
+            out_of_range(ctx)
         });
     }
     let signed_exponent = if exponent_negative {
@@ -108,13 +111,13 @@ pub(super) fn unsigned(ctx: &ParseScope<'_>, bytes: &[u8]) -> ParseResult<u64> {
     let shift = signed_exponent
         .checked_sub(fractional_digits)
         .and_then(|shift| shift.checked_add(trailing_zeros))
-        .ok_or_else(unsupported_length)?;
+        .ok_or_else(|| unsupported_length(ctx))?;
     if shift < 0 {
-        return Err(fractional());
+        return Err(fractional(ctx));
     }
     let significant_digits = last_nonzero_digit - first_digit + 1;
     if significant_digits > 20 || shift > 20 - significant_digits {
-        return Err(out_of_range());
+        return Err(out_of_range(ctx));
     }
 
     // Trimming bounds the second pass to 21 bytes and at most 19 appended zeros.
@@ -133,20 +136,20 @@ pub(super) fn unsigned(ctx: &ParseScope<'_>, bytes: &[u8]) -> ParseResult<u64> {
         })?;
     ctx.poll()?;
     ctx.with_work(
-        ImportWorkClass::WorkUnits,
-        accumulation_work,
-        |work| -> ParseResult<u64> {
+        &integer_work,
+        [accumulation_work],
+        |ctx, work| -> ParseResult<u64> {
             let mut value = 0_u64;
             for &byte in coefficient {
                 if byte != b'.' {
                     value = value
                         .checked_mul(10)
                         .and_then(|value| value.checked_add(u64::from(byte - b'0')))
-                        .ok_or_else(out_of_range)?;
+                        .ok_or_else(|| out_of_range(ctx))?;
                 }
             }
             for _ in 0..shift {
-                value = value.checked_mul(10).ok_or_else(out_of_range)?;
+                value = value.checked_mul(10).ok_or_else(|| out_of_range(ctx))?;
             }
             work.complete_all()?;
             Ok(value)
@@ -158,12 +161,12 @@ pub(super) fn unsigned(ctx: &ParseScope<'_>, bytes: &[u8]) -> ParseResult<u64> {
 mod tests {
     use crate::{GltfFailureCode, json_syntax};
     use baozi_import::{
-        DetectionOutcome, DetectionResult, DetectionScope, FormatDescriptor,
-        FormatFailureDetailValue, FormatImporter, FormatSelection, ImportCause,
-        ImportConfigOverlay, ImportDimension, ImportFailure, ImportOperationControl, ImportRequest,
-        ImportRequestLayer, LedgerCause, OptionCompileLimits, ParseResult, ParseScope, Probe,
-        ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder, ResourceLimits,
-        ResourceLimitsOverlay, SceneDraft, ScopeAbortCause, import_bytes,
+        DetectionOutcome, DetectionResult, DetectionScope, Format, FormatDescriptor,
+        FormatFailureDetailValue, FormatSelection, ImportCause, ImportConfigOverlay,
+        ImportDimension, ImportFailure, ImportOperationControl, ImportRequest, ImportRequestLayer,
+        LedgerCause, OptionCompileLimits, ParseResult, Probe, ReadConfidence, ReadHint,
+        RegistryBuildLimits, RegistryBuilder, ResourceLimits, ResourceLimitsOverlay,
+        ScopeAbortCause,
     };
     use baozi_io::AssetPath;
     use baozi_operation::{CancellationOrigin, CancellationSignal, ControlCause};
@@ -213,7 +216,19 @@ mod tests {
         interpret: bool,
     }
 
-    impl FormatImporter for InspectInteger {
+    impl Format for InspectInteger {
+        type Options = baozi_import::NoFormatOptions;
+
+        fn compile_defaults(
+            &self,
+            scope: &mut baozi_import::RegistryBuildScope<'_>,
+        ) -> std::result::Result<
+            baozi_import::CompiledOptions<Self::Options>,
+            baozi_import::OptionCompileError,
+        > {
+            Self::Options::compile_defaults(scope)
+        }
+
         fn descriptor(&self) -> FormatDescriptor {
             crate::format_descriptor()
         }
@@ -227,27 +242,32 @@ mod tests {
             Ok(DetectionOutcome::Match(ReadConfidence::Certain))
         }
 
-        fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-            let bytes = scope.primary_bytes();
-            let (_map, index) = json_syntax::admit(scope, bytes, 0, false)?;
-            let root = index.values.as_slice().first().expect("admitted root");
-            assert!(root.kind == json_syntax::ValueKind::Number);
-            self.inspection.admitted.store(true, Ordering::SeqCst);
-            if self.interpret {
-                self.inspection.interpreting.store(true, Ordering::SeqCst);
-                let result = super::super::decode::Decoder {
-                    ctx: scope,
-                    bytes,
-                    index: &index,
+        fn parse(
+            &self,
+            _: &Self::Options,
+            context: &mut baozi_import::ParseContext<'_>,
+        ) -> ParseResult<()> {
+            context.with_execution(|scope| {
+                let bytes = scope.primary_bytes();
+                let (_map, index) = json_syntax::admit(scope, bytes, 0, false)?;
+                let root = index.values.as_slice().first().expect("admitted root");
+                assert!(root.kind == json_syntax::ValueKind::Number);
+                self.inspection.admitted.store(true, Ordering::SeqCst);
+                if self.interpret {
+                    self.inspection.interpreting.store(true, Ordering::SeqCst);
+                    let result = super::super::decode::Decoder {
+                        bytes,
+                        index: &index,
+                    }
+                    .uint(0, scope);
+                    self.inspection.interpreting.store(false, Ordering::SeqCst);
+                    self.inspection.value.store(result?, Ordering::SeqCst);
+                    self.inspection.completed.store(true, Ordering::SeqCst);
                 }
-                .uint(0);
-                self.inspection.interpreting.store(false, Ordering::SeqCst);
-                self.inspection.value.store(result?, Ordering::SeqCst);
-                self.inspection.completed.store(true, Ordering::SeqCst);
-            }
-            // Stop without allocating format-failure evidence or charging unrelated work.
-            scope.enforce_resource_limit(INSPECTION_STOP, 1, 0)?;
-            unreachable!("the inspection-only resource bound must stop parsing")
+                // Stop without allocating format-failure evidence or charging unrelated work.
+                scope.enforce_resource_limit(INSPECTION_STOP, 1, 0)?;
+                unreachable!("the inspection-only resource bound must stop parsing")
+            })
         }
     }
 
@@ -266,30 +286,28 @@ mod tests {
             inspection: Arc::clone(&inspection),
             interpret,
         })?;
-        let request = registry
-            .freeze(RegistryBuildLimits::default())?
-            .compile_request(
-                &ImportRequest::from_layers(
-                    ImportRequestLayer::default(),
-                    ImportRequestLayer::new(
-                        ImportConfigOverlay::default()
-                            .with_resource_limits(ResourceLimitsOverlay::from_limits(limits))
-                            .with_format_selection(FormatSelection::Forced(
-                                baozi_import::authoring::FormatId::new(crate::FORMAT_ID)?,
-                            )),
-                    ),
+        let request = registry.freeze(RegistryBuildLimits::default())?.plan(
+            &ImportRequest::from_layers(
+                ImportRequestLayer::default(),
+                ImportRequestLayer::new(
+                    ImportConfigOverlay::default()
+                        .with_resource_limits(ResourceLimitsOverlay::from_limits(limits))
+                        .with_format_selection(FormatSelection::Forced(
+                            baozi_import::authoring::FormatId::new(crate::FORMAT_ID)?,
+                        )),
                 ),
-                OptionCompileLimits::default(),
-            )?;
-        let failure = import_bytes(
-            &request,
-            AssetPath::new("integer-inspection.gltf")?,
-            text.as_bytes(),
-            ImportOperationControl::default()
-                .with_cancellation(IntegerCancellation(Arc::clone(&inspection))),
-        )
-        .expect_err("integer inspection must never publish a scene")
-        .into_operation_failure()?;
+            ),
+            OptionCompileLimits::default(),
+        )?;
+        let failure = request
+            .read_bytes(
+                AssetPath::new("integer-inspection.gltf")?,
+                text.as_bytes(),
+                ImportOperationControl::default()
+                    .with_cancellation(IntegerCancellation(Arc::clone(&inspection))),
+            )
+            .expect_err("integer inspection must never publish a scene")
+            .into_operation_failure()?;
         assert_eq!(failure.ledger().current_live_bytes(), 0);
         assert_eq!(failure.ledger().active_reservations(), 0);
         assert_eq!(failure.ledger().committed_canonical_members(), 0);

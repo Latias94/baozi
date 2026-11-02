@@ -15,7 +15,9 @@ use baozi_import::authoring::{
     TextureBlendOperation, TextureChannel, TextureChannelSwizzle, TextureRole, TextureSourceKey,
     TextureStrength, TextureTransform, Vec2, Vec3,
 };
-use baozi_import::{ImportStorageClass, MeteredOrderedMap, MeteredVec, ParseScope};
+use baozi_import::{
+    ImportStorageClass, ImportWorkClass, MeteredOrderedMap, MeteredVec, ParseExecution,
+};
 use std::ops::Range;
 
 #[derive(Debug)]
@@ -51,7 +53,7 @@ impl MaterialContracts<'_> {
 
     pub(super) fn bindings(
         &self,
-        ctx: &ParseScope<'_>,
+        ctx: &mut ParseExecution<'_, '_>,
         material_index: usize,
     ) -> Result<&[BindingContract]> {
         let range = self.material(ctx, material_index)?.bindings.clone();
@@ -64,20 +66,19 @@ impl MaterialContracts<'_> {
 
     pub(super) fn material(
         &self,
-        ctx: &ParseScope<'_>,
+        _ctx: &mut ParseExecution<'_, '_>,
         material_index: usize,
     ) -> Result<&MaterialContract> {
         self.materials.get(&material_index).ok_or_else(|| {
-            gltf_parse_error(
-                ctx,
-                format_args!("glTF material contract is missing material {material_index}"),
-            )
+            gltf_parse_error(format_args!(
+                "glTF material contract is missing material {material_index}"
+            ))
         })
     }
 }
 
 pub(super) fn preflight<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     gltf: &crate::document::Document<'_>,
     closure: &ResourceClosure<'_>,
 ) -> Result<MaterialContracts<'scope>> {
@@ -96,9 +97,14 @@ pub(super) fn preflight<'scope>(
         "gltf-material-binding-contracts",
     );
 
+    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
     for (material_index, material) in root.materials.iter().enumerate() {
         poll_parser_loop(ctx, material_index)?;
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         let selected = closure
             .materials
             .as_slice()
@@ -114,13 +120,11 @@ pub(super) fn preflight<'scope>(
         }
         if material.unlit.is_some() && material.emissive_strength.is_some() {
             return Err(gltf_parse_error(
-                ctx,
                 "glTF KHR_materials_emissive_strength excludes KHR_materials_unlit",
             ));
         }
         if material.unlit.is_some() && (material.clearcoat.is_some() || material.sheen.is_some()) {
             return Err(gltf_parse_error(
-                ctx,
                 "glTF clearcoat and sheen exclude KHR_materials_unlit",
             ));
         }
@@ -147,7 +151,7 @@ pub(super) fn preflight<'scope>(
                 .as_ref()
                 .map(|coat| ClearcoatFactors::try_new(coat.factor, coat.roughness))
                 .transpose()
-                .map_err(|_| gltf_parse_error(ctx, "glTF clearcoat factors are invalid"))?,
+                .map_err(|_| gltf_parse_error("glTF clearcoat factors are invalid"))?,
         )
         .with_sheen(
             sheen
@@ -159,7 +163,7 @@ pub(super) fn preflight<'scope>(
                     )
                 })
                 .transpose()
-                .map_err(|_| gltf_parse_error(ctx, "glTF sheen factors are invalid"))?,
+                .map_err(|_| gltf_parse_error("glTF sheen factors are invalid"))?,
         );
         let binding_start = bindings.len();
         // Preserve core slot order, then append layer slots, including zero-valued layers.
@@ -223,17 +227,24 @@ pub(super) fn preflight<'scope>(
                 TextureRole::SheenRoughness,
             ),
         ] {
-            ctx.charge_work(1)?;
+            ctx.with_work(
+                &work_group,
+                [1],
+                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+            )?;
             if let Some(info) = info {
-                bindings.try_push(compile_texture_info_contract(
-                    ctx,
-                    gltf,
-                    material_index,
-                    source_key,
-                    role,
-                    info,
-                    extension_declared,
-                )?)?;
+                {
+                    let value = compile_texture_info_contract(
+                        ctx,
+                        gltf,
+                        material_index,
+                        source_key,
+                        role,
+                        info,
+                        extension_declared,
+                    )?;
+                    bindings.try_push(ctx, value)
+                }?;
             }
         }
         let contract = MaterialContract {
@@ -250,7 +261,10 @@ pub(super) fn preflight<'scope>(
                 .is_some_and(|coat| coat.normal_texture.is_some())
                 && material.normal_texture.is_none(),
         };
-        if materials.try_insert(material_index, contract)?.is_some() {
+        if materials
+            .try_insert(ctx, material_index, contract)?
+            .is_some()
+        {
             return Err(ContentError::from(GltfFailure::internal(
                 "glTF material contract index was inserted twice",
             )));
@@ -264,7 +278,7 @@ pub(super) fn preflight<'scope>(
 }
 
 fn compile_factors(
-    ctx: &ParseScope<'_>,
+    _ctx: &mut ParseExecution<'_, '_>,
     base: [f32; 4],
     metallic: f32,
     roughness: f32,
@@ -276,19 +290,17 @@ fn compile_factors(
         metallic,
         roughness,
     )
-    .map_err(|_| gltf_parse_error(ctx, "glTF material factors are outside canonical bounds"))?;
+    .map_err(|_| gltf_parse_error("glTF material factors are outside canonical bounds"))?;
     let emission =
         EmissionFactors::try_new(Vec3::new(emissive[0], emissive[1], emissive[2]), strength)
-            .map_err(|_| {
-                gltf_parse_error(ctx, "glTF material factors are outside canonical bounds")
-            })?;
+            .map_err(|_| gltf_parse_error("glTF material factors are outside canonical bounds"))?;
     Ok(MaterialFactors::empty()
         .with_emission(emission)
         .with_pbr_metallic_roughness(Some(pbr)))
 }
 
 fn compile_texture_info_contract(
-    ctx: &ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, '_>,
     document: &crate::document::Document<'_>,
     material_index: usize,
     source_key: &'static str,
@@ -299,12 +311,9 @@ fn compile_texture_info_contract(
     ctx.charge_work(1)?;
     let source_texture = info.index.value();
     if document.tables().textures.get(source_texture).is_none() {
-        return Err(gltf_parse_error(
-            ctx,
-            format_args!(
-                "glTF material {material_index} {source_key} texture {source_texture} is out of range"
-            ),
-        ));
+        return Err(gltf_parse_error(format_args!(
+            "glTF material {material_index} {source_key} texture {source_texture} is out of range"
+        )));
     }
     require_texture_transform_declaration(
         ctx,
@@ -328,7 +337,6 @@ fn compile_texture_info_contract(
             )
             .map_err(|error| {
                 gltf_parse_error(
-                    ctx,
                     format_args!(
                         "glTF material {material_index} {source_key} has invalid {KHR_TEXTURE_TRANSFORM}: {error}"
                     ),
@@ -340,7 +348,6 @@ fn compile_texture_info_contract(
     };
     let uv_set = u16::try_from(tex_coord).map_err(|_| {
         gltf_parse_error(
-            ctx,
             format_args!(
                 "glTF material {material_index} {source_key} texture coordinate set {tex_coord} is out of range"
             ),
@@ -397,9 +404,9 @@ fn compile_texture_info_contract(
         }
     };
     let channel_mapping = TextureChannelSwizzle::try_new(channels)
-        .map_err(|_| gltf_parse_error(ctx, "static glTF texture channel mapping is invalid"))?;
+        .map_err(|_| gltf_parse_error("static glTF texture channel mapping is invalid"))?;
     let strength = TextureStrength::try_new(scale)
-        .map_err(|_| gltf_parse_error(ctx, "glTF texture strength is not finite"))?;
+        .map_err(|_| gltf_parse_error("glTF texture strength is not finite"))?;
     Ok(BindingContract {
         source_texture,
         source_key,
@@ -413,25 +420,22 @@ fn compile_texture_info_contract(
 }
 
 fn require_texture_transform_declaration(
-    ctx: &ParseScope<'_>,
+    _ctx: &mut ParseExecution<'_, '_>,
     material_index: usize,
     source_key: &'static str,
     has_transform: bool,
     extension_declared: bool,
 ) -> Result<()> {
     if has_transform && !extension_declared {
-        return Err(gltf_parse_error(
-            ctx,
-            format_args!(
-                "glTF material {material_index} {source_key} uses {KHR_TEXTURE_TRANSFORM} without declaring it in extensionsUsed"
-            ),
-        ));
+        return Err(gltf_parse_error(format_args!(
+            "glTF material {material_index} {source_key} uses {KHR_TEXTURE_TRANSFORM} without declaring it in extensionsUsed"
+        )));
     }
     Ok(())
 }
 
 pub(super) fn add_authoring<'scope, 'document>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     storage: &mut AppearanceStorage<'scope>,
     gltf: &crate::document::Document<'document>,
     material: crate::document::Material<'document>,
@@ -445,9 +449,14 @@ pub(super) fn add_authoring<'scope, 'document>(
     let binding_offset =
         authoring_u32(ctx, storage.bindings.len(), "gltf-material-binding-offset")?;
 
+    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
     for (ordinal, binding) in contracts.bindings(ctx, material_index)?.iter().enumerate() {
         poll_parser_loop(ctx, ordinal)?;
-        ctx.charge_work(1)?;
+        ctx.with_work(
+            &work_group,
+            [1],
+            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
+        )?;
         if gltf.tables().textures.get(binding.source_texture).is_none() {
             return Err(ContentError::from(GltfFailure::internal(
                 "glTF compiled binding texture index is invalid",
@@ -488,7 +497,7 @@ pub(super) fn add_authoring<'scope, 'document>(
 }
 
 pub(super) fn add_default_authoring<'scope>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     storage: &mut AppearanceStorage<'scope>,
 ) -> Result<()> {
     ctx.charge_work(1)?;
@@ -518,7 +527,7 @@ pub(super) fn add_default_authoring<'scope>(
 }
 
 fn add_texture_binding<'scope, 'document>(
-    ctx: &'scope ParseScope<'_>,
+    ctx: &mut ParseExecution<'_, 'scope>,
     storage: &mut AppearanceStorage<'scope>,
     resolved_texture_uris: &ResolvedTextureUris<'_>,
     external_images: &ExternalImageResources<'scope>,
@@ -530,16 +539,14 @@ fn add_texture_binding<'scope, 'document>(
     let resolved_uri_len = match image.source() {
         ImageSource::Uri { uri, .. } if !is_data_uri(uri) => {
             let resolved = resolved_texture_uris.get(&image_index).ok_or_else(|| {
-                gltf_parse_error(
-                    ctx,
-                    format_args!("glTF texture resolution plan is missing image {image_index}"),
-                )
+                gltf_parse_error(format_args!(
+                    "glTF texture resolution plan is missing image {image_index}"
+                ))
             })?;
             if external_images.get(ctx, image_index)?.is_none() {
-                return Err(gltf_parse_error(
-                    ctx,
-                    format_args!("glTF texture resource is missing image {image_index}"),
-                ));
+                return Err(gltf_parse_error(format_args!(
+                    "glTF texture resource is missing image {image_index}"
+                )));
             }
             resolved.len()
         }
@@ -557,33 +564,39 @@ fn add_texture_binding<'scope, 'document>(
         .copied()
         .flatten()
         .ok_or_else(|| {
-            gltf_parse_error(
-                ctx,
-                format_args!("glTF texture {} is outside the closure", texture.index()),
-            )
+            gltf_parse_error(format_args!(
+                "glTF texture {} is outside the closure",
+                texture.index()
+            ))
         })?;
     let source_key = TextureSourceKey::try_new(contract.source_key)
-        .map_err(|_| gltf_parse_error(ctx, "static glTF texture source key is invalid"))?;
-    storage.bindings.try_push(BindingStorage {
-        texture: texture_id,
-        provenance: 0,
-        role: contract.role,
-        uv_set: contract.uv_set,
-        channel_mapping: contract.channel_mapping,
-        color_interpretation: contract.color_interpretation,
-        transform: contract.transform,
-        strength: contract.strength,
-        blend: TextureBlendOperation::Replace,
-        source_key,
-    })?;
+        .map_err(|_| gltf_parse_error("static glTF texture source key is invalid"))?;
+    storage.bindings.try_push(
+        ctx,
+        BindingStorage {
+            texture: texture_id,
+            provenance: 0,
+            role: contract.role,
+            uv_set: contract.uv_set,
+            channel_mapping: contract.channel_mapping,
+            color_interpretation: contract.color_interpretation,
+            transform: contract.transform,
+            strength: contract.strength,
+            blend: TextureBlendOperation::Replace,
+            source_key,
+        },
+    )?;
     Ok(())
 }
 
-fn map_alpha_mode(ctx: &ParseScope<'_>, material: &json::Material<'_>) -> Result<AlphaMode> {
+fn map_alpha_mode(
+    _ctx: &mut ParseExecution<'_, '_>,
+    material: &json::Material<'_>,
+) -> Result<AlphaMode> {
     match material.alpha_mode {
         crate::document::AlphaMode::Opaque => Ok(AlphaMode::Opaque),
         crate::document::AlphaMode::Mask => AlphaMode::mask(material.alpha_cutoff.unwrap_or(0.5))
-            .map_err(|_| gltf_parse_error(ctx, "glTF alpha cutoff is outside canonical bounds")),
+            .map_err(|_| gltf_parse_error("glTF alpha cutoff is outside canonical bounds")),
         crate::document::AlphaMode::Blend => Ok(AlphaMode::Blend),
     }
 }

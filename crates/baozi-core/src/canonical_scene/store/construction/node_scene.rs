@@ -31,7 +31,7 @@ use super::super::production::{
 };
 #[cfg(test)]
 use super::super::schema::NodeSceneOutcomeEvidenceSchema;
-use super::super::schema::{CanonicalBlockRef, SceneDirectorySchema};
+use super::super::schema::SceneDirectorySchema;
 use super::super::validation::NodeSceneValidationProof;
 use super::{ConstructionBrand, SceneConstructionStartError};
 #[cfg(test)]
@@ -70,7 +70,7 @@ mod publication;
 pub use publication::{
     NodeSceneFrozenGenerationRejection, NodeSceneHandoffPairingError, NodeSceneHandoffToken,
     NodeSceneLaneFreezePermit, NodeSceneLaneGenerationRejection, NodeSceneLaneJointCommit,
-    NodeScenePublishedSuccess, consume_node_scene_freeze_permit,
+    NodeScenePublishedSuccess, SceneParseOutcome, consume_node_scene_freeze_permit,
 };
 mod scratch;
 pub(in crate::canonical_scene::store) use scratch::{
@@ -284,16 +284,7 @@ where
     }
 }
 
-#[derive(Clone, Copy)]
-pub(in crate::canonical_scene::store) struct NodeSceneDraft {
-    brand: ConstructionBrand,
-    directory: CanonicalBlockRef<SceneDirectorySchema>,
-}
-
-/// Retained materialization owner awaiting its exact parser-facing descriptor.
-///
-/// The expected directory remains private to the owner so central validation can reject a
-/// descriptor from another construction before registering commitments or allocating scratch.
+/// Retained, centrally validated materialization owner awaiting the final parser outcome.
 #[must_use = "a pending node Scene draft owner must be centrally prepared or deliberately dropped"]
 #[cfg(test)]
 pub(in crate::canonical_scene::store) struct PendingNodeSceneDraft<
@@ -326,7 +317,6 @@ pub(in crate::canonical_scene::store) enum NodeSceneDraftBuild<
     U: ProgressUnit,
 {
     Draft {
-        draft: NodeSceneDraft,
         owner: PendingNodeSceneDraft<O, PP, U>,
     },
     Failure {

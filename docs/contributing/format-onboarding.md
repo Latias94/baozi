@@ -18,23 +18,38 @@ Use this checklist before adding or promoting a `baozi-format-*` crate.
 
 ## Parser Contract
 
-- Use the selected `ParseScope` resolver for every sidecar or dependency; format crates receive no
+- Implement `Format` with one concrete associated `Options` type. Compile bounded defaults once at
+  registry freeze; use `NoFormatOptions` for formats without options. A format with serialized
+  options declares its `FormatOptionSchema` and compiles the submitted layers against typed defaults
+  before any import session or IO begins.
+- Execute a frozen `ImportPlan` directly. The plan retains its registry and compiled invocations;
+  callers do not pair a prepared request with another importer.
+- Use the selected `ParseExecution` resolver for every sidecar or dependency; format crates receive no
   raw `AssetIo` or unrestricted path authority.
-- Charge input-derived work and reserve live storage through `ParseScope` before allocation, or
-  document and test a conservative allowance for an opaque trusted backend.
+- Enter `ParseContext::with_execution` to borrow work, storage and control. Bind repeated work groups
+  once outside their loops, admit work before each physical action, and record its actual completion
+  before the next observable boundary. Reserve live storage before allocation, or document and test
+  a conservative allowance for an opaque trusted backend. Poll at documented bounded frontiers and
+  before IO, allocation, external callbacks and success.
+- Metered containers and text/source cursors may retain session input, values and storage reservations.
+  Pass execution explicitly when they grow or perform accounted work; do not retain execution, a work
+  group, a permit or a mutable context inside them. Region-bound work cannot leave the closure.
 - Convert backend errors into crate-private synchronous evidence producers admitted through the
-  selected `ParseScope`, or bounded diagnostics/loss facts. `ParseScope` must copy every code, detail
+  selected `ParseExecution`, or bounded diagnostics/loss facts. It must copy every code, detail
   key, string value, and scalar into Baozi-owned evidence and destroy the producer before returning.
 - Never retain or publicly expose a backend error, source chain, concrete downcast target, callback,
   vtable, native handle, or plugin-owned destructor in an import outcome.
-- Evidence-producer code, detail, and destructor callbacks must not reenter `ParseScope` or a derived
+- Evidence-producer code, detail, and destructor callbacks must not reenter execution or a derived
   metered-storage capability. Reentry is a terminal descriptor-contract failure.
 - Propagate session-terminal capability-produced `ScopeAbort` unchanged; never catch it to continue
   or reclassify it as a format failure.
 - Continue after optional dependency unavailability only through the resolver's explicit non-abort
   outcome, after it records bounded diagnostic/loss evidence under descriptor and caller policy.
-- Return `SceneDraft` only. The import session owns central validation and publication of
-  `ValidatedScene`.
+- Stage authoring values in execution regions, then call outer `ParseContext::submit` with a
+  `StaticSceneBuilder`, or `submit_complete` with a complete `SceneAuthoringBatch`. Return
+  `ParseResult<()>`. The session retains the candidate and owns central validation, final control
+  reconciliation and publication of `ValidatedScene`. A submission followed by error or panic is
+  still a failed import; catching a terminal capability failure cannot restore success.
 - Do not expose backend parser types in public Baozi APIs.
 - Do not silently normalize coordinates, UVs, winding, materials, normals, or tangents.
 - Keep facade examples public-API-only. Examples must import from `baozi`, not from private format

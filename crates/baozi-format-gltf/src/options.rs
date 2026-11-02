@@ -1,13 +1,11 @@
 use crate::FORMAT_ID;
 use baozi_import::authoring::FormatId;
 use baozi_import::{
-    CompiledFormatOptions, FormatOptionCodec, FormatOptionEnvelope, FormatOptionEnvelopeError,
-    FormatOptionKey, FormatOptionLayers, FormatOptionPayload, FormatOptionReader,
-    FormatOptionSchema, FormatOptionSchemaId, FormatOptionSchemaKey, OptionCompileError,
-    OptionCompileScope, OptionRuntimeTypeKey, RegistryBuildScope,
+    CompiledOptions, FormatOptionEnvelope, FormatOptionEnvelopeError, FormatOptionLayers,
+    FormatOptionPayload, FormatOptionReader, FormatOptionSchema, FormatOptionSchemaId,
+    FormatOptionSchemaKey, OptionCompileError, OptionCompileScope, RegistryBuildScope,
 };
 use std::num::NonZeroU32;
-use std::sync::Arc;
 
 const PRESENCE_SCENE_SELECTION: u8 = 1 << 0;
 const KNOWN_PRESENCE_BITS: u8 = PRESENCE_SCENE_SELECTION;
@@ -52,15 +50,15 @@ impl GltfImportOptions {
     /// scene index adds four little-endian bytes, for a maximum of six payload bytes.
     /// `DocumentDefault` is present explicitly and therefore overrides a preset.
     pub fn to_envelope(self) -> Result<FormatOptionEnvelope, FormatOptionEnvelopeError> {
-        let key = gltf_import_option_key();
+        let schema = option_schema();
         match self.scene_selection {
-            GltfSceneSelection::DocumentDefault => key.envelope_from_canonical_payload([
+            GltfSceneSelection::DocumentDefault => schema.envelope_from_canonical_payload([
                 PRESENCE_SCENE_SELECTION,
                 SELECTION_DOCUMENT_DEFAULT,
             ]),
             GltfSceneSelection::SceneIndex(index) => {
                 let [a, b, c, d] = index.to_le_bytes();
-                key.envelope_from_canonical_payload([
+                schema.envelope_from_canonical_payload([
                     PRESENCE_SCENE_SELECTION,
                     SELECTION_SCENE_INDEX,
                     a,
@@ -73,16 +71,7 @@ impl GltfImportOptions {
     }
 }
 
-/// Returns the stable serialized and process-local key for glTF import options.
-pub fn gltf_import_option_key() -> FormatOptionKey<GltfImportOptions> {
-    FormatOptionKey::new(option_schema())
-}
-
-pub(crate) fn option_codec() -> Arc<dyn FormatOptionCodec> {
-    Arc::new(GltfOptionCodec)
-}
-
-fn option_schema() -> FormatOptionSchema {
+pub(crate) fn option_schema() -> FormatOptionSchema {
     FormatOptionSchema::new(
         FormatOptionSchemaKey::new(
             FormatId::new(FORMAT_ID).expect("static glTF format id must be valid"),
@@ -93,48 +82,26 @@ fn option_schema() -> FormatOptionSchema {
     )
 }
 
-#[derive(Debug)]
-struct GltfOptionCodec;
+pub(crate) fn compile_defaults(
+    scope: &mut RegistryBuildScope<'_>,
+) -> Result<CompiledOptions<GltfImportOptions>, OptionCompileError> {
+    scope.charge_work(1)?;
+    scope.finish(GltfImportOptions::default(), RETAINED_OPTION_BYTES)
+}
 
-impl FormatOptionCodec for GltfOptionCodec {
-    fn schema(&self) -> Option<FormatOptionSchema> {
-        Some(option_schema())
+pub(crate) fn compile_options(
+    scope: &mut OptionCompileScope<'_>,
+    defaults: &GltfImportOptions,
+    layers: FormatOptionLayers<'_>,
+) -> Result<CompiledOptions<GltfImportOptions>, OptionCompileError> {
+    let mut options = *defaults;
+    if let Some(payload) = layers.preset() {
+        apply_layer(scope, payload, &mut options)?;
     }
-
-    fn runtime_type_key(&self) -> OptionRuntimeTypeKey {
-        OptionRuntimeTypeKey::of::<GltfImportOptions>()
+    if let Some(payload) = layers.caller() {
+        apply_layer(scope, payload, &mut options)?;
     }
-
-    fn compile_defaults(
-        &self,
-        scope: &mut RegistryBuildScope<'_>,
-    ) -> Result<CompiledFormatOptions, OptionCompileError> {
-        scope.charge_work(1)?;
-        scope.finish(GltfImportOptions::default(), RETAINED_OPTION_BYTES)
-    }
-
-    fn compile_layers(
-        &self,
-        scope: &mut OptionCompileScope<'_>,
-        defaults: &CompiledFormatOptions,
-        layers: FormatOptionLayers<'_>,
-    ) -> Result<CompiledFormatOptions, OptionCompileError> {
-        let key = gltf_import_option_key();
-        let mut options = *defaults.downcast_ref(&key).ok_or_else(|| {
-            OptionCompileError::invalid_payload(
-                "default-type",
-                "registry supplied an incompatible glTF option default",
-            )
-        })?;
-
-        if let Some(payload) = layers.preset() {
-            apply_layer(scope, payload, &mut options)?;
-        }
-        if let Some(payload) = layers.caller() {
-            apply_layer(scope, payload, &mut options)?;
-        }
-        scope.finish(options, RETAINED_OPTION_BYTES)
-    }
+    scope.finish(options, RETAINED_OPTION_BYTES)
 }
 
 fn apply_layer(

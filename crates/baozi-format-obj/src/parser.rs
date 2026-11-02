@@ -1,9 +1,10 @@
-use crate::options::{ObjTextDecodingMode, obj_import_option_key};
+use crate::options::{ObjImportOptions, ObjTextDecodingMode};
 use crate::{ObjFailure, mesh_builder, mtl, obj};
 use baozi_import::{
-    ConformedTextInput, DiagnosticCode, DiagnosticSource, ImportWorkClass, ParseFailure,
-    ParseResult, ParseScope, SceneDraft, TextConformanceViolation, TextConformanceViolationKind,
-    TextDecodingMode, TextInputLine, TextInputOptions, TextInputRecoveryTracker,
+    ConformedTextInput, DiagnosticCode, DiagnosticSource, ImportWorkClass, ParseContext,
+    ParseExecution, ParseFailure, ParseResult, TextConformanceViolation,
+    TextConformanceViolationKind, TextDecodingMode, TextInputLine, TextInputOptions,
+    TextInputRecoveryTracker,
 };
 use std::ops::Range;
 
@@ -25,73 +26,72 @@ impl TokenScanScratch {
 }
 
 pub(crate) fn usize_amount(
-    scope: &ParseScope<'_>,
+    exec: &ParseExecution<'_, '_>,
     value: usize,
     resource: &'static str,
 ) -> ParseResult<u64> {
-    u64::try_from(value).map_err(|_| scope.allocation_failure(resource))
+    u64::try_from(value).map_err(|_| exec.allocation_failure(resource))
 }
 
-pub(crate) fn with_obj_text<'scope, 'session, 'source, T>(
-    scope: &'scope ParseScope<'session>,
+pub(crate) fn with_obj_text<'region, 'session, 'source, T>(
+    exec: &mut ParseExecution<'region, 'session>,
+    options: &ObjImportOptions,
     source: DiagnosticSource<'source>,
     resource: &'static str,
     action: impl for<'input> FnOnce(
-        &'input ConformedTextInput<'scope>,
+        &mut ParseExecution<'region, 'session>,
+        &'input ConformedTextInput<'session>,
         &mut TextInputRecoveryTracker<'input, 'session>,
     ) -> ParseResult<T>,
 ) -> ParseResult<T> {
-    with_obj_text_options(scope, source, obj_text_options(scope, resource)?, action)
+    with_obj_text_options(exec, source, obj_text_options(options, resource), action)
 }
 
-pub(crate) fn with_obj_dependency_text_limit<'scope, 'session, 'source, T>(
-    scope: &'scope ParseScope<'session>,
+pub(crate) fn with_obj_dependency_text_limit<'region, 'session, 'source, T>(
+    exec: &mut ParseExecution<'region, 'session>,
+    options: &ObjImportOptions,
     source: DiagnosticSource<'source>,
     resource: &'static str,
     effective_raw_limit: u64,
     action: impl for<'input> FnOnce(
-        &'input ConformedTextInput<'scope>,
+        &mut ParseExecution<'region, 'session>,
+        &'input ConformedTextInput<'session>,
         &mut TextInputRecoveryTracker<'input, 'session>,
     ) -> ParseResult<T>,
 ) -> ParseResult<T> {
-    let options = obj_text_options(scope, resource)?.with_raw_limit(resource, effective_raw_limit);
-    with_obj_text_options(scope, source, options, action)
+    let options = obj_text_options(options, resource).with_raw_limit(resource, effective_raw_limit);
+    with_obj_text_options(exec, source, options, action)
 }
 
-fn obj_text_options(
-    scope: &ParseScope<'_>,
-    resource: &'static str,
-) -> ParseResult<TextInputOptions> {
-    let selected_mode = scope
-        .options(&obj_import_option_key())?
-        .text_decoding_mode();
+fn obj_text_options(options: &ObjImportOptions, resource: &'static str) -> TextInputOptions {
+    let selected_mode = options.text_decoding_mode();
     let decoding_mode = match selected_mode {
         ObjTextDecodingMode::RejectInvalid => TextDecodingMode::RejectInvalid,
         ObjTextDecodingMode::ReplaceInvalidUtf8 => TextDecodingMode::ReplaceInvalidUtf8,
     };
-    Ok(TextInputOptions::new(decoding_mode, resource)
+    TextInputOptions::new(decoding_mode, resource)
         .with_decoded_resource("obj-decoded-utf8-bytes")
         .with_line_resource("line-bytes")
-        .with_line_index_resource("obj-line-index-bytes"))
+        .with_line_index_resource("obj-line-index-bytes")
 }
 
-fn with_obj_text_options<'scope, 'session, 'source, T>(
-    scope: &'scope ParseScope<'session>,
+fn with_obj_text_options<'region, 'session, 'source, T>(
+    exec: &mut ParseExecution<'region, 'session>,
     source: DiagnosticSource<'source>,
     options: TextInputOptions,
     action: impl for<'input> FnOnce(
-        &'input ConformedTextInput<'scope>,
+        &mut ParseExecution<'region, 'session>,
+        &'input ConformedTextInput<'session>,
         &mut TextInputRecoveryTracker<'input, 'session>,
     ) -> ParseResult<T>,
 ) -> ParseResult<T> {
-    scope
-        .with_conformed_text_input(source, options, action)?
-        .map_err(|violation| text_conformance_failure(scope, violation))
+    exec.with_conformed_text_input(source, options, action)?
+        .map_err(|violation| text_conformance_failure(exec, violation))
 }
 
-pub(crate) fn authorize_line_recoveries(
-    scope: &ParseScope<'_>,
-    recoveries: &mut TextInputRecoveryTracker<'_, '_>,
+pub(crate) fn authorize_line_recoveries<'session>(
+    exec: &mut ParseExecution<'_, 'session>,
+    recoveries: &mut TextInputRecoveryTracker<'_, 'session>,
     line: &TextInputLine<'_, '_>,
     allowed_value: Option<Range<usize>>,
     comment_start: Option<usize>,
@@ -105,7 +105,7 @@ pub(crate) fn authorize_line_recoveries(
         Some(comment_start) => {
             let decoded_comment_start =
                 decoded_start.checked_add(comment_start).ok_or_else(|| {
-                    scope.format_failure(ObjFailure::internal("comment-offset-overflow"))
+                    exec.format_failure(ObjFailure::internal("comment-offset-overflow"))
                 })?;
             line.replacements()
                 .partition_point(|replacement| replacement.decoded_start() < decoded_comment_start)
@@ -116,20 +116,21 @@ pub(crate) fn authorize_line_recoveries(
         let local_start = replacement
             .decoded_start()
             .checked_sub(decoded_start)
-            .ok_or_else(|| scope.format_failure(ObjFailure::internal("replacement-before-line")))?;
+            .ok_or_else(|| exec.format_failure(ObjFailure::internal("replacement-before-line")))?;
         let local_end = replacement
             .decoded_end()
             .checked_sub(decoded_start)
-            .ok_or_else(|| scope.format_failure(ObjFailure::internal("replacement-before-line")))?;
+            .ok_or_else(|| exec.format_failure(ObjFailure::internal("replacement-before-line")))?;
         let raw_range = replacement.raw_range();
         if allowed_value
             .as_ref()
             .is_some_and(|range| local_start >= range.start && local_end <= range.end)
         {
             let code = DiagnosticCode::new("obj.invalid_utf8_replaced").map_err(|_| {
-                scope.format_failure(ObjFailure::internal("invalid-recovery-diagnostic-code"))
+                exec.format_failure(ObjFailure::internal("invalid-recovery-diagnostic-code"))
             })?;
             recoveries.record_format_recovery(
+                exec,
                 replacement,
                 code,
                 format_args!(
@@ -141,98 +142,99 @@ pub(crate) fn authorize_line_recoveries(
             continue;
         }
 
-        return Err(invalid_utf8_failure(scope, raw_range.start()));
+        return Err(invalid_utf8_failure(exec, raw_range.start()));
     }
-    recoveries.discard_replacements(&line.replacements()[semantic_replacement_count..])?;
+    recoveries.discard_replacements(exec, &line.replacements()[semantic_replacement_count..])?;
     Ok(())
 }
 
 fn text_conformance_failure(
-    scope: &ParseScope<'_>,
+    exec: &mut ParseExecution<'_, '_>,
     violation: TextConformanceViolation,
 ) -> ParseFailure {
     let raw_offset = violation.raw_range().map(|range| range.start());
     match violation.kind() {
-        TextConformanceViolationKind::InvalidUtf8 => raw_offset.map_or_else(
-            || scope.format_failure(ObjFailure::internal("invalid-utf8-range-missing")),
-            |offset| invalid_utf8_failure(scope, offset),
-        ),
+        TextConformanceViolationKind::InvalidUtf8 => match raw_offset {
+            Some(offset) => invalid_utf8_failure(exec, offset),
+            None => exec.format_failure(ObjFailure::internal("invalid-utf8-range-missing")),
+        },
         TextConformanceViolationKind::UnsupportedNewline => document_byte_failure(
-            scope,
+            exec,
             raw_offset,
             "unsupported-newline",
             "unsupported-newline-range-missing",
         ),
         TextConformanceViolationKind::ForbiddenControl => document_byte_failure(
-            scope,
+            exec,
             raw_offset,
             "forbidden-control-character",
             "forbidden-control-range-missing",
         ),
         TextConformanceViolationKind::ForbiddenBom => document_byte_failure(
-            scope,
+            exec,
             raw_offset,
             "forbidden-bom",
             "forbidden-bom-range-missing",
         ),
         TextConformanceViolationKind::NonAscii => {
-            document_byte_failure(scope, raw_offset, "non-ascii", "non-ascii-range-missing")
+            document_byte_failure(exec, raw_offset, "non-ascii", "non-ascii-range-missing")
         }
         TextConformanceViolationKind::MissingTextProfile
         | TextConformanceViolationKind::UnsupportedSourceEncoding
         | TextConformanceViolationKind::DecodingModeNotDeclared => {
-            scope.format_failure(ObjFailure::internal("text-conformance-contract-violation"))
+            exec.format_failure(ObjFailure::internal("text-conformance-contract-violation"))
         }
-        _ => scope.format_failure(ObjFailure::internal("unknown-text-conformance-violation")),
+        _ => exec.format_failure(ObjFailure::internal("unknown-text-conformance-violation")),
     }
 }
 
 fn document_byte_failure(
-    scope: &ParseScope<'_>,
+    exec: &mut ParseExecution<'_, '_>,
     raw_offset: Option<u64>,
     reason: &'static str,
     missing_range_reason: &'static str,
 ) -> ParseFailure {
-    raw_offset.map_or_else(
-        || scope.format_failure(ObjFailure::internal(missing_range_reason)),
-        |offset| scope.format_failure(ObjFailure::invalid_document_byte(reason, offset)),
-    )
+    match raw_offset {
+        Some(offset) => exec.format_failure(ObjFailure::invalid_document_byte(reason, offset)),
+        None => exec.format_failure(ObjFailure::internal(missing_range_reason)),
+    }
 }
 
-pub(crate) fn scan_token_ranges(
-    scope: &ParseScope<'_>,
+pub(crate) fn scan_token_ranges<'region, 'session>(
+    exec: &mut ParseExecution<'region, 'session>,
     scratch: &mut TokenScanScratch,
     line: &str,
     resource: &'static str,
-    mut inspect: impl FnMut(usize, char) -> ParseResult<()>,
-    mut visit: impl FnMut(usize, usize) -> ParseResult<()>,
+    mut inspect: impl FnMut(&mut ParseExecution<'region, 'session>, usize, char) -> ParseResult<()>,
+    mut visit: impl FnMut(&mut ParseExecution<'region, 'session>, usize, usize) -> ParseResult<()>,
 ) -> ParseResult<Option<usize>> {
     let mut token_start = None;
     let mut chunk_start = 0usize;
+    let scan_work = exec.bind_work_group([ImportWorkClass::DecodeWork])?;
 
     while chunk_start < line.len() {
         let chunk_end = str_chunk_end(line, chunk_start);
         let mut scanned_len = 0usize;
-        scope.with_work(
-            ImportWorkClass::DecodeWork,
-            usize_amount(scope, chunk_end - chunk_start, resource)?,
-            |work| -> ParseResult<()> {
+        exec.with_work(
+            &scan_work,
+            [usize_amount(exec, chunk_end - chunk_start, resource)?],
+            |exec, work| -> ParseResult<()> {
                 for (relative, character) in line[chunk_start..chunk_end].char_indices() {
                     let offset =
-                        u16::try_from(relative).map_err(|_| scope.allocation_failure(resource))?;
+                        u16::try_from(relative).map_err(|_| exec.allocation_failure(resource))?;
                     let stored_offset = scratch
                         .offsets
                         .get_mut(scanned_len)
-                        .ok_or_else(|| scope.allocation_failure(resource))?;
+                        .ok_or_else(|| exec.allocation_failure(resource))?;
                     let stored_character = scratch
                         .characters
                         .get_mut(scanned_len)
-                        .ok_or_else(|| scope.allocation_failure(resource))?;
+                        .ok_or_else(|| exec.allocation_failure(resource))?;
                     *stored_offset = offset;
                     *stored_character = character;
                     scanned_len = scanned_len
                         .checked_add(1)
-                        .ok_or_else(|| scope.allocation_failure(resource))?;
+                        .ok_or_else(|| exec.allocation_failure(resource))?;
                 }
                 work.complete_all()
             },
@@ -247,17 +249,17 @@ pub(crate) fn scan_token_ranges(
         {
             let index = chunk_start
                 .checked_add(usize::from(relative))
-                .ok_or_else(|| scope.allocation_failure(resource))?;
+                .ok_or_else(|| exec.allocation_failure(resource))?;
             if character == '#' {
                 if let Some(start) = token_start.take() {
-                    visit(start, index)?;
+                    visit(exec, start, index)?;
                 }
                 return Ok(Some(index));
             }
-            inspect(index, character)?;
+            inspect(exec, index, character)?;
             if character.is_whitespace() {
                 if let Some(start) = token_start.take() {
-                    visit(start, index)?;
+                    visit(exec, start, index)?;
                 }
             } else if token_start.is_none() {
                 token_start = Some(index);
@@ -267,40 +269,48 @@ pub(crate) fn scan_token_ranges(
     }
 
     if let Some(start) = token_start {
-        visit(start, line.len())?;
+        visit(exec, start, line.len())?;
     }
     Ok(None)
 }
 
-pub(crate) fn read_obj(scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-    let parsed = with_obj_text(
-        scope,
-        scope.diagnostic_source(),
-        "obj-primary-text",
-        |text, recoveries| obj::parse(scope, text, recoveries),
-    )?;
-    let materials = mtl::load_libraries(scope, parsed.mtllibs.as_slice())?;
+pub(crate) fn read_obj(
+    options: &ObjImportOptions,
+    context: &mut ParseContext<'_>,
+) -> ParseResult<()> {
+    let parsed = context.with_execution(|exec| {
+        let source = exec.diagnostic_source();
+        with_obj_text(
+            exec,
+            options,
+            source,
+            "obj-primary-text",
+            |exec, text, recoveries| obj::parse(exec, text, recoveries),
+        )
+    })?;
+    let materials = context
+        .with_execution(|exec| mtl::load_libraries(exec, options, parsed.mtllibs.as_slice()))?;
 
-    mesh_builder::scene_from_parsed(scope, parsed, &materials)
+    mesh_builder::scene_from_parsed(context, parsed, &materials)
 }
 
-fn invalid_utf8_failure(scope: &ParseScope<'_>, raw_offset: u64) -> ParseFailure {
-    scope.format_failure(ObjFailure::invalid_utf8_at(raw_offset))
+fn invalid_utf8_failure(exec: &mut ParseExecution<'_, '_>, raw_offset: u64) -> ParseFailure {
+    exec.format_failure(ObjFailure::invalid_utf8_at(raw_offset))
 }
 
-pub(crate) fn max_text_value_bytes(scope: &ParseScope<'_>) -> usize {
-    scope.limits().max_string_bytes
+pub(crate) fn max_text_value_bytes(exec: &ParseExecution<'_, '_>) -> usize {
+    exec.limits().max_string_bytes
 }
 
 pub(crate) fn enforce_text_value_limit(
-    scope: &ParseScope<'_>,
+    exec: &ParseExecution<'_, '_>,
     bytes: usize,
     _resource: &'static str,
 ) -> ParseResult<()> {
-    scope.enforce_resource_limit(
+    exec.enforce_resource_limit(
         "string-bytes",
-        usize_amount(scope, bytes, "string-bytes")?,
-        usize_amount(scope, scope.limits().max_string_bytes, "string-bytes")?,
+        usize_amount(exec, bytes, "string-bytes")?,
+        usize_amount(exec, exec.limits().max_string_bytes, "string-bytes")?,
     )
 }
 

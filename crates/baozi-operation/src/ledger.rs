@@ -1116,6 +1116,25 @@ pub(crate) struct Ledger<O, P, D> {
 }
 
 /// Allocation-free scalar observation used only to prove scoped planning cleanup.
+/// Read-only storage evidence borrowed from one local invocation, with no shared ownership.
+#[derive(Clone, Copy)]
+pub(crate) struct LedgerStorageObservation<'op, P, D> {
+    state: &'op Mutex<LedgerState<P, D>>,
+    position: usize,
+    local: PhantomData<&'op std::cell::Cell<()>>,
+}
+
+impl<P, D> LedgerStorageObservation<'_, P, D> {
+    pub(crate) fn live_bytes(&self) -> u64 {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .dimensions[self.position]
+            .state
+            .current_live_bytes
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct LedgerPlanningState {
     current_live_bytes: u64,
@@ -2469,6 +2488,18 @@ where
             current_live_bytes: state.current_live_bytes - state.retained_output_bytes,
             active_reservations: state.active_reservations - state.retained_output_reservations,
         }
+    }
+
+    pub(crate) fn storage_observation(
+        &self,
+        dimension: D,
+    ) -> Result<LedgerStorageObservation<'_, P, D>, LedgerCause<D>> {
+        let position = self.bound_dimension_position(dimension)?;
+        Ok(LedgerStorageObservation {
+            state: &self.state,
+            position,
+            local: PhantomData,
+        })
     }
 
     pub(crate) fn try_grow_progress_evidence<T>(
