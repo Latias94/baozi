@@ -258,6 +258,13 @@ activation slot borrows. Actual import host migration, canonical caller binding 
 boundaries remain required. The accepted typed-context design now supplies the atomic P3/P4
 import cutover. Native timings and complete P3 acceptance are not established by this receipt.
 
+The subsequent [ordinary six-lane Windows measurement](../reviews/2026-11-02-windows-bound-execution-performance.md)
+shows repeated prepare 190.116 -> 130.041 ms, but grid import 379.162 -> 542.771 ms. All retained
+pairs pass the unchanged semantic checks. This fails integrated performance acceptance at the
+foundation checkpoint; retain immediate work truth and replace the remaining repeated import
+host/binding route, then remeasure. The large text regression's exact CPU attribution remains
+open; this result is not a reason to predeclare streaming or relax accounting semantics.
+
 Feasibility review approves the bounded P1 investigation and finds no established blocker to
 the direction. It does **not** approve a work-engine rewrite before the ownership/cadence sketch
 is reviewed. Evidence review verifies the complete Windows and six-lane Linux samples, both
