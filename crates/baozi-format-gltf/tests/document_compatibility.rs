@@ -221,7 +221,7 @@ fn sparse_mat4_replaces_only_the_second_bind_and_preserves_every_lane_bit() -> T
         "buffers": [{"byteLength": 228}],
         "bufferViews": [
             {"buffer": 0, "byteLength": 12},
-            {"buffer": 0, "byteOffset": 12, "byteLength": 4},
+            {"buffer": 0, "byteOffset": 12, "byteLength": 4, "byteStride": 4},
             {"buffer": 0, "byteOffset": 16, "byteLength": 16},
             {"buffer": 0, "byteOffset": 32, "byteLength": 128},
             {"buffer": 0, "byteOffset": 160, "byteLength": 1},

@@ -68,7 +68,7 @@ fn folded_quad_gltf() -> Result<Vec<u8>> {
             {"buffer": 0, "byteOffset": 0, "byteLength": 48, "target": 34962},
             {"buffer": 0, "byteOffset": 48, "byteLength": 12, "target": 34963},
             {"buffer": 0, "byteOffset": 60, "byteLength": 48, "target": 34962},
-            {"buffer": 0, "byteOffset": 108, "byteLength": 16, "target": 34962},
+            {"buffer": 0, "byteOffset": 108, "byteLength": 16, "byteStride": 4, "target": 34962},
             {"buffer": 0, "byteOffset": 124, "byteLength": 64, "target": 34962}
         ],
         "accessors": [
@@ -268,9 +268,9 @@ fn bound_folded_quad_io() -> Result<MemoryAssetIo> {
             {"buffer": 0, "byteOffset": 0, "byteLength": 48},
             {"buffer": 0, "byteOffset": 48, "byteLength": 12},
             {"buffer": 0, "byteOffset": 60, "byteLength": 48},
-            {"buffer": 0, "byteOffset": 108, "byteLength": 16},
+            {"buffer": 0, "byteOffset": 108, "byteLength": 16, "byteStride": 4},
             {"buffer": 0, "byteOffset": 124, "byteLength": 64},
-            {"buffer": 0, "byteOffset": 188, "byteLength": 16},
+            {"buffer": 0, "byteOffset": 188, "byteLength": 16, "byteStride": 4},
             {"buffer": 0, "byteOffset": 204, "byteLength": 64},
             {"buffer": 0, "byteOffset": 268, "byteLength": 384}
         ],

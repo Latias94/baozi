@@ -232,7 +232,7 @@ fn malformed_morph_contracts_fail_before_sidecar_io() -> TestResult<()> {
                 .remove("NORMAL");
         },
     ];
-    for mutate in mutations {
+    for (case, mutate) in mutations.iter().enumerate() {
         let (mut document, _) = fixture();
         document["buffers"][0]["uri"] = json!("unavailable.bin");
         mutate(&mut document);
@@ -242,7 +242,12 @@ fn malformed_morph_contracts_fail_before_sidecar_io() -> TestResult<()> {
             sidecar_options(),
         )?;
         let error = expected_error(result)?;
-        assert_gltf_failure(&error, GltfFailureCode::InvalidDocument, None)?;
+        let code = if (5..=7).contains(&case) {
+            GltfFailureCode::InvalidAccessor
+        } else {
+            GltfFailureCode::InvalidDocument
+        };
+        assert_gltf_failure(&error, code, None)?;
         assert_eq!(
             error
                 .ledger()
@@ -290,8 +295,8 @@ fn non_finite_delta_payloads_are_rejected() -> TestResult<()> {
     )?;
     assert_gltf_failure(
         &expected_error(result)?,
-        GltfFailureCode::InvalidDocument,
-        Some("finite VEC3"),
+        GltfFailureCode::InvalidAccessor,
+        Some("values must be finite"),
     )?;
     Ok(())
 }
@@ -307,7 +312,7 @@ fn morph_position_bounds_must_describe_the_decoded_values() -> TestResult<()> {
     )?;
     assert_gltf_failure(
         &expected_error(result)?,
-        GltfFailureCode::InvalidDocument,
+        GltfFailureCode::InvalidAccessor,
         Some("bounds do not match"),
     )?;
     Ok(())

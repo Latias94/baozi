@@ -1,5 +1,6 @@
 use crate::document::BufferSource;
 use crate::document::ImageSource;
+use crate::document::mesh_encoding::MeshAttributeUse;
 use crate::document::schema as json;
 use crate::document::{MagFilter, MinFilter, WrappingMode};
 use crate::document::{Mode, Semantic};
@@ -196,6 +197,7 @@ fn read_normalized_gltf<'scope>(ctx: &'scope ParseScope<'_>) -> Result<Normalize
         &resource_closure,
         &material_contracts,
     )?;
+    accessor::validate_vertex_views(ctx, &gltf, &resource_closure)?;
     let material_count = with_poll(ctx, || gltf.materials().count())?;
     let geometry_contracts = preflight_geometry_contracts(
         ctx,
@@ -1942,16 +1944,12 @@ fn validate_primitive_contract(
             )
         })?
         .value();
-    let position_count = validate_accessor(
+    let position_count = accessor::validate_mesh_attribute(
         ctx,
         gltf,
         position_index,
         owner,
-        "POSITION",
-        AccessorContract::vertex(
-            &[json::accessor::ComponentType::F32],
-            &[json::accessor::Type::Vec3],
-        ),
+        MeshAttributeUse::Base(Semantic::Positions),
     )?
     .count;
 
@@ -1972,52 +1970,13 @@ fn validate_primitive_contract(
                 .into());
             }
         };
-        let contract = match semantic {
-            json::mesh::Semantic::Normals => AccessorContract::vertex(
-                &[json::accessor::ComponentType::F32],
-                &[json::accessor::Type::Vec3],
-            ),
-            json::mesh::Semantic::Tangents => AccessorContract::vertex(
-                &[json::accessor::ComponentType::F32],
-                &[json::accessor::Type::Vec4],
-            ),
-            json::mesh::Semantic::TexCoords(_) => AccessorContract::vertex(
-                &[
-                    json::accessor::ComponentType::F32,
-                    json::accessor::ComponentType::U8,
-                    json::accessor::ComponentType::U16,
-                ],
-                &[json::accessor::Type::Vec2],
-            )
-            .require_normalized_integer(),
-            json::mesh::Semantic::Colors(_) => AccessorContract::vertex(
-                &[
-                    json::accessor::ComponentType::F32,
-                    json::accessor::ComponentType::U8,
-                    json::accessor::ComponentType::U16,
-                ],
-                &[json::accessor::Type::Vec3, json::accessor::Type::Vec4],
-            )
-            .require_normalized_integer(),
-            json::mesh::Semantic::Joints(_) => AccessorContract::vertex(
-                &[
-                    json::accessor::ComponentType::U8,
-                    json::accessor::ComponentType::U16,
-                ],
-                &[json::accessor::Type::Vec4],
-            ),
-            json::mesh::Semantic::Weights(_) => AccessorContract::vertex(
-                &[
-                    json::accessor::ComponentType::F32,
-                    json::accessor::ComponentType::U8,
-                    json::accessor::ComponentType::U16,
-                ],
-                &[json::accessor::Type::Vec4],
-            )
-            .require_normalized_integer(),
-            _ => continue,
-        };
-        let info = validate_accessor(ctx, gltf, accessor.value(), owner, label, contract)?;
+        let info = accessor::validate_mesh_attribute(
+            ctx,
+            gltf,
+            accessor.value(),
+            owner,
+            MeshAttributeUse::Base(*semantic),
+        )?;
         if info.count != position_count {
             return Err(ContentError::parse(
                 ctx.source(),
@@ -2407,6 +2366,12 @@ fn build_primitive_authoring<'scope>(
         .ok_or_else(|| ctx.allocation_failure("gltf-primitive-provenance-work"))?;
     ctx.charge_work(collection_work)?;
     pending_provenance.try_reserve(provenance_references)?;
+    // Four lanes bound every admitted stream; source bounds and decoding share one traversal.
+    let mesh_sample_work = to_u64(attribute_cell_count)
+        .checked_mul(4 * accessor::MESH_SAMPLE_WORK_PER_LANE)
+        .and_then(|work| work.checked_add(to_u64(contract.attribute_stream_count).checked_mul(9)?))
+        .and_then(|work| work.checked_add(contract.influences.work))
+        .ok_or_else(|| ctx.allocation_failure("gltf-mesh-sample-work"))?;
     let (output, non_unit_rows) = ctx.with_work_group(
         [
             (ImportWorkClass::Primitives, 1),
@@ -2422,7 +2387,7 @@ fn build_primitive_authoring<'scope>(
                 to_u64(attribute_cell_count),
             ),
             (ImportWorkClass::InfluenceCells, to_u64(contract.influences.cell_count)),
-            (ImportWorkClass::WorkUnits, contract.influences.work),
+            (ImportWorkClass::WorkUnits, mesh_sample_work),
         ],
         |work| -> Result<_> {
             let provenance_offset = provenance.len();
@@ -2438,49 +2403,28 @@ fn build_primitive_authoring<'scope>(
                 )?;
             }
             try_extend_provenance_unique(ctx, provenance, pending_provenance)?;
-            let positions = accessor::optional_vectors::<3>(ctx, primitive.get(&Semantic::Positions), buffers)?.map(|positions| {
-                    collect_f32_arrays(
-                        ctx,
-                        ImportStorageClass::SceneConstruction,
-                        contract.position_count,
-                        "gltf-position-values",
-                        positions,
-                    )
-                })
-            .transpose()?
-            .ok_or_else(|| {
-                ContentError::parse(
-                    ctx.source(),
-                    None,
-                    format_args!(
-                        "glTF mesh {} primitive {} POSITION accessor could not be read",
-                        mesh.index(),
-                        primitive.index()
-                    ),
+            let position_source = primitive.get(&Semantic::Positions)
+                .ok_or_else(|| gltf_parse_error(ctx, "glTF POSITION accessor disappeared after preflight"))?;
+            let positions = accessor::collect_mesh_attribute::<3>(
+                ctx, position_source, buffers, Semantic::Positions,
+                contract.position_count, "gltf-position-values",
+            )?;
+            let normals = primitive.get(&Semantic::Normals).map(|source| {
+                accessor::collect_mesh_attribute::<3>(
+                    ctx, source, buffers, Semantic::Normals,
+                    contract.position_count, "gltf-normal-values",
                 )
-            })?;
-            let normals = accessor::optional_vectors::<3>(ctx, primitive.get(&Semantic::Normals), buffers)?.map(|values| {
-                    collect_f32_arrays(
-                        ctx,
-                        ImportStorageClass::SceneConstruction,
-                        contract.position_count,
-                        "gltf-normal-values",
-                        values,
-                    )
-                })
+            })
             .transpose()?
             .unwrap_or_else(|| {
                 ctx.metered_vec(ImportStorageClass::SceneConstruction, "gltf-normal-values")
             });
-            let tangents = accessor::optional_vectors::<4>(ctx, primitive.get(&Semantic::Tangents), buffers)?.map(|values| {
-                    collect_f32_arrays(
-                        ctx,
-                        ImportStorageClass::SceneConstruction,
-                        contract.position_count,
-                        "gltf-tangent-values",
-                        values,
-                    )
-                })
+            let tangents = primitive.get(&Semantic::Tangents).map(|source| {
+                accessor::collect_mesh_attribute::<4>(
+                    ctx, source, buffers, Semantic::Tangents,
+                    contract.position_count, "gltf-tangent-values",
+                )
+            })
             .transpose()?
             .unwrap_or_else(|| {
                 ctx.metered_vec(ImportStorageClass::SceneConstruction, "gltf-tangent-values")
@@ -2547,15 +2491,12 @@ fn build_primitive_authoring<'scope>(
                 })?;
             }
             for set in 0..8 {
-                let Some(values) = accessor::optional_vectors::<2>(ctx, primitive.get(&Semantic::TexCoords(set)), buffers)?.map(|values| {
-                        collect_f32_arrays(
-                            ctx,
-                            ImportStorageClass::SceneConstruction,
-                            contract.position_count,
-                            "gltf-texcoord-values",
-                            values,
-                        )
-                    })
+                let Some(values) = primitive.get(&Semantic::TexCoords(set)).map(|source| {
+                    accessor::collect_mesh_attribute::<2>(
+                        ctx, source, buffers, Semantic::TexCoords(set),
+                        contract.position_count, "gltf-texcoord-values",
+                    )
+                })
                 .transpose()?
                 else {
                     break;
@@ -2577,20 +2518,19 @@ fn build_primitive_authoring<'scope>(
                 })?;
             }
             for set in 0..8 {
-                let Some(values) = with_poll(ctx, || {
-                    primitive.get(&Semantic::Colors(set)).map(|source| -> Result<_> {
-                        let values = accessor::bind(ctx, source, buffers)?.rgba().ok_or_else(|| {
-                            GltfFailure::invalid_accessor(Some(source.index()), "invalid color accessor shape")
-                        })?;
-                        collect_f32_arrays(
-                            ctx,
-                            ImportStorageClass::SceneConstruction,
-                            contract.position_count,
-                            "gltf-color-values",
-                            values,
-                        )
-                    })
-                })?
+                let Some(values) = primitive.get(&Semantic::Colors(set)).map(|source| -> Result<_> {
+                    match source.row().type_ {
+                        json::accessor::Type::Vec3 => accessor::collect_mesh_attribute::<3>(
+                            ctx, source, buffers, Semantic::Colors(set),
+                            contract.position_count, "gltf-color-values",
+                        ),
+                        json::accessor::Type::Vec4 => accessor::collect_mesh_attribute::<4>(
+                            ctx, source, buffers, Semantic::Colors(set),
+                            contract.position_count, "gltf-color-values",
+                        ),
+                        _ => Err(GltfFailure::invalid_accessor(Some(source.index()), "invalid color accessor shape").into()),
+                    }
+                })
                 .transpose()?
                 else {
                     break;
@@ -2694,39 +2634,6 @@ fn collect_indices<'scope>(
         return Err(gltf_parse_error(
             ctx,
             "glTF index stream differs from its admitted count",
-        ));
-    }
-    Ok(collected)
-}
-
-fn collect_f32_arrays<'scope, const N: usize>(
-    ctx: &'scope ParseScope<'_>,
-    class: ImportStorageClass,
-    expected: usize,
-    allocation: &'static str,
-    values: impl Iterator<Item = [f32; N]>,
-) -> Result<MeteredVec<'scope, f32>> {
-    let scalar_count = expected
-        .checked_mul(N)
-        .ok_or_else(|| ctx.allocation_failure(allocation))?;
-    let mut collected = ctx.metered_vec(class, allocation);
-    collected.try_reserve(scalar_count)?;
-    let mut count = 0usize;
-    for value in values {
-        poll_parser_loop(ctx, count)?;
-        if count == expected {
-            return Err(gltf_parse_error(
-                ctx,
-                format_args!("{allocation} produced more than {expected} values"),
-            ));
-        }
-        collected.try_extend_from_slice_reserved(&value)?;
-        count += 1;
-    }
-    if count != expected {
-        return Err(gltf_parse_error(
-            ctx,
-            format_args!("{allocation} produced {count} values, expected {expected}"),
         ));
     }
     Ok(collected)

@@ -123,7 +123,7 @@ fn mixed_modes_scene() -> Result<ValidatedScene> {
                 {"buffer": 0, "byteOffset": 144, "byteLength": 96},
                 {"buffer": 0, "byteOffset": 240, "byteLength": 48},
                 {"buffer": 0, "byteOffset": 288, "byteLength": 72},
-                {"buffer": 0, "byteOffset": 360, "byteLength": 24},
+                {"buffer": 0, "byteOffset": 360, "byteLength": 24, "byteStride": 4},
                 {"buffer": 0, "byteOffset": 384, "byteLength": 96},
                 {"buffer": 0, "byteOffset": 480, "byteLength": 12}
             ],

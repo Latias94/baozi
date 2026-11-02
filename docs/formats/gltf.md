@@ -72,6 +72,22 @@ document. Fresh target/sanitizer and archive-consumer evidence belongs to the
   with signed minima clamped before division. Accessor and influence reads share this rule;
   source influence rows are not renormalized. This stronger Baozi rule can differ by one ULP
   from a reference implementation without establishing a Khronos conformance defect there.
+- `KHR_mesh_quantization` admits additional base POSITION I8/U8/I16/U16, signed normalized
+  NORMAL/TANGENT, and signed or unnormalized unsigned TEXCOORD encodings. POSITION may be
+  normalized or unnormalized. Morph POSITION admits signed I8/I16 with either normalization;
+  morph NORMAL/TANGENT admit signed normalized I8/I16. All existing FLOAT encodings remain.
+  COLOR, JOINTS and WEIGHTS keep their core component profile. Both `extensionsUsed` and
+  `extensionsRequired` must declare quantization, even for a recognized extra encoding in an
+  omitted mesh. A used-only declaration is invalid even when all attributes happen to be FLOAT.
+  Canonical values remain F32; source integer widths do not reduce logical admission or change
+  node/skin/UV transform semantics. Quantized directions retain their decoded magnitudes.
+  Selected UV/color morphs remain outside the admitted morph profile.
+- Mesh bounds describe stored components, including normalized integer endpoints. Integer
+  bounds must be integral and in the source component range before any F32 conversion. Optional
+  bounds on supported streams, including JOINTS/WEIGHTS, are checked in their existing single
+  materialization traversal after sparse replacement. POSITION bounds are required; pure implicit
+  zero descriptors keep the exception above. No second full buffer pass or dequantization bake
+  is introduced.
 - Node hierarchy, node transforms, mesh binding, node-level skin binding, and camera binding.
 - Every declared node observes matrix/TRS mutual exclusion, even for an authored identity matrix
   or omitted node. Matrix-authored transforms require an exact affine bottom row, nonzero spatial
@@ -83,7 +99,7 @@ document. Fresh target/sanitizer and archive-consumer evidence belongs to the
   scenes are declared. Multiple declared scenes without a default require an explicit
   `GltfSceneSelection::SceneIndex`; no declaration-order fallback is applied.
 - Skins with joint node references, optional skeleton root, and optional inverse bind matrices.
-- F32 VEC3 POSITION/NORMAL/TANGENT morph deltas, with equal target width across morph-bearing
+- VEC3 POSITION/NORMAL/TANGENT morph deltas in the FLOAT or quantization encodings above, with equal target width across morph-bearing
   primitives, zero deltas for empty targets or primitives without targets, zero mesh defaults when
   weights are absent, and complete node weight overrides. Delta streams require the corresponding
   base semantic. Cardinality, finite values, ordered POSITION bounds, and morph-cell admission are
@@ -318,6 +334,11 @@ Repeated indices and degenerate elements remain present; import does not perform
 ### Sparse accessor validation and provenance
 
 The shared accessor preflight checks the base and both sparse layouts before dependency I/O.
+Short-component base vertex streams require explicit four-byte-multiple `byteStride`;
+distinct vertex accessors sharing one view also require a stride. The stride must cover an
+element and cannot exceed the view length. Each accessor's view-relative offset is four-byte
+aligned; view and accessor offsets independently retain component alignment. These vertex
+requirements do not pad tightly packed sparse replacement values or non-vertex streams.
 Sparse count must be positive and no greater than the logical accessor count. Sparse index encoding
 is U8, U16 or U32; both sparse views must omit `byteStride` and `target`, fit their declared buffers,
 and cover all replacements. Relative offsets and view offsets must each align to the corresponding

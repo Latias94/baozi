@@ -988,6 +988,7 @@ fn fixture_io() -> Result<MemoryAssetIo> {
         "sparse": {"count": 1, "indices": {"bufferView": sparse_indices, "componentType": 5121},
             "values": {"bufferView": sparse_values}}}));
     let joints_view = payload.view(&[0, 1, 0, 0, 0, 1, 0, 0]);
+    payload.views[joints_view]["byteStride"] = json!(4);
     let joints = payload.accessors.len();
     payload.accessors.push(
         json!({"bufferView": joints_view, "componentType": 5121, "type": "VEC4", "count": 2}),

@@ -14,6 +14,7 @@ fn document_with_color() -> TestResult<Value> {
     // Original positive control: source POSITION's zero/one F32 tuples are also legal RGB.
     let color = document["accessors"][0].clone();
     document["accessors"].as_array_mut().unwrap().push(color);
+    document["bufferViews"][0]["byteStride"] = json!(12);
     document["meshes"][0]["primitives"][0]["attributes"]["COLOR_0"] = json!(4);
     Ok(document)
 }
@@ -85,7 +86,12 @@ fn forbidden_reader_shapes_reject_before_missing_sidecars_can_mask_them() -> Tes
                 import_assets_result(source, [(source, bytes)], sidecar_options())?;
             assert!(diagnostics.is_empty());
             let failure = expected_error(result)?;
-            assert_gltf_failure(&failure, GltfFailureCode::InvalidDocument, Some(reason))?;
+            let code = if index == 3 {
+                GltfFailureCode::InvalidDocument
+            } else {
+                GltfFailureCode::InvalidAccessor
+            };
+            assert_gltf_failure(&failure, code, Some(reason))?;
             assert_eq!(
                 failure
                     .ledger()
@@ -118,9 +124,13 @@ fn aligned_near_u64_max_accessor_offset_rejects_with_checked_range_arithmetic() 
         let failure = expected_error(result)?;
         assert_gltf_failure(
             &failure,
-            GltfFailureCode::InvalidDocument,
+            if usize::BITS == 64 {
+                GltfFailureCode::InvalidAccessor
+            } else {
+                GltfFailureCode::InvalidDocument
+            },
             Some(if usize::BITS == 64 {
-                "POSITION accessor range overflow"
+                "range overflow"
             } else {
                 "glTF byte length, count or offset exceeds the host index domain"
             }),

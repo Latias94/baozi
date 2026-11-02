@@ -453,6 +453,9 @@ fn mixed_modes_keep_order_shared_accessors_deformation_and_source_owned_extras()
         document["bufferViews"].as_array_mut().unwrap().push(json!({
             "buffer": 0, "byteOffset": offset, "byteLength": bytes, "target": 34962
         }));
+        if component == 5121 {
+            document["bufferViews"][view]["byteStride"] = json!(4);
+        }
         document["accessors"].as_array_mut().unwrap().push(json!({
             "bufferView": view, "componentType": component, "count": 6, "type": kind
         }));

@@ -685,6 +685,7 @@ fn imports_packed_u16_texcoords_with_two_byte_aligned_view() -> TestResult<()> {
     document["accessors"][2]["normalized"] = serde_json::json!(true);
     document["bufferViews"][2]["byteOffset"] = serde_json::json!(74);
     document["bufferViews"][2]["byteLength"] = serde_json::json!(12);
+    document["bufferViews"][2]["byteStride"] = serde_json::json!(4);
     let mut binary = triangle_bin();
     for (bytes, value) in
         binary[74..86]
@@ -748,7 +749,7 @@ fn short_buffer_view_is_parse_error_before_reader() -> TestResult<()> {
     assert!(diagnostics.is_empty());
     assert_gltf_failure(
         &error,
-        GltfFailureCode::InvalidDocument,
+        GltfFailureCode::InvalidAccessor,
         Some("byteLength does not cover"),
     )?;
     Ok(())
@@ -840,7 +841,7 @@ fn float_accessor_must_not_be_normalized_before_reader() -> TestResult<()> {
     assert!(diagnostics.is_empty());
     assert_gltf_failure(
         &error,
-        GltfFailureCode::InvalidDocument,
+        GltfFailureCode::InvalidAccessor,
         Some("float POSITION accessor"),
     )?;
     Ok(())

@@ -19,6 +19,19 @@ pub(super) struct InfluenceRows<'scope> {
     pub(super) non_unit_rows: usize,
 }
 
+struct InfluenceSet<'bytes, J> {
+    joints: J,
+    weights: ReadWeights<'bytes>,
+    joint_bounds: accessor::MeshAccessorBounds<4>,
+    weight_bounds: accessor::MeshAccessorBounds<4>,
+}
+
+struct InfluenceWeights {
+    decoded: [f32; 4],
+    stored: [f32; 4],
+    unit_sum: u64,
+}
+
 pub(super) fn preflight(
     ctx: &ParseScope<'_>,
     primitive: &json::mesh::Primitive<'_>,
@@ -70,13 +83,14 @@ pub(super) fn preflight(
     };
     // Two accessor lookups per set, bounded construction, decoding/writing every lane,
     // and one stored offset per row. The row scratch heap sort takes at most 2R comparisons
-    // per level; the remaining 8R covers collection, adjacent checks and lane conversion.
+    // per level; the remaining 16R covers collection, adjacent checks, conversion and
+    // stored-domain extrema. Fixed per-set work also admits optional bounds setup/finalization.
     // Ordinary work scopes cannot nest during decoding.
     let lookup_levels = u64::from(usize::BITS - primitive.attributes.len().leading_zeros());
     let row_levels = u64::from(u32::BITS - row_width.leading_zeros());
     let work = u64::from(joints)
-        .checked_mul(2 * lookup_levels + 16)
-        .and_then(|work| work.checked_add(to_u64(cell_count).checked_mul(2 * row_levels + 8)?))
+        .checked_mul(2 * lookup_levels + 48)
+        .and_then(|work| work.checked_add(to_u64(cell_count).checked_mul(2 * row_levels + 16)?))
         .and_then(|work| work.checked_add(to_u64(offset_count)))
         .ok_or_else(|| ctx.allocation_failure("gltf-influence-work"))?;
     Ok(InfluenceContract {
@@ -131,10 +145,19 @@ pub(super) fn build_rows<'scope>(
         let weights = accessor::bind(ctx, weight_source, buffers)?
             .weights()
             .ok_or_else(|| gltf_parse_error(ctx, "glTF weight accessor encoding is invalid"))?;
+        let joint_bounds =
+            accessor::MeshAccessorBounds::new(joint_source.row(), joint_source.index(), false)?;
+        let weight_bounds =
+            accessor::MeshAccessorBounds::new(weight_source.row(), weight_source.index(), false)?;
         quantized &= !matches!(&weights, ReadWeights::F32(_));
         // MeteredVec restricts mutable slices to Copy elements. Each inline cell holds only
         // borrowed iterator state; interior mutation cannot replace or grow the metered table.
-        sets.try_push_reserved(RefCell::new((joints, weights)))?;
+        sets.try_push_reserved(RefCell::new(InfluenceSet {
+            joints,
+            weights,
+            joint_bounds,
+            weight_bounds,
+        }))?;
     }
 
     let mut nonzero_joints = try_vec_capacity(
@@ -154,13 +177,25 @@ pub(super) fn build_rows<'scope>(
             poll_parser_loop(ctx, influences.len())?;
             let (joints, weights, raw_sum) = {
                 let mut readers = readers.borrow_mut();
-                let joints = readers.0.next().ok_or_else(|| {
+                let joints = readers.joints.next().ok_or_else(|| {
                     gltf_parse_error(ctx, "glTF joint stream is shorter than its admitted count")
                 })?;
-                let (weights, raw_sum) = next_weights(&mut readers.1).ok_or_else(|| {
+                let weights = next_weights(&mut readers.weights).ok_or_else(|| {
                     gltf_parse_error(ctx, "glTF weight stream is shorter than its admitted count")
                 })?;
-                (joints, weights, raw_sum)
+                if weights
+                    .decoded
+                    .iter()
+                    .any(|weight| !weight.is_finite() || *weight < 0.0)
+                {
+                    return Err(gltf_parse_error(
+                        ctx,
+                        "glTF influence weights must be finite and non-negative",
+                    ));
+                }
+                readers.joint_bounds.observe_stored(joints.map(f32::from))?;
+                readers.weight_bounds.observe_stored(weights.stored)?;
+                (joints, weights.decoded, weights.unit_sum)
             };
             // The row width is in the u32 domain; summing u16 lanes cannot overflow u64.
             integer_sum += raw_sum;
@@ -168,12 +203,6 @@ pub(super) fn build_rows<'scope>(
             let source_base = (set as u32) * 4;
             for lane in 0..4 {
                 let weight = weights[lane];
-                if !weight.is_finite() || weight < 0.0 {
-                    return Err(gltf_parse_error(
-                        ctx,
-                        "glTF influence weights must be finite and non-negative",
-                    ));
-                }
                 float_sum += f64::from(weight);
                 if weight > 0.0 {
                     nonzero_joints.try_push_reserved(joints[lane])?;
@@ -221,12 +250,14 @@ pub(super) fn build_rows<'scope>(
     for (set, readers) in sets.as_slice().iter().enumerate() {
         poll_parser_loop(ctx, set)?;
         let mut readers = readers.borrow_mut();
-        if readers.0.next().is_some() || next_weights(&mut readers.1).is_some() {
+        if readers.joints.next().is_some() || next_weights(&mut readers.weights).is_some() {
             return Err(gltf_parse_error(
                 ctx,
                 "glTF influence stream exceeds its admitted count",
             ));
         }
+        readers.joint_bounds.finish()?;
+        readers.weight_bounds.finish()?;
     }
     if influences.len() != contract.cell_count || offsets.len() != contract.offset_count {
         return Err(GltfFailure::internal("glTF influence output differs from preflight").into());
@@ -239,23 +270,29 @@ pub(super) fn build_rows<'scope>(
 }
 
 /// Keep raw integer sums separate from the shared, single-rounding accessor conversion.
-fn next_weights(weights: &mut ReadWeights<'_>) -> Option<([f32; 4], u64)> {
+fn next_weights(weights: &mut ReadWeights<'_>) -> Option<InfluenceWeights> {
     match weights {
         ReadWeights::U8(values) => values.next().map(|values| {
             let sum = values.iter().map(|&value| u64::from(value) * 257).sum();
             // Raw carries component bits in U32; this variant's checked source width is U8.
-            (
-                values.map(|value| crate::document::read::normalized_u8(value as u8)),
-                sum,
-            )
+            InfluenceWeights {
+                decoded: values.map(|value| crate::document::read::normalized_u8(value as u8)),
+                stored: values.map(|value| value as f32),
+                unit_sum: sum,
+            }
         }),
         ReadWeights::U16(values) => values.next().map(|values| {
             let sum = values.iter().map(|&value| u64::from(value)).sum();
-            (
-                values.map(|value| crate::document::read::normalized_u16(value as u16)),
-                sum,
-            )
+            InfluenceWeights {
+                decoded: values.map(|value| crate::document::read::normalized_u16(value as u16)),
+                stored: values.map(|value| value as f32),
+                unit_sum: sum,
+            }
         }),
-        ReadWeights::F32(values) => values.next().map(|values| (values, 0)),
+        ReadWeights::F32(values) => values.next().map(|values| InfluenceWeights {
+            decoded: values,
+            stored: values,
+            unit_sum: 0,
+        }),
     }
 }

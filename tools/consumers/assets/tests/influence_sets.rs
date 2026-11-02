@@ -85,7 +85,7 @@ fn influence_sets_io(sets: usize, weights: &[[f32; 12]; 5]) -> Result<MemoryAsse
         accessors.push(json!({
             "bufferView": views.len(), "componentType": 5121, "count": 5, "type": "VEC4"
         }));
-        views.push(json!({"buffer": 0, "byteOffset": offset, "byteLength": 20}));
+        views.push(json!({"buffer": 0, "byteOffset": offset, "byteLength": 20, "byteStride": 4}));
 
         attributes[format!("WEIGHTS_{set}")] = json!(accessors.len());
         if set == 2 {

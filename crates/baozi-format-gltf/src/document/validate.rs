@@ -1,11 +1,14 @@
 //! Global schema/reference hooks. Selected interpretation remains in parser contracts.
 
+use super::mesh_encoding::{
+    MeshAttributeUse, MeshEncodingClass, mesh_attribute_encoding, optional_morph_semantic,
+};
 use super::schema::{self as s};
 use crate::GltfFailure;
 use baozi_import::{ImportStorageClass, ImportWorkClass, MeteredVec, ParseResult, ParseScope};
 
-pub(super) fn validate(ctx: &ParseScope<'_>, root: &s::Tables<'_>) -> ParseResult<()> {
-    extensions(ctx, root)?;
+pub(super) fn validate(ctx: &ParseScope<'_>, root: &s::Tables<'_>) -> ParseResult<bool> {
+    let has_quantization = extensions(ctx, root)?;
     let fail = |reason| ctx.format_failure(GltfFailure::invalid_document(reason));
     let reference = |id: s::Index, count: usize| -> ParseResult<()> {
         ctx.charge_work(1)?;
@@ -66,8 +69,15 @@ pub(super) fn validate(ctx: &ParseScope<'_>, root: &s::Tables<'_>) -> ParseResul
     for mesh in &root.meshes {
         for primitive in &mesh.primitives {
             ctx.charge_work(1)?;
-            for &id in primitive.attributes.values() {
+            for (&semantic, &id) in &primitive.attributes {
                 reference(id, root.accessors.len())?;
+                require_quantization(
+                    ctx,
+                    root,
+                    id,
+                    MeshAttributeUse::Base(semantic),
+                    has_quantization,
+                )?;
             }
             if let Some(id) = primitive.indices {
                 reference(id, root.accessors.len())?;
@@ -80,24 +90,44 @@ pub(super) fn validate(ctx: &ParseScope<'_>, root: &s::Tables<'_>) -> ParseResul
                 .get(&s::mesh::Semantic::Positions)
                 .ok_or_else(|| fail("glTF primitive requires POSITION"))?;
             let accessor = &root.accessors[position.value()];
-            if accessor.min.and_then(s::accessor::Bounds::vec3).is_none()
-                || accessor.max.and_then(s::accessor::Bounds::vec3).is_none()
+            if accessor.min.is_none_or(|bounds| bounds.len != 3)
+                || accessor.max.is_none_or(|bounds| bounds.len != 3)
             {
-                return Err(fail(
+                return Err(ctx.format_failure(GltfFailure::invalid_accessor(
+                    Some(position.value()),
                     "glTF POSITION accessor requires numeric VEC3 min and max",
-                ));
+                )));
             }
             if let Some(targets) = &primitive.targets {
                 for target in targets {
                     ctx.charge_work(1)?;
-                    for id in [target.positions, target.normals, target.tangents]
-                        .into_iter()
-                        .flatten()
-                    {
+                    for (semantic, id) in [
+                        (s::mesh::Semantic::Positions, target.positions),
+                        (s::mesh::Semantic::Normals, target.normals),
+                        (s::mesh::Semantic::Tangents, target.tangents),
+                    ] {
+                        let Some(id) = id else { continue };
                         reference(id, root.accessors.len())?;
+                        require_quantization(
+                            ctx,
+                            root,
+                            id,
+                            MeshAttributeUse::Morph(semantic),
+                            has_quantization,
+                        )?;
                     }
-                    for (_, id) in &target.other_attributes.0 {
+                    for (name, id) in &target.other_attributes.0 {
                         reference(*id, root.accessors.len())?;
+                        ctx.charge_work(name.len() as u64)?;
+                        if let Some(semantic) = optional_morph_semantic(name.as_str()) {
+                            require_quantization(
+                                ctx,
+                                root,
+                                *id,
+                                MeshAttributeUse::Morph(semantic),
+                                has_quantization,
+                            )?;
+                        }
                     }
                 }
             }
@@ -165,10 +195,33 @@ pub(super) fn validate(ctx: &ParseScope<'_>, root: &s::Tables<'_>) -> ParseResul
             }
         }
     }
+    Ok(has_quantization)
+}
+
+fn require_quantization(
+    ctx: &ParseScope<'_>,
+    root: &s::Tables<'_>,
+    id: s::Index,
+    usage: MeshAttributeUse,
+    has_quantization: bool,
+) -> ParseResult<()> {
+    let accessor = &root.accessors[id.value()];
+    if mesh_attribute_encoding(usage, accessor.component_type, accessor.normalized).is_some_and(
+        |encoding| {
+            encoding.class == MeshEncodingClass::Quantization
+                && encoding.dimensions.contains(&accessor.type_)
+        },
+    ) && !has_quantization
+    {
+        return Err(ctx.format_failure(GltfFailure::invalid_document(format_args!(
+            "integer {} accessor requires KHR_mesh_quantization in extensionsUsed and extensionsRequired",
+            usage.label(),
+        ))));
+    }
     Ok(())
 }
 
-fn extensions(ctx: &ParseScope<'_>, root: &s::Tables<'_>) -> ParseResult<()> {
+fn extensions(ctx: &ParseScope<'_>, root: &s::Tables<'_>) -> ParseResult<bool> {
     let used = sorted_names(ctx, &root.extensions_used, "extensionsUsed")?;
     let required = sorted_names(ctx, &root.extensions_required, "extensionsRequired")?;
     for &name in required.as_slice() {
@@ -187,7 +240,22 @@ fn extensions(ctx: &ParseScope<'_>, root: &s::Tables<'_>) -> ParseResult<()> {
             )));
         }
     }
-    Ok(())
+    ctx.charge_work(u64::from(usize::BITS) * 2)?;
+    let has_quantization = used
+        .as_slice()
+        .binary_search(&super::KHR_MESH_QUANTIZATION)
+        .is_ok();
+    if has_quantization
+        && required
+            .as_slice()
+            .binary_search(&super::KHR_MESH_QUANTIZATION)
+            .is_err()
+    {
+        return Err(ctx.format_failure(GltfFailure::invalid_document(
+            "KHR_mesh_quantization in extensionsUsed must also be in extensionsRequired",
+        )));
+    }
+    Ok(has_quantization)
 }
 
 fn sorted_names<'scope, 'document>(

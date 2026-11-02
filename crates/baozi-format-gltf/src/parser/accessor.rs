@@ -1,6 +1,11 @@
 //! Shared dense, sparse and implicit-zero accessor validation before typed materialization.
 
 use super::*;
+use crate::document::mesh_encoding::{
+    MeshAttributeUse, MeshEncodingClass, mesh_attribute_encoding,
+};
+
+pub(super) const MESH_SAMPLE_WORK_PER_LANE: u64 = 8;
 
 pub(super) fn bind<'bytes>(
     ctx: &ParseScope<'_>,
@@ -13,30 +18,6 @@ pub(super) fn bind<'bytes>(
             .and_then(Option::as_ref)
             .map(BufferData::as_slice)
     })?)
-}
-
-pub(super) fn vectors<'bytes, const N: usize>(
-    ctx: &ParseScope<'_>,
-    accessor: crate::document::Accessor<'_>,
-    buffers: &'bytes [Option<BufferData<'_>>],
-) -> Result<crate::document::read::Floats<'bytes, N>> {
-    bind(ctx, accessor, buffers)?.vectors().ok_or_else(|| {
-        GltfFailure::invalid_accessor(
-            Some(accessor.index()),
-            "accessor vector shape differs from its contract",
-        )
-        .into()
-    })
-}
-
-pub(super) fn optional_vectors<'bytes, const N: usize>(
-    ctx: &ParseScope<'_>,
-    accessor: Option<crate::document::Accessor<'_>>,
-    buffers: &'bytes [Option<BufferData<'_>>],
-) -> Result<Option<crate::document::read::Floats<'bytes, N>>> {
-    accessor
-        .map(|accessor| vectors(ctx, accessor, buffers))
-        .transpose()
 }
 
 #[derive(Clone, Copy)]
@@ -81,6 +62,327 @@ impl AccessorContract {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct AccessorInfo {
     pub(super) count: usize,
+}
+
+pub(super) fn validate_mesh_attribute(
+    ctx: &ParseScope<'_>,
+    gltf: &crate::document::Document<'_>,
+    index: usize,
+    owner: AccessorOwner,
+    usage: MeshAttributeUse,
+) -> Result<AccessorInfo> {
+    let label = usage.label();
+    let invalid = |reason| {
+        GltfFailure::invalid_accessor(
+            Some(index),
+            format_args!("{reason}; {label} accessor in {owner}"),
+        )
+    };
+    let accessor = gltf
+        .tables()
+        .accessors
+        .get(index)
+        .ok_or_else(|| invalid("mesh accessor reference is out of range"))?;
+    if accessor.component_type == json::accessor::ComponentType::F32 && accessor.normalized {
+        return Err(GltfFailure::invalid_accessor(
+            Some(index),
+            format_args!("{owner} float {label} accessor must not be normalized"),
+        )
+        .into());
+    }
+    let encoding = mesh_attribute_encoding(usage, accessor.component_type, accessor.normalized)
+        .filter(|encoding| encoding.dimensions.contains(&accessor.type_))
+        .ok_or_else(|| {
+            GltfFailure::invalid_accessor(
+                Some(index),
+                format_args!("{label} accessor type, component or normalization is unsupported"),
+            )
+        })?;
+    if encoding.class == MeshEncodingClass::Quantization && !gltf.has_mesh_quantization() {
+        return Err(invalid("mesh accessor requires KHR_mesh_quantization").into());
+    }
+    let semantic = usage.semantic();
+    validate_accessor_layout(
+        ctx,
+        gltf,
+        AccessorLayoutCheck {
+            index,
+            accessor,
+            component: accessor.component_type,
+            dimension: accessor.type_,
+            contract: AccessorContract::vertex(&[], encoding.dimensions),
+        },
+    )?;
+    ctx.charge_work(1 + component_count(accessor.type_) * 2)?;
+    let required = semantic == Semantic::Positions;
+    match accessor.type_ {
+        json::accessor::Type::Vec2 => {
+            MeshAccessorBounds::<2>::new(accessor, index, required)?;
+        }
+        json::accessor::Type::Vec3 => {
+            MeshAccessorBounds::<3>::new(accessor, index, required)?;
+        }
+        json::accessor::Type::Vec4 => {
+            MeshAccessorBounds::<4>::new(accessor, index, required)?;
+        }
+        _ => return Err(invalid("mesh accessor must use a vector shape").into()),
+    }
+    // Keep the established base-direction restriction separate from signed morph deltas.
+    if matches!(
+        usage,
+        MeshAttributeUse::Base(Semantic::Normals | Semantic::Tangents)
+    ) && accessor.buffer_view.is_none()
+        && accessor
+            .sparse
+            .as_ref()
+            .is_none_or(|sparse| sparse.count < accessor.count)
+    {
+        return Err(invalid("base direction accessor has implicit zero direction values").into());
+    }
+    let count = usize::try_from(accessor.count)
+        .map_err(|_| ctx.allocation_failure("gltf-accessor-count"))?;
+    Ok(AccessorInfo { count })
+}
+
+/// Bounds retain the stored component domain, including signed normalized endpoints.
+pub(super) struct MeshAccessorBounds<const N: usize> {
+    index: usize,
+    declared_min: Option<[f32; N]>,
+    declared_max: Option<[f32; N]>,
+    minimum: [f32; N],
+    maximum: [f32; N],
+    check_data: bool,
+}
+
+impl<const N: usize> MeshAccessorBounds<N> {
+    pub(super) fn new(
+        accessor: &json::accessor::Accessor,
+        index: usize,
+        required: bool,
+    ) -> Result<Self> {
+        use json::accessor::ComponentType as C;
+        let invalid = |reason| GltfFailure::invalid_accessor(Some(index), reason);
+        if required && (accessor.min.is_none() || accessor.max.is_none()) {
+            return Err(invalid("POSITION accessor requires min and max bounds").into());
+        }
+        let integer_range = match accessor.component_type {
+            C::I8 => Some((-128.0, 127.0)),
+            C::U8 => Some((0.0, 255.0)),
+            C::I16 => Some((-32768.0, 32767.0)),
+            C::U16 => Some((0.0, 65535.0)),
+            C::F32 => None,
+            C::U32 => return Err(invalid("U32 is not a mesh attribute encoding").into()),
+        };
+        let convert = |bounds: Option<json::accessor::Bounds>| -> Result<Option<[f32; N]>> {
+            let Some(bounds) = bounds else {
+                return Ok(None);
+            };
+            if bounds.len != N {
+                return Err(
+                    invalid("mesh accessor bounds lane count differs from its shape").into(),
+                );
+            }
+            let mut result = [0.0; N];
+            for (lane, output) in result.iter_mut().enumerate() {
+                let value = bounds.values[lane];
+                if !value.is_finite() {
+                    return Err(invalid("mesh accessor bounds must be finite").into());
+                }
+                if let Some((minimum, maximum)) = integer_range
+                    && (value.fract() != 0.0 || value < minimum || value > maximum)
+                {
+                    return Err(invalid(
+                        "mesh accessor bounds must be integral stored component values",
+                    )
+                    .into());
+                }
+                *output = value as f32;
+                if !output.is_finite() {
+                    return Err(invalid("mesh accessor bounds exceed the F32 domain").into());
+                }
+            }
+            Ok(Some(result))
+        };
+        let declared_min = convert(accessor.min)?;
+        let declared_max = convert(accessor.max)?;
+        if let Some((minimum, maximum)) = declared_min.zip(declared_max)
+            && (0..N).any(|lane| minimum[lane] > maximum[lane])
+        {
+            return Err(invalid("mesh accessor bounds must be ordered min <= max").into());
+        }
+        Ok(Self {
+            index,
+            declared_min,
+            declared_max,
+            minimum: [f32::INFINITY; N],
+            maximum: [f32::NEG_INFINITY; N],
+            // Core permits unrelated descriptor bounds for a wholly implicit zero accessor.
+            check_data: accessor.buffer_view.is_some() || accessor.sparse.is_some(),
+        })
+    }
+
+    pub(super) fn observe(&mut self, sample: &crate::document::read::Sample<N>) -> Result<()> {
+        if sample.decoded.iter().any(|value| !value.is_finite()) {
+            return Err(GltfFailure::invalid_accessor(
+                Some(self.index),
+                "mesh accessor values must be finite",
+            )
+            .into());
+        }
+        self.observe_stored(sample.stored)
+    }
+
+    pub(super) fn observe_stored(&mut self, stored: [f32; N]) -> Result<()> {
+        if stored.iter().any(|value| !value.is_finite()) {
+            return Err(GltfFailure::invalid_accessor(
+                Some(self.index),
+                "mesh accessor stored values must be finite",
+            )
+            .into());
+        }
+        if self.check_data && (self.declared_min.is_some() || self.declared_max.is_some()) {
+            for ((minimum, maximum), value) in
+                self.minimum.iter_mut().zip(&mut self.maximum).zip(stored)
+            {
+                *minimum = minimum.min(value);
+                *maximum = maximum.max(value);
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn finish(&self) -> Result<()> {
+        if self.check_data
+            && (self
+                .declared_min
+                .is_some_and(|minimum| minimum != self.minimum)
+                || self
+                    .declared_max
+                    .is_some_and(|maximum| maximum != self.maximum))
+        {
+            return Err(GltfFailure::invalid_accessor(
+                Some(self.index),
+                "mesh accessor bounds do not match the stored values",
+            )
+            .into());
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn collect_mesh_attribute<'scope, const N: usize>(
+    ctx: &'scope ParseScope<'_>,
+    accessor: crate::document::Accessor<'_>,
+    buffers: &[Option<BufferData<'_>>],
+    semantic: Semantic,
+    expected: usize,
+    allocation: &'static str,
+) -> Result<MeteredVec<'scope, f32>> {
+    let invalid = |reason| GltfFailure::invalid_accessor(Some(accessor.index()), reason);
+    let mut bounds = MeshAccessorBounds::<N>::new(
+        accessor.row(),
+        accessor.index(),
+        semantic == Semantic::Positions,
+    )?;
+    let values = bind(ctx, accessor, buffers)?
+        .samples::<N>()
+        .ok_or_else(|| invalid("mesh accessor shape differs from its checked contract"))?;
+    let pad_alpha = matches!(semantic, Semantic::Colors(_)) && N == 3;
+    let scalar_count = expected
+        .checked_mul(N + usize::from(pad_alpha))
+        .ok_or_else(|| ctx.allocation_failure(allocation))?;
+    let mut output = try_vec_capacity(
+        ctx,
+        ImportStorageClass::SceneConstruction,
+        scalar_count,
+        allocation,
+    )?;
+    let mut count = 0;
+    for sample in values {
+        poll_parser_loop(ctx, count)?;
+        if count == expected {
+            return Err(invalid("mesh accessor exceeds its admitted count").into());
+        }
+        bounds.observe(&sample)?;
+        if semantic == Semantic::Tangents
+            && sample
+                .decoded
+                .get(3)
+                .is_none_or(|&sign| sign != -1.0 && sign != 1.0)
+        {
+            return Err(invalid("TANGENT W must be -1 or +1").into());
+        }
+        output.try_extend_from_slice_reserved(&sample.decoded)?;
+        if pad_alpha {
+            output.try_push_reserved(1.0)?;
+        }
+        count += 1;
+    }
+    if count != expected {
+        return Err(invalid("mesh accessor differs from its admitted count").into());
+    }
+    bounds.finish()?;
+    Ok(output)
+}
+
+/// Track distinct selected vertex accessors per view without comparing accessor pairs.
+pub(super) fn validate_vertex_views(
+    ctx: &ParseScope<'_>,
+    document: &crate::document::Document<'_>,
+    closure: &ResourceClosure<'_>,
+) -> Result<()> {
+    let root = document.tables();
+    ctx.charge_work(to_u64(root.buffer_views.len()))?;
+    let mut first_accessor = try_vec_filled(
+        ctx,
+        ImportStorageClass::FormatNormalization,
+        root.buffer_views.len(),
+        None,
+        "gltf-vertex-view-accessors",
+    )?;
+    let mut visit = |id: json::Index| -> Result<()> {
+        ctx.charge_work(1)?;
+        let index = id.value();
+        let accessor = &root.accessors[index];
+        let Some(view) = accessor.buffer_view else {
+            return Ok(());
+        };
+        if root.buffer_views[view.value()].byte_stride.is_some() {
+            return Ok(());
+        }
+        let first = &mut first_accessor.as_mut_slice()[view.value()];
+        if first.is_some_and(|previous| previous != index) {
+            return Err(GltfFailure::invalid_accessor(
+                Some(index),
+                "distinct vertex accessors sharing a bufferView require byteStride",
+            )
+            .into());
+        }
+        *first = Some(index);
+        Ok(())
+    };
+    for (index, mesh) in root.meshes.iter().enumerate() {
+        ctx.charge_work(1)?;
+        if !closure.meshes.as_slice()[index] {
+            continue;
+        }
+        for primitive in &mesh.primitives {
+            ctx.charge_work(1)?;
+            for &id in primitive.attributes.values() {
+                visit(id)?;
+            }
+            for target in primitive.targets.iter().flatten() {
+                ctx.charge_work(1)?;
+                for id in [target.positions, target.normals, target.tangents]
+                    .into_iter()
+                    .flatten()
+                {
+                    visit(id)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn validate_accessor(
@@ -138,30 +440,11 @@ pub(super) fn validate_accessor(
         AccessorLayoutCheck {
             index: accessor_index,
             accessor,
-            owner,
-            label,
             component,
             dimension,
             contract,
         },
     )?;
-
-    // Unreplaced elements without a base view are zero, which cannot be unit directions.
-    // Morph NORMAL/TANGENT deltas use a separate contract and may legitimately be zero.
-    if matches!(owner, AccessorOwner::Primitive { .. })
-        && matches!(label, "NORMAL" | "TANGENT")
-        && accessor.buffer_view.is_none()
-        && accessor
-            .sparse
-            .as_ref()
-            .is_none_or(|sparse| sparse.count < accessor.count)
-    {
-        return Err(GltfFailure::invalid_accessor(
-            Some(accessor_index),
-            format_args!("{owner} {label} accessor has implicit zero direction values"),
-        )
-        .into());
-    }
 
     let count = usize::try_from(accessor.count)
         .map_err(|_| ctx.allocation_failure("gltf-accessor-count"))?;
@@ -172,8 +455,6 @@ pub(super) fn validate_accessor(
 struct AccessorLayoutCheck<'a> {
     index: usize,
     accessor: &'a json::accessor::Accessor,
-    owner: AccessorOwner,
-    label: &'static str,
     component: json::accessor::ComponentType,
     dimension: json::accessor::Type,
     contract: AccessorContract,
@@ -200,7 +481,7 @@ fn validate_accessor_layout(
         .ok_or_else(|| ctx.allocation_failure("gltf-accessor-decoded-size"))?;
 
     if check.accessor.buffer_view.is_some() {
-        validate_base_layout(ctx, gltf, check, component_size, element_size)?;
+        validate_base_layout(gltf, check, component_size, element_size)?;
     } else if check.accessor.byte_offset.is_some() {
         return Err(invalid("accessor without bufferView must not define byteOffset").into());
     }
@@ -288,56 +569,44 @@ fn checked_buffer_view<'a>(
 }
 
 fn validate_base_layout(
-    ctx: &ParseScope<'_>,
     gltf: &crate::document::Document<'_>,
     check: AccessorLayoutCheck<'_>,
     component_size: u64,
     element_size: u64,
 ) -> Result<()> {
+    let invalid = |reason| GltfFailure::invalid_accessor(Some(check.index), reason);
     let view = check.accessor.buffer_view.ok_or_else(|| {
         GltfFailure::internal("base layout validation requires an accessor bufferView")
     })?;
     let buffer_view = checked_buffer_view(gltf, check, view.value())?;
     let stride = match buffer_view.byte_stride {
         Some(_) if !check.contract.allow_stride => {
-            return Err(ContentError::parse(
-                ctx.source(),
-                None,
-                format_args!(
-                    "{} {} accessor uses byteStride where it is unsupported",
-                    check.owner, check.label
-                ),
-            ));
-        }
-        Some(stride) if !stride.is_multiple_of(4) => {
-            return Err(GltfFailure::invalid_accessor(
-                Some(check.index),
-                "accessor byteStride must be a multiple of four",
+            return Err(GltfFailure::invalid_document(
+                "accessor uses byteStride where it is unsupported",
             )
             .into());
         }
+        Some(stride) if !(4..=252).contains(&stride) || !stride.is_multiple_of(4) => {
+            return Err(
+                invalid("accessor byteStride must be a multiple of four in 4..=252").into(),
+            );
+        }
         Some(stride) => stride as u64,
+        None if check.contract.allow_stride && !component_size.is_multiple_of(4) => {
+            return Err(
+                invalid("short-component vertex accessors require explicit byteStride").into(),
+            );
+        }
         None => element_size,
     };
     if stride < element_size {
-        return Err(ContentError::parse(
-            ctx.source(),
-            None,
-            format_args!(
-                "{} {} byteStride is smaller than the accessor element size",
-                check.owner, check.label
-            ),
-        ));
+        return Err(invalid("byteStride is smaller than the accessor element size").into());
+    }
+    if stride > buffer_view.byte_length {
+        return Err(invalid("accessor byteStride exceeds bufferView byteLength").into());
     }
     if !stride.is_multiple_of(component_size) {
-        return Err(ContentError::parse(
-            ctx.source(),
-            None,
-            format_args!(
-                "{} {} byteStride is not aligned to component size",
-                check.owner, check.label
-            ),
-        ));
+        return Err(invalid("byteStride is not aligned to component size").into());
     }
 
     let view_offset = buffer_view.byte_offset.map_or(0, |offset| offset);
@@ -353,38 +622,16 @@ fn validate_base_layout(
     if !accessor_offset.is_multiple_of(component_size)
         || !view_offset.is_multiple_of(component_size)
     {
-        return Err(ContentError::parse(
-            ctx.source(),
-            None,
-            format_args!(
-                "{} {} byte offset is not aligned to component size",
-                check.owner, check.label
-            ),
-        ));
+        return Err(invalid("byte offset is not aligned to component size").into());
     }
 
-    let required =
-        required_accessor_bytes(check.accessor.count, element_size, stride).ok_or_else(|| {
-            gltf_parse_error(
-                ctx,
-                format_args!("{} {} byte range overflow", check.owner, check.label),
-            )
-        })?;
-    let accessor_end = accessor_offset.checked_add(required).ok_or_else(|| {
-        gltf_parse_error(
-            ctx,
-            format_args!("{} {} accessor range overflow", check.owner, check.label),
-        )
-    })?;
+    let required = required_accessor_bytes(check.accessor.count, element_size, stride)
+        .ok_or_else(|| invalid("accessor byte range overflow"))?;
+    let accessor_end = accessor_offset
+        .checked_add(required)
+        .ok_or_else(|| invalid("accessor range overflow"))?;
     if accessor_end > view_length {
-        return Err(ContentError::parse(
-            ctx.source(),
-            None,
-            format_args!(
-                "{} {} bufferView byteLength does not cover accessor data",
-                check.owner, check.label
-            ),
-        ));
+        return Err(invalid("bufferView byteLength does not cover accessor data").into());
     }
 
     Ok(())

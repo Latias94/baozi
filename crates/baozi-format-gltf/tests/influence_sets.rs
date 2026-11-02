@@ -78,7 +78,7 @@ fn two_set_triangle() -> TestResult<(Value, Vec<u8>)> {
     }
     document["buffers"][0]["byteLength"] = json!(binary.len());
     document["bufferViews"].as_array_mut().unwrap().extend([
-        json!({"buffer": 0, "byteOffset": 116, "byteLength": 24, "target": 34962}),
+        json!({"buffer": 0, "byteOffset": 116, "byteLength": 24, "byteStride": 8, "target": 34962}),
         json!({"buffer": 0, "byteOffset": 140, "byteLength": 48, "target": 34962}),
     ]);
     document["accessors"].as_array_mut().unwrap().extend([
@@ -233,7 +233,7 @@ fn three_and_seventeen_sets_retain_all_lanes_in_numeric_set_order() -> TestResul
                 .push(json!(node));
         }
         document["bufferViews"].as_array_mut().unwrap().extend([
-            json!({"buffer": 0, "byteOffset": 188, "byteLength": 24, "target": 34962}),
+            json!({"buffer": 0, "byteOffset": 188, "byteLength": 24, "byteStride": 8, "target": 34962}),
             json!({"buffer": 0, "byteOffset": 212, "byteLength": 48, "target": 34962}),
         ]);
         document["accessors"].as_array_mut().unwrap().extend([
@@ -246,7 +246,7 @@ fn three_and_seventeen_sets_retain_all_lanes_in_numeric_set_order() -> TestResul
             // The remaining sets share zero accessors; their lanes must still be retained.
             binary.resize(332, 0);
             document["bufferViews"].as_array_mut().unwrap().extend([
-                json!({"buffer": 0, "byteOffset": 260, "byteLength": 24, "target": 34962}),
+                json!({"buffer": 0, "byteOffset": 260, "byteLength": 24, "byteStride": 8, "target": 34962}),
                 json!({"buffer": 0, "byteOffset": 284, "byteLength": 48, "target": 34962}),
             ]);
             document["accessors"].as_array_mut().unwrap().extend([
@@ -371,6 +371,7 @@ fn sparse_normalized_later_sets_retain_values_and_complete_typed_provenance() ->
         document["accessors"][3]["componentType"] = json!(low_component);
         document["accessors"][3]["normalized"] = json!(true);
         document["bufferViews"][3]["byteLength"] = json!(low_bytes.len());
+        document["bufferViews"][3]["byteStride"] = json!(if low_component == 5121 { 4 } else { 8 });
 
         let indices = vec![0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 1, 2];
         let mut values = vec![0xa5; 8];
@@ -621,31 +622,31 @@ fn later_set_count_type_and_normalization_failures_precede_dependency_io() -> Te
     for (accessor, field, value, code) in [
         (4, "count", json!(2), GltfFailureCode::InvalidDocument),
         (5, "count", json!(2), GltfFailureCode::InvalidDocument),
-        (4, "type", json!("VEC3"), GltfFailureCode::InvalidDocument),
-        (5, "type", json!("VEC3"), GltfFailureCode::InvalidDocument),
+        (4, "type", json!("VEC3"), GltfFailureCode::InvalidAccessor),
+        (5, "type", json!("VEC3"), GltfFailureCode::InvalidAccessor),
         (
             4,
             "componentType",
             json!(5125),
-            GltfFailureCode::InvalidDocument,
+            GltfFailureCode::InvalidAccessor,
         ),
         (
             5,
             "componentType",
             json!(5122),
-            GltfFailureCode::InvalidDocument,
+            GltfFailureCode::InvalidAccessor,
         ),
         (
             5,
             "componentType",
             json!(5121),
-            GltfFailureCode::InvalidDocument,
+            GltfFailureCode::InvalidAccessor,
         ),
         (
             5,
             "normalized",
             json!(true),
-            GltfFailureCode::InvalidDocument,
+            GltfFailureCode::InvalidAccessor,
         ),
         (
             4,
@@ -684,21 +685,21 @@ fn later_set_layout_failures_precede_dependency_io() -> TestResult<()> {
             4,
             "byteStride",
             4,
-            GltfFailureCode::InvalidDocument,
+            GltfFailureCode::InvalidAccessor,
         ),
         (
             "bufferViews",
             5,
             "byteStride",
             20,
-            GltfFailureCode::InvalidDocument,
+            GltfFailureCode::InvalidAccessor,
         ),
         (
             "bufferViews",
             5,
             "byteLength",
             47,
-            GltfFailureCode::InvalidDocument,
+            GltfFailureCode::InvalidAccessor,
         ),
     ] {
         let (mut document, _) = two_set_triangle()?;
@@ -887,6 +888,8 @@ fn normalized_integer_witnesses_keep_exact_bits_in_dense_and_sparse_sets() -> Te
                 }
                 binary[offset..offset + encoded.len()].copy_from_slice(&encoded);
                 document["bufferViews"][accessor]["byteLength"] = json!(encoded.len());
+                document["bufferViews"][accessor]["byteStride"] =
+                    json!(if component == 5121 { 4 } else { 8 });
                 document["accessors"][accessor]["componentType"] = json!(component);
                 document["accessors"][accessor]["normalized"] = json!(true);
             }
@@ -995,6 +998,8 @@ fn integer_weight_sets_require_an_exact_sum_for_equal_and_mixed_widths() -> Test
             }
             binary[offset..offset + encoded.len()].copy_from_slice(&encoded);
             document["bufferViews"][accessor]["byteLength"] = json!(encoded.len());
+            document["bufferViews"][accessor]["byteStride"] =
+                json!(if components[set] == 5121 { 4 } else { 8 });
             document["accessors"][accessor]["componentType"] = json!(components[set]);
             document["accessors"][accessor]["normalized"] = json!(true);
         }
@@ -1046,6 +1051,7 @@ fn float_weight_sums_warn_once_per_primitive_and_preserve_source_bits() -> TestR
             document["accessors"][5]["componentType"] = json!(5121);
             document["accessors"][5]["normalized"] = json!(true);
             document["bufferViews"][5]["byteLength"] = json!(12);
+            document["bufferViews"][5]["byteStride"] = json!(4);
             binary[140..152].copy_from_slice(&[127, 0, 0, 0, 127, 0, 0, 0, 127, 0, 0, 0]);
         }
         // Multiple offending rows and two instances still produce one warning per definition.
@@ -1155,6 +1161,10 @@ fn influence_csr_endpoint_overflow_is_rejected_before_dependency_io() -> TestRes
             .as_object_mut()
             .unwrap()
             .remove("target");
+        document["bufferViews"][value_view]
+            .as_object_mut()
+            .unwrap()
+            .remove("byteStride");
     }
     let mut options = sidecar_options();
     options.limits.max_vertices = usize::try_from(vertex_count)?;
@@ -1176,7 +1186,7 @@ fn aggregate_influence_cell_budget_counts_definitions_and_all_zero_lanes_once() 
     binary.resize(260, 0);
     document["buffers"][0]["byteLength"] = json!(binary.len());
     document["bufferViews"].as_array_mut().unwrap().extend([
-        json!({"buffer": 0, "byteOffset": 188, "byteLength": 24, "target": 34962}),
+        json!({"buffer": 0, "byteOffset": 188, "byteLength": 24, "byteStride": 8, "target": 34962}),
         json!({"buffer": 0, "byteOffset": 212, "byteLength": 48, "target": 34962}),
     ]);
     document["accessors"].as_array_mut().unwrap().extend([

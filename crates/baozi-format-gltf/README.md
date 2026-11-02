@@ -14,7 +14,7 @@ The [exact selected profile](https://github.com/Latias94/baozi/blob/main/docs/fo
   root provenance binds both. Resources outside the selected closure are omitted;
   mixed-target animation filtering requires explicit semantic loss authorization.
 - Preserve all seven point, line and triangle primitive modes, supported vertex streams including
-  complete paired `JOINTS_n`/`WEIGHTS_n`, hierarchy and node transforms, skins, F32 VEC3
+  complete paired `JOINTS_n`/`WEIGHTS_n`, hierarchy and node transforms, skins, VEC3
   POSITION/NORMAL/TANGENT morph deltas, node TRS and morph-weight animation,
   perspective/orthographic cameras, selected shared `KHR_lights_punctual` definitions and
   placements, and PBR metallic-roughness materials.
@@ -26,6 +26,9 @@ The [exact selected profile](https://github.com/Latias94/baozi/blob/main/docs/fo
 - Decode dense and sparse accessors throughout the admitted profile, with an optional base
   or implicit zero values, normalized conversion, bounded layout/index validation and complete
   base/indices/values buffer provenance.
+- Support the finite `KHR_mesh_quantization` base and POSITION/NORMAL/TANGENT morph encodings.
+  Both extension declarations are required. Stored-domain bounds are checked before normalized
+  conversion; canonical attributes remain F32, and authored node/skin/UV transforms apply once.
 - Preserve encoded external, data-URI, and buffer-view image payloads without
   pixel decoding. Selected dependencies use the origin-qualified session resolver;
   external URIs use the restricted relative-path profile and embedded data URLs
@@ -34,7 +37,7 @@ The [exact selected profile](https://github.com/Latias94/baozi/blob/main/docs/fo
   selected primitive omits its binding. Effective material reads require no source-format guessing.
 - Preserve selected `extras` as exact `application/json` byte values owned by source identities,
   including JSON null, scalars, and nested sites. No source JSON is interpreted as scene behavior.
-- Support typed `KHR_materials_unlit` and independently authored `KHR_materials_emissive_strength`
+- Support typed `KHR_materials_unlit`, `KHR_materials_clearcoat`, `KHR_materials_sheen` and independently authored `KHR_materials_emissive_strength`
   at material objects and `KHR_texture_transform` at documented
   texture bindings. Unlit selects base color/vertex color and preserves alpha/sidedness; the original
   PBR fallback factors, bindings and complete resources remain retained. Reject unsupported selected

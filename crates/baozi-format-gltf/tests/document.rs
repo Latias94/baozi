@@ -194,7 +194,7 @@ fn omitted_core_rows_still_validate_references_hooks_and_unused_samplers() -> Te
         r#""buffers":[{"byteLength":12}],"bufferViews":[{"buffer":0,"byteLength":12}],"accessors":[{"bufferView":0,"componentType":5126,"count":1,"type":"VEC3"}],"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}]"#,
         r#""buffers":[{"byteLength":4}],"bufferViews":[{"buffer":0,"byteLength":4}],"accessors":[{"bufferView":0,"componentType":5126,"count":1,"type":"SCALAR"}],"animations":[{"channels":[],"samplers":[{"input":0,"output":1}]}]"#,
     ];
-    for rows in invalid_rows {
+    for (case, rows) in invalid_rows.into_iter().enumerate() {
         let json = format!(r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{}}],{rows}}}"#)
             .into_bytes();
         for (source, bytes) in [
@@ -205,7 +205,12 @@ fn omitted_core_rows_still_validate_references_hooks_and_unused_samplers() -> Te
                 import_assets_result(source, [(source, bytes)], GltfTestOptions::memory())?;
             let failure = expected_error(result)?;
             assert!(diagnostics.is_empty());
-            assert_gltf_failure(&failure, GltfFailureCode::InvalidDocument, None)?;
+            let code = if case == 5 {
+                GltfFailureCode::InvalidAccessor
+            } else {
+                GltfFailureCode::InvalidDocument
+            };
+            assert_gltf_failure(&failure, code, None)?;
             assert_eq!(
                 failure
                     .ledger()

@@ -13,6 +13,7 @@ pub(super) struct MorphContracts<'scope> {
     primitives: usize,
     targets: usize,
     deltas: usize,
+    sample_work: u64,
 }
 
 pub(super) struct LogicalMorphStorage<'scope> {
@@ -126,29 +127,6 @@ fn target_accessors(target: &json::mesh::MorphTarget<'_>) -> [MorphAccessor; 3] 
     ]
 }
 
-fn validate_position_bounds(
-    ctx: &ParseScope<'_>,
-    accessor: &json::accessor::Accessor,
-    index: usize,
-) -> Result<([f32; 3], [f32; 3])> {
-    let bounds = accessor
-        .min
-        .and_then(json::accessor::Bounds::vec3)
-        .zip(accessor.max.and_then(json::accessor::Bounds::vec3))
-        .filter(|(min, max)| min.iter().chain(max).all(|value| value.is_finite()));
-    let Some((min, max)) =
-        bounds.filter(|(min, max)| min.iter().zip(max).all(|(min, max)| *min <= *max))
-    else {
-        return Err(gltf_parse_error(
-            ctx,
-            format_args!(
-                "glTF morph POSITION accessor {index} requires ordered finite VEC3 min and max"
-            ),
-        ));
-    };
-    Ok((min, max))
-}
-
 pub(super) fn preflight<'scope>(
     ctx: &'scope ParseScope<'_>,
     document: &crate::document::Document<'_>,
@@ -170,6 +148,7 @@ pub(super) fn preflight<'scope>(
         primitives: 0,
         targets: 0,
         deltas: 0,
+        sample_work: 0,
     };
     for (mesh_index, mesh) in root.meshes.iter().enumerate() {
         ctx.charge_work(1)?;
@@ -224,7 +203,7 @@ pub(super) fn preflight<'scope>(
                             ),
                         ));
                     }
-                    let info = validate_accessor(
+                    let info = accessor::validate_mesh_attribute(
                         ctx,
                         document,
                         accessor.value(),
@@ -232,11 +211,7 @@ pub(super) fn preflight<'scope>(
                             mesh_index,
                             primitive_index,
                         },
-                        "morph delta",
-                        AccessorContract::vertex(
-                            &[json::accessor::ComponentType::F32],
-                            &[json::accessor::Type::Vec3],
-                        ),
+                        MeshAttributeUse::Morph(semantic),
                     )?;
                     if info.count != vertex_count {
                         return Err(gltf_parse_error(
@@ -246,17 +221,14 @@ pub(super) fn preflight<'scope>(
                             ),
                         ));
                     }
-                    if kind == MorphDeltaSemantic::Position {
-                        validate_position_bounds(
-                            ctx,
-                            &root.accessors[accessor.value()],
-                            accessor.value(),
-                        )?;
-                    }
                     let scalars = vertex_count
                         .checked_mul(3)
                         .ok_or_else(|| ctx.allocation_failure("gltf-morph-value-count"))?;
                     add_cells(ctx, &mut contracts.cells, scalars)?;
+                    contracts.sample_work = to_u64(scalars)
+                        .checked_mul(accessor::MESH_SAMPLE_WORK_PER_LANE)
+                        .and_then(|work| contracts.sample_work.checked_add(work))
+                        .ok_or_else(|| ctx.allocation_failure("gltf-morph-sample-work"))?;
                     contracts.deltas = contracts
                         .deltas
                         .checked_add(1)
@@ -310,94 +282,174 @@ pub(super) fn build_storage<'scope>(
         .and_then(|count| count.checked_add(contracts.deltas))
         .and_then(|count| count.checked_add(contracts.cells))
         .ok_or_else(|| ctx.allocation_failure("gltf-morph-work"))?;
+    let work_units = to_u64(work_units)
+        .checked_add(contracts.sample_work)
+        .ok_or_else(|| ctx.allocation_failure("gltf-morph-work"))?;
     let provenance_work = to_u64(contracts.deltas)
-        .checked_mul(AccessorSources::COLLECTION_WORK_BOUND)
+        .checked_mul(AccessorSources::COLLECTION_WORK_BOUND + 16)
         .ok_or_else(|| ctx.allocation_failure("gltf-morph-provenance-work"))?;
     ctx.charge_work(provenance_work)?;
-    ctx.with_work_group([
-        (ImportWorkClass::WorkUnits, to_u64(work_units)),
-        (ImportWorkClass::MorphCells, to_u64(contracts.cells)),
-    ], |work| -> Result<_> {
-        let class = ImportStorageClass::SceneConstruction;
-        let mut storage = MorphStorage {
-            definitions: try_vec_capacity(ctx, class, contracts.definitions, "gltf-morph-definitions")?,
-            logical_meshes: try_vec_capacity(ctx, class, contracts.logical_meshes, "gltf-logical-morphs")?,
-            primitives: try_vec_capacity(ctx, class, contracts.primitives, "gltf-primitive-morphs")?,
-            targets: try_vec_capacity(ctx, class, contracts.targets, "gltf-morph-targets")?,
-            deltas: try_vec_capacity(ctx, class, contracts.deltas, "gltf-morph-deltas")?,
-        };
-        for mesh in document.meshes() {
-            work.poll()?;
-            work.complete([1, 0])?;
-            let Some(width) = contracts.meshes.as_slice()[mesh.index()] else { continue };
-            let offset = authoring_u32(ctx, storage.definitions.len(), "gltf-morph-definition-offset")?;
-            let mut weights = try_vec_capacity(ctx, class, width, "gltf-morph-default-weights")?;
-            for index in 0..width {
-                if index.is_multiple_of(PARSER_POLL_INTERVAL) { work.poll()?; }
-                storage.definitions.try_push_reserved(MorphTargetDefinitionAuthoring::new(MorphTargetIdentity::new(authoring_u32(ctx, index, "gltf-morph-identity")?), Presence::Absent))?;
-                weights.try_push_reserved(mesh.weights().map_or(0.0, |weights| weights[index]))?;
-                work.complete([2, 2])?;
-            }
-            storage.logical_meshes.try_push_reserved(LogicalMorphStorage {
-                definitions: AuthoringRange::new(offset, authoring_u32(ctx, width, "gltf-morph-definition-width")?),
-                weights,
-            })?;
-            let mesh_geometry = geometry.meshes.as_slice()[mesh.index()].as_ref().ok_or_else(|| gltf_parse_error(ctx, "glTF morph geometry is missing"))?;
-            for primitive in mesh.primitives() {
+    ctx.with_work_group(
+        [
+            (ImportWorkClass::WorkUnits, work_units),
+            (ImportWorkClass::MorphCells, to_u64(contracts.cells)),
+        ],
+        |work| -> Result<_> {
+            let class = ImportStorageClass::SceneConstruction;
+            let mut storage = MorphStorage {
+                definitions: try_vec_capacity(
+                    ctx,
+                    class,
+                    contracts.definitions,
+                    "gltf-morph-definitions",
+                )?,
+                logical_meshes: try_vec_capacity(
+                    ctx,
+                    class,
+                    contracts.logical_meshes,
+                    "gltf-logical-morphs",
+                )?,
+                primitives: try_vec_capacity(
+                    ctx,
+                    class,
+                    contracts.primitives,
+                    "gltf-primitive-morphs",
+                )?,
+                targets: try_vec_capacity(ctx, class, contracts.targets, "gltf-morph-targets")?,
+                deltas: try_vec_capacity(ctx, class, contracts.deltas, "gltf-morph-deltas")?,
+            };
+            for mesh in document.meshes() {
                 work.poll()?;
                 work.complete([1, 0])?;
-                let start = storage.targets.len();
-                let source_targets = json_primitive(ctx, document, mesh.index(), primitive.index())?.targets.as_deref().unwrap_or(&[]);
-                let vertices = mesh_geometry.primitives.as_slice()[primitive.index()].position_count;
-                for target_index in 0..width {
-                    if target_index.is_multiple_of(PARSER_POLL_INTERVAL) { work.poll()?; }
-                    let delta_start = storage.deltas.len();
-                    if let Some(target) = source_targets.get(target_index) {
-                        for (_, semantic, accessor) in target_accessors(target) {
-                            let Some(accessor) = accessor else { continue };
-                            let declared_bounds = if semantic == MorphDeltaSemantic::Position {
-                                Some(validate_position_bounds(ctx, &document.tables().accessors[accessor.value()], accessor.value())?)
-                            } else { None };
-                            let accessor = document.accessors().nth(accessor.value()).ok_or_else(|| gltf_parse_error(ctx, "glTF morph accessor disappeared"))?;
-                            // Core permits descriptor bounds unrelated to the zero values when
-                            // neither a base view nor sparse data supplies the accessor.
-                            let require_data_bounds = accessor.view().is_some() || accessor.sparse().is_some();
-                            let provenance = accessor_provenance(ctx, buffers, accessor)?;
-                            let values = accessor::vectors::<3>(ctx, accessor, buffers)?;
-                            let count = vertices.checked_mul(3).ok_or_else(|| ctx.allocation_failure("gltf-morph-value-count"))?;
-                            let mut output = try_vec_capacity(ctx, class, count, "gltf-morph-delta-values")?;
-                            let mut minimum = [f32::INFINITY; 3];
-                            let mut maximum = [f32::NEG_INFINITY; 3];
-                            for value in values {
-                                if output.len().is_multiple_of(PARSER_POLL_INTERVAL) { work.poll()?; }
-                                if output.len() >= count || value.iter().any(|value| !value.is_finite()) {
-                                    return Err(gltf_parse_error(ctx, "glTF morph delta must have the declared finite VEC3 values"));
-                                }
-                                if declared_bounds.is_some() && require_data_bounds {
-                                    for axis in 0..3 {
-                                        minimum[axis] = minimum[axis].min(value[axis]);
-                                        maximum[axis] = maximum[axis].max(value[axis]);
-                                    }
-                                }
-                                output.try_extend_from_slice_reserved(&value)?;
-                                work.complete([3, 3])?;
-                            }
-                            if output.len() != count { return Err(gltf_parse_error(ctx, "glTF morph delta value count changed after preflight")); }
-                            if require_data_bounds && declared_bounds.is_some_and(|bounds| bounds != (minimum, maximum)) {
-                                return Err(gltf_parse_error(ctx, "glTF morph POSITION bounds do not match the delta values"));
-                            }
-                            storage.deltas.try_push_reserved(MorphDeltaStorage { semantic, values: output, provenance })?;
-                            work.complete([1, 0])?;
-                        }
+                let Some(width) = contracts.meshes.as_slice()[mesh.index()] else {
+                    continue;
+                };
+                let offset = authoring_u32(
+                    ctx,
+                    storage.definitions.len(),
+                    "gltf-morph-definition-offset",
+                )?;
+                let mut weights =
+                    try_vec_capacity(ctx, class, width, "gltf-morph-default-weights")?;
+                for index in 0..width {
+                    if index.is_multiple_of(PARSER_POLL_INTERVAL) {
+                        work.poll()?;
                     }
-                    storage.targets.try_push_reserved(MorphTargetStorage { deltas: delta_start..storage.deltas.len() })?;
-                    work.complete([1, 1])?;
+                    storage
+                        .definitions
+                        .try_push_reserved(MorphTargetDefinitionAuthoring::new(
+                            MorphTargetIdentity::new(authoring_u32(
+                                ctx,
+                                index,
+                                "gltf-morph-identity",
+                            )?),
+                            Presence::Absent,
+                        ))?;
+                    weights
+                        .try_push_reserved(mesh.weights().map_or(0.0, |weights| weights[index]))?;
+                    work.complete([2, 2])?;
                 }
-                storage.primitives.try_push_reserved(start..storage.targets.len())?;
+                storage
+                    .logical_meshes
+                    .try_push_reserved(LogicalMorphStorage {
+                        definitions: AuthoringRange::new(
+                            offset,
+                            authoring_u32(ctx, width, "gltf-morph-definition-width")?,
+                        ),
+                        weights,
+                    })?;
+                let mesh_geometry = geometry.meshes.as_slice()[mesh.index()]
+                    .as_ref()
+                    .ok_or_else(|| gltf_parse_error(ctx, "glTF morph geometry is missing"))?;
+                for primitive in mesh.primitives() {
+                    work.poll()?;
+                    work.complete([1, 0])?;
+                    let start = storage.targets.len();
+                    let source_targets =
+                        json_primitive(ctx, document, mesh.index(), primitive.index())?
+                            .targets
+                            .as_deref()
+                            .unwrap_or(&[]);
+                    let vertices =
+                        mesh_geometry.primitives.as_slice()[primitive.index()].position_count;
+                    for target_index in 0..width {
+                        if target_index.is_multiple_of(PARSER_POLL_INTERVAL) {
+                            work.poll()?;
+                        }
+                        let delta_start = storage.deltas.len();
+                        if let Some(target) = source_targets.get(target_index) {
+                            for (attribute_semantic, semantic, accessor) in target_accessors(target)
+                            {
+                                let Some(accessor) = accessor else { continue };
+                                let accessor =
+                                    document.accessors().nth(accessor.value()).ok_or_else(
+                                        || gltf_parse_error(ctx, "glTF morph accessor disappeared"),
+                                    )?;
+                                let mut bounds = accessor::MeshAccessorBounds::<3>::new(
+                                    accessor.row(),
+                                    accessor.index(),
+                                    attribute_semantic == Semantic::Positions,
+                                )?;
+                                let provenance = accessor_provenance(ctx, buffers, accessor)?;
+                                let values = accessor::bind(ctx, accessor, buffers)?
+                                    .samples::<3>()
+                                    .ok_or_else(|| {
+                                        GltfFailure::invalid_accessor(
+                                            Some(accessor.index()),
+                                            "invalid morph accessor shape",
+                                        )
+                                    })?;
+                                let count = vertices.checked_mul(3).ok_or_else(|| {
+                                    ctx.allocation_failure("gltf-morph-value-count")
+                                })?;
+                                let mut output =
+                                    try_vec_capacity(ctx, class, count, "gltf-morph-delta-values")?;
+                                for sample in values {
+                                    if output.len().is_multiple_of(PARSER_POLL_INTERVAL) {
+                                        work.poll()?;
+                                    }
+                                    if output.len() >= count {
+                                        return Err(GltfFailure::invalid_accessor(
+                                            Some(accessor.index()),
+                                            "glTF morph delta exceeds its admitted count",
+                                        )
+                                        .into());
+                                    }
+                                    bounds.observe(&sample)?;
+                                    output.try_extend_from_slice_reserved(&sample.decoded)?;
+                                    work.complete([
+                                        3 * (1 + accessor::MESH_SAMPLE_WORK_PER_LANE),
+                                        3,
+                                    ])?;
+                                }
+                                if output.len() != count {
+                                    return Err(gltf_parse_error(
+                                        ctx,
+                                        "glTF morph delta value count changed after preflight",
+                                    ));
+                                }
+                                bounds.finish()?;
+                                storage.deltas.try_push_reserved(MorphDeltaStorage {
+                                    semantic,
+                                    values: output,
+                                    provenance,
+                                })?;
+                                work.complete([1, 0])?;
+                            }
+                        }
+                        storage.targets.try_push_reserved(MorphTargetStorage {
+                            deltas: delta_start..storage.deltas.len(),
+                        })?;
+                        work.complete([1, 1])?;
+                    }
+                    storage
+                        .primitives
+                        .try_push_reserved(start..storage.targets.len())?;
+                }
             }
-        }
-        Ok(storage)
-    })
+            Ok(storage)
+        },
+    )
 }
 
 pub(super) fn delta_authoring<'a>(delta: &'a MorphDeltaStorage<'_>) -> MorphDeltaAuthoring<'a> {

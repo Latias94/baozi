@@ -291,6 +291,26 @@ Negative:
 
 ## Amendment History
 
+### 2026-11-02: Admit quantization through the shared accessor authority
+
+- `KHR_mesh_quantization` adds only its finite base and POSITION/NORMAL/TANGENT morph
+  component tuples. One encoding classifier serves global declaration checks and selected
+  interpretation. Both required/used declarations are checked, including referenced extra
+  encodings in omitted meshes, without acquiring their omitted buffers.
+- One dense/sparse merge yields both stored and normalized values. Source-domain bounds are
+  validated before narrowing and observed in the existing materialization traversal, including
+  optional influence bounds. Pure implicit-zero descriptors retain the core exception. The exact
+  rational normalized-conversion rule below is unchanged; directions are not silently normalized.
+- Short-component vertex bases and distinct accessors sharing a vertex view require explicit
+  stride under the pinned core text. Sparse values remain tightly packed and component-aligned.
+  Global buffer-view schema range errors remain document failures; selected encoding/layout/
+  bounds errors identify the accessor. Count/paired-set and influence-sum semantics retain their
+  own existing failure owner.
+- Canonical geometry remains F32, with one authoring path. Node transforms, inverse binds and
+  texture transforms supply authored dequantization once; the importer adds no bake, quantized
+  Scene representation, UV/color morph support or extra decoder. The exact matrix and execution
+  scope belong to the [profile](../formats/gltf.md) and evolution execution record.
+
 ### 2026-11-02: Own the core numeric and absence contracts explicitly
 
 - Node-matrix admission adopts Transformations at Khronos commit

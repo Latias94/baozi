@@ -267,6 +267,32 @@ impl<const N: usize> Iterator for Floats<'_, N> {
 }
 impl<const N: usize> ExactSizeIterator for Floats<'_, N> {}
 
+pub(crate) struct Sample<const N: usize> {
+    pub(crate) stored: [f32; N],
+    pub(crate) decoded: [f32; N],
+}
+
+pub(crate) struct Samples<'bytes, const N: usize>(Raw<'bytes, N>);
+
+impl<const N: usize> Iterator for Samples<'_, N> {
+    type Item = Sample<N>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let raw = self.0.next()?;
+        let component = self.0.bound.component;
+        Some(Sample {
+            stored: raw.map(|value| float(component, false, value)),
+            decoded: raw.map(|value| float(component, self.0.bound.normalized, value)),
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
+}
+
+impl<const N: usize> ExactSizeIterator for Samples<'_, N> {}
+
 impl<'bytes> Bound<'bytes> {
     fn raw<const N: usize>(self) -> Option<Raw<'bytes, N>> {
         (lanes(self.dimension) == N).then_some(Raw {
@@ -278,16 +304,15 @@ impl<'bytes> Bound<'bytes> {
     pub(crate) fn vectors<const N: usize>(self) -> Option<Floats<'bytes, N>> {
         self.raw().map(Floats)
     }
+    pub(crate) fn samples<const N: usize>(self) -> Option<Samples<'bytes, N>> {
+        if !matches!(self.component, C::I8 | C::U8 | C::I16 | C::U16 | C::F32) {
+            return None;
+        }
+        self.raw().map(Samples)
+    }
     pub(crate) fn scalars(self) -> Option<impl ExactSizeIterator<Item = f32> + 'bytes> {
         self.vectors::<1>()
             .map(|values| values.map(|value| value[0]))
-    }
-    pub(crate) fn rgba(self) -> Option<impl ExactSizeIterator<Item = [f32; 4]> + 'bytes> {
-        match self.dimension {
-            Type::Vec3 => Some(Colors::Rgb(self.vectors::<3>()?)),
-            Type::Vec4 => Some(Colors::Rgba(self.vectors::<4>()?)),
-            _ => None,
-        }
     }
     pub(crate) fn joints(self) -> Option<impl ExactSizeIterator<Item = [u16; 4]> + 'bytes> {
         matches!(self.component, C::U8 | C::U16).then_some(())?;
@@ -325,26 +350,6 @@ impl<'bytes> Bound<'bytes> {
         }))
     }
 }
-enum Colors<'bytes> {
-    Rgb(Floats<'bytes, 3>),
-    Rgba(Floats<'bytes, 4>),
-}
-impl Iterator for Colors<'_> {
-    type Item = [f32; 4];
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Rgb(values) => values.next().map(|[r, g, b]| [r, g, b, 1.]),
-            Self::Rgba(values) => values.next(),
-        }
-    }
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        match self {
-            Self::Rgb(values) => values.size_hint(),
-            Self::Rgba(values) => values.size_hint(),
-        }
-    }
-}
-impl ExactSizeIterator for Colors<'_> {}
 pub(crate) enum Weights<'bytes> {
     U8(Raw<'bytes, 4>),
     U16(Raw<'bytes, 4>),

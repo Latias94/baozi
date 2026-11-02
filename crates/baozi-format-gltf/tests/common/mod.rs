@@ -477,7 +477,7 @@ pub fn skinned_triangle_gltf() -> Vec<u8> {
   "bufferViews": [
     { "buffer": 0, "byteOffset": 0, "byteLength": 36, "target": 34962 },
     { "buffer": 0, "byteOffset": 36, "byteLength": 6, "target": 34963 },
-    { "buffer": 0, "byteOffset": 42, "byteLength": 24, "target": 34962 },
+    { "buffer": 0, "byteOffset": 42, "byteLength": 24, "byteStride": 8, "target": 34962 },
     { "buffer": 0, "byteOffset": 68, "byteLength": 48, "target": 34962 },
     { "buffer": 0, "byteOffset": 116, "byteLength": 128 }
   ],

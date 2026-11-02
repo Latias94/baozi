@@ -168,17 +168,6 @@ pub(crate) mod accessor {
         pub(crate) values: [f64; 16],
         pub(crate) len: usize,
     }
-    impl Bounds {
-        pub(crate) fn vec3(self) -> Option<[f32; 3]> {
-            (self.len == 3).then(|| {
-                [
-                    self.values[0] as f32,
-                    self.values[1] as f32,
-                    self.values[2] as f32,
-                ]
-            })
-        }
-    }
     pub(crate) struct Accessor {
         pub(crate) buffer_view: Option<Index>,
         pub(crate) byte_offset: Option<u64>,

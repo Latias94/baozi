@@ -267,15 +267,30 @@ fn authored_byte_offset_is_invalid_without_a_view_even_for_unused_or_sparse_acce
 
 #[test]
 fn zero_initialization_does_not_bypass_vertex_type_or_normalization_contracts() -> TestResult<()> {
-    for (semantic, component, dimension, normalized, reason) in [
-        ("TEXCOORD_0", 5126, "VEC3", false, "TEXCOORD accessor type"),
-        ("COLOR_0", 5120, "VEC3", true, "COLOR accessor type"),
+    for (semantic, component, dimension, normalized, reason, code) in [
+        (
+            "TEXCOORD_0",
+            5126,
+            "VEC3",
+            false,
+            "TEXCOORD accessor type",
+            GltfFailureCode::InvalidAccessor,
+        ),
+        (
+            "COLOR_0",
+            5120,
+            "VEC3",
+            true,
+            "COLOR accessor type",
+            GltfFailureCode::InvalidAccessor,
+        ),
         (
             "TEXCOORD_0",
             5123,
             "VEC2",
             false,
             "integer TEXCOORD accessor",
+            GltfFailureCode::InvalidDocument,
         ),
     ] {
         let mut document = points(1);
@@ -288,7 +303,7 @@ fn zero_initialization_does_not_bypass_vertex_type_or_normalization_contracts() 
                 import_assets_result(source, [(source, bytes)], GltfTestOptions::memory())?;
             assert!(diagnostics.is_empty());
             let failure = expected_error(result)?;
-            assert_gltf_failure(&failure, GltfFailureCode::InvalidDocument, Some(reason))?;
+            assert_gltf_failure(&failure, code, Some(reason))?;
             assert_failure_released(&failure);
         }
     }
@@ -355,8 +370,8 @@ fn implicit_descriptor_bounds_may_differ_from_zero_values_but_stored_morph_bound
             let failure = expected_error(result)?;
             assert_gltf_failure(
                 &failure,
-                GltfFailureCode::InvalidDocument,
-                Some("morph POSITION bounds do not match"),
+                GltfFailureCode::InvalidAccessor,
+                Some("mesh accessor bounds do not match"),
             )?;
             assert_failure_released(&failure);
         }

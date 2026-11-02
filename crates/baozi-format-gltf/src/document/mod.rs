@@ -2,6 +2,7 @@
 
 mod decode;
 mod integer;
+pub(crate) mod mesh_encoding;
 pub(crate) mod read;
 pub(crate) mod schema;
 mod transforms;
@@ -25,6 +26,7 @@ pub(crate) const KHR_MATERIALS_EMISSIVE_STRENGTH: &str = "KHR_materials_emissive
 pub(crate) const KHR_LIGHTS_PUNCTUAL: &str = "KHR_lights_punctual";
 pub(crate) const KHR_MATERIALS_CLEARCOAT: &str = "KHR_materials_clearcoat";
 pub(crate) const KHR_MATERIALS_SHEEN: &str = "KHR_materials_sheen";
+pub(crate) const KHR_MESH_QUANTIZATION: &str = "KHR_mesh_quantization";
 
 pub(crate) fn is_supported_extension(name: &str) -> bool {
     [
@@ -34,12 +36,14 @@ pub(crate) fn is_supported_extension(name: &str) -> bool {
         KHR_LIGHTS_PUNCTUAL,
         KHR_MATERIALS_CLEARCOAT,
         KHR_MATERIALS_SHEEN,
+        KHR_MESH_QUANTIZATION,
     ]
     .contains(&name)
 }
 
 pub(crate) struct Document<'scope> {
     tables: schema::Tables<'scope>,
+    has_mesh_quantization: bool,
     source_map: GltfSourceMap<'scope>,
     index: JsonIndex<'scope>,
     json: &'scope [u8],
@@ -58,9 +62,10 @@ impl<'scope> Document<'scope> {
             index: &index,
         }
         .root()?;
-        validate::validate(ctx, &tables)?;
+        let has_mesh_quantization = validate::validate(ctx, &tables)?;
         Ok(Self {
             tables,
+            has_mesh_quantization,
             source_map,
             index,
             json,
@@ -70,6 +75,9 @@ impl<'scope> Document<'scope> {
 
     pub(crate) fn tables(&self) -> &schema::Tables<'scope> {
         &self.tables
+    }
+    pub(crate) fn has_mesh_quantization(&self) -> bool {
+        self.has_mesh_quantization
     }
     pub(crate) fn source_map(&self) -> &GltfSourceMap<'scope> {
         &self.source_map
