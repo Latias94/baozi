@@ -96,6 +96,15 @@ jobs:
       - name: Test documentation examples
         run: cargo test --locked --doc --workspace --all-features
 
+      - name: Check direct glTF consumer formatting
+        run: cargo fmt --manifest-path tools/consumers/gltf-conformance/Cargo.toml --all --check
+
+      - name: Lint direct glTF consumer
+        run: cargo clippy --locked --manifest-path tools/consumers/gltf-conformance/Cargo.toml --target-dir target --all-targets --all-features --jobs 1 -- -D warnings
+
+      - name: Test direct glTF consumer
+        run: cargo nextest run --locked --manifest-path tools/consumers/gltf-conformance/Cargo.toml --target-dir target --all-features --build-jobs 1 --test-threads 1
+
       - name: Check documentation
         env:
           RUSTDOCFLAGS: -D warnings
@@ -135,6 +144,11 @@ jobs:
         env:
           CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime run
         run: cargo +1.95.0 test --locked -p baozi-core --lib --all-features --target wasm32-wasip1 --release --jobs 1 -- snapshot::tests --test-threads=1
+
+      - name: Run WASI glTF reader boundary regressions
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime run
+        run: cargo +1.95.0 test --locked -p baozi-format-gltf --test upstream_issue_boundaries --target wasm32-wasip1 --jobs 1 -- --test-threads=1
 
       - name: Prove non-candidate native filesystem targets fail closed
         shell: pwsh
@@ -313,7 +327,7 @@ jobs:
           }
 
       - name: Rehearse packaged scenes, native candidate, and all helper features offline
-        run: python scripts/check_packages.py --toolchain "${{ matrix.toolchain }}" --target "${{ matrix.target }}" --native --features repository-capture ${{ matrix.profile_args }}
+        run: python scripts/check_packages.py --toolchain "${{ matrix.toolchain }}" --target "${{ matrix.target }}" --native --features repository-capture --gltf-conformance ${{ matrix.profile_args }}
 
   native-fs-candidate:
     name: Native filesystem candidate (${{ matrix.target }})
@@ -404,6 +418,29 @@ jobs:
         run: >-
           cargo nextest run --locked --manifest-path tools/consumers/assets/Cargo.toml
           --target-dir target --target "${{ matrix.target }}" --all-features
+
+      - name: Check renderer native build prerequisite
+        if: runner.os == 'Windows' || runner.os == 'Linux'
+        run: cmake --version
+
+      - name: Check renderer consumer formatting
+        if: runner.os == 'Windows' || runner.os == 'Linux'
+        run: cargo fmt --manifest-path tools/consumers/render-wgpu/Cargo.toml --all --check
+
+      - name: Lint renderer consumer
+        if: runner.os == 'Windows' || runner.os == 'Linux'
+        run: >-
+          cargo clippy --locked --manifest-path tools/consumers/render-wgpu/Cargo.toml
+          --target-dir target --target "${{ matrix.target }}"
+          --all-targets --all-features --jobs 1 -- -D warnings
+
+      - name: Test renderer CPU contracts
+        if: runner.os == 'Windows' || runner.os == 'Linux'
+        # GPU readback requires a separately named adapter and remains explicitly ignored here.
+        run: >-
+          cargo nextest run --locked --manifest-path tools/consumers/render-wgpu/Cargo.toml
+          --target-dir target --target "${{ matrix.target }}"
+          --all-features --build-jobs 1 --test-threads 1
 
       - name: Test Apple portable workspace on the actual ARM64 host
         if: runner.os == 'macOS'
