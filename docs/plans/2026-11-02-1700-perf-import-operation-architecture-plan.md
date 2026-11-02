@@ -194,6 +194,15 @@ actual IO/lifetime requirements. Counting passes or allocations alone does not q
 If these remaining costs are small after P3, omit the corresponding implementation and record
 that decision; this does not create another generic scene graph or decoder.
 
+The [current-source attribution](../research/2026-11-03-current-import-cost-attribution.md)
+records a six-lane ordinary Windows checkpoint after the control corrections and six actual
+whole-worker Callgrind collections. Grid import regresses to 300.984 ms, with a stable same-lane
+Assimp control. Current profiles locate occurrence-sized OBJ sorting and repeated normal-action
+routes; Ir fractions remain separate from native time. The next bounded design candidates are
+OBJ source-index remaps/unique-source channel staging and stable vertex buckets for uniform
+nonzero smoothing groups. Review ordering, source-sparse memory, failure ownership and exact
+completion before implementation; retain only candidates that pass ordinary native comparison.
+
 ### P6. Complete native comparison and the original final qualification
 
 Retain per-change Windows measured variants against `4455d03`, then run the unchanged complete
