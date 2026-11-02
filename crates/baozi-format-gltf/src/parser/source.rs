@@ -3,7 +3,7 @@
 use super::{
     GltfFailure, NodeGraph, ParseScope, ResourceClosure, Result, animation, gltf_parse_error,
 };
-use crate::document::{KHR_MATERIALS_EMISSIVE_STRENGTH, KHR_MATERIALS_UNLIT};
+use crate::document::{KHR_LIGHTS_PUNCTUAL, KHR_MATERIALS_EMISSIVE_STRENGTH, KHR_MATERIALS_UNLIT};
 use crate::source_map::{
     GltfSourceMap, SourceEntityId, SourceEntityKind, SourceExtensionKind, SourcePayloadKind,
     SourcePayloadSite,
@@ -65,6 +65,7 @@ pub(super) fn preflight(
         ),
         (SourceEntityKind::Accessor, closure.accessors.as_slice()),
         (SourceEntityKind::Camera, closure.cameras.as_slice()),
+        (SourceEntityKind::Light, closure.lights.as_slice()),
         (
             SourceEntityKind::Animation,
             animations.selected_animations.as_slice(),
@@ -105,11 +106,13 @@ pub(super) fn preflight(
     // Payload ownership comes from scanner contexts, so unknown data cannot disappear in serde.
     let mut unlit_declared = false;
     let mut strength_declared = false;
+    let mut lights_declared = false;
     for name in &document.tables().extensions_used {
         ctx.charge_work(1)?;
         match name.as_str() {
             KHR_MATERIALS_UNLIT => unlit_declared = true,
             KHR_MATERIALS_EMISSIVE_STRENGTH => strength_declared = true,
+            KHR_LIGHTS_PUNCTUAL => lights_declared = true,
             _ => {}
         }
     }
@@ -154,6 +157,32 @@ pub(super) fn preflight(
                             | SourcePayloadSite::OcclusionTexture
                             | SourcePayloadSite::EmissiveTexture
                     ) => {}
+                SourcePayloadKind::Extension(SourceExtensionKind::KhrLightsPunctual)
+                    if matches!(
+                        entity.id.kind,
+                        SourceEntityKind::Document | SourceEntityKind::Node
+                    ) && payload.site == SourcePayloadSite::Entity =>
+                {
+                    let offset = usize::try_from(range.byte_offset).ok();
+                    if offset.and_then(|offset| ctx.primary_bytes().get(offset)) != Some(&b'{') {
+                        return Err(GltfFailure::invalid_json(
+                            KHR_LIGHTS_PUNCTUAL,
+                            range.byte_offset,
+                            range.byte_length,
+                            "glTF KHR_lights_punctual must be an object",
+                        )
+                        .into());
+                    }
+                    if !lights_declared {
+                        return Err(GltfFailure::invalid_json(
+                            KHR_LIGHTS_PUNCTUAL,
+                            range.byte_offset,
+                            range.byte_length,
+                            "glTF KHR_lights_punctual must be declared in extensionsUsed",
+                        )
+                        .into());
+                    }
+                }
                 SourcePayloadKind::Extension(kind)
                     if entity.id.kind == SourceEntityKind::Material
                         && payload.site == SourcePayloadSite::Entity =>
@@ -244,6 +273,7 @@ pub(super) fn selected(
         SourceEntityKind::BufferView => at(closure.buffer_views.as_slice()),
         SourceEntityKind::Accessor => at(closure.accessors.as_slice()),
         SourceEntityKind::Camera => at(closure.cameras.as_slice()),
+        SourceEntityKind::Light => at(closure.lights.as_slice()),
         SourceEntityKind::Animation => at(animations.selected_animations.as_slice()),
         SourceEntityKind::AnimationChannel => entity.parent_index.is_some_and(|animation| {
             let selected_clip = animations

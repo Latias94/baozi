@@ -686,6 +686,89 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
         })
     }
 
+    pub(super) fn punctual_light_reference(&self, id: ValueId) -> ParseResult<Index> {
+        self.required_id(id, "light")
+    }
+
+    fn light_number(&self, id: ValueId) -> ParseResult<f64> {
+        let value = self.number(id)?;
+        if value == 0.0 {
+            let text = self.raw_str(id)?;
+            self.ctx.charge_work(text.len() as u64)?;
+            // Source signs and nonzero values must not disappear during binary64 parsing.
+            if text
+                .bytes()
+                .take_while(|&byte| !matches!(byte, b'e' | b'E'))
+                .any(|byte| matches!(byte, b'1'..=b'9'))
+            {
+                return Err(self.invalid("glTF light number underflows the binary64 source domain"));
+            }
+        }
+        Ok(value)
+    }
+
+    pub(super) fn light(&self, id: ValueId) -> ParseResult<Light<'scope>> {
+        self.object(id)?;
+        let mut color = [1.0; 3];
+        if let Some(id) = self.field(id, "color")? {
+            self.kind(id, ValueKind::Array, "glTF light color requires an array")?;
+            if self.value(id).child_count != 3 {
+                return Err(self.invalid("glTF light color requires three components"));
+            }
+            for (component, id) in color.iter_mut().zip(self.children(id)) {
+                *component = self.light_number(id)?;
+            }
+        }
+        let spot = self
+            .field(id, "spot")?
+            .map(|id| -> ParseResult<LightSpot> {
+                self.object(id)?;
+                Ok(LightSpot {
+                    inner_cone_angle: self
+                        .field(id, "innerConeAngle")?
+                        .map_or(Ok(0.0), |id| self.light_number(id))?,
+                    outer_cone_angle: self
+                        .field(id, "outerConeAngle")?
+                        .map_or(Ok(std::f64::consts::FRAC_PI_4), |id| self.light_number(id))?,
+                })
+            })
+            .transpose()?;
+        Ok(Light {
+            name: self
+                .field(id, "name")?
+                .map(|id| self.text(id))
+                .transpose()?,
+            kind: self.text(self.required(id, "type")?)?,
+            color,
+            intensity: self
+                .field(id, "intensity")?
+                .map_or(Ok(1.0), |id| self.light_number(id))?,
+            range: self
+                .field(id, "range")?
+                .map(|id| self.light_number(id))
+                .transpose()?,
+            spot,
+        })
+    }
+
+    fn lights(&self) -> ParseResult<List<'scope, ValueId>> {
+        let payload = self
+            .field(0, "extensions")?
+            .map(|id| self.field(id, super::KHR_LIGHTS_PUNCTUAL))
+            .transpose()?
+            .flatten();
+        let lights = payload.map(|id| self.required(id, "lights")).transpose()?;
+        if lights.is_some_and(|id| {
+            self.value(id).kind == ValueKind::Array && self.value(id).child_count == 0
+        }) {
+            return Err(self.invalid("glTF punctual lights requires a nonempty lights array"));
+        }
+        self.list(lights, |id| {
+            self.object(id)?;
+            Ok(id)
+        })
+    }
+
     pub(super) fn root(&self) -> ParseResult<Tables<'scope>> {
         self.object(0)?;
         self.version()?;
@@ -704,6 +787,11 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
                     mesh: self.optional_id(id, "mesh")?,
                     skin: self.optional_id(id, "skin")?,
                     camera: self.optional_id(id, "camera")?,
+                    punctual_light: self
+                        .optional(id, "extensions")?
+                        .map(|id| self.field(id, super::KHR_LIGHTS_PUNCTUAL))
+                        .transpose()?
+                        .flatten(),
                     matrix: self
                         .optional(id, "matrix")?
                         .map(|id| self.fixed(id))
@@ -844,6 +932,7 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
             })?,
             materials: self.list(self.field(0, "materials")?, |id| self.material(id))?,
             cameras: self.list(self.field(0, "cameras")?, |id| self.camera(id))?,
+            lights: self.lights()?,
             animations: self.list(self.field(0, "animations")?, |id| {
                 Ok(animation::Animation {
                     name: self.name(id)?,

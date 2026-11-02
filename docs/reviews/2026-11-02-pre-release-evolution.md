@@ -225,9 +225,49 @@ is nextest `e6020e78-a326-465f-9b00-ac4e74bd3953`; later obsolete golden expecta
 from independent byte framing, with accounting expectations changed only for the added scalar.
 Fresh integrated portable/package/render/B1 qualification remains part of the later units.
 
+## Selected Punctual Lights and Detached Spatial Output
+
+U7 maps `KHR_lights_punctual` through the owned document, selected resource closure, one
+pre-IO lowering owner and the existing canonical spatial types. The root array remains a source
+inventory: selected node attachments choose definitions; shared placements reuse a definition,
+and omitted behavior is not interpreted. Source locators/extras retain raw JSON/GLB ranges and
+original ordinals. Light source-scope tag 16 is appended after existing observation categories;
+the v3 domain and no-light digest vectors are unchanged before U12.
+
+The application output now owns camera/light definitions, dense node references and the complete
+`SceneSpaceRef`. It removes the redundant top-level UV-origin field. Independent source vectors
+check photometric color/intensity conversion, strict cone ordering, range and camera units,
+asymmetric projections, shared references, node scale, reflected axes, local `-Z`, failure without
+partial output and actual reads/evaluation after Scene/importer/IO destruction. A small OBJ case
+also verifies that unknown axes/winding/units/UV origin survive direct extraction and destruction.
+
+| Check | Actual result | Evidence identity |
+| --- | --- | --- |
+| Import source-scope contract | 20/20 pass, including independently framed Light digest, collapse and tail mutation | nextest `637e5e60-86c4-4185-8893-748d35fb05ea` |
+| glTF scanner/normalized/light semantics | 41/41 pass | nextest `a033a3f0-8e39-4499-94ff-5847dbcfe804` |
+| Final light integration assertions | 16/16 pass, including mesh/camera/light on the same source node | nextest `2310452a-42b0-4d1a-b56f-9478bc0ddb48` |
+| Detached spatial/evaluation/material targets | 36/36 pass | nextest `79e973e7-538a-413f-ad47-c4a455b194d2` |
+| Spatial target with unknown-OBJ-space addition | 7/7 pass | nextest `1c7fd04f-bc19-4f79-b8be-18535fcfa19e` |
+
+These are Rust 1.95 Windows x86_64 MSVC executions. Strict all-target/all-feature glTF and asset
+Clippy and both format checks pass. Independent adversarial producer and correctness
+consumer/source-scope reviews found no remaining actionable defect; their private reports are
+`lights-producer-review.md` and `spatial-output-review.md`. The latter's nonblocking unknown-space
+test suggestion is covered by the final seven-test run. The former's scene-coexistence observation
+was strengthened to assert the actual mesh-instance node identity explicitly.
+
+The first producer run `97fe9aaa` exposed three test-fixture/expectation errors (invalid added root,
+startup-rejected memory limit, and source-node count); the first consumer run `072f0d9e` exposed
+main's mistaken inclusion of the hidden synthetic root in public node counts. Fixtures and
+expectations were corrected against the existing public contract; production acceptance and
+numeric tolerances were not relaxed. Final source identities and these runs are retained under
+`target/review/punctual-lights/`. Full integrated/package/portable/render qualification remains
+later work; imported light definitions alone establish no rendered result.
+
 ## Remaining Verification
 
 Timing/RSS B0, the separate heap observations and the regression policy are now recorded above. Production semantics remained unchanged throughout these campaigns.
-Subsequent light/render/device/quantization and clearcoat/sheen producer changes, canonical v1 cutover, B1 comparisons and final package/portable qualification remain ahead.
+Subsequent render/device/quantization and clearcoat/sheen producer changes, owned-glTF assurance,
+canonical v1 cutover, B1 comparisons and final package/portable qualification remain ahead.
 Historical qualification stays bound to the source in its original record.
 No registry publication/yank, push/PR or native target promotion has occurred in this work.

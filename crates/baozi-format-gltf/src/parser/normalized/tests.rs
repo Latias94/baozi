@@ -21,6 +21,7 @@ enum FixtureFault {
     MissingNodeSource,
     MissingNodeOwner,
     InspectSourceMap,
+    Light,
 }
 
 struct HandBuiltModel(FixtureFault);
@@ -84,6 +85,7 @@ fn build_fixture<'scope>(
     let primitive_source = entity(SourceEntityKind::Primitive, Some(0), 0);
     let position_source = entity(SourceEntityKind::Accessor, None, 0);
     let delta_source = entity(SourceEntityKind::Accessor, None, 1);
+    let light_source = entity(SourceEntityKind::Light, None, 0);
     let inventory = [
         DOCUMENT,
         node_source,
@@ -91,6 +93,7 @@ fn build_fixture<'scope>(
         primitive_source,
         position_source,
         delta_source,
+        light_source,
     ];
     let mut sources = SelectedSourceProfile::from_source_map(scope, &map, |id| {
         inventory.contains(&id)
@@ -116,6 +119,9 @@ fn build_fixture<'scope>(
             continue;
         }
         sources.link(scope, owner, source)?;
+    }
+    if matches!(fault, FixtureFault::Light) {
+        sources.link(scope, ProfileOwner::Light(0), light_source)?;
     }
     sources.finish(scope)?;
     let positions = AttributeStorage {
@@ -182,7 +188,11 @@ fn build_fixture<'scope>(
                 Presence::Absent,
                 AuthoredTransform::identity_trs(),
                 Presence::Absent,
-                Presence::Absent,
+                if matches!(fault, FixtureFault::Light) {
+                    Presence::Present(LightLocalId::new(0))
+                } else {
+                    Presence::Absent
+                },
             )],
         )?,
         names: one(
@@ -238,6 +248,34 @@ fn build_fixture<'scope>(
             ),
             camera_ids: values(scope, &[])?,
         },
+        lights: if matches!(fault, FixtureFault::Light) {
+            super::super::lights::LightStorage {
+                authored: one(
+                    scope,
+                    LightDefinition::try_from_scaled_linear_srgb(
+                        LightKind::point(Some(8.0)).unwrap(),
+                        LocalAxes::STANDARD,
+                        Color::WHITE,
+                        2.0,
+                    )
+                    .unwrap(),
+                )?,
+                names: one(
+                    scope,
+                    owned_name(scope, Some("Hand-built light"), "fixture-light-name")?,
+                )?,
+                light_ids: values(scope, &[Some(LightLocalId::new(0))])?,
+            }
+        } else {
+            super::super::lights::LightStorage {
+                authored: values(scope, &[])?,
+                names: scope.metered_vec(
+                    ImportStorageClass::FormatNormalization,
+                    "fixture-light-names",
+                ),
+                light_ids: values(scope, &[])?,
+            }
+        },
         nodes,
         skins: SkinStorage {
             skins: scope.metered_vec(ImportStorageClass::FormatNormalization, "fixture-skins"),
@@ -292,6 +330,33 @@ fn import_fixture(
         path,
         ImportOperationControl::default(),
     ))
+}
+
+#[test]
+fn hand_built_light_reaches_spatial_authoring_and_root_definition_provenance()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    // The light payload deliberately has no decoder meaning; this seam submits the owned model.
+    let primary = br#"{"fixture":true,"nodes":[{}],"meshes":[{"primitives":[{}]}],"accessors":[{},{}],"extensions":{"KHR_lights_punctual":{"lights":[{"fixture":true}]}}}"#;
+    let report = import_fixture(primary, FixtureFault::Light)??;
+    let scene = report.scene();
+    let light = scene.lights().next().unwrap();
+    assert_eq!(scene.lights().count(), 1);
+    assert_eq!(
+        scene.nodes().next().unwrap().light().unwrap().id(),
+        light.id()
+    );
+    assert_eq!(light.definition().intensity(), 2.0);
+    assert_eq!(light.definition().kind().range(), Some(8.0));
+    let offset = std::str::from_utf8(primary)?
+        .find(r#"{"fixture":true}]}}"#)
+        .unwrap();
+    let expected = format!("kind=light;parent=-;index=0;offset={offset};length=16");
+    assert!(scene.owner_provenance(light.metadata_owner())?.any(|node| {
+        matches!(node.kind(), baozi_core::ProvenanceKindRef::Source(source)
+            if matches!(source.locator(), baozi_import::SourceObjectLocatorRef::Namespaced { value, .. }
+                if value == expected))
+    }));
+    Ok(())
 }
 
 #[test]

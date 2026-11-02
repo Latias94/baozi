@@ -20,12 +20,14 @@ pub(crate) use schema::{
 pub(crate) const KHR_TEXTURE_TRANSFORM: &str = "KHR_texture_transform";
 pub(crate) const KHR_MATERIALS_UNLIT: &str = "KHR_materials_unlit";
 pub(crate) const KHR_MATERIALS_EMISSIVE_STRENGTH: &str = "KHR_materials_emissive_strength";
+pub(crate) const KHR_LIGHTS_PUNCTUAL: &str = "KHR_lights_punctual";
 
 pub(crate) fn is_supported_extension(name: &str) -> bool {
     [
         KHR_TEXTURE_TRANSFORM,
         KHR_MATERIALS_UNLIT,
         KHR_MATERIALS_EMISSIVE_STRENGTH,
+        KHR_LIGHTS_PUNCTUAL,
     ]
     .contains(&name)
 }
@@ -94,6 +96,31 @@ impl<'scope> Document<'scope> {
             .nodes
             .get(index)
             .map(|_| Node { doc: self, index })
+    }
+    pub(crate) fn punctual_light_reference(
+        &self,
+        ctx: &ParseScope<'_>,
+        id: ValueId,
+    ) -> ParseResult<schema::Index> {
+        decode::Decoder {
+            ctx,
+            bytes: self.json,
+            index: &self.index,
+        }
+        .punctual_light_reference(id)
+    }
+
+    pub(crate) fn light(
+        &self,
+        ctx: &'scope ParseScope<'_>,
+        id: ValueId,
+    ) -> ParseResult<schema::Light<'scope>> {
+        decode::Decoder {
+            ctx,
+            bytes: self.json,
+            index: &self.index,
+        }
+        .light(id)
     }
     pub(crate) fn default_scene(&self) -> Option<Scene<'_>> {
         self.tables.scene.map(|id| Scene {

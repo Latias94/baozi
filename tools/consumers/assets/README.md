@@ -42,6 +42,7 @@ cargo +1.95.0 run --locked --release --manifest-path tools/consumers/assets/Carg
 cargo +1.95.0 nextest run --locked --manifest-path tools/consumers/assets/Cargo.toml --target-dir target --all-features --build-jobs 1 --test-threads 1
 cargo +1.95.0 nextest run --locked --manifest-path tools/consumers/assets/Cargo.toml --target-dir target --test primitive_modes --build-jobs 1 --test-threads 1
 cargo +1.95.0 nextest run --locked --manifest-path tools/consumers/assets/Cargo.toml --target-dir target --test material_output --test indexing --test unlit_materials --test deformation_seams --build-jobs 1 --test-threads 1
+cargo +1.95.0 nextest run --locked --manifest-path tools/consumers/assets/Cargo.toml --target-dir target --test spatial_output --test evaluation --build-jobs 1 --test-threads 1
 ```
 
 `ROOT` is an ambient directory used to acquire the native capability; the asset path is relative to
@@ -101,6 +102,11 @@ This is a concrete extraction example, not a new canonical representation or a g
   declarations, animation time domains, channel extrapolation, samples and cubic derivatives
   survive Scene destruction. Authored matrices remain matrices.
   Opaque Scene IDs are mapped to application indices only after the final edit.
+- Independent `cameras` and `lights` tables own complete `CameraProjection` and `LightDefinition`
+  values. Each node has optional `camera` and `light` application indices, alongside any mesh
+  instances. Multiple nodes can share either definition without duplicating it. Camera/light-only
+  scenes require no geometry or default draw. Camera and Light names come from their own retained
+  `org.baozi.gltf:source-name` metadata; absent and explicitly empty names stay distinct.
 - Materials retain names, shading model, alpha mode (including Mask cutoff), sidedness and the
   complete `MaterialFactors` value: raw emission with independently optional strength,
   metallic/roughness, specular/glossiness, legacy, and independent optional clearcoat, transmission,
@@ -116,7 +122,9 @@ This is a concrete extraction example, not a new canonical representation or a g
   Image, Texture and Sampler names come only from their respective owners' retained
   `org.baozi.gltf:source-name` metadata. Absent and explicitly empty names remain distinct;
   no image-name or path fallback is copied into another owner.
-- `ApplicationAsset::uv_origin` preserves the scene declaration, including Unknown. Each draw's
+- `ApplicationAsset::space` copies the complete lifetime-free `SceneSpaceRef`: handedness, up/front
+  axes, optional unit scale to meters, front-face winding, and UV origin. Unknown facts stay unknown;
+  UV origin is read through `asset.space.uv_origin`. Each draw's
   `tangent_conventions` belongs to its selected tangent attribute and owns any namespaced basis
   and encoding identity/version. The copier neither flips UVs nor infers a MikkTSpace convention.
 - Source-object glTF JSON metadata is copied explicitly with sanitized resource identity, format,
@@ -126,7 +134,7 @@ This is a concrete extraction example, not a new canonical representation or a g
   The unchanged `MorphPrimitivesTest` checks all 147 original `/asset/extras` bytes after edits and
   Scene destruction, together with both primitives, shared default morph weights, and its JPEG.
 - This application selects one domain for each normal, tangent, retained UV set and COLOR0.
-  It does not retain other color sets, cameras, lights, custom attributes or the complete provenance
+  It does not retain other color sets, custom attributes or the complete provenance
   graph. It is not a round-trip serializer or renderer. Image decoding, shading, tangent generation
   and GPU packing remain outside this example. `mesh_local_bounds` aggregates base
   mesh-local positions; it does not apply instances, node transforms, skinning, or morph weights.
@@ -160,6 +168,31 @@ semantics, source-owner names, declared/unknown image media type, F64 PLY UVs, l
 named missing-UV failures for Unlit fallback. All full appearance assertions read owned output after
 the Scene, import evidence, importer, IO and fixture buffers are destroyed. The UV transform vector
 maps `(1/4,1/8)` to `(1/16,3/4)` using scale, 90-degree rotation, and translation, without decoding pixels.
+
+Camera projections retain their intrinsic axes, perspective field of view and optional aspect/far
+planes, or orthographic magnifications and depth range. Light definitions retain category, intrinsic
+axes, normalized linear tint, photometric intensity, optional range, and spot half-cones in radians.
+Directional intensity is in lux; point/spot intensity is in candela. Ranges and camera distances use
+the current `asset.space` length unit. The copier preserves these canonical values without deriving
+a second emission representation or applying attenuation.
+
+Node hierarchy and authored transforms remain the sole placement authority. The existing detached
+`evaluate` operation supplies `world_transforms[node_index]` even for a scene without draws. The
+node's world origin locates a point/spot emitter, while the definition's intrinsic axes identify its
+reference directions; glTF cameras and directional/spot lights use local -Z before conversion.
+Parent scale affects inherited position, but node scale does not rescale intensity, range, camera
+parameters, or cone angles. Explicit Scene unit conversion scales distances and ranges and converts
+intrinsic axes before extraction; emission and cone bits remain unchanged. These copied transforms
+can retain scale/shear. A renderer that needs a rigid photometric frame must check it explicitly;
+the copier and position evaluator do not silently orthogonalize it.
+
+The self-authored `spatial_output` tests specify camera/light-only scenes, shared definitions with
+omitted source ordinals, absent/empty owner names, exact light extras, and nodes carrying geometry,
+camera and light together. Independent source vectors give world origin `(12,26,42)` from parent
+translation `(10,20,30)`, scale `(2,3,4)` and child translation `(1,2,3)`. Conversion to left-handed
+Y-up centimeters gives `(1200,2600,-4200)` and range `8 -> 800`, with unchanged photometry and cones.
+All successful output assertions run after Scene, import/conversion reports, importer, IO and fixture
+buffers leave scope. A missing material UV returns an error while preserving the source Scene.
 
 The separate `evaluate` reference in `src/evaluation.rs` consumes only these owned buffers. Select one clip
 with `Some(index)` or the authored pose with `None`; `SampleTime::Declared(f64)` uses the clip's

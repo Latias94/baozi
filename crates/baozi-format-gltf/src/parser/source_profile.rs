@@ -245,6 +245,7 @@ fn source_locator<'scope>(
         SourceEntityKind::AnimationChannel => "animation-channel",
         SourceEntityKind::AnimationSampler => "animation-sampler",
         SourceEntityKind::Camera => "camera",
+        SourceEntityKind::Light => "light",
     };
     let mut label = ctx.metered_string(
         ImportStorageClass::FormatNormalization,
@@ -321,6 +322,16 @@ pub(super) fn associate(
                 ctx,
                 ProfileOwner::Camera(id.index()),
                 entity(SourceEntityKind::Camera, None, index),
+            )?;
+        }
+    }
+    for (index, id) in model.lights.light_ids.as_slice().iter().enumerate() {
+        ctx.charge_work(1)?;
+        if let Some(id) = id {
+            profile.link(
+                ctx,
+                ProfileOwner::Light(id.index()),
+                entity(SourceEntityKind::Light, None, index),
             )?;
         }
     }

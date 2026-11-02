@@ -27,6 +27,7 @@ pub(crate) enum SourceEntityKind {
     AnimationChannel,
     AnimationSampler,
     Camera,
+    Light,
 }
 
 /// Nested ordinals are local to their mesh or animation, identified by `parent_index`.
@@ -97,6 +98,9 @@ pub(crate) enum SourcePayloadSite {
     AnimationChannelTarget,
     CameraOrthographic,
     CameraPerspective,
+    DocumentPunctualLights,
+    NodePunctualLight,
+    LightSpot,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,6 +108,7 @@ pub(crate) enum SourceExtensionKind {
     KhrTextureTransform,
     KhrMaterialsUnlit,
     KhrMaterialsEmissiveStrength,
+    KhrLightsPunctual,
     Other,
 }
 
@@ -114,7 +119,7 @@ pub(crate) enum SourcePayloadKind {
     Extensions,
     /// One direct member of an `extensions` object. Its raw key remains available below.
     Extension(SourceExtensionKind),
-    /// One unsupported direct property of a recognized material extension object.
+    /// One unsupported direct property of a recognized extension or light object.
     ExtensionProperty,
 }
 

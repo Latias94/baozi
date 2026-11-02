@@ -34,10 +34,12 @@ pub enum SourceScopeEntityKind {
     Camera = 14,
     /// An animation sampler scoped to its source animation.
     AnimationSampler = 15,
+    /// A reusable light definition; node observations describe its placements.
+    Light = 16,
 }
 
 impl SourceScopeEntityKind {
-    const COUNT: usize = Self::AnimationSampler as usize + 1;
+    const COUNT: usize = Self::Light as usize + 1;
 
     const fn index(self) -> usize {
         self as usize

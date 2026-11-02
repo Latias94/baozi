@@ -29,6 +29,7 @@ enum Exit {
     NoRecord,
     Success,
     TypedSuccess,
+    LightSuccess,
     FailureAfterRecord,
     Duplicate,
 }
@@ -152,12 +153,17 @@ impl FormatImporter for ScopeImporter {
             record_typed(scope)?;
             return support::submit_minimal_scene(scope);
         }
+        if matches!(self.exit, Exit::LightSuccess) {
+            record_lights(scope, self.identities)?;
+            return support::submit_minimal_scene(scope);
+        }
 
         record(scope, self.identities)?;
         match self.exit {
             Exit::NoRecord => unreachable!(),
             Exit::Success => support::submit_minimal_scene(scope),
             Exit::TypedSuccess => unreachable!(),
+            Exit::LightSuccess => unreachable!(),
             Exit::FailureAfterRecord => Err(scope.format_failure(TestFormatFailure)),
             Exit::Duplicate => {
                 record(scope, &["scene:duplicate"])?;
@@ -251,6 +257,25 @@ fn record_typed(scope: &ParseScope<'_>) -> ParseResult<()> {
     }
     let record = builder.finish()?;
     scope.record_source_scope(record)
+}
+
+fn record_lights(scope: &ParseScope<'_>, identities: &[&str]) -> ParseResult<()> {
+    let mut builder = scope.source_scope_builder(
+        SourceScopeSelectionRequest::DocumentDefault,
+        selection_outcome(),
+    )?;
+    for (index, identity) in identities.iter().enumerate() {
+        builder.observe(
+            SourceScopeEntityKind::Light,
+            if index == 1 {
+                SourceScopeDisposition::Omitted
+            } else {
+                SourceScopeDisposition::Selected
+            },
+            identity,
+        )?;
+    }
+    scope.record_source_scope(builder.finish()?)
 }
 
 #[derive(Debug)]
@@ -547,6 +572,75 @@ fn typed_counts_remain_partitioned_by_source_entity_kind() {
             0x5f, 0x51, 0x89, 0x23, 0xdd, 0xe6, 0xb0, 0xa0, 0xd8, 0x6f, 0xf2, 0xd6, 0xf0, 0x98,
             0x28, 0x9e, 0xbc, 0xb8,
         ]
+    );
+}
+
+#[test]
+fn light_definitions_have_a_distinct_tag_and_full_digest_when_details_collapse() {
+    assert_eq!(SourceScopeEntityKind::AnimationSampler as u8, 15);
+    assert_eq!(SourceScopeEntityKind::Light as u8, 16);
+    // Independently framed v3 prefix, default/parentless scene.scope selection,
+    // then [16, disposition] + u64_le(2) + l0/l1/l2. No production encoder.
+    let expected = [
+        0x14, 0x03, 0xf8, 0x99, 0xbd, 0x4c, 0x22, 0xd6, 0xfd, 0xb2, 0xbc, 0xd7, 0x79, 0x0d, 0xa3,
+        0x0d, 0xf8, 0x24, 0xf4, 0xdf, 0xc5, 0x9c, 0xe8, 0xe3, 0x99, 0x4e, 0xaf, 0xfd, 0xe7, 0xd1,
+        0x35, 0x3a,
+    ];
+    for collapse in [false, true] {
+        let mut limits = ResourceLimits::default();
+        limits.max_source_scope_items = 3;
+        limits.max_source_scope_digest_bytes = 6;
+        if collapse {
+            limits.max_source_scope_detail_count = 0;
+        }
+        let report = run(
+            Exit::LightSuccess,
+            &["l0", "l1", "l2"],
+            limits,
+            provenance_loss_policy(),
+        )
+        .unwrap();
+        let record = report.source_scope_record().unwrap();
+        assert_eq!(record.counts(SourceScopeEntityKind::Light).selected(), 2);
+        assert_eq!(record.counts(SourceScopeEntityKind::Light).omitted(), 1);
+        assert_eq!(
+            record
+                .counts(SourceScopeEntityKind::AnimationSampler)
+                .total(),
+            0
+        );
+        assert_eq!(record.counts(SourceScopeEntityKind::Node).total(), 0);
+        assert_eq!(record.digest().as_bytes(), &expected);
+        if collapse {
+            assert_eq!(record.detail_state(), SourceScopeDetailState::Collapsed);
+            assert_eq!(record.details().count(), 0);
+            assert_eq!(record.collapsed_detail_count(), 3);
+            assert_eq!(record.collapsed_detail_bytes(), 6);
+        } else {
+            assert_eq!(record.detail_state(), SourceScopeDetailState::Detailed);
+            let details = record.details().collect::<Vec<_>>();
+            assert_eq!(details.len(), 3);
+            for (detail, identity) in details.iter().zip(["l0", "l1", "l2"]) {
+                assert_eq!(detail.kind(), SourceScopeEntityKind::Light);
+                assert_eq!(detail.identity(), identity);
+            }
+            assert_eq!(details[1].disposition(), SourceScopeDisposition::Omitted);
+        }
+        assert_eq!(report.ledger().current_live_bytes(), 0);
+    }
+
+    let mut limits = ResourceLimits::default();
+    limits.max_source_scope_detail_count = 0;
+    let changed = run(
+        Exit::LightSuccess,
+        &["l0", "l1", "l3"],
+        limits,
+        provenance_loss_policy(),
+    )
+    .unwrap();
+    assert_ne!(
+        changed.source_scope_record().unwrap().digest().as_bytes(),
+        &expected
     );
 }
 

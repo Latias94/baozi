@@ -102,5 +102,8 @@ fn key(site: SourcePayloadSite) -> &'static str {
         Site::AnimationChannelTarget => "org.baozi.gltf:target-extras",
         Site::CameraOrthographic => "org.baozi.gltf:orthographic-extras",
         Site::CameraPerspective => "org.baozi.gltf:perspective-extras",
+        Site::DocumentPunctualLights => "org.baozi.gltf:punctual-lights-extras",
+        Site::NodePunctualLight => "org.baozi.gltf:punctual-light-extras",
+        Site::LightSpot => "org.baozi.gltf:spot-extras",
     }
 }

@@ -70,6 +70,10 @@ document. Fresh target/sanitizer and archive-consumer evidence belongs to the
   base semantic. Cardinality, finite values, ordered POSITION bounds, and morph-cell admission are
   checked before canonical publication; unsupported morph semantics are rejected explicitly.
 - Perspective and orthographic camera projection data.
+- Typed `KHR_lights_punctual` directional, point and spot definitions, selected by node
+  attachments. Shared definitions retain their source ordinals, names, exact extras and owner
+  provenance; unreferenced definitions remain omitted. Light-only scenes need no geometry or
+  sidecar IO. The existing checked core photometry and spatial conversion remain authoritative.
 - Selected `extras` values, including document/asset, scene, buffer/view/accessor, animation sampler,
   and nested schema sites, retained as exact `application/json` bytes under source-object metadata
   owners. Source objects without a canonical entity keep their own identity and metadata.
@@ -112,7 +116,7 @@ document. Fresh target/sanitizer and archive-consumer evidence belongs to the
   duplicate targets, and weights on a node without morph targets are rejected.
 - A bounded development `SourceScopeRecord` covering declared scenes, selected/omitted nodes,
   meshes/primitives, materials, textures/images/samplers, skins, accessors/buffer views/buffers,
-  animations, and animation channels. The selected core resource closure is compiled before
+  animations, animation channels, cameras and light definitions. The selected core resource closure is compiled before
   dependency IO; omitted external buffers/images are not authorized, and selected data-URI or
   buffer-view images are materialized as encoded payloads.
 - Typed source-scope selection evidence retains the requested mode and actual source scene or
@@ -235,6 +239,35 @@ no semantic-loss record. This replaces the earlier misleading `gltf.extension_ig
 See the [pinned Khronos unlit contract](https://github.com/KhronosGroup/glTF/blob/59ecbdba704206bb656965ab4e202881806066f1/extensions/2.0/Khronos/KHR_materials_unlit/README.md)
 and [extension schema](https://github.com/KhronosGroup/glTF/blob/59ecbdba704206bb656965ab4e202881806066f1/extensions/2.0/Khronos/KHR_materials_unlit/schema/material.KHR_materials_unlit.schema.json).
 
+### Punctual lights and spatial consumption
+
+Root `extensions.KHR_lights_punctual.lights` is a definition inventory. Only attachments on
+selected nodes select definitions; several nodes may share one light, and a node can also carry
+a camera and geometry. Declaration/root-array safety is checked globally, while omitted light
+payloads are not interpreted. Selected light preparation precedes dependency IO and uses one
+checked `LightDefinition` construction per definition. Public node readers hide the internal
+synthetic projection root, as for other glTF scenes.
+
+Directional intensity is illuminance in lux; point/spot intensity is luminous intensity in candela.
+glTF linear-sRGB color times intensity is converted through the existing canonical unit-luminance
+tint/intensity contract in [ADR 0040](../adr/0040-camera-and-light-canonical-semantics.md).
+Defaults are white, intensity one, no range and the standard local frame. Emission points along
+local `-Z`. A spot requires a `spot` object; its defaults are inner zero and outer `pi/4`.
+Source cones satisfy `0 <= inner < outer <= pi/2` before narrowing and must remain strictly
+ordered in canonical F32. Invalid colors/intensities/ranges, authored nulls, overflow and nonzero
+underflow reject explicitly. Unsupported selected properties/sites and nested behavior reject
+under both loss policies; descriptive extras retain their exact source bytes.
+
+Node scale changes placement through hierarchy composition without scaling range, photometry or
+cone angles. Explicit Scene unit conversion scales range and camera clipping/extents, transports
+intrinsic axes and keeps emission/cone bits. The detached asset example owns camera/light
+definitions, dense node references and the full `SceneSpaceRef` after original Scene/importer/IO
+destruction. Its actual renderer is a separate application and qualification boundary.
+
+The [pinned Khronos extension](https://github.com/KhronosGroup/glTF/blob/59ecbdba704206bb656965ab4e202881806066f1/extensions/2.0/Khronos/KHR_lights_punctual/README.md)
+defines the source semantics. The finite canonical cutoff policy remains ADR 0040; import does
+not promise pixel identity with every other renderer.
+
 ### Primitive counts and index validation
 
 Draw Corner count comes from the index accessor when present, otherwise from the vertex attributes.
@@ -354,7 +387,8 @@ and import-contract tests.
 
 - Embedded image buffer views and image data URIs are materialized as encoded image payloads without
   pixel decoding. Typed extension payloads beyond
-  `KHR_texture_transform` and material-level `KHR_materials_unlit` are rejected explicitly.
+  `KHR_texture_transform`, material-level `KHR_materials_unlit` /
+  `KHR_materials_emissive_strength`, and the punctual-light sites above are rejected explicitly.
 - Unsupported selected extension payloads are explicitly rejected with original raw byte
   ranges. A supported extension at an unsupported owner/site is rejected as well. Unselected entity
   payloads remain scope omissions. Declaring an unsupported optional extension without a selected

@@ -3,7 +3,7 @@
 //! Every collection uses the import session's admitted storage. No decoder handle or
 //! decoder-dependent borrow is retained by this model.
 
-use super::{animation, morph, source_profile, uri};
+use super::{animation, lights, morph, source_profile, uri};
 use baozi_import::authoring::*;
 use baozi_import::{DependencySnapshot, MeteredString, MeteredVec, SourceScopeSelectionRequest};
 
@@ -123,6 +123,7 @@ pub(super) struct NormalizedGltf<'scope> {
     pub(super) appearance: AppearanceStorage<'scope>,
     pub(super) geometry: GeometryStorage<'scope>,
     pub(super) cameras: CameraStorage<'scope>,
+    pub(super) lights: lights::LightStorage<'scope>,
     pub(super) nodes: NodeStorage<'scope>,
     pub(super) skins: SkinStorage<'scope>,
     pub(super) instance_deformations: MeteredVec<'scope, InstanceDeformationStorage<'scope>>,

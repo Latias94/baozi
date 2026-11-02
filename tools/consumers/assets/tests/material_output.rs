@@ -161,7 +161,7 @@ fn complete_material_uv_and_sampling_closure_survives_all_source_owners() -> Res
         let (document, payload) = document();
         copy_document(&document, &payload)?
     };
-    assert_eq!(asset.uv_origin, UvOrigin::UpperLeft);
+    assert_eq!(asset.space.uv_origin, UvOrigin::UpperLeft);
     assert_eq!(
         (
             asset.draws.len(),

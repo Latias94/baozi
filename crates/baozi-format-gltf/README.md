@@ -16,7 +16,8 @@ The [exact selected profile](https://github.com/Latias94/baozi/blob/main/docs/fo
 - Preserve all seven point, line and triangle primitive modes, supported vertex streams including
   complete paired `JOINTS_n`/`WEIGHTS_n`, hierarchy and node transforms, skins, F32 VEC3
   POSITION/NORMAL/TANGENT morph deltas, node TRS and morph-weight animation,
-  perspective/orthographic cameras, and PBR metallic-roughness materials.
+  perspective/orthographic cameras, selected shared `KHR_lights_punctual` definitions and
+  placements, and PBR metallic-roughness materials.
   Animation interpolation covers Step, Linear, and CubicSpline.
 - Preserve every admitted influence lane in set/lane source order, including zero weights,
   with bounded variable rows and complete source provenance. Validate paired contiguous sets,
@@ -33,11 +34,15 @@ The [exact selected profile](https://github.com/Latias94/baozi/blob/main/docs/fo
   selected primitive omits its binding. Effective material reads require no source-format guessing.
 - Preserve selected `extras` as exact `application/json` byte values owned by source identities,
   including JSON null, scalars, and nested sites. No source JSON is interpreted as scene behavior.
-- Support typed `KHR_materials_unlit` at material objects and `KHR_texture_transform` at documented
+- Support typed `KHR_materials_unlit` and independently authored `KHR_materials_emissive_strength`
+  at material objects and `KHR_texture_transform` at documented
   texture bindings. Unlit selects base color/vertex color and preserves alpha/sidedness; the original
   PBR fallback factors, bindings and complete resources remain retained. Reject unsupported selected
   extension payloads and unsupported required extensions. Unknown optional declarations without
   retained payloads produce a declaration-only diagnostic, with no semantic-loss claim.
+- Lower selected punctual-light photometry through the checked canonical light type before
+  dependency IO. Node scale affects placement, explicit unit conversion scales range, and shared
+  camera/light definitions remain distinct from node attachments. No pixels are rendered here.
 - Import retains source topology; the explicit `baozi-postprocess::list_vertices` view expands
   strips/fans/loops for list consumers without mutating the Scene. Resource-limit
   coverage is partial, canonical dependency identities remain session-opaque, and

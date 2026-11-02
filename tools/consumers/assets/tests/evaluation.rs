@@ -3,7 +3,7 @@ use std::sync::Arc;
 use baozi::{
     AnimationExtrapolation as Extrapolation, AnimationInterpolation as Interpolation,
     AnimationTimeDomain, AssetPath, AuthoredTransform, Axis, FrontFaceWinding, Handedness,
-    Importer, Mat4, MaterialAssignment, MemoryAssetIo, MorphDeltaSemantic, Quat,
+    Importer, Mat4, MaterialAssignment, MemoryAssetIo, MorphDeltaSemantic, Quat, SceneSpaceRef,
     SkinMatrixCorrection, SkinMatrixSpace, SkinMatrixSpaces, TargetSpace, TopologyKind, UvOrigin,
     Vec3,
     postprocess::{PostProcessControl, SpaceConversionOptions, convert_scene_space},
@@ -47,6 +47,8 @@ fn node(x: f32) -> Node {
         name: None,
         transform: translation(x),
         children: Vec::new(),
+        camera: None,
+        light: None,
     }
 }
 
@@ -56,6 +58,8 @@ fn asset() -> ApplicationAsset {
         mesh_morph_weights: vec![Vec::new()],
         roots: vec![0],
         nodes: vec![node(0.0)],
+        cameras: Vec::new(),
+        lights: Vec::new(),
         draws: vec![DrawBuffer {
             mesh: 0,
             primitive: 0,
@@ -85,7 +89,14 @@ fn asset() -> ApplicationAsset {
         images: Vec::new(),
         textures: Vec::new(),
         samplers: Vec::new(),
-        uv_origin: UvOrigin::Unknown,
+        space: SceneSpaceRef {
+            handedness: Handedness::Unknown,
+            up_axis: Axis::Unknown,
+            front_axis: Axis::Unknown,
+            unit_scale_to_meters: None,
+            front_face_winding: FrontFaceWinding::Unknown,
+            uv_origin: UvOrigin::Unknown,
+        },
         source_json_metadata: Vec::new(),
     }
 }
@@ -538,6 +549,8 @@ fn world_composition_respects_parent_order_and_nonuniform_trs() -> Result<()> {
             Vec3::new(2.0, 3.0, 4.0),
         )?,
         children: vec![0],
+        camera: None,
+        light: None,
     });
     asset.roots = vec![1];
     let sampled = evaluate(&asset, None, SampleTime::Declared(0.0))?;
@@ -822,6 +835,8 @@ fn hierarchical_uniform_scales_remain_invertible_beyond_f32_range() -> Result<()
                 name: None,
                 transform: authored,
                 children: vec![child],
+                camera: None,
+                light: None,
             });
             child = parent;
         }

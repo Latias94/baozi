@@ -92,6 +92,7 @@ pub(crate) struct Tables<'scope> {
     pub(crate) accessors: List<'scope, accessor::Accessor>,
     pub(crate) animations: List<'scope, animation::Animation<'scope>>,
     pub(crate) cameras: List<'scope, Camera<'scope>>,
+    pub(crate) lights: List<'scope, crate::json_syntax::ValueId>,
     pub(crate) extensions_used: List<'scope, Text<'scope>>,
     pub(crate) extensions_required: List<'scope, Text<'scope>>,
 }
@@ -105,6 +106,7 @@ pub(crate) struct Node<'scope> {
     pub(crate) mesh: Option<Index>,
     pub(crate) skin: Option<Index>,
     pub(crate) camera: Option<Index>,
+    pub(crate) punctual_light: Option<crate::json_syntax::ValueId>,
     pub(crate) matrix: Option<[f32; 16]>,
     pub(crate) translation: [f32; 3],
     pub(crate) rotation: [f32; 4],
@@ -114,6 +116,21 @@ pub(crate) struct Node<'scope> {
 pub(crate) struct Buffer<'scope> {
     pub(crate) uri: Option<Text<'scope>>,
     pub(crate) byte_length: u64,
+}
+
+/// Source fields remain binary64 until the format's checked lowering operation.
+pub(crate) struct Light<'scope> {
+    pub(crate) name: Option<Text<'scope>>,
+    pub(crate) kind: Text<'scope>,
+    pub(crate) color: [f64; 3],
+    pub(crate) intensity: f64,
+    pub(crate) range: Option<f64>,
+    pub(crate) spot: Option<LightSpot>,
+}
+
+pub(crate) struct LightSpot {
+    pub(crate) inner_cone_angle: f64,
+    pub(crate) outer_cone_angle: f64,
 }
 pub(crate) mod buffer {
     use super::*;

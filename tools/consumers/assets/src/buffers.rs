@@ -3,12 +3,13 @@ use std::{collections::HashMap, fmt, num::NonZeroU32};
 use baozi::{
     Aabb, AnimationExtrapolation, AnimationInterpolation, AnimationTarget, AnimationTimeDomain,
     AttributeData, AttributeDomain, AttributeElement, AttributeRef, AttributeSemanticRef,
-    AuthoredTransform, BasePoseWorldTransforms, CancellationToken, ColorInterpretation, Mat4,
-    MaterialAssignment, MaterialFactors, MetadataOwnerRef, MetadataValueRef, MorphDeltaSemantic,
-    PrimitiveId, PrimitiveRef, SamplerState, SceneProfileOwner, SkinMatrixSpaces,
-    SourceObjectLocatorRef, SpatialQueryError, SpatialQueryLimits, TangentBasisRef,
-    TangentEncodingRef, TextureBlendOperation, TextureChannelSwizzle, TextureRole, TextureStrength,
-    TextureTransform, TopologyKind, UvOrigin, ValidatedScene,
+    AuthoredTransform, BasePoseWorldTransforms, CameraProjection, CancellationToken,
+    ColorInterpretation, LightDefinition, Mat4, MaterialAssignment, MaterialFactors,
+    MetadataOwnerRef, MetadataValueRef, MorphDeltaSemantic, PrimitiveId, PrimitiveRef,
+    SamplerState, SceneProfileOwner, SceneSpaceRef, SkinMatrixSpaces, SourceObjectLocatorRef,
+    SpatialQueryError, SpatialQueryLimits, TangentBasisRef, TangentEncodingRef,
+    TextureBlendOperation, TextureChannelSwizzle, TextureRole, TextureStrength, TextureTransform,
+    TopologyKind, ValidatedScene,
     postprocess::{PrimitiveVertex, list_vertices},
 };
 
@@ -260,6 +261,22 @@ pub struct Node {
     pub name: Option<String>,
     pub transform: AuthoredTransform,
     pub children: Vec<usize>,
+    /// Dense application index into `ApplicationAsset::cameras`, independent of geometry.
+    pub camera: Option<usize>,
+    /// Dense application index into `ApplicationAsset::lights`; definitions may be shared.
+    pub light: Option<usize>,
+}
+
+#[derive(Debug)]
+pub struct Camera {
+    pub name: Option<String>,
+    pub projection: CameraProjection,
+}
+
+#[derive(Debug)]
+pub struct Light {
+    pub name: Option<String>,
+    pub definition: LightDefinition,
 }
 
 #[derive(Debug)]
@@ -403,6 +420,8 @@ pub struct ApplicationAsset {
     pub mesh_morph_weights: Vec<Vec<f32>>,
     pub roots: Vec<usize>,
     pub nodes: Vec<Node>,
+    pub cameras: Vec<Camera>,
+    pub lights: Vec<Light>,
     pub draws: Vec<DrawBuffer>,
     pub instances: Vec<Instance>,
     pub skins: Vec<Skin>,
@@ -411,7 +430,7 @@ pub struct ApplicationAsset {
     pub textures: Vec<Texture>,
     pub samplers: Vec<Sampler>,
     pub images: Vec<Image>,
-    pub uv_origin: UvOrigin,
+    pub space: SceneSpaceRef,
     pub source_json_metadata: Vec<SourceJsonMetadata>,
 }
 
@@ -425,6 +444,8 @@ impl ApplicationAsset {
         // Public IDs stay opaque. The application creates its own dense indices exactly once,
         // after the final Scene edit, for references that must outlive that Scene.
         let nodes = dense_indices(scene.nodes().map(|n| n.id()))?;
+        let camera_indices = dense_indices(scene.cameras().map(|c| c.id()))?;
+        let light_indices = dense_indices(scene.lights().map(|l| l.id()))?;
         let meshes = dense_indices(scene.meshes().map(|m| m.id()))?;
         let skins = dense_indices(scene.skins().map(|s| s.id()))?;
         let instances = dense_indices(scene.mesh_instances().map(|i| i.id()))?;
@@ -432,6 +453,22 @@ impl ApplicationAsset {
         let image_indices = dense_indices(scene.images().map(|i| i.id()))?;
         let texture_indices = dense_indices(scene.textures().map(|t| t.id()))?;
         let sampler_indices = dense_indices(scene.samplers().map(|s| s.id()))?;
+        let mut cameras = Vec::new();
+        cameras.try_reserve_exact(scene.camera_count())?;
+        for camera in scene.cameras() {
+            cameras.push(Camera {
+                name: None,
+                projection: camera.projection(),
+            });
+        }
+        let mut lights = Vec::new();
+        lights.try_reserve_exact(scene.light_count())?;
+        for light in scene.lights() {
+            lights.push(Light {
+                name: None,
+                definition: light.definition(),
+            });
+        }
         let mut materials = Vec::new();
         materials.try_reserve_exact(scene.material_count())?;
         for material in scene.materials() {
@@ -683,6 +720,8 @@ impl ApplicationAsset {
                 name: copy_name(node.name())?,
                 transform: node.authored_transform(),
                 children,
+                camera: node.camera().map(|camera| camera_indices[&camera.id()]),
+                light: node.light().map(|light| light_indices[&light.id()]),
             });
         }
         let mut roots = Vec::new();
@@ -725,6 +764,12 @@ impl ApplicationAsset {
                 // Source names belong to these independent owners, never to a display fallback.
                 if entry.key() == "org.baozi.gltf:source-name" {
                     let target = match owner.descriptor() {
+                        SceneProfileOwner::Camera(index) => {
+                            Some(&mut cameras[usize::try_from(index)?].name)
+                        }
+                        SceneProfileOwner::Light(index) => {
+                            Some(&mut lights[usize::try_from(index)?].name)
+                        }
                         SceneProfileOwner::Image(index) => {
                             Some(&mut images[usize::try_from(index)?].name)
                         }
@@ -783,6 +828,8 @@ impl ApplicationAsset {
             mesh_morph_weights,
             roots,
             nodes: copied_nodes,
+            cameras,
+            lights,
             instances: copied_instances,
             skins: copied_skins,
             animations,
@@ -790,7 +837,7 @@ impl ApplicationAsset {
             textures,
             samplers,
             images,
-            uv_origin: scene.space().uv_origin,
+            space: scene.space(),
             source_json_metadata,
             draws,
         })

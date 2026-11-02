@@ -243,6 +243,17 @@ enum SourceMember {
     KhrMaterialsUnlit,
     KhrMaterialsEmissiveStrength,
     EmissiveStrength,
+    KhrLightsPunctual,
+    Lights,
+    Light,
+    Spot,
+    Name,
+    Type,
+    Color,
+    Intensity,
+    Range,
+    InnerConeAngle,
+    OuterConeAngle,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -589,6 +600,19 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                 ) {
                     return self.begin_source_payload(id, SourcePayloadSite::Entity, frame);
                 }
+                if id.kind == SourceEntityKind::Light
+                    && !matches!(
+                        frame.member,
+                        SourceMember::Name
+                            | SourceMember::Type
+                            | SourceMember::Color
+                            | SourceMember::Intensity
+                            | SourceMember::Range
+                            | SourceMember::Spot
+                    )
+                {
+                    return self.begin_source_payload(id, SourcePayloadSite::Entity, frame);
+                }
                 if first == Some(b'[') {
                     return Ok(source_entity_array(id, frame.member)
                         .map_or(SourceContext::Other, |(kind, parent_index)| {
@@ -611,7 +635,12 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                 if matches!(
                     frame.member,
                     SourceMember::Extensions | SourceMember::Extras
-                ) {
+                ) || (site == SourcePayloadSite::LightSpot
+                    && !matches!(
+                        frame.member,
+                        SourceMember::InnerConeAngle | SourceMember::OuterConeAngle
+                    ))
+                {
                     return self.begin_source_payload(owner, site, frame);
                 }
                 Ok(source_property(owner, site, frame.member, first))
@@ -627,14 +656,31 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                     source: SourceContext::ExtensionProperty { owner, site, .. },
                     ..
                 },
-            ) if matches!(
-                frame.member,
-                SourceMember::Extras | SourceMember::Extensions
-            ) || site == SourcePayloadSite::MaterialUnlit
-                || (site == SourcePayloadSite::MaterialEmissiveStrength
-                    && frame.member != SourceMember::EmissiveStrength) =>
-            {
-                self.begin_source_payload(owner, site, frame)
+            ) => {
+                if site == SourcePayloadSite::DocumentPunctualLights
+                    && frame.member == SourceMember::Lights
+                    && first == Some(b'[')
+                {
+                    return Ok(SourceContext::EntityArray {
+                        kind: SourceEntityKind::Light,
+                        parent_index: None,
+                    });
+                }
+                if matches!(
+                    frame.member,
+                    SourceMember::Extras | SourceMember::Extensions
+                ) || site == SourcePayloadSite::MaterialUnlit
+                    || (site == SourcePayloadSite::MaterialEmissiveStrength
+                        && frame.member != SourceMember::EmissiveStrength)
+                    || (site == SourcePayloadSite::DocumentPunctualLights
+                        && frame.member != SourceMember::Lights)
+                    || (site == SourcePayloadSite::NodePunctualLight
+                        && frame.member != SourceMember::Light)
+                {
+                    self.begin_source_payload(owner, site, frame)
+                } else {
+                    Ok(SourceContext::Other)
+                }
             }
             Some(JsonFrame {
                 source: SourceContext::EntityArray { kind, parent_index },
@@ -673,6 +719,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                 SourceMember::KhrMaterialsEmissiveStrength => {
                     SourceExtensionKind::KhrMaterialsEmissiveStrength
                 }
+                SourceMember::KhrLightsPunctual => SourceExtensionKind::KhrLightsPunctual,
                 _ => SourceExtensionKind::Other,
             };
             SourcePayloadKind::Extension(extension)
@@ -708,6 +755,16 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
             });
         }
         let site = match (kind, owner.kind, site) {
+            (
+                SourcePayloadKind::Extension(SourceExtensionKind::KhrLightsPunctual),
+                SourceEntityKind::Document,
+                SourcePayloadSite::Entity,
+            ) => SourcePayloadSite::DocumentPunctualLights,
+            (
+                SourcePayloadKind::Extension(SourceExtensionKind::KhrLightsPunctual),
+                SourceEntityKind::Node,
+                SourcePayloadSite::Entity,
+            ) => SourcePayloadSite::NodePunctualLight,
             (
                 SourcePayloadKind::Extension(SourceExtensionKind::KhrMaterialsUnlit),
                 SourceEntityKind::Material,
@@ -1559,6 +1616,17 @@ fn source_member(bytes: &[u8], content_start: usize, content_end: usize) -> Sour
         b"KHR_materials_unlit" => SourceMember::KhrMaterialsUnlit,
         b"KHR_materials_emissive_strength" => SourceMember::KhrMaterialsEmissiveStrength,
         b"emissiveStrength" => SourceMember::EmissiveStrength,
+        b"KHR_lights_punctual" => SourceMember::KhrLightsPunctual,
+        b"lights" => SourceMember::Lights,
+        b"light" => SourceMember::Light,
+        b"spot" => SourceMember::Spot,
+        b"name" => SourceMember::Name,
+        b"type" => SourceMember::Type,
+        b"color" => SourceMember::Color,
+        b"intensity" => SourceMember::Intensity,
+        b"range" => SourceMember::Range,
+        b"innerConeAngle" => SourceMember::InnerConeAngle,
+        b"outerConeAngle" => SourceMember::OuterConeAngle,
         _ => SourceMember::Other,
     }
 }
@@ -1610,6 +1678,9 @@ fn source_property(
         }
         (SourceEntityKind::Camera, SourcePayloadSite::Entity, SourceMember::Perspective) => {
             SourcePayloadSite::CameraPerspective
+        }
+        (SourceEntityKind::Light, SourcePayloadSite::Entity, SourceMember::Spot) => {
+            SourcePayloadSite::LightSpot
         }
         _ => return SourceContext::Other,
     };
@@ -2689,6 +2760,91 @@ mod tests {
             assert!(map.entities().is_empty());
             assert!(map.get(id(SourceEntityKind::Document, None, 0)).is_none());
         })
+    }
+
+    #[test]
+    fn punctual_lights_inventory_and_unknown_sites_use_only_their_schema_owners() -> TestResult {
+        let json = br#"{
+            "extensions":{
+                "KHR_lights_punct\u0075al":{"li\u0067hts":[{
+                    "type":"spot","unknown":[{"lights":[{}]}],
+                    "sp\u006ft":{"innerConeAngle":0,"outerConeAngle":1,"unknown":false,"extras":null}
+                }],"unknown":true,"extras":[]},
+                "VENDOR_data":{"lights":[{}],"extensions":{"KHR_lights_punctual":{"lights":[{}]}}}
+            },
+            "nodes":[{"extensions":{"KHR_lights_punctual":{"light":0,"unknown":17,"extras":{}}}}],
+            "materials":[{"extensions":{"KHR_lights_punctual":{"lights":[{}]}}}],
+            "extras":{"extensions":{"KHR_lights_punctual":{"lights":[{}]}}}
+        }"#;
+        fn inspect(scope: &ParseScope<'_>, map: &GltfSourceMap<'_>) {
+            let lights = map
+                .entities()
+                .iter()
+                .filter(|entity| entity.id.kind == SourceEntityKind::Light)
+                .collect::<Vec<_>>();
+            assert_eq!(lights.len(), 1);
+            assert_eq!(lights[0].id, id(SourceEntityKind::Light, None, 0));
+            for (owner, site, raw) in [
+                (
+                    id(SourceEntityKind::Document, None, 0),
+                    SourcePayloadSite::DocumentPunctualLights,
+                    "true",
+                ),
+                (
+                    id(SourceEntityKind::Node, None, 0),
+                    SourcePayloadSite::NodePunctualLight,
+                    "17",
+                ),
+                (
+                    id(SourceEntityKind::Light, None, 0),
+                    SourcePayloadSite::Entity,
+                    r#"[{"lights":[{}]}]"#,
+                ),
+                (
+                    id(SourceEntityKind::Light, None, 0),
+                    SourcePayloadSite::LightSpot,
+                    "false",
+                ),
+            ] {
+                let payload = map
+                    .payloads_for(owner)
+                    .iter()
+                    .find(|payload| {
+                        payload.site == site && payload.kind == SourcePayloadKind::ExtensionProperty
+                    })
+                    .unwrap();
+                assert_raw(scope, payload.key_range, r#""unknown""#);
+                assert_raw(scope, payload.value_range, raw);
+            }
+            for (owner, site, raw) in [
+                (
+                    id(SourceEntityKind::Document, None, 0),
+                    SourcePayloadSite::DocumentPunctualLights,
+                    "[]",
+                ),
+                (
+                    id(SourceEntityKind::Node, None, 0),
+                    SourcePayloadSite::NodePunctualLight,
+                    "{}",
+                ),
+                (
+                    id(SourceEntityKind::Light, None, 0),
+                    SourcePayloadSite::LightSpot,
+                    "null",
+                ),
+            ] {
+                let payload = map
+                    .payloads_for(owner)
+                    .iter()
+                    .find(|payload| {
+                        payload.site == site && payload.kind == SourcePayloadKind::Extras
+                    })
+                    .unwrap();
+                assert_raw(scope, payload.value_range, raw);
+            }
+        }
+        inspect_admission(json, inspect)?;
+        inspect_admission(&glb(json), inspect)
     }
 
     #[test]

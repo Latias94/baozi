@@ -25,6 +25,7 @@ pub(super) fn submit(ctx: &ParseScope<'_>, model: &NormalizedGltf<'_>) -> Result
         &model.appearance,
         &model.geometry,
         &model.cameras,
+        &model.lights,
         &model.nodes,
         &model.skins,
         &model.instance_deformations,
@@ -49,6 +50,7 @@ pub(super) fn submit_parts(
     appearance_storage: &AppearanceStorage<'_>,
     geometry_storage: &GeometryStorage<'_>,
     cameras: &CameraStorage<'_>,
+    lights: &super::lights::LightStorage<'_>,
     nodes: &NodeStorage<'_>,
     skins: &SkinStorage<'_>,
     instance_deformations: &MeteredVec<'_, InstanceDeformationStorage<'_>>,
@@ -370,7 +372,11 @@ pub(super) fn submit_parts(
         front_face_winding: FrontFaceWinding::CounterClockwise,
         uv_origin: UvOrigin::UpperLeft,
     };
-    let spatial = SpatialAuthoringBatch::new(&scene_space, cameras.authored.as_slice(), &[]);
+    let spatial = SpatialAuthoringBatch::new(
+        &scene_space,
+        cameras.authored.as_slice(),
+        lights.authored.as_slice(),
+    );
     let mut authored_nodes = ctx.metered_vec(
         ImportStorageClass::SceneConstruction,
         "gltf-complete-batch-nodes",
@@ -505,6 +511,7 @@ pub(super) fn submit_parts(
         2,
         nodes.nodes.len(),
         cameras.authored.len(),
+        lights.authored.len(),
         appearance_storage.images.len(),
         appearance_storage.samplers.len(),
         appearance_storage.textures.len(),
@@ -638,6 +645,17 @@ pub(super) fn submit_parts(
             selected_sources,
             resource_count,
             ProfileOwner::Camera(authoring_u32(ctx, index, "gltf-profile-camera-owner")?),
+            0,
+        )?;
+    }
+    for index in 0..lights.authored.len() {
+        push_owner_source(
+            ctx,
+            &mut owner_sources,
+            &mut owner_source_values,
+            selected_sources,
+            resource_count,
+            ProfileOwner::Light(authoring_u32(ctx, index, "gltf-profile-light-owner")?),
             0,
         )?;
     }
@@ -1001,6 +1019,10 @@ pub(super) fn submit_parts(
         }
     }
     for (owner, names) in [
+        (
+            ProfileOwner::Light as fn(u32) -> ProfileOwner,
+            lights.names.as_slice(),
+        ),
         (
             ProfileOwner::Image as fn(u32) -> ProfileOwner,
             appearance_storage.image_names.as_slice(),

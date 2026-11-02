@@ -30,6 +30,7 @@ use accessor::{AccessorContract, validate_accessor};
 mod animation;
 mod extras;
 mod influences;
+mod lights;
 mod materials;
 use materials::MaterialContracts;
 mod model;
@@ -175,8 +176,9 @@ fn read_normalized_gltf<'scope>(ctx: &'scope ParseScope<'_>) -> Result<Normalize
     )?;
     report_uninterpreted_extension_declarations(ctx, gltf.tables())?;
     let material_contracts = materials::preflight(ctx, &gltf, &resource_closure)?;
+    let lights = lights::prepare(ctx, &gltf, resource_closure.lights.as_slice())?;
     let repeated_mesh_string_bytes =
-        preflight_canonical_base_strings(ctx, &gltf, &node_graph, &resource_closure)?;
+        preflight_canonical_base_strings(ctx, &gltf, &node_graph, &resource_closure, &lights)?;
     let resolved_texture_uris =
         preflight_texture_strings(ctx, &gltf, repeated_mesh_string_bytes, &resource_closure)?;
     let material_count = with_poll(ctx, || gltf.materials().count())?;
@@ -208,7 +210,7 @@ fn read_normalized_gltf<'scope>(ctx: &'scope ParseScope<'_>) -> Result<Normalize
     )?;
     let buffers = load_buffers(ctx, &gltf, gltf.bin_bytes(), &prepared.resource_closure)?;
     accessor::validate_sparse_indices(ctx, &gltf, buffers.as_slice(), &prepared.resource_closure)?;
-    let normalized = normalize_document(ctx, &gltf, buffers, &prepared, gltf.source_map())?;
+    let normalized = normalize_document(ctx, &gltf, buffers, &prepared, gltf.source_map(), lights)?;
     drop(prepared);
     drop(gltf);
     Ok(normalized)
@@ -265,6 +267,7 @@ fn preflight_canonical_base_strings(
     gltf: &crate::document::Document<'_>,
     graph: &NodeGraph<'_, '_>,
     closure: &ResourceClosure<'_>,
+    lights: &lights::LightStorage<'_>,
 ) -> Result<usize> {
     with_poll(ctx, || {
         let mut bytes = 0usize;
@@ -358,6 +361,12 @@ fn preflight_canonical_base_strings(
             }
         }
 
+        for name in lights.names.as_slice() {
+            ctx.charge_work(1)?;
+            if let Some(name) = name {
+                add_repeated_string_bytes(ctx, &mut bytes, name.len(), limit)?;
+            }
+        }
         Ok(bytes)
     })?
 }
@@ -1135,6 +1144,7 @@ fn normalize_document<'scope>(
     buffers: BufferSet<'scope>,
     prepared: &PreparedDocument<'_, '_>,
     source_map: &crate::source_map::GltfSourceMap<'_>,
+    lights: lights::LightStorage<'scope>,
 ) -> Result<NormalizedGltf<'scope>> {
     let external_image_resource_offset = authoring_u32(
         ctx,
@@ -1173,6 +1183,8 @@ fn normalize_document<'scope>(
         &prepared.node_graph,
         &geometry_storage.logical_mesh_ids,
         &cameras,
+        &lights,
+        prepared.resource_closure.node_lights.as_slice(),
     )?;
     let animation_storage = animation::build_storage(
         ctx,
@@ -1225,6 +1237,7 @@ fn normalize_document<'scope>(
         appearance: appearance_storage,
         geometry: geometry_storage,
         cameras,
+        lights,
         nodes: node_storage,
         skins: skin_storage,
         instance_deformations: mesh_instance_deformations,
@@ -2730,6 +2743,8 @@ fn build_scene_nodes<'scope, 'document>(
     graph: &NodeGraph<'document, '_>,
     logical_mesh_ids: &MeteredVec<'_, Option<LogicalMeshLocalId>>,
     cameras: &CameraStorage<'_>,
+    lights: &lights::LightStorage<'_>,
+    node_lights: &[Option<json::Index>],
 ) -> Result<NodeStorage<'scope>> {
     let selected_node_count = selected_count(ctx, graph.selected.as_slice())?;
     let mut storage = NodeStorage {
@@ -2851,11 +2866,26 @@ fn build_scene_nodes<'scope, 'document>(
                 .map(Some)?,
             None => None,
         };
+        let light = node_lights
+            .get(node_index)
+            .ok_or_else(|| GltfFailure::internal("glTF node light cache is incomplete"))?
+            .map(|source| {
+                lights
+                    .light_ids
+                    .as_slice()
+                    .get(source.value())
+                    .copied()
+                    .flatten()
+                    .ok_or_else(|| {
+                        gltf_parse_error(ctx, "selected glTF node light is outside the closure")
+                    })
+            })
+            .transpose()?;
         let authored = NodeAuthoringNode::new(
             parent,
             transform,
             camera.map_or(Presence::Absent, Presence::Present),
-            Presence::Absent,
+            light.map_or(Presence::Absent, Presence::Present),
         );
         let name = with_poll(ctx, || node.name())?;
         if let Some(name) = name {
@@ -2948,6 +2978,8 @@ struct ResourceClosure<'scope> {
     samplers: MeteredVec<'scope, bool>,
     skins: MeteredVec<'scope, bool>,
     cameras: MeteredVec<'scope, bool>,
+    lights: MeteredVec<'scope, bool>,
+    node_lights: MeteredVec<'scope, Option<json::Index>>,
     animation_sampler_ranges: MeteredVec<'scope, std::ops::Range<usize>>,
     animation_samplers: MeteredVec<'scope, bool>,
     buffers: MeteredVec<'scope, bool>,
@@ -3028,6 +3060,20 @@ fn build_resource_closure<'scope, 'document>(
             false,
             "gltf-closure-camera-selection",
         )?,
+        lights: try_vec_filled(
+            ctx,
+            ImportStorageClass::FormatNormalization,
+            root.lights.len(),
+            false,
+            "gltf-closure-light-selection",
+        )?,
+        node_lights: try_vec_filled(
+            ctx,
+            ImportStorageClass::FormatNormalization,
+            root.nodes.len(),
+            None,
+            "gltf-closure-node-lights",
+        )?,
         animation_sampler_ranges,
         animation_samplers: try_vec_filled(
             ctx,
@@ -3093,6 +3139,11 @@ fn build_resource_closure<'scope, 'document>(
         }
         if let Some(camera) = node.camera {
             mark_bool(ctx, &mut closure.cameras, camera.value(), "camera")?;
+        }
+        if let Some(payload) = node.punctual_light {
+            let light = gltf.punctual_light_reference(ctx, payload)?;
+            mark_bool(ctx, &mut closure.lights, light.value(), "light")?;
+            closure.node_lights.as_mut_slice()[node_index] = Some(light);
         }
     }
 
@@ -3767,6 +3818,15 @@ fn record_source_scope(
         )?;
     }
 
+    for (light_index, selected) in closure.lights.as_slice().iter().copied().enumerate() {
+        observe_source_identity(
+            &mut builder,
+            &mut identity,
+            SourceScopeEntityKind::Light,
+            selected,
+            format_args!("l{light_index}"),
+        )?;
+    }
     let record = builder.finish()?;
     ctx.record_source_scope(record)?;
     Ok(())
