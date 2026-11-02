@@ -124,6 +124,13 @@ endfunction()
 add_executable(baozi-assimp-probe src/main.cpp)
 configure_probe(baozi-assimp-probe)
 
+option(BAOZI_ASSIMP_BUILD_CONTROL "Build finite progress/cancellation diagnostics" OFF)
+if(BAOZI_ASSIMP_BUILD_CONTROL)
+    add_executable(baozi-assimp-control src/control.cpp src/main.cpp)
+    target_compile_definitions(baozi-assimp-control PRIVATE BAOZI_ASSIMP_NO_MAIN)
+    configure_probe(baozi-assimp-control)
+endif()
+
 if(BUILD_TESTING)
     add_executable(baozi-assimp-semantic tests/semantic.cpp src/main.cpp)
     target_compile_definitions(baozi-assimp-semantic PRIVATE BAOZI_ASSIMP_NO_MAIN)
