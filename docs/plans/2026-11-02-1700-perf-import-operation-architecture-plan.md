@@ -113,6 +113,12 @@ parent/child scopes, persistent outstanding/pending/fault state after `mem::forg
 terminal work after ordinary sealing, and intermediate snapshots during independent storage
 drop. P1 may revise or reject this split if those constraints cannot be met coherently.
 
+The [reviewed bounded-control contract](../research/2026-11-02-bounded-operation-control-design.md)
+specifies 256 bounded library geometry actions, the existing 4,096-byte text frontier, mandatory
+external/parent/final checkpoints and exact failure reconciliation. It explicitly replaces
+deferred text completion with truthful local completion and does not promise elapsed-time
+cancellation for blocking operations. Its review is closed; ownership integration remains P1.
+
 Scope: `baozi-operation` ledger/coordinator/retained/concrete-store owners and relevant ADRs;
 `baozi-import` callback/session ownership; postprocess runtime. Review correctness and
 feasibility independently. A design that requires a guard across callbacks or double recording
