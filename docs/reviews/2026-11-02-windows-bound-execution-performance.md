@@ -6,7 +6,7 @@ foundation before the production import-context cutover. It does not pass integr
 performance acceptance: normal preparation improves, while the larger text import regresses.
 
 The unchanged ordinary collector ran six memory-input lanes with three warmups and twenty
-retained fresh-process pairs each, alternating AB/BA. All 120 retained pairs and 36 warmup pairs
+retained fresh-process pairs each, alternating AB/BA. All 120 retained pairs and 18 warmup pairs
 succeeded; no failed lane or discarded sample. Rust 1.95.0 Cargo Release, ordinary System
 allocator, generic x64 MSVC, dynamic CRT, no allocation interception. Assimp 6.0.5 uses the same
 immutable binaries as the control series. Input/field/precision/normal policy and the collector's
@@ -82,3 +82,7 @@ semantic-cost disposition; this foundation receipt does not grant that dispositi
 
 Full B1, Linux heap observations and final U14 remain open. No release, publish, push, PR or
 native-target promotion follows from this bounded measurement.
+
+Count-label correction from the subsequent P4 evidence review: the six lanes have 18 warmup
+pairs, or 36 child processes. The original receipt called those 36 processes pairs. Raw samples,
+statistics and this checkpoint's regression disposition are unchanged.
