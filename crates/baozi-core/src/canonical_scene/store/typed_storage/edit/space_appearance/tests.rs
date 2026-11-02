@@ -1,9 +1,10 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::appearance::{
-    ColorInterpretation, LegacyMaterialFactors, PbrMetallicRoughnessFactors,
-    PbrSpecularGlossinessFactors, ShadingModel, TextureBlendOperation, TextureChannelSwizzle,
-    TextureTransform,
+    ClearcoatFactors, ColorInterpretation, EmissionFactors, LegacyMaterialFactors, MaterialFactors,
+    PbrMetallicRoughnessFactors, PbrSpecularGlossinessFactors, ShadingModel, SheenFactors,
+    TextureBlendOperation, TextureChannelSwizzle, TextureTransform, ThicknessFactors,
+    TransmissionFactors,
 };
 use crate::canonical_scene::store::typed_storage::appearance::{
     AppearancePayloads, StoredImage, StoredImageIndex, StoredSamplerIndex, StoredTexture,
@@ -107,25 +108,27 @@ fn units(unit_scale: f64) -> SpaceConversion {
 }
 
 fn factors(thickness: f32) -> MaterialFactors {
-    MaterialFactors::try_new_with_supplemental_pbr(
-        Vec3::new(-0.0, 2.0, f32::from_bits(1)),
-        Some(
+    MaterialFactors::empty()
+        .with_emission(
+            EmissionFactors::try_new(Vec3::new(-0.0, 2.0, f32::from_bits(1)), None).unwrap(),
+        )
+        .with_pbr_metallic_roughness(Some(
             PbrMetallicRoughnessFactors::try_new(
                 Color::linear_rgba(-0.0, 0.125, 0.5, 1.0),
                 -0.0,
                 0.75,
             )
             .unwrap(),
-        ),
-        Some(
+        ))
+        .with_pbr_specular_glossiness(Some(
             PbrSpecularGlossinessFactors::try_new(
                 Color::linear_rgba(1.0, -0.0, 0.5, 0.25),
                 Vec3::new(-0.0, 1.0, 0.125),
                 f32::from_bits(0x3e80_0001),
             )
             .unwrap(),
-        ),
-        Some(
+        ))
+        .with_legacy(Some(
             LegacyMaterialFactors::try_new(
                 Vec3::new(-0.0, 1.0, 2.0),
                 Vec3::new(0.25, -0.0, 3.0),
@@ -135,18 +138,13 @@ fn factors(thickness: f32) -> MaterialFactors {
                 -0.0,
             )
             .unwrap(),
-        ),
-        SupplementalPbrFactors::try_new(
-            -0.0,
-            0.125,
-            0.25,
-            thickness,
-            Vec3::new(-0.0, 1.5, f32::from_bits(1)),
-            0.5,
-        )
-        .unwrap(),
-    )
-    .unwrap()
+        ))
+        .with_clearcoat(Some(ClearcoatFactors::try_new(-0.0, 0.125).unwrap()))
+        .with_transmission(Some(TransmissionFactors::try_new(0.25).unwrap()))
+        .with_thickness(Some(ThicknessFactors::try_new(thickness).unwrap()))
+        .with_sheen(Some(
+            SheenFactors::try_new(Vec3::new(-0.0, 1.5, f32::from_bits(1)), 0.5).unwrap(),
+        ))
 }
 
 fn material(factors: MaterialFactors) -> StoredMaterial {
@@ -237,15 +235,11 @@ fn fixture() -> AppearanceRows {
                 bindings: TableRange::new(4, 1),
                 name: Some(TextRange(TableRange::new(27, 0))),
                 ..material(
-                    MaterialFactors::try_new_with_supplemental_pbr(
-                        Vec3::ZERO,
-                        None,
-                        None,
-                        None,
-                        SupplementalPbrFactors::try_new(0.0, 0.0, 0.0, -0.0, Vec3::ZERO, 0.0)
-                            .unwrap(),
-                    )
-                    .unwrap(),
+                    MaterialFactors::empty()
+                        .with_clearcoat(Some(ClearcoatFactors::try_new(0.0, 0.0).unwrap()))
+                        .with_transmission(Some(TransmissionFactors::try_new(0.0).unwrap()))
+                        .with_thickness(Some(ThicknessFactors::try_new(-0.0).unwrap()))
+                        .with_sheen(Some(SheenFactors::try_new(Vec3::ZERO, 0.0).unwrap())),
                 )
             },
             StoredMaterial {
@@ -325,7 +319,8 @@ fn reflected_conversion_scales_only_thickness_and_displacement_with_exact_row_wo
     assert_eq!(
         actual.materials[1]
             .factors
-            .supplemental_pbr()
+            .thickness()
+            .unwrap()
             .thickness()
             .to_bits(),
         (-0.0_f32).to_bits()
@@ -378,43 +373,136 @@ fn selectors_follow_actual_bits_for_axes_winding_rounding_and_zero_lengths() {
 fn explicit_zero_factor_groups_retain_presence_distinct_from_absence() {
     let black = Color::linear_rgba(0.0, 0.0, 0.0, 0.0);
     for factors in [
-        MaterialFactors::try_new(
-            Vec3::ZERO,
-            Some(PbrMetallicRoughnessFactors::try_new(black, 0.0, 0.0).unwrap()),
-            None,
-            None,
-        )
-        .unwrap(),
-        MaterialFactors::try_new(
-            Vec3::ZERO,
-            None,
-            Some(PbrSpecularGlossinessFactors::try_new(black, Vec3::ZERO, 0.0).unwrap()),
-            None,
-        )
-        .unwrap(),
-        MaterialFactors::try_new(
-            Vec3::ZERO,
-            None,
-            None,
-            Some(
-                LegacyMaterialFactors::try_new(
-                    Vec3::ZERO,
-                    Vec3::ZERO,
-                    Vec3::ZERO,
-                    Vec3::ZERO,
-                    0.0,
-                    0.0,
-                )
-                .unwrap(),
-            ),
-        )
-        .unwrap(),
+        MaterialFactors::empty()
+            .with_emission(EmissionFactors::try_new(Vec3::ZERO, Some(0.0)).unwrap()),
+        MaterialFactors::empty().with_clearcoat(Some(ClearcoatFactors::default())),
+        MaterialFactors::empty().with_transmission(Some(TransmissionFactors::default())),
+        MaterialFactors::empty().with_thickness(Some(ThicknessFactors::default())),
+        MaterialFactors::empty().with_sheen(Some(SheenFactors::default())),
+        MaterialFactors::empty().with_pbr_metallic_roughness(Some(
+            PbrMetallicRoughnessFactors::try_new(black, 0.0, 0.0).unwrap(),
+        )),
+        MaterialFactors::empty().with_pbr_specular_glossiness(Some(
+            PbrSpecularGlossinessFactors::try_new(black, Vec3::ZERO, 0.0).unwrap(),
+        )),
+        MaterialFactors::empty().with_legacy(Some(
+            LegacyMaterialFactors::try_new(
+                Vec3::ZERO,
+                Vec3::ZERO,
+                Vec3::ZERO,
+                Vec3::ZERO,
+                0.0,
+                0.0,
+            )
+            .unwrap(),
+        )),
     ] {
         let source = material(factors);
         let actual = convert_material(source, units(2.0)).unwrap();
         assert!(same_material(source, actual));
-        assert!(!same_factors(MaterialFactors::empty(), actual.factors));
+        assert!(!MaterialFactors::empty().same_bits(actual.factors));
     }
+}
+
+#[test]
+fn optional_thickness_conversion_preserves_presence_and_all_dimensionless_bits() {
+    let authored = factors(7.0)
+        .with_emission(
+            EmissionFactors::try_new(Vec3::new(-0.0, f32::MAX, f32::from_bits(1)), Some(-0.0))
+                .unwrap(),
+        )
+        .with_transmission(None)
+        .with_thickness(None);
+    let conversion = conversion(0.5, true, FrontFaceWinding::CounterClockwise);
+    for (thickness, expected) in [
+        (None, None),
+        (Some(0.0), Some(0.0)),
+        (Some(-0.0), Some(-0.0)),
+        (Some(f32::from_bits(1)), Some(f32::from_bits(2))),
+        (Some(1.25), Some(2.5)),
+    ] {
+        let source = material(
+            authored
+                .with_thickness(thickness.map(|value| ThicknessFactors::try_new(value).unwrap())),
+        );
+        let actual = convert_material(source, conversion).unwrap();
+        assert_eq!(
+            actual
+                .factors
+                .thickness()
+                .map(|value| value.thickness().to_bits()),
+            expected.map(f32::to_bits)
+        );
+        assert!(actual.factors.with_thickness(None).same_bits(authored));
+        assert_eq!(actual.factors.transmission(), None);
+        assert_eq!(
+            actual.factors.emission().factor().x.to_bits(),
+            (-0.0_f32).to_bits()
+        );
+        assert_eq!(
+            actual.factors.emission().factor().y.to_bits(),
+            f32::MAX.to_bits()
+        );
+        assert_eq!(actual.factors.emission().factor().z.to_bits(), 1);
+        assert_eq!(
+            actual.factors.emission().strength().unwrap().to_bits(),
+            (-0.0_f32).to_bits()
+        );
+        assert_eq!(
+            source
+                .factors
+                .thickness()
+                .map(|value| value.thickness().to_bits()),
+            thickness.map(f32::to_bits)
+        );
+    }
+    let source = material(
+        MaterialFactors::empty()
+            .with_transmission(Some(TransmissionFactors::try_new(0.5).unwrap())),
+    );
+    let actual = convert_material(source, conversion).unwrap();
+    assert_eq!(actual.factors.thickness(), None);
+    assert_eq!(actual.factors.transmission().unwrap().factor(), 0.5);
+}
+
+#[test]
+fn correspondence_rejects_new_lobe_presence_and_authored_strength_bits() {
+    let empty = MaterialFactors::empty();
+    let present = empty
+        .with_emission(EmissionFactors::try_new(Vec3::ZERO, Some(0.0)).unwrap())
+        .with_clearcoat(Some(ClearcoatFactors::default()))
+        .with_transmission(Some(TransmissionFactors::default()))
+        .with_thickness(Some(ThicknessFactors::default()))
+        .with_sheen(Some(SheenFactors::default()));
+    let source = material(present);
+    let expected = convert_material(source, units(2.0)).unwrap();
+    for changed in [
+        present.with_emission(EmissionFactors::default()),
+        present.with_emission(EmissionFactors::try_new(Vec3::ZERO, Some(-0.0)).unwrap()),
+        present.with_clearcoat(None),
+        present.with_clearcoat(Some(ClearcoatFactors::try_new(0.0, -0.0).unwrap())),
+        present.with_transmission(None),
+        present.with_transmission(Some(TransmissionFactors::try_new(-0.0).unwrap())),
+        present.with_thickness(None),
+        present.with_thickness(Some(ThicknessFactors::try_new(-0.0).unwrap())),
+        present.with_sheen(None),
+        present.with_sheen(Some(
+            SheenFactors::try_new(Vec3::new(0.0, -0.0, 0.0), 0.0).unwrap(),
+        )),
+    ] {
+        assert!(!same_material(expected, material(changed)));
+    }
+    let implicit = material(
+        empty.with_emission(EmissionFactors::try_new(Vec3::new(2.0, 1.0, 0.5), None).unwrap()),
+    );
+    let explicit = material(implicit.factors.with_emission(
+        EmissionFactors::try_new(implicit.factors.emission().factor(), Some(1.0)).unwrap(),
+    ));
+    assert_eq!(
+        implicit.factors.emission().effective_rgb(),
+        explicit.factors.emission().effective_rgb()
+    );
+    assert!(!same_material(implicit, explicit));
 }
 
 #[test]
@@ -592,11 +680,12 @@ fn correspondence_rejects_material_identity_presence_and_each_factor_groups_bits
             materialize_rows(&source, units(0.5), capacities, &mut Control::default()).unwrap();
         let material = &mut actual.materials[0];
         let factors = material.factors;
-        let mut emissive = factors.emissive();
+        let mut emissive = factors.emission().factor();
         let mut metallic = factors.pbr_metallic_roughness();
         let mut specular = factors.pbr_specular_glossiness();
         let mut legacy = factors.legacy();
-        let mut supplemental = factors.supplemental_pbr();
+        let mut clearcoat = factors.clearcoat().unwrap();
+        let mut sheen = factors.sheen().unwrap();
         match fault {
             0 => material.bindings = TableRange::new(1, 4),
             1 => material.bindings = TableRange::new(0, 3),
@@ -652,28 +741,12 @@ fn correspondence_rejects_material_identity_presence_and_each_factor_groups_bits
                 );
             }
             16 => {
-                supplemental = SupplementalPbrFactors::try_new(
-                    0.0,
-                    supplemental.clearcoat_roughness(),
-                    supplemental.transmission(),
-                    supplemental.thickness(),
-                    supplemental.sheen_color(),
-                    supplemental.sheen_roughness(),
-                )
-                .unwrap();
+                clearcoat = ClearcoatFactors::try_new(0.0, clearcoat.roughness()).unwrap();
             }
             17 => {
-                let mut sheen = supplemental.sheen_color();
-                sheen.x = 0.0;
-                supplemental = SupplementalPbrFactors::try_new(
-                    supplemental.clearcoat(),
-                    supplemental.clearcoat_roughness(),
-                    supplemental.transmission(),
-                    supplemental.thickness(),
-                    sheen,
-                    supplemental.sheen_roughness(),
-                )
-                .unwrap();
+                let mut color = sheen.color();
+                color.x = 0.0;
+                sheen = SheenFactors::try_new(color, sheen.roughness()).unwrap();
             }
             18 => {
                 actual.materials[1].name = None;
@@ -684,14 +757,15 @@ fn correspondence_rejects_material_identity_presence_and_each_factor_groups_bits
             _ => unreachable!(),
         }
         if fault < 18 {
-            actual.materials[0].factors = MaterialFactors::try_new_with_supplemental_pbr(
-                emissive,
-                metallic,
-                specular,
-                legacy,
-                supplemental,
-            )
-            .unwrap();
+            actual.materials[0].factors = factors
+                .with_emission(
+                    EmissionFactors::try_new(emissive, factors.emission().strength()).unwrap(),
+                )
+                .with_pbr_metallic_roughness(metallic)
+                .with_pbr_specular_glossiness(specular)
+                .with_legacy(legacy)
+                .with_clearcoat(Some(clearcoat))
+                .with_sheen(Some(sheen));
         }
         assert!(
             !validate_rows_correspondence(&source, &actual, units(0.5), &mut Control::default())

@@ -153,7 +153,7 @@ fn materialise_header_color_maps_to_default_material() -> TestResult {
     let report = import_bytes("materialise-color.stl", &bytes)?;
     let snapshot = scene_snapshot(&report)?;
     assert!(snapshot_line(&snapshot, "material[0]").contains(concat!(
-        "factors(present,total=39)=[",
+        "factors(present,total=40)=[",
         "0x00000000,0x00000000,0x00000000,",
         "0x3e008081,0x3e808081,0x3f008081,0x3f800000"
     )));

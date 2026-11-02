@@ -60,9 +60,9 @@ impl fmt::Debug for NodeSceneAppearanceMaterialFactors<'_> {
 
 fn factor_scalar(factors: &MaterialFactors, index: usize) -> f32 {
     match index {
-        0 => factors.emissive().x,
-        1 => factors.emissive().y,
-        2 => factors.emissive().z,
+        0 => factors.emission().factor().x,
+        1 => factors.emission().factor().y,
+        2 => factors.emission().factor().z,
         3..=8 => factors
             .pbr_metallic_roughness()
             .map_or(0.0, |value| match index {
@@ -101,14 +101,15 @@ fn factor_scalar(factors: &MaterialFactors, index: usize) -> f32 {
             29 => value.shininess(),
             _ => value.opacity(),
         }),
-        31 => factors.supplemental_pbr().clearcoat(),
-        32 => factors.supplemental_pbr().clearcoat_roughness(),
-        33 => factors.supplemental_pbr().transmission(),
-        34 => factors.supplemental_pbr().thickness(),
-        35 => factors.supplemental_pbr().sheen_color().x,
-        36 => factors.supplemental_pbr().sheen_color().y,
-        37 => factors.supplemental_pbr().sheen_color().z,
-        38 => factors.supplemental_pbr().sheen_roughness(),
+        31 => factors.clearcoat().map_or(0.0, |value| value.factor()),
+        32 => factors.clearcoat().map_or(0.0, |value| value.roughness()),
+        33 => factors.transmission().map_or(0.0, |value| value.factor()),
+        34 => factors.thickness().map_or(0.0, |value| value.thickness()),
+        35 => factors.sheen().map_or(0.0, |value| value.color().x),
+        36 => factors.sheen().map_or(0.0, |value| value.color().y),
+        37 => factors.sheen().map_or(0.0, |value| value.color().z),
+        38 => factors.sheen().map_or(0.0, |value| value.roughness()),
+        39 => factors.emission().strength().unwrap_or(0.0),
         _ => unreachable!("the private factor iterator selects only the declared transcript width"),
     }
 }

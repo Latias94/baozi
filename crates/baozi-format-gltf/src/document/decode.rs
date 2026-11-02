@@ -591,6 +591,11 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
                 .map(|id| self.field(id, "KHR_materials_unlit"))
                 .transpose()?
                 .flatten(),
+            emissive_strength: self
+                .optional(id, "extensions")?
+                .map(|id| self.field(id, super::KHR_MATERIALS_EMISSIVE_STRENGTH))
+                .transpose()?
+                .flatten(),
         })
     }
 
@@ -636,6 +641,36 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
             name: self.name(id)?,
             projection,
         })
+    }
+
+    pub(super) fn emissive_strength(&self, id: ValueId) -> ParseResult<f32> {
+        self.object(id)?;
+        let Some(id) = self.field(id, "emissiveStrength")? else {
+            return Ok(1.0);
+        };
+        let value = self.number(id)?;
+        if value < 0.0 {
+            return Err(self.invalid("glTF emissiveStrength must be nonnegative"));
+        }
+        let narrowed = value as f32;
+        if !narrowed.is_finite() || (value != 0.0 && narrowed == 0.0) {
+            return Err(self.invalid("glTF emissiveStrength exceeds the canonical F32 domain"));
+        }
+        // A nonzero JSON mantissa may already have underflowed while parsing f64.
+        if value == 0.0 {
+            let text = self.raw_str(id)?;
+            self.ctx.charge_work(text.len() as u64)?;
+            if text
+                .bytes()
+                .take_while(|&byte| !matches!(byte, b'e' | b'E'))
+                .any(|byte| matches!(byte, b'1'..=b'9'))
+            {
+                return Err(
+                    self.invalid("glTF emissiveStrength underflows the canonical F32 domain")
+                );
+            }
+        }
+        Ok(narrowed)
     }
 
     pub(super) fn transform(

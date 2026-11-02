@@ -13,8 +13,8 @@ use baozi_operation::{CapacityPlan, CapacityPlanError};
 use thiserror::Error;
 
 use crate::appearance::{
-    AppearanceBuildError, MaterialFactors, MaterialTextureBindingSemanticsValidator,
-    validate_material_semantics, validate_texture_binding_semantics,
+    AppearanceBuildError, MaterialTextureBindingSemanticsValidator, validate_material_semantics,
+    validate_texture_binding_semantics,
 };
 use crate::canonical_scene::store::typed_storage::appearance::build::AppearanceStoragePlan;
 use crate::entity::validate_entity_name_str;
@@ -737,7 +737,7 @@ where
                     })
             })?;
         }
-        let numeric_cells = material_factor_cells(semantics.factors())
+        let numeric_cells = semantics.factors().semantic_cell_count()
             + u64::from(semantics.alpha_mode().mask_cutoff().is_some());
         context.add_semantic_cells(numeric_cells)?;
         if let Presence::Present(name) = material.name() {
@@ -786,15 +786,6 @@ where
             _reservation: reservation,
         },
     })
-}
-
-/// Counts only authored numeric components. Absent optional groups have no
-/// numeric payload; default supplemental factors and emissive are always present.
-fn material_factor_cells(factors: MaterialFactors) -> u64 {
-    3 + 8
-        + u64::from(factors.pbr_metallic_roughness().is_some()) * 6
-        + u64::from(factors.pbr_specular_glossiness().is_some()) * 8
-        + u64::from(factors.legacy().is_some()) * 14
 }
 
 pub(in crate::canonical_scene::store) fn validate_encoded_payload_limit(

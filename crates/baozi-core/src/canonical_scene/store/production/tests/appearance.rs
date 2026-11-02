@@ -5,10 +5,12 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
 use crate::appearance::{
-    AlphaMode, AppearanceBuildError, ColorInterpretation, MaterialFactorGroup, MaterialFactors,
-    MaterialSemantics, ShadingModel, TextureBindingSemantics, TextureBlendOperation,
-    TextureChannel, TextureChannelSwizzle, TextureRole, TextureSourceKey, TextureStrength,
-    TextureTransform,
+    AlphaMode, AppearanceBuildError, ClearcoatFactors, ColorInterpretation, EmissionFactors,
+    LegacyMaterialFactors, MaterialFactorGroup, MaterialFactors, MaterialSemantics,
+    PbrMetallicRoughnessFactors, PbrSpecularGlossinessFactors, ShadingModel, SheenFactors,
+    TextureBindingSemantics, TextureBlendOperation, TextureChannel, TextureChannelSwizzle,
+    TextureRole, TextureSourceKey, TextureStrength, TextureTransform, ThicknessFactors,
+    TransmissionFactors,
 };
 use crate::canonical_scene::store::typed_storage::appearance::build::AppearanceStoragePlan;
 use crate::canonical_scene::store::typed_storage::appearance::{
@@ -17,6 +19,7 @@ use crate::canonical_scene::store::typed_storage::appearance::{
 };
 use crate::extension::ExtensionMediaType;
 use crate::image::{MAX_ENCODED_IMAGE_BYTES, SamplerState};
+use crate::math::{Color, Vec3};
 use crate::{SCENE_VALIDATION_POLL_INTERVAL, SceneValidationWork};
 
 use super::super::plan::appearance::{
@@ -152,9 +155,9 @@ fn authoring_seals_actual_typed_footprint_and_borrows_original_semantics() {
         assert_eq!(batch.entity_count(), 11);
         assert_eq!(batch.edge_count(), 10);
         assert_eq!(batch.reference_count(), 10);
-        // 6 image bytes + 24 UTF-8 bytes + 3*6 binding floats + 3*11 present
+        // 6 image bytes + 24 UTF-8 bytes + 3*6 binding floats + 3*3 present
         // material factor floats + one authored Mask cutoff. No absent-group padding.
-        assert_eq!(batch.semantic_cell_count(), 82);
+        assert_eq!(batch.semantic_cell_count(), 58);
         // Rows + text bytes + one owner check per binding + edge/reference
         // actions + final ownership closure. Opaque image contents require no scan.
         assert_eq!(batch.validation_work(), 11 + 24 + 3 + 20 + 1);
@@ -268,7 +271,7 @@ fn exact_typed_limits_accept_and_each_one_less_boundary_releases_scratch() {
             .with_max_entities(11)
             .with_max_edges(10)
             .with_max_references(10)
-            .with_max_payload_cells(82)
+            .with_max_payload_cells(58)
             .with_max_canonical_bytes(bytes)
             .with_max_work(59)
             .with_max_scratch_bytes(scratch);
@@ -290,7 +293,7 @@ fn exact_typed_limits_accept_and_each_one_less_boundary_releases_scratch() {
             ),
             (
                 AppearanceAuthoringLimit::SemanticCells,
-                exact.with_max_payload_cells(81),
+                exact.with_max_payload_cells(57),
             ),
             (
                 AppearanceAuthoringLimit::CanonicalBytes,
@@ -315,6 +318,84 @@ fn exact_typed_limits_accept_and_each_one_less_boundary_releases_scratch() {
             assert_eq!(control.current_bytes.get(), 0);
         }
     });
+}
+
+#[test]
+fn material_numeric_limits_count_authored_cells_and_charge_inline_rows_once() {
+    let empty = MaterialFactors::empty();
+    let emission = EmissionFactors::try_new(Vec3::ZERO, Some(0.0)).unwrap();
+    let metallic = PbrMetallicRoughnessFactors::default();
+    let specular = PbrSpecularGlossinessFactors::try_new(Color::WHITE, Vec3::ZERO, 0.0).unwrap();
+    let legacy =
+        LegacyMaterialFactors::try_new(Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, 0.0, 0.0)
+            .unwrap();
+    let all = empty
+        .with_emission(emission)
+        .with_pbr_metallic_roughness(Some(metallic))
+        .with_pbr_specular_glossiness(Some(specular))
+        .with_legacy(Some(legacy))
+        .with_clearcoat(Some(ClearcoatFactors::default()))
+        .with_transmission(Some(TransmissionFactors::default()))
+        .with_thickness(Some(ThicknessFactors::default()))
+        .with_sheen(Some(SheenFactors::default()));
+    let expected_bytes = (std::mem::size_of::<AppearanceStorage>()
+        + std::mem::size_of::<AppearanceRows>()
+        + std::mem::size_of::<AppearancePayloads>()
+        + std::mem::size_of::<StoredMaterial>()) as u64;
+    for (factors, cells) in [
+        (empty, 3),
+        (empty.with_emission(emission), 4),
+        (empty.with_pbr_metallic_roughness(Some(metallic)), 9),
+        (empty.with_pbr_specular_glossiness(Some(specular)), 11),
+        (empty.with_legacy(Some(legacy)), 17),
+        (empty.with_clearcoat(Some(ClearcoatFactors::default())), 5),
+        (
+            empty.with_transmission(Some(TransmissionFactors::default())),
+            4,
+        ),
+        (empty.with_thickness(Some(ThicknessFactors::default())), 4),
+        (empty.with_sheen(Some(SheenFactors::default())), 7),
+        (all, 40),
+    ] {
+        let materials = [MaterialAuthoring::new(
+            AuthoringRange::new(0, 0),
+            MaterialSemantics::new(ShadingModel::Unlit, AlphaMode::Opaque, false, factors),
+        )];
+        let input = AppearanceAuthoringBatch::new(&[], &[], &[], &[], &materials);
+        let snapshots = ResourceSnapshotAuthoringTable::new(0, &[]);
+        let exact = SceneValidationLimits::default().with_max_payload_cells(cells);
+        let mut control = TestControl::default();
+        let batch =
+            validate_appearance_batch_with_control(input, snapshots, exact, &mut control).unwrap();
+        assert_eq!(batch.semantic_cell_count(), cells);
+        assert_eq!(batch.canonical_bytes(), expected_bytes);
+        assert_eq!(
+            AppearanceStoragePlan::new(&batch)
+                .unwrap()
+                .canonical_bytes()
+                .unwrap(),
+            expected_bytes
+        );
+        drop(batch);
+        let result = validate_appearance_batch_with_control(
+            input,
+            snapshots,
+            exact.with_max_payload_cells(cells - 1),
+            &mut control,
+        );
+        assert!(matches!(
+            result,
+            Err(AppearanceAuthoringFailure::Semantic(
+                AppearanceAuthoringSemanticError::LimitExceeded {
+                    limit: AppearanceAuthoringLimit::SemanticCells,
+                    ..
+                }
+            ))
+        ));
+        drop(result);
+        assert_eq!(control.live.get(), 0);
+        assert_eq!(control.current_bytes.get(), 0);
+    }
 }
 
 #[test]

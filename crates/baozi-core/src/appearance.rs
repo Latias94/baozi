@@ -5,7 +5,7 @@
 //! consumed while producing that storage. Only descriptive source keys borrow
 //! from their producer; closed behavior values are owned directly.
 
-use crate::math::{Color, Vec2, Vec3};
+use crate::math::Vec2;
 use std::fmt;
 use thiserror::Error;
 
@@ -111,439 +111,14 @@ impl AlphaMode {
     }
 }
 
-/// A numeric material field validated at a typed construction boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum MaterialFactorField {
-    AlphaCutoff,
-    Emissive,
-    PbrBaseColor,
-    Metallic,
-    Roughness,
-    PbrDiffuse,
-    PbrSpecular,
-    Glossiness,
-    LegacyAmbient,
-    LegacyDiffuse,
-    LegacySpecular,
-    LegacyEmissive,
-    LegacyShininess,
-    LegacyOpacity,
-    Clearcoat,
-    ClearcoatRoughness,
-    Transmission,
-    Thickness,
-    SheenColor,
-    SheenRoughness,
-}
+mod factors;
 
-/// Why a typed material factor was rejected.
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-pub enum MaterialFactorError {
-    #[error("material factor {field:?} contains a non-finite component")]
-    NonFinite { field: MaterialFactorField },
-
-    #[error("material factor {field:?} contains a negative component")]
-    Negative { field: MaterialFactorField },
-
-    #[error("material factor {field:?} is outside the closed unit interval")]
-    OutsideUnitInterval { field: MaterialFactorField },
-}
-
-/// glTF-style metallic/roughness factors with no texture identity.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PbrMetallicRoughnessFactors {
-    base_color: Color,
-    metallic: f32,
-    roughness: f32,
-}
-
-impl PbrMetallicRoughnessFactors {
-    pub fn try_new(
-        base_color: Color,
-        metallic: f32,
-        roughness: f32,
-    ) -> Result<Self, MaterialFactorError> {
-        validate_unit_color(base_color, MaterialFactorField::PbrBaseColor)?;
-        validate_unit_factor(metallic, MaterialFactorField::Metallic)?;
-        validate_unit_factor(roughness, MaterialFactorField::Roughness)?;
-        Ok(Self {
-            base_color,
-            metallic,
-            roughness,
-        })
-    }
-
-    pub const fn base_color(self) -> Color {
-        self.base_color
-    }
-
-    pub const fn metallic(self) -> f32 {
-        self.metallic
-    }
-
-    pub const fn roughness(self) -> f32 {
-        self.roughness
-    }
-}
-
-impl Default for PbrMetallicRoughnessFactors {
-    fn default() -> Self {
-        Self {
-            base_color: Color::WHITE,
-            metallic: 1.0,
-            roughness: 1.0,
-        }
-    }
-}
-
-/// PBR specular/glossiness factors retained independently from metallic PBR.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PbrSpecularGlossinessFactors {
-    diffuse: Color,
-    specular: Vec3,
-    glossiness: f32,
-}
-
-impl PbrSpecularGlossinessFactors {
-    pub fn try_new(
-        diffuse: Color,
-        specular: Vec3,
-        glossiness: f32,
-    ) -> Result<Self, MaterialFactorError> {
-        validate_unit_color(diffuse, MaterialFactorField::PbrDiffuse)?;
-        validate_unit_vec3(specular, MaterialFactorField::PbrSpecular)?;
-        validate_unit_factor(glossiness, MaterialFactorField::Glossiness)?;
-        Ok(Self {
-            diffuse,
-            specular,
-            glossiness,
-        })
-    }
-
-    pub const fn diffuse(self) -> Color {
-        self.diffuse
-    }
-
-    pub const fn specular(self) -> Vec3 {
-        self.specular
-    }
-
-    pub const fn glossiness(self) -> f32 {
-        self.glossiness
-    }
-}
-
-/// Source-authored legacy lighting factors.
-///
-/// RGB components may exceed one to preserve finite HDR source truth. Opacity
-/// remains a unit factor, while shininess is finite and non-negative.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LegacyMaterialFactors {
-    ambient: Vec3,
-    diffuse: Vec3,
-    specular: Vec3,
-    emissive: Vec3,
-    shininess: f32,
-    opacity: f32,
-}
-
-impl LegacyMaterialFactors {
-    #[allow(clippy::too_many_arguments)]
-    pub fn try_new(
-        ambient: Vec3,
-        diffuse: Vec3,
-        specular: Vec3,
-        emissive: Vec3,
-        shininess: f32,
-        opacity: f32,
-    ) -> Result<Self, MaterialFactorError> {
-        validate_nonnegative_vec3(ambient, MaterialFactorField::LegacyAmbient)?;
-        validate_nonnegative_vec3(diffuse, MaterialFactorField::LegacyDiffuse)?;
-        validate_nonnegative_vec3(specular, MaterialFactorField::LegacySpecular)?;
-        validate_nonnegative_vec3(emissive, MaterialFactorField::LegacyEmissive)?;
-        validate_nonnegative_factor(shininess, MaterialFactorField::LegacyShininess)?;
-        validate_unit_factor(opacity, MaterialFactorField::LegacyOpacity)?;
-        Ok(Self {
-            ambient,
-            diffuse,
-            specular,
-            emissive,
-            shininess,
-            opacity,
-        })
-    }
-
-    pub const fn ambient(self) -> Vec3 {
-        self.ambient
-    }
-
-    pub const fn diffuse(self) -> Vec3 {
-        self.diffuse
-    }
-
-    pub const fn specular(self) -> Vec3 {
-        self.specular
-    }
-
-    pub const fn emissive(self) -> Vec3 {
-        self.emissive
-    }
-
-    pub const fn shininess(self) -> f32 {
-        self.shininess
-    }
-
-    pub const fn opacity(self) -> f32 {
-        self.opacity
-    }
-}
-
-/// Stable supplemental PBR factors shared by clearcoat, transmission, thickness, and sheen.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct SupplementalPbrFactors {
-    clearcoat: f32,
-    clearcoat_roughness: f32,
-    transmission: f32,
-    thickness: f32,
-    sheen_color: Vec3,
-    sheen_roughness: f32,
-}
-
-impl SupplementalPbrFactors {
-    pub fn try_new(
-        clearcoat: f32,
-        clearcoat_roughness: f32,
-        transmission: f32,
-        thickness: f32,
-        sheen_color: Vec3,
-        sheen_roughness: f32,
-    ) -> Result<Self, MaterialFactorError> {
-        validate_unit_factor(clearcoat, MaterialFactorField::Clearcoat)?;
-        validate_unit_factor(clearcoat_roughness, MaterialFactorField::ClearcoatRoughness)?;
-        validate_unit_factor(transmission, MaterialFactorField::Transmission)?;
-        validate_nonnegative_factor(thickness, MaterialFactorField::Thickness)?;
-        validate_nonnegative_vec3(sheen_color, MaterialFactorField::SheenColor)?;
-        validate_unit_factor(sheen_roughness, MaterialFactorField::SheenRoughness)?;
-        Ok(Self {
-            clearcoat,
-            clearcoat_roughness,
-            transmission,
-            thickness,
-            sheen_color,
-            sheen_roughness,
-        })
-    }
-
-    pub const fn clearcoat(self) -> f32 {
-        self.clearcoat
-    }
-
-    pub const fn clearcoat_roughness(self) -> f32 {
-        self.clearcoat_roughness
-    }
-
-    pub const fn transmission(self) -> f32 {
-        self.transmission
-    }
-
-    pub const fn thickness(self) -> f32 {
-        self.thickness
-    }
-
-    pub const fn sheen_color(self) -> Vec3 {
-        self.sheen_color
-    }
-
-    pub const fn sheen_roughness(self) -> f32 {
-        self.sheen_roughness
-    }
-}
-
-impl Default for SupplementalPbrFactors {
-    fn default() -> Self {
-        Self {
-            clearcoat: 0.0,
-            clearcoat_roughness: 0.0,
-            transmission: 0.0,
-            thickness: 0.0,
-            sheen_color: Vec3::ZERO,
-            sheen_roughness: 0.0,
-        }
-    }
-}
-
-/// Independent typed factor groups retained by one material.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct MaterialFactors {
-    emissive: Vec3,
-    pbr_metallic_roughness: Option<PbrMetallicRoughnessFactors>,
-    pbr_specular_glossiness: Option<PbrSpecularGlossinessFactors>,
-    legacy: Option<LegacyMaterialFactors>,
-    supplemental_pbr: SupplementalPbrFactors,
-}
-
-impl MaterialFactors {
-    pub fn try_new(
-        emissive: Vec3,
-        pbr_metallic_roughness: Option<PbrMetallicRoughnessFactors>,
-        pbr_specular_glossiness: Option<PbrSpecularGlossinessFactors>,
-        legacy: Option<LegacyMaterialFactors>,
-    ) -> Result<Self, MaterialFactorError> {
-        Self::try_new_with_supplemental_pbr(
-            emissive,
-            pbr_metallic_roughness,
-            pbr_specular_glossiness,
-            legacy,
-            SupplementalPbrFactors::default(),
-        )
-    }
-
-    pub fn try_new_with_supplemental_pbr(
-        emissive: Vec3,
-        pbr_metallic_roughness: Option<PbrMetallicRoughnessFactors>,
-        pbr_specular_glossiness: Option<PbrSpecularGlossinessFactors>,
-        legacy: Option<LegacyMaterialFactors>,
-        supplemental_pbr: SupplementalPbrFactors,
-    ) -> Result<Self, MaterialFactorError> {
-        validate_nonnegative_vec3(emissive, MaterialFactorField::Emissive)?;
-        Ok(Self {
-            emissive,
-            pbr_metallic_roughness,
-            pbr_specular_glossiness,
-            legacy,
-            supplemental_pbr,
-        })
-    }
-
-    pub const fn empty() -> Self {
-        Self {
-            emissive: Vec3::ZERO,
-            pbr_metallic_roughness: None,
-            pbr_specular_glossiness: None,
-            legacy: None,
-            supplemental_pbr: SupplementalPbrFactors {
-                clearcoat: 0.0,
-                clearcoat_roughness: 0.0,
-                transmission: 0.0,
-                thickness: 0.0,
-                sheen_color: Vec3::ZERO,
-                sheen_roughness: 0.0,
-            },
-        }
-    }
-
-    pub const fn emissive(self) -> Vec3 {
-        self.emissive
-    }
-
-    pub const fn pbr_metallic_roughness(self) -> Option<PbrMetallicRoughnessFactors> {
-        self.pbr_metallic_roughness
-    }
-
-    pub const fn pbr_specular_glossiness(self) -> Option<PbrSpecularGlossinessFactors> {
-        self.pbr_specular_glossiness
-    }
-
-    pub const fn legacy(self) -> Option<LegacyMaterialFactors> {
-        self.legacy
-    }
-
-    pub const fn supplemental_pbr(self) -> SupplementalPbrFactors {
-        self.supplemental_pbr
-    }
-
-    /// Rechecks the actual inline values at the central retained-storage boundary.
-    pub(crate) fn validate(self) -> Result<(), MaterialFactorError> {
-        validate_nonnegative_vec3(self.emissive, MaterialFactorField::Emissive)?;
-        if let Some(pbr) = self.pbr_metallic_roughness {
-            PbrMetallicRoughnessFactors::try_new(pbr.base_color, pbr.metallic, pbr.roughness)?;
-        }
-        if let Some(pbr) = self.pbr_specular_glossiness {
-            PbrSpecularGlossinessFactors::try_new(pbr.diffuse, pbr.specular, pbr.glossiness)?;
-        }
-        if let Some(legacy) = self.legacy {
-            LegacyMaterialFactors::try_new(
-                legacy.ambient,
-                legacy.diffuse,
-                legacy.specular,
-                legacy.emissive,
-                legacy.shininess,
-                legacy.opacity,
-            )?;
-        }
-        let pbr = self.supplemental_pbr;
-        SupplementalPbrFactors::try_new(
-            pbr.clearcoat,
-            pbr.clearcoat_roughness,
-            pbr.transmission,
-            pbr.thickness,
-            pbr.sheen_color,
-            pbr.sheen_roughness,
-        )?;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn corrupt_emissive_for_test(&mut self) {
-        self.emissive.x = f32::NAN;
-    }
-}
-
-impl Default for MaterialFactors {
-    fn default() -> Self {
-        Self::empty()
-    }
-}
-
-fn validate_unit_color(
-    value: Color,
-    field: MaterialFactorField,
-) -> Result<(), MaterialFactorError> {
-    for component in [value.r, value.g, value.b, value.a] {
-        validate_unit_factor(component, field)?;
-    }
-    Ok(())
-}
-
-fn validate_unit_vec3(value: Vec3, field: MaterialFactorField) -> Result<(), MaterialFactorError> {
-    for component in [value.x, value.y, value.z] {
-        validate_unit_factor(component, field)?;
-    }
-    Ok(())
-}
-
-fn validate_nonnegative_vec3(
-    value: Vec3,
-    field: MaterialFactorField,
-) -> Result<(), MaterialFactorError> {
-    for component in [value.x, value.y, value.z] {
-        validate_nonnegative_factor(component, field)?;
-    }
-    Ok(())
-}
-
-fn validate_unit_factor(value: f32, field: MaterialFactorField) -> Result<(), MaterialFactorError> {
-    if !value.is_finite() {
-        return Err(MaterialFactorError::NonFinite { field });
-    }
-    if !(0.0..=1.0).contains(&value) {
-        return Err(MaterialFactorError::OutsideUnitInterval { field });
-    }
-    Ok(())
-}
-
-fn validate_nonnegative_factor(
-    value: f32,
-    field: MaterialFactorField,
-) -> Result<(), MaterialFactorError> {
-    if !value.is_finite() {
-        return Err(MaterialFactorError::NonFinite { field });
-    }
-    if value < 0.0 {
-        return Err(MaterialFactorError::Negative { field });
-    }
-    Ok(())
-}
+use factors::validate_unit_factor;
+pub use factors::{
+    ClearcoatFactors, EmissionFactors, LegacyMaterialFactors, MaterialFactorError,
+    MaterialFactorField, MaterialFactors, PbrMetallicRoughnessFactors,
+    PbrSpecularGlossinessFactors, SheenFactors, ThicknessFactors, TransmissionFactors,
+};
 
 /// A canonical material texture role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1172,14 +747,14 @@ pub(crate) fn validate_material_semantics(
     let shading_model = semantics.shading_model();
     let factors = semantics.factors();
     let required = match shading_model {
-        ShadingModel::PbrMetallicRoughness if factors.pbr_metallic_roughness.is_none() => {
+        ShadingModel::PbrMetallicRoughness if factors.pbr_metallic_roughness().is_none() => {
             Some(MaterialFactorGroup::PbrMetallicRoughness)
         }
-        ShadingModel::PbrSpecularGlossiness if factors.pbr_specular_glossiness.is_none() => {
+        ShadingModel::PbrSpecularGlossiness if factors.pbr_specular_glossiness().is_none() => {
             Some(MaterialFactorGroup::PbrSpecularGlossiness)
         }
         ShadingModel::Lambert | ShadingModel::Phong | ShadingModel::BlinnPhong
-            if factors.legacy.is_none() =>
+            if factors.legacy().is_none() =>
         {
             Some(MaterialFactorGroup::Legacy)
         }
@@ -1380,6 +955,7 @@ pub(crate) fn validate_material_texture_binding_semantics<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::math::{Color, Vec3};
 
     const UV_ZERO: u16 = 0;
     const REPLACE: TextureBlendOperation = TextureBlendOperation::Replace;
@@ -1436,8 +1012,9 @@ mod tests {
             0.9,
         )
         .expect("legacy factors should be valid");
-        let factors = MaterialFactors::try_new(Vec3::ZERO, Some(pbr), None, Some(legacy))
-            .expect("factor set should be valid");
+        let factors = MaterialFactors::empty()
+            .with_pbr_metallic_roughness(Some(pbr))
+            .with_legacy(Some(legacy));
         let semantics = MaterialSemantics::new(shading_model, alpha_mode, true, factors);
 
         validate_material_semantics(semantics).expect("selected factor group is present");
@@ -1451,8 +1028,8 @@ mod tests {
         let material = {
             let shading_model = ShadingModel::Unlit;
             let alpha_mode = AlphaMode::mask(-0.0).unwrap();
-            let factors =
-                MaterialFactors::try_new(Vec3::new(2.0, -0.0, 0.5), None, None, None).unwrap();
+            let factors = MaterialFactors::empty()
+                .with_emission(EmissionFactors::try_new(Vec3::new(2.0, -0.0, 0.5), None).unwrap());
             MaterialSemantics::new(shading_model, alpha_mode, true, factors)
         };
         validate_material_semantics(material).unwrap();
@@ -1462,7 +1039,7 @@ mod tests {
             (-0.0_f32).to_bits()
         );
         assert_eq!(
-            material.factors().emissive().y.to_bits(),
+            material.factors().emission().factor().y.to_bits(),
             (-0.0_f32).to_bits()
         );
 
@@ -1771,14 +1348,14 @@ mod tests {
 
     #[test]
     fn actual_numeric_values_revalidate_without_normalizing_or_allocating() {
-        let mut factors = MaterialFactors::try_new(
-            Vec3::new(2.0, -0.0, 0.5),
-            Some(PbrMetallicRoughnessFactors::default()),
-            Some(
+        let mut factors = MaterialFactors::empty()
+            .with_emission(EmissionFactors::try_new(Vec3::new(2.0, -0.0, 0.5), None).unwrap())
+            .with_pbr_metallic_roughness(Some(PbrMetallicRoughnessFactors::default()))
+            .with_pbr_specular_glossiness(Some(
                 PbrSpecularGlossinessFactors::try_new(Color::WHITE, Vec3::new(0.5, 0.5, 0.5), 0.5)
                     .unwrap(),
-            ),
-            Some(
+            ))
+            .with_legacy(Some(
                 LegacyMaterialFactors::try_new(
                     Vec3::ZERO,
                     Vec3::new(3.0, 2.0, 1.0),
@@ -1788,9 +1365,7 @@ mod tests {
                     1.0,
                 )
                 .unwrap(),
-            ),
-        )
-        .unwrap();
+            ));
         let transform =
             TextureTransform::try_new(Vec2::new(-0.0, -2.0), 7.0, Vec2::new(-3.0, 0.0)).unwrap();
         let allocation = allocation_counter::measure(|| {
@@ -1801,9 +1376,12 @@ mod tests {
             assert!(validate_texture_source_key("source:custom slot").is_ok());
         });
         assert_eq!(allocation.count_total, 0);
-        assert_eq!(factors.emissive().y.to_bits(), (-0.0_f32).to_bits());
+        assert_eq!(
+            factors.emission().factor().y.to_bits(),
+            (-0.0_f32).to_bits()
+        );
         assert_eq!(transform.offset().x.to_bits(), (-0.0_f32).to_bits());
-        factors.pbr_specular_glossiness.as_mut().unwrap().glossiness = f32::NAN;
+        factors.corrupt_glossiness_for_test();
         assert!(factors.validate().is_err());
         assert!(
             AlphaMode::Mask(AlphaCutoff(f32::INFINITY))

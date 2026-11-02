@@ -60,6 +60,11 @@ const TAG_SOURCE_KEY_BYTES: u8 = 164;
 const TAG_F32_BITS: u8 = 165;
 const TAG_MATERIAL_NAME: u8 = 166;
 const TAG_MATERIAL_NAME_BYTES: u8 = 167;
+const TAG_EMISSIVE_STRENGTH_PRESENCE: u8 = 229;
+const TAG_CLEARCOAT_PRESENCE: u8 = 230;
+const TAG_TRANSMISSION_PRESENCE: u8 = 231;
+const TAG_THICKNESS_PRESENCE: u8 = 232;
+const TAG_SHEEN_PRESENCE: u8 = 233;
 
 const SNAPSHOT_PAYLOAD_CHUNK_BYTES: usize = 4 * 1024;
 
@@ -289,6 +294,26 @@ fn write_materials(
             TAG_LEGACY_PRESENCE,
             encode_presence(factors.legacy().is_some()),
         )?;
+        transcript.tagged_u8(
+            TAG_EMISSIVE_STRENGTH_PRESENCE,
+            encode_presence(factors.emission().strength().is_some()),
+        )?;
+        transcript.tagged_u8(
+            TAG_CLEARCOAT_PRESENCE,
+            encode_presence(factors.clearcoat().is_some()),
+        )?;
+        transcript.tagged_u8(
+            TAG_TRANSMISSION_PRESENCE,
+            encode_presence(factors.transmission().is_some()),
+        )?;
+        transcript.tagged_u8(
+            TAG_THICKNESS_PRESENCE,
+            encode_presence(factors.thickness().is_some()),
+        )?;
+        transcript.tagged_u8(
+            TAG_SHEEN_PRESENCE,
+            encode_presence(factors.sheen().is_some()),
+        )?;
         transcript.tagged_usize(TAG_BINDING_OFFSET, material.binding_offset())?;
         transcript.tagged_usize(TAG_COLLECTION_TOTAL, material.binding_count())?;
         transcript.tagged_usize(TAG_FACTOR_OFFSET, material.factor_offset())?;
@@ -325,6 +350,51 @@ fn write_materials(
         preview.geometry_field_usize(render, "binding_count", material.binding_count());
         preview.geometry_field_usize(render, "factor_offset", material.factor_offset());
         preview.geometry_field_usize(render, "factor_count", factor_count);
+        preview.geometry_field_word(
+            render,
+            "emissive_strength",
+            if factors.emission().strength().is_some() {
+                "present"
+            } else {
+                "absent"
+            },
+        );
+        preview.geometry_field_word(
+            render,
+            "clearcoat",
+            if factors.clearcoat().is_some() {
+                "present"
+            } else {
+                "absent"
+            },
+        );
+        preview.geometry_field_word(
+            render,
+            "transmission",
+            if factors.transmission().is_some() {
+                "present"
+            } else {
+                "absent"
+            },
+        );
+        preview.geometry_field_word(
+            render,
+            "thickness",
+            if factors.thickness().is_some() {
+                "present"
+            } else {
+                "absent"
+            },
+        );
+        preview.geometry_field_word(
+            render,
+            "sheen",
+            if factors.sheen().is_some() {
+                "present"
+            } else {
+                "absent"
+            },
+        );
         preview.begin_geometry_leaf(render, "factors", true, factor_count);
         for (ordinal, value) in material.factor_values().enumerate() {
             preview.geometry_f32_bits(render, ordinal, value.to_bits())?;

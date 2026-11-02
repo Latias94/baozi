@@ -15,7 +15,7 @@ const TEXTURE_BYTES: &[u8] = b"snapshotted-obj-texture";
 fn material_factor_bits(snapshot: &SceneSnapshot, material: usize, factor: usize) -> u32 {
     let line = snapshot_line(snapshot, &format!("material[{material}]"));
     let factors = line
-        .split_once("factors(present,total=39)=[")
+        .split_once("factors(present,total=40)=[")
         .expect("material snapshot must expose canonical factors")
         .1
         .split_once(']')

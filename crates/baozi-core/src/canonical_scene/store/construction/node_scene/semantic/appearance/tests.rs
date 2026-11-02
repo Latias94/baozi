@@ -1,6 +1,7 @@
 use crate::appearance::{
-    LegacyMaterialFactors, PbrMetallicRoughnessFactors, PbrSpecularGlossinessFactors,
-    SupplementalPbrFactors, TextureChannel,
+    ClearcoatFactors, EmissionFactors, LegacyMaterialFactors, PbrMetallicRoughnessFactors,
+    PbrSpecularGlossinessFactors, SheenFactors, TextureChannel, ThicknessFactors,
+    TransmissionFactors,
 };
 use crate::canonical_scene::store::typed_storage::appearance::{
     AppearancePayloads, AppearanceRows, StoredImage, StoredImageIndex, StoredSamplerIndex,
@@ -33,25 +34,28 @@ fn empty_storage() -> Storage {
 }
 
 fn rich_factors() -> MaterialFactors {
-    MaterialFactors::try_new_with_supplemental_pbr(
-        Vec3::new(-0.0, f32::from_bits(1), 2.0),
-        Some(
+    MaterialFactors::empty()
+        .with_emission(
+            EmissionFactors::try_new(Vec3::new(-0.0, f32::from_bits(1), 2.0), Some(f32::MAX))
+                .unwrap(),
+        )
+        .with_pbr_metallic_roughness(Some(
             PbrMetallicRoughnessFactors::try_new(
                 Color::linear_rgba(0.125, -0.0, 0.25, 1.0),
                 -0.0,
                 0.75,
             )
             .unwrap(),
-        ),
-        Some(
+        ))
+        .with_pbr_specular_glossiness(Some(
             PbrSpecularGlossinessFactors::try_new(
                 Color::linear_rgba(0.5, 0.25, -0.0, 1.0),
                 Vec3::new(0.75, 0.5, 0.25),
                 0.125,
             )
             .unwrap(),
-        ),
-        Some(
+        ))
+        .with_legacy(Some(
             LegacyMaterialFactors::try_new(
                 Vec3::new(1.0, 2.0, 3.0),
                 Vec3::new(4.0, 5.0, 6.0),
@@ -61,11 +65,13 @@ fn rich_factors() -> MaterialFactors {
                 0.875,
             )
             .unwrap(),
-        ),
-        SupplementalPbrFactors::try_new(0.25, 0.5, 0.75, 2.5, Vec3::new(-0.0, 0.125, 0.25), 0.375)
-            .unwrap(),
-    )
-    .unwrap()
+        ))
+        .with_clearcoat(Some(ClearcoatFactors::try_new(0.25, 0.5).unwrap()))
+        .with_transmission(Some(TransmissionFactors::try_new(0.75).unwrap()))
+        .with_thickness(Some(ThicknessFactors::try_new(2.5).unwrap()))
+        .with_sheen(Some(
+            SheenFactors::try_new(Vec3::new(-0.0, 0.125, 0.25), 0.375).unwrap(),
+        ))
 }
 
 fn fixture() -> Storage {
@@ -242,7 +248,7 @@ fn selected_views_borrow_actual_rows_bytes_and_text_without_allocating() {
             ),
             (1, 1, 1)
         );
-        assert_eq!(material.factor_offset(), 39);
+        assert_eq!(material.factor_offset(), 40);
         let named = view.material_at(2).unwrap();
         assert_eq!(named.name(), Some("材质"));
         assert!(std::ptr::eq(
@@ -295,7 +301,7 @@ fn selected_views_borrow_actual_rows_bytes_and_text_without_allocating() {
 #[test]
 fn scalar_projections_preserve_snapshot_order_bits_and_exact_exhaustion() {
     let storage = fixture();
-    let expected: [f32; 39] = [
+    let expected: [f32; 40] = [
         -0.0,
         f32::from_bits(1),
         2.0,
@@ -335,6 +341,7 @@ fn scalar_projections_preserve_snapshot_order_bits_and_exact_exhaustion() {
         0.125,
         0.25,
         0.375,
+        f32::MAX,
     ];
     let allocations = allocation_counter::measure(|| {
         let material = tables(&storage).material_at(1).unwrap();
@@ -367,6 +374,74 @@ fn scalar_projections_preserve_snapshot_order_bits_and_exact_exhaustion() {
     });
     assert_eq!(allocations.count_total, 0);
     assert_eq!(allocations.bytes_total, 0);
+}
+
+#[test]
+fn optional_lobe_projection_pads_absence_and_preserves_each_authored_zero_slot() {
+    let empty = MaterialFactors::empty();
+    for (factors, slots) in [
+        (
+            empty.with_emission(EmissionFactors::try_new(Vec3::ZERO, Some(-0.0)).unwrap()),
+            &[39][..],
+        ),
+        (
+            empty.with_clearcoat(Some(ClearcoatFactors::try_new(-0.0, -0.0).unwrap())),
+            &[31, 32][..],
+        ),
+        (
+            empty.with_transmission(Some(TransmissionFactors::try_new(-0.0).unwrap())),
+            &[33][..],
+        ),
+        (
+            empty.with_thickness(Some(ThicknessFactors::try_new(-0.0).unwrap())),
+            &[34][..],
+        ),
+        (
+            empty.with_sheen(Some(
+                SheenFactors::try_new(Vec3::new(-0.0, -0.0, -0.0), -0.0).unwrap(),
+            )),
+            &[35, 36, 37, 38][..],
+        ),
+    ] {
+        let mut storage = empty_storage();
+        storage.rows.materials.push(StoredMaterial {
+            bindings: TableRange::new(0, 0),
+            shading: ShadingModel::Unlit,
+            alpha: AlphaMode::Opaque,
+            double_sided: false,
+            factors,
+            name: None,
+        });
+        let material = tables(&storage).material_at(0).unwrap();
+        assert_eq!(material.factor_values().len(), 40);
+        for (slot, value) in material.factor_values().enumerate() {
+            let expected = if slots.contains(&slot) {
+                -0.0_f32
+            } else {
+                0.0_f32
+            };
+            assert_eq!(value.to_bits(), expected.to_bits(), "slot {slot}");
+        }
+        assert_eq!(
+            material.factors().emission().effective_strength().to_bits(),
+            if slots == [39] {
+                (-0.0_f32).to_bits()
+            } else {
+                1.0_f32.to_bits()
+            }
+        );
+        let mut reverse = material.factor_values();
+        for slot in (0..40).rev() {
+            let expected = if slots.contains(&slot) {
+                -0.0_f32
+            } else {
+                0.0_f32
+            };
+            assert_eq!(reverse.next_back().unwrap().to_bits(), expected.to_bits());
+        }
+        assert!(reverse.next_back().is_none());
+        reverse.finish().unwrap();
+    }
 }
 
 #[test]

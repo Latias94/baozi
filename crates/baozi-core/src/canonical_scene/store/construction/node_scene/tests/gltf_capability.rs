@@ -8,10 +8,11 @@ use baozi_operation::{
 
 use crate::SceneValidationLimits;
 use crate::appearance::{
-    AlphaMode, ColorInterpretation, MaterialFactors, MaterialSemantics,
-    PbrMetallicRoughnessFactors, PbrSpecularGlossinessFactors, ShadingModel,
-    SupplementalPbrFactors, TextureBindingSemantics, TextureBlendOperation, TextureChannel,
+    AlphaMode, ClearcoatFactors, ColorInterpretation, EmissionFactors, MaterialFactors,
+    MaterialSemantics, PbrMetallicRoughnessFactors, PbrSpecularGlossinessFactors, ShadingModel,
+    SheenFactors, TextureBindingSemantics, TextureBlendOperation, TextureChannel,
     TextureChannelSwizzle, TextureRole, TextureSourceKey, TextureStrength, TextureTransform,
+    ThicknessFactors, TransmissionFactors,
 };
 use crate::attribute::{AttributeDomain, AttributeSemantic};
 use crate::canonical_scene::store::construction::STORE_DIMENSION;
@@ -507,7 +508,7 @@ fn encode_gltf_source(
     }
 
     fn encode_material_factors(encoder: &mut GltfSourceEncoder, factors: MaterialFactors) {
-        encode_vec3(encoder, factors.emissive());
+        encode_vec3(encoder, factors.emission().factor());
         encode_option(
             encoder,
             factors.pbr_metallic_roughness(),
@@ -534,13 +535,27 @@ fn encode_gltf_source(
             encoder.f32(group.shininess());
             encoder.f32(group.opacity());
         });
-        let supplemental = factors.supplemental_pbr();
-        encoder.f32(supplemental.clearcoat());
-        encoder.f32(supplemental.clearcoat_roughness());
-        encoder.f32(supplemental.transmission());
-        encoder.f32(supplemental.thickness());
-        encode_vec3(encoder, supplemental.sheen_color());
-        encoder.f32(supplemental.sheen_roughness());
+        encode_option(encoder, factors.clearcoat(), |encoder, group| {
+            encoder.f32(group.factor());
+            encoder.f32(group.roughness());
+        });
+        encode_option(encoder, factors.transmission(), |encoder, group| {
+            encoder.f32(group.factor());
+        });
+        encode_option(encoder, factors.thickness(), |encoder, group| {
+            encoder.f32(group.thickness());
+        });
+        encode_option(encoder, factors.sheen(), |encoder, group| {
+            encode_vec3(encoder, group.color());
+            encoder.f32(group.roughness());
+        });
+        encode_option(
+            encoder,
+            factors.emission().strength(),
+            |encoder, strength| {
+                encoder.f32(strength);
+            },
+        );
     }
 
     fn encode_topology(encoder: &mut GltfSourceEncoder, topology: GeometryTopologyAuthoring<'_>) {
@@ -1156,37 +1171,33 @@ fn with_gltf_capability_input<R>(
         AlphaMode::Opaque
     };
     let factors = if material_semantics_mutated {
-        MaterialFactors::try_new_with_supplemental_pbr(
-            Vec3::new(0.1, 0.2, 0.3),
-            Some(
+        MaterialFactors::empty()
+            .with_emission(EmissionFactors::try_new(Vec3::new(0.1, 0.2, 0.3), Some(2.0)).unwrap())
+            .with_pbr_metallic_roughness(Some(
                 PbrMetallicRoughnessFactors::try_new(
                     Color::linear_rgba(0.8, 0.7, 0.6, 0.5),
                     0.25,
                     0.75,
                 )
                 .expect("mutated glTF metallic-roughness factors must be canonical"),
-            ),
-            Some(
+            ))
+            .with_pbr_specular_glossiness(Some(
                 PbrSpecularGlossinessFactors::try_new(
                     Color::linear_rgba(0.9, 0.8, 0.7, 1.0),
                     Vec3::new(0.2, 0.3, 0.4),
                     0.55,
                 )
                 .expect("mutated glTF specular-glossiness factors must be canonical"),
-            ),
-            None,
-            SupplementalPbrFactors::try_new(0.2, 0.3, 0.4, 0.5, Vec3::new(0.1, 0.2, 0.3), 0.6)
-                .expect("mutated glTF supplemental PBR factors must be canonical"),
-        )
-        .expect("mutated glTF material factors must be canonical")
+            ))
+            .with_clearcoat(Some(ClearcoatFactors::try_new(0.2, 0.3).unwrap()))
+            .with_transmission(Some(TransmissionFactors::try_new(0.4).unwrap()))
+            .with_thickness(Some(ThicknessFactors::try_new(0.5).unwrap()))
+            .with_sheen(Some(
+                SheenFactors::try_new(Vec3::new(0.1, 0.2, 0.3), 0.6).unwrap(),
+            ))
     } else {
-        MaterialFactors::try_new(
-            Vec3::ZERO,
-            Some(PbrMetallicRoughnessFactors::default()),
-            None,
-            None,
-        )
-        .expect("default glTF PBR factors must be canonical")
+        MaterialFactors::empty()
+            .with_pbr_metallic_roughness(Some(PbrMetallicRoughnessFactors::default()))
     };
     let material_semantics = MaterialSemantics::new(
         shading_model,
@@ -2106,17 +2117,18 @@ pub(in crate::canonical_scene::store) fn inspect_gltf_capability_semantics_with_
             assert_eq!(material.alpha_mode(), &AlphaMode::Opaque);
             assert!(!material.double_sided());
             let factors = material.factors();
-            assert_eq!(factors.emissive(), Vec3::ZERO);
+            assert_eq!(factors.emission().factor(), Vec3::ZERO);
+            assert_eq!(factors.emission().strength(), None);
             assert_eq!(
                 factors.pbr_metallic_roughness(),
                 Some(PbrMetallicRoughnessFactors::default()),
             );
             assert_eq!(factors.pbr_specular_glossiness(), None);
             assert_eq!(factors.legacy(), None);
-            assert_eq!(
-                factors.supplemental_pbr(),
-                SupplementalPbrFactors::default(),
-            );
+            assert_eq!(factors.clearcoat(), None);
+            assert_eq!(factors.transmission(), None);
+            assert_eq!(factors.thickness(), None);
+            assert_eq!(factors.sheen(), None);
             assert_eq!(
                 (material.binding_offset(), material.binding_count()),
                 (offset, count),
@@ -3657,7 +3669,7 @@ fn gltf_shape_materializes_all_five_canonical_domains() {
     );
 
     let (full, bounded) = capture_gltf_capability_snapshots_for_probe(&parts);
-    assert_eq!(full.schema_revision, 7);
+    assert_eq!(full.schema_revision, 8);
     assert_eq!(bounded.digest, full.digest);
     assert_eq!(bounded.totals, full.totals);
     assert!(bounded.preview.bytes_truncated || bounded.preview.items_truncated);

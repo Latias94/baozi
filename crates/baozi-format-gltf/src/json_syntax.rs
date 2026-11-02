@@ -241,6 +241,8 @@ enum SourceMember {
     Perspective,
     KhrTextureTransform,
     KhrMaterialsUnlit,
+    KhrMaterialsEmissiveStrength,
+    EmissiveStrength,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -628,7 +630,9 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
             ) if matches!(
                 frame.member,
                 SourceMember::Extras | SourceMember::Extensions
-            ) || site == SourcePayloadSite::MaterialUnlit =>
+            ) || site == SourcePayloadSite::MaterialUnlit
+                || (site == SourcePayloadSite::MaterialEmissiveStrength
+                    && frame.member != SourceMember::EmissiveStrength) =>
             {
                 self.begin_source_payload(owner, site, frame)
             }
@@ -666,6 +670,9 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
             let extension = match frame.member {
                 SourceMember::KhrTextureTransform => SourceExtensionKind::KhrTextureTransform,
                 SourceMember::KhrMaterialsUnlit => SourceExtensionKind::KhrMaterialsUnlit,
+                SourceMember::KhrMaterialsEmissiveStrength => {
+                    SourceExtensionKind::KhrMaterialsEmissiveStrength
+                }
                 _ => SourceExtensionKind::Other,
             };
             SourcePayloadKind::Extension(extension)
@@ -706,6 +713,11 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                 SourceEntityKind::Material,
                 SourcePayloadSite::Entity,
             ) => SourcePayloadSite::MaterialUnlit,
+            (
+                SourcePayloadKind::Extension(SourceExtensionKind::KhrMaterialsEmissiveStrength),
+                SourceEntityKind::Material,
+                SourcePayloadSite::Entity,
+            ) => SourcePayloadSite::MaterialEmissiveStrength,
             (
                 SourcePayloadKind::Extension(SourceExtensionKind::KhrTextureTransform),
                 _,
@@ -1500,7 +1512,7 @@ struct ScannedString {
 /// The extra decode is bounded by the longest recognized ASCII name, even for escaped keys.
 fn source_member(bytes: &[u8], content_start: usize, content_end: usize) -> SourceMember {
     let mut scalars = DecodedScalars::new(bytes, content_start, content_end);
-    let mut name = [0_u8; 24];
+    let mut name = [0_u8; crate::document::KHR_MATERIALS_EMISSIVE_STRENGTH.len()];
     let mut length = 0;
     loop {
         match scalars.next_scalar() {
@@ -1545,6 +1557,8 @@ fn source_member(bytes: &[u8], content_start: usize, content_end: usize) -> Sour
         b"perspective" => SourceMember::Perspective,
         b"KHR_texture_transform" => SourceMember::KhrTextureTransform,
         b"KHR_materials_unlit" => SourceMember::KhrMaterialsUnlit,
+        b"KHR_materials_emissive_strength" => SourceMember::KhrMaterialsEmissiveStrength,
+        b"emissiveStrength" => SourceMember::EmissiveStrength,
         _ => SourceMember::Other,
     }
 }

@@ -1,6 +1,8 @@
 use super::*;
 use crate::appearance::{
-    LegacyMaterialFactors, PbrMetallicRoughnessFactors, SupplementalPbrFactors, TextureChannel,
+    ClearcoatFactors, EmissionFactors, LegacyMaterialFactors, MaterialFactorField,
+    PbrMetallicRoughnessFactors, SheenFactors, TextureChannel, ThicknessFactors,
+    TransmissionFactors,
 };
 use crate::image::{MipmapFilter, TexelFilter, TextureAddressMode};
 use crate::math::{Color, Vec2, Vec3};
@@ -168,18 +170,17 @@ fn fixture() -> Fixture {
     storage.rows.bindings[1].transform =
         TextureTransform::try_new(Vec2::new(-0.0, -2.0), 7.0, Vec2::new(-3.0, 0.0)).unwrap();
     storage.rows.bindings[1].uv_set = u16::MAX;
-    let factors = MaterialFactors::try_new_with_supplemental_pbr(
-        Vec3::new(2.0, -0.0, 0.5),
-        Some(
+    let factors = MaterialFactors::empty()
+        .with_emission(EmissionFactors::try_new(Vec3::new(2.0, -0.0, 0.5), None).unwrap())
+        .with_pbr_metallic_roughness(Some(
             PbrMetallicRoughnessFactors::try_new(
                 Color::linear_rgba(0.7, -0.0, 0.5, 1.0),
                 0.25,
                 0.75,
             )
             .unwrap(),
-        ),
-        None,
-        Some(
+        ))
+        .with_legacy(Some(
             LegacyMaterialFactors::try_new(
                 Vec3::ZERO,
                 Vec3::new(3.0, 2.0, 1.0),
@@ -189,10 +190,13 @@ fn fixture() -> Fixture {
                 1.0,
             )
             .unwrap(),
-        ),
-        SupplementalPbrFactors::try_new(0.2, 0.3, 0.4, 5.0, Vec3::new(2.0, 0.0, 1.0), 0.6).unwrap(),
-    )
-    .unwrap();
+        ))
+        .with_clearcoat(Some(ClearcoatFactors::try_new(0.2, 0.3).unwrap()))
+        .with_transmission(Some(TransmissionFactors::try_new(0.4).unwrap()))
+        .with_thickness(Some(ThicknessFactors::try_new(5.0).unwrap()))
+        .with_sheen(Some(
+            SheenFactors::try_new(Vec3::new(2.0, 0.0, 1.0), 0.6).unwrap(),
+        ));
     storage.rows.materials = vec![
         StoredMaterial {
             bindings: TableRange::new(0, 2),
@@ -207,13 +211,8 @@ fn fixture() -> Fixture {
             shading: ShadingModel::PbrMetallicRoughness,
             alpha: AlphaMode::Opaque,
             double_sided: false,
-            factors: MaterialFactors::try_new(
-                Vec3::ZERO,
-                Some(PbrMetallicRoughnessFactors::default()),
-                None,
-                None,
-            )
-            .unwrap(),
+            factors: MaterialFactors::empty()
+                .with_pbr_metallic_roughness(Some(PbrMetallicRoughnessFactors::default())),
             name: None,
         },
         StoredMaterial {
@@ -272,7 +271,12 @@ fn actual_rows_and_pools_validate_without_allocation_or_projection_with_exact_wo
         (-0.0_f32).to_bits()
     );
     assert_eq!(
-        fixture.rows.materials[0].factors.emissive().y.to_bits(),
+        fixture.rows.materials[0]
+            .factors
+            .emission()
+            .factor()
+            .y
+            .to_bits(),
         (-0.0_f32).to_bits()
     );
     assert_eq!(
@@ -287,7 +291,8 @@ fn actual_rows_and_pools_validate_without_allocation_or_projection_with_exact_wo
     assert_eq!(
         fixture.rows.materials[0]
             .factors
-            .supplemental_pbr()
+            .thickness()
+            .unwrap()
             .thickness(),
         5.0
     );
@@ -498,6 +503,40 @@ fn actual_references_factors_swizzles_and_cross_binding_authority_fail_closed() 
                     .unwrap();
         }),
     ]);
+}
+
+#[test]
+fn actual_optional_fields_are_revalidated_for_unlit_with_zero_emission_without_projection() {
+    for field in [
+        MaterialFactorField::EmissiveStrength,
+        MaterialFactorField::Clearcoat,
+        MaterialFactorField::ClearcoatRoughness,
+        MaterialFactorField::Transmission,
+        MaterialFactorField::Thickness,
+        MaterialFactorField::SheenColor,
+        MaterialFactorField::SheenRoughness,
+    ] {
+        let mut fixture = fixture();
+        fixture.rows.materials[0].shading = ShadingModel::Unlit;
+        fixture.rows.materials[0].factors = MaterialFactors::empty()
+            .with_emission(EmissionFactors::try_new(Vec3::ZERO, Some(0.0)).unwrap())
+            .with_clearcoat(Some(ClearcoatFactors::default()))
+            .with_transmission(Some(TransmissionFactors::default()))
+            .with_thickness(Some(ThicknessFactors::default()))
+            .with_sheen(Some(SheenFactors::default()));
+        assert!(fixture.validate(&mut Control::default()).unwrap());
+        fixture.rows.materials[0]
+            .factors
+            .corrupt_optional_factor_for_test(field);
+        let allocation = allocation_counter::measure(|| {
+            assert!(
+                !fixture.validate(&mut Control::default()).unwrap(),
+                "{field:?}"
+            );
+        });
+        assert_eq!(allocation.count_total, 0);
+        assert_eq!(allocation.bytes_total, 0);
+    }
 }
 
 #[test]

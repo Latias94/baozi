@@ -277,12 +277,21 @@ Binding, texture, sampler, and image identities remain distinct. Image decoding 
 application. Factor groups and closed binding values are returned by value; names, optional source
 keys, and encoded bytes borrow the Scene's actual storage. No getter allocates a replacement model.
 
+`material.factors().emission()` returns the raw RGB `factor()` and independently authored
+`strength()`. Absence means an effective multiplier of one; an explicitly authored one remains
+`Some(1.0)`. `effective_rgb()` derives their product in F64 without changing either input.
+The effective emissive sample additionally applies the active binding's color transfer, texture
+sample and binding strength once. It does not participate in glTF Unlit shading.
+`clearcoat()`, `transmission()`, `thickness()` and `sheen()` each return an independent optional
+typed group. An absent group remains distinct from a present default. Custom authoring assembles
+checked leaves through `MaterialFactors::empty().with_*`; there is no supplemental factor bag.
+
 Public authoring takes the same direct UV index as the third argument to
 `MaterialBindingAuthoring::try_from_parts`. Convert a wider source index with a checked narrowing
 conversion before calling it. Only the optional descriptive source key gives binding authoring its
 borrowed lifetime; numeric and closed behavior values are owned.
 
-Whole-Scene space conversion scales supplemental thickness and signed displacement strength by the
+Whole-Scene space conversion scales present typed thickness and signed displacement strength by the
 positive unit ratio. Other factors and optional groups, normal-map strengths, and UV indices and
 transforms keep their exact bits. A changed appearance rebuilds its row tables while sharing the
 encoded-image and text pools; destination byte slices and text borrow that same retained payload

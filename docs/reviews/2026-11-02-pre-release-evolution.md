@@ -186,9 +186,48 @@ Existing cubic-derivative, retained-validation, reflected-conversion and upstrea
 Independent review recomputed the source/boundary arithmetic and checked the common admission predicate, public retention, conversion and temporary-evaluation distinction; it found no actionable issue.
 Its fixed-source receipt is `.git/baozi-review/pre-release-evolution-execution/quaternion-review.md`.
 
+## Typed Material Groups and Emissive Strength
+
+U6 replaces the combined supplemental constructor with checked optional clearcoat, transmission,
+thickness and sheen groups, alongside emission's independently authored RGB and optional strength.
+The old aggregate constructors and supplemental accessor have no remaining Rust callers or aliases.
+Effective emission widens both operands to F64 before multiplication; it does not overwrite raw
+factors or presence. Space conversion changes present thickness and displacement while preserving
+dimensionless bits and the existing shared image/text owner.
+
+The glTF producer now lowers selected materials once through `parser/materials.rs`, before
+dependency IO, and retains the compiled values through canonical authoring. Its emissive-strength
+profile covers strict numeric narrowing, declarations, owner/site restrictions, Unlit exclusion,
+extras, escaped keys and GLB absolute ranges. Core validation continues to allow legitimate
+cross-format fallback factors. The intermediate snapshot revision is 8, with forty scalar slots
+and separate presence tags; U12 will perform the coordinated v1 cutover.
+
+Two independent reviewers checked the core factor/accounting/conversion/transcript path and the
+producer path respectively. The only confirmed producer finding was an incorrect literal extension
+length in a test, corrected from 29 to 31 and independently rechecked. Full handwritten transcript
+vectors were independently reconstructed and hashed; no production snapshot encoder supplied their
+expected bytes. The private reports are `material-core-review.md` and
+`emissive-producer-review.md` under the execution review directory.
+
+| Check | Actual result | Evidence identity |
+| --- | --- | --- |
+| Workspace all-feature semantics | 2,890/2,890 pass; four existing manual exclusions | nextest `6d8c60de-3597-4153-a4ec-1f8ebbd65e63` |
+| Standalone owned asset consumer | 86/86 pass; one existing manual exclusion | nextest `f2998730-830e-4b6c-8eec-71c082c362b8` |
+| Independent scene consumer | All four format assertions and custom authoring/conversion pass | `all-formats,postprocess,tracing,mint`, expected `obj,stl,ply,gltf` |
+| Static checks | Workspace and asset consumer strict all-target/all-feature Clippy pass; all three workspace format checks pass | Rust 1.95, serial shared target |
+
+These executions use Rust 1.95 on Windows x86_64 MSVC. The exact pre-commit source/doc hashes are
+retained in `target/review/material-factors/tested-source.json`, and the independent complete
+transcript vectors in `independent-snapshot-vectors.json` beside it. Final formatting only normalized
+newlines in the snapshot test module; the manifest records that raw-byte difference separately.
+The earlier test-first rejection
+is nextest `e6020e78-a326-465f-9b00-ac4e74bd3953`; later obsolete golden expectations were updated
+from independent byte framing, with accounting expectations changed only for the added scalar.
+Fresh integrated portable/package/render/B1 qualification remains part of the later units.
+
 ## Remaining Verification
 
 Timing/RSS B0, the separate heap observations and the regression policy are now recorded above. Production semantics remained unchanged throughout these campaigns.
-Subsequent material/light/render/device/quantization changes, canonical v1 cutover, B1 comparisons and final package/portable qualification remain ahead.
+Subsequent light/render/device/quantization and clearcoat/sheen producer changes, canonical v1 cutover, B1 comparisons and final package/portable qualification remain ahead.
 Historical qualification stays bound to the source in its original record.
 No registry publication/yank, push/PR or native target promotion has occurred in this work.

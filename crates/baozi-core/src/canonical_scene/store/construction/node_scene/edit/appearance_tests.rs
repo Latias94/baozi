@@ -2,9 +2,10 @@
 
 use super::*;
 use crate::appearance::{
-    AlphaMode, ColorInterpretation, MaterialFactors, MaterialSemantics, ShadingModel,
-    SupplementalPbrFactors, TextureBindingSemantics, TextureBlendOperation, TextureChannelSwizzle,
-    TextureRole, TextureStrength, TextureTransform,
+    AlphaMode, ClearcoatFactors, ColorInterpretation, MaterialFactors, MaterialSemantics,
+    ShadingModel, SheenFactors, TextureBindingSemantics, TextureBlendOperation,
+    TextureChannelSwizzle, TextureRole, TextureStrength, TextureTransform, ThicknessFactors,
+    TransmissionFactors,
 };
 use crate::canonical_scene::store::production::{
     ImageAuthoring, ImageLocalId, MaterialAuthoring, MaterialBindingAuthoring, SamplerAuthoring,
@@ -51,14 +52,11 @@ fn source_appearance(account: &PhysicalStorageAccount, nonzero: bool) -> NodeSce
     });
     let materials = std::array::from_fn::<_, 3, _>(|index| {
         let thickness = if index == 0 && nonzero { 4.0 } else { -0.0 };
-        let factors = MaterialFactors::try_new_with_supplemental_pbr(
-            Vec3::ZERO,
-            None,
-            None,
-            None,
-            SupplementalPbrFactors::try_new(0.0, 0.0, 0.0, thickness, Vec3::ZERO, 0.0).unwrap(),
-        )
-        .unwrap();
+        let factors = MaterialFactors::empty()
+            .with_clearcoat(Some(ClearcoatFactors::try_new(0.0, 0.0).unwrap()))
+            .with_transmission(Some(TransmissionFactors::try_new(0.0).unwrap()))
+            .with_thickness(Some(ThicknessFactors::try_new(thickness).unwrap()))
+            .with_sheen(Some(SheenFactors::try_new(Vec3::ZERO, 0.0).unwrap()));
         MaterialAuthoring::new(
             AuthoringRange::new(index as u32, 1),
             MaterialSemantics::new(ShadingModel::Unlit, AlphaMode::Opaque, false, factors),
@@ -190,7 +188,8 @@ fn changed_lengths_retain_only_rows_and_rebind_exact_owners_to_own_and_scene_par
     assert_eq!(
         after.rows.as_ref().materials[0]
             .factors
-            .supplemental_pbr()
+            .thickness()
+            .unwrap()
             .thickness(),
         8.0
     );

@@ -114,7 +114,12 @@ fn facade_reads_material_factors_bindings_and_encoded_images() {
     assert_eq!(red.alpha_mode(), AlphaMode::Blend);
     assert!(!red.double_sided());
     let factors = red.factors();
-    assert_eq!(factors.emissive(), Vec3::new(0.1, 0.2, 0.3));
+    assert_eq!(factors.emission().factor(), Vec3::new(0.1, 0.2, 0.3));
+    assert!(factors.emission().strength().is_none());
+    assert!(factors.clearcoat().is_none());
+    assert!(factors.transmission().is_none());
+    assert!(factors.thickness().is_none());
+    assert!(factors.sheen().is_none());
     assert!(factors.pbr_metallic_roughness().is_none());
     assert!(factors.pbr_specular_glossiness().is_none());
     let legacy = factors.legacy().expect("OBJ retains legacy factors");

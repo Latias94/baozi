@@ -1,6 +1,6 @@
 //! Source-bound conversion of Scene-unit appearance values without copying immutable payloads.
 //!
-//! Only supplemental material thickness and displacement binding strength are lengths. A positive
+//! Only material thickness and displacement binding strength are lengths. A positive
 //! unit ratio scales both, independently of handedness; all other fields retain their exact bits.
 //! Preflight checks every binding and material. Materialization and correspondence each charge one
 //! action per row in the five tables, without walking image bytes or text. The enclosing retained
@@ -8,9 +8,7 @@
 
 use baozi_operation::{CapacityPlan, StorePlanError};
 
-use crate::appearance::{
-    AlphaMode, MaterialFactors, SupplementalPbrFactors, TextureRole, TextureStrength,
-};
+use crate::appearance::{AlphaMode, TextureRole, TextureStrength, ThicknessFactors};
 use crate::space_conversion::{NumericConversionError, SpaceConversion};
 
 use super::super::appearance::build::AppearanceStoragePlan;
@@ -334,27 +332,15 @@ fn convert_material(
     conversion: SpaceConversion,
 ) -> Result<StoredMaterial, AppearanceRowConversionError> {
     let factors = source.factors;
-    let supplemental = factors.supplemental_pbr();
+    let Some(thickness) = factors.thickness() else {
+        return Ok(source);
+    };
     let thickness = conversion
-        .length(supplemental.thickness())
+        .length(thickness.thickness())
         .map_err(AppearanceRowConversionError::Numeric)?;
-    let supplemental = SupplementalPbrFactors::try_new(
-        supplemental.clearcoat(),
-        supplemental.clearcoat_roughness(),
-        supplemental.transmission(),
-        thickness,
-        supplemental.sheen_color(),
-        supplemental.sheen_roughness(),
-    )
-    .map_err(|_| AppearanceRowConversionError::Invariant)?;
-    let factors = MaterialFactors::try_new_with_supplemental_pbr(
-        factors.emissive(),
-        factors.pbr_metallic_roughness(),
-        factors.pbr_specular_glossiness(),
-        factors.legacy(),
-        supplemental,
-    )
-    .map_err(|_| AppearanceRowConversionError::Invariant)?;
+    let thickness = ThicknessFactors::try_new(thickness)
+        .map_err(|_| AppearanceRowConversionError::Invariant)?;
+    let factors = factors.with_thickness(Some(thickness));
     Ok(StoredMaterial { factors, ..source })
 }
 
@@ -389,80 +375,6 @@ fn same_material(source: StoredMaterial, actual: StoredMaterial) -> bool {
         && source.shading == actual.shading
         && same_alpha
         && source.double_sided == actual.double_sided
-        && same_factors(source.factors, actual.factors)
+        && source.factors.same_bits(actual.factors)
         && source.name == actual.name
-}
-
-fn same_factors(source: MaterialFactors, actual: MaterialFactors) -> bool {
-    // These bounded inline groups have distinct optional presence and exact authored f32 bits.
-    // Keep the comparisons tied to the concrete values rather than a separate scalar schema.
-    let metallic_roughness = |pbr: crate::appearance::PbrMetallicRoughnessFactors| {
-        let color = pbr.base_color();
-        [
-            color.r.to_bits(),
-            color.g.to_bits(),
-            color.b.to_bits(),
-            color.a.to_bits(),
-            pbr.metallic().to_bits(),
-            pbr.roughness().to_bits(),
-        ]
-    };
-    let specular_glossiness = |pbr: crate::appearance::PbrSpecularGlossinessFactors| {
-        let color = pbr.diffuse();
-        let specular = pbr.specular();
-        [
-            color.r.to_bits(),
-            color.g.to_bits(),
-            color.b.to_bits(),
-            color.a.to_bits(),
-            specular.x.to_bits(),
-            specular.y.to_bits(),
-            specular.z.to_bits(),
-            pbr.glossiness().to_bits(),
-        ]
-    };
-    let legacy = |legacy: crate::appearance::LegacyMaterialFactors| {
-        let ambient = legacy.ambient();
-        let diffuse = legacy.diffuse();
-        let specular = legacy.specular();
-        let emissive = legacy.emissive();
-        [
-            ambient.x.to_bits(),
-            ambient.y.to_bits(),
-            ambient.z.to_bits(),
-            diffuse.x.to_bits(),
-            diffuse.y.to_bits(),
-            diffuse.z.to_bits(),
-            specular.x.to_bits(),
-            specular.y.to_bits(),
-            specular.z.to_bits(),
-            emissive.x.to_bits(),
-            emissive.y.to_bits(),
-            emissive.z.to_bits(),
-            legacy.shininess().to_bits(),
-            legacy.opacity().to_bits(),
-        ]
-    };
-    let supplemental = |pbr: SupplementalPbrFactors| {
-        let sheen = pbr.sheen_color();
-        [
-            pbr.clearcoat().to_bits(),
-            pbr.clearcoat_roughness().to_bits(),
-            pbr.transmission().to_bits(),
-            pbr.thickness().to_bits(),
-            sheen.x.to_bits(),
-            sheen.y.to_bits(),
-            sheen.z.to_bits(),
-            pbr.sheen_roughness().to_bits(),
-        ]
-    };
-    source.emissive().x.to_bits() == actual.emissive().x.to_bits()
-        && source.emissive().y.to_bits() == actual.emissive().y.to_bits()
-        && source.emissive().z.to_bits() == actual.emissive().z.to_bits()
-        && source.pbr_metallic_roughness().map(metallic_roughness)
-            == actual.pbr_metallic_roughness().map(metallic_roughness)
-        && source.pbr_specular_glossiness().map(specular_glossiness)
-            == actual.pbr_specular_glossiness().map(specular_glossiness)
-        && source.legacy().map(legacy) == actual.legacy().map(legacy)
-        && supplemental(source.supplemental_pbr()) == supplemental(actual.supplemental_pbr())
 }

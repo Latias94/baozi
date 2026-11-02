@@ -1,5 +1,160 @@
 use super::*;
+use crate::appearance::{
+    ClearcoatFactors, EmissionFactors, SheenFactors, ThicknessFactors, TransmissionFactors,
+};
 use crate::{AttributeData, AttributeSemanticRef, ValidatedScene};
+
+#[test]
+fn material_factor_presence_and_strength_have_independent_complete_snapshot_framing() {
+    let factory = factory();
+    let account = account(&factory);
+    let empty = MaterialFactors::empty();
+    let cases = [
+        (empty, [0, 0, 0, 0, 0], 0.0_f32, None),
+        (
+            empty.with_emission(EmissionFactors::try_new(Vec3::ZERO, Some(0.0)).unwrap()),
+            [1, 0, 0, 0, 0],
+            0.0,
+            None,
+        ),
+        (
+            empty.with_emission(EmissionFactors::try_new(Vec3::ZERO, Some(-0.0)).unwrap()),
+            [1, 0, 0, 0, 0],
+            -0.0,
+            None,
+        ),
+        (
+            empty.with_emission(EmissionFactors::try_new(Vec3::ZERO, Some(1.0)).unwrap()),
+            [1, 0, 0, 0, 0],
+            1.0,
+            None,
+        ),
+        (
+            empty.with_clearcoat(Some(ClearcoatFactors::default())),
+            [0, 1, 0, 0, 0],
+            0.0,
+            None,
+        ),
+        (
+            empty.with_transmission(Some(TransmissionFactors::default())),
+            [0, 0, 1, 0, 0],
+            0.0,
+            None,
+        ),
+        (
+            empty.with_thickness(Some(ThicknessFactors::default())),
+            [0, 0, 0, 1, 0],
+            0.0,
+            None,
+        ),
+        (
+            empty.with_sheen(Some(SheenFactors::default())),
+            [0, 0, 0, 0, 1],
+            0.0,
+            None,
+        ),
+        (
+            empty.with_thickness(Some(ThicknessFactors::try_new(-0.0).unwrap())),
+            [0, 0, 0, 1, 0],
+            0.0,
+            Some(34),
+        ),
+    ];
+    let mut digests = Vec::new();
+    for (factors, presence, strength, negative_zero_slot) in cases {
+        let materials = [MaterialAuthoring::new(
+            AuthoringRange::new(0, 0),
+            MaterialSemantics::new(ShadingModel::Unlit, AlphaMode::Opaque, false, factors),
+        )];
+        let parts = build_scene_with_appearance_and_geometry(
+            &account,
+            &[],
+            &[],
+            AppearanceAuthoringBatch::new(&[], &[], &[], &[], &materials),
+            GeometryAuthoringBatch::empty(),
+        );
+        let (full, transcript) = capture_node_scene_with_test_transcript(
+            &parts.scene,
+            snapshot_limits(16_384, 64),
+            None,
+        )
+        .unwrap();
+        assert_eq!(full.schema_revision, 8);
+        assert!(transcript.complete);
+
+        // Independent material-row encoding fixes existing tags, new presence tags, and width.
+        let mut expected = vec![17, 13];
+        expected.extend_from_slice(&0_u64.to_le_bytes());
+        expected.extend_from_slice(&[142, 0, 143, 0, 144]);
+        expected.extend_from_slice(&0_u32.to_le_bytes());
+        expected.extend_from_slice(&[145, 0, 146, 0, 147, 0, 148, 0]);
+        for (tag, present) in [229, 230, 231, 232, 233].into_iter().zip(presence) {
+            expected.extend_from_slice(&[tag, present]);
+        }
+        for tag in [72, 11, 149] {
+            expected.push(tag);
+            expected.extend_from_slice(&0_u64.to_le_bytes());
+        }
+        expected.extend_from_slice(&[150, 11]);
+        expected.extend_from_slice(&40_u64.to_le_bytes());
+        for slot in 0..40 {
+            let value = if slot == 39 {
+                strength
+            } else if negative_zero_slot == Some(slot) {
+                -0.0
+            } else {
+                0.0
+            };
+            expected.push(165);
+            expected.extend_from_slice(&value.to_bits().to_le_bytes());
+        }
+        expected.extend_from_slice(&[166, 12, 0]);
+        assert!(
+            transcript
+                .bytes
+                .windows(expected.len())
+                .any(|row| row == expected)
+        );
+        assert!(full.preview.text.contains("factors(present,total=40)="));
+        for (name, present) in [
+            "emissive_strength",
+            "clearcoat",
+            "transmission",
+            "thickness",
+            "sheen",
+        ]
+        .into_iter()
+        .zip(presence)
+        {
+            let state = if present == 1 { "present" } else { "absent" };
+            assert!(full.preview.text.contains(&format!("{name}={state}")));
+        }
+        let zero = capture_node_scene(&parts.scene, snapshot_limits(0, 0), None).unwrap();
+        let bounded = capture_node_scene(&parts.scene, snapshot_limits(64, 1), None).unwrap();
+        assert_eq!(full.digest, zero.digest);
+        assert_eq!(full.digest, bounded.digest);
+        assert!(zero.preview.text.is_empty());
+        assert!(!digests.contains(&full.digest));
+        digests.push(full.digest);
+        let scene = ValidatedScene::from_node_scene(parts.scene);
+        let actual = scene.materials().next().unwrap().factors();
+        assert_eq!(
+            actual.emission().strength().map(f32::to_bits),
+            factors.emission().strength().map(f32::to_bits)
+        );
+        assert_eq!(actual.clearcoat(), factors.clearcoat());
+        assert_eq!(actual.transmission(), factors.transmission());
+        assert_eq!(
+            actual.thickness().map(|value| value.thickness().to_bits()),
+            factors.thickness().map(|value| value.thickness().to_bits())
+        );
+        assert_eq!(actual.sheen(), factors.sheen());
+        drop(scene);
+        drop(parts.report);
+    }
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
 
 fn f64_builtin_scene(
     account: &PhysicalStorageAccount,
@@ -561,7 +716,7 @@ fn material_assignment_public_reads_and_snapshot_preserve_source_presence() {
     ] {
         let parts = build(assignment);
         let snapshot = capture_node_scene(&parts.scene, snapshot_limits(16_384, 64), None).unwrap();
-        assert_eq!(snapshot.schema_revision, 7);
+        assert_eq!(snapshot.schema_revision, 8);
         assert!(!digests.contains(&snapshot.digest));
         digests.push(snapshot.digest);
         let scene = ValidatedScene::from_node_scene(parts.scene);

@@ -102,8 +102,10 @@ This is a concrete extraction example, not a new canonical representation or a g
   survive Scene destruction. Authored matrices remain matrices.
   Opaque Scene IDs are mapped to application indices only after the final edit.
 - Materials retain names, shading model, alpha mode (including Mask cutoff), sidedness and the
-  complete `MaterialFactors` value: emissive, independent metallic/roughness, specular/glossiness,
-  legacy, and supplemental PBR groups. Every ordered binding retains texture identity, role, UV
+  complete `MaterialFactors` value: raw emission with independently optional strength,
+  metallic/roughness, specular/glossiness, legacy, and independent optional clearcoat, transmission,
+  thickness and sheen groups. Presence and factor bits survive extraction; effective emission is
+  derived in F64 without overwriting the authored values. Every ordered binding retains texture identity, role, UV
   set, channel mapping, color interpretation, transform, strength, blend operation and an owned
   optional source key. Unlit keeps all lighting fallback factors and bindings.
 - Independent `textures`, `samplers` and `images` tables close every binding. A texture holds an

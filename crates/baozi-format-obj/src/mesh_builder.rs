@@ -1182,13 +1182,14 @@ fn material_from_factors<'input, 'scope>(
     } else {
         AlphaMode::Opaque
     };
-    let factors = MaterialFactors::try_new(
+    let emission = baozi_import::authoring::EmissionFactors::try_new(
         Vec3::new(emissive.r, emissive.g, emissive.b),
         None,
-        None,
-        Some(legacy),
     )
     .map_err(|_| scope.format_failure(ObjFailure::internal("invalid-material-factors")))?;
+    let factors = MaterialFactors::empty()
+        .with_emission(emission)
+        .with_legacy(Some(legacy));
     Ok(BuiltMaterial {
         name,
         shading_model,

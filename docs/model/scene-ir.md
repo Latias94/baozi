@@ -219,7 +219,12 @@ implied. The two-dimensional transform acts on the selected UV coordinates under
 source indices are checked before authoring. Snapshot encoding retains the existing coordinate
 kind zero and the index as `u32`, so this API shrink changes no UV transcript bytes or revision.
 
-Supplemental material thickness is a nonnegative Scene-unit length. A Displacement binding's
+Material factors retain raw emission and optional authored strength, independent optional workflow
+groups, and independent optional clearcoat, transmission, thickness and sheen groups. Absent and
+explicit default values have distinct presence. One checked inline value serves authoring,
+validation, storage and public reads; derived effective emission does not replace authored bits.
+
+Present material thickness is a nonnegative Scene-unit length. A Displacement binding's
 strength is a signed Scene-unit length. Whole-Scene space conversion applies the positive unit
 ratio `s` to both, with a binary64 intermediate and one checked binary32 rounding. Handedness does
 not add a displacement sign. Signed zeros survive; overflow and nonzero underflow to zero fail at

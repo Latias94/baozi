@@ -1,13 +1,14 @@
 use baozi_core::{NumericConversionError, SceneSnapshotLimits, TargetSpace, ValidatedScene};
 use baozi_import::authoring::{
-    AlphaMode, AuthoredTransform, AuthoringRange, Axis, Color, ColorInterpretation,
-    ExtensionMediaType, FormatId, FrontFaceWinding, Handedness, ImageAuthoring, ImageLocalId,
-    LegacyMaterialFactors, MaterialAuthoring, MaterialBindingAuthoring, MaterialFactors,
-    NodeAuthoringNode, NodeLocalId, PbrMetallicRoughnessFactors, PbrSpecularGlossinessFactors,
-    Presence, SamplerAuthoring, SamplerLocalId, SamplerState, SceneSpace, ShadingModel,
-    StaticSceneBuilder, SupplementalPbrFactors, TextureAuthoring, TextureBlendOperation,
-    TextureChannelSwizzle, TextureLocalId, TextureRole, TextureSourceKey, TextureStrength,
-    TextureTransform, Vec2, Vec3,
+    AlphaMode, AuthoredTransform, AuthoringRange, Axis, ClearcoatFactors, Color,
+    ColorInterpretation, EmissionFactors, ExtensionMediaType, FormatId, FrontFaceWinding,
+    Handedness, ImageAuthoring, ImageLocalId, LegacyMaterialFactors, MaterialAuthoring,
+    MaterialBindingAuthoring, MaterialFactors, NodeAuthoringNode, NodeLocalId,
+    PbrMetallicRoughnessFactors, PbrSpecularGlossinessFactors, Presence, SamplerAuthoring,
+    SamplerLocalId, SamplerState, SceneSpace, ShadingModel, SheenFactors, StaticSceneBuilder,
+    TextureAuthoring, TextureBlendOperation, TextureChannelSwizzle, TextureLocalId, TextureRole,
+    TextureSourceKey, TextureStrength, TextureTransform, ThicknessFactors, TransmissionFactors,
+    Vec2, Vec3,
 };
 use baozi_import::{
     CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
@@ -105,22 +106,23 @@ fn factors(material: usize, thickness: f32) -> MaterialFactors {
         ),
         _ => unreachable!(),
     };
-    MaterialFactors::try_new_with_supplemental_pbr(
-        Vec3::new(-0.0, 2.0, f32::from_bits(1)),
-        metallic,
-        specular,
-        legacy,
-        SupplementalPbrFactors::try_new(
-            -0.0,
-            0.125,
-            0.25,
-            thickness,
-            Vec3::new(-0.0, 1.5, f32::from_bits(1)),
-            0.5,
+    MaterialFactors::empty()
+        .with_emission(
+            EmissionFactors::try_new(
+                Vec3::new(-0.0, 2.0, f32::from_bits(1)),
+                [Some(-0.0), Some(8.0), None][material],
+            )
+            .unwrap(),
         )
-        .unwrap(),
-    )
-    .unwrap()
+        .with_pbr_metallic_roughness(metallic)
+        .with_pbr_specular_glossiness(specular)
+        .with_legacy(legacy)
+        .with_clearcoat(Some(ClearcoatFactors::try_new(-0.0, 0.125).unwrap()))
+        .with_transmission(Some(TransmissionFactors::try_new(0.25).unwrap()))
+        .with_thickness(Some(ThicknessFactors::try_new(thickness).unwrap()))
+        .with_sheen(Some(
+            SheenFactors::try_new(Vec3::new(-0.0, 1.5, f32::from_bits(1)), 0.5).unwrap(),
+        ))
 }
 
 fn transform() -> TextureTransform {
@@ -289,9 +291,13 @@ fn assert_factors(actual: MaterialFactors, expected: MaterialFactors) {
     // Derived equality checks every optional group's presence; the explicit comparisons below
     // additionally distinguish authored negative zeros in every concrete numeric group.
     assert_eq!(actual, expected);
-    let a = actual.emissive();
-    let e = expected.emissive();
+    let a = actual.emission().factor();
+    let e = expected.emission().factor();
     assert_bits(&[a.x, a.y, a.z], &[e.x, e.y, e.z]);
+    assert_eq!(
+        actual.emission().strength().map(f32::to_bits),
+        expected.emission().strength().map(f32::to_bits),
+    );
     if let (Some(a), Some(e)) = (
         actual.pbr_metallic_roughness(),
         expected.pbr_metallic_roughness(),
@@ -345,32 +351,23 @@ fn assert_factors(actual: MaterialFactors, expected: MaterialFactors) {
         }
         assert_bits(&[a.shininess(), a.opacity()], &[e.shininess(), e.opacity()]);
     }
-    let a = actual.supplemental_pbr();
-    let e = expected.supplemental_pbr();
-    let asheen = a.sheen_color();
-    let esheen = e.sheen_color();
-    assert_bits(
-        &[
-            a.clearcoat(),
-            a.clearcoat_roughness(),
-            a.transmission(),
-            a.thickness(),
-            asheen.x,
-            asheen.y,
-            asheen.z,
-            a.sheen_roughness(),
-        ],
-        &[
-            e.clearcoat(),
-            e.clearcoat_roughness(),
-            e.transmission(),
-            e.thickness(),
-            esheen.x,
-            esheen.y,
-            esheen.z,
-            e.sheen_roughness(),
-        ],
-    );
+    if let (Some(a), Some(e)) = (actual.clearcoat(), expected.clearcoat()) {
+        assert_bits(&[a.factor(), a.roughness()], &[e.factor(), e.roughness()]);
+    }
+    if let (Some(a), Some(e)) = (actual.transmission(), expected.transmission()) {
+        assert_bits(&[a.factor()], &[e.factor()]);
+    }
+    if let (Some(a), Some(e)) = (actual.thickness(), expected.thickness()) {
+        assert_bits(&[a.thickness()], &[e.thickness()]);
+    }
+    if let (Some(a), Some(e)) = (actual.sheen(), expected.sheen()) {
+        let ac = a.color();
+        let ec = e.color();
+        assert_bits(
+            &[ac.x, ac.y, ac.z, a.roughness()],
+            &[ec.x, ec.y, ec.z, e.roughness()],
+        );
+    }
 }
 
 fn assert_appearance(scene: &ValidatedScene, expected: Lengths, image_len: usize) {

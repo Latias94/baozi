@@ -1,9 +1,9 @@
 //! Selection-aware checks over the existing admission scanner's raw source map.
 
 use super::{
-    GltfFailure, KHR_MATERIALS_UNLIT, NodeGraph, ParseScope, ResourceClosure, Result, animation,
-    gltf_parse_error, to_u64,
+    GltfFailure, NodeGraph, ParseScope, ResourceClosure, Result, animation, gltf_parse_error,
 };
+use crate::document::{KHR_MATERIALS_EMISSIVE_STRENGTH, KHR_MATERIALS_UNLIT};
 use crate::source_map::{
     GltfSourceMap, SourceEntityId, SourceEntityKind, SourceExtensionKind, SourcePayloadKind,
     SourcePayloadSite,
@@ -103,12 +103,16 @@ pub(super) fn preflight(
     }
 
     // Payload ownership comes from scanner contexts, so unknown data cannot disappear in serde.
-    ctx.charge_work(to_u64(document.tables().extensions_used.len()))?;
-    let unlit_declared = document
-        .tables()
-        .extensions_used
-        .iter()
-        .any(|name| name == KHR_MATERIALS_UNLIT);
+    let mut unlit_declared = false;
+    let mut strength_declared = false;
+    for name in &document.tables().extensions_used {
+        ctx.charge_work(1)?;
+        match name.as_str() {
+            KHR_MATERIALS_UNLIT => unlit_declared = true,
+            KHR_MATERIALS_EMISSIVE_STRENGTH => strength_declared = true,
+            _ => {}
+        }
+    }
     let mut extras = super::extras::ExtrasPreflight::default();
     for entity in map.entities() {
         ctx.charge_work(1)?;
@@ -150,26 +154,41 @@ pub(super) fn preflight(
                             | SourcePayloadSite::OcclusionTexture
                             | SourcePayloadSite::EmissiveTexture
                     ) => {}
-                SourcePayloadKind::Extension(SourceExtensionKind::KhrMaterialsUnlit)
+                SourcePayloadKind::Extension(kind)
                     if entity.id.kind == SourceEntityKind::Material
                         && payload.site == SourcePayloadSite::Entity =>
                 {
+                    let (name, declared) = match kind {
+                        SourceExtensionKind::KhrMaterialsUnlit => {
+                            (KHR_MATERIALS_UNLIT, unlit_declared)
+                        }
+                        SourceExtensionKind::KhrMaterialsEmissiveStrength => {
+                            (KHR_MATERIALS_EMISSIVE_STRENGTH, strength_declared)
+                        }
+                        _ => {
+                            return Err(fail(
+                                "extension-payload",
+                                "glTF extension payload is outside the admitted profile",
+                            )
+                            .into());
+                        }
+                    };
                     let offset = usize::try_from(range.byte_offset).ok();
                     if offset.and_then(|offset| ctx.primary_bytes().get(offset)) != Some(&b'{') {
                         return Err(GltfFailure::invalid_json(
-                            "KHR_materials_unlit",
+                            name,
                             range.byte_offset,
                             range.byte_length,
-                            "glTF KHR_materials_unlit must be an object",
+                            format_args!("glTF {name} must be an object"),
                         )
                         .into());
                     }
-                    if !unlit_declared {
+                    if !declared {
                         return Err(GltfFailure::invalid_json(
-                            "KHR_materials_unlit",
+                            name,
                             range.byte_offset,
                             range.byte_length,
-                            "glTF KHR_materials_unlit must be declared in extensionsUsed",
+                            format_args!("glTF {name} must be declared in extensionsUsed"),
                         )
                         .into());
                     }

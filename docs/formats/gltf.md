@@ -74,6 +74,11 @@ document. Fresh target/sanitizer and archive-consumer evidence belongs to the
   and nested schema sites, retained as exact `application/json` bytes under source-object metadata
   owners. Source objects without a canonical entity keep their own identity and metadata.
 - PBR metallic-roughness material factors.
+- Typed `KHR_materials_emissive_strength`: raw emission RGB and independently authored strength
+  survive reads, snapshots, conversion and owned application output. An absent extension retains
+  `None`; an empty object retains explicit default strength one. Effective emission is derived in
+  F64. Selected invalid, negative, overflowing or nonzero-underflowing strength and the forbidden
+  Unlit combination reject before dependency IO; image bytes and binding strength are unchanged.
 - Typed `KHR_materials_unlit` materials through the existing `ShadingModel::Unlit`, with base color,
   vertex colors, alpha coverage and double-sided state. Original PBR fallback factors, bindings and
   their resources remain retained independently of the active shading model.

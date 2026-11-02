@@ -6,15 +6,15 @@ use baozi::{
 };
 use baozi_import::authoring::{
     AlphaMode, AttributeDomain, AttributeSemantic, AuthoredTransform, AuthoringRange,
-    CameraLocalId, CameraProjection, Color, ColorInterpretation, GeometryAttributeAuthoring,
-    GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring, GeometryPrimitiveAuthoring,
-    GeometryTopologyAuthoring, ImageAuthoring, ImageLocalId, LightDefinition, LightKind,
-    LightLocalId, LocalAxes, LogicalMeshLocalId, MaterialAuthoring, MaterialBindingAuthoring,
-    MaterialFactors, NodeAuthoringNode, NodeLocalId, NodeParent, Presence, SamplerAuthoring,
-    SamplerLocalId, SamplerState, ShadingModel, StaticSceneBuilder, SupplementalPbrFactors,
-    TangentBasisConvention, TangentConventions, TangentHandednessEncoding, TextureAuthoring,
-    TextureBlendOperation, TextureChannelSwizzle, TextureLocalId, TextureRole, TextureSourceKey,
-    TextureStrength, TextureTransform,
+    CameraLocalId, CameraProjection, ClearcoatFactors, Color, ColorInterpretation, EmissionFactors,
+    GeometryAttributeAuthoring, GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring,
+    GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, ImageAuthoring, ImageLocalId,
+    LightDefinition, LightKind, LightLocalId, LocalAxes, LogicalMeshLocalId, MaterialAuthoring,
+    MaterialBindingAuthoring, MaterialFactors, NodeAuthoringNode, NodeLocalId, NodeParent,
+    Presence, SamplerAuthoring, SamplerLocalId, SamplerState, ShadingModel, SheenFactors,
+    StaticSceneBuilder, TangentBasisConvention, TangentConventions, TangentHandednessEncoding,
+    TextureAuthoring, TextureBlendOperation, TextureChannelSwizzle, TextureLocalId, TextureRole,
+    TextureSourceKey, TextureStrength, TextureTransform, ThicknessFactors, TransmissionFactors,
 };
 use baozi_import::{
     CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
@@ -156,22 +156,14 @@ impl FormatImporter for CustomScene {
             Some(&key),
         )
         .unwrap()];
-        let factors = MaterialFactors::try_new_with_supplemental_pbr(
-            Vec3::new(-0.0, 0.25, 0.5),
-            None,
-            None,
-            None,
-            SupplementalPbrFactors::try_new(
-                0.125,
-                -0.0,
-                0.25,
-                1.5,
-                Vec3::new(0.25, 0.5, 0.75),
-                0.5,
-            )
-            .unwrap(),
-        )
-        .unwrap();
+        let factors = MaterialFactors::empty()
+            .with_emission(EmissionFactors::try_new(Vec3::new(-0.0, 0.25, 0.5), Some(4.0)).unwrap())
+            .with_clearcoat(Some(ClearcoatFactors::try_new(0.125, -0.0).unwrap()))
+            .with_transmission(Some(TransmissionFactors::try_new(0.25).unwrap()))
+            .with_thickness(Some(ThicknessFactors::try_new(1.5).unwrap()))
+            .with_sheen(Some(
+                SheenFactors::try_new(Vec3::new(0.25, 0.5, 0.75), 0.5).unwrap(),
+            ));
         let materials = [MaterialAuthoring::try_from_parts(
             AuthoringRange::new(0, 1),
             ShadingModel::Unlit,
@@ -435,14 +427,23 @@ fn assert_appearance(scene: &baozi::ValidatedScene, thickness: f32, displacement
     assert!(factors.pbr_metallic_roughness().is_none());
     assert!(factors.pbr_specular_glossiness().is_none());
     assert!(factors.legacy().is_none());
-    assert_eq!(factors.emissive().x.to_bits(), (-0.0_f32).to_bits());
-    let supplemental = factors.supplemental_pbr();
-    assert_eq!(supplemental.thickness().to_bits(), thickness.to_bits());
-    assert_eq!(supplemental.clearcoat(), 0.125);
     assert_eq!(
-        supplemental.clearcoat_roughness().to_bits(),
+        factors.emission().factor().x.to_bits(),
         (-0.0_f32).to_bits()
     );
+    assert_eq!(factors.emission().strength(), Some(4.0));
+    assert_eq!(factors.emission().effective_rgb()[1..], [1.0, 2.0]);
+    assert_eq!(
+        factors.thickness().unwrap().thickness().to_bits(),
+        thickness.to_bits()
+    );
+    let clearcoat = factors.clearcoat().unwrap();
+    assert_eq!(clearcoat.factor(), 0.125);
+    assert_eq!(clearcoat.roughness().to_bits(), (-0.0_f32).to_bits());
+    assert_eq!(factors.transmission().unwrap().factor(), 0.25);
+    let sheen = factors.sheen().unwrap();
+    assert_eq!(sheen.color(), Vec3::new(0.25, 0.5, 0.75));
+    assert_eq!(sheen.roughness(), 0.5);
     let binding = material.bindings().next().unwrap();
     assert_eq!(binding.role(), TextureRole::Displacement);
     assert_eq!(binding.uv_set(), u16::MAX);

@@ -36,7 +36,7 @@ fn assert_generated_default(
     let color = pbr.base_color();
     assert_eq!([color.r, color.g, color.b, color.a], [1.0; 4]);
     assert_eq!([pbr.metallic(), pbr.roughness()], [1.0; 2]);
-    let emissive = factors.emissive();
+    let emissive = factors.emission().factor();
     assert_eq!([emissive.x, emissive.y, emissive.z], [0.0; 3]);
     assert!(factors.pbr_specular_glossiness().is_none());
     assert!(factors.legacy().is_none());

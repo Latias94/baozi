@@ -98,10 +98,11 @@ pub mod __scene_integration {
 
 pub use animation::{AnimationExtrapolation, AnimationInterpolation, AnimationTimeDomain};
 pub use appearance::{
-    AlphaCutoff, AlphaMode, ColorInterpretation, LegacyMaterialFactors, MaterialAssignment,
-    MaterialFactorError, MaterialFactorField, MaterialFactors, PbrMetallicRoughnessFactors,
-    PbrSpecularGlossinessFactors, ShadingModel, SupplementalPbrFactors, TextureBlendOperation,
-    TextureChannel, TextureChannelSwizzle, TextureRole, TextureStrength, TextureTransform,
+    AlphaCutoff, AlphaMode, ClearcoatFactors, ColorInterpretation, EmissionFactors,
+    LegacyMaterialFactors, MaterialAssignment, MaterialFactorError, MaterialFactorField,
+    MaterialFactors, PbrMetallicRoughnessFactors, PbrSpecularGlossinessFactors, ShadingModel,
+    SheenFactors, TextureBlendOperation, TextureChannel, TextureChannelSwizzle, TextureRole,
+    TextureStrength, TextureTransform, ThicknessFactors, TransmissionFactors,
 };
 pub use attribute::{
     AttributeDomain, AttributeSemantic, AttributeSemanticKind, CustomAttributeSemantic,

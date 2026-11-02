@@ -31,7 +31,7 @@ pub(in crate::canonical_scene::store) use payload::{
 };
 
 // These widths describe the existing snapshot transcript, not duplicate retained pools.
-const MATERIAL_FACTOR_SCALARS: usize = 39;
+const MATERIAL_FACTOR_SCALARS: usize = 40;
 const BINDING_SEMANTIC_SCALARS: usize = 6;
 
 #[cfg(test)]

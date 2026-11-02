@@ -78,6 +78,8 @@ pub(crate) enum SourcePayloadSite {
     MaterialPbrMetallicRoughness,
     /// Direct payload members inside a material's KHR_materials_unlit.
     MaterialUnlit,
+    /// Direct payload members inside a material's KHR_materials_emissive_strength.
+    MaterialEmissiveStrength,
     BaseColorTexture,
     MetallicRoughnessTexture,
     NormalTexture,
@@ -101,6 +103,7 @@ pub(crate) enum SourcePayloadSite {
 pub(crate) enum SourceExtensionKind {
     KhrTextureTransform,
     KhrMaterialsUnlit,
+    KhrMaterialsEmissiveStrength,
     Other,
 }
 
@@ -111,7 +114,7 @@ pub(crate) enum SourcePayloadKind {
     Extensions,
     /// One direct member of an `extensions` object. Its raw key remains available below.
     Extension(SourceExtensionKind),
-    /// One direct non-extras/extensions property of a recognized material unlit object.
+    /// One unsupported direct property of a recognized material extension object.
     ExtensionProperty,
 }
 

@@ -26,11 +26,12 @@ pub use baozi_core::{
     Aabb, Color, FormatId, FormatIdError, Mat4, Quat, SceneGenerationId, Vec2, Vec3, Vec4,
 };
 pub use baozi_core::{
-    AlphaCutoff, AlphaMode, ColorInterpretation, ExtensionSchemaId, ExtensionSchemaIdError,
-    LegacyMaterialFactors, MaterialAssignment, MaterialFactorError, MaterialFactorField,
-    MaterialFactors, NamespacedName, NamespacedNameError, PbrMetallicRoughnessFactors,
-    PbrSpecularGlossinessFactors, ShadingModel, SupplementalPbrFactors, TextureBlendOperation,
-    TextureChannel, TextureChannelSwizzle, TextureRole, TextureStrength, TextureTransform,
+    AlphaCutoff, AlphaMode, ClearcoatFactors, ColorInterpretation, EmissionFactors,
+    ExtensionSchemaId, ExtensionSchemaIdError, LegacyMaterialFactors, MaterialAssignment,
+    MaterialFactorError, MaterialFactorField, MaterialFactors, NamespacedName, NamespacedNameError,
+    PbrMetallicRoughnessFactors, PbrSpecularGlossinessFactors, ShadingModel, SheenFactors,
+    TextureBlendOperation, TextureChannel, TextureChannelSwizzle, TextureRole, TextureStrength,
+    TextureTransform, ThicknessFactors, TransmissionFactors,
 };
 pub use baozi_core::{
     AnimationChannelRef, AnimationClipId, AnimationClipRef, AnimationExtrapolation,

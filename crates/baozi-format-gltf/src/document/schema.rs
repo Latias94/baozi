@@ -365,6 +365,7 @@ pub(crate) struct Material<'scope> {
     pub(crate) occlusion_texture: Option<texture::Info>,
     pub(crate) emissive_texture: Option<texture::Info>,
     pub(crate) unlit: Option<crate::json_syntax::ValueId>,
+    pub(crate) emissive_strength: Option<crate::json_syntax::ValueId>,
 }
 pub(crate) struct Pbr {
     pub(crate) base_color_factor: [f32; 4],

@@ -292,7 +292,7 @@ fn optional_and_required_unlit_survive_conversion_and_source_owner_destruction()
             let base = pbr.base_color();
             assert_eq!([base.r, base.g, base.b, base.a], [0.8, 0.4, 0.2, 0.6]);
             assert_eq!((pbr.metallic(), pbr.roughness()), (0.625, 0.375));
-            let emissive = material.factors.emissive();
+            let emissive = material.factors.emission().factor();
             assert_eq!([emissive.x, emissive.y, emissive.z], [0.125, 0.25, 0.5]);
             assert_eq!(material.bindings.len(), BINDINGS.len());
             for (image, binding) in material.bindings.iter().enumerate() {

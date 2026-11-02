@@ -19,9 +19,15 @@ pub(crate) use schema::{
 
 pub(crate) const KHR_TEXTURE_TRANSFORM: &str = "KHR_texture_transform";
 pub(crate) const KHR_MATERIALS_UNLIT: &str = "KHR_materials_unlit";
+pub(crate) const KHR_MATERIALS_EMISSIVE_STRENGTH: &str = "KHR_materials_emissive_strength";
 
 pub(crate) fn is_supported_extension(name: &str) -> bool {
-    [KHR_TEXTURE_TRANSFORM, KHR_MATERIALS_UNLIT].contains(&name)
+    [
+        KHR_TEXTURE_TRANSFORM,
+        KHR_MATERIALS_UNLIT,
+        KHR_MATERIALS_EMISSIVE_STRENGTH,
+    ]
+    .contains(&name)
 }
 
 pub(crate) struct Document<'scope> {
@@ -74,6 +80,14 @@ impl<'scope> Document<'scope> {
             index: &self.index,
         }
         .transform(id)
+    }
+    pub(crate) fn emissive_strength(&self, ctx: &ParseScope<'_>, id: ValueId) -> ParseResult<f32> {
+        decode::Decoder {
+            ctx,
+            bytes: self.json,
+            index: &self.index,
+        }
+        .emissive_strength(id)
     }
     pub(crate) fn node(&self, index: usize) -> Option<Node<'_>> {
         self.tables
@@ -530,15 +544,6 @@ impl<'a> Material<'a> {
             row: &self.row().pbr_metallic_roughness,
         }
     }
-    pub(crate) fn emissive_factor(&self) -> [f32; 3] {
-        self.row().emissive_factor
-    }
-    pub(crate) fn alpha_mode(&self) -> AlphaMode {
-        self.row().alpha_mode
-    }
-    pub(crate) fn alpha_cutoff(&self) -> Option<f32> {
-        self.row().alpha_cutoff
-    }
     pub(crate) fn double_sided(&self) -> bool {
         self.row().double_sided
     }
@@ -566,15 +571,6 @@ pub(crate) struct Pbr<'a> {
     row: &'a schema::Pbr,
 }
 impl<'a> Pbr<'a> {
-    pub(crate) fn base_color_factor(&self) -> [f32; 4] {
-        self.row.base_color_factor
-    }
-    pub(crate) fn metallic_factor(&self) -> f32 {
-        self.row.metallic_factor
-    }
-    pub(crate) fn roughness_factor(&self) -> f32 {
-        self.row.roughness_factor
-    }
     pub(crate) fn base_color_texture(&self) -> Option<TextureInfo<'a>> {
         self.row
             .base_color_texture

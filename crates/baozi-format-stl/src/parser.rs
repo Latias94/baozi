@@ -13,7 +13,7 @@ use baozi_import::authoring::{
     ProfileAuthoringBatch, ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring,
     ResourceIdentity, ResourceIdentityLocalId, SceneAuthoringBatch, SceneSpace,
     SessionOpaqueReason, ShadingModel, SourceIdentityAuthoring, SourceIdentityLocalId,
-    SourceObjectKind, SourceObjectLocator, SpatialAuthoringBatch, Vec3,
+    SourceObjectKind, SourceObjectLocator, SpatialAuthoringBatch,
 };
 use baozi_import::{
     ImportStorageClass, ImportWorkClass, MeteredString, MeteredVec, ParseFailure, ParseResult,
@@ -99,8 +99,7 @@ fn scene_from_parsed<'scope>(
     };
     let pbr_factors = PbrMetallicRoughnessFactors::try_new(base_color, 0.0, 1.0)
         .map_err(|_| canonical_contract_failure(scope, "stl-default-material-factors"))?;
-    let material_factors = MaterialFactors::try_new(Vec3::ZERO, Some(pbr_factors), None, None)
-        .map_err(|_| canonical_contract_failure(scope, "stl-default-material-factors"))?;
+    let material_factors = MaterialFactors::empty().with_pbr_metallic_roughness(Some(pbr_factors));
     let material = MaterialAuthoring::try_from_parts(
         AuthoringRange::new(0, 0),
         shading_model,

@@ -2,9 +2,9 @@ use std::convert::Infallible;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::appearance::{
-    LegacyMaterialFactors, PbrMetallicRoughnessFactors, PbrSpecularGlossinessFactors,
-    SupplementalPbrFactors, TextureChannel, validate_material_semantics,
-    validate_texture_binding_semantics,
+    ClearcoatFactors, EmissionFactors, LegacyMaterialFactors, PbrMetallicRoughnessFactors,
+    PbrSpecularGlossinessFactors, SheenFactors, TextureChannel, ThicknessFactors,
+    TransmissionFactors, validate_material_semantics, validate_texture_binding_semantics,
 };
 use crate::canonical_scene::store::production::{
     AppearanceAuthoringBatch, AuthoringRange, CanonicalAuthoringControl, ImageAuthoring,
@@ -117,17 +117,17 @@ fn full_factors() -> MaterialFactors {
         -0.0,
     )
     .unwrap();
-    let supplemental =
-        SupplementalPbrFactors::try_new(-0.0, 0.125, 0.75, 3.5, Vec3::new(5.0, -0.0, tiny), 0.5)
-            .unwrap();
-    MaterialFactors::try_new_with_supplemental_pbr(
-        Vec3::new(0.0, tiny, -0.0),
-        Some(metallic),
-        Some(specular),
-        Some(legacy),
-        supplemental,
-    )
-    .unwrap()
+    MaterialFactors::empty()
+        .with_emission(EmissionFactors::try_new(Vec3::new(0.0, tiny, -0.0), Some(-0.0)).unwrap())
+        .with_pbr_metallic_roughness(Some(metallic))
+        .with_pbr_specular_glossiness(Some(specular))
+        .with_legacy(Some(legacy))
+        .with_clearcoat(Some(ClearcoatFactors::try_new(-0.0, 0.125).unwrap()))
+        .with_transmission(Some(TransmissionFactors::try_new(0.75).unwrap()))
+        .with_thickness(Some(ThicknessFactors::try_new(3.5).unwrap()))
+        .with_sheen(Some(
+            SheenFactors::try_new(Vec3::new(5.0, -0.0, tiny), 0.5).unwrap(),
+        ))
 }
 
 fn with_fixture<T>(action: impl FnOnce(&ValidatedAppearanceBatch<'_, u64>) -> T) -> T {
@@ -214,9 +214,9 @@ fn with_fixture<T>(action: impl FnOnce(&ValidatedAppearanceBatch<'_, u64>) -> T)
         )
     });
     let full = full_factors();
-    let legacy_only = MaterialFactors::try_new(Vec3::ZERO, None, None, full.legacy()).unwrap();
+    let legacy_only = MaterialFactors::empty().with_legacy(full.legacy());
     let specular_only =
-        MaterialFactors::try_new(Vec3::ZERO, None, full.pbr_specular_glossiness(), None).unwrap();
+        MaterialFactors::empty().with_pbr_specular_glossiness(full.pbr_specular_glossiness());
     let shadings = [
         ShadingModel::PbrMetallicRoughness,
         ShadingModel::Unlit,
@@ -282,7 +282,10 @@ fn color_bits(value: Color) -> [u32; 4] {
 }
 
 fn assert_factor_bits(actual: MaterialFactors, expected: MaterialFactors) {
-    assert_eq!(vec3_bits(actual.emissive()), vec3_bits(expected.emissive()));
+    assert_eq!(
+        vec3_bits(actual.emission().factor()),
+        vec3_bits(expected.emission().factor())
+    );
     match (
         actual.pbr_metallic_roughness(),
         expected.pbr_metallic_roughness(),
@@ -319,26 +322,37 @@ fn assert_factor_bits(actual: MaterialFactors, expected: MaterialFactors) {
         (None, None) => {}
         _ => panic!("legacy factor presence changed"),
     }
-    let a = actual.supplemental_pbr();
-    let e = expected.supplemental_pbr();
-    assert_eq!(vec3_bits(a.sheen_color()), vec3_bits(e.sheen_color()));
     assert_eq!(
-        [
-            a.clearcoat(),
-            a.clearcoat_roughness(),
-            a.transmission(),
-            a.thickness(),
-            a.sheen_roughness()
-        ]
-        .map(f32::to_bits),
-        [
-            e.clearcoat(),
-            e.clearcoat_roughness(),
-            e.transmission(),
-            e.thickness(),
-            e.sheen_roughness()
-        ]
-        .map(f32::to_bits)
+        actual.emission().strength().map(f32::to_bits),
+        expected.emission().strength().map(f32::to_bits)
+    );
+    assert_eq!(
+        actual
+            .clearcoat()
+            .map(|value| [value.factor(), value.roughness()].map(f32::to_bits)),
+        expected
+            .clearcoat()
+            .map(|value| [value.factor(), value.roughness()].map(f32::to_bits))
+    );
+    assert_eq!(
+        actual.transmission().map(|value| value.factor().to_bits()),
+        expected
+            .transmission()
+            .map(|value| value.factor().to_bits())
+    );
+    assert_eq!(
+        actual.thickness().map(|value| value.thickness().to_bits()),
+        expected
+            .thickness()
+            .map(|value| value.thickness().to_bits())
+    );
+    assert_eq!(
+        actual
+            .sheen()
+            .map(|value| (vec3_bits(value.color()), value.roughness().to_bits())),
+        expected
+            .sheen()
+            .map(|value| (vec3_bits(value.color()), value.roughness().to_bits()))
     );
 }
 
@@ -560,17 +574,12 @@ fn build_owns_resolved_images_and_compact_text_in_source_order_with_exact_work()
     assert_factor_bits(storage.rows.materials[1].factors, MaterialFactors::empty());
     assert_factor_bits(
         storage.rows.materials[2].factors,
-        MaterialFactors::try_new(Vec3::ZERO, None, None, full_factors().legacy()).unwrap(),
+        MaterialFactors::empty().with_legacy(full_factors().legacy()),
     );
     assert_factor_bits(
         storage.rows.materials[3].factors,
-        MaterialFactors::try_new(
-            Vec3::ZERO,
-            None,
-            full_factors().pbr_specular_glossiness(),
-            None,
-        )
-        .unwrap(),
+        MaterialFactors::empty()
+            .with_pbr_specular_glossiness(full_factors().pbr_specular_glossiness()),
     );
     for row in &storage.rows.bindings {
         let key = row.source_key.map(|range| {

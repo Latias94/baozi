@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use baozi::{
     AlphaMode, AssetPath, AttributeDomain, ColorInterpretation, Importer, MaterialAssignment,
-    MemoryAssetIo, MipmapFilter, SamplerState, ShadingModel, SupplementalPbrFactors, TexelFilter,
-    TextureAddressMode, TextureBlendOperation, TextureChannel, TextureChannelSwizzle, TextureRole,
-    TextureTransform, UvOrigin,
+    MemoryAssetIo, MipmapFilter, SamplerState, ShadingModel, TexelFilter, TextureAddressMode,
+    TextureBlendOperation, TextureChannel, TextureChannelSwizzle, TextureRole, TextureTransform,
+    UvOrigin,
 };
 use baozi_asset_consumer::{
     ApplicationAsset, Result, TangentBasis, TangentEncoding, UvExtractionError,
@@ -127,6 +127,32 @@ fn copy_document(document: &Value, payload: &[u8]) -> Result<ApplicationAsset> {
     drop(importer);
     drop(io);
     Ok(asset)
+}
+
+#[test]
+fn detached_emission_keeps_authored_factor_when_strength_is_present() -> Result<()> {
+    for strength in [0.0, 1.0, 4.0] {
+        let (mut document, payload) = document();
+        document["extensionsUsed"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("KHR_materials_emissive_strength"));
+        document["materials"][0]["extensions"] =
+            json!({"KHR_materials_emissive_strength": {"emissiveStrength": strength}});
+        let asset = copy_document(&document, &payload)?;
+        let emission = asset.materials[0].factors.emission();
+        let factor = emission.factor();
+        assert_eq!([factor.x, factor.y, factor.z], [0.25, 0.5, 0.75]);
+        assert_eq!(emission.strength(), Some(strength as f32));
+        assert_eq!(
+            emission.effective_rgb(),
+            [0.25 * strength, 0.5 * strength, 0.75 * strength]
+        );
+        assert!(asset.materials[1].factors.emission().strength().is_none());
+        assert_eq!(asset.images[0].encoded_bytes, PNG);
+        assert_eq!(asset.materials[0].bindings.len(), 5);
+    }
+    Ok(())
 }
 
 #[test]
@@ -260,14 +286,15 @@ fn complete_material_uv_and_sampling_closure_survives_all_source_owners() -> Res
         let base = pbr.base_color();
         assert_eq!([base.r, base.g, base.b, base.a], [0.125, 0.25, 0.5, 0.75]);
         assert_eq!((pbr.metallic(), pbr.roughness()), (0.625, 0.375));
-        let emissive = material.factors.emissive();
+        let emissive = material.factors.emission().factor();
         assert_eq!([emissive.x, emissive.y, emissive.z], [0.25, 0.5, 0.75]);
         assert!(material.factors.pbr_specular_glossiness().is_none());
         assert!(material.factors.legacy().is_none());
-        assert_eq!(
-            material.factors.supplemental_pbr(),
-            SupplementalPbrFactors::default()
-        );
+        assert!(material.factors.clearcoat().is_none());
+        assert!(material.factors.transmission().is_none());
+        assert!(material.factors.thickness().is_none());
+        assert!(material.factors.sheen().is_none());
+        assert!(material.factors.emission().strength().is_none());
         assert_eq!((draw.vertices.len(), draw.indices.len()), (4, 6));
         assert_eq!(draw.indices, [0, 1, 2, 0, 2, 3]);
         assert_eq!(
@@ -382,7 +409,7 @@ fn implicit_and_authored_defaults_keep_distinct_assignments_after_copy_and_drop(
         let base = pbr.base_color();
         assert_eq!([base.r, base.g, base.b, base.a], [1.0; 4]);
         assert_eq!((pbr.metallic(), pbr.roughness()), (1.0, 1.0));
-        let emissive = material.factors.emissive();
+        let emissive = material.factors.emission().factor();
         assert_eq!([emissive.x, emissive.y, emissive.z], [0.0; 3]);
     }
     assert_eq!(implicit.factors, authored.factors);
@@ -545,10 +572,11 @@ fn public_obj_legacy_factors_are_owned_independently_from_pbr_groups() -> Result
     assert_eq!((legacy.shininess(), legacy.opacity()), (64.0, 0.625));
     assert!(material.factors.pbr_metallic_roughness().is_none());
     assert!(material.factors.pbr_specular_glossiness().is_none());
-    assert_eq!(
-        material.factors.supplemental_pbr(),
-        SupplementalPbrFactors::default()
-    );
+    assert!(material.factors.clearcoat().is_none());
+    assert!(material.factors.transmission().is_none());
+    assert!(material.factors.thickness().is_none());
+    assert!(material.factors.sheen().is_none());
+    assert!(material.factors.emission().strength().is_none());
     assert!(material.bindings.is_empty());
     Ok(())
 }

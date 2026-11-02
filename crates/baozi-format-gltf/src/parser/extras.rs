@@ -83,6 +83,7 @@ fn key(site: SourcePayloadSite) -> &'static str {
         Site::Asset => "org.baozi.gltf:asset-extras",
         Site::MaterialPbrMetallicRoughness => "org.baozi.gltf:pbr-metallic-roughness-extras",
         Site::MaterialUnlit => "org.baozi.gltf:unlit-extras",
+        Site::MaterialEmissiveStrength => "org.baozi.gltf:emissive-strength-extras",
         Site::BaseColorTexture => "org.baozi.gltf:base-color-texture-extras",
         Site::MetallicRoughnessTexture => "org.baozi.gltf:metallic-roughness-texture-extras",
         Site::NormalTexture => "org.baozi.gltf:normal-texture-extras",

@@ -145,7 +145,7 @@ fn optional_and_required_unlit_objects_preserve_default_factors() -> TestResult<
                 factors.pbr_metallic_roughness(),
                 Some(PbrMetallicRoughnessFactors::default()),
             );
-            let emissive = factors.emissive();
+            let emissive = factors.emission().factor();
             assert_eq!([emissive.x, emissive.y, emissive.z], [0.0; 3]);
             assert!(factors.pbr_specular_glossiness().is_none());
             assert!(factors.legacy().is_none());
@@ -365,7 +365,7 @@ fn unlit_retains_all_pbr_factors_bindings_and_selected_fallback_resources() -> T
             .map(f32::to_bits),
             [0.8_f32, 0.1, 0.2, 0.7, 0.5, 0.25].map(f32::to_bits),
         );
-        let emissive = material.factors().emissive();
+        let emissive = material.factors().emission().factor();
         assert_eq!([emissive.x, emissive.y, emissive.z], [0.2, 0.4, 0.6]);
         let expected_bindings = [
             (

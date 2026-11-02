@@ -534,10 +534,10 @@ fn assert_appearance(scene: &ValidatedScene) {
     assert!(materials[0].double_sided());
     assert!(!materials[1].double_sided());
     assert_eq!(
-        materials[0].factors().emissive(),
+        materials[0].factors().emission().factor(),
         Vec3::new(0.125, 0.25, 0.5)
     );
-    assert_eq!(materials[1].factors().emissive(), Vec3::ZERO);
+    assert_eq!(materials[1].factors().emission().factor(), Vec3::ZERO);
     for (index, color, metallic, roughness) in [
         (0, Color::linear_rgba(0.25, 0.5, 0.75, 1.0), 0.125, 0.875),
         (1, Color::linear_rgba(1.0, 0.5, 0.25, 0.75), 0.5, 0.25),

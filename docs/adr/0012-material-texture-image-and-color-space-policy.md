@@ -146,7 +146,8 @@ not claim that encoded samples were decoded or validated.
 | --- | --- | --- |
 | Base color, diffuse | RGB or RGBA color | linear sampled RGB multiplied component-wise by its typed material factor and a binding strength in `[0, 1]`; mapped alpha contributes only through the opacity rule below |
 | Specular | RGB color | linear sampled RGB multiplied component-wise by its typed material factor and a binding strength in `[0, 1]` |
-| Emissive, sheen color | RGB color | linear sampled RGB multiplied component-wise by its nonnegative finite material factor and nonnegative finite binding strength |
+| Emissive | RGB color | linear sampled RGB multiplied component-wise by the authored emission factor, effective material emissive strength, and nonnegative finite binding strength; each multiplier is applied once |
+| Sheen color | RGB color | linear sampled RGB multiplied component-wise by its nonnegative finite material factor and nonnegative finite binding strength |
 | Metallic, roughness, clearcoat, clearcoat roughness, transmission, sheen roughness | one data lane in `[0, 1]` | unit-interval material factor multiplied by the sample; canonical binding strength is one |
 | Metallic-roughness | exactly two explicitly mapped data lanes in `[0, 1]` | metallic and roughness factors multiply their named lanes independently; canonical binding strength is one |
 | Occlusion | one data lane in `[0, 1]` | with strength `s` in `[0, 1]`, factor is `1 + s * (sample - 1)` |
@@ -155,7 +156,7 @@ not claim that encoded samples were decoded or validated.
 | Displacement | one finite data lane | signed Scene-unit offset is `sample * strength`; nonzero bias or unknown units require an admitted schema or explicit loss/failure |
 | Thickness | one data lane in `[0, 1]` | nonnegative Scene-unit material thickness multiplied by the sample; canonical binding strength is one |
 
-For a positive Scene-unit conversion ratio `s`, supplemental material thickness and Displacement
+For a positive Scene-unit conversion ratio `s`, present material thickness and Displacement
 binding strength each become `f32(f64(value) * s)`, using ADR 0008's checked single-rounding length
 conversion. Displacement remains signed; handedness does not add a `det(Q)` factor. Signed zero is
 preserved, and overflow or nonzero underflow to zero rejects the conversion at the material or
@@ -194,6 +195,37 @@ represented canonical role returns structured unsupported/loss evidence under ca
 Producerless `Namespaced` variants and empty schema-snapshot placeholders are not retained in the
 appearance API. Metadata alone never pretends to preserve rendering behavior and no unknown role is
 mislabeled as known. ADR 0023 defines the admission requirements for a future typed descriptor.
+
+### Typed factor groups and authored emission (2026-11-02 amendment)
+
+`MaterialFactors` is the single inline authority shared by authoring, retained storage, validation,
+public reads and detached application output. Its named assembly methods take checked leaf values;
+there is no positional supplemental constructor, compatibility alias or parallel factor bag.
+Metallic-roughness, specular-glossiness and legacy workflows retain their existing optional groups.
+Clearcoat, transmission, thickness and sheen are independent optional typed groups. Absence and
+an explicitly present default remain distinguishable even when their effective shading is equal.
+Thickness can be authored independently of transmission; it is measured in the current Scene unit.
+Core sheen color retains the existing finite nonnegative HDR domain. A format producer applies
+its narrower source rules without changing that cross-format domain.
+
+`EmissionFactors` always retains raw factor RGB and independently retains `Option<f32>` strength.
+Absent strength has effective multiplier one; `Some(1)` remains authored presence. Zero strength
+does not delete a factor, texture, binding or source resource. The derived `effective_rgb()` helper
+multiplies in F64 so two valid HDR F32 operands do not overflow a cached F32 result. No effective
+value replaces authored storage. Signed zero and representable subnormals remain unchanged.
+An inactive texture binding contributes nothing under the existing Decal/activity rule; without
+an active emissive texture the texture and binding multipliers are one.
+
+Selected glTF emissive-strength objects, including an empty object with default strength one, use
+that same value. The producer rejects the extension's forbidden Unlit combination before opening
+dependencies. Core can still retain legitimate cross-format Unlit fallback factors and bindings.
+
+Actual row layout accounts for inline optional fields once. Semantic scalar admission counts only
+present groups and strength, while the snapshot projects forty fixed slots with explicit group
+presence and positive-zero padding for absence. The first thirty-nine scalar positions retain their
+existing meaning; authored strength occupies the final slot. Presence and raw bits affect the full
+digest even when preview is disabled. This changes the current draft snapshot framing; historical
+revision-7 evidence above remains bound to its original source.
 
 `AppearanceStorage` is an inline root in `SceneTables` with two independently retained shared
 children. `AppearanceRows` owns exactly five Vec tables: images, samplers, textures, bindings, and
