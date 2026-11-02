@@ -161,6 +161,13 @@ If it does not, diagnose the remaining phase instead of expanding the accounting
 
 ### P4. Replace the cross-format construction interface
 
+The [typed-context design](../research/2026-11-02-typed-format-context-design.md) makes the
+import portion of P3 and this interface cutover atomic. Actual nested storage/child callbacks
+cannot safely retain a bound work group through the old whole-owner host projection. Qualify
+the separate P3 execution/geometry/text foundation first, then prove the concrete mutable
+context/container lifetime seam before migrating all formats. Measure the integrated import
+path afterwards; do not preserve a second host/work backend to force an intermediate build.
+
 Introduce typed format definition/options, a private erased registry adapter, self-executing
 immutable plan and concrete parse context. Migrate STL/OBJ/PLY/glTF and real custom importers
 atomically. Remove separate public runtime option-key hooks, parse-side downcast protocol,
@@ -201,6 +208,17 @@ The already prepared commands are execution aids, not passing evidence. Close in
 findings, source-qualified documents and scoped local Conventional Commits before completing
 the original goal. No publishing, push or target promotion follows.
 
+The user's control-assurance follow-up also requires a separate cancellation/progress matrix
+for OBJ, STL, PLY and glTF: cancellation during actual parser work, after the last action,
+before IO/allocation, and before publication; deadline and observer-requested cancellation;
+monotone phase/unit progress with unknown totals represented honestly. Check physical completed
+prefixes and the documented polling bound rather than preserving historical callback counts.
+Inspect the matching Assimp 6.0.5 paths and exercise its
+[`ProgressHandler`](https://github.com/assimp/assimp/blob/v6.0.5/include/assimp/ProgressHandler.hpp)
+separately: callback-return cancellation and actual importer coverage are distinct questions.
+These controlled runs do not replace or alter the ordinary comparison protocol, and neither
+library is claimed to interrupt a blocking backend operation at a fixed elapsed-time bound.
+
 ## Review and Acceptance
 
 - Confirm P1's ownership and control decisions before implementation. Review the replacement,
@@ -232,6 +250,13 @@ and immediate text completion remain unimplemented. P4-P6 and original full B1/U
 this receipt does not mark the architecture continuation or active goal complete.
 
 ## Initial Independent Review (2026-11-02)
+
+The P3 [bound-execution foundation receipt](../reviews/2026-11-02-bound-execution-and-physical-prefixes.md)
+qualifies implementation `46eb6c27b4f272d956eb5ae4889a0470eec3a26c`: disjoint views, raw parser
+channels, real normal leaves, bounded geometry control, immediate text completion and short
+activation slot borrows. Actual import host migration, canonical caller binding and polygon leaf
+boundaries remain required. The accepted typed-context design now supplies the atomic P3/P4
+import cutover. Native timings and complete P3 acceptance are not established by this receipt.
 
 Feasibility review approves the bounded P1 investigation and finds no established blocker to
 the direction. It does **not** approve a work-engine rewrite before the ownership/cadence sketch
