@@ -315,7 +315,10 @@ pub use control::{
     OperationPoll, ProgressDecision, ProgressDeliveryLimits, ProgressEvent, ProgressObserver,
     ProgressPhase, ProgressStorageError, ProgressUnit, ProgressViolation,
 };
-pub use coordinator::{FinalProgress, OperationCheckpoint, OperationCoordinator, PublicationCause};
+pub use coordinator::{
+    FinalProgress, OperationCheckpoint, OperationCoordinator, OperationFinishError,
+    PublicationCause,
+};
 pub use ledger::{
     Commitment, CounterClass, DEFAULT_LEDGER_EVIDENCE_BYTE_LIMIT, DimensionPolicy,
     DimensionSnapshot, LedgerCause, LedgerEvidenceError, LedgerEvidencePurpose, LedgerFinishError,

@@ -891,7 +891,7 @@ where
             first_dimension: proof.terminal_projection().dimensions().next().and_then(
                 |(dimension, _)| {
                     proof
-                        .test_dimension_evidence(dimension)
+                        .test_storage_dimension_evidence_at(0)
                         .map(|snapshot| (dimension, snapshot))
                 },
             ),
@@ -2363,20 +2363,6 @@ where
             std::mem::forget(attribution);
         }
     }
-}
-
-pub(super) fn prepare_terminal_control<O, P, PP, U, D>(
-    coordinator: &mut OperationCoordinator<O, P, PP, U, D>,
-    final_progress: FinalProgress<PP, U>,
-) -> Option<ControlCause>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-    D: Copy + Ord + fmt::Debug,
-{
-    coordinator.try_prepare_typed_control(final_progress).err()
 }
 
 #[allow(

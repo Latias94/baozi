@@ -274,7 +274,7 @@ fn activation_builder_panic_preserves_the_exact_completed_work_prefix() {
         )
         .expect("session activation owner");
     let mut success = Some(success);
-    let mut ledger = None;
+    let mut observed_work = None;
 
     let result = outcome_owner.plan_and_activate_scoped(|mut planning| {
         let mut semantic = planning
@@ -293,7 +293,6 @@ fn activation_builder_panic_preserves_the_exact_completed_work_prefix() {
             CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
         };
         permit.activate(|mut lane, _plan| {
-            ledger = Some(lane.test_ledger_probe());
             let cause = lane
                 .try_retain_sequence(
                     SequencePlan::<u8>::new(COMPLETED + 1).expect("sequence plan"),
@@ -307,6 +306,10 @@ fn activation_builder_panic_preserves_the_exact_completed_work_prefix() {
                 )
                 .expect_err("builder panic must enter activation containment");
             assert!(matches!(cause, StoreRuntimeError::BuilderPanicked));
+            observed_work = Some(
+                lane.test_dimension_evidence(keys.work_dimension)
+                    .expect("the live materialization owner retains its completed prefix"),
+            );
             lane.reject::<(), (), ScalarSequence<u8>, TestTag>((), 74)
         })
     });
@@ -319,10 +322,7 @@ fn activation_builder_panic_preserves_the_exact_completed_work_prefix() {
         AccountPoisonReason::RetainedBuilderPanicked
     );
 
-    let ledger = ledger.expect("materialization captured the contained ledger");
-    let work = ledger
-        .dimension_evidence(keys.work_dimension)
-        .expect("materialization work remains observable inside containment");
+    let work = observed_work.expect("materialization captured exact work before containment");
     assert_eq!(
         (work.attempted(), work.consumed()),
         (
@@ -1444,8 +1444,7 @@ fn verified_work_rejection_activates_failure_terminal_work_before_evidence_appen
         .expect("verified rejection must activate protected evidence work");
     let protected = assembly
         .raw
-        .test_ledger_probe()
-        .dimension_evidence(keys.failure_terminal_dimension)
+        .test_dimension_evidence(keys.failure_terminal_dimension)
         .expect("protected failure-terminal dimension");
     assert_eq!((protected.attempted(), protected.consumed()), (2, 2));
 
@@ -2408,7 +2407,6 @@ fn controlled_builders_and_validation_poll_and_charge_exact_work() {
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 2, 1))
         .expect("controlled assembly");
-    let ledger = assembly.raw.test_ledger_probe();
     let leaf = assembly
         .try_retain_canonical_sequence_controlled(
             SequencePlan::<u8>::new(1).expect("sequence plan"),
@@ -2460,12 +2458,12 @@ fn controlled_builders_and_validation_poll_and_charge_exact_work() {
                 && session.outcome_evidence_sequence(evidence_root).is_some())
         },
     );
-    assert!(matches!(
-        &validated,
-        StoreControlledSuccessValidation::Valid(_)
-    ));
-    let dimension = ledger
-        .dimension_evidence(keys.work_dimension)
+    let StoreControlledSuccessValidation::Valid(validated) = validated else {
+        panic!("the exact controlled graph must validate");
+    };
+    let dimension = validated
+        .raw
+        .test_dimension_evidence(keys.work_dimension)
         .expect("work dimension evidence");
     assert_eq!(dimension.attempted(), 10);
     assert_eq!(dimension.consumed(), 10);
@@ -2518,7 +2516,6 @@ fn controlled_bytes_and_utf8_write_exact_payloads_and_charge_exact_work() {
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 3, 1))
         .expect("controlled payload assembly");
-    let ledger = assembly.raw.test_ledger_probe();
 
     let before_binary = account.snapshot();
     let binary = assembly
@@ -2593,14 +2590,16 @@ fn controlled_bytes_and_utf8_write_exact_payloads_and_charge_exact_work() {
                 && session.outcome_evidence_sequence(evidence_root).is_some()
         },
     );
-    assert!(matches!(&validated, StoreSuccessValidation::Valid(_)));
-
     let binary_charge = test_physical_delta(before_binary, after_binary);
     let text_charge = test_physical_delta(after_binary, after_text);
     assert_eq!(binary_charge, text_charge);
     assert_eq!(binary_charge.1, 2);
-    let dimension = ledger
-        .dimension_evidence(keys.work_dimension)
+    let StoreSuccessValidation::Valid(validated) = validated else {
+        panic!("the exact controlled graph must validate");
+    };
+    let dimension = validated
+        .raw
+        .test_dimension_evidence(keys.work_dimension)
         .expect("work dimension evidence");
     assert_eq!(dimension.attempted(), 12);
     assert_eq!(dimension.consumed(), 12);
@@ -2733,7 +2732,6 @@ fn controlled_work_stops_after_the_first_fault_without_charging_more_work() {
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 1, 1))
         .expect("first-fault assembly");
-    let ledger = assembly.raw.test_ledger_probe();
     cancellation.cancel();
 
     let error = assembly
@@ -2753,8 +2751,9 @@ fn controlled_work_stops_after_the_first_fault_without_charging_more_work() {
         .expect_err("the controlled builder must preserve cancellation");
 
     assert!(matches!(error, StoreRuntimeError::Control(_)));
-    let work = ledger
-        .dimension_evidence(keys.work_dimension)
+    let work = assembly
+        .raw
+        .test_dimension_evidence(keys.work_dimension)
         .expect("work dimension evidence");
     assert_eq!(work.attempted(), 0);
     assert_eq!(work.consumed(), 0);

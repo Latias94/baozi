@@ -2491,7 +2491,12 @@ where
             return Err(RetainedWriterError::AccountPoisoned(poisoned));
         }
         Ok(Ok(attribution)) => attribution,
-        Ok(Err(cause)) => return Err(RetainedWriterError::Ledger(cause)),
+        Ok(Err(cause)) => {
+            admitted_share_work
+                .finish_partial()
+                .map_err(RetainedWriterError::Ledger)?;
+            return Err(RetainedWriterError::Ledger(cause));
+        }
     };
     let mut physical_admission = match account.try_admit_retained_after_action(
         account_admission,
@@ -2730,6 +2735,10 @@ where
         }
         Ok(Ok(attribution)) => attribution,
         Ok(Err(cause)) => {
+            admitted_share_work
+                .finish_partial()
+                .map_err(RetainedWriterError::Ledger)
+                .map_err(RetainedPublicationError::Writer)?;
             return Err(RetainedPublicationError::Writer(
                 RetainedWriterError::Ledger(cause),
             ));

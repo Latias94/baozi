@@ -12,7 +12,7 @@ fn finish_error_preserves_real_live_and_pending_evidence() {
         .expect_err("live bytes prevent clean finalization");
     assert_eq!(
         live_error.cause(),
-        &LedgerCause::LiveReservationsRemain { bytes: 7 }
+        &PublicationCause::Ledger(LedgerCause::LiveReservationsRemain { bytes: 7 })
     );
     assert_eq!(live_error.snapshot().current_live_bytes(), 7);
     assert_eq!(live_error.snapshot().peak_live_bytes(), 7);
@@ -64,7 +64,10 @@ fn finish_error_preserves_real_live_and_pending_evidence() {
         .finish()
         .expect_err("empty pending transaction cannot disappear from evidence");
     let (cause, snapshot) = pending_error.into_parts();
-    assert_eq!(cause, LedgerCause::PendingPublicationsRemain);
+    assert_eq!(
+        cause,
+        PublicationCause::Ledger(LedgerCause::PendingPublicationsRemain)
+    );
     assert_eq!(snapshot.current_live_bytes(), 0);
     assert!(
         snapshot
@@ -154,7 +157,7 @@ fn zero_byte_reservation_capabilities_must_be_released_before_clean_finalization
         .expect_err("an active capability retains ledger state even without payload bytes");
     assert_eq!(
         error.cause(),
-        &LedgerCause::ActiveReservationsRemain { count: 1 }
+        &PublicationCause::Ledger(LedgerCause::ActiveReservationsRemain { count: 1 })
     );
     assert_eq!(error.snapshot().current_live_bytes(), 0);
     assert_eq!(error.snapshot().active_reservations(), 1);

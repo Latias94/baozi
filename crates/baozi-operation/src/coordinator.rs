@@ -5,8 +5,8 @@ use crate::control::{
     discard_extension, discard_untrusted_panic_payload,
 };
 use crate::ledger::{
-    Commitment, Ledger, LedgerCause, LedgerEvidenceError, LedgerFinishError, LedgerLimits,
-    LedgerSnapshot, LiveReservation, PendingPublication, PublicationReservationBatch,
+    Commitment, Ledger, LedgerCause, LedgerEvidenceError, LedgerLimits, LedgerSnapshot,
+    LiveReservation, PendingPublication, PublicationReservationBatch,
 };
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -83,6 +83,44 @@ impl<D> From<LedgerCause<D>> for PublicationCause<D> {
     }
 }
 
+/// A terminal operation failure with the exact final accounting evidence.
+#[derive(Debug, PartialEq, Eq)]
+pub struct OperationFinishError<P, D> {
+    cause: PublicationCause<D>,
+    snapshot: LedgerSnapshot<P, D>,
+}
+
+impl<P, D> OperationFinishError<P, D> {
+    /// Returns the control or accounting failure that prevented clean finalization.
+    pub const fn cause(&self) -> &PublicationCause<D> {
+        &self.cause
+    }
+
+    /// Returns the exact evidence after extension owners have been disposed.
+    pub const fn snapshot(&self) -> &LedgerSnapshot<P, D> {
+        &self.snapshot
+    }
+
+    /// Separates the failure from its final accounting evidence.
+    pub fn into_parts(self) -> (PublicationCause<D>, LedgerSnapshot<P, D>) {
+        (self.cause, self.snapshot)
+    }
+}
+
+impl<P, D: fmt::Debug> fmt::Display for OperationFinishError<P, D> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "operation finalization failed: {}", self.cause)
+    }
+}
+
+impl<P: fmt::Debug + 'static, D: fmt::Debug + 'static> std::error::Error
+    for OperationFinishError<P, D>
+{
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.cause)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ProgressState {
     completed: u64,
@@ -117,67 +155,23 @@ impl<PP, U> OperationPollCheckpoint<'_, PP, U> {
     }
 }
 
-/// Serializes operation control and owns one generic ledger.
+/// Progress authority lent independently of the invocation-local work owner.
 ///
-/// Ledger phases (`LP`) and progress phases (`PP`) are deliberately distinct vocabularies. Import
-/// and post-process lifecycle evidence is owned above this module and is not represented here.
-///
-/// ```compile_fail
-/// use baozi_operation::{
-///     DimensionPolicy, LedgerLimits, OperationControl, OperationCoordinator, OperationOwner,
-///     ProgressPhase, ProgressUnit,
-/// };
-///
-/// struct Owner;
-/// impl OperationOwner for Owner {}
-/// #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-/// enum LedgerPhase { Build }
-/// #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-/// enum ObserverPhase { Parse }
-/// impl ProgressPhase for ObserverPhase {
-///     fn order(self) -> u32 { 0 }
-///     fn stable_id(self) -> &'static str { "parse" }
-/// }
-/// #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-/// enum Unit { Work }
-/// impl ProgressUnit for Unit {
-///     fn stable_id(self) -> &'static str { "work" }
-/// }
-/// #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-/// enum Dimension { Bytes }
-///
-/// let mut coordinator = OperationCoordinator::<
-///     Owner, LedgerPhase, ObserverPhase, Unit, Dimension,
-/// >::try_new(
-///     OperationControl::default(),
-///     LedgerLimits::new(
-///         8,
-///         [(Dimension::Bytes, DimensionPolicy::reservable_bytes(8, 8, 8, 8))],
-///     ).unwrap(),
-///     &[LedgerPhase::Build],
-/// ).unwrap();
-/// coordinator.report_progress(LedgerPhase::Build, Unit::Work, 1, None).unwrap();
-/// ```
-pub struct OperationCoordinator<O, LP, PP, U, D>
-where
-    O: OperationOwner,
-    LP: Copy + Ord,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-    D: Copy + Ord + fmt::Debug,
-{
-    control: OperationControl<PP, U>,
-    ledger: Ledger<O, LP, D>,
-    terminal: Option<ControlCause>,
-    progress: Vec<((PP, U), ProgressState)>,
-    progress_evidence_bytes: u64,
-    last_phase_order: Option<u32>,
-    delivered_events: usize,
-    delivered_bytes: usize,
-    next_sequence: u64,
+/// A producer can retain a borrowed work envelope while polling or reporting progress.
+/// No callback runs while either accounting state is borrowed.
+pub(crate) struct OperationProgressCheckpoint<'a, O, LP, PP, U, D> {
+    control: &'a mut OperationControl<PP, U>,
+    terminal: &'a mut Option<ControlCause>,
+    ledger: &'a Ledger<O, LP, D>,
+    progress: &'a mut Vec<((PP, U), ProgressState)>,
+    progress_evidence_bytes: &'a mut u64,
+    last_phase_order: &'a mut Option<u32>,
+    delivered_events: &'a mut usize,
+    delivered_bytes: &'a mut usize,
+    next_sequence: &'a mut u64,
 }
 
-impl<O, LP, PP, U, D> OperationCoordinator<O, LP, PP, U, D>
+impl<O, LP, PP, U, D> OperationProgressCheckpoint<'_, O, LP, PP, U, D>
 where
     O: OperationOwner,
     LP: Copy + Ord,
@@ -185,51 +179,11 @@ where
     U: ProgressUnit,
     D: Copy + Ord + fmt::Debug,
 {
-    /// Creates one coordinator with frozen initial policy and a complete phase vocabulary.
-    pub fn try_new(
-        control: OperationControl<PP, U>,
-        ledger_limits: LedgerLimits<D>,
-        phases: &[LP],
-    ) -> Result<Self, LedgerCause<D>> {
-        Ok(Self {
-            control,
-            ledger: Ledger::try_new(ledger_limits, phases)?,
-            terminal: None,
-            progress: Vec::new(),
-            progress_evidence_bytes: 0,
-            last_phase_order: None,
-            delivered_events: 0,
-            delivered_bytes: 0,
-            next_sequence: 0,
-        })
+    pub(crate) fn poll(&mut self) -> Result<(), ControlCause> {
+        poll_operation_control(self.control, self.terminal)
     }
 
-    /// Rehydrates the coordinator around a ledger whose complete startup graph already crossed
-    /// the retained Ready boundary. No ledger or physical admission work is repeated here.
-    pub(crate) fn from_started_ledger(
-        control: OperationControl<PP, U>,
-        started: crate::retained::StartedLedger<O, LP, D>,
-    ) -> Self {
-        Self {
-            control,
-            ledger: started.into_inner(),
-            terminal: None,
-            progress: Vec::new(),
-            progress_evidence_bytes: 0,
-            last_phase_order: None,
-            delivered_events: 0,
-            delivered_bytes: 0,
-            next_sequence: 0,
-        }
-    }
-
-    /// Polls cancellation and deadline state.
-    pub fn poll(&mut self) -> Result<(), ControlCause> {
-        poll_operation_control(&mut self.control, &mut self.terminal)
-    }
-
-    /// Validates, coalesces, and serially delivers owner-defined progress.
-    pub fn report_progress(
+    pub(crate) fn report_progress(
         &mut self,
         phase: PP,
         unit: U,
@@ -243,15 +197,6 @@ where
             total,
             ProgressDelivery::Transient,
         )
-    }
-
-    fn report_final_progress(
-        &mut self,
-        phase: PP,
-        unit: U,
-        total: u64,
-    ) -> Result<(), ControlCause> {
-        self.report_progress_with_delivery(phase, unit, total, Some(total), ProgressDelivery::Final)
     }
 
     fn report_progress_with_delivery(
@@ -330,14 +275,14 @@ where
                 position
             }
         };
-        self.last_phase_order = Some(phase.order());
+        *self.last_phase_order = Some(phase.order());
 
         if !should_deliver || self.control.observer.is_none() {
             return Ok(());
         }
         let encoded_bytes = match delivery {
             ProgressDelivery::Transient => {
-                if self.delivered_events >= self.control.progress_limits.max_events() {
+                if *self.delivered_events >= self.control.progress_limits.max_events() {
                     return Ok(());
                 }
                 let encoded_bytes = estimated_event_bytes(phase, unit);
@@ -351,7 +296,7 @@ where
             ProgressDelivery::Final => None,
         };
 
-        let event = ProgressEvent::new(phase, unit, completed, total, self.next_sequence);
+        let event = ProgressEvent::new(phase, unit, completed, total, *self.next_sequence);
         let Some(mut observer) = self.control.observer.take() else {
             return Ok(());
         };
@@ -369,10 +314,10 @@ where
         };
 
         if let Some(encoded_bytes) = encoded_bytes {
-            self.delivered_events = self.delivered_events.saturating_add(1);
-            self.delivered_bytes = self.delivered_bytes.saturating_add(encoded_bytes);
+            *self.delivered_events = self.delivered_events.saturating_add(1);
+            *self.delivered_bytes = self.delivered_bytes.saturating_add(encoded_bytes);
         }
-        self.next_sequence = self.next_sequence.saturating_add(1);
+        *self.next_sequence = self.next_sequence.saturating_add(1);
         self.progress[progress_position].1.last_delivered = Some(completed);
         if decision == ProgressDecision::Cancel {
             return self.fail(ControlCause::Cancelled {
@@ -380,6 +325,190 @@ where
             });
         }
         Ok(())
+    }
+
+    fn fail(&mut self, cause: ControlCause) -> Result<(), ControlCause> {
+        *self.terminal = Some(cause.clone());
+        Err(cause)
+    }
+
+    fn try_insert_progress(
+        &mut self,
+        position: usize,
+        key: (PP, U),
+        state: ProgressState,
+    ) -> Result<(), ProgressStorageError> {
+        let desired_capacity = self.progress.len().saturating_add(1);
+        let limit = self.control.progress_limits.max_states();
+        if desired_capacity > limit {
+            return Err(ProgressStorageError::StateLimitExceeded {
+                value: desired_capacity,
+                limit,
+            });
+        }
+        self.ledger
+            .try_grow_progress_evidence(
+                self.progress,
+                desired_capacity,
+                self.progress_evidence_bytes,
+            )
+            .map_err(|cause| ProgressStorageError::Evidence { cause })?;
+        self.progress.insert(position, (key, state));
+        Ok(())
+    }
+}
+
+/// Serializes operation control and owns one generic ledger.
+///
+/// Ledger phases (`LP`) and progress phases (`PP`) are deliberately distinct vocabularies. Import
+/// and post-process lifecycle evidence is owned above this module and is not represented here.
+///
+/// ```compile_fail
+/// use baozi_operation::{
+///     DimensionPolicy, LedgerLimits, OperationControl, OperationCoordinator, OperationOwner,
+///     ProgressPhase, ProgressUnit,
+/// };
+///
+/// struct Owner;
+/// impl OperationOwner for Owner {}
+/// #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// enum LedgerPhase { Build }
+/// #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// enum ObserverPhase { Parse }
+/// impl ProgressPhase for ObserverPhase {
+///     fn order(self) -> u32 { 0 }
+///     fn stable_id(self) -> &'static str { "parse" }
+/// }
+/// #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// enum Unit { Work }
+/// impl ProgressUnit for Unit {
+///     fn stable_id(self) -> &'static str { "work" }
+/// }
+/// #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// enum Dimension { Bytes }
+///
+/// let mut coordinator = OperationCoordinator::<
+///     Owner, LedgerPhase, ObserverPhase, Unit, Dimension,
+/// >::try_new(
+///     OperationControl::default(),
+///     LedgerLimits::new(
+///         8,
+///         [(Dimension::Bytes, DimensionPolicy::reservable_bytes(8, 8, 8, 8))],
+///     ).unwrap(),
+///     &[LedgerPhase::Build],
+/// ).unwrap();
+/// coordinator.report_progress(LedgerPhase::Build, Unit::Work, 1, None).unwrap();
+/// ```
+pub struct OperationCoordinator<O, LP, PP, U, D>
+where
+    O: OperationOwner,
+    LP: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    control: OperationControl<PP, U>,
+    ledger: Ledger<O, LP, D>,
+    terminal: Option<ControlCause>,
+    progress: Vec<((PP, U), ProgressState)>,
+    progress_evidence_bytes: u64,
+    last_phase_order: Option<u32>,
+    delivered_events: usize,
+    delivered_bytes: usize,
+    next_sequence: u64,
+    terminal_control_gate: Option<Result<(), PublicationCause<D>>>,
+}
+
+impl<O, LP, PP, U, D> OperationCoordinator<O, LP, PP, U, D>
+where
+    O: OperationOwner,
+    LP: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    /// Creates one coordinator with frozen initial policy and a complete phase vocabulary.
+    pub fn try_new(
+        control: OperationControl<PP, U>,
+        ledger_limits: LedgerLimits<D>,
+        phases: &[LP],
+    ) -> Result<Self, LedgerCause<D>> {
+        Ok(Self {
+            control,
+            ledger: Ledger::try_new(ledger_limits, phases)?,
+            terminal: None,
+            progress: Vec::new(),
+            progress_evidence_bytes: 0,
+            last_phase_order: None,
+            delivered_events: 0,
+            delivered_bytes: 0,
+            next_sequence: 0,
+            terminal_control_gate: None,
+        })
+    }
+
+    /// Rehydrates the coordinator around a ledger whose complete startup graph already crossed
+    /// the retained Ready boundary. No ledger or physical admission work is repeated here.
+    pub(crate) fn from_started_ledger(
+        control: OperationControl<PP, U>,
+        started: crate::retained::StartedLedger<O, LP, D>,
+    ) -> Self {
+        Self {
+            control,
+            ledger: started.into_inner(),
+            terminal: None,
+            progress: Vec::new(),
+            progress_evidence_bytes: 0,
+            last_phase_order: None,
+            delivered_events: 0,
+            delivered_bytes: 0,
+            next_sequence: 0,
+            terminal_control_gate: None,
+        }
+    }
+
+    /// Polls cancellation and deadline state.
+    pub fn poll(&mut self) -> Result<(), ControlCause> {
+        poll_operation_control(&mut self.control, &mut self.terminal)
+    }
+
+    /// Validates, coalesces, and serially delivers owner-defined progress.
+    pub fn report_progress(
+        &mut self,
+        phase: PP,
+        unit: U,
+        completed: u64,
+        total: Option<u64>,
+    ) -> Result<(), ControlCause> {
+        self.report_progress_with_delivery(
+            phase,
+            unit,
+            completed,
+            total,
+            ProgressDelivery::Transient,
+        )
+    }
+
+    fn report_final_progress(
+        &mut self,
+        phase: PP,
+        unit: U,
+        total: u64,
+    ) -> Result<(), ControlCause> {
+        self.report_progress_with_delivery(phase, unit, total, Some(total), ProgressDelivery::Final)
+    }
+
+    fn report_progress_with_delivery(
+        &mut self,
+        phase: PP,
+        unit: U,
+        completed: u64,
+        total: Option<u64>,
+        delivery: ProgressDelivery,
+    ) -> Result<(), ControlCause> {
+        self.split_progress_checkpoint_and_retained_ledger()
+            .0
+            .report_progress_with_delivery(phase, unit, completed, total, delivery)
     }
 
     /// Returns the latest semantic progress report, including reports not delivered to an observer.
@@ -438,6 +567,7 @@ where
         reservation: &mut LiveReservation<O, LP, D>,
         bytes: u64,
     ) -> Result<(), LedgerCause<D>> {
+        self.ledger.ensure_work_open()?;
         self.ledger.resize_reservation(reservation, bytes)
     }
 
@@ -451,6 +581,7 @@ where
         dimension: D,
         bytes: u64,
     ) -> Result<(), LedgerCause<D>> {
+        self.ledger.ensure_work_open()?;
         self.ledger
             .transition_reservation(reservation, phase, dimension, bytes)
     }
@@ -463,6 +594,7 @@ where
         dimension: D,
         bytes: u64,
     ) -> Result<(), LedgerCause<D>> {
+        self.ledger.ensure_work_open()?;
         self.ledger
             .transition_reservations(reservations, phase, dimension, bytes)
     }
@@ -476,6 +608,7 @@ where
         reservations: &mut PublicationReservationBatch<O, LP, D>,
         commitments: &[Commitment<D>],
     ) -> Result<PendingPublication<O, LP, D>, LedgerCause<D>> {
+        self.ledger.ensure_work_open()?;
         self.ledger.prepare_publication(reservations, commitments)
     }
 
@@ -490,12 +623,8 @@ where
         final_progress: FinalProgress<PP, U>,
     ) -> Result<(), PublicationCause<D>> {
         self.ledger.check_publication(publication)?;
-        self.report_final_progress(
-            final_progress.phase,
-            final_progress.unit,
-            final_progress.total,
-        )?;
-        self.poll()?;
+        self.try_prepare_typed_control(final_progress)?;
+        self.ledger.close_work()?;
         self.ledger.publish(publication)?;
         Ok(())
     }
@@ -506,6 +635,7 @@ where
         reservation: &mut LiveReservation<O, LP, D>,
         bytes: u64,
     ) -> Result<LiveReservation<O, LP, D>, LedgerCause<D>> {
+        self.ledger.ensure_work_open()?;
         self.ledger.split(reservation, bytes)
     }
 
@@ -519,6 +649,44 @@ where
 
     pub(crate) fn retained_ledger(&self) -> &Ledger<O, LP, D> {
         &self.ledger
+    }
+
+    #[allow(
+        clippy::type_complexity,
+        reason = "the tuple exposes the concrete disjoint ledger and progress borrows"
+    )]
+    pub(crate) fn split_progress_checkpoint_and_retained_ledger(
+        &mut self,
+    ) -> (
+        OperationProgressCheckpoint<'_, O, LP, PP, U, D>,
+        &Ledger<O, LP, D>,
+    ) {
+        let Self {
+            control,
+            ledger,
+            terminal,
+            progress,
+            progress_evidence_bytes,
+            last_phase_order,
+            delivered_events,
+            delivered_bytes,
+            next_sequence,
+            ..
+        } = self;
+        (
+            OperationProgressCheckpoint {
+                control,
+                terminal,
+                ledger,
+                progress,
+                progress_evidence_bytes,
+                last_phase_order,
+                delivered_events,
+                delivered_bytes,
+                next_sequence,
+            },
+            ledger,
+        )
     }
 
     pub(crate) fn split_poll_checkpoint_and_retained_ledger(
@@ -568,18 +736,58 @@ where
     pub(crate) fn try_prepare_typed_control(
         &mut self,
         final_progress: FinalProgress<PP, U>,
-    ) -> Result<(), ControlCause> {
-        self.report_final_progress(
-            final_progress.phase,
-            final_progress.unit,
-            final_progress.total,
-        )?;
-        self.poll()
+    ) -> Result<(), PublicationCause<D>> {
+        if let Some(result) = &self.terminal_control_gate {
+            return result.clone();
+        }
+        let delivery = match self.ledger.seal_ordinary_work() {
+            Ok(()) => self
+                .report_final_progress(
+                    final_progress.phase,
+                    final_progress.unit,
+                    final_progress.total,
+                )
+                .and_then(|()| self.poll())
+                .map_err(PublicationCause::Control),
+            Err(cause) => Err(PublicationCause::Ledger(cause)),
+        };
+        // A rejected gate leaves ordinary work sealed and the finite failure grant dormant.
+        // Dispose both extension owners even if sealing or final delivery failed.
+        let disposal = self
+            .dispose_control_owners()
+            .map_err(PublicationCause::Control);
+        let result = delivery.and(disposal);
+        self.terminal_control_gate = Some(result.clone());
+        result
+    }
+
+    fn dispose_control_owners(&mut self) -> Result<(), ControlCause> {
+        if let Err(cause) = self.control.dispose_extensions() {
+            if self.terminal.is_none() {
+                self.terminal = Some(cause.clone());
+            }
+            return Err(cause);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn close_for_terminal_extraction(&mut self) -> Result<(), PublicationCause<D>> {
+        let seal = self.ledger.seal_ordinary_work();
+        let disposal = self.dispose_control_owners();
+        let close = if seal.is_ok() {
+            self.ledger.close_work()
+        } else {
+            Ok(())
+        };
+        seal?;
+        disposal?;
+        close?;
+        Ok(())
     }
 
     pub(crate) fn into_ledger_for_typed_publication(self) -> Ledger<O, LP, D> {
         let Self {
-            mut control,
+            control,
             ledger,
             progress,
             progress_evidence_bytes,
@@ -587,7 +795,6 @@ where
         } = self;
         drop(progress);
         ledger.release_progress_evidence(progress_evidence_bytes);
-        control.discard_cancellation();
         drop(control);
         ledger
     }
@@ -600,42 +807,27 @@ where
         clippy::result_large_err,
         reason = "boxing final evidence would allocate on the invariant-failure path"
     )]
-    pub fn finish(mut self) -> Result<LedgerSnapshot<LP, D>, LedgerFinishError<LP, D>> {
+    pub fn finish(mut self) -> Result<LedgerSnapshot<LP, D>, OperationFinishError<LP, D>> {
+        let disposal = self.dispose_control_owners();
+        let control_cause = self.terminal.clone().or_else(|| disposal.err());
         self.progress = Vec::new();
         self.ledger
             .release_progress_evidence(self.progress_evidence_bytes);
         self.progress_evidence_bytes = 0;
-        self.ledger.finish()
-    }
-
-    fn fail(&mut self, cause: ControlCause) -> Result<(), ControlCause> {
-        self.terminal = Some(cause.clone());
-        Err(cause)
-    }
-
-    fn try_insert_progress(
-        &mut self,
-        position: usize,
-        key: (PP, U),
-        state: ProgressState,
-    ) -> Result<(), ProgressStorageError> {
-        let desired_capacity = self.progress.len().saturating_add(1);
-        let limit = self.control.progress_limits.max_states();
-        if desired_capacity > limit {
-            return Err(ProgressStorageError::StateLimitExceeded {
-                value: desired_capacity,
-                limit,
+        let snapshot = self.ledger.finish().map_err(|failure| {
+            let (cause, snapshot) = failure.into_parts();
+            OperationFinishError {
+                cause: PublicationCause::Ledger(cause),
+                snapshot,
+            }
+        })?;
+        if let Some(cause) = control_cause {
+            return Err(OperationFinishError {
+                cause: PublicationCause::Control(cause),
+                snapshot,
             });
         }
-        self.ledger
-            .try_grow_progress_evidence(
-                &mut self.progress,
-                desired_capacity,
-                &mut self.progress_evidence_bytes,
-            )
-            .map_err(|cause| ProgressStorageError::Evidence { cause })?;
-        self.progress.insert(position, (key, state));
-        Ok(())
+        Ok(snapshot)
     }
 }
 
@@ -645,6 +837,9 @@ fn poll_operation_control<PP, U>(
 ) -> Result<(), ControlCause> {
     if let Some(cause) = terminal.clone() {
         return Err(cause);
+    }
+    if let Some(cause) = control.disposal_failure().cloned() {
+        return fail_operation_control(terminal, cause);
     }
     let cancellation = control.cancellation.as_ref().map(Arc::clone);
     let cancelled = catch_unwind(move || cancellation.is_some_and(|signal| signal.is_cancelled()));
@@ -748,6 +943,7 @@ where
         dimension: D,
         bytes: u64,
     ) -> Result<LiveReservation<O, LP, D>, LedgerCause<D>> {
+        self.coordinator.ledger.ensure_work_open()?;
         self.coordinator.ledger.reserve(phase, dimension, bytes)
     }
 
@@ -820,3 +1016,6 @@ fn estimated_event_bytes<P: ProgressPhase, U: ProgressUnit>(phase: P, unit: U) -
         .saturating_add(unit.stable_id().len())
         .saturating_add(32)
 }
+
+#[cfg(test)]
+mod tests;

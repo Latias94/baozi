@@ -19,7 +19,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 /// Linear completion authority for one admitted clone-and-handle work pair.
 ///
 /// Admission records both attempted units and reserves their complete future consumed envelope
-/// under one ledger lock. The two consumed units are recorded only after the reference-count clone
+/// in the local work owner. The two consumed units are recorded only after the reference-count clone
 /// and its typed retained handle, respectively, have actually been constructed.
 #[must_use = "admitted retained share work must complete a physical share or remain attempted-only"]
 pub(in crate::retained) struct RetainedShareWorkPermit<'ledger, O, P, D>
@@ -28,7 +28,7 @@ where
     P: Copy + Ord,
     D: Copy + Ord + fmt::Debug,
 {
-    work: LinearWorkBatchPermit<O, P, D, 2>,
+    work: LinearWorkBatchPermit<'ledger, D, 2>,
     charges: [(D, u64); 2],
     _ledger: PhantomData<&'ledger Ledger<O, P, D>>,
 }
@@ -55,7 +55,17 @@ where
     }
 
     fn complete_typed_handle(mut self) -> Result<(), crate::ledger::LedgerCause<D>> {
-        self.work.complete(1, self.charges[1].1)
+        match self.work.complete(1, self.charges[1].1) {
+            Ok(()) => self.work.finish(),
+            Err(cause) => {
+                self.work.finish_partial()?;
+                Err(cause)
+            }
+        }
+    }
+
+    pub(in crate::retained) fn finish_partial(self) -> Result<(), crate::ledger::LedgerCause<D>> {
+        self.work.finish_partial()
     }
 
     pub(in crate::retained) fn try_share_account(
@@ -65,6 +75,7 @@ where
     {
         let inner = account.inner.share();
         if let Err(cause) = self.complete_reference_clone() {
+            let cause = self.finish_partial().err().unwrap_or(cause);
             return Err(RetainedShareWorkCompletionFailure {
                 owner: PhysicalStorageAccount { inner },
                 cause,
@@ -84,6 +95,7 @@ where
     {
         let inner = allocation.inner.share();
         if let Err(cause) = self.complete_reference_clone() {
+            let cause = self.finish_partial().err().unwrap_or(cause);
             return Err(RetainedShareWorkCompletionFailure {
                 owner: RetainedAllocation {
                     inner,
@@ -252,7 +264,7 @@ where
         let charges = step.into_charges();
         ledger
             .try_admit_linear_work_batch(&charges)
-            .map(|work| RetainedShareWorkPermit {
+            .map(|work| RetainedShareWorkPermit::<O, P, D> {
                 work,
                 charges,
                 _ledger: PhantomData,

@@ -101,9 +101,10 @@ pub enum ControlCause {
     Cancelled { origin: CancellationOrigin },
     /// The configured deadline elapsed.
     DeadlineExceeded,
-    /// A progress observer panicked while unwinding was available.
+    /// A progress observer panicked during invocation or disposal while unwinding was available.
     ObserverPanicked,
-    /// A custom cancellation signal panicked while unwinding was available.
+    /// A custom cancellation signal panicked during invocation or disposal while unwinding
+    /// was available.
     CancellationSignalPanicked,
     /// An owner reported progress that violated the monotonic contract.
     InvalidProgress { violation: ProgressViolation },
@@ -304,13 +305,17 @@ pub struct OperationControl<P, U> {
     pub(crate) observer: Option<Box<dyn ProgressObserver<P, U>>>,
     pub(crate) deadline: Option<Instant>,
     pub(crate) progress_limits: ProgressDeliveryLimits,
+    disposal_failure: Option<ControlCause>,
 }
 
 impl<P, U> OperationControl<P, U> {
     /// Replaces the no-op cancellation signal.
     pub fn with_cancellation(mut self, cancellation: impl CancellationSignal) -> Self {
-        if let Some(previous) = self.cancellation.replace(Arc::new(cancellation)) {
-            discard_extension(previous);
+        if let Some(previous) = self.cancellation.replace(Arc::new(cancellation))
+            && try_discard_extension(previous).is_err()
+        {
+            self.disposal_failure
+                .get_or_insert(ControlCause::CancellationSignalPanicked);
         }
         self
     }
@@ -320,8 +325,11 @@ impl<P, U> OperationControl<P, U> {
         mut self,
         observer: impl ProgressObserver<P, U> + 'static,
     ) -> Self {
-        if let Some(previous) = self.observer.replace(Box::new(observer)) {
-            discard_extension(previous);
+        if let Some(previous) = self.observer.replace(Box::new(observer))
+            && try_discard_extension(previous).is_err()
+        {
+            self.disposal_failure
+                .get_or_insert(ControlCause::ObserverPanicked);
         }
         self
     }
@@ -339,9 +347,43 @@ impl<P, U> OperationControl<P, U> {
     }
 
     pub(crate) fn discard_cancellation(&mut self) {
-        if let Some(cancellation) = self.cancellation.take() {
-            discard_extension(cancellation);
+        if let Some(cancellation) = self.cancellation.take()
+            && try_discard_extension(cancellation).is_err()
+        {
+            self.disposal_failure
+                .get_or_insert(ControlCause::CancellationSignalPanicked);
         }
+    }
+
+    /// Disposes both owned extensions and reports the first disposal failure, including replacements.
+    ///
+    /// The owner must call this outside all accounting guards before closing sealed work and
+    /// reconcile any failure before final composition. Both drops are attempted independently;
+    /// repeated calls do not drop an extension again and preserve the same failure.
+    pub(crate) fn dispose_extensions(&mut self) -> Result<(), ControlCause> {
+        let cancellation = self.cancellation.take();
+        let observer = self.observer.take();
+        if let Some(cancellation) = cancellation
+            && try_discard_extension(cancellation).is_err()
+        {
+            self.disposal_failure
+                .get_or_insert(ControlCause::CancellationSignalPanicked);
+        }
+        if let Some(observer) = observer
+            && try_discard_extension(observer).is_err()
+        {
+            self.disposal_failure
+                .get_or_insert(ControlCause::ObserverPanicked);
+        }
+        match &self.disposal_failure {
+            Some(cause) => Err(cause.clone()),
+            None => Ok(()),
+        }
+    }
+
+    /// Returns the first contained disposal failure without clearing it, for owner control checks.
+    pub(crate) fn disposal_failure(&self) -> Option<&ControlCause> {
+        self.disposal_failure.as_ref()
     }
 }
 
@@ -352,18 +394,14 @@ impl<P, U> Default for OperationControl<P, U> {
             observer: None,
             deadline: None,
             progress_limits: ProgressDeliveryLimits::default(),
+            disposal_failure: None,
         }
     }
 }
 
 impl<P, U> Drop for OperationControl<P, U> {
     fn drop(&mut self) {
-        if let Some(cancellation) = self.cancellation.take() {
-            discard_extension(cancellation);
-        }
-        if let Some(observer) = self.observer.take() {
-            discard_extension(observer);
-        }
+        let _ = self.dispose_extensions();
     }
 }
 
@@ -377,7 +415,17 @@ pub(crate) fn discard_untrusted_panic_payload(payload: Box<dyn std::any::Any + S
 }
 
 pub(crate) fn discard_extension<T>(extension: T) {
+    let _ = try_discard_extension(extension);
+}
+
+fn try_discard_extension<T>(extension: T) -> Result<(), ()> {
     if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(extension))) {
         discard_untrusted_panic_payload(payload);
+        Err(())
+    } else {
+        Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -298,7 +298,12 @@ where
         }
         let owner = self.core.owner.as_ref().ok_or(LedgerCause::OwnerMismatch)?;
         let mut state = lock(owner);
-        if !self.core.active || state.publication != super::PublicationState::Open {
+        if !self.core.active
+            || !matches!(
+                state.publication,
+                super::PublicationState::Open | super::PublicationState::Closing
+            )
+        {
             return Err(LedgerCause::OwnerMismatch);
         }
         let overflow = || LedgerCause::LiveReservationsRemain { bytes: u64::MAX };
@@ -860,14 +865,15 @@ where
         }
     }
 
-    pub(super) fn destroy_storage_then_release_bound_cover(
-        &mut self,
-        state: &mut LedgerState<P, D>,
-    ) {
+    /// Called outside accounting guards after payload attributions have been released.
+    pub(super) fn destroy_storage_then_release_bound_cover(&mut self) {
         drop(std::mem::take(&mut self.attributions));
         drop(std::mem::take(&mut self.commitments));
         if let Some(mut capacity_cover) = self.capacity_cover.take() {
-            capacity_cover.core.release_bound_locked(state);
+            {
+                let mut state = lock(&self.owner);
+                capacity_cover.core.release_bound_locked(&mut state);
+            }
             drop(capacity_cover);
         }
     }

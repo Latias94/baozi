@@ -1149,9 +1149,9 @@ fn startup_graph_overflow_checks_leave_all_prior_ledger_state_unchanged() {
     test_reset_startup_graph_probes(None);
     let (limits, parts, _) = default_qualified_graph();
     let ledger = frozen_graph_ledger(limits);
-    let build_position = phase_entry(&lock(&ledger.state).phases, Phase::Build)
-        .expect("build phase")
-        .state_position;
+    let build_position = ledger
+        .bound_phase_position(Phase::Build)
+        .expect("build phase");
     {
         let mut state = lock(&ledger.state);
         state.phase_states[build_position].current_live_bytes = u64::MAX;

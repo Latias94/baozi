@@ -325,6 +325,9 @@ fn ordinary_work_permit_records_exact_attempted_and_completed_work() {
                     Err(RetainedWorkFinishError::Incomplete) => {
                         panic!("exact ordinary work permit must complete")
                     }
+                    Err(RetainedWorkFinishError::Ledger(cause)) => {
+                        panic!("exact ordinary work permit must resolve: {cause:?}")
+                    }
                 }
                 Ok(emplacer.place(7, EvidenceRootTag))
             },
@@ -332,8 +335,7 @@ fn ordinary_work_permit_records_exact_attempted_and_completed_work() {
         .unwrap_or_else(|_| panic!("exact ordinary work evidence must retain"));
 
     let work = assembly
-        .test_ledger_probe()
-        .dimension_evidence(TestDimension::Work)
+        .test_dimension_evidence(TestDimension::Work)
         .unwrap_or_else(|| panic!("ordinary work evidence"));
     assert_eq!((work.attempted(), work.consumed()), (3, 3));
     assert_eq!(
@@ -379,8 +381,7 @@ fn ordinary_work_permit_preserves_completed_prefix_when_dropped_incomplete() {
         )) if cause == BUILD_FAILED
     ));
     let work = assembly
-        .test_ledger_probe()
-        .dimension_evidence(TestDimension::Work)
+        .test_dimension_evidence(TestDimension::Work)
         .unwrap_or_else(|| panic!("incomplete ordinary work evidence"));
     assert_eq!((work.attempted(), work.consumed()), (3, 2));
     assert_eq!(
@@ -425,8 +426,7 @@ fn borrowed_work_permit_resolves_verified_partial_work_without_abandonment() {
         )) if cause == BUILD_FAILED
     ));
     let work = assembly
-        .test_ledger_probe()
-        .dimension_evidence(TestDimension::Work)
+        .test_dimension_evidence(TestDimension::Work)
         .unwrap_or_else(|| panic!("borrowed work evidence"));
     assert_eq!((work.attempted(), work.consumed()), (3, 2));
     assert_eq!(
@@ -471,8 +471,7 @@ fn dropped_borrowed_work_permit_preserves_prefix_and_latches_abandonment() {
         )) if cause == BUILD_FAILED
     ));
     let work = assembly
-        .test_ledger_probe()
-        .dimension_evidence(TestDimension::Work)
+        .test_dimension_evidence(TestDimension::Work)
         .unwrap_or_else(|| panic!("abandoned borrowed-work evidence"));
     assert_eq!((work.attempted(), work.consumed()), (3, 1));
     assert_eq!(
@@ -778,8 +777,7 @@ fn borrowed_work_permit_preserves_prefix_before_mid_action_cancellation() {
         )) if cause == BUILD_FAILED
     ));
     let work = assembly
-        .test_ledger_probe()
-        .dimension_evidence(TestDimension::Work)
+        .test_dimension_evidence(TestDimension::Work)
         .unwrap_or_else(|| panic!("cancellable borrowed-work evidence"));
     assert_eq!((work.attempted(), work.consumed()), (3, 1));
     assert_eq!(
@@ -825,8 +823,7 @@ fn ordinary_work_permit_rejects_consumed_overrun_without_fabricating_completion(
         )) if cause == BUILD_FAILED
     ));
     let work = assembly
-        .test_ledger_probe()
-        .dimension_evidence(TestDimension::Work)
+        .test_dimension_evidence(TestDimension::Work)
         .unwrap_or_else(|| panic!("overrun ordinary work evidence"));
     assert_eq!((work.attempted(), work.consumed()), (3, 0));
     assert_eq!(
@@ -878,8 +875,7 @@ fn ordinary_work_admission_rejects_short_consumed_capacity_before_action() {
         "the protected action must not start after rejection"
     );
     let work = assembly
-        .test_ledger_probe()
-        .dimension_evidence(TestDimension::Work)
+        .test_dimension_evidence(TestDimension::Work)
         .unwrap_or_else(|| panic!("short-capacity ordinary work evidence"));
     assert_eq!((work.attempted(), work.consumed()), (3, 0));
     assert_eq!(
@@ -926,8 +922,7 @@ fn ordinary_work_admission_observes_preexisting_cancellation_before_attempting_w
         "cancelled work must not enter the protected action"
     );
     let work = assembly
-        .test_ledger_probe()
-        .dimension_evidence(TestDimension::Work)
+        .test_dimension_evidence(TestDimension::Work)
         .unwrap_or_else(|| panic!("cancelled ordinary work evidence"));
     assert_eq!((work.attempted(), work.consumed()), (0, 0));
     assert_eq!(
@@ -967,8 +962,7 @@ fn ordinary_work_permit_cannot_address_the_protected_failure_dimension() {
         )) if cause == BUILD_FAILED
     ));
     let protected = assembly
-        .test_ledger_probe()
-        .dimension_evidence(TestDimension::FailureTerminalWork)
+        .test_dimension_evidence(TestDimension::FailureTerminalWork)
         .unwrap_or_else(|| panic!("protected work evidence"));
     assert_eq!((protected.attempted(), protected.consumed()), (0, 0));
     assert_eq!(
@@ -1373,8 +1367,7 @@ fn validated_success_can_downgrade_after_ordinary_work_is_exhausted() {
         .unwrap_or_else(|_| panic!("success-capable publication must open"));
     let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
     let ordinary = assembly
-        .test_ledger_probe()
-        .dimension_evidence(TestDimension::Bytes)
+        .test_dimension_evidence(TestDimension::Bytes)
         .unwrap_or_else(|| panic!("ordinary dimension evidence before exhaustion"));
     let remaining = ORDINARY_WORK_LIMIT
         .checked_sub(ordinary.consumed())
@@ -1509,8 +1502,7 @@ fn direct_rich_validation_of_a_success_plan_activates_protected_work() {
     };
     let ordinary_before = failure
         .assembly
-        .test_ledger_probe()
-        .dimension_evidence(TestDimension::Bytes)
+        .test_dimension_evidence(TestDimension::Bytes)
         .unwrap_or_else(|| panic!("ordinary evidence before protected append"));
     let detail = failure
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
@@ -1519,13 +1511,11 @@ fn direct_rich_validation_of_a_success_plan_activates_protected_work() {
         .unwrap_or_else(|_| panic!("direct rich validation must activate protected append work"));
     let ordinary_after = failure
         .assembly
-        .test_ledger_probe()
-        .dimension_evidence(TestDimension::Bytes)
+        .test_dimension_evidence(TestDimension::Bytes)
         .unwrap_or_else(|| panic!("ordinary evidence after protected append"));
     let protected = failure
         .assembly
-        .test_ledger_probe()
-        .dimension_evidence(TestDimension::FailureTerminalWork)
+        .test_dimension_evidence(TestDimension::FailureTerminalWork)
         .unwrap_or_else(|| panic!("protected evidence after direct rich validation"));
     assert_eq!(ordinary_after.attempted(), ordinary_before.attempted());
     assert_eq!(ordinary_after.consumed(), ordinary_before.consumed());
@@ -1575,8 +1565,7 @@ fn failed_protected_evidence_action_seals_the_terminal_rail() {
         ))) if cause == BUILD_FAILED
     ));
     let after_first_failure = assembly
-        .test_ledger_probe()
-        .dimension_evidence(TestDimension::FailureTerminalWork)
+        .test_dimension_evidence(TestDimension::FailureTerminalWork)
         .unwrap_or_else(|| panic!("failure-terminal evidence after protected failure"));
 
     assert!(matches!(
@@ -1586,8 +1575,7 @@ fn failed_protected_evidence_action_seals_the_terminal_rail() {
         Err(RetainedPublicationError::FailureTerminalWorkSealed)
     ));
     let after_rejected_retry = assembly
-        .test_ledger_probe()
-        .dimension_evidence(TestDimension::FailureTerminalWork)
+        .test_dimension_evidence(TestDimension::FailureTerminalWork)
         .unwrap_or_else(|| panic!("failure-terminal evidence after sealed retry"));
     assert_eq!(after_rejected_retry, after_first_failure);
 
@@ -1632,8 +1620,7 @@ fn active_and_failed_terminal_states_seal_canonical_and_success_paths() {
         .unwrap_or_else(|_| panic!("success-capable publication must open"));
     let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
     let ordinary = assembly
-        .test_ledger_probe()
-        .dimension_evidence(TestDimension::Bytes)
+        .test_dimension_evidence(TestDimension::Bytes)
         .unwrap_or_else(|| panic!("ordinary evidence before terminal rejection"));
     let failing_amount = ORDINARY_WORK_LIMIT
         .checked_sub(ordinary.consumed())
@@ -1653,8 +1640,7 @@ fn active_and_failed_terminal_states_seal_canonical_and_success_paths() {
         })
         .unwrap_or_else(|_| panic!("recorded rejection must activate protected evidence work"));
     let protected_after_activation = assembly
-        .test_ledger_probe()
-        .dimension_evidence(TestDimension::FailureTerminalWork)
+        .test_dimension_evidence(TestDimension::FailureTerminalWork)
         .unwrap_or_else(|| panic!("protected evidence after activation"));
     assert_eq!(
         (
@@ -1671,8 +1657,7 @@ fn active_and_failed_terminal_states_seal_canonical_and_success_paths() {
         Err(RetainedPublicationError::SuccessOutcomeRejected)
     ));
     let protected_after_canonical_retry = assembly
-        .test_ledger_probe()
-        .dimension_evidence(TestDimension::FailureTerminalWork)
+        .test_dimension_evidence(TestDimension::FailureTerminalWork)
         .unwrap_or_else(|| panic!("protected evidence after canonical retry"));
     assert_eq!(protected_after_canonical_retry, protected_after_activation);
 
@@ -1685,16 +1670,14 @@ fn active_and_failed_terminal_states_seal_canonical_and_success_paths() {
         ))) if cause == BUILD_FAILED
     ));
     let protected_after_failure = assembly
-        .test_ledger_probe()
-        .dimension_evidence(TestDimension::FailureTerminalWork)
+        .test_dimension_evidence(TestDimension::FailureTerminalWork)
         .unwrap_or_else(|| panic!("protected evidence after sealed failure"));
     assert!(matches!(
         assembly.try_commit_outcome_evidence(TestDimension::Bytes, 1),
         Err(RetainedPublicationError::FailureTerminalWorkSealed)
     ));
     let protected_after_commit = assembly
-        .test_ledger_probe()
-        .dimension_evidence(TestDimension::FailureTerminalWork)
+        .test_dimension_evidence(TestDimension::FailureTerminalWork)
         .unwrap_or_else(|| panic!("protected evidence after sealed commitment"));
     assert_eq!(protected_after_commit, protected_after_failure);
 
@@ -1780,12 +1763,26 @@ fn run_failure_guard_case(case: FailureGuardCase, fault: FailureFault) {
         | FailureGuardCase::RichBoth
         | FailureGuardCase::MinimalNone => 64,
     };
-    let operation = test_operation_on_account_with_control(
-        &account,
-        evidence_limit,
-        RetainedBatchLimits::new(2, 2),
-        OperationControl::default(),
-    );
+    let operation = match case {
+        FailureGuardCase::RichEvidence
+        | FailureGuardCase::RichBoth
+        | FailureGuardCase::MinimalEvidence => test_operation_on_account_with_failure_work(
+            &account,
+            evidence_limit,
+            RetainedBatchLimits::new(2, 2),
+            OperationControl::default(),
+            1,
+            7_u32,
+        ),
+        FailureGuardCase::MinimalNone | FailureGuardCase::MinimalBoth => {
+            test_operation_on_account_with_control(
+                &account,
+                evidence_limit,
+                RetainedBatchLimits::new(2, 2),
+                OperationControl::default(),
+            )
+        }
+    };
     let ledger = operation.coordinator.retained_ledger().test_probe();
 
     macro_rules! run_prepare {
@@ -3353,8 +3350,7 @@ fn share_work_rejection_does_not_clone_or_mutate_the_target_table() {
         .unwrap_or_else(|_| panic!("canonical source map must bind before share work"));
     let physical_before_share = account.snapshot();
     let work_before_share = assembly
-        .test_ledger_probe()
-        .dimension_evidence(TestDimension::Bytes)
+        .test_dimension_evidence(TestDimension::Bytes)
         .unwrap_or_else(|| panic!("share work dimension must remain observable"));
     assert_eq!(work_before_share.consumed(), 15);
 
@@ -3372,8 +3368,7 @@ fn share_work_rejection_does_not_clone_or_mutate_the_target_table() {
         ))
     ));
     let work_after_share = assembly
-        .test_ledger_probe()
-        .dimension_evidence(TestDimension::Bytes)
+        .test_dimension_evidence(TestDimension::Bytes)
         .unwrap_or_else(|| panic!("rejected share work evidence must remain observable"));
     assert_eq!(
         work_after_share.attempted(),
@@ -3454,7 +3449,8 @@ fn invalid_publication_capacity_is_rejected_before_every_open_side_effect() {
     for (index, (case, invalid_plan, expects_batch_capacity)) in
         invalid_plans.into_iter().enumerate()
     {
-        let operation = test_operation(&factory, 64);
+        let operation =
+            test_operation_with_failure_work(&factory, 64, RetainedBatchLimits::new(2, 2), 1);
         let dimension_before = operation
             .coordinator
             .dimension_evidence(TestDimension::Bytes)
@@ -3639,7 +3635,8 @@ fn second_table_allocation_failure_reports_canonical_storage_cleanup_failure() {
 #[test]
 fn semantic_rejection_can_append_evidence_and_prepare_a_rich_failure() {
     let factory = account_factory(1);
-    let operation = test_operation_with_writer_limits(&factory, 64, RetainedBatchLimits::new(3, 2));
+    let operation =
+        test_operation_with_failure_work(&factory, 64, RetainedBatchLimits::new(3, 2), 2);
     let mut assembly: TestPublication<u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 2))
         .unwrap_or_else(|_| panic!("semantic rejection publication must open"));
@@ -3742,7 +3739,8 @@ fn validation_panic_transitions_to_fallback_only() {
 #[test]
 fn repeated_semantic_rejection_preserves_the_product_graph_fallback_cause() {
     let factory = account_factory(1);
-    let operation = test_operation(&factory, 64);
+    let operation =
+        test_operation_with_failure_work(&factory, 64, RetainedBatchLimits::new(2, 2), 1);
     let mut assembly: TestPublication<u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("repeated-rejection publication must open"));
@@ -3991,7 +3989,8 @@ fn partial_canonical_downgrades_to_rich_failure_after_storage_drops_first() {
     static OBSERVED_PHYSICAL_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 
     let factory = account_factory(1);
-    let operation = test_operation_with_writer_limits(&factory, 64, RetainedBatchLimits::new(2, 2));
+    let operation =
+        test_operation_with_failure_work(&factory, 64, RetainedBatchLimits::new(2, 2), 1);
     let mut assembly: TestPublication<LiveDropObservation, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("publication assembly must open"));
@@ -4061,7 +4060,8 @@ fn partial_canonical_downgrades_to_rich_failure_after_storage_drops_first() {
 #[test]
 fn failure_only_plan_rejects_canonical_construction_and_publishes_evidence() {
     let factory = account_factory(1);
-    let operation = test_operation(&factory, 64);
+    let operation =
+        test_operation_with_failure_work(&factory, 64, RetainedBatchLimits::new(2, 2), 1);
     let plan =
         RetainedPublicationPlan::rich_failure(RetainedBlockTablePlan::new(writer_plan(2, 2), 1, 1));
     let mut assembly: TestPublication<u64, u64> = operation
@@ -4217,7 +4217,8 @@ fn primary_binding_failure_preserves_the_earlier_control_cause() {
 #[test]
 fn evidence_primary_rejection_uses_minimal_fallback_without_retry() {
     let factory = account_factory(1);
-    let operation = test_operation(&factory, 4);
+    let operation =
+        test_operation_with_failure_work(&factory, 4, RetainedBatchLimits::new(2, 2), 1);
     let plan =
         RetainedPublicationPlan::rich_failure(RetainedBlockTablePlan::new(writer_plan(2, 2), 1, 1));
     let mut assembly: TestPublication<u64, u64> = operation
@@ -4471,28 +4472,34 @@ fn success_double_primary_rejection_drops_both_tables_before_minimal_fallback() 
 }
 
 #[test]
-fn primary_ordering_panic_retains_storage_and_attribution_without_cleanup() {
+fn terminal_prepare_never_calls_dimension_ordering() {
     static BLOCK_DROPS: AtomicU64 = AtomicU64::new(0);
     static OBSERVED_ACTIVE: AtomicU64 = AtomicU64::new(0);
     static OBSERVED_LIVE: AtomicU64 = AtomicU64::new(0);
 
-    let _ord_lock = PRIMARY_DIMENSION_ORD_TEST_LOCK
+    let _ord_lock = TERMINAL_DIMENSION_ORD_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _reset = PrimaryDimensionOrdReset;
-    PANIC_ON_PRIMARY_DIMENSION_ORD.store(false, Ordering::SeqCst);
+    let _reset = TerminalDimensionOrdReset;
+    FORBID_TERMINAL_DIMENSION_ORD.store(false, Ordering::SeqCst);
     BLOCK_DROPS.store(0, Ordering::SeqCst);
     OBSERVED_ACTIVE.store(0, Ordering::SeqCst);
     OBSERVED_LIVE.store(0, Ordering::SeqCst);
 
-    type PanicOperation =
-        RetainedOperation<TestOwner, TestPhase, TestProgress, TestUnit, PrimaryPanicDimension, u32>;
-    type PanicPublication = RetainedPublicationAssembly<
+    type OrderingOperation = RetainedOperation<
         TestOwner,
         TestPhase,
         TestProgress,
         TestUnit,
-        PrimaryPanicDimension,
+        TerminalOrderingDimension,
+        u32,
+    >;
+    type OrderingPublication = RetainedPublicationAssembly<
+        TestOwner,
+        TestPhase,
+        TestProgress,
+        TestUnit,
+        TerminalOrderingDimension,
         u32,
         PrimaryBindDropObservation,
         u64,
@@ -4500,11 +4507,11 @@ fn primary_ordering_panic_retains_storage_and_attribution_without_cleanup() {
 
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
-    let dimension = PrimaryPanicDimension(7);
+    let dimension = TerminalOrderingDimension(7);
     let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
         .with_published_outcome_evidence_limit(64);
     let limits = LedgerLimits::new(u64::MAX, [(dimension, policy)])
-        .unwrap_or_else(|_| panic!("panic-order policy must be valid"));
+        .unwrap_or_else(|_| panic!("terminal-order policy must be valid"));
     let writer = RetainedWriterPlan::new(
         TestPhase::Build,
         dimension,
@@ -4519,10 +4526,10 @@ fn primary_ordering_panic_retains_storage_and_attribution_without_cleanup() {
         OutputCommitment::new(dimension, 1),
     );
     let operation =
-        PanicOperation::try_start(OperationControl::default(), limits, &account, start, || {
+        OrderingOperation::try_start(OperationControl::default(), limits, &account, start, || {
             Ok(7_u32)
         })
-        .unwrap_or_else(|_| panic!("panic-order operation must start"));
+        .unwrap_or_else(|_| panic!("terminal-order operation must start"));
     let ledger = operation.coordinator.retained_ledger().test_probe();
     let deferred_ledger = StdArc::new(StdMutex::new(Some(ledger)));
     let table_writer = RetainedWriterPlan::new(
@@ -4535,9 +4542,9 @@ fn primary_ordering_panic_retains_storage_and_attribution_without_cleanup() {
         RetainedBlockTablePlan::new(table_writer, 1, 1),
         RetainedBlockTablePlan::new(table_writer, 1, 1),
     );
-    let mut assembly: PanicPublication = operation
+    let mut assembly: OrderingPublication = operation
         .try_publication_assembly(publication_plan)
-        .unwrap_or_else(|_| panic!("panic-order publication must open"));
+        .unwrap_or_else(|_| panic!("terminal-order publication must open"));
     let canonical = assembly
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(
@@ -4550,53 +4557,35 @@ fn primary_ordering_panic_retains_storage_and_attribution_without_cleanup() {
                 CanonicalRootTag,
             ))
         })
-        .unwrap_or_else(|_| panic!("panic-order canonical block must retain"));
+        .unwrap_or_else(|_| panic!("terminal-order canonical block must retain"));
     let evidence = assembly
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(9_u64, EvidenceRootTag))
         })
-        .unwrap_or_else(|_| panic!("panic-order evidence block must retain"));
-    let (expected_active, expected_live) = {
-        let ledger = lock_recovering_poison(&deferred_ledger);
-        let ledger = ledger.as_ref().expect("panic-order ledger probe");
-        (ledger.active_reservations(), ledger.current_live_bytes())
-    };
+        .unwrap_or_else(|_| panic!("terminal-order evidence block must retain"));
 
     let validated =
         match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
             session.canonical(canonical).is_some() && session.outcome_evidence(evidence) == Some(&9)
         }) {
             RetainedSuccessValidation::Valid(validated) => validated,
-            _ => panic!("panic-order candidate must validate"),
+            _ => panic!("terminal-order candidate must validate"),
         };
     let before_physical = account.snapshot();
-    PANIC_ON_PRIMARY_DIMENSION_ORD.store(true, Ordering::SeqCst);
+    FORBID_TERMINAL_DIMENSION_ORD.store(true, Ordering::SeqCst);
     let result = validated.try_prepare(final_progress());
-    PANIC_ON_PRIMARY_DIMENSION_ORD.store(false, Ordering::SeqCst);
+    FORBID_TERMINAL_DIMENSION_ORD.store(false, Ordering::SeqCst);
 
-    assert!(matches!(
-        result,
-        Err(RetainedPublicationPrepareError::FinalizationContainment(cause))
-            if cause.reason() == AccountPoisonReason::PrimaryPublicationBindingPanicked
-    ));
+    let prepared = result.unwrap_or_else(|_| {
+        panic!("terminal preparation must succeed without invoking dimension ordering")
+    });
     assert_eq!(BLOCK_DROPS.load(Ordering::SeqCst), 0);
     assert_eq!(OBSERVED_ACTIVE.load(Ordering::SeqCst), 0);
     assert_eq!(OBSERVED_LIVE.load(Ordering::SeqCst), 0);
-    {
-        let ledger = lock_recovering_poison(&deferred_ledger);
-        let ledger = ledger.as_ref().expect("retained panic-order ledger probe");
-        assert_eq!(ledger.active_reservations(), expected_active);
-        assert_eq!(ledger.current_live_bytes(), expected_live);
-    }
     let after_physical = account.snapshot();
-    assert_eq!(
-        after_physical.live_retained_bytes(),
-        before_physical.live_retained_bytes()
-    );
-    assert_eq!(
-        after_physical.live_retained_allocations(),
-        before_physical.live_retained_allocations()
-    );
+    assert!(!after_physical.poisoned());
+    assert!(after_physical.live_retained_bytes() > 0);
+    assert!(after_physical.live_retained_allocations() > 0);
     assert_eq!(
         after_physical.total_admitted_retained_bytes(),
         before_physical.total_admitted_retained_bytes()
@@ -4605,14 +4594,18 @@ fn primary_ordering_panic_retains_storage_and_attribution_without_cleanup() {
         after_physical.total_admitted_retained_allocations(),
         before_physical.total_admitted_retained_allocations()
     );
-    assert_eq!(
-        after_physical
-            .first_poison_evidence()
-            .map(AccountPoisonEvidence::reason),
-        Some(AccountPoisonReason::PrimaryPublicationBindingPanicked)
-    );
+    let published = handoff_for_test(prepared);
+    assert!(matches!(
+        &published,
+        PublishedRetainedPublicationParts::Success { .. }
+    ));
+    assert_eq!(BLOCK_DROPS.load(Ordering::SeqCst), 0);
+    drop(published);
+    assert_eq!(BLOCK_DROPS.load(Ordering::SeqCst), 1);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
     drop(account);
-    assert_eq!(factory.snapshot().live_accounts(), 1);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
 }
 
 #[test]
@@ -4687,21 +4680,27 @@ fn cleanup_lattice_is_order_independent_and_preserves_error_precedence() {
 }
 
 #[test]
-fn primary_binding_panic_stops_before_later_storage_cleanup() {
-    let _ord_lock = PRIMARY_DIMENSION_ORD_TEST_LOCK
+fn evidence_only_binding_panic_stops_before_later_storage_cleanup() {
+    let _ord_lock = TERMINAL_DIMENSION_ORD_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _reset = PrimaryDimensionOrdReset;
-    PANIC_ON_PRIMARY_DIMENSION_ORD.store(false, Ordering::SeqCst);
+    let _reset = TerminalDimensionOrdReset;
+    FORBID_TERMINAL_DIMENSION_ORD.store(false, Ordering::SeqCst);
 
-    type PanicOperation =
-        RetainedOperation<TestOwner, TestPhase, TestProgress, TestUnit, PrimaryPanicDimension, u32>;
+    type PanicOperation = RetainedOperation<
+        TestOwner,
+        TestPhase,
+        TestProgress,
+        TestUnit,
+        TerminalOrderingDimension,
+        u32,
+    >;
     type PanicPublication = RetainedPublicationAssembly<
         TestOwner,
         TestPhase,
         TestProgress,
         TestUnit,
-        PrimaryPanicDimension,
+        TerminalOrderingDimension,
         u32,
         u64,
         u64,
@@ -4709,8 +4708,8 @@ fn primary_binding_panic_stops_before_later_storage_cleanup() {
 
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
-    let dimension = PrimaryPanicDimension(7);
-    let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
+    let dimension = TerminalOrderingDimension(7);
+    let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, 0, u64::MAX)
         .with_published_outcome_evidence_limit(64);
     let limits = LedgerLimits::new(u64::MAX, [(dimension, policy)])
         .unwrap_or_else(|_| panic!("combined-fault policy must be valid"));
@@ -4756,6 +4755,9 @@ fn primary_binding_panic_stops_before_later_storage_cleanup() {
             Ok(emplacer.place(9_u64, EvidenceRootTag))
         })
         .unwrap_or_else(|_| panic!("combined-fault evidence block must retain"));
+    assembly
+        .try_commit_canonical(dimension, 1)
+        .unwrap_or_else(|_| panic!("canonical rejection commitment must fit the batch"));
     let validated =
         match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
             session.canonical(canonical) == Some(&11)
@@ -4769,9 +4771,8 @@ fn primary_binding_panic_stops_before_later_storage_cleanup() {
     let before_physical = account.snapshot();
 
     test_panic_final_owner_drop_after(0);
-    PANIC_ON_PRIMARY_DIMENSION_ORD.store(true, Ordering::SeqCst);
+    panic_next_evidence_only_primary_bind();
     let result = validated.try_prepare(final_progress());
-    PANIC_ON_PRIMARY_DIMENSION_ORD.store(false, Ordering::SeqCst);
 
     assert!(matches!(
         result,
@@ -4955,7 +4956,8 @@ fn table_payload_drop_panic_fails_closed_before_attribution_release() {
     static EVIDENCE_DROPS: AtomicU64 = AtomicU64::new(0);
 
     let factory = account_factory(1);
-    let operation = test_operation(&factory, 64);
+    let operation =
+        test_operation_with_failure_work(&factory, 64, RetainedBatchLimits::new(2, 2), 1);
     let account = operation
         .account()
         .share_after_test_admission()
@@ -5457,7 +5459,17 @@ fn rich_failure_fallback_drop_panic_preserves_every_unacknowledged_attribution()
     for includes_canonical_discard in [false, true] {
         DROP_COUNT.store(0, Ordering::SeqCst);
         let factory = account_factory(1);
-        let operation = test_operation_with_fallback(&factory, PanickingRichFallback);
+        let operation = {
+            let account = account(&factory, u64::MAX, 128);
+            test_operation_on_account_with_failure_work(
+                &account,
+                64,
+                RetainedBatchLimits::new(2, 2),
+                OperationControl::default(),
+                1,
+                PanickingRichFallback,
+            )
+        };
         let account = operation
             .account()
             .share_after_test_admission()
@@ -5669,7 +5681,8 @@ fn rejected_primary_payload_drop_panic_fails_closed_before_token_release() {
     }
 
     let factory = account_factory(1);
-    let operation = test_operation(&factory, 4);
+    let operation =
+        test_operation_with_failure_work(&factory, 4, RetainedBatchLimits::new(2, 2), 1);
     let account = operation
         .account()
         .share_after_test_admission()

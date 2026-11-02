@@ -1730,10 +1730,11 @@ where
     }
 
     #[cfg(test)]
-    pub(in crate::concrete_store) fn test_ledger_probe(
+    pub(in crate::concrete_store) fn test_dimension_evidence(
         &self,
-    ) -> crate::ledger::LedgerTestProbe<StorePhaseKey, StoreDimensionKey> {
-        self.assembly.raw.test_ledger_probe()
+        dimension: StoreDimensionKey,
+    ) -> Option<crate::DimensionSnapshot> {
+        self.assembly.raw.test_dimension_evidence(dimension)
     }
 
     pub fn control_checkpoint<'borrow>(

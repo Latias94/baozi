@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-10
-updated: 2026-07-13
+updated: 2026-11-02
 authors:
   - Codex
 decision_type: architecture
@@ -147,6 +147,25 @@ Rules:
 Progress callback panics are caught only when the platform panic strategy can unwind. The coordinator
 returns a typed trusted-extension cause to the owning operation, cancels remaining work, and preserves
 evidence. Abort, process exit, deadlock, and arbitrary allocation cannot be contained in-process.
+
+### Terminal Control Ownership
+
+Ordinary work is irreversibly sealed before final progress delivery. The final control gate is
+single-use: it delivers final progress, performs the mandatory poll, and disposes both owned
+extension objects outside accounting guards. Disposal attempts both owners even when one destructor
+panics. A contained destructor failure is returned to the operation's existing cause selector before
+success, publication, or immutable evidence can be accepted.
+
+An accepted control gate may precede a later generation decision. Work remains ordinary-sealed at
+that point; a rejection can still activate the prequalified finite failure grant. Closing work is a
+later transition after all protected envelopes resolve. Closed work is never reopened, and rollback
+cannot restore ordinary work or ordinary allocation authority. Minimal preadmitted fallback performs
+no new user cancellation or progress callback; it still disposes extension owners and verifies the
+outstanding ownership and physical cleanup conditions.
+
+Generic coordinator finalization returns an `OperationFinishError` with a `PublicationCause` and
+the exact final ledger snapshot when control or accounting prevents clean completion. A remembered
+control failure cannot become a successful finalization merely because storage cleanup completed.
 
 ### Diagnostics
 

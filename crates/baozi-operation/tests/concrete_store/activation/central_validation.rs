@@ -3458,15 +3458,36 @@ fn incomplete_validation_work_cannot_form_a_candidate() {
             )
         },
     );
-    let containment = match result {
-        Err(containment) => containment,
-        Ok(_) => panic!("an incomplete validation permit must not form a candidate"),
+    let rejected = match result
+        .expect("explicit partial cleanup preserves the verified recovery owner")
+    {
+        CanonicalCentralValidationOutcome::Rejected(rejected) => rejected,
+        CanonicalCentralValidationOutcome::Candidate(_)
+        | CanonicalCentralValidationOutcome::Fallback(_)
+        | CanonicalCentralValidationOutcome::Interrupted(_) => {
+            panic!("incomplete validation must return a contract rejection and never a candidate")
+        }
     };
+    assert_eq!(rejected.canonical_len(), 0);
     assert_eq!(
-        containment.cause().reason(),
-        AccountPoisonReason::OwnershipGraphUnverified
+        rejected.cause(),
+        &StoreCanonicalRejection::Runtime(StoreRuntimeError::CanonicalValidationContractRejected,)
     );
-    assert!(account.snapshot().poisoned());
+    let (prepared, _cause) = rejected.prepare_minimal_fallback().unwrap().into_parts();
+    let published = prepared.handoff();
+    let work = published.ledger_evidence.dimension(keys.dimension).unwrap();
+    assert_eq!(
+        work.attempted() - work.consumed(),
+        1,
+        "the sealed unvisited validation unit remains attempted-only"
+    );
+    assert_eq!(
+        store_failure_cause(&published.ledger_evidence).class(),
+        StorePreparationFailureClass::ProductGraph
+    );
+    assert!(!account.snapshot().poisoned());
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
 
 #[test]

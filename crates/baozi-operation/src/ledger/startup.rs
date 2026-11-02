@@ -3,7 +3,6 @@ use super::{
     CanonicalOutput, CounterClass, FallbackBatchBaseline, Ledger, LedgerCause, LedgerLimits,
     LedgerState, OperationAttributionReservation, OutcomeEvidenceDestination, OutputCommitment,
     PublicationDestination, ReservationCore, StorageCoveringReservation, dimension_entry, lock,
-    phase_entry,
 };
 use crate::retained::{AdmittedStartupLedgerGraph, ReadyStartupGraphSplitAuthority};
 use crate::{CapacityPlan, OperationOwner};
@@ -345,7 +344,8 @@ where
                 .copied()
         };
         for (index, (dimension, _)) in all().enumerate() {
-            let entry = dimension_entry(&self.dimensions, dimension)
+            let policy = self
+                .dimension(dimension)
                 .ok_or(LedgerCause::UnknownDimension { dimension })?;
             if all().take(index).any(|(previous, _)| previous == dimension) {
                 continue;
@@ -361,12 +361,12 @@ where
                             dimension,
                         })
                 })?;
-            if attempted > entry.policy.attempted_limit {
+            if attempted > policy.attempted_limit {
                 return Err(LedgerCause::LimitExceeded {
                     class: CounterClass::Attempted,
                     dimension,
                     value: attempted,
-                    limit: entry.policy.attempted_limit,
+                    limit: policy.attempted_limit,
                 });
             }
 
@@ -387,12 +387,12 @@ where
                     attempted,
                 });
             }
-            if consumed > entry.policy.consumed_limit {
+            if consumed > policy.consumed_limit {
                 return Err(LedgerCause::LimitExceeded {
                     class: CounterClass::Consumed,
                     dimension,
                     value: consumed,
-                    limit: entry.policy.consumed_limit,
+                    limit: policy.consumed_limit,
                 });
             }
         }
@@ -477,6 +477,20 @@ struct StartupReservationProjection<P, D> {
     spec: StartupReservationSpec<P, D>,
     phase_position: usize,
     dimension_position: usize,
+}
+
+struct StartupReservationBinding<P, D> {
+    spec: StartupReservationSpec<P, D>,
+    phase_position: Result<usize, LedgerCause<D>>,
+    dimension_position: Result<usize, LedgerCause<D>>,
+}
+
+struct StartupLedgerBindings<'op, P, D: Copy> {
+    reservations: [StartupReservationBinding<P, D>; STARTUP_RESERVATION_COUNT as usize],
+    work: Result<super::BoundWorkGroup<'op, D, 8>, LedgerCause<D>>,
+    work_amounts: [u64; 8],
+    commitments: [OutputCommitment<D, OutcomeEvidenceDestination>; 2],
+    commitment_bindings: [Result<(), LedgerCause<D>>; 2],
 }
 
 struct StartupLedgerAdmission<P, D> {
@@ -889,13 +903,59 @@ where
         &self,
         reservation_specs: [StartupReservationSpec<P, D>; STARTUP_RESERVATION_COUNT as usize],
         account_shares: &StartupAccountShareEnvelope<D>,
-        commitments: [OutputCommitment<D, OutcomeEvidenceDestination>; 2],
+        mut commitments: [OutputCommitment<D, OutcomeEvidenceDestination>; 2],
     ) -> Result<StartupLedgerCommit<O, P, D>, LedgerCause<D>> {
+        // Resolve owner keys without guards, but replay errors at their original preflight stage.
+        let reservations = reservation_specs.map(|spec| StartupReservationBinding {
+            spec,
+            phase_position: self.bound_phase_position(spec.phase),
+            dimension_position: self
+                .work
+                .catalogue()
+                .binary_search(&spec.dimension)
+                .map_err(|_| LedgerCause::UnknownDimension {
+                    dimension: spec.dimension,
+                }),
+        });
+        let steps = &account_shares.steps;
+        let work_specs = [
+            steps[0].charges[0],
+            steps[0].charges[1],
+            steps[1].charges[0],
+            steps[1].charges[1],
+            steps[2].charges[0],
+            steps[2].charges[1],
+            steps[3].charges[0],
+            steps[3].charges[1],
+        ];
+        let work = self.bind_work(work_specs.map(|(dimension, _)| dimension));
+        let commitment_bindings = std::array::from_fn(|index| {
+            let commitment = &mut commitments[index];
+            commitment.dimension_position = usize::MAX;
+            let position = self
+                .work
+                .catalogue()
+                .binary_search(&commitment.dimension)
+                .map_err(|_| LedgerCause::UnknownDimension {
+                    dimension: commitment.dimension,
+                })?;
+            commitment.dimension_position = position;
+            Ok(())
+        });
+        let bindings = StartupLedgerBindings {
+            reservations,
+            work,
+            work_amounts: work_specs.map(|(_, amount)| amount),
+            commitments,
+            commitment_bindings,
+        };
+        let work_state = self.work.borrow_state()?;
         let mut state = lock(&self.state);
         Self::ensure_open(&state)?;
-        let admission =
-            self.preflight_startup_ledger(&state, reservation_specs, account_shares, commitments)?;
+        let admission = self.preflight_startup_ledger(&state, &work_state, bindings)?;
         commit_startup_ledger(&mut state, &admission);
+        drop(state);
+        drop(work_state);
         let StartupLedgerAdmission {
             reservations,
             commitments,
@@ -919,33 +979,29 @@ where
     fn preflight_startup_ledger(
         &self,
         state: &LedgerState<P, D>,
-        reservation_specs: [StartupReservationSpec<P, D>; STARTUP_RESERVATION_COUNT as usize],
-        account_shares: &StartupAccountShareEnvelope<D>,
-        mut commitments: [OutputCommitment<D, OutcomeEvidenceDestination>; 2],
+        work_state: &super::WorkState<D>,
+        bindings: StartupLedgerBindings<'_, P, D>,
     ) -> Result<StartupLedgerAdmission<P, D>, LedgerCause<D>> {
-        let mut reservations = reservation_specs.map(|spec| StartupReservationProjection {
-            spec,
-            phase_position: usize::MAX,
-            dimension_position: usize::MAX,
-        });
-        for projection in &mut reservations {
-            let phase_position = phase_entry(&state.phases, projection.spec.phase)
-                .ok_or(LedgerCause::UnknownPhase)?
-                .state_position;
+        let mut reservations =
+            bindings
+                .reservations
+                .each_ref()
+                .map(|binding| StartupReservationProjection {
+                    spec: binding.spec,
+                    phase_position: usize::MAX,
+                    dimension_position: usize::MAX,
+                });
+        for (projection, binding) in reservations.iter_mut().zip(bindings.reservations) {
+            let phase_position = binding.phase_position?;
             if state.phase_states.get(phase_position).is_none() {
                 return Err(LedgerCause::FinalSnapshotShapeMismatch);
             }
-            let dimension_position = state
+            let dimension_position = binding.dimension_position?;
+            let entry = state
                 .dimensions
-                .binary_search_by_key(&projection.spec.dimension, |entry| entry.dimension)
-                .map_err(|_| LedgerCause::UnknownDimension {
-                    dimension: projection.spec.dimension,
-                })?;
-            if state.dimensions[dimension_position]
-                .policy
-                .live_byte_limit
-                .is_none()
-            {
+                .get(dimension_position)
+                .ok_or(LedgerCause::FinalSnapshotShapeMismatch)?;
+            if entry.policy.live_byte_limit.is_none() {
                 return Err(LedgerCause::DimensionNotReservable {
                     dimension: projection.spec.dimension,
                 });
@@ -979,10 +1035,13 @@ where
                     dimension: projection.spec.dimension,
                 },
             )?;
-            let limit = entry
-                .policy
-                .live_byte_limit
-                .expect("startup reservation dimensions were proven reservable");
+            let limit =
+                entry
+                    .policy
+                    .live_byte_limit
+                    .ok_or(LedgerCause::DimensionNotReservable {
+                        dimension: projection.spec.dimension,
+                    })?;
             if value > limit {
                 return Err(LedgerCause::LimitExceeded {
                     class: CounterClass::Live,
@@ -1045,37 +1104,30 @@ where
                 dimension: reservations[0].spec.dimension,
             })?;
 
-        let steps = &account_shares.steps;
-        let work_specs = [
-            steps[0].charges[0],
-            steps[0].charges[1],
-            steps[1].charges[0],
-            steps[1].charges[1],
-            steps[2].charges[0],
-            steps[2].charges[1],
-            steps[3].charges[0],
-            steps[3].charges[1],
-        ];
-        let _ = super::preflight_observed_charges(state, &work_specs)?;
+        bindings.work?.preflight_repeated_observed_state(
+            work_state,
+            bindings.work_amounts,
+            std::num::NonZeroU64::MIN,
+        )?;
 
-        for index in 0..commitments.len() {
+        let commitments = bindings.commitments;
+        for (index, binding) in bindings.commitment_bindings.into_iter().enumerate() {
+            binding?;
             let commitment = commitments[index];
-            let dimension_position = state
+            let dimension_position = commitment.dimension_position;
+            let entry = state
                 .dimensions
-                .binary_search_by_key(&commitment.dimension, |entry| entry.dimension)
-                .map_err(|_| LedgerCause::UnknownDimension {
-                    dimension: commitment.dimension,
-                })?;
-            commitments[index].dimension_position = dimension_position;
+                .get(dimension_position)
+                .ok_or(LedgerCause::FinalSnapshotShapeMismatch)?;
             if commitments[..index]
                 .iter()
-                .any(|prior| prior.dimension == commitment.dimension)
+                .any(|prior| prior.dimension_position == dimension_position)
             {
                 continue;
             }
             let added = commitments
                 .iter()
-                .filter(|candidate| candidate.dimension == commitment.dimension)
+                .filter(|candidate| candidate.dimension_position == dimension_position)
                 .try_fold(0_u64, |total, candidate| {
                     total
                         .checked_add(candidate.amount)
@@ -1084,7 +1136,6 @@ where
                             dimension: commitment.dimension,
                         })
                 })?;
-            let entry = &state.dimensions[dimension_position];
             let value = entry
                 .state
                 .published_outcome_evidence

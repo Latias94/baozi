@@ -1,19 +1,19 @@
+use super::evidence::SharedEvidenceVec;
 use super::{
     AttributionReservationBatch, Commitment, CounterClass, DestinationKind, DestinationState,
     DimensionEntry, LedgerCause, LedgerEvidenceError, LedgerEvidencePurpose, LedgerState,
-    PublicationDestination, capacity_bytes, dimension_entry, release_evidence,
-    try_grow_evidence_vec,
+    PublicationDestination,
 };
 use crate::OperationOwner;
+use std::sync::{Arc, Mutex};
 
 pub(super) enum AggregateCommitmentError<D> {
     Ledger(LedgerCause<D>),
     Evidence(LedgerEvidenceError),
 }
 
-pub(super) struct CommitmentAggregate<D> {
-    pub(super) entries: Vec<AggregatedCommitment<D>>,
-    pub(super) evidence_bytes: u64,
+pub(super) struct CommitmentAggregate<'a, P, D> {
+    evidence: SharedEvidenceVec<'a, P, D, AggregatedCommitment<D>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,78 +23,46 @@ pub(super) struct AggregatedCommitment<D> {
     pub(super) amount: u64,
 }
 
-struct CommitmentAggregateAssembly<'a, P, D> {
-    state: &'a mut LedgerState<P, D>,
-    entries: Vec<AggregatedCommitment<D>>,
-    evidence_bytes: u64,
-    armed: bool,
-}
+impl<P, D> CommitmentAggregate<'_, P, D> {
+    pub(super) fn entries(&self) -> &[AggregatedCommitment<D>] {
+        &self.evidence.values
+    }
 
-impl<P, D> CommitmentAggregateAssembly<'_, P, D> {
-    fn finish(mut self) -> CommitmentAggregate<D> {
-        self.armed = false;
-        CommitmentAggregate {
-            entries: std::mem::take(&mut self.entries),
-            evidence_bytes: self.evidence_bytes,
-        }
+    /// Transfers backing and its charge together to the pending publication owner.
+    pub(super) fn into_parts(self) -> (Vec<AggregatedCommitment<D>>, u64) {
+        self.evidence.into_parts()
     }
 }
 
-impl<P, D> Drop for CommitmentAggregateAssembly<'_, P, D> {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        drop(std::mem::take(&mut self.entries));
-        release_evidence(self.state, self.evidence_bytes);
-    }
-}
-
-pub(super) fn aggregate_commitments<P, D>(
-    state: &mut LedgerState<P, D>,
+/// Builds the positioned batch before the caller acquires work or storage guards.
+pub(super) fn aggregate_commitments<'a, P, D>(
+    storage: &'a Arc<Mutex<LedgerState<P, D>>>,
+    catalogue: &[D],
     commitments: &[Commitment<D>],
-) -> Result<CommitmentAggregate<D>, AggregateCommitmentError<D>>
+) -> Result<CommitmentAggregate<'a, P, D>, AggregateCommitmentError<D>>
 where
     D: Copy + Ord,
 {
-    let mut aggregate = Vec::new();
-    let evidence_before = state.current_evidence_bytes;
-    if let Err(cause) = try_grow_evidence_vec(
-        &mut aggregate,
+    let mut evidence = SharedEvidenceVec::<P, D, AggregatedCommitment<D>>::try_with_capacity(
+        storage,
         commitments.len(),
-        &mut state.current_evidence_bytes,
-        &mut state.peak_evidence_bytes,
-        state.evidence_byte_limit,
         LedgerEvidencePurpose::Publication,
-    ) {
-        let retained = capacity_bytes(&aggregate).unwrap_or(0);
-        drop(aggregate);
-        release_evidence(state, retained);
-        return Err(AggregateCommitmentError::Evidence(cause));
-    }
-    let evidence_bytes = state.current_evidence_bytes.saturating_sub(evidence_before);
-    let mut assembly = CommitmentAggregateAssembly {
-        state,
-        entries: aggregate,
-        evidence_bytes,
-        armed: true,
-    };
+    )
+    .map_err(AggregateCommitmentError::Evidence)?;
     for commitment in commitments {
-        let dimension_position = assembly
-            .state
-            .dimensions
-            .binary_search_by_key(&commitment.dimension, |entry| entry.dimension)
+        let dimension_position = catalogue
+            .binary_search(&commitment.dimension)
             .map_err(|_| {
                 AggregateCommitmentError::Ledger(LedgerCause::UnknownDimension {
                     dimension: commitment.dimension,
                 })
             })?;
-        match assembly
-            .entries
+        match evidence
+            .values
             .binary_search_by_key(&dimension_position, |entry| entry.dimension_position)
         {
             Ok(position) => {
-                let Some(amount) = assembly.entries[position]
+                let Some(amount) = evidence.values[position]
                     .amount
                     .checked_add(commitment.amount)
                 else {
@@ -105,9 +73,9 @@ where
                         },
                     ));
                 };
-                assembly.entries[position].amount = amount;
+                evidence.values[position].amount = amount;
             }
-            Err(position) => assembly.entries.insert(
+            Err(position) => evidence.values.insert(
                 position,
                 AggregatedCommitment {
                     dimension: commitment.dimension,
@@ -117,7 +85,7 @@ where
             ),
         }
     }
-    Ok(assembly.finish())
+    Ok(CommitmentAggregate { evidence })
 }
 
 pub(super) fn validate_commitments<D: Copy>(
@@ -207,12 +175,12 @@ where
     for (index, commitment) in all().enumerate() {
         if all()
             .take(index)
-            .any(|prior| prior.dimension == commitment.dimension)
+            .any(|prior| prior.dimension_position == commitment.dimension_position)
         {
             continue;
         }
         let amount = all()
-            .filter(|candidate| candidate.dimension == commitment.dimension)
+            .filter(|candidate| candidate.dimension_position == commitment.dimension_position)
             .try_fold(0_u64, |total, candidate| {
                 total.checked_add(candidate.amount)
             })
@@ -223,11 +191,9 @@ where
                 },
                 dimension: commitment.dimension,
             })?;
-        let entry = dimension_entry(dimensions, commitment.dimension).ok_or(
-            LedgerCause::UnknownDimension {
-                dimension: commitment.dimension,
-            },
-        )?;
+        let entry = dimensions
+            .get(commitment.dimension_position)
+            .ok_or(LedgerCause::FinalSnapshotShapeMismatch)?;
         let (current, limit, class) = match Destination::KIND {
             DestinationKind::CanonicalOutput => (
                 entry.state.committed,

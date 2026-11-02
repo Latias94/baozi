@@ -2320,6 +2320,7 @@ where
             RetainedProducerWorkFinishError::Incomplete => {
                 StoreRuntimeError::ObservedWorkIncomplete
             }
+            RetainedProducerWorkFinishError::Ledger(cause) => StoreRuntimeError::Ledger(cause),
         })
     }
 

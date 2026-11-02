@@ -69,7 +69,7 @@ fn publication_must_take_every_live_byte_or_commit_nothing() {
 }
 
 #[test]
-fn pending_and_published_boundaries_seal_all_accounting_mutation() {
+fn pending_and_rolled_back_boundaries_seal_all_accounting_mutation() {
     let mut coordinator = coordinator(20);
     let mut zero = coordinator
         .checkpoint()
@@ -102,17 +102,67 @@ fn pending_and_published_boundaries_seal_all_accounting_mutation() {
     ));
 
     pending.rollback();
-    coordinator
-        .transition_reservation(&mut zero, Phase::Output, Dimension::AssetBytes, 0)
-        .expect("rollback reopens accounting mutation");
+    assert_eq!(
+        coordinator.transition_reservation(&mut zero, Phase::Output, Dimension::AssetBytes, 0),
+        Err(LedgerCause::PublicationAlreadyPending)
+    );
+    assert!(matches!(
+        coordinator.split_reservation(&mut zero, 0),
+        Err(LedgerCause::PublicationAlreadyPending)
+    ));
+    assert_eq!(
+        coordinator
+            .checkpoint()
+            .charge_attempted(Dimension::Records, 1),
+        Err(LedgerCause::PublicationAlreadyPending)
+    );
+    assert_eq!(
+        coordinator
+            .checkpoint()
+            .charge_consumed(Dimension::Records, 1),
+        Err(LedgerCause::PublicationAlreadyPending)
+    );
+    assert!(matches!(
+        coordinator
+            .checkpoint()
+            .reserve(Phase::Output, Dimension::OutputBytes, 1),
+        Err(LedgerCause::PublicationAlreadyPending)
+    ));
 
     let mut replacement_batch = PublicationBatch::default();
-    let mut pending = coordinator
-        .prepare_publication(
+    assert!(matches!(
+        coordinator.prepare_publication(
             &mut replacement_batch,
             &[Commitment::new(Dimension::Records, 1)],
-        )
-        .expect("replacement transaction");
+        ),
+        Err(LedgerCause::PublicationAlreadyPending)
+    ));
+    let records = coordinator
+        .dimension_evidence(Dimension::Records)
+        .expect("record evidence");
+    assert_eq!((records.attempted(), records.consumed()), (0, 0));
+    assert_eq!(records.pending_publication(), 0);
+    assert_eq!(records.committed(), 0);
+    drop(zero);
+    let snapshot = coordinator
+        .finish()
+        .expect("rollback releases every token without reopening");
+    assert_eq!(snapshot.current_live_bytes(), 0);
+    assert_eq!(snapshot.active_reservations(), 0);
+    assert_eq!(snapshot.current_evidence_bytes(), 0);
+}
+
+#[test]
+fn published_boundary_seals_all_accounting_mutation_on_a_fresh_operation() {
+    let mut coordinator = coordinator(20);
+    let mut zero = coordinator
+        .checkpoint()
+        .reserve(Phase::Snapshot, Dimension::AssetBytes, 0)
+        .expect("fresh zero-byte linear token");
+    let mut batch = PublicationBatch::default();
+    let mut pending = coordinator
+        .prepare_publication(&mut batch, &[Commitment::new(Dimension::Records, 1)])
+        .expect("fresh operation publication transaction");
     coordinator
         .publish(
             &mut pending,
@@ -130,10 +180,18 @@ fn pending_and_published_boundaries_seal_all_accounting_mutation() {
         Err(LedgerCause::PublicationAlreadyCompleted)
     );
     drop(zero);
+    let snapshot = coordinator
+        .finish()
+        .expect("published operation finalizes cleanly");
+    assert_eq!(
+        snapshot.dimension(Dimension::Records).unwrap().committed(),
+        1
+    );
+    assert_eq!(snapshot.active_reservations(), 0);
 }
 
 #[test]
-fn pending_drop_rolls_back_live_and_commitments_then_allows_reprepare() {
+fn pending_drop_releases_live_and_commitments_without_reopening_the_operation() {
     let mut coordinator = publication_coordinator(20);
     let reservation = coordinator
         .checkpoint()
@@ -173,6 +231,7 @@ fn pending_drop_rolls_back_live_and_commitments_then_allows_reprepare() {
     drop(pending);
     let rolled_back = coordinator.ledger_snapshot();
     assert_eq!(rolled_back.current_live_bytes(), 0);
+    assert_eq!(rolled_back.active_reservations(), 0);
     assert_eq!(
         rolled_back
             .dimension(Dimension::OutputBytes)
@@ -184,39 +243,79 @@ fn pending_drop_rolls_back_live_and_commitments_then_allows_reprepare() {
         rolled_back
             .dimension(Dimension::Records)
             .expect("record evidence")
+            .pending_publication(),
+        0
+    );
+    assert_eq!(
+        rolled_back
+            .dimension(Dimension::Records)
+            .expect("record evidence")
             .committed(),
         0
     );
+    assert_eq!(
+        rolled_back
+            .dimension(Dimension::OutputBytes)
+            .expect("output evidence")
+            .committed(),
+        0
+    );
+    assert!(matches!(
+        coordinator
+            .checkpoint()
+            .reserve(Phase::Output, Dimension::OutputBytes, 4),
+        Err(LedgerCause::PublicationAlreadyPending)
+    ));
+    let mut blocked_batch = PublicationBatch::default();
+    assert!(matches!(
+        coordinator.prepare_publication(
+            &mut blocked_batch,
+            &[Commitment::new(Dimension::Records, 1)],
+        ),
+        Err(LedgerCause::PublicationAlreadyPending)
+    ));
+    let snapshot = coordinator
+        .finish()
+        .expect("rolled-back operation can finalize");
+    assert_eq!(snapshot.current_live_bytes(), 0);
+    assert_eq!(snapshot.peak_live_bytes(), publication_capacity_bytes() + 6);
+    assert_eq!(snapshot.current_evidence_bytes(), 0);
 
-    let replacement = coordinator
+    let mut fresh = publication_coordinator(20);
+    let replacement = fresh
         .checkpoint()
         .reserve(Phase::Output, Dimension::OutputBytes, 4)
-        .expect("replacement reservation");
-    let mut replacement_batch = publication_batch(&mut coordinator, [replacement]);
-    let mut replacement = coordinator
+        .expect("fresh operation reservation");
+    let mut replacement_batch = publication_batch(&mut fresh, [replacement]);
+    let mut replacement = fresh
         .prepare_publication(
             &mut replacement_batch,
             &[Commitment::new(Dimension::Records, 1)],
         )
-        .expect("rollback reopens publication admission");
-    coordinator
+        .expect("a separate ordinary operation admits publication");
+    fresh
         .publish(
             &mut replacement,
             FinalProgress::new(ObserverPhase::Publish, Unit::Work, 1),
         )
-        .expect("replacement publishes");
+        .expect("fresh operation publishes");
     assert_eq!(
-        coordinator
+        fresh
             .ledger_snapshot()
             .dimension(Dimension::Records)
             .expect("record evidence")
             .committed(),
         1
     );
+    let snapshot = fresh
+        .finish()
+        .expect("fresh publication releases all live storage");
+    assert_eq!(snapshot.current_live_bytes(), 0);
+    assert_eq!(snapshot.peak_live_bytes(), publication_capacity_bytes() + 4);
 }
 
 #[test]
-fn publication_batch_releases_accounted_vector_capacity_on_rollback_and_publish() {
+fn publication_batch_releases_accounted_vector_capacity_on_rollback() {
     let mut coordinator = publication_coordinator(20);
     let payload = coordinator
         .checkpoint()
@@ -233,15 +332,57 @@ fn publication_batch_releases_accounted_vector_capacity_on_rollback_and_publish(
     );
     pending.rollback();
     assert_eq!(coordinator.ledger_snapshot().current_live_bytes(), 0);
+    assert!(matches!(
+        coordinator
+            .checkpoint()
+            .reserve(Phase::Output, Dimension::OutputBytes, 5),
+        Err(LedgerCause::PublicationAlreadyPending)
+    ));
+    let snapshot = coordinator
+        .finish()
+        .expect("rollback releases payload and vector capacity");
+    assert_eq!(snapshot.current_live_bytes(), 0);
+    assert_eq!(snapshot.active_reservations(), 0);
+    assert_eq!(snapshot.peak_live_bytes(), publication_capacity_bytes() + 4);
+    assert_eq!(
+        snapshot
+            .dimension(Dimension::AssetBytes)
+            .unwrap()
+            .current_live_bytes(),
+        0
+    );
+    assert_eq!(
+        snapshot
+            .dimension(Dimension::AssetBytes)
+            .unwrap()
+            .peak_live_bytes(),
+        publication_capacity_bytes()
+    );
+    assert_eq!(
+        snapshot
+            .dimension(Dimension::OutputBytes)
+            .unwrap()
+            .current_live_bytes(),
+        0
+    );
+    assert_eq!(
+        snapshot.dimension(Dimension::Records).unwrap().committed(),
+        0
+    );
+    assert_eq!(snapshot.current_evidence_bytes(), 0);
+}
 
+#[test]
+fn publication_batch_releases_accounted_vector_capacity_on_fresh_operation_publish() {
+    let mut coordinator = publication_coordinator(20);
     let payload = coordinator
         .checkpoint()
         .reserve(Phase::Output, Dimension::OutputBytes, 5)
-        .expect("replacement payload reservation");
+        .expect("fresh payload reservation");
     let mut batch = publication_batch(&mut coordinator, [payload]);
     let mut pending = coordinator
         .prepare_publication(&mut batch, &[Commitment::new(Dimension::Records, 1)])
-        .expect("replacement batch owns every live byte");
+        .expect("fresh batch owns every live byte");
     coordinator
         .publish(
             &mut pending,
@@ -253,6 +394,7 @@ fn publication_batch_releases_accounted_vector_capacity_on_rollback_and_publish(
         .finish()
         .expect("published capacity leaves no live token");
     assert_eq!(snapshot.current_live_bytes(), 0);
+    assert_eq!(snapshot.active_reservations(), 0);
     assert_eq!(snapshot.peak_live_bytes(), publication_capacity_bytes() + 5);
     assert_eq!(
         snapshot
@@ -542,13 +684,39 @@ fn only_one_pending_or_published_batch_is_admitted() {
     ));
     pending.rollback();
 
-    let mut pending = coordinator
+    assert!(matches!(
+        coordinator.prepare_publication(
+            &mut blocked_batch,
+            &[Commitment::new(Dimension::Records, 1)],
+        ),
+        Err(LedgerCause::PublicationAlreadyPending)
+    ));
+    assert_eq!(
+        coordinator
+            .dimension_evidence(Dimension::Records)
+            .unwrap()
+            .pending_publication(),
+        0
+    );
+    assert_eq!(
+        coordinator
+            .dimension_evidence(Dimension::Records)
+            .unwrap()
+            .committed(),
+        0
+    );
+    coordinator
+        .finish()
+        .expect("rolled-back operation has no outstanding owner");
+
+    let mut fresh = publication_coordinator(20);
+    let mut pending = fresh
         .prepare_publication(
             &mut blocked_batch,
             &[Commitment::new(Dimension::Records, 1)],
         )
-        .expect("rollback permits a replacement batch");
-    coordinator
+        .expect("fresh operation admits its first batch");
+    fresh
         .publish(
             &mut pending,
             FinalProgress::new(ObserverPhase::Publish, Unit::Work, 1),
@@ -556,12 +724,52 @@ fn only_one_pending_or_published_batch_is_admitted() {
         .expect("first durable batch");
     let mut completed_batch = PublicationBatch::default();
     assert!(matches!(
-        coordinator.prepare_publication(
+        fresh.prepare_publication(
             &mut completed_batch,
             &[Commitment::new(Dimension::Unknown, u64::MAX)],
         ),
         Err(LedgerCause::PublicationAlreadyCompleted)
     ));
+    let snapshot = fresh.finish().expect("fresh durable publication finalizes");
+    assert_eq!(
+        snapshot.dimension(Dimension::Records).unwrap().committed(),
+        1
+    );
+}
+
+#[test]
+fn finish_with_pending_publication_preserves_its_typed_cause_and_exact_evidence() {
+    let mut coordinator = coordinator(20);
+    let mut batch = PublicationBatch::default();
+    let pending = coordinator
+        .prepare_publication(&mut batch, &[Commitment::new(Dimension::Records, 1)])
+        .expect("one pending commitment without live storage");
+
+    let failure = coordinator
+        .finish()
+        .expect_err("pending publication prevents clean generic finalization");
+    assert_eq!(
+        failure.cause(),
+        &PublicationCause::Ledger(LedgerCause::PendingPublicationsRemain)
+    );
+    let records = failure
+        .snapshot()
+        .dimension(Dimension::Records)
+        .expect("record evidence");
+    assert_eq!(records.pending_publication(), 1);
+    assert_eq!(records.committed(), 0);
+    assert_eq!(failure.snapshot().current_live_bytes(), 0);
+
+    pending.rollback();
+    assert_eq!(
+        failure
+            .snapshot()
+            .dimension(Dimension::Records)
+            .unwrap()
+            .pending_publication(),
+        1,
+        "later rollback cannot rewrite the immutable evidence captured at finish"
+    );
 }
 
 #[test]

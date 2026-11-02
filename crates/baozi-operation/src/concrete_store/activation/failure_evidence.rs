@@ -88,13 +88,14 @@ where
 
     fn complete(self) -> Result<(), StoreRuntimeError> {
         match self {
-            Self::Ordinary(permit) => permit
-                .complete()
-                .map(|_| ())
-                .map_err(|RetainedWorkFinishError::Incomplete| failure_work_envelope_exhausted()),
-            Self::Protected(permit) => permit.complete().map(|_| ()).map_err(
-                |RetainedFailureWorkFinishError::Incomplete| failure_work_envelope_exhausted(),
-            ),
+            Self::Ordinary(permit) => permit.complete().map(|_| ()).map_err(|cause| match cause {
+                RetainedWorkFinishError::Incomplete => failure_work_envelope_exhausted(),
+                RetainedWorkFinishError::Ledger(cause) => StoreRuntimeError::Ledger(cause),
+            }),
+            Self::Protected(permit) => permit.complete().map(|_| ()).map_err(|cause| match cause {
+                RetainedFailureWorkFinishError::Incomplete => failure_work_envelope_exhausted(),
+                RetainedFailureWorkFinishError::Ledger(cause) => StoreRuntimeError::Ledger(cause),
+            }),
         }
     }
 
@@ -768,9 +769,12 @@ where
             .permit
             .take()
             .expect("a finished validation retains its work permit");
-        let result = permit.finish_validation(accepted).map_err(
-            |RetainedFailureWorkFinishError::Incomplete| failure_work_envelope_exhausted(),
-        );
+        let result = permit
+            .finish_validation(accepted)
+            .map_err(|cause| match cause {
+                RetainedFailureWorkFinishError::Incomplete => failure_work_envelope_exhausted(),
+                RetainedFailureWorkFinishError::Ledger(cause) => StoreRuntimeError::Ledger(cause),
+            });
         if let Err(cause) = &result {
             self.sticky.get_or_insert_with(|| cause.clone());
         }

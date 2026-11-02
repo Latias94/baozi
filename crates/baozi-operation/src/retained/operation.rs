@@ -20,7 +20,7 @@ use super::{
     TerminalEvidenceBackingPlan, TerminalEvidenceKey, TerminalFallbackAttribution,
     TerminalFallbackGuard, TerminalLedgerEvidence, TerminalPhysicalOwnershipManifest,
     TerminalPrimaryGuard, drop_retained_table_with_account_anchor, map_batch_error,
-    prepare_terminal_control, try_create_retained_block_table, try_open_publication_account,
+    try_create_retained_block_table, try_open_publication_account,
     try_qualify_retained_block_table_plan, unreachable_final_owner_state,
 };
 use super::{AccountPoisoned, FinalizationContainmentError};
@@ -32,7 +32,9 @@ use super::{
     test_retained_final_owner_allocator_entries,
 };
 use crate::control::discard_untrusted_panic_payload;
-use crate::coordinator::{OperationCoordinator, OperationPollCheckpoint};
+use crate::coordinator::{
+    OperationCoordinator, OperationPollCheckpoint, OperationProgressCheckpoint,
+};
 use crate::ledger::{
     AttributionBatchPlan, CanonicalOutput, LedgerCause, LedgerLimits, LinearWorkBatchPermit,
     LinearWorkCompletion, LiveReservation, OutcomeEvidenceDestination, PhaseCompletionError,
@@ -41,6 +43,7 @@ use crate::ledger::{
 use crate::ledger::{DimensionPolicy, DimensionSnapshot};
 use crate::{
     ControlCause, FinalProgress, OperationControl, OperationOwner, ProgressPhase, ProgressUnit,
+    PublicationCause,
 };
 use std::fmt;
 use std::num::NonZeroU64;
@@ -228,6 +231,30 @@ fn apply_linear_work_completion<D>(
     completion.into_result()
 }
 
+/// Wrapper Drop has trusted cleanup authority; direct raw abandonment remains an integrity fault.
+fn finish_dropped_work<D: Copy, const N: usize>(
+    work: &mut Option<LinearWorkBatchPermit<'_, D, N>>,
+    outstanding: &mut bool,
+    sticky_terminal_cause: &mut Option<PreparationFailureCode>,
+    abandoned_code: u32,
+) {
+    record_terminal_cause_with_precedence(
+        sticky_terminal_cause,
+        PreparationFailureCode::product_graph(abandoned_code),
+    );
+    let result = match work.take() {
+        Some(work) => work.finish_partial(),
+        None => Err(LedgerCause::InactiveLinearWorkPermit),
+    };
+    match result {
+        Ok(()) => *outstanding = false,
+        Err(_) => record_terminal_cause_with_precedence(
+            sticky_terminal_cause,
+            PreparationFailureCode::ledger(),
+        ),
+    }
+}
+
 impl<D: Copy> FailureTerminalWorkCapability<D> {
     fn from_qualified(plan: RetainedFailureTerminalWorkPlan<D>) -> Self {
         Self {
@@ -377,15 +404,16 @@ pub(crate) enum RetainedProducerWorkStartError<D> {
     Outstanding,
 }
 
-pub(crate) enum RetainedProducerWorkFinishError {
+pub(crate) enum RetainedProducerWorkFinishError<D> {
     Incomplete,
+    Ledger(LedgerCause<D>),
 }
 
 /// Linear observed-work authority for one pre-admitted producer action.
 ///
-/// Grouped completion transfers every dimension under one ledger lock. Explicit partial finish is
-/// the only normal way to release an unfinished suffix. An unresolved drop records ProductGraph;
-/// forgetting the owner leaves the ledger permit active so final preparation fails closed.
+/// Grouped completion transfers every dimension in one local work transaction. Explicit partial
+/// finish is the only normal way to release an unfinished suffix. An unresolved drop records
+/// ProductGraph; forgetting the owner leaves the ledger permit active so final preparation fails closed.
 #[must_use = "observed work must finish exactly or explicitly resolve its completed prefix"]
 pub(crate) struct RetainedProducerWorkPermit<'a, O, P, PP, U, D, const N: usize>
 where
@@ -395,10 +423,10 @@ where
     U: ProgressUnit,
     D: Copy + Ord + fmt::Debug,
 {
-    coordinator: &'a mut OperationCoordinator<O, P, PP, U, D>,
+    progress: OperationProgressCheckpoint<'a, O, P, PP, U, D>,
     permit_outstanding: &'a mut bool,
     sticky_terminal_cause: &'a mut Option<PreparationFailureCode>,
-    work: LinearWorkBatchPermit<O, P, D, N>,
+    work: Option<LinearWorkBatchPermit<'a, D, N>>,
     remaining: [u64; N],
     resolved: bool,
 }
@@ -441,8 +469,9 @@ pub(crate) enum RetainedWorkConsumeError<D> {
     ExceedsAttempted,
 }
 
-pub(crate) enum RetainedWorkFinishError {
+pub(crate) enum RetainedWorkFinishError<D> {
     Incomplete,
+    Ledger(LedgerCause<D>),
 }
 
 /// Linear completion authority for one admitted ordinary work action.
@@ -460,7 +489,7 @@ where
     D: Copy + Ord + fmt::Debug,
 {
     control: Option<RetainedWorkControl<'a, O, P, PP, U, D>>,
-    work: LinearWorkBatchPermit<O, P, D, 1>,
+    work: Option<LinearWorkBatchPermit<'a, D, 1>>,
     remaining: u64,
 }
 
@@ -478,7 +507,7 @@ where
     D: Copy + Ord + fmt::Debug,
 {
     control: &'borrow mut RetainedWorkControl<'operation, O, P, PP, U, D>,
-    work: LinearWorkBatchPermit<O, P, D, 1>,
+    work: Option<LinearWorkBatchPermit<'operation, D, 1>>,
     remaining: u64,
     resolved: bool,
 }
@@ -513,8 +542,9 @@ pub(crate) enum RetainedFailureWorkConsumeError<D> {
     ExceedsAttempted,
 }
 
-pub(crate) enum RetainedFailureWorkFinishError {
+pub(crate) enum RetainedFailureWorkFinishError<D> {
     Incomplete,
+    Ledger(LedgerCause<D>),
 }
 
 /// Linear completion authority for one admitted protected failure-work action.
@@ -533,7 +563,7 @@ where
     D: Copy + Ord + fmt::Debug,
 {
     control: Option<RetainedFailureWorkControl<'a, O, P, PP, U, D>>,
-    work: LinearWorkBatchPermit<O, P, D, 1>,
+    work: Option<LinearWorkBatchPermit<'a, D, 1>>,
     remaining: u64,
 }
 
@@ -694,23 +724,26 @@ where
         }
         self.poll()
             .map_err(RetainedProducerWorkStartError::Control)?;
-        let result = self
+        let (progress, ledger) = self
             .coordinator
-            .retained_ledger()
-            .try_admit_linear_work_batch(&charges);
+            .split_progress_checkpoint_and_retained_ledger();
+        let result = ledger.try_admit_producer_work_batch(&charges);
         let work = match result {
             Ok(work) => work,
             Err(cause) => {
-                self.record_ledger_failure();
+                record_terminal_cause_with_precedence(
+                    self.sticky_terminal_cause,
+                    PreparationFailureCode::ledger(),
+                );
                 return Err(RetainedProducerWorkStartError::Ledger(cause));
             }
         };
         *self.permit_outstanding = true;
         Ok(RetainedProducerWorkPermit {
-            coordinator: &mut *self.coordinator,
+            progress,
             permit_outstanding: &mut *self.permit_outstanding,
             sticky_terminal_cause: &mut *self.sticky_terminal_cause,
-            work,
+            work: Some(work),
             remaining: charges.map(|(_, amount)| amount),
             resolved: false,
         })
@@ -761,7 +794,7 @@ where
     D: Copy + Ord + fmt::Debug,
 {
     pub(crate) fn poll(&mut self) -> Result<(), ControlCause> {
-        let result = self.coordinator.poll();
+        let result = self.progress.poll();
         if let Err(cause) = &result {
             record_terminal_cause_with_precedence(
                 self.sticky_terminal_cause,
@@ -778,9 +811,7 @@ where
         completed: u64,
         total: Option<u64>,
     ) -> Result<(), ControlCause> {
-        let result = self
-            .coordinator
-            .report_progress(phase, unit, completed, total);
+        let result = self.progress.report_progress(phase, unit, completed, total);
         if let Err(cause) = &result {
             record_terminal_cause_with_precedence(
                 self.sticky_terminal_cause,
@@ -809,7 +840,11 @@ where
             );
             return Err(RetainedWorkConsumeError::ExceedsAttempted);
         }
-        let completion = self.work.complete_batch_with_outcome(amounts);
+        let completion = self
+            .work
+            .as_mut()
+            .expect("an unresolved producer work permit retains its work")
+            .complete_batch_with_outcome(amounts);
         if completion.prefix_was_applied() {
             for (remaining, amount) in self.remaining.iter_mut().zip(amounts) {
                 *remaining -= amount;
@@ -824,7 +859,7 @@ where
         })
     }
 
-    pub(crate) fn finish(mut self) -> Result<(), RetainedProducerWorkFinishError> {
+    pub(crate) fn finish(mut self) -> Result<(), RetainedProducerWorkFinishError<D>> {
         if self.remaining.iter().any(|remaining| *remaining != 0) {
             record_terminal_cause_with_precedence(
                 self.sticky_terminal_cause,
@@ -832,14 +867,37 @@ where
             );
             return Err(RetainedProducerWorkFinishError::Incomplete);
         }
-        *self.permit_outstanding = false;
+        let result = self
+            .work
+            .take()
+            .expect("a producer work permit resolves at most once")
+            .finish();
         self.resolved = true;
+        result.map_err(|cause| {
+            record_terminal_cause_with_precedence(
+                self.sticky_terminal_cause,
+                PreparationFailureCode::ledger(),
+            );
+            RetainedProducerWorkFinishError::Ledger(cause)
+        })?;
+        *self.permit_outstanding = false;
         Ok(())
     }
 
     pub(crate) fn finish_partial(mut self) {
-        *self.permit_outstanding = false;
+        let result = self
+            .work
+            .take()
+            .expect("a producer work permit resolves at most once")
+            .finish_partial();
         self.resolved = true;
+        match result {
+            Ok(()) => *self.permit_outstanding = false,
+            Err(_) => record_terminal_cause_with_precedence(
+                self.sticky_terminal_cause,
+                PreparationFailureCode::ledger(),
+            ),
+        }
     }
 }
 
@@ -855,11 +913,12 @@ where
         if self.resolved {
             return;
         }
-        record_terminal_cause_with_precedence(
+        finish_dropped_work(
+            &mut self.work,
+            self.permit_outstanding,
             self.sticky_terminal_cause,
-            PreparationFailureCode::product_graph(ORDINARY_WORK_PERMIT_ABANDONED_CODE),
+            ORDINARY_WORK_PERMIT_ABANDONED_CODE,
         );
-        *self.permit_outstanding = false;
     }
 }
 
@@ -909,7 +968,7 @@ where
     fn try_admit_permit(
         &mut self,
         amount: NonZeroU64,
-    ) -> Result<LinearWorkBatchPermit<O, P, D, 1>, RetainedWorkStartError<D>> {
+    ) -> Result<LinearWorkBatchPermit<'a, D, 1>, RetainedWorkStartError<D>> {
         if *self.ordinary_work_permit_outstanding {
             record_terminal_cause_with_precedence(
                 self.sticky_terminal_cause,
@@ -918,13 +977,13 @@ where
             return Err(RetainedWorkStartError::Outstanding);
         }
         self.poll().map_err(RetainedWorkStartError::Control)?;
+        let ledger = self.ledger;
         let result = if self.failure_terminal_work_dimension == Some(self.dimension) {
             Err(LedgerCause::UnknownDimension {
                 dimension: self.dimension,
             })
         } else {
-            self.ledger
-                .try_admit_linear_work(self.dimension, amount.get())
+            ledger.try_admit_linear_work(self.dimension, amount.get())
         };
         let work = result.map_err(|cause| {
             record_terminal_cause_with_precedence(
@@ -997,7 +1056,7 @@ where
         let work = self.try_admit_permit(amount)?;
         Ok(RetainedWorkPermit {
             control: Some(self),
-            work,
+            work: Some(work),
             remaining: amount.get(),
         })
     }
@@ -1010,7 +1069,7 @@ where
         let work = self.try_admit_permit(amount)?;
         Ok(BorrowedRetainedWorkPermit {
             control: self,
-            work,
+            work: Some(work),
             remaining: amount.get(),
             resolved: false,
         })
@@ -1051,7 +1110,11 @@ where
             );
             return Err(RetainedWorkConsumeError::ExceedsAttempted);
         }
-        let completion = self.work.complete_with_outcome(0, amount.get());
+        let completion = self
+            .work
+            .as_mut()
+            .expect("an unresolved borrowed work permit retains its work")
+            .complete_with_outcome(0, amount.get());
         if let Err(cause) =
             apply_linear_work_completion(completion, &mut self.remaining, amount.get())
         {
@@ -1064,7 +1127,7 @@ where
         Ok(())
     }
 
-    pub(crate) fn complete(mut self) -> Result<(), RetainedWorkFinishError> {
+    pub(crate) fn complete(mut self) -> Result<(), RetainedWorkFinishError<D>> {
         if self.remaining != 0 {
             record_terminal_cause_with_precedence(
                 self.control.sticky_terminal_cause,
@@ -1072,15 +1135,40 @@ where
             );
             return Err(RetainedWorkFinishError::Incomplete);
         }
-        *self.control.ordinary_work_permit_outstanding = false;
+        let result = self
+            .work
+            .take()
+            .expect("a borrowed work permit resolves at most once")
+            .finish();
         self.resolved = true;
+        result.map_err(|cause| {
+            record_terminal_cause_with_precedence(
+                self.control.sticky_terminal_cause,
+                PreparationFailureCode::ledger(),
+            );
+            RetainedWorkFinishError::Ledger(cause)
+        })?;
+        *self.control.ordinary_work_permit_outstanding = false;
         Ok(())
     }
 
     pub(crate) fn finish_partial(mut self) {
-        *self.control.ordinary_work_permit_outstanding = false;
-        *self.control.ordinary_work_permit_partially_resolved = true;
+        let result = self
+            .work
+            .take()
+            .expect("a borrowed work permit resolves at most once")
+            .finish_partial();
         self.resolved = true;
+        match result {
+            Ok(()) => {
+                *self.control.ordinary_work_permit_outstanding = false;
+                *self.control.ordinary_work_permit_partially_resolved = true;
+            }
+            Err(_) => record_terminal_cause_with_precedence(
+                self.control.sticky_terminal_cause,
+                PreparationFailureCode::ledger(),
+            ),
+        }
     }
 }
 
@@ -1096,15 +1184,12 @@ where
         if self.resolved {
             return;
         }
-        record_terminal_cause_with_precedence(
+        finish_dropped_work(
+            &mut self.work,
+            self.control.ordinary_work_permit_outstanding,
             self.control.sticky_terminal_cause,
-            PreparationFailureCode::product_graph(ORDINARY_WORK_PERMIT_ABANDONED_CODE),
+            ORDINARY_WORK_PERMIT_ABANDONED_CODE,
         );
-        // A fully consumed permit can release its capability during Drop while still rejecting the
-        // missing explicit finish. An incomplete or forgotten permit remains fail-closed.
-        if self.remaining == 0 {
-            *self.control.ordinary_work_permit_outstanding = false;
-        }
     }
 }
 
@@ -1213,7 +1298,11 @@ where
             .control
             .as_mut()
             .expect("an incomplete ordinary work permit retains its control");
-        let completion = self.work.complete_with_outcome(0, amount.get());
+        let completion = self
+            .work
+            .as_mut()
+            .expect("an unresolved ordinary work permit retains its work")
+            .complete_with_outcome(0, amount.get());
         if let Err(cause) =
             apply_linear_work_completion(completion, &mut self.remaining, amount.get())
         {
@@ -1228,7 +1317,7 @@ where
 
     pub(crate) fn complete(
         mut self,
-    ) -> Result<RetainedWorkControl<'a, O, P, PP, U, D>, RetainedWorkFinishError> {
+    ) -> Result<RetainedWorkControl<'a, O, P, PP, U, D>, RetainedWorkFinishError<D>> {
         if self.remaining != 0 {
             let control = self
                 .control
@@ -1244,6 +1333,17 @@ where
             .control
             .take()
             .expect("an ordinary work permit completes at most once");
+        self.work
+            .take()
+            .expect("an ordinary work permit resolves at most once")
+            .finish()
+            .map_err(|cause| {
+                record_terminal_cause_with_precedence(
+                    control.sticky_terminal_cause,
+                    PreparationFailureCode::ledger(),
+                );
+                RetainedWorkFinishError::Ledger(cause)
+            })?;
         *control.ordinary_work_permit_outstanding = false;
         Ok(control)
     }
@@ -1253,8 +1353,21 @@ where
             .control
             .take()
             .expect("an ordinary work permit resolves at most once");
-        *control.ordinary_work_permit_outstanding = false;
-        *control.ordinary_work_permit_partially_resolved = true;
+        match self
+            .work
+            .take()
+            .expect("an ordinary work permit resolves at most once")
+            .finish_partial()
+        {
+            Ok(()) => {
+                *control.ordinary_work_permit_outstanding = false;
+                *control.ordinary_work_permit_partially_resolved = true;
+            }
+            Err(_) => record_terminal_cause_with_precedence(
+                control.sticky_terminal_cause,
+                PreparationFailureCode::ledger(),
+            ),
+        }
     }
 }
 
@@ -1270,15 +1383,12 @@ where
         let Some(control) = self.control.as_mut() else {
             return;
         };
-        record_terminal_cause_with_precedence(
+        finish_dropped_work(
+            &mut self.work,
+            control.ordinary_work_permit_outstanding,
             control.sticky_terminal_cause,
-            PreparationFailureCode::product_graph(ORDINARY_WORK_PERMIT_ABANDONED_CODE),
+            ORDINARY_WORK_PERMIT_ABANDONED_CODE,
         );
-        // A fully consumed permit can release its capability during Drop while still rejecting the
-        // missing explicit finish. An incomplete or forgotten permit remains fail-closed.
-        if self.remaining == 0 {
-            *control.ordinary_work_permit_outstanding = false;
-        }
     }
 }
 
@@ -1310,9 +1420,9 @@ where
         }
         self.poll()
             .map_err(RetainedFailureWorkStartError::Control)?;
-        let work = self
-            .ledger
-            .try_admit_linear_work(self.dimension, amount.get())
+        let ledger = self.ledger;
+        let work = ledger
+            .try_admit_failure_work(self.dimension, amount.get())
             .map_err(|cause| {
                 record_terminal_cause_with_precedence(
                     self.sticky_terminal_cause,
@@ -1323,7 +1433,7 @@ where
         *self.permit_outstanding = true;
         Ok(RetainedFailureWorkPermit {
             control: Some(self),
-            work,
+            work: Some(work),
             remaining: amount.get(),
         })
     }
@@ -1378,7 +1488,11 @@ where
             .control
             .as_mut()
             .expect("an incomplete failure-work permit retains its control");
-        let completion = self.work.complete_with_outcome(0, amount.get());
+        let completion = self
+            .work
+            .as_mut()
+            .expect("an unresolved failure-work permit retains its work")
+            .complete_with_outcome(0, amount.get());
         if let Err(cause) =
             apply_linear_work_completion(completion, &mut self.remaining, amount.get())
         {
@@ -1393,7 +1507,7 @@ where
 
     pub(crate) fn complete(
         mut self,
-    ) -> Result<RetainedFailureWorkControl<'a, O, P, PP, U, D>, RetainedFailureWorkFinishError>
+    ) -> Result<RetainedFailureWorkControl<'a, O, P, PP, U, D>, RetainedFailureWorkFinishError<D>>
     {
         if self.remaining != 0 {
             let control = self
@@ -1407,6 +1521,17 @@ where
             .control
             .take()
             .expect("a failure-work permit completes at most once");
+        self.work
+            .take()
+            .expect("a failure-work permit resolves at most once")
+            .finish()
+            .map_err(|cause| {
+                record_terminal_cause_with_precedence(
+                    control.sticky_terminal_cause,
+                    PreparationFailureCode::ledger(),
+                );
+                RetainedFailureWorkFinishError::Ledger(cause)
+            })?;
         *control.permit_outstanding = false;
         Ok(control)
     }
@@ -1414,7 +1539,7 @@ where
     pub(crate) fn finish_validation(
         mut self,
         accepted: bool,
-    ) -> Result<RetainedFailureWorkControl<'a, O, P, PP, U, D>, RetainedFailureWorkFinishError>
+    ) -> Result<RetainedFailureWorkControl<'a, O, P, PP, U, D>, RetainedFailureWorkFinishError<D>>
     {
         if accepted {
             return self.complete();
@@ -1423,6 +1548,17 @@ where
             .control
             .take()
             .expect("a validation work permit resolves at most once");
+        self.work
+            .take()
+            .expect("a validation work permit resolves at most once")
+            .finish_partial()
+            .map_err(|cause| {
+                record_terminal_cause_with_precedence(
+                    control.sticky_terminal_cause,
+                    PreparationFailureCode::ledger(),
+                );
+                RetainedFailureWorkFinishError::Ledger(cause)
+            })?;
         *control.permit_outstanding = false;
         Ok(control)
     }
@@ -1432,7 +1568,39 @@ where
             .control
             .take()
             .expect("a failure-work permit resolves at most once");
-        *control.permit_outstanding = false;
+        match self
+            .work
+            .take()
+            .expect("a failure-work permit resolves at most once")
+            .finish_partial()
+        {
+            Ok(()) => *control.permit_outstanding = false,
+            Err(_) => record_terminal_cause_with_precedence(
+                control.sticky_terminal_cause,
+                PreparationFailureCode::ledger(),
+            ),
+        }
+    }
+}
+
+impl<O, P, PP, U, D> Drop for RetainedFailureWorkPermit<'_, O, P, PP, U, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    fn drop(&mut self) {
+        let Some(control) = self.control.as_mut() else {
+            return;
+        };
+        finish_dropped_work(
+            &mut self.work,
+            control.permit_outstanding,
+            control.sticky_terminal_cause,
+            FAILURE_WORK_PERMIT_ABANDONED_CODE,
+        );
     }
 }
 
@@ -1947,6 +2115,13 @@ where
         let baseline = baseline
             .try_bind(ledger)
             .map_err(RetainedOperationStartError::Writer)?;
+        if let Some(dimension) = failure_terminal_work_dimension {
+            ledger
+                .configure_protected_work(dimension)
+                .map_err(|cause| {
+                    RetainedOperationStartError::Writer(RetainedWriterError::Ledger(cause))
+                })?;
+        }
 
         Ok(Self {
             coordinator,
@@ -2023,10 +2198,51 @@ where
         result
     }
 
-    pub(super) fn activate_failure_terminal_work(&mut self) -> Option<RetainedHandleSharePlan<D>> {
-        self.failure_terminal_work
+    pub(super) fn activate_failure_terminal_work(
+        &mut self,
+    ) -> Result<Option<RetainedHandleSharePlan<D>>, LedgerCause<D>> {
+        self.coordinator.retained_ledger().seal_ordinary_work()?;
+        let Some(capability) = self.failure_terminal_work.as_ref() else {
+            return Ok(None);
+        };
+        let dimension = capability.handle_share_work.charges()[0].0;
+        self.coordinator
+            .retained_ledger()
+            .activate_protected_work(dimension)?;
+        Ok(self
+            .failure_terminal_work
             .take()
-            .map(|capability| capability.handle_share_work)
+            .map(|capability| capability.handle_share_work))
+    }
+
+    fn record_terminal_gate(
+        &mut self,
+        result: Result<(), PublicationCause<D>>,
+    ) -> Option<ControlCause> {
+        match result {
+            Ok(()) => None,
+            Err(PublicationCause::Control(cause)) => {
+                self.record_terminal_cause(PreparationFailureCode::from_control(&cause));
+                Some(cause)
+            }
+            Err(PublicationCause::Ledger(_)) => {
+                self.record_ledger_failure();
+                None
+            }
+        }
+    }
+
+    pub(super) fn prepare_terminal_control(
+        &mut self,
+        final_progress: FinalProgress<PP, U>,
+    ) -> Option<ControlCause> {
+        let result = self.coordinator.try_prepare_typed_control(final_progress);
+        self.record_terminal_gate(result)
+    }
+
+    pub(super) fn close_terminal_owners(&mut self) -> Option<ControlCause> {
+        let result = self.coordinator.close_for_terminal_extraction();
+        self.record_terminal_gate(result)
     }
 
     pub(crate) fn failure_terminal_work_limits(&self) -> Option<(usize, u64, u64)> {
@@ -2213,8 +2429,10 @@ where
         self.failure_terminal_work_dimension.is_some()
     }
 
-    pub(crate) const fn is_terminal_only(&self) -> bool {
-        self.failure_terminal_work_dimension.is_some() && self.failure_terminal_work.is_none()
+    pub(crate) fn is_terminal_only(&self) -> bool {
+        self.coordinator.retained_ledger().ordinary_work_is_sealed()
+            || (self.failure_terminal_work_dimension.is_some()
+                && self.failure_terminal_work.is_none())
     }
 
     pub(super) fn validate_ordinary_dimension(
@@ -2261,9 +2479,8 @@ where
         mut self,
         final_progress: FinalProgress<PP, U>,
     ) -> Result<PreparedRetainedEvidenceOnlyOutcome<F, P, D>, RetainedPublicationPrepareError> {
-        if let Some(cause) = prepare_terminal_control(&mut self.coordinator, final_progress) {
-            self.record_terminal_cause(PreparationFailureCode::from_control(&cause));
-        }
+        self.prepare_terminal_control(final_progress);
+        self.close_terminal_owners();
         let terminal_cause = self.sticky_terminal_cause();
         let RetainedOperation {
             coordinator,
@@ -2330,12 +2547,13 @@ where
     /// this method.
     #[must_use = "the prepared fallback must be handed off or deliberately dropped"]
     pub fn prepare_minimal_fallback<CanonicalBlock, EvidenceBlock>(
-        self,
+        mut self,
         cause: PreparationFailureCode,
     ) -> Result<
         PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>,
         RetainedPublicationPrepareError,
     > {
+        self.close_terminal_owners();
         let cause = self.sticky_terminal_cause().unwrap_or(cause);
         let RetainedOperation {
             coordinator,
@@ -2377,13 +2595,6 @@ where
             || plan
                 .canonical
                 .is_some_and(|canonical| !writer_is_admitted(canonical.writer))
-        {
-            return Err(
-                self.into_publication_open_error(RetainedWriterError::InvalidPublicationPlan, true)
-            );
-        }
-        if let Some(capability) = self.failure_terminal_work.as_ref()
-            && plan.outcome_evidence.total_blocks() > capability.max_evidence_members
         {
             return Err(
                 self.into_publication_open_error(RetainedWriterError::InvalidPublicationPlan, true)
@@ -2438,26 +2649,33 @@ where
             },
             None => None,
         };
+        if let Some(capability) = self.failure_terminal_work.as_ref()
+            && plan.outcome_evidence.total_blocks() > capability.max_evidence_members
+        {
+            return Err(
+                self.into_publication_open_error(RetainedWriterError::InvalidPublicationPlan, true)
+            );
+        }
         let ordinary_handle_share_work = self.terminal_account_share_work;
         let (
             open_handle_share_work,
             failure_evidence_handle_share_work,
             failure_terminal_work_state,
         ) = if failure_only {
-            self.failure_terminal_work.take().map_or(
-                (
-                    ordinary_handle_share_work,
-                    None,
-                    FailureTerminalWorkState::Inactive,
-                ),
-                |capability| {
-                    (
-                        capability.handle_share_work,
-                        Some(capability.handle_share_work),
-                        FailureTerminalWorkState::Active,
-                    )
-                },
-            )
+            match self.activate_failure_terminal_work() {
+                Ok(Some(work)) => (work, Some(work), FailureTerminalWorkState::Active),
+                Ok(None) => {
+                    return Err(self.into_publication_open_error(
+                        RetainedWriterError::InvalidPublicationPlan,
+                        true,
+                    ));
+                }
+                Err(cause) => {
+                    return Err(
+                        self.into_publication_open_error(RetainedWriterError::Ledger(cause), true)
+                    );
+                }
+            }
         } else {
             (
                 ordinary_handle_share_work,

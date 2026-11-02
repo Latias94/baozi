@@ -283,11 +283,13 @@ fn semantic_progress_capacity_obeys_the_evidence_limit_and_latches() {
             }
         }
     ));
-    assert_eq!(coordinator.poll(), Err(error));
+    assert_eq!(coordinator.poll(), Err(error.clone()));
 
-    let snapshot = coordinator
+    let failure = coordinator
         .finish()
-        .expect("denied progress growth retains no evidence capacity");
+        .expect_err("the evidence limit failure remains terminal");
+    let (cause, snapshot) = failure.into_parts();
+    assert_eq!(cause, baozi_operation::PublicationCause::Control(error));
     assert_eq!(snapshot.current_evidence_bytes(), 0);
 }
 
@@ -451,7 +453,7 @@ fn invalid_progress_is_a_latched_control_cause() {
         .report_progress(Phase::Acquire, Unit::Bytes, 1, None)
         .expect_err("phase regression must fail");
     assert!(matches!(error, ControlCause::InvalidProgress { .. }));
-    assert_eq!(coordinator.poll(), Err(error));
+    assert_eq!(coordinator.poll(), Err(error.clone()));
 }
 
 #[test]
@@ -591,7 +593,7 @@ fn every_progress_regression_is_typed_and_latched() {
                 violation: expected,
             }
         );
-        assert_eq!(coordinator.poll(), Err(error));
+        assert_eq!(coordinator.poll(), Err(error.clone()));
     }
 }
 

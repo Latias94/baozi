@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-08-19
+updated: 2026-11-02
 authors:
   - Codex
 decision_type: architecture
@@ -12,6 +13,8 @@ evidence:
   - docs/knowledge/engineering/verification/2026-08-19T152712Z-post-u4-authority-reset-review.md
   - docs/conformance/contracts.toml
   - crates/baozi-operation/src/ledger.rs
+  - crates/baozi-operation/src/ledger/work.rs
+  - crates/baozi-operation/src/ledger/evidence.rs
   - crates/baozi-operation/src/concrete_store/activation/preflight.rs
 related:
   - docs/adr/0002-runtime-concurrency-observability.md
@@ -59,6 +62,34 @@ may present several snapshots together but cannot add counters with different ph
 `baozi-operation` owns the runtime-neutral accounting mechanism. The operation-owning crate defines
 the closed phase and dimension vocabulary, limits, public interpretation, and typed outcome. Format
 code can use only capabilities issued by that owner.
+
+### Invocation Work and Independent Storage
+
+One invocation owns attempted, consumed, pending-consumption, work-policy and scoped-work state.
+`LocalWork` uses short numeric `RefCell` borrows. Bound roles and linear envelopes borrow that actual
+owner; they retain neither a borrow guard nor reference-counted work ownership across an action.
+Storage reservations and physical payload owners retain independently synchronized storage state
+and may outlive or be released independently of the invocation. There is no shared-work backend or
+second mutable accounting copy.
+
+A dimension that accounts for both work and storage is split by field. Work limits accompany local
+work; live, publication and commitment limits accompany storage. Tightening a mixed policy observes
+and updates both halves in one joint transaction. Immutable identity catalogues and dense positions
+are prepared before numeric guards; bound numeric actions do not compare owner keys or search them.
+
+Completion does not itself end scoped ownership. A fully completed envelope must still explicitly
+finish. Forgetting a permit, including one with zero remaining units, leaves persistent ownership
+that rejects terminal finalization. Trusted wrappers may explicitly resolve a verified unfinished
+suffix during error or unwind cleanup while retaining attempted work, completed prefixes and the
+accepted failure. Raw abandonment and conflicting-borrow faults remain fail-closed.
+
+Numeric work and shared storage guards do not cross allocator entry, owner-key comparisons,
+extension calls or payload destruction. Interim snapshots first admit and allocate their backing,
+then borrow current work and lock storage for one coherent copy into the qualified buffers. Cleanup
+subtracts only the snapshot's own admission from current counters; it never restores an earlier
+global baseline. The outgoing snapshot's backing is excluded from current ledger-owned evidence
+while its construction overlap remains in the peak. Final composition uses preadmitted staging and
+retains the metered catalogue owners through the observation interval.
 
 ### Evidence Planes
 

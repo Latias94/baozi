@@ -653,8 +653,9 @@ fn aggregate_share_work_rejection_is_zero_mutation_and_retryable() {
         .try_publication_assembly(publication_plan(keys, 2))
         .expect("work-headroom batch assembly");
     let ledger = assembly.raw.test_ledger_probe();
-    let before_work = ledger
-        .dimension_evidence(keys.dimension)
+    let before_work = assembly
+        .raw
+        .test_dimension_evidence(keys.dimension)
         .expect("work evidence before batch");
     assert_eq!(before_work.attempted(), 14);
     assert_eq!(before_work.consumed(), 14);
@@ -693,8 +694,9 @@ fn aggregate_share_work_rejection_is_zero_mutation_and_retryable() {
         before_attributed
     );
     assert_eq!(account.snapshot(), before_physical);
-    let after_rejection = ledger
-        .dimension_evidence(keys.dimension)
+    let after_rejection = assembly
+        .raw
+        .test_dimension_evidence(keys.dimension)
         .expect("work evidence after rejection");
     assert_eq!(after_rejection, before_work);
 
@@ -706,8 +708,9 @@ fn aggregate_share_work_rejection_is_zero_mutation_and_retryable() {
         )
         .expect("one item fits the remaining work budget");
     assert_eq!(range.len(), 1);
-    let exact = ledger
-        .dimension_evidence(keys.dimension)
+    let exact = assembly
+        .raw
+        .test_dimension_evidence(keys.dimension)
         .expect("work evidence at exact limit");
     assert_eq!(exact.attempted(), WORK_LIMIT);
     assert_eq!(exact.consumed(), WORK_LIMIT);
@@ -734,8 +737,9 @@ fn aggregate_share_work_exact_fit_charges_only_executed_items() {
         .try_publication_assembly(publication_plan(keys, 2))
         .expect("exact-fit batch assembly");
     let ledger = assembly.raw.test_ledger_probe();
-    let before = ledger
-        .dimension_evidence(keys.dimension)
+    let before = assembly
+        .raw
+        .test_dimension_evidence(keys.dimension)
         .expect("work evidence before exact-fit batch");
     assert_eq!(before.attempted(), 14);
     assert_eq!(before.consumed(), 14);
@@ -753,8 +757,9 @@ fn aggregate_share_work_exact_fit_charges_only_executed_items() {
         .expect("projected exact-fit batch");
 
     assert_eq!(range.len(), 2);
-    let exact = ledger
-        .dimension_evidence(keys.dimension)
+    let exact = assembly
+        .raw
+        .test_dimension_evidence(keys.dimension)
         .expect("work evidence after exact-fit batch");
     assert_eq!(exact.attempted(), WORK_LIMIT);
     assert_eq!(exact.consumed(), WORK_LIMIT);
@@ -783,8 +788,9 @@ fn mid_batch_failure_rolls_back_the_prefix_and_leaves_the_assembly_writable() {
     let before_ledger_bytes = ledger.current_live_bytes();
     let before_attributed_bytes = assembly.raw.test_canonical_attributed_bytes();
     let before_physical = account.snapshot();
-    let before_work = ledger
-        .dimension_evidence(keys.dimension)
+    let before_work = assembly
+        .raw
+        .test_dimension_evidence(keys.dimension)
         .expect("work evidence before failing batch");
     let item_values = [[1_u8], [2_u8], [3_u8]];
     let items = [
@@ -852,8 +858,9 @@ fn mid_batch_failure_rolls_back_the_prefix_and_leaves_the_assembly_writable() {
         after_physical.first_poison_evidence(),
         before_physical.first_poison_evidence()
     );
-    let after_work = ledger
-        .dimension_evidence(keys.dimension)
+    let after_work = assembly
+        .raw
+        .test_dimension_evidence(keys.dimension)
         .expect("work evidence after failing batch");
     assert_eq!(after_work.attempted() - before_work.attempted(), 4);
     assert_eq!(after_work.consumed() - before_work.consumed(), 4);

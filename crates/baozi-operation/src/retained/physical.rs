@@ -1225,18 +1225,33 @@ impl PhysicalStorageAccount {
     {
         if !action.account().is_same_account(self) {
             let poisoned = self.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            admitted_share_work
+                .finish_partial()
+                .map_err(RetainedShareAdmissionError::Ledger)?;
             return Err(RetainedShareAdmissionError::Physical(
                 RetainedAllocationError::AccountPoisoned(poisoned),
             ));
         }
         let mut state = lock_recovering_poison(&self.inner.value().linear);
-        let admitted_retained_owners = state.admitted_retained_owners.checked_add(1).ok_or(
-            RetainedShareAdmissionError::Physical(RetainedAllocationError::AccountingOverflow),
-        )?;
+        let Some(admitted_retained_owners) = state.admitted_retained_owners.checked_add(1) else {
+            drop(state);
+            admitted_share_work
+                .finish_partial()
+                .map_err(RetainedShareAdmissionError::Ledger)?;
+            return Err(RetainedShareAdmissionError::Physical(
+                RetainedAllocationError::AccountingOverflow,
+            ));
+        };
         let limits = self.limits().counter_limits();
-        try_admit_locked(&mut state.counters, limits, charge)
-            .map_err(map_retained_admission_error)
-            .map_err(RetainedShareAdmissionError::Physical)?;
+        if let Err(cause) = try_admit_locked(&mut state.counters, limits, charge) {
+            drop(state);
+            admitted_share_work
+                .finish_partial()
+                .map_err(RetainedShareAdmissionError::Ledger)?;
+            return Err(RetainedShareAdmissionError::Physical(
+                map_retained_admission_error(cause),
+            ));
+        }
         state.admitted_retained_owners = admitted_retained_owners;
         drop(state);
         let lease_owner = match admitted_share_work.try_share_account(self) {

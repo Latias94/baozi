@@ -156,42 +156,42 @@ impl TerminalEvidenceKeySeal for TestDimension {}
 
 impl TerminalEvidenceKey for TestDimension {}
 
-static PANIC_ON_PRIMARY_DIMENSION_ORD: AtomicBool = AtomicBool::new(false);
-static PRIMARY_DIMENSION_ORD_TEST_LOCK: StdMutex<()> = StdMutex::new(());
+static FORBID_TERMINAL_DIMENSION_ORD: AtomicBool = AtomicBool::new(false);
+static TERMINAL_DIMENSION_ORD_TEST_LOCK: StdMutex<()> = StdMutex::new(());
 
-struct PrimaryDimensionOrdReset;
+struct TerminalDimensionOrdReset;
 
-impl Drop for PrimaryDimensionOrdReset {
+impl Drop for TerminalDimensionOrdReset {
     fn drop(&mut self) {
-        PANIC_ON_PRIMARY_DIMENSION_ORD.store(false, Ordering::SeqCst);
+        FORBID_TERMINAL_DIMENSION_ORD.store(false, Ordering::SeqCst);
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PrimaryPanicDimension(u8);
+struct TerminalOrderingDimension(u8);
 
-impl TerminalEvidenceKeySeal for PrimaryPanicDimension {}
+impl TerminalEvidenceKeySeal for TerminalOrderingDimension {}
 
-impl TerminalEvidenceKey for PrimaryPanicDimension {}
+impl TerminalEvidenceKey for TerminalOrderingDimension {}
 
-impl PartialOrd for PrimaryPanicDimension {
+impl PartialOrd for TerminalOrderingDimension {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for PrimaryPanicDimension {
+impl Ord for TerminalOrderingDimension {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         assert!(
-            !PANIC_ON_PRIMARY_DIMENSION_ORD.load(Ordering::SeqCst),
-            "primary bind invoked owner-defined dimension ordering"
+            !FORBID_TERMINAL_DIMENSION_ORD.load(Ordering::SeqCst),
+            "terminal preparation invoked owner-defined dimension ordering"
         );
         self.0.cmp(&other.0)
     }
 }
 
 struct PrimaryBindDropObservation {
-    ledger: StdArc<StdMutex<Option<LedgerTestProbe<TestPhase, PrimaryPanicDimension>>>>,
+    ledger: StdArc<StdMutex<Option<LedgerTestProbe<TestPhase, TerminalOrderingDimension>>>>,
     drop_count: &'static AtomicU64,
     observed_active: &'static AtomicU64,
     observed_live: &'static AtomicU64,
@@ -410,6 +410,70 @@ fn test_operation_on_account_with_control(
         Ok(operation) => operation,
         Err(_) => panic!("test operation bootstrap must succeed"),
     }
+}
+
+fn test_operation_with_failure_work(
+    factory: &PhysicalStorageAccountFactory,
+    evidence_limit: u64,
+    writer_limits: RetainedBatchLimits,
+    max_evidence_members: usize,
+) -> TestOperation {
+    let account = account(factory, u64::MAX, 128);
+    test_operation_on_account_with_failure_work(
+        &account,
+        evidence_limit,
+        writer_limits,
+        OperationControl::default(),
+        max_evidence_members,
+        7_u32,
+    )
+}
+
+fn test_operation_on_account_with_failure_work<F>(
+    account: &PhysicalStorageAccount,
+    evidence_limit: u64,
+    writer_limits: RetainedBatchLimits,
+    control: OperationControl<TestProgress, TestUnit>,
+    max_evidence_members: usize,
+    fallback: F,
+) -> RetainedOperation<TestOwner, TestPhase, TestProgress, TestUnit, TestDimension, F>
+where
+    F: Send + Sync + 'static,
+{
+    let failure_work = RetainedFailureTerminalWorkPlan::new(
+        TestDimension::FailureTerminalWork,
+        max_evidence_members,
+    );
+    let failure_limit = failure_work
+        .requirement()
+        .expect("finite failure-work fixture must qualify")
+        .observed_work_limit();
+    let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
+        .with_published_outcome_evidence_limit(evidence_limit);
+    let limits = LedgerLimits::new(
+        u64::MAX,
+        [
+            (TestDimension::Bytes, policy),
+            (
+                TestDimension::FailureTerminalWork,
+                DimensionPolicy::counter(failure_limit, failure_limit, 0),
+            ),
+        ],
+    )
+    .expect("failure-work fixture limits must qualify");
+    let plan = RetainedOperationStartPlan::new(
+        writer_plan(
+            writer_limits.attribution_slots(),
+            writer_limits.commitment_slots(),
+        ),
+        share_work(),
+        empty_plan(),
+        OutputCommitment::new(TestDimension::Bytes, 1),
+        OutputCommitment::new(TestDimension::Bytes, 1),
+    )
+    .with_failure_terminal_work(failure_work);
+    RetainedOperation::try_start(control, limits, account, plan, || Ok(fallback))
+        .unwrap_or_else(|_| panic!("finite failure-work fixture must start"))
 }
 
 fn test_derived_operation_on_account_with_control<CanonicalBlock>(

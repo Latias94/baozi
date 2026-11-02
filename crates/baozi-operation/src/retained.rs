@@ -24,7 +24,7 @@ mod terminal_output;
 #[cfg(test)]
 use crate::OperationControl;
 use crate::control::discard_untrusted_panic_payload;
-use crate::coordinator::{FinalProgress, OperationCoordinator};
+use crate::coordinator::FinalProgress;
 use crate::ledger::CommitmentPairPushError;
 #[cfg(test)]
 use crate::ledger::{AttributionBatchCreateError, LedgerLimits};
@@ -145,8 +145,7 @@ use terminal::{
     FreezeReadyDetachedTerminalEvidence, FrozenSuccessPrimaryTransition, PrimaryPublicationBatches,
     QualifiedDetachedTerminalEvidence, TerminalFallbackAttribution, TerminalFallbackGuard,
     TerminalPhysicalOwnershipManifest, TerminalPrimaryGuard, TerminalPrimaryTransition,
-    drop_retained_table_with_account_anchor, prepare_terminal_control,
-    terminal_evidence_catalog_is_qualified,
+    drop_retained_table_with_account_anchor, terminal_evidence_catalog_is_qualified,
 };
 use terminal_failure::{TerminalMinimalFreezeGuard, TerminalRichFreezeGuard};
 use terminal_output::RetainedPublicationPayload;
@@ -842,10 +841,6 @@ where
         }
         self.record_terminal_cause(fallback_cause);
         self.activate_failure_terminal_work();
-        if self.failure_terminal_work_state == FailureTerminalWorkState::Failed {
-            let cause = self.poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
-            return Err(cause);
-        }
         self.try_discard_canonical_ownership()?;
 
         Ok(RetainedFailureAssembly {
@@ -945,17 +940,18 @@ where
             self.failure_terminal_work_state = FailureTerminalWorkState::Failed;
             return;
         };
-        let configured = operation.has_failure_terminal_work_configuration();
         match operation.activate_failure_terminal_work() {
-            Some(handle_share_work) => {
+            Ok(Some(handle_share_work)) => {
                 self.failure_evidence_handle_share_work = Some(handle_share_work);
                 self.failure_terminal_work_state = FailureTerminalWorkState::Active;
             }
-            None if configured => {
-                operation.record_product_graph_failure(FAILURE_TERMINAL_WORK_SEALED_CODE);
+            Ok(None) => {
                 self.failure_terminal_work_state = FailureTerminalWorkState::Failed;
             }
-            None => {}
+            Err(_) => {
+                operation.record_ledger_failure();
+                self.failure_terminal_work_state = FailureTerminalWorkState::Failed;
+            }
         }
     }
 
@@ -1757,6 +1753,16 @@ where
             self.observe_publication_error(error);
         }
         result
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_dimension_evidence(&self, dimension: D) -> Option<DimensionSnapshot> {
+        self.operation
+            .as_ref()?
+            .coordinator
+            .retained_ledger()
+            .dimension_evidence(dimension)
+            .ok()
     }
 
     #[cfg(test)]
@@ -2671,7 +2677,7 @@ where
 
         let frozen_success = matches!(&request, RetainedTerminalRequest::FrozenSuccess { .. });
         let mut observed_control_cause = None;
-        let terminal = match request {
+        let mut terminal = match request {
             RetainedTerminalRequest::Success {
                 proof,
                 final_progress,
@@ -2701,8 +2707,7 @@ where
                 }
                 let terminal_cause = match self.operation.as_mut() {
                     Some(operation) => {
-                        let control_cause =
-                            prepare_terminal_control(&mut operation.coordinator, final_progress);
+                        let control_cause = operation.prepare_terminal_control(final_progress);
                         observed_control_cause = control_cause.clone();
                         if let Some(cause) = control_cause.as_ref() {
                             operation
@@ -2786,8 +2791,7 @@ where
                 }
                 let terminal_cause = match self.operation.as_mut() {
                     Some(operation) => {
-                        let control_cause =
-                            prepare_terminal_control(&mut operation.coordinator, final_progress);
+                        let control_cause = operation.prepare_terminal_control(final_progress);
                         observed_control_cause = control_cause.clone();
                         if let Some(cause) = control_cause.as_ref() {
                             operation
@@ -2842,15 +2846,7 @@ where
             }
             RetainedTerminalRequest::MinimalFallback { requested_cause } => {
                 let cause = match self.operation.as_mut() {
-                    Some(operation) => {
-                        let control_cause = operation.coordinator.poll().err();
-                        observed_control_cause = control_cause.clone();
-                        if let Some(cause) = control_cause.as_ref() {
-                            operation
-                                .record_terminal_cause(PreparationFailureCode::from_control(cause));
-                        }
-                        operation.sticky_terminal_cause().unwrap_or(requested_cause)
-                    }
+                    Some(operation) => operation.sticky_terminal_cause().unwrap_or(requested_cause),
                     None => {
                         let cause = self
                             .poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
@@ -2862,6 +2858,27 @@ where
                 RetainedTerminalMode::MinimalFallback { cause }
             }
         };
+
+        if let Some(operation) = self.operation.as_mut() {
+            let disposal_cause = operation.close_terminal_owners();
+            if observed_control_cause.is_none() {
+                observed_control_cause = disposal_cause;
+            }
+            if let Some(cause) = operation.sticky_terminal_cause() {
+                terminal = match terminal {
+                    RetainedTerminalMode::Success { evidence_root, .. }
+                    | RetainedTerminalMode::RichFailure { evidence_root, .. } => {
+                        RetainedTerminalMode::RichFailure {
+                            evidence_root,
+                            cause,
+                        }
+                    }
+                    RetainedTerminalMode::MinimalFallback { .. } => {
+                        RetainedTerminalMode::MinimalFallback { cause }
+                    }
+                };
+            }
+        }
 
         if self.operation.is_none() || self.evidence_batch.is_none() || self.account.is_none() {
             let cause = self.poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
@@ -3135,6 +3152,11 @@ where
     EvidenceBlock: Send + Sync + 'static,
 {
     #[cfg(test)]
+    pub(crate) fn test_dimension_evidence(&self, dimension: D) -> Option<DimensionSnapshot> {
+        self.assembly.test_dimension_evidence(dimension)
+    }
+
+    #[cfg(test)]
     fn test_probe_freeze_permit_qualification(
         mut self,
         canonical_dimension: D,
@@ -3183,8 +3205,7 @@ where
             Err(cause) => {
                 let dimension = self
                     .assembly
-                    .test_ledger_probe()
-                    .dimension_evidence(canonical_dimension)
+                    .test_dimension_evidence(canonical_dimension)
                     .unwrap_or_else(|| panic!("test dimension must remain observable"));
                 FreezePermitQualificationProbe::Rejected {
                     cause,
@@ -3291,8 +3312,7 @@ where
 
         let (terminal_cause, control_cause) = match self.assembly.operation.as_mut() {
             Some(operation) => {
-                let control_cause =
-                    prepare_terminal_control(&mut operation.coordinator, final_progress);
+                let control_cause = operation.prepare_terminal_control(final_progress);
                 if let Some(cause) = control_cause.as_ref() {
                     operation.record_terminal_cause(PreparationFailureCode::from_control(cause));
                 }
