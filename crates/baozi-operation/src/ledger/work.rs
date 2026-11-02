@@ -321,6 +321,14 @@ impl<'op, D: Copy, const N: usize> BoundWorkGroup<'op, D, N> {
     /// Validates distinct dimensions in catalog order and commits the complete group or nothing.
     pub(crate) fn consume_direct_atomic(&self, amounts: [u64; N]) -> Result<(), LedgerCause<D>> {
         let mut state = self.borrow_active()?;
+        self.consume_direct_atomic_in_state(&mut state, amounts)
+    }
+
+    fn consume_direct_atomic_in_state(
+        &self,
+        state: &mut WorkState<D>,
+        amounts: [u64; N],
+    ) -> Result<(), LedgerCause<D>> {
         let mut consumed = [0; N];
         let mut cursor = 0;
         while cursor < N {

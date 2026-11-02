@@ -121,9 +121,7 @@ impl<'op, D: Copy, const N: usize> ParserWorkScope<'op, D, N> {
 
     /// Records one exact group prefix without reserving a pending-consumed envelope.
     pub(crate) fn complete(&mut self, amounts: [u64; N]) -> Result<(), LedgerCause<D>> {
-        {
-            let _state = self.borrow_active()?;
-        }
+        let mut state = self.borrow_active()?;
         if amounts
             .iter()
             .zip(self.remaining)
@@ -134,8 +132,10 @@ impl<'op, D: Copy, const N: usize> ParserWorkScope<'op, D, N> {
         if amounts.iter().all(|amount| *amount == 0) {
             return Ok(());
         }
-        // No external action can intervene between channel validation and this shared kernel.
-        self.group.consume_direct_atomic(amounts)?;
+        // Channel validation and numeric completion share one short borrow. No callback or
+        // physical action runs while it is held; the ordinary group uses this same kernel.
+        self.group
+            .consume_direct_atomic_in_state(&mut state, amounts)?;
         for (remaining, amount) in self.remaining.iter_mut().zip(amounts) {
             *remaining -= amount;
         }
