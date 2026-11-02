@@ -9,6 +9,21 @@ use std::ops::Range;
 
 pub(crate) const SCAN_CHUNK_BYTES: usize = 4 * 1024;
 
+// A document reuses these initialized buffers; scans read only the populated prefix.
+pub(crate) struct TokenScanScratch {
+    offsets: [u16; SCAN_CHUNK_BYTES],
+    characters: [char; SCAN_CHUNK_BYTES],
+}
+
+impl TokenScanScratch {
+    pub(crate) fn new() -> Self {
+        Self {
+            offsets: [0_u16; SCAN_CHUNK_BYTES],
+            characters: ['\0'; SCAN_CHUNK_BYTES],
+        }
+    }
+}
+
 pub(crate) fn usize_amount(
     scope: &ParseScope<'_>,
     value: usize,
@@ -186,6 +201,7 @@ fn document_byte_failure(
 
 pub(crate) fn scan_token_ranges(
     scope: &ParseScope<'_>,
+    scratch: &mut TokenScanScratch,
     line: &str,
     resource: &'static str,
     mut inspect: impl FnMut(usize, char) -> ParseResult<()>,
@@ -193,8 +209,6 @@ pub(crate) fn scan_token_ranges(
 ) -> ParseResult<Option<usize>> {
     let mut token_start = None;
     let mut chunk_start = 0usize;
-    let mut scanned_offsets = [0_u16; SCAN_CHUNK_BYTES];
-    let mut scanned_characters = ['\0'; SCAN_CHUNK_BYTES];
 
     while chunk_start < line.len() {
         let chunk_end = str_chunk_end(line, chunk_start);
@@ -206,10 +220,12 @@ pub(crate) fn scan_token_ranges(
                 for (relative, character) in line[chunk_start..chunk_end].char_indices() {
                     let offset =
                         u16::try_from(relative).map_err(|_| scope.allocation_failure(resource))?;
-                    let stored_offset = scanned_offsets
+                    let stored_offset = scratch
+                        .offsets
                         .get_mut(scanned_len)
                         .ok_or_else(|| scope.allocation_failure(resource))?;
-                    let stored_character = scanned_characters
+                    let stored_character = scratch
+                        .characters
                         .get_mut(scanned_len)
                         .ok_or_else(|| scope.allocation_failure(resource))?;
                     *stored_offset = offset;
@@ -225,9 +241,9 @@ pub(crate) fn scan_token_ranges(
         // Token visitors can meter their own work, so semantic callbacks run only after the
         // bounded scan capability has closed. The fixed buffer avoids an unmetered allocation or
         // a second UTF-8 decode pass while preserving callback order.
-        for (&relative, &character) in scanned_offsets[..scanned_len]
+        for (&relative, &character) in scratch.offsets[..scanned_len]
             .iter()
-            .zip(&scanned_characters[..scanned_len])
+            .zip(&scratch.characters[..scanned_len])
         {
             let index = chunk_start
                 .checked_add(usize::from(relative))

@@ -536,6 +536,156 @@ fn mtl_utf8_and_line_scans_charge_each_fixed_byte_chunk() -> TestResult<()> {
 }
 
 #[test]
+fn reused_obj_scan_keeps_later_comment_chunk_admission_and_cancellation_prefixes() -> TestResult<()>
+{
+    let document = format!(
+        "{}o held\nv 0 0 0\n{}#{}\ng skipped",
+        " ".repeat(8_192),
+        " ".repeat(4_096),
+        "x".repeat(4_096),
+    );
+    assert_eq!(document.len(), 16_410);
+    // Planning/building consume 32_820 bytes; the first two record scans and their token
+    // bytes add 8_214. The comment's second chunk must be admitted before seeing '#'.
+    let mut limited = ResourceLimits::default();
+    limited.max_decode_work = 49_225;
+    let rejected = expected_failure(import_bytes_result(
+        "reused-comment.obj",
+        document.as_bytes(),
+        limited,
+    )?);
+    assert_ledger_limit(&rejected, ImportDimension::DecodeWork);
+    let decode = rejected
+        .ledger()
+        .dimension(ImportDimension::DecodeWork)
+        .unwrap();
+    assert_eq!(decode.attempted(), 49_226);
+    assert_eq!(decode.consumed(), 45_130);
+
+    let mut limits = ResourceLimits::default();
+    limits.max_records = 3;
+    let (control, polls) = controlled_import(None);
+    let calibration = expected_failure(import_assets_result_with_control(
+        "reused-comment.obj",
+        [("reused-comment.obj", document.as_bytes())],
+        limits.clone(),
+        false,
+        control,
+    )?);
+    assert_ledger_limit(&calibration, ImportDimension::Records);
+    let decode = calibration
+        .ledger()
+        .dimension(ImportDimension::DecodeWork)
+        .unwrap();
+    assert_eq!(decode.attempted(), 49_226);
+    assert_eq!(decode.consumed(), 49_226);
+    let total_polls = polls.load(Ordering::SeqCst);
+    let (boundary_poll, cancelled) = first_cancelled_dimension_prefix_at_least(
+        total_polls,
+        ImportDimension::DecodeWork,
+        45_130,
+        |cancel_on| {
+            let (control, polls) = controlled_import(Some(cancel_on));
+            let failure = expected_failure(import_assets_result_with_control(
+                "reused-comment.obj",
+                [("reused-comment.obj", document.as_bytes())],
+                limits.clone(),
+                false,
+                control,
+            )?);
+            assert_cancelled(&failure);
+            assert_eq!(polls.load(Ordering::SeqCst), cancel_on);
+            Ok(failure)
+        },
+    )?;
+    assert!(boundary_poll < total_polls);
+    let decode = cancelled
+        .ledger()
+        .dimension(ImportDimension::DecodeWork)
+        .unwrap();
+    assert_eq!(decode.attempted(), 45_130);
+    assert_eq!(decode.consumed(), 45_130);
+    for failure in [&rejected, &calibration, &cancelled] {
+        assert_eq!(work_consumed(failure, ImportDimension::Records), 3);
+        let tokens = failure.ledger().dimension(ImportDimension::Tokens).unwrap();
+        assert_eq!(tokens.attempted(), 6);
+        assert_eq!(tokens.consumed(), 6);
+        assert_eq!(work_consumed(failure, ImportDimension::Vertices), 1);
+        assert_eq!(failure.ledger().current_live_bytes(), 0);
+        assert_eq!(failure.ledger().active_reservations(), 0);
+        assert_eq!(failure.ledger().committed_canonical_members(), 0);
+    }
+    Ok(())
+}
+
+#[test]
+fn reused_obj_scan_finishes_later_record_chunks_before_token_rejection() -> TestResult<()> {
+    let padding = " ".repeat(8_192);
+    let document = format!("{padding}o held\nv 0 0 0\n{padding}v 1 0 0\nv 0 1 0\nf 1 2 3");
+    assert_eq!(document.len(), 16_422);
+    let mut limits = ResourceLimits::default();
+    limits.max_tokens = 7;
+    let failure = expected_failure(import_bytes_result(
+        "reused-token.obj",
+        document.as_bytes(),
+        limits,
+    )?);
+    assert_ledger_limit(&failure, ImportDimension::Tokens);
+    // Both text passes, three complete line scans and the first seven token byte lengths
+    // are consumed; the eighth token's byte charge is never attempted.
+    for (dimension, attempted, consumed) in [
+        (ImportDimension::DecodeWork, 49_258, 49_258),
+        (ImportDimension::Tokens, 8, 7),
+        (ImportDimension::Records, 3, 3),
+        (ImportDimension::Vertices, 1, 1),
+    ] {
+        let snapshot = failure.ledger().dimension(dimension).unwrap();
+        assert_eq!(snapshot.attempted(), attempted, "{dimension:?}");
+        assert_eq!(snapshot.consumed(), consumed, "{dimension:?}");
+    }
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    assert_eq!(failure.ledger().active_reservations(), 0);
+    assert_eq!(failure.ledger().committed_canonical_members(), 0);
+    Ok(())
+}
+
+#[test]
+fn reused_mtl_scan_preserves_later_token_rejection_prefix_and_releases_storage() -> TestResult<()> {
+    let obj = b"mtllib palette.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+    let mtl = format!("newmtl {}\nKd 0.25 0.5 1\nnewmtl b", "a".repeat(4_100));
+    assert_eq!(mtl.len(), 4_130);
+    let mut limits = ResourceLimits::default();
+    limits.max_tokens = 25;
+    let failure = expected_failure(import_assets_result(
+        "reused-mtl.obj",
+        [
+            ("reused-mtl.obj", obj.as_slice()),
+            ("palette.mtl", mtl.as_bytes()),
+        ],
+        limits,
+        false,
+    )?);
+    assert_ledger_limit(&failure, ImportDimension::Tokens);
+    // OBJ text/scans/tokens consume 181 bytes of DecodeWork. MTL adds 8_260 from
+    // text passes, 4_128 from line scans and 4_122 from the first seven MTL tokens.
+    for (dimension, attempted, consumed) in [
+        (ImportDimension::DecodeWork, 16_691, 16_691),
+        (ImportDimension::Tokens, 26, 25),
+        (ImportDimension::Records, 8, 8),
+        (ImportDimension::Vertices, 3, 3),
+        (ImportDimension::Faces, 1, 1),
+    ] {
+        let snapshot = failure.ledger().dimension(dimension).unwrap();
+        assert_eq!(snapshot.attempted(), attempted, "{dimension:?}");
+        assert_eq!(snapshot.consumed(), consumed, "{dimension:?}");
+    }
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    assert_eq!(failure.ledger().active_reservations(), 0);
+    assert_eq!(failure.ledger().committed_canonical_members(), 0);
+    Ok(())
+}
+
+#[test]
 fn repeated_texture_replacement_does_not_accumulate_live_reservations() -> TestResult<()> {
     const REPLACEMENTS: usize = 64;
     const MAP_LINE: &str = "map_Kd textures/diffuse.png\n";

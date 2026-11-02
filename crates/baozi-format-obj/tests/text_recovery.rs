@@ -1,5 +1,6 @@
 mod common;
 
+use baozi_core::{MetadataValueRef, Vec3};
 use baozi_format_obj::{
     FORMAT_ID, ObjFailureCode, ObjImportOptions, ObjImporter, ObjTextDecodingMode,
     format_descriptor, obj_import_option_key,
@@ -406,6 +407,116 @@ fn decoder_carries_utf8_state_across_four_kib_boundaries() -> TestResult<()> {
             .collect::<Vec<_>>(),
         vec![(4_095, 4_097)]
     );
+    Ok(())
+}
+
+#[test]
+fn obj_scan_reuse_preserves_frontier_names_and_later_raw_recovery_offsets() -> TestResult<()> {
+    let mut bytes = Vec::from(b"o ".as_slice());
+    bytes.extend(std::iter::repeat_n(b'a', 4_093));
+    bytes.extend_from_slice("\u{1f642}".as_bytes());
+    bytes.extend_from_slice(b"\xffz # \x80\n");
+    bytes.extend_from_slice(GEOMETRY);
+    bytes.extend_from_slice(b"o q\xff # \x80\nf 1 3 2");
+
+    let report = import_recovered_obj(&bytes)?;
+    let expected_ranges = [(4_099, 4_100), (4_141, 4_142)];
+    assert_eq!(ranges(&report).as_slice(), &expected_ranges);
+    assert_eq!(report.diagnostics().len(), 2);
+    for (diagnostic, (start, end)) in report.diagnostics().iter().zip(expected_ranges) {
+        assert_eq!(diagnostic.code().as_str(), "obj.invalid_utf8_replaced");
+        assert_eq!(diagnostic.source().as_str(), "recovered.obj");
+        let range = diagnostic.byte_range().unwrap();
+        assert_eq!((range.start(), range.end()), (start, end));
+    }
+    let long_name = format!("{}\u{1f642}\u{fffd}z", "a".repeat(4_093));
+    assert_eq!(report.scene().mesh_count(), 2);
+    assert_eq!(
+        report
+            .scene()
+            .metadata_entries()
+            .filter(|entry| entry.key() == "obj:object")
+            .map(|entry| entry.value())
+            .collect::<Vec<_>>(),
+        vec![
+            MetadataValueRef::String(&long_name),
+            MetadataValueRef::String("q\u{fffd}"),
+        ]
+    );
+    assert_eq!(
+        report
+            .scene()
+            .meshes()
+            .map(|mesh| mesh.name())
+            .collect::<Vec<_>>(),
+        vec![None, Some("q\u{fffd}")]
+    );
+    Ok(())
+}
+
+#[test]
+fn mtl_scan_reuse_preserves_frontier_materials_and_later_raw_recovery_offsets() -> TestResult<()> {
+    let long_name = format!("{}\u{1f642}\u{fffd}d", "b".repeat(1_001));
+    let obj = format!(
+        "mtllib material.mtl\nusemtl {long_name}\n\
+v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\nusemtl q\u{fffd}\nf 1 3 2"
+    );
+    let mut mtl = Vec::from(b"newmtl ".as_slice());
+    mtl.extend(std::iter::repeat_n(b' ', 3_087));
+    mtl.extend(std::iter::repeat_n(b'b', 1_001));
+    mtl.extend_from_slice("\u{1f642}".as_bytes());
+    mtl.extend_from_slice(
+        b"\xffd # \x80\nKd 0.75 0.25 0.5\n\n# ignored \xff\nnewmtl q\xff # \x80\nKd 0.125 0.5 1",
+    );
+    let report = expected_success(import_assets_result_with_text_policy(
+        "model.obj",
+        [
+            ("model.obj", obj.as_bytes()),
+            ("material.mtl", mtl.as_slice()),
+        ],
+        ResourceLimits::default(),
+        false,
+        Some(replacement_options()),
+        ConformancePolicy::AllowDeclaredRecovery,
+        true,
+    )?);
+
+    let expected_ranges = [(4_099, 4_100), (4_144, 4_145)];
+    assert_eq!(ranges(&report).as_slice(), &expected_ranges);
+    assert_eq!(report.diagnostics().len(), 2);
+    for (diagnostic, (start, end)) in report.diagnostics().iter().zip(expected_ranges) {
+        assert_eq!(diagnostic.code().as_str(), "obj.invalid_utf8_replaced");
+        assert_eq!(diagnostic.source().as_str(), "material.mtl");
+        let range = diagnostic.byte_range().unwrap();
+        assert_eq!((range.start(), range.end()), (start, end));
+    }
+    let scene = report.scene();
+    assert_eq!(scene.mesh_count(), 2);
+    assert_eq!(scene.material_count(), 2);
+    assert_eq!(
+        scene
+            .metadata_entries()
+            .filter(|entry| entry.key() == "obj:material")
+            .map(|entry| entry.value())
+            .collect::<Vec<_>>(),
+        vec![
+            MetadataValueRef::String(&long_name),
+            MetadataValueRef::String("q\u{fffd}"),
+        ]
+    );
+    for (mesh, (name, diffuse)) in scene.meshes().zip([
+        (Some(long_name.as_str()), Vec3::new(0.75, 0.25, 0.5)),
+        (Some("q\u{fffd}"), Vec3::new(0.125, 0.5, 1.0)),
+    ]) {
+        let material = mesh
+            .primitives()
+            .next()
+            .unwrap()
+            .authored_material()
+            .unwrap();
+        assert_eq!(material.name(), name);
+        assert_eq!(material.factors().legacy().unwrap().diffuse(), diffuse);
+    }
     Ok(())
 }
 

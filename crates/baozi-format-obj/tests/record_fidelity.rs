@@ -1,7 +1,8 @@
 mod common;
 
 use baozi_core::{
-    AttributeData, AttributeDomain, AttributeRef, AttributeSemanticRef, PrimitiveRef,
+    AttributeData, AttributeDomain, AttributeRef, AttributeSemanticRef, MetadataOwnerRef,
+    MetadataValueRef, PrimitiveRef, Vec3,
 };
 use baozi_format_obj::ObjFailureCode;
 use baozi_import::{
@@ -10,7 +11,7 @@ use baozi_import::{
     LossPolicy, ResourceLimits, ScopeAbortCause, SourceScopeEntityKind,
 };
 use common::{
-    TestResult, expected_failure, expected_success, import_bytes,
+    TestResult, expected_failure, expected_success, import_assets_result, import_bytes,
     import_bytes_result_with_loss_policy,
 };
 
@@ -52,6 +53,124 @@ fn diagnostic_unsigned(diagnostic: &ImportDiagnostic, key: &str) -> Option<u64> 
             _ => None,
         }
     })
+}
+
+#[test]
+fn multichunk_records_then_short_records_preserve_exact_obj_and_mtl_values() -> TestResult<()> {
+    let long_object = format!("{}  tail", "O".repeat(8_192));
+    let padding = " ".repeat(8_192);
+    let obj = format!(
+        "mtllib palette.mtl\no {long_object}\ng first # usemtl ghost\nusemtl red\ns 7\n\
+v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nvn 0 0 1\n\
+f 1/1/1 2/2/1 3/3/1\n\n# o ghost\no short\ng last\nusemtl blue\ns off\n\
+f 3/2/1 1/3/1 2/1/1"
+    );
+    let mtl = format!(
+        "{padding}newmtl red # newmtl ghost\nKd 0.75 0.25 0.5\n\n# Kd 9 9 9\n\
+newmtl blue\n{padding}Kd 0.125 0.5 1\nd 0.5"
+    );
+    let report = expected_success(import_assets_result(
+        "records.obj",
+        [
+            ("records.obj", obj.as_bytes()),
+            ("palette.mtl", mtl.as_bytes()),
+        ],
+        ResourceLimits::default(),
+        false,
+    )?);
+    assert!(report.diagnostics().is_empty());
+    assert!(report.loss_evidence().is_empty());
+    let scene = report.scene();
+    assert_eq!(scene.mesh_count(), 2);
+    assert_eq!(scene.primitive_count(), 2);
+    assert_eq!(scene.material_count(), 2);
+    let mut meshes = scene.meshes();
+    let first_mesh = meshes.next().unwrap();
+    let last_mesh = meshes.next().unwrap();
+    for (mesh, group, object, material_name, diffuse, opacity, smoothing) in [
+        (
+            first_mesh,
+            "first",
+            long_object.as_str(),
+            "red",
+            Vec3::new(0.75, 0.25, 0.5),
+            1.0,
+            7,
+        ),
+        (
+            last_mesh,
+            "last",
+            "short",
+            "blue",
+            Vec3::new(0.125, 0.5, 1.0),
+            0.5,
+            0,
+        ),
+    ] {
+        assert_eq!(mesh.name(), Some(group));
+        let metadata = scene
+            .metadata_entries()
+            .filter(|entry| entry.owner() == MetadataOwnerRef::Entity(mesh.metadata_owner()))
+            .map(|entry| (entry.key(), entry.value()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            metadata,
+            vec![
+                ("obj:group", MetadataValueRef::String(group)),
+                ("obj:material", MetadataValueRef::String(material_name)),
+                ("obj:object", MetadataValueRef::String(object)),
+            ]
+        );
+        assert_eq!(mesh.primitive_count(), 1);
+        let primitive = mesh.primitives().next().unwrap();
+        assert_eq!(primitive.vertex_count(), 3);
+        assert_eq!(primitive.corner_count(), 3);
+        assert_eq!(primitive.face_count(), 1);
+        assert_eq!(primitive.indices(), Some(&[0, 1, 2][..]));
+        let material = primitive.authored_material().unwrap();
+        assert_eq!(material.name(), Some(material_name));
+        let legacy = material.factors().legacy().unwrap();
+        assert_eq!(legacy.diffuse(), diffuse);
+        assert_eq!(legacy.opacity(), opacity);
+        assert_eq!(
+            primitive
+                .attribute(AttributeSemanticRef::SmoothingGroup, AttributeDomain::Face)
+                .unwrap()
+                .data(),
+            AttributeData::DenseU32 {
+                lanes: 1,
+                values: &[smoothing],
+            }
+        );
+        assert_f32(
+            primitive.normals(AttributeDomain::Corner).unwrap(),
+            3,
+            &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+        );
+    }
+    let first = first_mesh.primitives().next().unwrap();
+    assert_f32(
+        first.positions().unwrap(),
+        3,
+        &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+    );
+    assert_f32(
+        first.texcoords(0, AttributeDomain::Corner).unwrap(),
+        2,
+        &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+    );
+    let last = last_mesh.primitives().next().unwrap();
+    assert_f32(
+        last.positions().unwrap(),
+        3,
+        &[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+    );
+    assert_f32(
+        last.texcoords(0, AttributeDomain::Corner).unwrap(),
+        2,
+        &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+    );
+    Ok(())
 }
 
 #[test]

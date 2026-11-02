@@ -369,6 +369,7 @@ fn parse_mtl<'scope>(
     library: &mut MaterialLibrary<'scope>,
 ) -> ParseResult<()> {
     let mut current = None;
+    let mut scan_scratch = parser::TokenScanScratch::new();
 
     for decoded_line in text.lines() {
         let line_number = u32::try_from(decoded_line.number())
@@ -380,7 +381,7 @@ fn parse_mtl<'scope>(
             work.complete_all()?;
             Ok(raw_line)
         })?;
-        let tokens = tokenize_mtl(scope, &decoded_line)?;
+        let tokens = tokenize_mtl(scope, &mut scan_scratch, &decoded_line)?;
         let keyword = tokens.first().map(|token| token.text);
         let allowed_value = match keyword {
             Some("newmtl") => trailing_mtl_token_range(&tokens),
@@ -654,6 +655,7 @@ impl<'line> std::ops::Deref for MtlTokenBuffer<'_, 'line> {
 
 fn tokenize_mtl<'scope, 'line>(
     scope: &'scope ParseScope<'_>,
+    scan_scratch: &mut parser::TokenScanScratch,
     decoded_line: &'line TextInputLine<'_, '_>,
 ) -> ParseResult<MtlTokenBuffer<'scope, 'line>> {
     let line = decoded_line.text();
@@ -663,6 +665,7 @@ fn tokenize_mtl<'scope, 'line>(
     };
     tokens.comment_start = parser::scan_token_ranges(
         scope,
+        scan_scratch,
         line,
         "obj-mtl-token-scan-work",
         |_, _| Ok(()),

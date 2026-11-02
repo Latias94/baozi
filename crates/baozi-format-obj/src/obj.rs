@@ -103,6 +103,7 @@ pub(crate) fn parse<'scope>(
         material: None,
         smoothing: ObjSmoothing::Unspecified,
     };
+    let mut scan_scratch = parser::TokenScanScratch::new();
 
     for line in text.lines() {
         let line_number = u32::try_from(line.number())
@@ -111,7 +112,7 @@ pub(crate) fn parse<'scope>(
             work.complete_all()?;
             Ok(line)
         })?;
-        parser.parse_line(recoveries, &line, line_number)?;
+        parser.parse_line(&mut scan_scratch, recoveries, &line, line_number)?;
     }
 
     Ok(parser.parsed)
@@ -142,12 +143,13 @@ struct TokenBuffer<'scope, 'line> {
 impl<'scope> ObjParser<'scope, '_> {
     fn parse_line(
         &mut self,
+        scan_scratch: &mut parser::TokenScanScratch,
         recoveries: &mut TextInputRecoveryTracker<'_, '_>,
         decoded_line: &TextInputLine<'_, '_>,
         line_number: u32,
     ) -> ParseResult<()> {
         let raw_line = decoded_line.text();
-        let tokens = tokenize(self.scope, decoded_line, line_number)?;
+        let tokens = tokenize(self.scope, scan_scratch, decoded_line, line_number)?;
         let token_values = tokens.values.as_slice();
         let allowed_value = token_values.first().and_then(|first| match first.text {
             "o" | "g" | "usemtl" | "mtllib" => trailing_token_range(token_values),
@@ -382,6 +384,7 @@ fn parse_smoothing_group(
 
 fn tokenize<'scope, 'line>(
     scope: &'scope ParseScope<'_>,
+    scan_scratch: &mut parser::TokenScanScratch,
     decoded_line: &'line TextInputLine<'_, '_>,
     line_number: u32,
 ) -> ParseResult<TokenBuffer<'scope, 'line>> {
@@ -393,6 +396,7 @@ fn tokenize<'scope, 'line>(
 
     tokens.comment_start = parser::scan_token_ranges(
         scope,
+        scan_scratch,
         line,
         "obj-token-scan-work",
         |index, character| {
