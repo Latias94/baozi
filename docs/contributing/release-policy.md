@@ -100,10 +100,12 @@ The following packages currently set `publish = false`:
 
 - `baozi-test-support`: test-only helpers
 - `baozi-xtask`: repository-only governance tooling
-- `baozi-format-ply`: intended for the release unit, but publication remains disabled until its
-  package and release evidence is complete
-- `baozi-format-gltf`: the selected profile is source-admitted after the `2dc2fc8` Linux ASan and
-  independent consumer gates; publication remains disabled pending package/release evidence
+- `baozi-format-ply`: intended for the release unit and locally qualified in the
+  [candidate record](../release/portable-0.1.0-candidate.md); publication remains disabled pending
+  the separate registry release gates
+- `baozi-format-gltf`: the selected profile has current U8 qualification in the
+  [candidate record](../release/portable-0.1.0-candidate.md); publication remains disabled pending
+  the separate registry release gates
 - `baozi-fuzz`: cargo-fuzz workspace
 - `baozi-native-io-candidate`: standalone, unregistered native adapter and optional repository capture
 - `baozi-cap-primitives`, `baozi-cap-std`, and `baozi-cap-fs-ext`: maintained native dependency

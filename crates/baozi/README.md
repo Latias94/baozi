@@ -5,7 +5,7 @@ readers, structured errors, and explicit postprocess operations. This is the
 application entry point; parser authoring uses the experimental `baozi-import`
 extension API, and backend/storage mechanisms remain internal.
 
-Baozi is an experimental parser foundation requiring the Rust standard library.
+Baozi is an experimental asset import and processing library requiring the Rust standard library.
 `default-formats` enables STL and OBJ/MTL; `default-features = false` selects no
 built-in formats. `all-formats` additionally enables PLY and the selected glTF/GLB
 profile. Individual `format-stl`, `format-obj`, `format-ply`, and `format-gltf`
@@ -13,8 +13,9 @@ features select each backend. Format declarations are `Unverified`, with no
 assigned Baozi maturity; enabling a feature does not imply full format coverage.
 
 The [glTF/GLB restrictions](https://github.com/Latias94/baozi/blob/main/docs/formats/gltf.md) apply, including selected
-scene closure, limited topology and extension support, and encoded images without
-pixel decoding. Optional `postprocess` provides atomic selected-primitive triangle preparation,
+scene closure and limited extension support, and encoded images without pixel decoding. Import
+retains all seven glTF primitive modes; triangle preparation accepts only its documented topology
+profile. Optional `postprocess` provides atomic selected-primitive triangle preparation,
 flat/smooth normals, explicit tangent generation, and whole-Scene coordinate/unit conversion including skin
 matrices, morph deltas, TRS animation curves, camera projections, and light definitions.
 Camera/light reference frames include reflection without adding placement nodes.

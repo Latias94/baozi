@@ -25,6 +25,13 @@ binds the corrected source to actual host tests, unchanged archives, WASI runtim
 browser compilation and bounded sanitizer runs. Registry availability and target promotion
 retain their separate release gates.
 
+The [current Assimp comparison and recommended route](research/2026-11-02-baozi-assimp-comparison-and-roadmap.md)
+uses the completed U1-U8 baseline. It recommends current-profile distribution, common glTF mappings
+with a thin renderer integration, concrete device-output limits and then one demanded new format.
+These are follow-on priorities, not extra blockers for the finite portable candidate or a new
+implementation mandate. Completed precision, navigation, batch preparation and consumption work
+must not be inferred missing from the historical audits above.
+
 ## Product Direction
 
 Baozi is trusted, fidelity-preserving, engine-neutral 3D asset ingestion and offline compilation
@@ -162,9 +169,9 @@ The initial tranche is complete: Windows workspace tests pass 2,482/2,482, Linux
 regressions include 98,304/393,216 Corner grids, five workloads have three fresh normal observations
 plus separate allocation measurements, and the Linux ASan lifecycle target completes smoke,
 1,803 seconds of campaigning and a 126-second saved-corpus resume. The current implementation has
-no newly executed hosted/platform matrix or maturity/release promotion. Shared-primitive
-measurements identify repeated single-primitive edit work to study when a concrete larger
-consumer needs it, before choosing a batch API.
+no newly executed hosted/platform matrix or maturity/release promotion. At that revision,
+shared-primitive measurements identified repeated single-primitive edit work. The later maturation
+refactor replaces that loop with one selected preparation transaction and reconstruction.
 
 Tangent construction/encoding declarations now belong to each Tangent attribute, and explicit
 single-primitive Triangle UV Derivative generation is implemented. Read-only base-pose world

@@ -3,8 +3,8 @@
 Baozi is a Rust workspace for a model import library inspired by Assimp's breadth, but designed
 around Rust ownership, typed errors, explicit post-processing, and a source-preserving scene IR.
 
-Current status: experimental parser foundation. STL, OBJ/MTL, and PLY have owned parser paths with
-fixture and fuzz coverage. The glTF/GLB selected-scene PBR, skin, morph, and TRS animation profile
+Current status: experimental asset import and processing library. STL, OBJ/MTL, and PLY have owned
+parser paths with fixture and fuzz coverage. The glTF/GLB selected-scene PBR, skin, morph, and TRS animation profile
 is available through `format-gltf`; its [exact restrictions](docs/formats/gltf.md) apply.
 Scene nodes, geometry, materials, images, skins, morphs, and animation have borrowed typed readers.
 The optional `postprocess` feature provides atomic selected-primitive triangle preparation,

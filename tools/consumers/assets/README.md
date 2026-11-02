@@ -1,11 +1,11 @@
 # Offline Real-Asset Consumer
 
 This unpublished standalone application exercises the public Baozi API with unchanged upstream
-assets and actual capability-bound filesystem access. It imports a model, converts the complete
-Scene directly to the requested target space once, and calls `prepare_triangles` once for all
-primitive IDs acquired from that converted Scene. Preparation lowers topology and preserves
-authored normals or generates missing normals together in one selected transaction. The application
-then copies buffers and destroys the Scene before returning those buffers and detached import evidence.
+assets and actual capability-bound filesystem access. It imports a model and calls
+`prepare_triangles` once for all primitive IDs acquired from the imported Scene. Preparation lowers
+topology and preserves authored normals or generates missing normals together in one selected transaction. The application
+then converts the complete prepared Scene to the requested target space once, copies buffers and
+destroys the Scene before returning those buffers and detached import evidence.
 Before extraction it walks the retained provenance of each primitive through the public borrowed
 readers, sharing one visited set across draws. This reports reached source objects without
 inventing a persistent application provenance graph.
@@ -13,9 +13,9 @@ inventing a persistent application provenance graph.
 `process_file` and `process` use the shared triangle preparation workflow: TriangleList primitives
 are accepted, TriangleStrip/TriangleFan primitives are lowered to lists, and polygons are triangulated.
 Points and line modes, including LineLoop, are rejected during preparation. The normal policy is
-`NormalOptions::default()` with `NormalOrientation::SceneFrontFace { assume_unknown: None }`:
-generated normals follow the converted Scene's front-face declaration, and existing normals are
-preserved. The default tangent policy preserves existing tangents and rejects invalidating normal
+`NormalOptions::default()` with `NormalOrientation::SceneFrontFace`, using `Options::source_assumptions`
+when supplied: generated normals follow the source Scene's front-face declaration or explicit source
+assumption, and existing normals are preserved. The default tangent policy preserves existing tangents and rejects invalidating normal
 changes unless the caller chooses an explicit replacement/removal policy through the preparation API.
 `ApplicationAsset::from_scene` is a separate direct extraction path for an already validated Scene.
 It explicitly uses `list_vertices`
@@ -28,9 +28,9 @@ The target is left-handed, positive Y up, negative Z front, centimeters, with co
 faces. UVs remain in their declared source convention. Formats with unknown spatial facts, including
 OBJ, need an explicit caller assumption. The native dependency remains an unregistered candidate;
 this tool does not add a filesystem backend to the portable library or its release target list.
-Library callers choosing a clockwise target convert directly to that target before preparation;
-normal orientation follows its declared fronts. There is no temporary CCW processing space or
-second winding conversion after normal generation.
+Library callers choosing a clockwise target prepare using the source winding and then convert
+directly to that target, transporting generated normals and Corner tuples together. There is no
+temporary CCW processing space or second winding conversion.
 glTF explicitly declares a +Z asset front, distinct from camera-local -Z viewing axes; conversion
 to this application's default target maps `(x, y, z)` to `(100x, 100y, -100z)`.
 
@@ -190,7 +190,8 @@ a self-authored shared-instance glTF with ancestor transforms, nonuniform/negati
 an unreferenced vertex, plus the unchanged rigged, morph and animated upstream models.
 
 Preparation preserves mesh and primitive order. Handles belong to one Scene generation, so the
-application gathers the full selection after coordinate conversion and submits it in one call.
+application gathers the full selection from the imported Scene and submits it in one call before
+coordinate conversion.
 It does not reacquire targets between per-primitive edits. The two-polygon integration fixture
 exercises multiple primitives in that selection. The unchanged real
 models and their independent expected facts are documented in [fixtures/README.md](fixtures/README.md).
