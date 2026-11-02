@@ -67,6 +67,26 @@ separately for triangulation, normal generation and conversion, plus public nume
 | `cancel_triangulate.bin`, `cancel_normals.bin`, `cancel_space.bin` | Each operation is cancelled through its pre-cancelled public token and returns the exact original Scene. |
 | `workflow_cancel_normals.bin` | Triangulation publishes, normal generation is cancelled without changing that generation/digest, then conversion publishes successfully. |
 
+## Feature-reaching glTF seeds
+
+The four original fixtures below extend `corpus/gltf_import/` and the existing `gltf_import`
+target. JSON inputs use embedded data URIs or the target's first-NUL split followed by bytes for
+`buffer.bin`. They require no upstream model files, images or network access.
+
+| Seed | Required successful observation |
+| --- | --- |
+| `scene_one_selection.gltf` | Document default selects scene 1, retains `Chosen`/`Leaf` and their translations, and records the omitted node from scene 0. |
+| `material_lobes_light.gltf` | A selected triangle retains emissive factor and strength, clearcoat and sheen; its node retains a punctual point light with known intensity, tint and range. |
+| `quantized_attributes.gltfbin` | Three vertices decode signed-byte positions/normals and signed-short UVs, each with explicit four-byte stride; padding bytes are not attribute values. |
+| `implicit_zero_attributes.gltf` | Buffer-free accessors materialize positive-zero positions/UVs/RGB and indices, plus implicit alpha 1, without dependency acquisition. |
+
+Deterministic `gltf_seed_tests` use the same `support::prepared_request(GltfImporter, FORMAT_ID)`
+and default limits as the target. Each fixture must import successfully through public
+`MemoryAssetIo`/`import_asset`, satisfy literal semantic or numeric expectations, capture the
+existing bounded snapshot, and release all import-ledger reservations. These assertions do not
+depend on mutation finding an accepted document. The library validation command below includes
+these tests; neither their addition nor this description claims an executed fuzz campaign.
+
 ## Serial validation and retained campaigns
 
 After changing dependencies, let Cargo update `fuzz/Cargo.lock` before using `--locked`; do not

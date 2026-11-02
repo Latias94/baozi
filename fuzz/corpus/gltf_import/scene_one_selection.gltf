@@ -1,0 +1,1 @@
+{"asset":{"version":"2.0"},"scene":1,"scenes":[{"nodes":[0]},{"nodes":[1]}],"nodes":[{"name":"Omitted"},{"name":"Chosen","translation":[2,-3,5],"children":[2]},{"name":"Leaf","translation":[0,4,0]}]}

@@ -13,3 +13,6 @@ mod support;
 
 #[cfg(test)]
 mod edit_lifecycle_tests;
+
+#[cfg(test)]
+mod gltf_seed_tests;
