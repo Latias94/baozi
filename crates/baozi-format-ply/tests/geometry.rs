@@ -1,11 +1,13 @@
 mod common;
 
+use baozi_core::{AttributeData, AttributeDomain, AttributeSemanticRef, TopologyKind};
 use baozi_format_ply::PlyFailureCode;
 use baozi_import::ResourceLimits;
 use common::{
-    TestResult, ascii_point_cloud, ascii_quad, ascii_triangle, assert_resource_limit,
-    binary_triangle, expected_error, expected_ply_failure, import_bytes, import_bytes_result,
-    ply_unsigned_detail, scene_snapshot, snapshot_line, snapshot_line_containing,
+    TestResult, ascii_point_cloud, ascii_quad, ascii_triangle, assert_requested_terminal_failure,
+    assert_resource_limit, binary_triangle, expected_error, expected_ply_failure, import_bytes,
+    import_bytes_result, ply_unsigned_detail, scene_snapshot, snapshot_line,
+    snapshot_line_containing,
 };
 
 #[test]
@@ -144,6 +146,163 @@ fn imports_binary_big_endian_triangle() -> TestResult<()> {
     assert!(
         snapshot_line_containing(&snapshot, "key=ply:format").contains("string=binary_big_endian")
     );
+    Ok(())
+}
+
+// Original schema: nonempty ignored lists precede retained scalars and wide-count topology.
+fn reordered_properties_with_lists(format: &str) -> Vec<u8> {
+    let mut bytes = format!(
+        "ply\nformat {format} 1.0\nelement vertex 3\n\
+         property float z\nproperty list uchar short neighbors\n\
+         property double signal\nproperty float x\nproperty float y\n\
+         element face 1\nproperty list uchar ushort ignored\n\
+         property list ushort int vertex_index\nend_header\n"
+    )
+    .into_bytes();
+    if format == "ascii" {
+        bytes.extend_from_slice(
+            b"3 2 111 -222 16777217 1 2\n5 0 -0 4 6\n9 1 -7 1e100 -7 8\n2 42 513 3 2 0 1\n",
+        );
+        return bytes;
+    }
+    let little_endian = match format {
+        "binary_little_endian" => true,
+        "binary_big_endian" => false,
+        _ => panic!("unsupported fixture encoding: {format}"),
+    };
+    let body_start = bytes.len();
+    macro_rules! append_scalar {
+        ($value:expr) => {
+            bytes.extend_from_slice(&if little_endian {
+                ($value).to_le_bytes()
+            } else {
+                ($value).to_be_bytes()
+            })
+        };
+    }
+    for (offset, z, neighbors, signal, x, y) in [
+        (
+            0,
+            3.0_f32,
+            &[111_i16, -222][..],
+            16_777_217.0_f64,
+            1.0_f32,
+            2.0_f32,
+        ),
+        (25, 5.0, &[][..], -0.0, 4.0, 6.0),
+        (46, 9.0, &[-7][..], 1e100, -7.0, 8.0),
+    ] {
+        assert_eq!(bytes.len() - body_start, offset);
+        append_scalar!(z);
+        bytes.push(neighbors.len() as u8);
+        for neighbor in neighbors {
+            append_scalar!(neighbor);
+        }
+        append_scalar!(signal);
+        append_scalar!(x);
+        append_scalar!(y);
+    }
+    assert_eq!(bytes.len() - body_start, 69);
+    bytes.push(2);
+    for ignored in [42_u16, 513] {
+        append_scalar!(ignored);
+    }
+    append_scalar!(3_u16);
+    for index in [2_i32, 0, 1] {
+        append_scalar!(index);
+    }
+    assert_eq!(bytes.len() - body_start, 88);
+    bytes
+}
+
+#[test]
+fn named_properties_and_skipped_lists_preserve_binary_alignment() -> TestResult<()> {
+    for format in ["ascii", "binary_little_endian", "binary_big_endian"] {
+        let bytes = reordered_properties_with_lists(format);
+        let report = import_bytes(&format!("reordered-lists-{format}.ply"), &bytes)?;
+
+        assert!(report.loss_evidence().is_empty());
+        assert_eq!(report.diagnostics().len(), 2);
+        for code in [
+            "ply.vertex_list_property_ignored",
+            "ply.face_list_property_ignored",
+        ] {
+            assert_eq!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .filter(|diagnostic| diagnostic.code().as_str() == code)
+                    .count(),
+                1,
+                "{format}: {code} must be emitted once per schema"
+            );
+        }
+        let scene = report.scene();
+        assert_eq!(scene.mesh_count(), 1);
+        assert_eq!(scene.primitive_count(), 1);
+        assert_eq!(scene.attribute_count(), 2);
+        let mesh = scene.meshes().next().expect("one PLY mesh");
+        assert_eq!(mesh.primitive_count(), 1);
+        let primitive = mesh.primitives().next().expect("one PLY primitive");
+        assert_eq!(primitive.topology(), TopologyKind::TriangleList);
+        assert_eq!(primitive.vertex_count(), 3);
+        assert_eq!(primitive.corner_count(), 3);
+        assert_eq!(primitive.face_count(), 1);
+        assert_eq!(primitive.indices(), Some(&[2, 0, 1][..]));
+
+        let positions = primitive.positions().expect("named PLY positions");
+        assert_eq!(positions.domain(), AttributeDomain::Vertex);
+        assert_eq!(positions.lanes(), 3);
+        assert_eq!(positions.len(), 3);
+        let AttributeData::DenseF32 { lanes: 3, values } = positions.data() else {
+            panic!("expected dense F32 positions, got {:?}", positions.data());
+        };
+        assert_eq!(
+            values
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            [1.0_f32, 2.0, 3.0, 4.0, 6.0, 5.0, -7.0, 8.0, 9.0].map(f32::to_bits),
+            "{format}: reordered position bits"
+        );
+        let signal = primitive
+            .attribute(
+                AttributeSemanticRef::Custom("ply:signal"),
+                AttributeDomain::Vertex,
+            )
+            .expect("PLY custom F64 scalar after ignored list");
+        assert_eq!(signal.domain(), AttributeDomain::Vertex);
+        assert_eq!(signal.lanes(), 1);
+        assert_eq!(signal.len(), 3);
+        let AttributeData::DenseF64 { lanes: 1, values } = signal.data() else {
+            panic!("expected dense F64 signal, got {:?}", signal.data());
+        };
+        assert_eq!(
+            values
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            [16_777_217.0_f64, -0.0, 1e100].map(f64::to_bits),
+            "{format}: custom signal bits"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn truncated_reordered_list_payloads_publish_no_canonical_members() -> TestResult<()> {
+    for format in ["binary_little_endian", "binary_big_endian"] {
+        let bytes = reordered_properties_with_lists(format);
+        let failure = expected_error(import_bytes_result(
+            &format!("truncated-reordered-lists-{format}.ply"),
+            &bytes[..bytes.len() - 1],
+            ResourceLimits::default(),
+        )?)?;
+
+        expected_ply_failure(&failure, PlyFailureCode::TruncatedPayload);
+        assert_requested_terminal_failure(&failure);
+        assert!(failure.loss_evidence().is_empty());
+    }
     Ok(())
 }
 

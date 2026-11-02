@@ -1,5 +1,6 @@
 mod common;
 
+use baozi_core::{AttributeData, AttributeDomain, TopologyKind};
 use baozi_format_stl::StlFailureCode;
 use baozi_import::{
     DetectionOutcome, ImportCause, ImportDimension, ImportTerminalCause,
@@ -62,6 +63,90 @@ fn imports_one_triangle_binary_stl_through_session() -> TestResult {
             .consumed(),
         bytes.len() as u64
     );
+    Ok(())
+}
+
+#[test]
+fn authored_facet_payloads_are_exact_in_binary_and_ascii() -> TestResult {
+    // Original facets distinguish later records, authored normals, and repeated vertices.
+    let binary = binary_stl(
+        b"authored facets",
+        &[
+            BinaryFacet {
+                normal: [2.0, -3.0, 4.0],
+                vertices: [[-0.0, 2.0, -3.0], [4.0, 0.5, -6.0], [-7.0, 8.0, 0.25]],
+                attribute: 0,
+            },
+            BinaryFacet {
+                normal: [-0.0, 0.0, -2.0],
+                vertices: [[9.0, 10.0, 11.0], [9.0, 10.0, 11.0], [12.0, 13.0, 14.0]],
+                attribute: 0,
+            },
+        ],
+    );
+    assert_eq!(binary.len(), 184);
+    assert_eq!(&binary[80..84], &[2, 0, 0, 0]);
+    let ascii = b"solid authored facets\n\
+        facet normal 2 -3 4\nouter loop\n\
+        vertex -0 2 -3\nvertex 4 0.5 -6\nvertex -7 8 0.25\n\
+        endloop\nendfacet\n\
+        facet normal -0 0 -2\nouter loop\n\
+        vertex 9 10 11\nvertex 9 10 11\nvertex 12 13 14\n\
+        endloop\nendfacet\nendsolid authored facets\n";
+    let expected_positions = [
+        -0.0_f32, 2.0, -3.0, 4.0, 0.5, -6.0, -7.0, 8.0, 0.25, 9.0, 10.0, 11.0, 9.0, 10.0, 11.0,
+        12.0, 13.0, 14.0,
+    ];
+    let expected_normals = [
+        2.0_f32, -3.0, 4.0, 2.0, -3.0, 4.0, 2.0, -3.0, 4.0, -0.0, 0.0, -2.0, -0.0, 0.0, -2.0, -0.0,
+        0.0, -2.0,
+    ];
+
+    for (encoding, bytes) in [("binary", binary.as_slice()), ("ascii", ascii.as_slice())] {
+        let report = import_bytes(&format!("authored-facets-{encoding}.stl"), bytes)?;
+        assert!(report.diagnostics().is_empty());
+        assert!(report.loss_evidence().is_empty());
+        let scene = report.scene();
+        assert_eq!(scene.mesh_count(), 1);
+        assert_eq!(scene.primitive_count(), 1);
+        assert_eq!(scene.attribute_count(), 2);
+        let mesh = scene.meshes().next().expect("one STL mesh");
+        assert_eq!(mesh.primitive_count(), 1);
+        let primitive = mesh.primitives().next().expect("one STL primitive");
+        assert_eq!(primitive.topology(), TopologyKind::TriangleList);
+        assert_eq!(primitive.vertex_count(), 6);
+        assert_eq!(primitive.corner_count(), 6);
+        assert_eq!(primitive.face_count(), 2);
+        assert_eq!(primitive.indices(), Some(&[0, 1, 2, 3, 4, 5][..]));
+        for (attribute, expected) in [
+            (
+                primitive.positions().expect("STL positions"),
+                expected_positions,
+            ),
+            (
+                primitive
+                    .normals(AttributeDomain::Vertex)
+                    .expect("STL vertex normals"),
+                expected_normals,
+            ),
+        ] {
+            assert_eq!(attribute.domain(), AttributeDomain::Vertex);
+            assert_eq!(attribute.lanes(), 3);
+            assert_eq!(attribute.len(), 6);
+            let AttributeData::DenseF32 { lanes: 3, values } = attribute.data() else {
+                panic!("expected dense XYZ STL stream, got {:?}", attribute.data());
+            };
+            assert_eq!(
+                values
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                expected.map(f32::to_bits),
+                "{encoding} {:?} scalar bits",
+                attribute.semantic()
+            );
+        }
+    }
     Ok(())
 }
 

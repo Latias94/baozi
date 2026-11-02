@@ -72,6 +72,8 @@ Existing asset and scale probes measure different lifetimes, and some include sn
 - R14. Use measured hotspots to choose performance changes; define regression budgets from B0 variability before optimization and report justified semantic-cost tradeoffs instead of inventing a requirement to beat Assimp.
 - R15. The complete public facade/IO feature union remains portable; renderer, pixel codecs, C++ comparison tools and host adapters remain outside that dependency closure.
 - R16. Final documentation and unchanged-package consumer evidence name the actual source, profile, target and toolchain; missing execution, local source replacement and comparison successes do not imply registry availability or maturity promotion.
+- R18. The owned glTF decoder receives a revision-qualified comparison against Khronos normative rules, the official Validator and published gltf-rs behavior. Original regressions cover relevant upstream issue classes; a direct public single-format consumer demonstrates independent use. Disagreements distinguish conformance defects, deliberate policy and unsupported capabilities.
+- R19. Describe the actual boundary between a Baozi Scene importer, a standalone glTF document library and gltf-rs API compatibility. A private selected-profile document is not advertised as a complete replacement. Any extraction must share one production parser and receive a concrete public-API design review and independent consumer acceptance first.
 
 ### Key Decisions
 
@@ -419,6 +421,7 @@ Proposed CLI arguments below are contracts to implement in U1–U4, not commands
 | Focused Rust semantics | `cargo +1.95.0 nextest run --locked --offline -j 1 -p <affected-package> --test <target> --test-threads 2` | Unit-specific happy, malformed, precision, ownership, budget and cancellation cases pass |
 | Portable integration | `cargo +1.95.0 nextest run --locked --offline --workspace --all-features --build-jobs 1 --test-threads 2` | Full integrated source passes; manual exclusions named |
 | Owned asset consumer | `cargo +1.95.0 nextest run --locked --offline --manifest-path tools/consumers/assets/Cargo.toml --target-dir target --all-features --build-jobs 1 --test-threads 1` | Existing and new detached workflow tests pass |
+| Direct glTF conformance consumer | Explicit nextest/Clippy/fmt on the excluded `tools/consumers/gltf-conformance/Cargo.toml`; separate pinned Validator invocation; package rehearsal with direct version-only format/import/IO roots | Literal semantic/issue regressions execute through public single-format APIs outside facade unification; pinned references are test-only; unchanged archives run without root patches |
 | Renderer CPU and GPU | Focused nextest on the new manifest, plus named-backend readback invocation defined in its README | CPU remaps and actual static/animated observations pass; missing adapter does not count |
 | Assimp probe | Recorded CMake build and `ctest --test-dir target/assimp-comparison/build --output-on-failure` per precision variant | Equivalent small cases and lifetime checks pass before ratios |
 | Collector | `python -m unittest discover -s scripts/tests -p test_asset_profile.py` | Timeout/failure/partial-report behavior is correct |
@@ -430,6 +433,29 @@ Proposed CLI arguments below are contracts to implement in U1–U4, not commands
 
 Do not broaden or repeat passing expensive checks without a new change, failure or unresolved concern.
 Maintain direct behavior tests; do not revive retired receipts, AST/source-shape analysis or arbitrary test-count release gates.
+
+### Owned glTF assurance amendment (2026-11-02)
+
+The user explicitly requested deeper tests after confirming that the former gltf-rs decoder had
+been replaced. This strengthens U7/U10/U14 and the existing follow-up map; it does not replace the
+fifteen units or treat every optional extension as a first-release requirement.
+
+| Existing unit | Bounded addition and observable acceptance |
+| --- | --- |
+| U3/U14 comparison evidence | Use literal failure-status names and otherwise complete negative CLI requests. Keep an explicit missing-option test and valid maximum-u64 control. Demonstrate that removing either numeric/duplicate guard or mislabelling the status makes the corresponding test fail; preserve frozen B0. |
+| U7 spatial output | Independently assert imported asymmetric camera parameters, optional planes/aspect, shared definitions and unit conversion as well as the planned light semantics. |
+| U10 application evaluation | Calculate RiggedSimple and AnimatedMorphCube positions directly from pinned source bytes at a key and an interval midpoint. Add bound skin/morph plus seam-edit composition and Corner/Face color extraction observations using original small fixtures. These supplement, rather than waive, deformed-frame and device-readback acceptance. |
+| U14 ordinary formats | Test unequal OBJ position/UV/normal negative-index tables at record time, mixed material absence/reuse, every scalar in distinct STL facets, and reordered binary PLY fields after nonempty skipped lists. Use independent authored expectations and typed negative outcomes. |
+| U14 owned document | Add compact raw-syntax/Unicode-key and core-field-type/default matrices, asymmetric sparse MAT4 values and GLB logical-buffer/padding boundaries. Extend the existing glTF fuzz lane with small feature-reaching seeds and bounded failure observations, without a new fuzz framework. |
+| U14 independent references | Pin current Khronos specification/registry and Validator sources plus the published gltf-rs comparator; inspect its newer source and relevant issues separately. Compare a finite shared semantic profile against independent facts, not majority acceptance. Record validator limitations and unsupported extensions. |
+| U14 direct package use | Prefer a small excluded single-format conformance consumer using public `baozi-format-gltf` registration, `baozi-import` and IO APIs outside facade feature unification. Keep gltf-rs/reference tools outside the production dependency closure. This proves the documented importer use case; it does not establish low-level document API parity. |
+| Reviewed follow-up | Assess a separately usable glTF document/accessor crate against actual raw-document consumer needs, metering, precision, lifetimes, IO and error contracts. If extraction is justified, replace the private owner atomically under its own reviewed plan; do not retain a competing decoder or expose private internals as a shortcut. |
+
+The audit uses Assimp development pin `a2a586d9370a493651256ec5d03524710ce37a5f` only as a
+scenario source. Assimp release pin and B0/B1 protocol remain unchanged. Fixtures are original or
+already license-audited Khronos samples; no Assimp model files are copied. The current-source
+research and execution records distinguish proposed cases from actual passing tests. Independent
+literal/analytic expectations and valid negative controls follow the updated fixture policy.
 
 ---
 
@@ -444,6 +470,7 @@ Maintain direct behavior tests; do not revive retired receipts, AST/source-shape
 | Optimization | Measured changes preserve semantics/resource contracts; regression policy breaches are resolved or remain explicit blockers |
 | Rendering | Named-backend static and supported animated readback follows analytic expectations after native library state is destroyed |
 | Distribution | Final source has scoped host/package/portable evidence and truthful documentation; actual publication remains separately authorized |
+| Owned glTF assurance | R18/R19 have current revision-qualified standards/issues/reference evidence, actual independent single-format and unchanged-package consumer execution, and an explicit importer/document-library/API-compatibility boundary |
 | Review and handoff | Independent milestone/final findings are resolved or explicitly retained with consequence; local commits and the execution record identify tested source and artifacts |
 
 This plan is complete only for its required tranche; the follow-up map remains future work.

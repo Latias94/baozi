@@ -22,6 +22,31 @@ assets into this repository.
 Parser tests should prefer small in-memory fixtures first. File fixtures are appropriate when the
 format behavior depends on filenames, sidecar lookup, archive layout, or binary corpus reuse.
 
+## Independent Behavior Evidence
+
+Expected meaning comes from authored literal values, independently decoded source bytes, a stated
+mathematical invariant, or a pinned normative rule. A production decoder, remap, serializer mapping
+or snapshot encoder cannot provide its own expected answer. Round trips, cross-loader comparisons
+and copy-correspondence checks remain useful when their narrower purpose is explicit; anchor the
+claimed interpretation with an independent value or identity assertion.
+
+Keep a negative input valid except for the condition under test and include a nearby valid control.
+Check its typed failure and distinguishing subject or diagnostic where the public contract provides
+them. An unrelated rejection does not prove the intended guard. Preserve authored absence, source
+precision and signed bits separately from calculated values with justified tolerances.
+
+Detached-consumer tests read actual fields or evaluate output after the original Scene, reports,
+importer and IO are destroyed. Nonempty output, a summary count or a digest alone does not prove
+that the selected data remains useful. Failure and resource-release checks retain their independent
+purpose alongside these observations.
+
+External comparisons record the specification, loader, tool and asset revisions and their finite
+common profile. Validator success is evidence only for the checks that validator implements;
+another loader's acceptance is not a normative answer. Track deliberate policy differences rather
+than repairing fixtures or weakening expectations to obtain agreement. When fixing an identified
+assertion-sensitivity defect, retain a localized fault-injection result where practical. Test counts
+and aggregate mutation scores are not maturity gates.
+
 ## Review Rules
 
 Snapshot diffs should be readable in code review. If a snapshot becomes too large to inspect, split

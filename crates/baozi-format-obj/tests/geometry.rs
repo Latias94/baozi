@@ -1,9 +1,11 @@
 mod common;
 
+use baozi_core::{AttributeData, AttributeDomain, TopologyKind};
+use baozi_format_obj::ObjFailureCode;
 use baozi_import::{
-    ImportCause, ImportDiagnostic, ImportLossDisposition, ImportLossEvidence, ImportLossKind,
-    ImportLossSubject, LossPolicy, ResourceLimits, SceneSnapshot, ScopeAbortCause,
-    SourceScopeEntityKind,
+    FormatFailureDetailValue, ImportCause, ImportDiagnostic, ImportLossDisposition,
+    ImportLossEvidence, ImportLossKind, ImportLossSubject, LossPolicy, ResourceLimits,
+    SceneSnapshot, ScopeAbortCause, SourceScopeEntityKind,
 };
 use common::{
     TestResult, expected_failure, expected_success, import_assets, import_bytes,
@@ -15,6 +17,12 @@ const PARTIAL_TEXCOORD_OBJ: &[u8] =
 const PARTIAL_NORMAL_OBJ: &[u8] =
     b"v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nvn 0 0 1\nf 1/1/1 2/2 3/3/1\n";
 const PARTIAL_BOTH_OBJ: &[u8] = b"g mixed\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nvn 0 0 1\nf 1/1/1 2/2/1 3/3/1\nf 1 2 3\n";
+
+// Original fixture: every source table has a different length at each face record.
+const NEGATIVE_CORNER_OBJ: &str = "v 10 0 0\nv 0 20 0\nv 0 0 30\n\
+    vt 0.125 0.25\nvt 0.5 0.75\nvt 0.875 1\nvt -1 2\n\
+    vn 2 0 0\nvn 0 -3 0\ng first\nf -3/-4/-2 -1/-1/-1 2/2/1\n\
+    v 99 98 97\nvt 9 8\nvn 0 0 7\ng second\nf -1/-1/-1 1/1/1 2/2/2\n";
 
 fn assert_triangle_positions(snapshot: &SceneSnapshot) {
     assert!(
@@ -348,6 +356,161 @@ fn supports_negative_face_indices() -> TestResult<()> {
         "polygon_boundaries(present,total=1)=[4] ",
         "indices(present,total=4)=[0,1,2,3]"
     )));
+    Ok(())
+}
+
+#[test]
+fn negative_corner_indices_use_each_table_at_the_face_record() -> TestResult<()> {
+    let report = import_bytes("negative-corners.obj", NEGATIVE_CORNER_OBJ.as_bytes())?;
+
+    assert!(report.diagnostics().is_empty());
+    assert!(report.loss_evidence().is_empty());
+    let scene = report.scene();
+    assert_eq!(scene.mesh_count(), 2);
+    assert_eq!(scene.primitive_count(), 2);
+    assert_eq!(scene.attribute_count(), 6);
+
+    let expected = [
+        (
+            "first",
+            [[10.0_f32, 0.0, 0.0], [0.0, 0.0, 30.0], [0.0, 20.0, 0.0]],
+            [[0.125_f32, 0.25], [-1.0, 2.0], [0.5, 0.75]],
+            [[2.0_f32, 0.0, 0.0], [0.0, -3.0, 0.0], [2.0, 0.0, 0.0]],
+        ),
+        (
+            "second",
+            [[99.0, 98.0, 97.0], [10.0, 0.0, 0.0], [0.0, 20.0, 0.0]],
+            [[9.0, 8.0], [0.125, 0.25], [0.5, 0.75]],
+            [[0.0, 0.0, 7.0], [2.0, 0.0, 0.0], [0.0, -3.0, 0.0]],
+        ),
+    ];
+    for (mesh, (name, expected_positions, expected_texcoords, expected_normals)) in
+        scene.meshes().zip(expected)
+    {
+        assert_eq!(mesh.name(), Some(name));
+        assert_eq!(mesh.primitive_count(), 1);
+        let primitive = mesh
+            .primitives()
+            .next()
+            .expect("one OBJ triangle per segment");
+        assert_eq!(primitive.topology(), TopologyKind::TriangleList);
+        assert_eq!(primitive.vertex_count(), 3);
+        assert_eq!(primitive.corner_count(), 3);
+        assert_eq!(primitive.face_count(), 1);
+        assert_eq!(primitive.attributes().len(), 3);
+        let indices = primitive.indices().expect("indexed OBJ triangle");
+        assert_eq!(indices.len(), 3);
+        let positions = primitive.positions().expect("OBJ positions");
+        let texcoords = primitive
+            .texcoords(0, AttributeDomain::Corner)
+            .expect("OBJ corner UVs");
+        let normals = primitive
+            .normals(AttributeDomain::Corner)
+            .expect("OBJ corner normals");
+        for (attribute, domain, lanes) in [
+            (positions, AttributeDomain::Vertex, 3),
+            (texcoords, AttributeDomain::Corner, 2),
+            (normals, AttributeDomain::Corner, 3),
+        ] {
+            assert_eq!(attribute.domain(), domain);
+            assert_eq!(attribute.lanes(), lanes);
+            assert_eq!(attribute.len(), 3);
+        }
+        let (positions, texcoords, normals) =
+            match (positions.data(), texcoords.data(), normals.data()) {
+                (
+                    AttributeData::DenseF32 {
+                        lanes: 3,
+                        values: positions,
+                    },
+                    AttributeData::DenseF32 {
+                        lanes: 2,
+                        values: texcoords,
+                    },
+                    AttributeData::DenseF32 {
+                        lanes: 3,
+                        values: normals,
+                    },
+                ) => (positions, texcoords, normals),
+                payloads => {
+                    panic!("expected dense OBJ position/UV/normal streams, got {payloads:?}")
+                }
+            };
+        for (corner, index) in indices.iter().copied().enumerate() {
+            let vertex = index as usize;
+            assert_eq!(
+                &positions[vertex * 3..vertex * 3 + 3],
+                &expected_positions[corner],
+                "{name} corner {corner} position"
+            );
+            assert_eq!(
+                &texcoords[corner * 2..corner * 2 + 2],
+                &expected_texcoords[corner],
+                "{name} corner {corner} UV"
+            );
+            assert_eq!(
+                &normals[corner * 3..corner * 3 + 3],
+                &expected_normals[corner],
+                "{name} corner {corner} normal"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn malformed_corner_indices_are_not_rescued_by_semantic_loss_authority() -> TestResult<()> {
+    for (reference, subject, reason) in [
+        ("-3/0/-2", "texcoord", "zero"),
+        ("-3/-5/-2", "texcoord", "out-of-range"),
+        ("-3/-4/0", "normal", "zero"),
+        ("-3/-4/-3", "normal", "out-of-range"),
+    ] {
+        let document = NEGATIVE_CORNER_OBJ.replacen("-3/-4/-2", reference, 1);
+        for loss_policy in [
+            LossPolicy::preserve_or_fail(),
+            LossPolicy::preserve_or_fail().allow(ImportLossKind::SourceSemanticLoss),
+        ] {
+            let failure = expected_failure(import_bytes_result_with_loss_policy(
+                "invalid-negative-corner.obj",
+                document.as_bytes(),
+                ResourceLimits::default(),
+                loss_policy,
+            )?);
+            let ImportCause::Format(envelope) = failure.cause() else {
+                panic!(
+                    "expected OBJ format failure for {reference}, got {:?}",
+                    failure.cause()
+                );
+            };
+            assert_eq!(envelope.code(), ObjFailureCode::InvalidIndex.as_str());
+            for (key, expected) in [("line", 11), ("column", 3)] {
+                assert_eq!(
+                    envelope
+                        .details()
+                        .iter()
+                        .find(|detail| detail.key() == key)
+                        .map(|detail| detail.value()),
+                    Some(FormatFailureDetailValue::Unsigned(expected)),
+                    "{reference}: {key}"
+                );
+            }
+            for (key, expected) in [("subject", subject), ("reason", reason)] {
+                let actual = envelope
+                    .details()
+                    .iter()
+                    .find(|detail| detail.key() == key)
+                    .and_then(|detail| match detail.value() {
+                        FormatFailureDetailValue::String(value) => Some(value.as_str()),
+                        _ => None,
+                    });
+                assert_eq!(actual, Some(expected), "{reference}: {key}");
+            }
+            assert_eq!(failure.ledger().committed_canonical_members(), 0);
+            assert!(failure.diagnostics().is_empty());
+            assert!(failure.loss_evidence().is_empty());
+        }
+    }
     Ok(())
 }
 

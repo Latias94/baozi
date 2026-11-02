@@ -502,7 +502,13 @@ void test_json(const std::filesystem::path &corpus) {
     expect(std::count(text.begin(), text.end(), '\n') == 1 && text.back() == '\n', "One stdout JSON object");
     expect(text.find("\"scalar_bytes\":" + std::to_string(sizeof(ai_real))) != std::string::npos, "Retained scalar width in JSON");
     expect(text.find("\"computation_scalar_bytes\":" + std::to_string(sizeof(ai_real))) != std::string::npos, "Computation width in JSON");
-    for (Status status : {Status::PolicyRejected, Status::Unsupported, Status::SemanticMismatch, Status::Timeout, Status::Crash}) {
+    const std::pair<Status, const char *> failure_statuses[]{
+            {Status::PolicyRejected, "policy_rejected"},
+            {Status::Unsupported, "unsupported"},
+            {Status::SemanticMismatch, "semantic_mismatch"},
+            {Status::Timeout, "timeout"},
+            {Status::Crash, "crash"}};
+    for (const auto &[status, wire_status] : failure_statuses) {
         Report failure;
         failure.status = status;
         failure.message = "quoted \"field\"\\path\nline\r\t";
@@ -513,7 +519,7 @@ void test_json(const std::filesystem::path &corpus) {
         std::ostringstream emitted;
         write_report(emitted, options, failure);
         const auto json = emitted.str();
-        expect(json.find("\"status\":\"" + std::string(name(status)) + "\"") != std::string::npos, "Finite failure status vocabulary");
+        expect(json.find("\"status\":\"" + std::string(wire_status) + "\"") != std::string::npos, "Finite failure status vocabulary");
         expect(json.find("\"observation\":null") != std::string::npos && json.find("\"stage_ns\":null") != std::string::npos,
                 "Failure does not fabricate observations/timing");
         expect(json.find("\"failure_stage\":\"observe\"") != std::string::npos, "Failure serializes its actual operation");
@@ -530,10 +536,15 @@ void test_json(const std::filesystem::path &corpus) {
     rejects(Status::Unsupported, [&] { parse_request(5, conversion, parsed); });
     const char *image[]{"probe", ".", "asset.ply", "--fields", "image"};
     rejects(Status::Unsupported, [&] { parse_request(5, image, parsed); });
-    const char *bad_budget[]{"probe", ".", "asset.ply", "--max-work-units", "18446744073709551616"};
-    rejects(Status::PolicyRejected, [&] { parse_request(5, bad_budget, parsed); });
-    const char *duplicate[]{"probe", ".", "asset.ply", "--comparison", "import", "--comparison", "extract"};
-    rejects(Status::PolicyRejected, [&] { parse_request(7, duplicate, parsed); });
+    const char *missing_options[]{"probe", ".", "asset.ply", "--comparison", "import"};
+    rejects(Status::PolicyRejected, [&] { parse_request(5, missing_options, parsed); });
+    // Keep every other required option valid so an unrelated missing-option guard cannot mask these checks.
+    const char *bad_budget[]{"probe", ".", "asset.ply", "--comparison", "pipeline", "--io-mode", "file",
+            "--fields", "position", "--normals", "missing", "--max-work-units", "18446744073709551616"};
+    rejects(Status::PolicyRejected, [&] { parse_request(13, bad_budget, parsed); });
+    const char *duplicate[]{"probe", ".", "asset.ply", "--comparison", "import", "--comparison", "extract",
+            "--io-mode", "file", "--fields", "position", "--normals", "missing", "--max-work-units", "1"};
+    rejects(Status::PolicyRejected, [&] { parse_request(15, duplicate, parsed); });
 }
 
 void test_runtime() {
