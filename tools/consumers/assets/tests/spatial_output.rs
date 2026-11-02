@@ -6,9 +6,18 @@ use baozi::{
     postprocess::{PostProcessControl, SpaceConversionOptions, convert_scene_space},
 };
 use baozi_asset_consumer::{
-    ApplicationAsset, Result, SampleTime, UvExtractionError, UvExtractionErrorKind, evaluate,
+    ApplicationAsset, EvaluationLimits, EvaluationRequest, FramePolicy, Result, SampleTime,
+    UvExtractionError, UvExtractionErrorKind, evaluate,
 };
 use serde_json::{Value, json};
+
+fn position_request() -> EvaluationRequest<'static> {
+    EvaluationRequest {
+        frames: FramePolicy::PositionOnly,
+        limits: EvaluationLimits::default(),
+        cancellation: None,
+    }
+}
 
 fn document() -> Value {
     json!({
@@ -265,7 +274,7 @@ fn camera_only_output_keeps_absent_name_optional_planes_and_shared_definition() 
             .iter()
             .all(|node| node.camera == Some(0) && node.light.is_none())
     );
-    let evaluated = evaluate(&asset, None, SampleTime::Declared(0.0))?;
+    let evaluated = evaluate(&asset, None, SampleTime::Declared(0.0), position_request())?;
     assert_eq!(evaluated.world_transforms[1][3], [1.0, 2.0, 3.0, 1.0]);
     Ok(())
 }
@@ -310,7 +319,7 @@ fn camera_and_light_only_output_owns_selected_definitions_names_and_metadata() -
     assert_eq!(extras.format, "org.baozi.gltf");
     assert_eq!(extras.media_type, "application/json");
     assert_eq!(extras.payload, br#"{"tag":"spot"}"#);
-    let evaluated = evaluate(&asset, None, SampleTime::Declared(0.0))?;
+    let evaluated = evaluate(&asset, None, SampleTime::Declared(0.0), position_request())?;
     assert!(evaluated.draws.is_empty());
     assert_eq!(
         evaluated.world_transforms[node_index(&asset, "mixed")][3],
@@ -349,7 +358,7 @@ fn geometry_camera_and_light_coexist_and_parent_scale_moves_only_the_placement()
             assert_eq!(instance.mesh, 0);
             assert!(asset.nodes[node].camera.is_some() && asset.nodes[node].light.is_some());
         }
-        let evaluated = evaluate(&asset, None, SampleTime::Declared(0.0))?;
+        let evaluated = evaluate(&asset, None, SampleTime::Declared(0.0), position_request())?;
         assert_eq!(evaluated.world_transforms[mixed][3], origin);
         assert_eq!(
             evaluated.draws[0].world_positions[0],
@@ -399,7 +408,7 @@ fn converted_spatial_output_owns_reflected_frames_and_centimeter_distances() -> 
             (Axis::PositiveX, Axis::PositiveY, Axis::PositiveZ)
         );
     }
-    let evaluated = evaluate(&asset, None, SampleTime::Declared(0.0))?;
+    let evaluated = evaluate(&asset, None, SampleTime::Declared(0.0), position_request())?;
     assert_eq!(
         evaluated.world_transforms[node_index(&asset, "mixed")][3],
         [1200.0, 2600.0, -4200.0, 1.0]
@@ -439,7 +448,7 @@ fn detached_direction_uses_local_negative_z_under_a_rigid_y_rotation() -> Result
     )?;
     assert_eq!(asset.nodes[0].light, Some(0));
     assert_eq!(asset.lights[0].definition.axes().forward(), Axis::NegativeZ);
-    let evaluated = evaluate(&asset, None, SampleTime::Declared(0.0))?;
+    let evaluated = evaluate(&asset, None, SampleTime::Declared(0.0), position_request())?;
     // A rigid +90 degree Y rotation maps the reference -Z direction to -X.
     for (actual, expected) in evaluated.world_transforms[0][2][..3]
         .iter()

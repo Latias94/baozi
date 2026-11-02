@@ -10,7 +10,8 @@ use baozi::{
 };
 use baozi_asset_consumer::{
     ApplicationAsset, Channel, ChannelTarget, Clip, DrawBuffer, EvaluatedAsset, EvaluationError,
-    Influences, Instance, MorphStream, Node, Result, SampleTime, Skin, Vertex, evaluate,
+    EvaluationLimits, EvaluationRequest, FramePolicy, Influences, Instance, MorphStream, Node,
+    Result, SampleTime, Skin, Vertex, evaluate,
 };
 use serde_json::{Value, json};
 
@@ -129,8 +130,21 @@ fn set_channel(asset: &mut ApplicationAsset, channel: Channel) {
     }];
 }
 
+fn position_request() -> EvaluationRequest<'static> {
+    EvaluationRequest {
+        frames: FramePolicy::PositionOnly,
+        limits: EvaluationLimits::default(),
+        cancellation: None,
+    }
+}
+
 fn at(asset: &ApplicationAsset, time: f64) -> Result<EvaluatedAsset> {
-    Ok(evaluate(asset, Some(0), SampleTime::Declared(time))?)
+    Ok(evaluate(
+        asset,
+        Some(0),
+        SampleTime::Declared(time),
+        position_request(),
+    )?)
 }
 
 fn add_morph(asset: &mut ApplicationAsset, default: f32) {
@@ -147,7 +161,7 @@ fn unanimated_owned_positions_keep_f64_values() -> Result<()> {
     let mut asset = asset();
     let position = [16_777_217.0, -0.0, f64::from_bits(1)];
     asset.draws[0].vertices[0].position = position;
-    let sampled = evaluate(&asset, None, SampleTime::Declared(0.0))?;
+    let sampled = evaluate(&asset, None, SampleTime::Declared(0.0), position_request())?;
     assert_eq!(
         sampled.draws[0].positions[0].map(f64::to_bits),
         position.map(f64::to_bits)
@@ -321,7 +335,12 @@ fn cubic_rotations_normalize_only_the_result_and_preserve_key_signs() -> Result<
     cubic.in_tangents = Some(vec![0.0; 8]);
     cubic.out_tangents = Some(vec![0.0; 8]);
     assert!(matches!(
-        evaluate(&asset, Some(0), SampleTime::Declared(1.0)),
+        evaluate(
+            &asset,
+            Some(0),
+            SampleTime::Declared(1.0),
+            position_request()
+        ),
         Err(EvaluationError::ZeroLengthQuaternion { channel: 0 })
     ));
     Ok(())
@@ -425,7 +444,7 @@ fn constant_and_source_default_are_distinct_on_both_sides() -> Result<()> {
                 mode
             };
             assert!(
-                matches!(evaluate(&asset, Some(0), SampleTime::Declared(11.0)),
+                matches!(evaluate(&asset, Some(0), SampleTime::Declared(11.0), position_request()),
                 Err(EvaluationError::UnsupportedExtrapolation { channel: 0, mode: actual }) if actual == mode)
             );
         }
@@ -458,26 +477,42 @@ fn f64_time_and_explicit_rates_preserve_declared_domain_derivatives() -> Result<
     ] {
         asset.animations[0].time_domain = domain;
         near(
-            evaluate(&asset, Some(0), SampleTime::Seconds(1.0 / rate))?.local_transforms[0][3][0],
+            evaluate(
+                &asset,
+                Some(0),
+                SampleTime::Seconds(1.0 / rate),
+                position_request(),
+            )?
+            .local_transforms[0][3][0],
             1.5,
         );
     }
     asset.animations[0].time_domain = AnimationTimeDomain::Ticks { rate: None };
     near(at(&asset, 1.0)?.local_transforms[0][3][0], 1.5);
     assert!(matches!(
-        evaluate(&asset, Some(0), SampleTime::Seconds(1.0)),
+        evaluate(
+            &asset,
+            Some(0),
+            SampleTime::Seconds(1.0),
+            position_request()
+        ),
         Err(EvaluationError::UnknownTimeRate)
     ));
     for rate in [0.0, -1.0, f64::INFINITY, f64::NAN] {
         asset.animations[0].time_domain = AnimationTimeDomain::Frames { rate };
         assert!(matches!(
-            evaluate(&asset, Some(0), SampleTime::Seconds(1.0)),
+            evaluate(
+                &asset,
+                Some(0),
+                SampleTime::Seconds(1.0),
+                position_request()
+            ),
             Err(EvaluationError::InvalidTimeRate)
         ));
     }
     for time in [f64::NAN, f64::INFINITY] {
         assert!(matches!(
-            evaluate(&asset, None, SampleTime::Declared(time)),
+            evaluate(&asset, None, SampleTime::Declared(time), position_request()),
             Err(EvaluationError::NonFiniteTime)
         ));
     }
@@ -496,7 +531,7 @@ fn morph_precedence_is_per_instance_and_source_default_is_immutable() -> Result<
         skin: None,
         morph_weights: Some(vec![0.75]),
     });
-    let base = evaluate(&asset, None, SampleTime::Declared(0.0))?;
+    let base = evaluate(&asset, None, SampleTime::Declared(0.0), position_request())?;
     point(base.draws[0].positions[0], [1.5, 0.0, 0.0]);
     point(base.draws[1].positions[0], [2.5, 0.0, 0.0]);
     set_channel(
@@ -530,7 +565,8 @@ fn morph_precedence_is_per_instance_and_source_default_is_immutable() -> Result<
         values: vec![[4.0, 0.0, 0.0]],
     });
     point(
-        evaluate(&asset, None, SampleTime::Declared(0.0))?.draws[0].positions[0],
+        evaluate(&asset, None, SampleTime::Declared(0.0), position_request())?.draws[0].positions
+            [0],
         [2.0, 0.0, 0.0],
     );
     Ok(())
@@ -553,7 +589,7 @@ fn world_composition_respects_parent_order_and_nonuniform_trs() -> Result<()> {
         light: None,
     });
     asset.roots = vec![1];
-    let sampled = evaluate(&asset, None, SampleTime::Declared(0.0))?;
+    let sampled = evaluate(&asset, None, SampleTime::Declared(0.0), position_request())?;
     // Authored F32 quaternion components are preserved, so allow their squared-length error.
     for (actual, expected) in sampled.draws[0].world_positions[0]
         .into_iter()
@@ -565,7 +601,8 @@ fn world_composition_respects_parent_order_and_nonuniform_trs() -> Result<()> {
     shear.cols[1][0] = 2.0;
     asset.nodes[0].transform = AuthoredTransform::try_matrix(shear)?;
     assert_eq!(
-        evaluate(&asset, None, SampleTime::Declared(0.0))?.local_transforms[0][1][0],
+        evaluate(&asset, None, SampleTime::Declared(0.0), position_request())?.local_transforms[0]
+            [1][0],
         2.0
     );
     set_channel(
@@ -577,7 +614,12 @@ fn world_composition_respects_parent_order_and_nonuniform_trs() -> Result<()> {
         ),
     );
     assert!(matches!(
-        evaluate(&asset, Some(0), SampleTime::Declared(1.0)),
+        evaluate(
+            &asset,
+            Some(0),
+            SampleTime::Declared(1.0),
+            position_request()
+        ),
         Err(EvaluationError::MatrixAuthoredAnimation { node: 0 })
     ));
     Ok(())
@@ -620,7 +662,7 @@ fn skinned_asset() -> ApplicationAsset {
 #[test]
 fn two_joint_positions_morph_before_skin_with_each_instances_palette() -> Result<()> {
     let asset = skinned_asset();
-    let sampled = evaluate(&asset, None, SampleTime::Declared(0.0))?;
+    let sampled = evaluate(&asset, None, SampleTime::Declared(0.0), position_request())?;
     // p=1 + 0.5*2=2; first world x=0.25*12 + 0.75*14=13.5, then inverse(T10).
     point(sampled.draws[0].positions[0], [3.5, 0.0, 0.0]);
     point(sampled.draws[0].world_positions[0], [13.5, 0.0, 0.0]);
@@ -636,7 +678,7 @@ fn two_joint_positions_morph_before_skin_with_each_instances_palette() -> Result
 fn skinning_retains_all_influences_and_unnormalized_homogeneous_weights() -> Result<()> {
     let mut asset = skinned_asset();
     asset.draws[0].influences.as_mut().unwrap().weights = vec![0.5, 1.5];
-    let sampled = evaluate(&asset, None, SampleTime::Declared(0.0))?;
+    let sampled = evaluate(&asset, None, SampleTime::Declared(0.0), position_request())?;
     point(sampled.draws[0].positions[0], [7.0, 0.0, 0.0]);
     point(sampled.draws[0].world_positions[0], [27.0, 0.0, 0.0]);
     point(sampled.draws[1].positions[0], [7.0, 0.0, 0.0]);
@@ -647,7 +689,8 @@ fn skinning_retains_all_influences_and_unnormalized_homogeneous_weights() -> Res
         weights: vec![0.125, 0.125, 0.125, 0.125, 0.125, 0.375],
     });
     point(
-        evaluate(&asset, None, SampleTime::Declared(0.0))?.draws[0].positions[0],
+        evaluate(&asset, None, SampleTime::Declared(0.0), position_request())?.draws[0].positions
+            [0],
         [3.25, 0.0, 0.0],
     );
     Ok(())
@@ -663,7 +706,7 @@ fn unsupported_correction_and_singular_instance_are_named_failures() -> Result<(
     )?;
     asset.skins[0].matrix_spaces = SkinMatrixSpaces::canonical().with_correction(correction);
     assert!(matches!(
-        evaluate(&asset, None, SampleTime::Declared(0.0)),
+        evaluate(&asset, None, SampleTime::Declared(0.0), position_request()),
         Err(EvaluationError::UnsupportedSkinCorrection { skin: 0 })
     ));
     assert_eq!(asset.skins[0].matrix_spaces.correction(), Some(correction));
@@ -671,7 +714,7 @@ fn unsupported_correction_and_singular_instance_are_named_failures() -> Result<(
     asset.nodes[0].transform =
         AuthoredTransform::try_trs(Vec3::ZERO, Quat::IDENTITY, Vec3::new(0.0, 1.0, 1.0))?;
     assert!(matches!(
-        evaluate(&asset, None, SampleTime::Declared(0.0)),
+        evaluate(&asset, None, SampleTime::Declared(0.0), position_request()),
         Err(EvaluationError::SingularInstanceTransform { instance: 0 })
     ));
     Ok(())
@@ -713,7 +756,7 @@ fn rounded_nonzero_pivot_cannot_accept_an_owned_singular_instance() -> Result<()
         let asset = matrix_skin_asset(matrix)?;
         assert!(
             matches!(
-                evaluate(&asset, None, SampleTime::Declared(0.0)),
+                evaluate(&asset, None, SampleTime::Declared(0.0), position_request()),
                 Err(EvaluationError::SingularInstanceTransform { instance: 0 })
             ),
             "singular matrix at scale 2^{exponent} must not publish positions"
@@ -741,7 +784,7 @@ fn inaccurate_candidate_inverse_is_rejected_by_its_two_sided_residual() -> Resul
         // of its retained candidate is 2^-17, above the 2^-26 accuracy cap.
         assert!(
             matches!(
-                evaluate(&asset, None, SampleTime::Declared(0.0)),
+                evaluate(&asset, None, SampleTime::Declared(0.0), position_request()),
                 Err(EvaluationError::NumericFailure {
                     operation: "instance inverse residual"
                 })
@@ -768,7 +811,7 @@ fn general_affine_translation_cancellation_uses_the_full_vector_scale() -> Resul
         };
         let mut asset = matrix_skin_asset(matrix)?;
         asset.draws[0].vertices[0].position = [f64::from(scale), 0.0, 0.0];
-        let sampled = evaluate(&asset, None, SampleTime::Declared(0.0))?;
+        let sampled = evaluate(&asset, None, SampleTime::Declared(0.0), position_request())?;
         point(
             sampled.draws[0].positions[0],
             [-7.0 / 23.0, -29.0 / 23.0, 9.0 / 23.0],
@@ -797,7 +840,7 @@ fn small_and_large_uniform_scales_and_affine_shear_remain_invertible() -> Result
             let mut asset = matrix_skin_asset(matrix)?;
             asset.draws[0].vertices[0].position =
                 [17.0, 2.0, 3.0].map(|value| value * f64::from(scale));
-            let sampled = evaluate(&asset, None, SampleTime::Declared(0.0))?;
+            let sampled = evaluate(&asset, None, SampleTime::Declared(0.0), position_request())?;
             drop(asset);
             // After removing translation, (13,4,-3) is sent through inverse(S).
             // For shear S=[[1,2,0],[0,1,-1],[0,0,1]], inverse(S)*d=(11,1,-3).
@@ -843,7 +886,7 @@ fn hierarchical_uniform_scales_remain_invertible_beyond_f32_range() -> Result<()
         asset.roots[0] = child;
         let scale = 2.0_f64.powi(exponent * 6);
         asset.draws[0].vertices[0].position = [1.0, -2.0, 3.0].map(|value| value * scale);
-        let sampled = evaluate(&asset, None, SampleTime::Declared(0.0))?;
+        let sampled = evaluate(&asset, None, SampleTime::Declared(0.0), position_request())?;
         point(sampled.draws[0].positions[0], [1.0, -2.0, 3.0]);
         point(
             sampled.draws[0].world_positions[0].map(|value| value / scale),
@@ -866,18 +909,28 @@ fn malformed_owned_tables_fail_without_partial_output_or_panics() -> Result<()> 
     );
     asset.animations[0].channels[0].times[1] = 0.0;
     assert!(matches!(
-        evaluate(&asset, Some(0), SampleTime::Declared(1.0)),
+        evaluate(
+            &asset,
+            Some(0),
+            SampleTime::Declared(1.0),
+            position_request()
+        ),
         Err(EvaluationError::InvalidChannel { .. })
     ));
     asset.nodes[0].children.push(0);
     assert!(matches!(
-        evaluate(&asset, None, SampleTime::Declared(0.0)),
+        evaluate(&asset, None, SampleTime::Declared(0.0), position_request()),
         Err(EvaluationError::InvalidHierarchy)
     ));
     let mut skinned = skinned_asset();
     skinned.draws[0].influences.as_mut().unwrap().joints[0] = 99;
     assert!(matches!(
-        evaluate(&skinned, None, SampleTime::Declared(0.0)),
+        evaluate(
+            &skinned,
+            None,
+            SampleTime::Declared(0.0),
+            position_request()
+        ),
         Err(EvaluationError::InvalidAsset(_))
     ));
     Ok(())
@@ -1061,18 +1114,35 @@ fn public_import_copy_drop_preserves_animation_skin_and_weight_contracts() -> Re
         }
     }
     assert_eq!(source.draws[0].morphs[0].values[1], [0.0; 3]);
-    let sampled = evaluate(&source, Some(0), SampleTime::Declared(1.0))?;
+    let sampled = evaluate(
+        &source,
+        Some(0),
+        SampleTime::Declared(1.0),
+        position_request(),
+    )?;
     assert_eq!(sampled.morph_weights, [vec![0.5], vec![0.25]]);
     point(sampled.draws[0].world_positions[0], [13.5, -1.8, 3.85]);
     point(sampled.draws[0].positions[0], [1.75, -0.6, 0.9625]);
     point(sampled.draws[1].world_positions[0], [23.0, 1.5, 3.375]);
     point(sampled.draws[1].positions[0], [3.0, 0.75, 1.125]);
     assert_eq!(
-        evaluate(&source, Some(0), SampleTime::Declared(-1.0))?.morph_weights,
+        evaluate(
+            &source,
+            Some(0),
+            SampleTime::Declared(-1.0),
+            position_request()
+        )?
+        .morph_weights,
         [vec![0.25], vec![0.25]]
     );
     assert_eq!(
-        evaluate(&source, Some(0), SampleTime::Declared(3.0))?.morph_weights,
+        evaluate(
+            &source,
+            Some(0),
+            SampleTime::Declared(3.0),
+            position_request()
+        )?
+        .morph_weights,
         [vec![0.75], vec![0.25]]
     );
     let late_node = source
@@ -1081,13 +1151,25 @@ fn public_import_copy_drop_preserves_animation_skin_and_weight_contracts() -> Re
         .position(|node| node.name.as_deref() == Some("late-base"))
         .unwrap();
     near(
-        evaluate(&source, None, SampleTime::Declared(0.0))?.local_transforms[late_node][3][0],
+        evaluate(&source, None, SampleTime::Declared(0.0), position_request())?.local_transforms
+            [late_node][3][0],
         0.0,
     );
-    let late = evaluate(&source, Some(1), SampleTime::Declared(0.0))?;
+    let late = evaluate(
+        &source,
+        Some(1),
+        SampleTime::Declared(0.0),
+        position_request(),
+    )?;
     near(late.local_transforms[late_node][3][0], 7.0);
     near(
-        evaluate(&source, Some(1), SampleTime::Declared(13.0))?.local_transforms[late_node][3][0],
+        evaluate(
+            &source,
+            Some(1),
+            SampleTime::Declared(13.0),
+            position_request(),
+        )?
+        .local_transforms[late_node][3][0],
         9.0,
     );
     drop(source);
@@ -1107,8 +1189,18 @@ fn reflected_centimeter_conversion_commutes_with_evaluation() -> Result<()> {
         .unwrap();
     assert_eq!(derivative.out_tangents.as_ref().unwrap()[0], -2.0);
     for time in [-1.0, 0.0, 0.25, 1.0, 1.75, 2.0, 3.0] {
-        let original = evaluate(&source, Some(0), SampleTime::Declared(time))?;
-        let changed = evaluate(&converted, Some(0), SampleTime::Declared(time))?;
+        let original = evaluate(
+            &source,
+            Some(0),
+            SampleTime::Declared(time),
+            position_request(),
+        )?;
+        let changed = evaluate(
+            &converted,
+            Some(0),
+            SampleTime::Declared(time),
+            position_request(),
+        )?;
         assert_eq!(original.morph_weights, changed.morph_weights);
         assert_eq!(original.draws.len(), changed.draws.len());
         for (original, changed) in original.draws.iter().zip(&changed.draws) {

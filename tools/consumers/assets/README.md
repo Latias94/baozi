@@ -168,6 +168,10 @@ semantics, source-owner names, declared/unknown image media type, F64 PLY UVs, l
 named missing-UV failures for Unlit fallback. All full appearance assertions read owned output after
 the Scene, import evidence, importer, IO and fixture buffers are destroyed. The UV transform vector
 maps `(1/4,1/8)` to `(1/16,3/4)` using scale, 90-degree rotation, and translation, without decoding pixels.
+Clearcoat/sheen cases also retain explicit zero-valued groups, all five additional texture roles,
+signed coat-normal scale, independent UV transforms and exact nested extras. Shared images with
+different samplers remain shared through coordinate conversion and source-owner destruction;
+missing sheen UVs report their exact material-local binding ordinal.
 
 Camera projections retain their intrinsic axes, perspective field of view and optional aspect/far
 planes, or orthographic magnifications and depth range. Light definitions retain category, intrinsic
@@ -194,7 +198,9 @@ Y-up centimeters gives `(1200,2600,-4200)` and range `8 -> 800`, with unchanged 
 All successful output assertions run after Scene, import/conversion reports, importer, IO and fixture
 buffers leave scope. A missing material UV returns an error while preserving the source Scene.
 
-The separate `evaluate` reference in `src/evaluation.rs` consumes only these owned buffers. Select one clip
+The separate `evaluate` reference in `src/evaluation.rs` consumes only these owned buffers. Its
+fourth argument is an explicit `EvaluationRequest` with frame policy, `EvaluationLimits` and an
+optional cancellation token. Select one clip
 with `Some(index)` or the authored pose with `None`; `SampleTime::Declared(f64)` uses the clip's
 time domain and `SampleTime::Seconds(f64)` requires a known positive frame/tick rate. It samples
 Step, Linear and CubicSpline TRS/morph curves with F64 math, normalized shortest-path slerp for
@@ -208,9 +214,29 @@ quaternion results return named failures. Inversion tests numerical rank relativ
 3x3 scale, allowing well-conditioned tiny or large uniform scales and affine shear. It checks
 both inverse multiplication residuals and translation cancellation before publishing positions;
 an inverse that cannot meet the F64 reference accuracy limit returns a named numeric failure.
-Output owns F64 local/world transforms, effective morph
-weights and per-instance draw positions. Playback clocks, blending, bounds and skin shading are
-outside this reference; see `tests/evaluation.rs` for independent analytic and reflected-space vectors.
+Output owns F64 local/world transforms, effective morph weights and per-instance draw positions.
+`PositionOnly` returns no shading frames. `FrozenWeight` additionally applies authored normal and
+tangent morph deltas before the complete per-vertex weighted linear skin map; normals use its
+checked inverse transpose, tangents are orthogonalized, and tangent W includes reflection parity.
+This frozen-weight approximation does not differentiate spatial weight gradients. Missing active
+morph shading deltas, singular maps, degenerate frames and mixed element orientation fail the
+requested result without a bind-pose fallback. Source influence rows and samples are unchanged.
+
+`FrozenWeightNormalsOnly` explicitly requests normals/orientation without certifying unused authored
+tangents. The unchanged untextured AnimatedMorphCube needs this policy: one source tangent is
+parallel to its normal, so a full frame still returns `DegenerateTangent`. `TriangleUvDerivative`
+also requests normals/orientation, rejects active nonzero tangent morph conflicts and leaves each
+binding's UV derivative frame to the separate [renderer consumer](../render-wgpu/README.md).
+No policy silently downgrades after a failure. RiggedSimple and Cube tests compare positions and
+changing normals at a source key and interval midpoint with independently decoded source values.
+
+Limits admit output vertices/draws, both transform tables, nested output capacities, optional frames,
+per-instance palette matrices, cumulative scratch capacities and work. Allocation is fallible;
+cancellation is checked between bounded visits/kernels. `EvaluationAccounting` reports capacities
+and work for that operation. Cumulative scratch is a conservative admission account, not a peak
+live heap or RSS measurement; borrowed input, allocator overhead and system internals are excluded.
+Playback clocks, blending and animated bounds remain outside this reference. See
+`tests/evaluation.rs` and `tests/evaluation_frames.rs` for analytic and reflected-space vectors.
 
 `BasePoseSpatialSnapshot::from_scene` is a separate, opt-in query before Scene destruction. It
 returns an owned `BasePoseWorldTransforms` table and scene-wide `Option<Aabb>` in the Scene's current

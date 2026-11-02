@@ -406,6 +406,49 @@ positive complete-byte detector. A development-only import dependency names the 
 API; production dependency roots are unchanged. The complete current consumer then passes 114
 tests. The future U11 test draft remains excluded from that execution.
 
+## U10 CPU Reference: Explicit Evaluated Shading Frames
+
+The detached evaluator now takes one `EvaluationRequest` with explicit frame policy, limits and
+cancellation. The old three-argument entry point is removed; its existing position callers select
+`PositionOnly`. One sampler and one position path remain. `FrozenWeight` applies authored morph
+normal/tangent deltas before the complete weighted linear skin map, uses the existing checked
+inverse transpose for normals, orthogonalizes tangents and transports reflection handedness.
+The frozen-weight approximation does not differentiate spatial weight gradients. Empty/singular
+blends, missing shading deltas, degenerate frames and mixed element orientation have named errors.
+Complete source rows, non-unit weight sums and homogeneous world XYZ remain unchanged.
+
+An actual failed sample test exposed an interface gap: AnimatedMorphCube source vertex ten has
+normal `(-1,0,-0)` and tangent `(1,0,-0,1)` with zero tangent deltas. Its untextured material needs
+valid deformed normals but cannot request an orthogonal authored tangent. The independently
+verified source bytes remain unchanged. Explicit `FrozenWeightNormalsOnly` now evaluates the
+normal/orientation without claiming tangent validity; full `FrozenWeight` still rejects that
+same source with `DegenerateTangent`. `TriangleUvDerivative` likewise leaves unused authored
+tangents uncertified and rejects active tangent-morph conflicts; the renderer owns each binding's
+derivative frame. No failure silently downgrades, changes source bits or substitutes bind normals.
+
+Independent analytic cases cover nonuniform/reflected maps, all influence lanes, non-unit sums,
+morph-before-skin, degeneracy, cancellation and exact admission boundaries. Pinned RiggedSimple
+and AnimatedMorphCube positions and changing normals at a key and interval midpoint match
+independently decoded source-byte vectors. Additional public-consumer cases compose generated
+flat-normal seams with bound skins, complete six-positive-joint rows, two different palettes and
+instance morph weights. A public custom producer supplies Corner/Face COLOR_0 and signed-zero
+seams, checked against literal tuples after all original owners are destroyed.
+
+The final current asset suite passes **114/114**, one existing manual skip, nextest
+`ec4522a3-a4ba-45ab-950c-50a91a1336d5`; scoped strict Clippy and format checks pass. As above, the
+future quantization draft is excluded. This follows the earlier affected 72-test result and the
+pre-fix Cube and fixture-detector failures, which remain in their logs rather than relabelled.
+Independent evaluator review resolved the Cube request finding without changing the math or
+degeneracy threshold; the post-review Clippy-only tuple return was replaced by a private named
+frame record. The source-qualified CPU receipt is `target/review/evaluation-frames/verification.json`.
+
+Limits admit complete output/nested vector capacities, transform tables, palettes, cumulative
+scratch and work before growth/population, with actual-capacity reconciliation. Scratch is a
+conservative cumulative admission value, not peak heap/RSS; borrowed input, allocator overhead
+and system internals are excluded. The returned output remains detached. This closes the CPU
+reference slice only: actual animated renderer readback, final renderer/API integration review
+and complete U10 device acceptance remain open.
+
 ## Remaining Verification
 
 Timing/RSS B0, the separate heap observations and the regression policy are now recorded above. Production semantics remained unchanged throughout these campaigns.
