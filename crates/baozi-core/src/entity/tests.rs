@@ -67,6 +67,32 @@ fn authored_transform_rejects_invalid_matrix_and_trs_values() {
 }
 
 #[test]
+fn authored_rotations_share_the_numeric_policy_and_preserve_accepted_bits() {
+    for (bits, admitted) in [
+        (0x3f35_02a2, false),
+        (0x3f35_02a3, true),
+        (0x3f35_0744, true),
+        (0x3f35_0745, false),
+        (0x3f35_07c8, false),
+    ] {
+        for sign in [1.0, -1.0] {
+            let a = f32::from_bits(bits) * sign;
+            let rotation = Quat::from_xyzw(-0.0, 0.0, a, a);
+            let result = AuthoredTransform::try_trs(Vec3::ZERO, rotation, Vec3::new(1.0, 1.0, 1.0));
+            if admitted {
+                let retained = result.unwrap().authored_trs().unwrap().rotation();
+                assert_eq!(
+                    [retained.x, retained.y, retained.z, retained.w].map(f32::to_bits),
+                    [(-0.0_f32).to_bits(), 0, a.to_bits(), a.to_bits()],
+                );
+            } else {
+                assert_eq!(result, Err(AuthoredTransformError::RotationNotUnit));
+            }
+        }
+    }
+}
+
+#[test]
 fn camera_projection_rejects_invalid_frusta() {
     assert_eq!(
         CameraProjection::perspective(LocalAxes::STANDARD, 0.0, None, 0.1, None),

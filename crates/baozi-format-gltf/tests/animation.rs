@@ -286,6 +286,59 @@ fn non_finite_animation_payload_is_rejected_without_committing_cells() -> TestRe
 }
 
 #[test]
+fn rotation_boundary_keys_are_preserved_or_rejected_by_the_canonical_policy() -> TestResult<()> {
+    for (bits, admitted) in [
+        (0x3f35_02a2, false),
+        (0x3f35_02a3, true),
+        (0x3f35_0744, true),
+        (0x3f35_0745, false),
+        (0x3f35_07c8, false),
+    ] {
+        for sign in [1.0, -1.0] {
+            let a = f32::from_bits(bits) * sign;
+            let key = [-0.0_f32, 0.0, a, a];
+            let mut bin = base_animation_bin();
+            for (component, value) in key.into_iter().enumerate() {
+                write_f32(&mut bin, 48 + component * 4, value);
+            }
+            let document = animation_glb(base_animation_json(), &bin);
+            let (result, diagnostics) = import_assets_result(
+                "rotation-boundary.glb",
+                [("rotation-boundary.glb", document)],
+                GltfTestOptions::memory(),
+            )?;
+            assert!(diagnostics.is_empty());
+            if admitted {
+                let report = result?;
+                let clip = report.scene().animation_clips().next().unwrap();
+                let channel = clip.channel(1).unwrap();
+                assert_eq!(
+                    channel.values()[4..8]
+                        .iter()
+                        .map(|v| v.to_bits())
+                        .collect::<Vec<_>>(),
+                    key.map(f32::to_bits),
+                );
+                let encoded = key
+                    .map(|value| format!("0x{:08x}", value.to_bits()))
+                    .join(",");
+                assert!(scene_snapshot(&report).preview().contains(&encoded));
+            } else {
+                let failure = expected_error(result)?;
+                assert_gltf_failure(
+                    &failure,
+                    GltfFailureCode::InvalidDocument,
+                    Some("non-unit animation rotation"),
+                )?;
+                assert_eq!(failure.ledger().current_live_bytes(), 0);
+                assert_eq!(failure.ledger().active_reservations(), 0);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn invalid_animation_times_fail_during_bounded_materialization() -> TestResult<()> {
     for (first, second, reason, consumed) in [
         (-1.0_f32, 1.0_f32, "negative animation time", 0_u64),

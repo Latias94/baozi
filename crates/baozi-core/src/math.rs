@@ -250,6 +250,48 @@ mod tests {
     }
 
     #[test]
+    fn quaternion_admission_uses_squared_length_at_adjacent_f32_boundaries() {
+        // Independent binary64 sums of the exact F32 components, q=(0,0,a,a).
+        let cases: [(u32, f64, bool); 5] = [
+            (0x3f35_02a2, 0.999_899_995_947_117_8, false),
+            (0x3f35_02a3, 0.999_900_164_526_089, true),
+            (0x3f35_0744, 1.0000999405930315, true),
+            (0x3f35_0745, 1.0001001091888568, false),
+            (0x3f35_07c8, 1.0001221953648383, false),
+        ];
+        for (bits, norm2, admitted) in cases {
+            for sign in [1.0, -1.0] {
+                let a = f32::from_bits(bits) * sign;
+                let rotation = Quat::from_xyzw(-0.0, 0.0, a, a);
+                assert_eq!(rotation.length_squared_f64().to_bits(), norm2.to_bits());
+                assert_eq!(rotation.is_unit(), admitted, "a bits={bits:#x}");
+            }
+        }
+        let length_only = Quat::from_xyzw(
+            0.0,
+            0.0,
+            f32::from_bits(0x3f35_07c8),
+            f32::from_bits(0x3f35_07c8),
+        );
+        assert!((length_only.length_squared_f64().sqrt() - 1.0).abs() < 1e-4);
+        assert!(!length_only.is_unit());
+    }
+
+    #[test]
+    fn quaternion_admission_rejects_zero_nonfinite_and_scaled_components() {
+        for rotation in [
+            Quat::from_xyzw(0.0, -0.0, 0.0, 0.0),
+            Quat::from_xyzw(f32::from_bits(1), 0.0, 0.0, 0.0),
+            Quat::from_xyzw(0.0, 0.0, 0.0, 2.0),
+            Quat::from_xyzw(0.0, f32::NAN, 0.0, 1.0),
+            Quat::from_xyzw(0.0, 0.0, f32::INFINITY, 1.0),
+            Quat::from_xyzw(0.0, 0.0, 0.0, f32::NEG_INFINITY),
+        ] {
+            assert!(!rotation.is_unit(), "{rotation:?}");
+        }
+    }
+
+    #[test]
     fn composes_column_vector_trs_without_rewriting_components() {
         let matrix = Mat4::from_trs(
             Vec3::new(4.0, 5.0, 6.0),

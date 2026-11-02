@@ -94,6 +94,12 @@ document. Fresh target/sanitizer and archive-consumer evidence belongs to the
   domain, interpolation, retained channel order, and non-contiguous source indexes preserved through
   canonical storage. Whole clips outside the selected scene are scope omissions; mixed-target clips
   require explicit `SourceSemanticLoss` authority before outside channels may be filtered.
+  Rotation values use Baozi's canonical `abs(norm2 - 1) <= 1e-4` policy, computed in F64 from
+  retained F32 components. This differs from the Khronos validator's length-tolerance policy.
+  The unchanged official SimpleSkin fixture passes the pinned validator but remains an explicit
+  Baozi policy rejection; see the [source and boundary adjudication](../research/2026-11-02-quaternion-compatibility.md).
+  Accepted source bits remain unchanged. Temporary application evaluation can normalize an
+  effective interpolation sample under its documented policy; it does not rewrite stored keys.
 - Morph-weight animation targets the mesh instance attached to the authored source node, even when
   several nodes share a logical mesh. Step, Linear, and CubicSpline retain key-major weight vectors;
   cubic input/value/output parts each contain a complete target-width vector. Output is SCALAR F32

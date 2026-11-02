@@ -103,7 +103,16 @@
         ]
       },
       "external_resources": ["SimpleSkin_geometry.bin", "SimpleSkin_skinningData.bin", "SimpleSkin_inverseBindMatrices.bin", "SimpleSkin_animation.bin"],
-      "notes": ["Retained unchanged as a Baozi policy rejection fixture. Do not normalize upstream quaternion bytes or broaden the canonical tolerance to admit this model."],
+      "validator_evidence": {
+        "tool": "gltf-validator@2.0.0-dev.3.10",
+        "commit": "bcd52cc4ba5f333b2999a58f67cc05ddf28b4fb1",
+        "errors": 0, "warnings": 0, "infos": 0, "hints": 1,
+        "hint_code": "BUFFER_VIEW_TARGET_MISSING",
+        "quaternion_length_tolerance": 0.00769,
+        "scope": "Unchanged glTF and all four external buffers; unlimited issues, no suppression or severity override. This is the validator's result, not Baozi admission.",
+        "record": "docs/research/2026-11-02-quaternion-compatibility.md"
+      },
+      "notes": ["Retained unchanged as a Baozi policy rejection fixture despite passing the pinned official validator. Do not normalize upstream quaternion bytes or broaden the canonical tolerance merely to admit this model."],
       "source_pointers": ["/scenes/0", "/nodes", "/meshes/0", "/skins/0", "/animations/0", "/accessors/0", "/accessors/1", "/accessors/4", "/accessors/5", "/accessors/6"]
     },
     {

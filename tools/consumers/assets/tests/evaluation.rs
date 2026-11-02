@@ -354,6 +354,35 @@ fn one_key_and_step_rotations_remain_defined_at_endpoints() -> Result<()> {
 }
 
 #[test]
+fn effective_endpoint_rotation_normalizes_a_tolerated_key_without_rewriting_it() -> Result<()> {
+    let mut asset = asset();
+    for interpolation in [Interpolation::Step, Interpolation::Linear] {
+        for sign in [1.0, -1.0] {
+            let a = f32::from_bits(0x3f35_0744) * sign;
+            let key = [-0.0_f32, 0.0, a, a];
+            let mut single = channel(ChannelTarget::Rotation(0), interpolation, &key);
+            single.times = vec![10.0];
+            set_channel(&mut asset, single);
+            for time in [0.0, 10.0, 20.0] {
+                point(
+                    at(&asset, time)?.draws[0].world_positions[0],
+                    [0.0, 1.0, 0.0],
+                );
+                assert_eq!(
+                    asset.animations[0].channels[0]
+                        .values
+                        .iter()
+                        .map(|v| v.to_bits())
+                        .collect::<Vec<_>>(),
+                    key.map(f32::to_bits),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn constant_and_source_default_are_distinct_on_both_sides() -> Result<()> {
     let mut asset = asset();
     let mut translated = channel(

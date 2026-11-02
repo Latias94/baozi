@@ -165,6 +165,27 @@ The reviewed data and budget values are unchanged; the fixed-source private rece
 Archive SHA-256 is `cac541c2f8a70a261120e61116ad01104d5f4506a4a75628e286e81315c3ec4a`; its file-digest manifest SHA-256 is `6c0eca8cfc68ef2ea5a4d8291a58d293f9b8f22dd7be43ec17fe5812ce072d02`.
 These ignored local artifacts are retained evidence, not a remotely published archive. The archive records the original B0 protocol and frozen budget; later explanatory documentation does not rewrite those observations.
 
+## Quaternion Policy Adjudication
+
+The [source/validator investigation](../research/2026-11-02-quaternion-compatibility.md) retains SimpleSkin as a documented Baozi policy rejection, with unchanged fixture bytes and unchanged canonical tolerance.
+The pinned official validator reports zero errors/warnings/infos and one unrelated hint. Eight independently decoded keys exceed Baozi's narrower squared-length threshold.
+The capability manifest records both outcomes, rather than treating the official asset as generally invalid.
+No production arithmetic, authored/effective representation or normalization policy changed in this slice.
+
+Characterization adds adjacent-F32 boundary vectors to math, authored transforms and public glTF import/snapshot reads, including negated rotations, signed zero and a value that distinguishes length from squared length.
+An owned-evaluator endpoint check proves its temporary normalization without rewriting a tolerated key.
+Existing cubic-derivative, retained-validation, reflected-conversion and upstream-rejection checks remain in use.
+
+| Check | Actual result | Evidence identity |
+| --- | --- | --- |
+| Core boundary and existing semantic cases | 6/6 pass | nextest `b1018d63-771d-4df7-9a00-dada7f72d1ee` |
+| glTF public animation/snapshot cases | 3/3 pass | nextest `01ef4ac8-a408-4b5b-8d70-95a921934d91` |
+| Detached evaluation and unchanged rejection | 5/5 pass | nextest `2d183b30-2c69-4e65-b689-2cba2b053e26` |
+| Static checks | core/glTF and asset consumer strict all-target/all-feature Clippy; both format checks pass | Rust 1.95, Windows x86_64 MSVC, serial shared target |
+
+Independent review recomputed the source/boundary arithmetic and checked the common admission predicate, public retention, conversion and temporary-evaluation distinction; it found no actionable issue.
+Its fixed-source receipt is `.git/baozi-review/pre-release-evolution-execution/quaternion-review.md`.
+
 ## Remaining Verification
 
 Timing/RSS B0, the separate heap observations and the regression policy are now recorded above. Production semantics remained unchanged throughout these campaigns.
