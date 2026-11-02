@@ -220,6 +220,14 @@ precision, source identity and publication remain shared. Additional bounded scr
 the admitted peak and failure site; do not catch rejection and silently retry. Each candidate
 must preserve the existing sparse-storage protections and pass physical-prefix/control probes.
 
+The [implemented candidate receipt](../reviews/2026-11-03-source-remap-and-normal-ordering.md)
+qualifies `52446ec8511b7dfba2e5352ce6941558d85e0ae2`: 439/439 affected tests, final public
+control/frontier refreshes, strict Clippy/fmt and closed independent reviews. Its ordinary six-lane
+Windows comparison against the separately qualified numeric-only source reduces repeated import/
+preparation/pipeline to 36.786/48.732/90.847 ms and grid import/pipeline to 178.630/194.523 ms,
+with stable substantial Assimp controls. Grid whole-child working-set/commit medians also fall.
+Retain the bounded algorithms; full Windows, Linux B1/heap and final U14 remain open.
+
 ### P6. Complete native comparison and the original final qualification
 
 Retain per-change Windows measured variants against `4455d03`, then run the unchanged complete
