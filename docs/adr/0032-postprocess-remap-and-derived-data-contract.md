@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-10
-updated: 2026-11-02
+updated: 2026-11-03
 authors:
   - Codex
 decision_type: architecture
@@ -261,6 +261,17 @@ Canonical `(semantic, domain)` keys may legally provide multiple authored Normal
 When generation would need to select, merge, or remove multiple such fields, this increment returns
 an explicit capability error before replacement. It does not silently select a domain or merge
 owner-local metadata. Typed attribute reads require both semantic and domain.
+
+Ordering preserves the original Corner order within each smoothing bucket, including its
+floating accumulation and first-error attribution. Indexed Smooth input may use a stable
+Vertex histogram/prefix/forward scatter when groups are absent or uniformly nonzero and the
+logical Vertex count V fits the Corner count C. The optional V-slot cursor tail shares the
+C-slot order allocation, is bounded by C, and is admitted before use. The kernel proves group
+uniformity after ordinary position/face validation. Mixed/zero groups and source-sparse domains
+use the general key sort. Both routes share the same cross, accumulation, normalization and
+publication logic; allocation/work/control rejection never silently selects another route.
+Cursor scratch changes actual work/peak evidence without changing the options or scene-value
+contract. Every bounded physical leaf retains immediate completion and the shared control bound.
 
 `NormalOptions` makes source-field changes explicit. The default `ExistingNormals::Preserve`
 returns the exact input unchanged when a Normal exists. `Replace` authorizes replacement. If a

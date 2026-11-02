@@ -50,6 +50,21 @@ pub(crate) struct Input<'a, P = &'a [[f32; 3]]> {
 }
 
 impl<P: PositionSource> Input<'_, P> {
+    /// Bounds optional vertex scratch by the existing corner-order workspace.
+    pub(crate) fn vertex_cursor_count(self, mode: Mode) -> usize {
+        let corners = self.corner_count();
+        let vertices = self.positions.len();
+        if mode == Mode::Smooth
+            && matches!(self.vertex_ids, VertexIds::Indexed(_))
+            && corners != 0
+            && vertices <= corners
+        {
+            vertices
+        } else {
+            0
+        }
+    }
+
     fn corner_count(self) -> usize {
         match self.vertex_ids {
             VertexIds::Indexed(ids) => ids.len(),
@@ -273,6 +288,9 @@ impl Output<'_> {
 pub(crate) struct Workspace<'a> {
     /// Exactly C entries for Smooth; empty for Flat. Initial contents are ignored.
     pub corner_order: &'a mut [usize],
+    /// Optional V count/cursor entries only for indexed Smooth with 0 < C and V <= C.
+    /// Initial contents are ignored. Without this scratch, ordering uses the general key sort.
+    pub vertex_cursors: Option<&'a mut [usize]>,
     /// Optional cache of exactly C / 3 unnormalized face crosses and their error bounds.
     /// Initial contents are ignored. Without it, Smooth recomputes each corner's cross.
     pub face_crosses: Option<&'a mut [Estimate3]>,
@@ -283,6 +301,7 @@ pub(crate) enum Buffer {
     Output,
     CornerOrder,
     FaceCrosses,
+    VertexCursors,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,8 +367,10 @@ pub(crate) enum Error<E> {
 /// or UV inspection occurs. Only vertex identity and optional Face groups determine smoothing.
 /// The input slices are never modified. Output and workspace are provisional on any error.
 ///
-/// Work is O(V + C log C) for Smooth and O(V + C) for Flat. Smooth uses C caller-owned usize
-/// entries, an optional C / 3 cross cache, and constant stack space; Flat needs no corner scratch.
+/// Dense work is O(V + C) for Flat or vertex-bucket Smooth, O(V + C log C) for general Smooth.
+/// Sparse reads retain their separately metered search cost. Smooth uses C caller-owned usize
+/// entries, optional V count/cursor entries bounded by C, an optional C / 3 cross cache, and
+/// constant stack space; Flat needs no corner scratch.
 /// Every input-sized loop exposes bounded leaf actions, including sift-down and output.
 /// Begin admits one action; Complete follows its normal return, including a semantic error.
 /// No action encloses another action or a checkpoint. The callback owns polling cadence;
@@ -397,6 +418,13 @@ pub(crate) fn generate_into<E, P: PositionSource>(
     )?;
     if let Some(crosses) = workspace.face_crosses.as_deref() {
         check_length(Buffer::FaceCrosses, faces, crosses.len())?;
+    }
+    if let Some(cursors) = workspace.vertex_cursors.as_deref() {
+        check_length(
+            Buffer::VertexCursors,
+            input.vertex_cursor_count(mode),
+            cursors.len(),
+        )?;
     }
 
     let wide = input.positions.is_f64();
@@ -467,13 +495,20 @@ pub(crate) fn generate_into<E, P: PositionSource>(
 
     if mode == Mode::Smooth {
         control(WorkEvent::Checkpoint).map_err(Error::Control)?;
-        for (corner, slot) in workspace.corner_order.iter_mut().enumerate() {
-            run_action(&mut control, || {
-                *slot = corner;
-                Ok(())
-            })?;
+        if let Some(cursors) = workspace.vertex_cursors.as_deref_mut()
+            && !cursors.is_empty()
+            && uniform_smoothing_groups(input.smoothing_groups, &mut control)?
+        {
+            stable_vertex_order(input, workspace.corner_order, cursors, &mut control)?;
+        } else {
+            for (corner, slot) in workspace.corner_order.iter_mut().enumerate() {
+                run_action(&mut control, || {
+                    *slot = corner;
+                    Ok(())
+                })?;
+            }
+            heapsort(input, workspace.corner_order, &mut control)?;
         }
-        heapsort(input, workspace.corner_order, &mut control)?;
         control(WorkEvent::Checkpoint).map_err(Error::Control)?;
         let mut start = 0;
         while start < corners {
@@ -734,6 +769,65 @@ fn less(input: Input<'_, impl PositionSource>, left: usize, right: usize) -> boo
     (smoothing_key(input, left), left) < (smoothing_key(input, right), right)
 }
 
+fn uniform_smoothing_groups<E>(
+    groups: Option<&[u32]>,
+    control: &mut impl FnMut(WorkEvent) -> Result<(), E>,
+) -> Result<bool, Error<E>> {
+    let Some(groups) = groups else {
+        return Ok(true);
+    };
+    let mut first = None;
+    for group in groups {
+        if !run_action(control, || {
+            let group = *group;
+            Ok(group != 0 && group == *first.get_or_insert(group))
+        })? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn stable_vertex_order<E>(
+    input: Input<'_, impl PositionSource>,
+    order: &mut [usize],
+    cursors: &mut [usize],
+    control: &mut impl FnMut(WorkEvent) -> Result<(), E>,
+) -> Result<(), Error<E>> {
+    for slot in cursors.iter_mut() {
+        run_action(control, || {
+            *slot = 0;
+            Ok(())
+        })?;
+    }
+    for corner in 0..order.len() {
+        run_action(control, || {
+            cursors[input.vertex(corner)] += 1;
+            Ok(())
+        })?;
+    }
+    let mut next = 0;
+    for slot in cursors.iter_mut() {
+        run_action(control, || {
+            let count = *slot;
+            *slot = next;
+            next += count;
+            Ok(())
+        })?;
+    }
+    // All IDs were checked by face validation. Ascending scatter preserves the corner tie-break.
+    for corner in 0..order.len() {
+        run_action(control, || {
+            let vertex = input.vertex(corner);
+            let destination = cursors[vertex];
+            order[destination] = corner;
+            cursors[vertex] = destination + 1;
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
 fn heapsort<E>(
     input: Input<'_, impl PositionSource>,
     order: &mut [usize],
@@ -786,3 +880,7 @@ mod tests;
 #[cfg(test)]
 #[path = "diagnostics.rs"]
 mod diagnostics;
+
+#[cfg(test)]
+#[path = "bucket_tests.rs"]
+mod bucket_tests;

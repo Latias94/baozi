@@ -484,7 +484,11 @@ fn f64_smooth_normals_use_one_primitive_scale_and_analytic_area_weights() {
     let shared = [0.0, 1.0 / 17.0_f64.sqrt(), 4.0 / 17.0_f64.sqrt()];
     for exponent in [-900, 0, 900] {
         let scale = power_of_two(exponent);
-        for storage in [Storage::Dense, Storage::Sparse { logical_count: 9 }] {
+        for storage in [
+            Storage::Dense,
+            Storage::Sparse { logical_count: 6 },
+            Storage::Sparse { logical_count: 9 },
+        ] {
             let fixture = Fixture {
                 positions: vec![
                     [-0.0, 0.0, -0.0],
@@ -517,7 +521,11 @@ fn f64_smooth_normals_use_one_primitive_scale_and_analytic_area_weights() {
 
 #[test]
 fn f64_smooth_cancellation_is_a_bucket_uncertainty_with_original_scene() {
-    for storage in [Storage::Dense, Storage::Sparse { logical_count: 7 }] {
+    for storage in [
+        Storage::Dense,
+        Storage::Sparse { logical_count: 6 },
+        Storage::Sparse { logical_count: 7 },
+    ] {
         let mut fixture = Fixture::triangle([[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], storage);
         fixture.indices = vec![1, 2, 0, 0, 2, 1];
         for groups in [None, Some(vec![7, 7])] {
@@ -545,6 +553,41 @@ fn f64_smooth_cancellation_is_a_bucket_uncertainty_with_original_scene() {
                 [0.0, 0.0, -1.0],
             ],
         );
+    }
+}
+
+#[test]
+fn sparse_f32_bucket_area_weights_retain_f64_replacement_width() {
+    let shared = [0.0, 1.0 / 17.0_f64.sqrt(), 4.0 / 17.0_f64.sqrt()];
+    for storage in [Storage::Dense, Storage::Sparse { logical_count: 6 }] {
+        for groups in [None, Some(vec![7, 7])] {
+            let fixture = Fixture {
+                positions: vec![
+                    [-0.0, 0.0, -0.0],
+                    [0.5, 0.0, 0.0],
+                    [0.0, 0.5, 0.0],
+                    [0.0, 0.0, 0.25],
+                    [0.25, 0.0, 0.0],
+                ],
+                width: Width::F32,
+                storage,
+                indices: vec![0, 1, 2, 0, 3, 4],
+                normal: Some(Width::F64),
+                groups,
+            };
+            assert_normals(
+                &generate(&fixture, NormalMode::Smooth),
+                Width::F64,
+                &[
+                    shared,
+                    [0.0, 0.0, 1.0],
+                    [0.0, 0.0, 1.0],
+                    shared,
+                    [0.0, 1.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                ],
+            );
+        }
     }
 }
 

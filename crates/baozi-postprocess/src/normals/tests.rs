@@ -52,6 +52,7 @@ fn run(input: Input<'_>, mode: Mode, cached: bool) -> Result<Vec<[f32; 3]>, Erro
     let corners = input.corner_count();
     let mut output = vec![[f32::NAN; 3]; corners];
     let mut order = vec![usize::MAX; if mode == Mode::Smooth { corners } else { 0 }];
+    let mut cursors = vec![usize::MAX; input.vertex_cursor_count(mode)];
     let mut crosses = cached.then(|| vec![cross_slot(f64::NAN); corners / 3]);
     generate(
         input,
@@ -59,6 +60,7 @@ fn run(input: Input<'_>, mode: Mode, cached: bool) -> Result<Vec<[f32; 3]>, Erro
         &mut output,
         Workspace {
             corner_order: &mut order,
+            vertex_cursors: (!cursors.is_empty()).then_some(cursors.as_mut_slice()),
             face_crosses: crosses.as_deref_mut(),
         },
         |_| Ok::<(), Infallible>(()),
@@ -426,6 +428,7 @@ fn cancelling_face_sums_are_errors_without_a_fallback_normal() {
                     &mut output,
                     Workspace {
                         corner_order: &mut order,
+                        vertex_cursors: None,
                         face_crosses: cached.then_some(&mut crosses[..]),
                     },
                     |_| Ok::<(), Infallible>(()),
@@ -511,6 +514,7 @@ fn output_and_workspace_shapes_are_exact() {
                     &mut output,
                     Workspace {
                         corner_order: &mut order,
+                        vertex_cursors: None,
                         face_crosses: Some(&mut crosses),
                     },
                     |_| Ok::<(), Infallible>(()),
@@ -521,6 +525,7 @@ fn output_and_workspace_shapes_are_exact() {
                         Buffer::Output => 6,
                         Buffer::CornerOrder => expected_order,
                         Buffer::FaceCrosses => 2,
+                        Buffer::VertexCursors => POSITIONS.len(),
                     },
                     actual,
                 })
@@ -748,6 +753,7 @@ fn every_work_event_error_stops_immediately_in_all_paths_without_nesting() {
                 let corners = input.corner_count();
                 let mut output = vec![[73.0; 3]; corners];
                 let mut order = vec![usize::MAX; if mode == Mode::Smooth { corners } else { 0 }];
+                let mut cursors = vec![usize::MAX; input.vertex_cursor_count(mode)];
                 let mut crosses = vec![cross_slot(73.0); corners / 3];
                 let mut events = Vec::new();
                 generate(
@@ -756,6 +762,7 @@ fn every_work_event_error_stops_immediately_in_all_paths_without_nesting() {
                     &mut output,
                     Workspace {
                         corner_order: &mut order,
+                        vertex_cursors: (!cursors.is_empty()).then_some(cursors.as_mut_slice()),
                         face_crosses: cached.then_some(&mut crosses[..]),
                     },
                     |event| {
@@ -772,6 +779,7 @@ fn every_work_event_error_stops_immediately_in_all_paths_without_nesting() {
                 for fail_at in 1..=total + 1 {
                     output.fill([73.0; 3]);
                     order.fill(usize::MAX);
+                    cursors.fill(usize::MAX);
                     crosses.fill(cross_slot(73.0));
                     let mut calls = 0;
                     let mut observed = Vec::new();
@@ -781,6 +789,7 @@ fn every_work_event_error_stops_immediately_in_all_paths_without_nesting() {
                         &mut output,
                         Workspace {
                             corner_order: &mut order,
+                            vertex_cursors: (!cursors.is_empty()).then_some(cursors.as_mut_slice()),
                             face_crosses: cached.then_some(&mut crosses[..]),
                         },
                         |event| {
@@ -810,6 +819,7 @@ fn every_work_event_error_stops_immediately_in_all_paths_without_nesting() {
                         if fail_at == 1 {
                             assert_eq!(output, vec![[73.0; 3]; corners]);
                             assert!(order.iter().all(|&corner| corner == usize::MAX));
+                            assert!(cursors.iter().all(|&cursor| cursor == usize::MAX));
                             assert!(crosses.iter().all(|cross| cross.value == [73.0; 3]));
                         }
                         if fail_at == total {
@@ -833,19 +843,22 @@ fn run_f64(
     mode: Mode,
     cached: bool,
 ) -> Result<Vec<[f64; 3]>, Error<Infallible>> {
+    let input = Input {
+        positions,
+        vertex_ids: VertexIds::Indexed(ids),
+        smoothing_groups: None,
+    };
     let mut output = vec![[73.0; 3]; ids.len()];
     let mut order = vec![usize::MAX; if mode == Mode::Smooth { ids.len() } else { 0 }];
+    let mut cursors = vec![usize::MAX; input.vertex_cursor_count(mode)];
     let mut crosses = cached.then(|| vec![cross_slot(f64::NAN); ids.len() / 3]);
     super::generate_into(
-        Input {
-            positions,
-            vertex_ids: VertexIds::Indexed(ids),
-            smoothing_groups: None,
-        },
+        input,
         mode,
         super::Output::F64(&mut output),
         Workspace {
             corner_order: &mut order,
+            vertex_cursors: (!cursors.is_empty()).then_some(cursors.as_mut_slice()),
             face_crosses: crosses.as_deref_mut(),
         },
         |_| Ok::<_, Infallible>(()),
@@ -913,6 +926,7 @@ fn f64_cache_and_recomputation_keep_area_weights_and_stop_at_every_callback() {
             let run_at = |fail_at| {
                 let mut output = [[73.0; 3]; 6];
                 let mut order = [usize::MAX; 6];
+                let mut cursors = [usize::MAX; 5];
                 let mut crosses = [cross_slot(f64::NAN); 2];
                 let mut calls = 0;
                 let mut events = Vec::new();
@@ -930,6 +944,7 @@ fn f64_cache_and_recomputation_keep_area_weights_and_stop_at_every_callback() {
                         } else {
                             &mut []
                         },
+                        vertex_cursors: (mode == Mode::Smooth).then_some(&mut cursors),
                         face_crosses: cached.then_some(&mut crosses),
                     },
                     |event| {
@@ -1179,6 +1194,7 @@ fn flat_output_admission_and_completion_failures_keep_the_physical_prefix() {
         &mut output,
         Workspace {
             corner_order: &mut [],
+            vertex_cursors: None,
             face_crosses: None,
         },
         |event| {
@@ -1199,6 +1215,7 @@ fn flat_output_admission_and_completion_failures_keep_the_physical_prefix() {
             &mut output,
             Workspace {
                 corner_order: &mut [],
+                vertex_cursors: None,
                 face_crosses: None,
             },
             |event| {

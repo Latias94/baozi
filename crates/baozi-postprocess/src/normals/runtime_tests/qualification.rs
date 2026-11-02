@@ -250,6 +250,166 @@ fn projected_flat_cancellation_keeps_periodic_and_final_short_region_prefixes() 
 }
 
 #[test]
+fn projected_smooth_cancellation_keeps_ordering_and_final_short_prefixes() {
+    const FACES: usize = 90;
+    const CORNERS: u64 = 3 * FACES as u64;
+    // Three scratch shares, output/order/tail/cache initialization, six Position leaves,
+    // and nine cached geometry leaves per face precede the ordering checkpoint.
+    const BEFORE_ORDER: u64 =
+        ENTRY_WORK + 3 * SCRATCH_SHARE_WORK + 2 * CORNERS + 3 + FACES as u64 + 6 + 9 * FACES as u64;
+    // Uniform proof F + reset 3 + count C + prefix 3 + scatter C.
+    const ORDER_WORK: u64 = FACES as u64 + 6 + 2 * CORNERS;
+    // Four leaves per corner, two leaves per bucket, two boundary comparisons.
+    const COMPLETE: u64 = BEFORE_ORDER + ORDER_WORK + 4 * CORNERS + 8;
+    let mut obj = b"v 0 0 0\nv 1 0 0\nv 0 1 0\ns 1\n".to_vec();
+    for _ in 0..FACES {
+        obj.extend_from_slice(b"f 1 2 3\n");
+    }
+    let (scene, import) = common::import_obj(&obj).into_parts();
+    let generation = scene.generation();
+    let primitive = scene.meshes().next().unwrap().primitives().next().unwrap();
+    let positions = primitive.positions().unwrap();
+    let groups = [1_u32; FACES];
+    assert_eq!(positions.len(), 3);
+    assert_eq!(primitive.indices().unwrap().len(), CORNERS as usize);
+
+    // Local polls: 0 entry, 1 normal allocation, 2 normal-init periodic, 3/4 order/cache
+    // allocation, 5 order-init periodic, 6 kernel entry, 7 finite/face boundary,
+    // 8..10 face periodic, 11 ordering entry, 12/13 ordering periodic, 14 accumulation
+    // entry, 15..18 accumulation periodic, 19 kernel final, 20 execution final.
+    for (stop, completed) in [
+        (11, BEFORE_ORDER),
+        (12, BEFORE_ORDER + 256), // Histogram prefix, including the complete group proof.
+        (13, BEFORE_ORDER + 512), // Scatter prefix.
+        (14, BEFORE_ORDER + ORDER_WORK),
+        (19, COMPLETE),
+        (20, COMPLETE),
+        (usize::MAX, COMPLETE),
+    ] {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let (mut operation, keys) = start(
+            &scene,
+            PostProcessControl::default().with_cancellation_signal(StopAtPoll {
+                polls: polls.clone(),
+                stop,
+                panic: false,
+            }),
+        );
+        polls.store(0, Ordering::Relaxed);
+        let physical = live_storage(&operation);
+        let mut returned_output = false;
+        let result = runtime::with_execution(&mut operation, keys, |active| {
+            let generated = input::generate(
+                input::NormalInput::projected(
+                    positions,
+                    primitive.indices(),
+                    Some(&groups),
+                    CORNERS as u32,
+                    NormalMode::Smooth,
+                    false,
+                ),
+                active,
+                keys,
+            )?;
+            let SceneVectorValues::F32(values) = generated.values() else {
+                panic!("F32 positions must keep F32 normal output");
+            };
+            assert_eq!(values.len(), CORNERS as usize);
+            assert!(values.iter().all(|value| *value == [0.0, 0.0, 1.0]));
+            returned_output = true;
+            Ok::<_, input::InputError>(())
+        });
+        assert_eq!(returned_output, stop >= 20);
+        assert_eq!(
+            polls.load(Ordering::Relaxed),
+            if stop == usize::MAX { 21 } else { stop + 1 }
+        );
+        let failure = if stop == usize::MAX {
+            result.unwrap();
+            None
+        } else {
+            assert_cancelled(result);
+            Some(StorePreparationFailureClass::Control)
+        };
+        assert_eq!(live_storage(&operation), physical);
+        finish(operation, keys, failure, completed, completed);
+        assert_eq!(scene.generation(), generation);
+        assert!(import.matches_scene(&scene));
+        assert!(primitive.normals(AttributeDomain::Corner).is_none());
+    }
+}
+
+#[test]
+fn enlarged_order_admission_rejects_without_retrying_the_general_algorithm() {
+    let (scene, import) = common::canonical_triangle_import().into_parts();
+    let primitive = scene.meshes().next().unwrap().primitives().next().unwrap();
+    let positions = primitive.positions().unwrap();
+    let generation = scene.generation();
+    let ids = [0_u32, 1, 2, 0, 1, 2];
+    // Six output rows admit an eight-row envelope. C=6 used eight order slots;
+    // C+V=9 now requires sixteen. Even the smallest output backing rejects the latter.
+    let limit =
+        8 * std::mem::size_of::<[f32; 3]>() as u64 + 8 * std::mem::size_of::<usize>() as u64;
+    let (mut operation, keys) = start(&scene, PostProcessControl::default());
+    operation
+        .producer_host()
+        .tighten_dimension_policy(
+            keys.scratch,
+            DimensionPolicy::reservable_bytes(0, 0, 0, limit),
+        )
+        .unwrap();
+    let physical = live_storage(&operation);
+    let mut returned_output = false;
+    let result: Result<(), input::InputError> =
+        runtime::with_execution(&mut operation, keys, |active| {
+            input::generate(
+                input::NormalInput::projected(
+                    positions,
+                    Some(&ids),
+                    None,
+                    6,
+                    NormalMode::Smooth,
+                    false,
+                ),
+                active,
+                keys,
+            )?;
+            returned_output = true;
+            Ok(())
+        });
+    assert!(
+        !returned_output,
+        "storage rejection must not retry the general workspace"
+    );
+    let Err(input::InputError::Runtime(StoreRuntimeError::Ledger(LedgerCause::LimitExceeded {
+        dimension,
+        class,
+        value,
+        limit: actual_limit,
+    }))) = result
+    else {
+        panic!("expected the enlarged scratch admission error, got {result:?}");
+    };
+    assert_eq!(dimension, keys.scratch);
+    assert_eq!(class, CounterClass::Live);
+    assert_eq!(actual_limit, limit);
+    assert!(value > limit);
+    assert_eq!(live_storage(&operation), physical);
+    // Only output storage's two share units and six zero appends completed.
+    let completed = ENTRY_WORK + SCRATCH_SHARE_WORK + 6;
+    finish(
+        operation,
+        keys,
+        Some(StorePreparationFailureClass::Ledger),
+        completed,
+        completed,
+    );
+    assert_eq!(scene.generation(), generation);
+    assert!(import.matches_scene(&scene));
+    assert!(primitive.normals(AttributeDomain::Corner).is_none());
+}
+
+#[test]
 fn projected_dense_budget_rejection_keeps_tuple_sort_and_output_prefixes() {
     let (scene, import) = common::canonical_triangle_import().into_parts();
     let primitive = scene.meshes().next().unwrap().primitives().next().unwrap();
@@ -257,23 +417,34 @@ fn projected_dense_budget_rejection_keeps_tuple_sort_and_output_prefixes() {
     let generation = scene.generation();
     // Flat: startup 8 + scratch share 2 + initialization 3 + validation 6 = 19.
     // Face geometry takes 8 leaves, normalization 1, then output occupies 29..=31.
-    // Smooth: 3 scratch shares + 7 initializations + validation 6 + cached face 9
-    // + order initialization 3 put sorting at 40..=46. Sorting [0, 1, 2] takes
-    // two child/root compares, a swap, extraction, root compare, swap, extraction.
-    for (mode, allowed) in [
-        (NormalMode::Flat, 13),   // First dense tuple.
-        (NormalMode::Flat, 14),   // Finite-position validation after the tuple.
-        (NormalMode::Flat, 23),   // First face tuple after identity ordering.
-        (NormalMode::Flat, 26),   // Determinant after all three face tuples.
-        (NormalMode::Flat, 28),   // First output write.
-        (NormalMode::Flat, 29),   // Second output write.
-        (NormalMode::Flat, 30),   // Final output write.
-        (NormalMode::Flat, 31),   // Every flat output write completed.
-        (NormalMode::Smooth, 39), // First sorting comparison.
-        (NormalMode::Smooth, 41), // First sorting swap.
-        (NormalMode::Smooth, 45), // Final heap extraction.
-        (NormalMode::Smooth, 52), // First smoothed output write.
-        (NormalMode::Smooth, 66), // All three independent smoothing buckets completed.
+    // Smooth reaches 39 after the combined order tail initialization, validation and face cache.
+    // Absent groups use reset 40..=42, histogram 43..=45, prefix 46..=48 and scatter 49..=51.
+    // A hard group uses proof 40, identity 41..=43 and the general seven-leaf sort 44..=50.
+    let hard_groups = [0_u32];
+    for (mode, groups, allowed) in [
+        (NormalMode::Flat, None, 13),   // First dense tuple.
+        (NormalMode::Flat, None, 14),   // Finite-position validation after the tuple.
+        (NormalMode::Flat, None, 23),   // First face tuple after identity ordering.
+        (NormalMode::Flat, None, 26),   // Determinant after all three face tuples.
+        (NormalMode::Flat, None, 28),   // First output write.
+        (NormalMode::Flat, None, 29),   // Second output write.
+        (NormalMode::Flat, None, 30),   // Final output write.
+        (NormalMode::Flat, None, 31),   // Every flat output write completed.
+        (NormalMode::Smooth, None, 39), // First cursor reset.
+        (NormalMode::Smooth, None, 42), // First histogram update.
+        (NormalMode::Smooth, None, 45), // First prefix update.
+        (NormalMode::Smooth, None, 48), // First scatter write.
+        (NormalMode::Smooth, None, 50), // Final scatter write.
+        (NormalMode::Smooth, None, 57), // First smoothed output write.
+        (NormalMode::Smooth, None, 70), // Final smoothed output write.
+        (NormalMode::Smooth, None, 71), // Every bucket completed.
+        (NormalMode::Smooth, Some(hard_groups.as_slice()), 39), // First group proof read.
+        (NormalMode::Smooth, Some(hard_groups.as_slice()), 43), // First sorting comparison.
+        (NormalMode::Smooth, Some(hard_groups.as_slice()), 45), // First sorting swap.
+        (NormalMode::Smooth, Some(hard_groups.as_slice()), 49), // Final heap extraction.
+        (NormalMode::Smooth, Some(hard_groups.as_slice()), 56), // First hard output write.
+        (NormalMode::Smooth, Some(hard_groups.as_slice()), 69), // Final hard output write.
+        (NormalMode::Smooth, Some(hard_groups.as_slice()), 70), // Every hard bucket completed.
     ] {
         for class in [CounterClass::Attempted, CounterClass::Consumed] {
             let polls = Arc::new(AtomicUsize::new(0));
@@ -294,7 +465,7 @@ fn projected_dense_budget_rejection_keeps_tuple_sort_and_output_prefixes() {
                     input::NormalInput::projected(
                         positions,
                         primitive.indices(),
-                        None,
+                        groups,
                         3,
                         mode,
                         false,
@@ -309,17 +480,18 @@ fn projected_dense_budget_rejection_keeps_tuple_sort_and_output_prefixes() {
                 returned_output = true;
                 Ok::<_, input::InputError>(())
             });
-            let complete = match mode {
-                NormalMode::Flat => 31,
-                NormalMode::Smooth => 66,
+            let complete = match (mode, groups.is_some()) {
+                (NormalMode::Flat, _) => 31,
+                (NormalMode::Smooth, false) => 71,
+                (NormalMode::Smooth, true) => 70,
             };
-            let expected_polls = match (mode, allowed) {
-                (NormalMode::Flat, 13 | 14) => 3,
-                (NormalMode::Flat, 31) => 6,
-                (NormalMode::Flat, _) => 4,
-                (NormalMode::Smooth, 66) => 10,
-                (NormalMode::Smooth, 52) => 8,
-                (NormalMode::Smooth, _) => 7,
+            let expected_polls = match (mode, groups.is_some(), allowed) {
+                (NormalMode::Flat, _, 13 | 14) => 3,
+                (NormalMode::Flat, _, 31) => 6,
+                (NormalMode::Flat, _, _) => 4,
+                (NormalMode::Smooth, false, 71) | (NormalMode::Smooth, true, 70) => 10,
+                (NormalMode::Smooth, false, 57 | 70) | (NormalMode::Smooth, true, 56 | 69) => 8,
+                (NormalMode::Smooth, _, _) => 7,
             };
             assert_eq!(polls.load(Ordering::Relaxed), expected_polls);
             assert_eq!(returned_output, allowed == complete);
@@ -378,6 +550,7 @@ fn real_runtime_kernel_output_rejection_preserves_the_written_prefix() {
                 kernel::Output::F32(&mut output),
                 kernel::Workspace {
                     corner_order: &mut [],
+                    vertex_cursors: None,
                     face_crosses: None,
                 },
                 |event| match event {

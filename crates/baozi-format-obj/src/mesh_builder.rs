@@ -28,6 +28,11 @@ use baozi_import::{
     MeteredVec, ParseContext, ParseExecution, ParseResult, SourceScopeEntityKind,
 };
 
+mod dense;
+
+#[cfg(test)]
+mod dense_tests;
+
 const FALLBACK_RESOURCE_IDENTITY: &str = "session/obj-primary";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -478,6 +483,27 @@ impl<'session> SegmentBuilder<'session> {
         total_attribute_stream_count: usize,
     ) -> ParseResult<BuiltGeometryStreams<'session>> {
         let corner_count = self.corner_references.len();
+        if dense::eligible(
+            corner_count,
+            [
+                parsed.positions.len(),
+                parsed.texcoords.len(),
+                parsed.normals.len(),
+            ],
+            channels,
+        ) {
+            return dense::materialize(
+                exec,
+                groups,
+                parsed,
+                self.corner_references.as_slice(),
+                channels,
+                total_attribute_stream_count,
+            );
+        }
+        // Source-sparse segments retain the occurrence-based general algorithm.
+        #[cfg(test)]
+        dense_tests::general_segment();
         let mut texcoord_lanes = 2_u8;
         let mut normals = if channels.normals {
             Some(BuiltCornerProjection::new(

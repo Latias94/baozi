@@ -62,6 +62,7 @@ fn sample<P: PositionSource>(label: &str, positions: P, indices: &[u32], groups:
             Output::F32(&mut output),
             Workspace {
                 corner_order: &mut order,
+                vertex_cursors: None,
                 face_crosses: Some(&mut crosses),
             },
             |event| {
