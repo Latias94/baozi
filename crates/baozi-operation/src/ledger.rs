@@ -1442,6 +1442,25 @@ where
         Self::charge_attempted_open(&mut state, dimension, amount)
     }
 
+    /// Binds an ordinary producer dimension before checking publication or charging work.
+    pub(crate) fn charge_producer_attempted(
+        &self,
+        dimension: D,
+        amount: u64,
+        excluded_dimension: Option<D>,
+    ) -> Result<(), LedgerCause<D>> {
+        let mut state = lock(&self.state);
+        if excluded_dimension == Some(dimension) {
+            return Err(LedgerCause::UnknownDimension { dimension });
+        }
+        let position = state
+            .dimensions
+            .binary_search_by_key(&dimension, |entry| entry.dimension)
+            .map_err(|_| LedgerCause::UnknownDimension { dimension })?;
+        Self::ensure_open(&state)?;
+        Self::charge_attempted_entry(&mut state.dimensions[position], dimension, amount)
+    }
+
     fn charge_attempted_open(
         state: &mut LedgerState<P, D>,
         dimension: D,
@@ -1449,6 +1468,14 @@ where
     ) -> Result<(), LedgerCause<D>> {
         let entry = dimension_entry_mut(&mut state.dimensions, dimension)
             .ok_or(LedgerCause::UnknownDimension { dimension })?;
+        Self::charge_attempted_entry(entry, dimension, amount)
+    }
+
+    fn charge_attempted_entry(
+        entry: &mut DimensionEntry<D>,
+        dimension: D,
+        amount: u64,
+    ) -> Result<(), LedgerCause<D>> {
         let policy = entry.policy;
         let value =
             entry
@@ -1857,6 +1884,43 @@ where
             positions[index] = position;
         }
 
+        Self::charge_consumed_batch_bound(&mut state, charges, &positions)
+    }
+
+    /// Binds every ordinary producer dimension before publication, ordering, or numeric checks.
+    pub(crate) fn charge_producer_consumed_batch<const N: usize>(
+        &self,
+        charges: &[(D, u64); N],
+        excluded_dimension: Option<D>,
+    ) -> Result<(), LedgerCause<D>> {
+        let mut state = lock(&self.state);
+        let mut positions = [0_usize; N];
+        for (index, &(dimension, _)) in charges.iter().enumerate() {
+            if excluded_dimension == Some(dimension) {
+                return Err(LedgerCause::UnknownDimension { dimension });
+            }
+            positions[index] = state
+                .dimensions
+                .binary_search_by_key(&dimension, |entry| entry.dimension)
+                .map_err(|_| LedgerCause::UnknownDimension { dimension })?;
+        }
+        Self::ensure_open(&state)?;
+        for index in 1..N {
+            if positions[index] < positions[index - 1] {
+                return Err(LedgerCause::ConsumedBatchOutOfOrder {
+                    previous: charges[index - 1].0,
+                    dimension: charges[index].0,
+                });
+            }
+        }
+        Self::charge_consumed_batch_bound(&mut state, charges, &positions)
+    }
+
+    fn charge_consumed_batch_bound<const N: usize>(
+        state: &mut LedgerState<P, D>,
+        charges: &[(D, u64); N],
+        positions: &[usize; N],
+    ) -> Result<(), LedgerCause<D>> {
         let mut projected = [0_u64; N];
         let mut index = 0;
         while index < N {

@@ -600,6 +600,530 @@ fn consumed_batch_is_atomic_and_aggregates_duplicate_dimensions() {
 }
 
 #[test]
+fn producer_attempted_preserves_rejected_work_and_the_last_representable_value() {
+    for (limit, initial, amount, expected, attempted) in [
+        (16, 0, 0, Ok(()), 0),
+        (16, 15, 1, Ok(()), 16),
+        (
+            16,
+            16,
+            1,
+            Err(LedgerCause::LimitExceeded {
+                class: CounterClass::Attempted,
+                dimension: Dimension::Bytes,
+                value: 17,
+                limit: 16,
+            }),
+            17,
+        ),
+        (u64::MAX, u64::MAX - 1, 1, Ok(()), u64::MAX),
+        (
+            u64::MAX,
+            u64::MAX,
+            1,
+            Err(LedgerCause::ArithmeticOverflow {
+                class: CounterClass::Attempted,
+                dimension: Dimension::Bytes,
+            }),
+            u64::MAX,
+        ),
+    ] {
+        let ledger = test_ledger(
+            LedgerLimits::new(
+                0,
+                [(Dimension::Bytes, DimensionPolicy::counter(limit, limit, 0))],
+            )
+            .expect("attempted producer policy"),
+        );
+        ledger
+            .charge_attempted(Dimension::Bytes, initial)
+            .expect("initial attempted work fits");
+        assert_eq!(
+            ledger.charge_producer_attempted(Dimension::Bytes, amount, None),
+            expected
+        );
+        if attempted > limit {
+            assert_eq!(
+                ledger.charge_producer_attempted(Dimension::Bytes, 0, None),
+                Err(LedgerCause::LimitExceeded {
+                    class: CounterClass::Attempted,
+                    dimension: Dimension::Bytes,
+                    value: attempted,
+                    limit,
+                }),
+                "zero attempted work cannot refund an earlier representable rejection"
+            );
+        }
+        assert_eq!(
+            lock(&ledger.state).dimensions[0].state,
+            DimensionState {
+                attempted,
+                ..DimensionState::default()
+            }
+        );
+    }
+}
+
+#[test]
+fn producer_consumed_batch_preserves_membership_precedence_and_atomic_snapshots() {
+    for (charges, excluded, expected, consumed) in [
+        (
+            [
+                (Dimension::Records, 0),
+                (Dimension::Bytes, 0),
+                (Dimension::Unknown, 0),
+            ],
+            None,
+            Err(LedgerCause::UnknownDimension {
+                dimension: Dimension::Unknown,
+            }),
+            [1, 0],
+        ),
+        (
+            [
+                (Dimension::Bytes, u64::MAX),
+                (Dimension::Bytes, 1),
+                (Dimension::Unknown, 0),
+            ],
+            None,
+            Err(LedgerCause::UnknownDimension {
+                dimension: Dimension::Unknown,
+            }),
+            [1, 0],
+        ),
+        (
+            [
+                (Dimension::Unknown, 0),
+                (Dimension::Records, 0),
+                (Dimension::Bytes, 0),
+            ],
+            Some(Dimension::Records),
+            Err(LedgerCause::UnknownDimension {
+                dimension: Dimension::Unknown,
+            }),
+            [1, 0],
+        ),
+        (
+            [
+                (Dimension::Records, 0),
+                (Dimension::Unknown, 0),
+                (Dimension::Bytes, 0),
+            ],
+            Some(Dimension::Records),
+            Err(LedgerCause::UnknownDimension {
+                dimension: Dimension::Records,
+            }),
+            [1, 0],
+        ),
+        (
+            [
+                (Dimension::Bytes, u64::MAX),
+                (Dimension::Bytes, 1),
+                (Dimension::Records, 0),
+            ],
+            Some(Dimension::Records),
+            Err(LedgerCause::UnknownDimension {
+                dimension: Dimension::Records,
+            }),
+            [1, 0],
+        ),
+        (
+            [
+                (Dimension::Records, 0),
+                (Dimension::Bytes, 0),
+                (Dimension::Bytes, 0),
+            ],
+            None,
+            Err(LedgerCause::ConsumedBatchOutOfOrder {
+                previous: Dimension::Records,
+                dimension: Dimension::Bytes,
+            }),
+            [1, 0],
+        ),
+        (
+            [
+                (Dimension::Bytes, 1),
+                (Dimension::Bytes, 1),
+                (Dimension::Records, 3),
+            ],
+            None,
+            Err(LedgerCause::ConsumedExceedsAttempted {
+                dimension: Dimension::Records,
+                consumed: 3,
+                attempted: 2,
+            }),
+            [1, 0],
+        ),
+        (
+            [
+                (Dimension::Bytes, 1),
+                (Dimension::Bytes, 1),
+                (Dimension::Records, 2),
+            ],
+            None,
+            Ok(()),
+            [3, 2],
+        ),
+        (
+            [
+                (Dimension::Bytes, 0),
+                (Dimension::Bytes, 0),
+                (Dimension::Records, 0),
+            ],
+            None,
+            Ok(()),
+            [1, 0],
+        ),
+    ] {
+        let ledger = test_ledger(limits());
+        ledger.charge_attempted(Dimension::Bytes, 3).unwrap();
+        ledger.charge_attempted(Dimension::Records, 2).unwrap();
+        ledger.charge_consumed(Dimension::Bytes, 1).unwrap();
+
+        assert_eq!(
+            ledger.charge_producer_consumed_batch(&charges, excluded),
+            expected,
+            "producer charges: {charges:?}, excluded: {excluded:?}"
+        );
+        let state = lock(&ledger.state);
+        assert_eq!(
+            [state.dimensions[0].state, state.dimensions[1].state],
+            [
+                DimensionState {
+                    attempted: 3,
+                    consumed: consumed[0],
+                    ..DimensionState::default()
+                },
+                DimensionState {
+                    attempted: 2,
+                    consumed: consumed[1],
+                    ..DimensionState::default()
+                },
+            ]
+        );
+        assert_eq!(state.active_linear_work_permits, 0);
+    }
+}
+
+#[test]
+fn producer_consumed_batch_numeric_failures_leave_every_counter_unchanged() {
+    for (attempted, consumed, pending, limit, amounts, expected) in [
+        (
+            u64::MAX,
+            0,
+            0,
+            u64::MAX,
+            [u64::MAX, 1],
+            LedgerCause::ArithmeticOverflow {
+                class: CounterClass::Consumed,
+                dimension: Dimension::Records,
+            },
+        ),
+        (
+            u64::MAX,
+            u64::MAX,
+            0,
+            u64::MAX,
+            [1, 0],
+            LedgerCause::ArithmeticOverflow {
+                class: CounterClass::Consumed,
+                dimension: Dimension::Records,
+            },
+        ),
+        (
+            u64::MAX,
+            u64::MAX - 1,
+            1,
+            u64::MAX,
+            [1, 0],
+            LedgerCause::ArithmeticOverflow {
+                class: CounterClass::Consumed,
+                dimension: Dimension::Records,
+            },
+        ),
+        (
+            3,
+            1,
+            2,
+            3,
+            [1, 0],
+            LedgerCause::ConsumedExceedsAttempted {
+                dimension: Dimension::Records,
+                consumed: 4,
+                attempted: 3,
+            },
+        ),
+        (
+            4,
+            1,
+            1,
+            2,
+            [1, 0],
+            LedgerCause::LimitExceeded {
+                class: CounterClass::Consumed,
+                dimension: Dimension::Records,
+                value: 3,
+                limit: 2,
+            },
+        ),
+    ] {
+        let ledger = test_ledger(
+            LedgerLimits::new(
+                0,
+                [
+                    (Dimension::Bytes, DimensionPolicy::counter(2, 2, 0)),
+                    (
+                        Dimension::Records,
+                        DimensionPolicy::counter(u64::MAX, limit, 0),
+                    ),
+                ],
+            )
+            .expect("numeric producer policies"),
+        );
+        ledger.charge_attempted(Dimension::Bytes, 2).unwrap();
+        ledger
+            .charge_attempted(Dimension::Records, attempted - pending)
+            .unwrap();
+        ledger
+            .charge_consumed(Dimension::Records, consumed)
+            .unwrap();
+        let permit = (pending != 0).then(|| {
+            ledger
+                .try_admit_linear_work(Dimension::Records, pending)
+                .expect("pending work fits before the competing batch")
+        });
+        let before = {
+            let state = lock(&ledger.state);
+            [state.dimensions[0].state, state.dimensions[1].state]
+        };
+        assert_eq!(
+            ledger.charge_producer_consumed_batch(
+                &[
+                    (Dimension::Bytes, 1),
+                    (Dimension::Records, amounts[0]),
+                    (Dimension::Records, amounts[1])
+                ],
+                None,
+            ),
+            Err(expected)
+        );
+        {
+            let state = lock(&ledger.state);
+            assert_eq!(
+                [state.dimensions[0].state, state.dimensions[1].state],
+                before
+            );
+            assert_eq!(state.active_linear_work_permits, u64::from(pending != 0));
+        }
+        drop(permit);
+    }
+}
+
+#[test]
+fn producer_consumed_batch_reports_the_first_numeric_group_failure() {
+    let ledger = test_ledger(limits());
+    ledger.charge_attempted(Dimension::Bytes, 1).unwrap();
+    ledger.charge_attempted(Dimension::Records, 1).unwrap();
+
+    assert_eq!(
+        ledger.charge_producer_consumed_batch(
+            &[
+                (Dimension::Bytes, 2),
+                (Dimension::Records, u64::MAX),
+                (Dimension::Records, 1)
+            ],
+            None,
+        ),
+        Err(LedgerCause::ConsumedExceedsAttempted {
+            dimension: Dimension::Bytes,
+            consumed: 2,
+            attempted: 1,
+        })
+    );
+    let state = lock(&ledger.state);
+    for entry in &state.dimensions {
+        assert_eq!(
+            entry.state,
+            DimensionState {
+                attempted: 1,
+                ..DimensionState::default()
+            }
+        );
+    }
+}
+
+#[test]
+fn producer_membership_precedes_publication_without_changing_general_entry_order() {
+    let ledger = test_ledger(limits());
+    assert_eq!(
+        ledger.charge_consumed_batch(&[
+            (Dimension::Records, 0),
+            (Dimension::Bytes, 0),
+            (Dimension::Unknown, 0),
+        ]),
+        Err(LedgerCause::ConsumedBatchOutOfOrder {
+            previous: Dimension::Records,
+            dimension: Dimension::Bytes,
+        }),
+        "the general batch retains its interleaved membership and ordering checks"
+    );
+    for excluded in [None, Some(Dimension::Records)] {
+        assert_eq!(ledger.charge_producer_consumed_batch(&[], excluded), Ok(()));
+    }
+
+    for published in [false, true] {
+        let ledger = test_ledger(limits());
+        ledger.charge_attempted(Dimension::Bytes, 2).unwrap();
+        ledger.charge_consumed(Dimension::Bytes, 1).unwrap();
+        let mut reservations = PublicationReservationBatch::default();
+        let mut publication = ledger.prepare_publication(&mut reservations, &[]).unwrap();
+        let closed = if published {
+            ledger.publish(&mut publication).unwrap();
+            LedgerCause::PublicationAlreadyCompleted
+        } else {
+            LedgerCause::PublicationAlreadyPending
+        };
+        let before = {
+            let state = lock(&ledger.state);
+            [state.dimensions[0].state, state.dimensions[1].state]
+        };
+        for (dimension, excluded) in [
+            (Dimension::Unknown, None),
+            (Dimension::Records, Some(Dimension::Records)),
+        ] {
+            assert_eq!(
+                ledger.charge_producer_attempted(dimension, 0, excluded),
+                Err(LedgerCause::UnknownDimension { dimension })
+            );
+        }
+        assert_eq!(
+            ledger.charge_producer_consumed_batch(
+                &[
+                    (Dimension::Records, 0),
+                    (Dimension::Bytes, 0),
+                    (Dimension::Unknown, 0)
+                ],
+                None,
+            ),
+            Err(LedgerCause::UnknownDimension {
+                dimension: Dimension::Unknown
+            })
+        );
+        assert_eq!(
+            ledger.charge_producer_consumed_batch(
+                &[(Dimension::Bytes, u64::MAX), (Dimension::Records, 0)],
+                Some(Dimension::Records),
+            ),
+            Err(LedgerCause::UnknownDimension {
+                dimension: Dimension::Records
+            })
+        );
+        assert_eq!(
+            ledger.charge_producer_attempted(Dimension::Bytes, u64::MAX, None),
+            Err(closed.clone())
+        );
+        assert_eq!(
+            ledger.charge_producer_consumed_batch(
+                &[(Dimension::Records, 0), (Dimension::Bytes, 0)],
+                None
+            ),
+            Err(closed.clone())
+        );
+        assert_eq!(
+            ledger.charge_producer_consumed_batch(&[(Dimension::Bytes, u64::MAX)], None),
+            Err(closed.clone())
+        );
+        for excluded in [None, Some(Dimension::Records)] {
+            assert_eq!(
+                ledger.charge_producer_consumed_batch(&[], excluded),
+                Err(closed.clone())
+            );
+        }
+        assert_eq!(
+            ledger.charge_attempted(Dimension::Unknown, 0),
+            Err(closed.clone())
+        );
+        assert_eq!(
+            ledger.charge_consumed_batch(&[(Dimension::Unknown, 0)]),
+            Err(closed)
+        );
+        let state = lock(&ledger.state);
+        assert_eq!(
+            [state.dimensions[0].state, state.dimensions[1].state],
+            before
+        );
+        assert_eq!(state.active_linear_work_permits, 0);
+    }
+}
+
+#[test]
+fn producer_consumed_batch_preserves_pending_capacity_through_partial_completion_and_drop() {
+    let ledger = test_ledger(
+        LedgerLimits::new(0, [(Dimension::Records, DimensionPolicy::counter(4, 3, 0))])
+            .expect("partial producer work policy"),
+    );
+    ledger.charge_attempted(Dimension::Records, 1).unwrap();
+    let mut permit = ledger.try_admit_linear_work(Dimension::Records, 3).unwrap();
+    for (consumed, pending) in [(0, 3), (1, 2)] {
+        let expected = DimensionState {
+            attempted: 4,
+            consumed,
+            pending_consumed: pending,
+            ..DimensionState::default()
+        };
+        {
+            let state = lock(&ledger.state);
+            assert_eq!(state.dimensions[0].state, expected);
+            assert_eq!(state.active_linear_work_permits, 1);
+        }
+        assert_eq!(
+            ledger.charge_producer_consumed_batch(&[(Dimension::Records, 1)], None),
+            Err(LedgerCause::LimitExceeded {
+                class: CounterClass::Consumed,
+                dimension: Dimension::Records,
+                value: 4,
+                limit: 3,
+            })
+        );
+        {
+            let state = lock(&ledger.state);
+            assert_eq!(state.dimensions[0].state, expected);
+            assert_eq!(state.active_linear_work_permits, 1);
+        }
+        if consumed == 0 {
+            permit.complete(0, 1).unwrap();
+        }
+    }
+    drop(permit);
+    {
+        let state = lock(&ledger.state);
+        assert_eq!(
+            state.dimensions[0].state,
+            DimensionState {
+                attempted: 4,
+                consumed: 1,
+                ..DimensionState::default()
+            }
+        );
+        assert_eq!(state.active_linear_work_permits, 0);
+        assert!(!state.linear_work_faulted);
+    }
+    ledger
+        .charge_producer_consumed_batch(&[(Dimension::Records, 1)], None)
+        .unwrap();
+    let state = lock(&ledger.state);
+    assert_eq!(
+        state.dimensions[0].state,
+        DimensionState {
+            attempted: 4,
+            consumed: 2,
+            ..DimensionState::default()
+        }
+    );
+    assert_eq!(state.active_linear_work_permits, 0);
+}
+
+#[test]
 fn linear_work_admission_records_attempted_before_consumed_completion() {
     let ledger = test_ledger(limits());
 
@@ -2478,37 +3002,91 @@ fn consumed_batch_never_compares_owner_keys_after_its_lookup_preflight() {
     let _guard = BOUND_ORD_TEST_LOCK.lock().expect("bound Ord test lock");
     let first = StatefulOrd(7);
     let second = StatefulOrd(9);
-    let ledger = stateful_ledger(stateful_multi_dimension_limits(), &[StatefulOrd(2)]);
-    ledger
-        .charge_attempted(first, 1)
-        .expect("first attempted work");
-    ledger
-        .charge_attempted(second, 1)
-        .expect("second attempted work");
+    let excluded = Some(StatefulOrd(11));
+    let charges = [(first, 0), (first, 1), (second, 1)];
+    for producer in [false, true] {
+        let ledger = stateful_ledger(stateful_multi_dimension_limits(), &[StatefulOrd(2)]);
+        ledger
+            .charge_attempted(first, 1)
+            .expect("first attempted work");
+        ledger
+            .charge_attempted(second, 1)
+            .expect("second attempted work");
 
+        let lookup_comparisons = {
+            let state = lock(&ledger.state);
+            BOUND_ORD_COMPARISON_COUNT.store(0, Ordering::SeqCst);
+            for &(dimension, _) in &charges {
+                if producer {
+                    assert!(excluded != Some(dimension));
+                }
+                state
+                    .dimensions
+                    .binary_search_by_key(&dimension, |entry| entry.dimension)
+                    .expect("predeclared dimension");
+            }
+            BOUND_ORD_COMPARISON_COUNT.load(Ordering::SeqCst)
+        };
+        BOUND_ORD_COMPARISONS_REMAINING.store(lookup_comparisons, Ordering::SeqCst);
+        let charged = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if producer {
+                ledger.charge_producer_consumed_batch(&charges, excluded)
+            } else {
+                ledger.charge_consumed_batch(&charges)
+            }
+        }));
+        let remaining = BOUND_ORD_COMPARISONS_REMAINING.swap(usize::MAX, Ordering::SeqCst);
+
+        assert_eq!(remaining, 0, "every admitted lookup must consume its quota");
+        charged
+            .expect("batch compared owner keys after resolving numeric positions")
+            .expect("predeclared completed work must fit");
+        let state = lock(&ledger.state);
+        for entry in &state.dimensions {
+            assert_eq!(
+                entry.state,
+                DimensionState {
+                    attempted: 1,
+                    consumed: 1,
+                    ..DimensionState::default()
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn producer_attempted_never_compares_owner_keys_after_binding() {
+    let _guard = BOUND_ORD_TEST_LOCK.lock().expect("bound Ord test lock");
+    let ledger = stateful_ledger(stateful_ord_limits(), &[StatefulOrd(2)]);
+    let dimension = StatefulOrd(7);
+    let excluded = Some(StatefulOrd(11));
     let lookup_comparisons = {
         let state = lock(&ledger.state);
         BOUND_ORD_COMPARISON_COUNT.store(0, Ordering::SeqCst);
-        for dimension in [first, second] {
-            state
-                .dimensions
-                .binary_search_by_key(&dimension, |entry| entry.dimension)
-                .expect("predeclared dimension");
-        }
+        assert!(excluded != Some(dimension));
+        state
+            .dimensions
+            .binary_search_by_key(&dimension, |entry| entry.dimension)
+            .unwrap();
         BOUND_ORD_COMPARISON_COUNT.load(Ordering::SeqCst)
     };
     BOUND_ORD_COMPARISONS_REMAINING.store(lookup_comparisons, Ordering::SeqCst);
     let charged = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ledger.charge_consumed_batch(&[(first, 1), (second, 1)])
+        ledger.charge_producer_attempted(dimension, 1, excluded)
     }));
     let remaining = BOUND_ORD_COMPARISONS_REMAINING.swap(usize::MAX, Ordering::SeqCst);
-
-    assert_eq!(remaining, 0, "every admitted lookup must consume its quota");
+    assert_eq!(remaining, 0);
     charged
-        .expect("batch compared owner keys after resolving numeric positions")
-        .expect("predeclared completed work must fit");
-    assert_eq!(lock(&ledger.state).dimensions[0].state.consumed, 1);
-    assert_eq!(lock(&ledger.state).dimensions[1].state.consumed, 1);
+        .expect("attempted accounting compares only while binding")
+        .unwrap();
+    assert_eq!(
+        lock(&ledger.state).dimensions[0].state,
+        DimensionState {
+            attempted: 1,
+            ..DimensionState::default()
+        }
+    );
 }
 
 #[test]
@@ -3412,43 +3990,76 @@ fn typed_terminal_binding_uses_prestored_numeric_positions_without_a_mutation_ta
 
 #[test]
 fn consumed_batch_binds_every_dimension_before_its_numeric_mutation_tail() {
-    let production = ledger_root_source();
-    let batch = production
-        .split("pub fn charge_consumed_batch<const N: usize>(")
-        .nth(1)
-        .expect("fixed-array consumed batch exists")
-        .split("/// Reserves byte capacity")
-        .next()
-        .expect("consumed batch boundary exists");
-    assert!(batch.contains("charges: &[(D, u64); N]"));
-    assert!(batch.contains("let mut positions = [0_usize; N]"));
-    assert!(batch.contains("let mut projected = [0_u64; N]"));
-
-    let first_mutation = batch
-        .find("state.dimensions[position].state.consumed = projected[index]")
-        .expect("consumed batch has one numeric mutation tail");
-    let preflight = &batch[..first_mutation];
-    assert!(preflight.contains("binary_search_by_key"));
-    assert!(preflight.contains("position < positions[index - 1]"));
-    let mutation_tail = &batch[first_mutation..];
-    for forbidden in [
-        "?",
-        "charges[",
-        "binary_search",
-        "dimension_entry(",
-        "charge_consumed_open(",
-        "checked_",
-        "try_reserve",
-        ".reserve(",
-        ".push(",
-        ".insert(",
-        "expect(",
-        "unwrap",
-        "panic!",
-    ] {
+    let _guard = BOUND_ORD_TEST_LOCK.lock().expect("bound Ord test lock");
+    let first = StatefulOrd(7);
+    let second = StatefulOrd(9);
+    let excluded = Some(StatefulOrd(11));
+    let charges = [(first, 1), (second, 1)];
+    for producer in [false, true] {
+        let ledger = stateful_ledger(stateful_multi_dimension_limits(), &[StatefulOrd(2)]);
+        ledger.charge_attempted(first, 2).unwrap();
+        ledger.charge_attempted(second, 2).unwrap();
+        ledger.charge_consumed(first, 1).unwrap();
+        let (before, first_binding_comparisons) = {
+            let state = lock(&ledger.state);
+            BOUND_ORD_COMPARISON_COUNT.store(0, Ordering::SeqCst);
+            if producer {
+                assert!(excluded != Some(first));
+            }
+            state
+                .dimensions
+                .binary_search_by_key(&first, |entry| entry.dimension)
+                .unwrap();
+            (
+                [state.dimensions[0].state, state.dimensions[1].state],
+                BOUND_ORD_COMPARISON_COUNT.load(Ordering::SeqCst),
+            )
+        };
+        BOUND_ORD_COMPARISONS_REMAINING.store(first_binding_comparisons, Ordering::SeqCst);
+        let binding = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if producer {
+                ledger.charge_producer_consumed_batch(&charges, excluded)
+            } else {
+                ledger.charge_consumed_batch(&charges)
+            }
+        }));
+        let remaining = BOUND_ORD_COMPARISONS_REMAINING.swap(usize::MAX, Ordering::SeqCst);
         assert!(
-            !mutation_tail.contains(forbidden),
-            "consumed batch regained a semantic, fallible, or allocating operation after its first mutation through `{forbidden}`"
+            binding.is_err(),
+            "the second dimension must panic during binding"
+        );
+        assert_eq!(remaining, 0);
+        assert!(ledger.state.is_poisoned());
+        {
+            let state = lock(&ledger.state);
+            assert_eq!(
+                [state.dimensions[0].state, state.dimensions[1].state],
+                before
+            );
+            assert_eq!(state.active_linear_work_permits, 0);
+        }
+        if producer {
+            ledger.charge_producer_consumed_batch(&charges, excluded)
+        } else {
+            ledger.charge_consumed_batch(&charges)
+        }
+        .expect("restored comparisons can charge through the recovered poisoned mutex");
+        let state = lock(&ledger.state);
+        assert_eq!(
+            state.dimensions[0].state,
+            DimensionState {
+                attempted: 2,
+                consumed: 2,
+                ..DimensionState::default()
+            }
+        );
+        assert_eq!(
+            state.dimensions[1].state,
+            DimensionState {
+                attempted: 2,
+                consumed: 1,
+                ..DimensionState::default()
+            }
         );
     }
 }

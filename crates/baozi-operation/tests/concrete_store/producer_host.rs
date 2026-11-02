@@ -333,6 +333,178 @@ fn split_parser_batches_validate_every_dimension_before_charging() {
 }
 
 #[test]
+fn direct_consumed_batches_reject_late_invalid_keys_without_changing_the_prefix() {
+    for invalid_kind in 0..3 {
+        let factory = factory(1);
+        let account = account(&factory);
+        let (mut operation, keys) = operation(&account);
+        let invalid = match invalid_kind {
+            0 => foreign_dimension(),
+            1 => keys.other_dimension,
+            _ => keys.failure_terminal_dimension,
+        };
+        let baseline = {
+            let mut host = operation.producer_host();
+            host.charge_attempted(keys.dimension, 3).unwrap();
+            host.charge_consumed(keys.dimension, 1).unwrap();
+            host.dimension_state(keys.dimension).unwrap()
+        };
+        let rejected = operation
+            .producer_host()
+            .charge_consumed_batch([(keys.dimension, 1), (invalid, 0)]);
+        if invalid_kind == 0 {
+            assert_eq!(
+                rejected,
+                Err(StoreRuntimeError::ForeignDimensionDomain { dimension: invalid })
+            );
+            assert_eq!(
+                operation.producer_host().charge_consumed_batch([
+                    (keys.failure_terminal_dimension, 0),
+                    (keys.other_dimension, 0),
+                    (invalid, 0),
+                ]),
+                Err(StoreRuntimeError::ForeignDimensionDomain { dimension: invalid }),
+                "complete domain validation precedes every raw membership check"
+            );
+        } else {
+            assert_eq!(
+                rejected,
+                Err(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension {
+                    dimension: invalid,
+                }))
+            );
+        }
+        {
+            let mut host = operation.producer_host();
+            assert_eq!(host.dimension_state(keys.dimension).unwrap(), baseline);
+            host.charge_consumed_batch([])
+                .expect("empty direct accounting preserves sticky evidence");
+            assert_eq!(host.dimension_state(keys.dimension).unwrap(), baseline);
+        }
+        let evidence = requested_fallback_evidence(operation, 84);
+        assert_eq!(
+            store_failure_cause(&evidence).class(),
+            StorePreparationFailureClass::Ledger
+        );
+        let terminal = evidence.dimension(keys.dimension).unwrap();
+        assert_eq!(terminal.attempted(), baseline.attempted());
+        assert_eq!(terminal.consumed(), baseline.consumed());
+    }
+}
+
+#[test]
+fn direct_accounting_preserves_domain_then_outstanding_then_membership_precedence() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (mut operation, keys) = operation(&account);
+    {
+        let mut host = operation.producer_host();
+        let mut permit = host.try_begin_observed_work([(keys.dimension, 3)]).unwrap();
+        permit.complete([1]).unwrap();
+        std::mem::forget(permit);
+    }
+    let baseline = operation
+        .producer_host()
+        .dimension_state(keys.dimension)
+        .unwrap();
+    let foreign = foreign_dimension();
+    {
+        let mut host = operation.producer_host();
+        assert_eq!(
+            host.charge_consumed_batch([(keys.other_dimension, 0), (foreign, 0)]),
+            Err(StoreRuntimeError::ForeignDimensionDomain { dimension: foreign })
+        );
+        assert_eq!(
+            host.charge_attempted(foreign, 0),
+            Err(StoreRuntimeError::ForeignDimensionDomain { dimension: foreign })
+        );
+        for dimension in [
+            keys.dimension,
+            keys.other_dimension,
+            keys.failure_terminal_dimension,
+        ] {
+            assert_eq!(
+                host.charge_attempted(dimension, 0),
+                Err(StoreRuntimeError::ObservedWorkOutstanding)
+            );
+            assert_eq!(
+                host.charge_consumed_batch([(dimension, 0)]),
+                Err(StoreRuntimeError::ObservedWorkOutstanding)
+            );
+        }
+        assert_eq!(
+            host.charge_consumed_batch([]),
+            Err(StoreRuntimeError::ObservedWorkOutstanding)
+        );
+        assert_eq!(host.dimension_state(keys.dimension).unwrap(), baseline);
+    }
+    assert!(matches!(
+        operation.prepare_minimal_fallback(85),
+        Err(StorePrepareError::FinalizationContainment(_))
+    ));
+}
+
+#[test]
+fn direct_accounting_resumes_after_a_normally_resolved_partial_permit() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (mut operation, keys) = operation_with_producer_dimensions(
+        &account,
+        OperationControl::default(),
+        DimensionPolicy::counter(16, 16, 0),
+    );
+    let primary = operation
+        .producer_host()
+        .dimension_state(keys.dimension)
+        .unwrap();
+    let secondary = operation
+        .producer_host()
+        .dimension_state(keys.other_dimension)
+        .unwrap();
+    {
+        let mut host = operation.producer_host();
+        let mut permit = host
+            .try_begin_observed_work([(keys.dimension, 3), (keys.other_dimension, 2)])
+            .unwrap();
+        permit.complete([1, 1]).unwrap();
+        permit.finish_partial();
+        host.charge_attempted(keys.dimension, 1).unwrap();
+        host.charge_attempted(keys.other_dimension, 1).unwrap();
+        host.charge_consumed_batch([
+            (keys.dimension, 1),
+            (keys.dimension, 1),
+            (keys.other_dimension, 1),
+        ])
+        .expect("resolved pending suffixes no longer reserve direct consumed capacity");
+    }
+    let primary_after = operation
+        .producer_host()
+        .dimension_state(keys.dimension)
+        .unwrap();
+    let secondary_after = operation
+        .producer_host()
+        .dimension_state(keys.other_dimension)
+        .unwrap();
+    assert_eq!(primary_after.attempted(), primary.attempted() + 4);
+    assert_eq!(primary_after.consumed(), primary.consumed() + 3);
+    assert_eq!(primary_after.live_bytes(), primary.live_bytes());
+    assert_eq!(secondary_after.attempted(), secondary.attempted() + 3);
+    assert_eq!(secondary_after.consumed(), secondary.consumed() + 2);
+    assert_eq!(secondary_after.live_bytes(), secondary.live_bytes());
+    let evidence = requested_fallback_evidence(operation, 86);
+    assert_eq!(
+        store_failure_cause(&evidence).class(),
+        StorePreparationFailureClass::Requested
+    );
+    let primary_terminal = evidence.dimension(keys.dimension).unwrap();
+    let secondary_terminal = evidence.dimension(keys.other_dimension).unwrap();
+    assert_eq!(primary_terminal.attempted(), primary_after.attempted());
+    assert_eq!(primary_terminal.consumed(), primary_after.consumed());
+    assert_eq!(secondary_terminal.attempted(), secondary_after.attempted());
+    assert_eq!(secondary_terminal.consumed(), secondary_after.consumed());
+}
+
+#[test]
 fn group_overrun_is_side_effect_free_and_latches_product_graph() {
     let factory = factory(1);
     let account = account(&factory);

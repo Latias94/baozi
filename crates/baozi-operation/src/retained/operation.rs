@@ -608,12 +608,10 @@ where
         amount: u64,
     ) -> Result<(), RetainedProducerWorkStartError<D>> {
         self.ensure_direct_accounting_available()?;
-        self.validate_dimension(dimension)
-            .map_err(RetainedProducerWorkStartError::Ledger)?;
         let result = self
             .coordinator
             .retained_ledger()
-            .charge_attempted(dimension, amount);
+            .charge_producer_attempted(dimension, amount, self.failure_terminal_work_dimension);
         if result.is_err() {
             self.record_ledger_failure();
         }
@@ -662,14 +660,10 @@ where
         charges: &[(D, u64); N],
     ) -> Result<(), RetainedProducerWorkStartError<D>> {
         self.ensure_direct_accounting_available()?;
-        for &(dimension, _) in charges {
-            self.validate_dimension(dimension)
-                .map_err(RetainedProducerWorkStartError::Ledger)?;
-        }
         let result = self
             .coordinator
             .retained_ledger()
-            .charge_consumed_batch(charges);
+            .charge_producer_consumed_batch(charges, self.failure_terminal_work_dimension);
         if result.is_err() {
             self.record_ledger_failure();
         }
