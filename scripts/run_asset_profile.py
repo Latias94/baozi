@@ -25,6 +25,8 @@ PROTOCOL = "baozi-assimp-observation/v1"
 STAGES = ("import", "prepare", "extract", "pipeline")
 IO_MODES = ("file", "memory")
 FIELDS = ("position", "position-normal", "position-normal-uv0")
+PROCESS_METRICS = ("stage_ns", "elapsed_ns", "peak_rss_bytes",
+                   "windows_peak_working_set_bytes", "windows_peak_commit_bytes")
 STATUSES = ("success", "policy_rejected", "unsupported", "semantic_mismatch", "timeout", "crash")
 OBSERVATION_FIELDS = (
     "draws", "placements", "tuples", "bounds", "area", "normal_bounds", "uv0_bounds",
@@ -93,6 +95,55 @@ def read_peak_rss(path: Path) -> tuple[int | None, str | None]:
     return None, "GNU time did not provide a positive whole-child peak RSS value"
 
 
+class WindowsMemory:
+    """Keep a query handle through termination; read lifetime peaks before closing it."""
+
+    def __init__(self, pid: int):
+        import ctypes
+        from ctypes import wintypes
+
+        class Counters(ctypes.Structure):
+            _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD)] + [
+                (name, ctypes.c_size_t) for name in (
+                    "PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage",
+                    "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage",
+                    "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage", "PrivateUsage")]
+
+        self.ctypes = ctypes
+        self.api = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.api.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        self.api.OpenProcess.restype = wintypes.HANDLE
+        self.api.K32GetProcessMemoryInfo.argtypes = (
+            wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD)
+        self.api.K32GetProcessMemoryInfo.restype = wintypes.BOOL
+        self.api.CloseHandle.argtypes = (wintypes.HANDLE,)
+        self.api.CloseHandle.restype = wintypes.BOOL
+        self.counters = Counters()
+        self.counters.cb = ctypes.sizeof(self.counters)
+        self.handle = self.api.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        self.error = None if self.handle else f"OpenProcess: {ctypes.WinError(ctypes.get_last_error())}"
+
+    def finish(self) -> dict:
+        result = {"windows_peak_working_set_bytes": None, "windows_peak_commit_bytes": None,
+                  "windows_memory_unavailable_reason": self.error}
+        if not self.handle:
+            return result
+        try:
+            if not self.api.K32GetProcessMemoryInfo(
+                    self.handle, self.ctypes.byref(self.counters), self.counters.cb):
+                result["windows_memory_unavailable_reason"] = (
+                    f"GetProcessMemoryInfo: {self.ctypes.WinError(self.ctypes.get_last_error())}")
+            elif self.counters.PeakWorkingSetSize <= 0 or self.counters.PeakPagefileUsage <= 0:
+                result["windows_memory_unavailable_reason"] = "process API did not supply positive lifetime peaks"
+            else:
+                result.update(windows_peak_working_set_bytes=self.counters.PeakWorkingSetSize,
+                              windows_peak_commit_bytes=self.counters.PeakPagefileUsage)
+        finally:
+            self.api.CloseHandle(self.handle)
+            self.handle = None
+        return result
+
+
 def stop_child(process: subprocess.Popen, timeout: float) -> None:
     # GNU time and its worker share this fresh POSIX process group.
     if os.name == "posix":
@@ -118,7 +169,11 @@ def run_command(arguments: argparse.Namespace, artifact_root: Path, report: dict
     rss_path = artifact_root / f"{name}.rss-kib.txt"
     if measure_rss:
         record.update(probe_argv=command, peak_rss_bytes=None, rss_scope="whole_child_lifetime",
-                      rss_unavailable_reason=f"requires Linux /usr/bin/time; platform={sys.platform}")
+                      rss_unavailable_reason=f"requires Linux /usr/bin/time; platform={sys.platform}",
+                      windows_peak_working_set_bytes=None, windows_peak_commit_bytes=None,
+                      windows_memory_scope="whole_child_lifetime",
+                      windows_memory_unavailable_reason="child not launched" if sys.platform == "win32"
+                      else f"requires Windows process API; platform={sys.platform}")
         if report["rss_tool"] and skip is None:
             record["argv"] = [report["rss_tool"], "-q", "-f", "%M", "-o", str(rss_path),
                               "--", *command]
@@ -128,6 +183,7 @@ def run_command(arguments: argparse.Namespace, artifact_root: Path, report: dict
         save_report(artifact_root, report)
     started = time.monotonic_ns()
     process = None
+    windows_memory = None
     try:
         with ((artifact_root / record["stdout"]).open("xb") as stdout,
               (artifact_root / record["stderr"]).open("xb") as stderr):
@@ -138,6 +194,11 @@ def run_command(arguments: argparse.Namespace, artifact_root: Path, report: dict
                                            stdout=stdout, stderr=stderr,
                                            start_new_session=os.name == "posix")
                 record["launched"] = True
+                if measure_rss and sys.platform == "win32":
+                    try:
+                        windows_memory = WindowsMemory(process.pid)
+                    except OSError as error:
+                        record["windows_memory_unavailable_reason"] = f"process API: {error}"
                 try:
                     record["returncode"] = process.wait(timeout=arguments.timeout)
                     record["status"] = "success" if record["returncode"] == 0 else "crash"
@@ -161,6 +222,8 @@ def run_command(arguments: argparse.Namespace, artifact_root: Path, report: dict
         record["host_load"] = host_load()
         if measure_rss and report["rss_tool"] and record["launched"]:
             record["peak_rss_bytes"], record["rss_unavailable_reason"] = read_peak_rss(rss_path)
+        if windows_memory is not None:
+            record.update(windows_memory.finish())
         if kind != "comparison":
             save_report(artifact_root, report)
     return record
@@ -442,7 +505,7 @@ def summarize_series(series: dict, records: list[dict]) -> None:
         successes = [record for record in attempts if record["status"] == "success"]
         summary = {"statuses": dict(Counter(record["status"] for record in attempts)),
                    "samples": [record["name"] for record in attempts]}
-        for metric in ("stage_ns", "elapsed_ns", "peak_rss_bytes"):
+        for metric in PROCESS_METRICS:
             summary[metric] = summarize([record[metric] for record in successes
                                          if record.get(metric) is not None])
         for metric in ("logical_bytes", "capacity_bytes"):
@@ -451,6 +514,9 @@ def summarize_series(series: dict, records: list[dict]) -> None:
         summary["rss_unavailable_reasons"] = sorted({record["rss_unavailable_reason"]
                                                     for record in attempts
                                                     if record.get("rss_unavailable_reason")})
+        summary["windows_memory_unavailable_reasons"] = sorted({
+            record["windows_memory_unavailable_reason"] for record in attempts
+            if record.get("windows_memory_unavailable_reason")})
         series["engines"][engine] = summary
     pairs = {}
     for record in retained:
@@ -459,7 +525,7 @@ def summarize_series(series: dict, records: list[dict]) -> None:
                if all(pair.get(engine, {}).get("status") == "success" for engine in ("baozi", "assimp"))]
     series["matched_pairs"] = len(matched)
     series["ratios"] = {}
-    for metric in ("stage_ns", "elapsed_ns", "peak_rss_bytes"):
+    for metric in PROCESS_METRICS:
         usable = [pair for pair in matched if all(pair[engine].get(metric) is not None
                   and pair[engine][metric] > 0 for engine in ("baozi", "assimp"))]
         ratios = [pair["assimp"][metric] / pair["baozi"][metric] for pair in usable]
@@ -627,6 +693,8 @@ def main() -> int:
         "environment_scope": "selected build/thread/allocator controls only; other inherited values are not recorded",
         "rss_tool": str(GNU_TIME) if sys.platform == "linux" and GNU_TIME.is_file() else None,
         "rss_scope": "whole-child peak RSS, including setup, validation and serialization; never a stage peak",
+        "windows_memory_tool": "kernel32!K32GetProcessMemoryInfo" if sys.platform == "win32" else None,
+        "windows_memory_scope": "whole-child lifetime PeakWorkingSetSize and PeakPagefileUsage, queried after wait with a retained query handle; never stage peaks or Linux RSS",
         "parent_clock": {"implementation": clock.implementation, "resolution_ns": clock.resolution * 1e9},
         "statistics_policy": "median; inclusive linear quartiles; IQR=Q3-Q1; warmups excluded; no aggregate winner",
         "tolerances": TOLERANCES,

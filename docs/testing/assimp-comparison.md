@@ -133,7 +133,15 @@ Retain every sample, median, interquartile range, min/max, timer-resolution limi
 Do not put builds, fixture generation, downloads, profiler injection or global cache flushing inside timed workers.
 
 Linux `/usr/bin/time -f %M` supplies each child's whole-lifetime peak RSS in KiB, converted to bytes.
-Windows peak working set, current private commit and peak private commit remain distinct optional metrics from the documented process API.
+On Windows, the collector opens a `PROCESS_QUERY_LIMITED_INFORMATION` handle immediately after
+launch and retains it through termination. `K32GetProcessMemoryInfo` supplies
+`windows_peak_working_set_bytes` (`PeakWorkingSetSize`) and `windows_peak_commit_bytes`
+(`PeakPagefileUsage`, the lifetime peak commit charge). A touched-buffer child test checks
+that both peaks survive exit; current post-exit working set/private usage are not reported as peaks.
+These are whole-child metrics, including setup, checking and serialization. Failed queries leave
+nulls with an explicit reason. Windows leaves `peak_rss_bytes` null.
+The API and field meanings follow Microsoft's [process memory query](https://learn.microsoft.com/en-us/windows/win32/api/psapi/nf-psapi-getprocessmemoryinfo)
+and [counter definitions](https://learn.microsoft.com/en-us/windows/win32/api/psapi/ns-psapi-process_memory_counters_ex).
 Never subtract idle RSS or consecutive high-water marks to invent stage peaks.
 Linux/Windows values are separate series.
 

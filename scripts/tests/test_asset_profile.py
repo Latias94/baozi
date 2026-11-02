@@ -449,6 +449,25 @@ class AssetProfileCLI(unittest.TestCase):
             self.assertIsNone(sample["rss_unavailable_reason"])
             self.assertEqual(sample["peak_rss_bytes"], int((artifacts / sample["rss_log"]).read_text()) * 1024)
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows process API required")
+    def test_windows_lifetime_peaks_survive_child_exit_without_becoming_linux_rss(self):
+        touched = 32 * 1024 * 1024
+        result, report, _ = self.collect([self.case()], repetitions=2, config={"touch_bytes": touched})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for sample in report["commands"]:
+            if sample["kind"] != "comparison":
+                continue
+            self.assertEqual(sample["windows_memory_scope"], "whole_child_lifetime")
+            self.assertGreater(sample["windows_peak_working_set_bytes"], touched)
+            self.assertGreater(sample["windows_peak_commit_bytes"], touched)
+            self.assertIsNone(sample["windows_memory_unavailable_reason"])
+            self.assertIsNone(sample["peak_rss_bytes"])
+            self.assertTrue(sample["rss_unavailable_reason"])
+        for metric in ("windows_peak_working_set_bytes", "windows_peak_commit_bytes"):
+            self.assertEqual(report["series"][0]["ratios"][metric]["statistics"]["count"], 2)
+            for engine in ("baozi", "assimp"):
+                self.assertEqual(report["series"][0]["engines"][engine][metric]["count"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
