@@ -253,10 +253,19 @@ different projections separately when several source scenes are needed.
 
 `source_scope_record().selection_request()` exposes `DocumentDefault` or
 `ExplicitScene { scene_index }`; `selection_outcome()` exposes the resolved source identity.
-Both participate in the `baozi.source-scope.v3` digest and survive optional-detail collapse or a
-later import failure. The generated root operation uses `org.baozi.gltf:projection-root-v2`;
+Both participate in the `baozi.source-scope.v1\0` digest and survive optional-detail collapse or a
+later import failure. The generated root operation uses `org.baozi.gltf:projection-root-v1`;
 its source parents identify the actual document and scene, while its options digest distinguishes
-the requested modes. No canonical snapshot wire-layout revision is needed.
+the requested modes. Its 18-byte request/resolution frame retains big-endian u64 index lanes and
+the default request's zero index lane.
+
+**2026-11-02 U12 amendment:** These owned draft-v1 identities supersede the earlier source-scope v3
+and projection v2 names. Source-scope request indices remain little-endian u64; the selection frame,
+ordered observations including Light, actual source parents and selected resource closure are
+unchanged. Persisted draft evidence binds the exact source closure and vector set under
+[ADR 0026](../adr/0026-validation-snapshot-and-fuzz-gates.md#snapshot-schema-lifecycle). Earlier
+revision-qualified evidence retains its original source binding; the import-options codec remains
+its separate version-one family.
 
 This follows [ADR 0039](../adr/0039-source-document-scene-selection-and-import-closure.md) and
 the [pinned Khronos scenes contract](https://github.com/KhronosGroup/glTF/blob/59ecbdba704206bb656965ab4e202881806066f1/specification/2.0/Specification.adoc#scenes).

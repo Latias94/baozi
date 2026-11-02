@@ -80,8 +80,9 @@ source front without conversion; the explicit Scene conversion transports every 
 Column vectors and local-to-parent authored node transforms are fixed canonical API semantics,
 not source facts or target options. `SceneSpace` does not carry a duplicate transform-convention
 tag. Inverse bind, correction, and other matrices retain their domain-specific source/destination
-spaces; their meaning is not redefined as a node transform. Removing the redundant tag changes the
-deterministic snapshot schema to revision 4.
+spaces; their meaning is not redefined as a node transform. The earlier removal of the redundant
+tag changed the then-current deterministic snapshot schema to revision 4. The 2026-11-02 amendment
+below records the current draft-v1 cutover.
 
 Unknown is an explicit value, never a guessed default. The standard spatial target is right-handed,
 positive Y up, negative Z front, meters, and counter-clockwise front faces. `TargetSpace` requires
@@ -323,3 +324,13 @@ Chosen.
   reflection fixtures, while explicit non-glTF recovery records normalized source loss/provenance.
 - CAD-oriented format/workflow admission fails governance review unless an accepted update to this
   ADR supplies the complete precision and migration evidence above.
+
+## Amendment History
+
+### 2026-11-02: Preserve numeric semantics through the draft-v1 cutover
+
+U12 rebases the current core-owned Scene snapshot from observed revision 8 to draft revision 1,
+consumed through `ValidatedScene`. The earlier revision-4 transition remains historical. Numeric
+widths, float bits, transform conventions and explicit conversion rules retain their current
+semantics. [ADR 0026](0026-validation-snapshot-and-fuzz-gates.md#snapshot-schema-lifecycle) governs
+draft evidence identity; historical evidence remains bound to its original source and revision.

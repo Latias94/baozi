@@ -892,7 +892,7 @@ pub(super) fn submit_parts(
     instruction[9] = projection_tag;
     instruction[10..].copy_from_slice(&projection_index.to_be_bytes());
     let (root_options, root_evidence) =
-        generated_evidence(ctx, "org.baozi.gltf:projection-root-v2", &instruction)?;
+        generated_evidence(ctx, "org.baozi.gltf:projection-root-v1", &instruction)?;
     let root_kind = OperationKind::Generated;
     let root_attachment = [ProvenanceLocalId::new(authoring_u32(
         ctx,

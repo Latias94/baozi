@@ -1,7 +1,7 @@
 ---
 status: superseded
 date: 2026-07-09
-updated: 2026-08-19
+updated: 2026-11-02
 authors:
   - Codex
 decision_type: architecture
@@ -379,8 +379,9 @@ evidence bytes while preserving the actual operation-wide and evidence-storage p
 The complete header-plus-cell `Layout` is a checked semantic shape/overflow preflight, not evidence of
 one allocator request. ADR 0044 may give the fixed header owner and keyed evidence backing separate
 actual allocations; every actual allocation has its own policy-governed `CapacityPlan` and full
-layout/capacity charge. A separate crate-private evidence anchor pairs the concrete-store revision
-with the capacity-policy revision. Before retained payload/evidence allocator entry, bootstrap checked-sums all requested envelopes and
+layout/capacity charge. Qualification evidence identifies the exact executed source closure and
+capacity-policy revision with the actual toolchain, target, build profile and allocator/runtime.
+Before retained payload/evidence allocator entry, bootstrap checked-sums all requested envelopes and
 block counts, admits the complete ledger aggregate first, and admits the complete physical aggregate
 second through the private guard. Consolidating those backings later cannot change the observable
 evidence, admission, rollback, query, or failure contract and cannot merge the two locks.
@@ -504,11 +505,10 @@ requirement but places its geometric target in the allocator or candidate plan's
 base plan requests only the additional capacity needed for its own `desired`. Observed capacity may
 be smaller but not larger than that allocator-facing plan's envelope, and no conservative difference
 is refunded while live. A replacement candidate's complete envelope is admitted in addition to the
-still-live source before allocator entry. Separately, a
-crate-private evidence anchor pairs the concrete-store revision with that policy revision. Neither
-the runtime plan nor this anchor is allocator/toolchain/target attestation. Strict conformance
-requires repository-managed probe evidence bound to the anchor, while custom or unknown allocator
-paths remain `Unverified`. The envelope measures Baozi-
+still-live source before allocator entry. The runtime plan is not allocator/toolchain/target
+attestation. Strict conformance requires repository-managed probe evidence identifying the exact
+executed source closure, capacity-policy revision, rustc/libstd, target, build profile and
+allocator/runtime. Custom or unknown allocator paths remain `Unverified`. The envelope measures Baozi-
 requested layout/capacity, not allocator size classes, metadata, fragmentation, page retention,
 hidden overgrant, or exact process RSS. From the first allocator entry, backing storage is
 structurally owned with its covering admission and must be destroyed before
@@ -793,7 +793,7 @@ Negative:
 | Reservation drift undercounts actual capacity | Critical | One `baozi-import` metered-storage owner, capacity-based tests, checked arithmetic, destructor-order tests, and heap/RSS scale gates. |
 | Attribution commit double-counts or controls the physical owner | High | ADR 0044's deep retained-allocation module commits only operation evidence and exposes no lease-control token. |
 | Structural retained plan mutates state before an overflow or capacity failure | Critical | Validate count/width/overflow/table/max-new/attribution structure before set-id, work, account, or allocator side effects. |
-| Observed allocator capacity differs from admission | Critical | Govern the plan by the capacity-policy revision and match a separate concrete-store/policy evidence anchor, charge the full envelope before entry, request only desired additional capacity, accept desired-through-envelope in `finish`, retain conservative charge while live, and destroy over-envelope storage before releasing owners with `CapacityEnvelopeViolated`. This is a post-allocation defense, not proof that transient RSS never exceeded the envelope. |
+| Observed allocator capacity differs from admission | Critical | Govern the plan by the capacity-policy revision, qualify probe evidence against the exact executed source/build, charge the full envelope before entry, request only desired additional capacity, accept desired-through-envelope in `finish`, retain conservative charge while live, and destroy over-envelope storage before releasing owners with `CapacityEnvelopeViolated`. This is a post-allocation defense, not proof that transient RSS never exceeded the envelope. |
 | Repeated exact `len + 1` growth becomes quadratic | Critical | Fixed plans keep logical-minimum semantics, while growable and replacement wrappers preserve that requirement and put a geometric target in the allocator-facing plan. Scale gates count successful replacements and all moved source elements/bytes, rejecting linear replacement counts or superlinear movement. |
 | A physical-account limit is presented as an exact process-memory limit | Critical | Define it as Baozi-requested policy-governed layout/capacity only; exclude allocator-private overhead/overgrant, deny strict claims for unknown or unverified allocator paths, and require an OS/subprocess limit for a hard process-memory boundary. |
 | Operation accounting ignores shared account poison | Critical | operation start/retain/share composes with ADR 0044's account state, while terminal preparation first builds a zero-commit closed intent. Account publication eligibility is the pivot's final fallible observation: poison-first leaves zero destination commitment; eligibility-first permits only the lock-free infallible commit move to an exact wrapper. |
@@ -829,7 +829,7 @@ Negative:
 | Import ledger uniqueness | one import session owner, coordinator, and ledger snapshot cover detection through dormant-authority activation, canonical validation, and outcome finalization; no nested standalone core ledger or second snapshot exists | real import-owned session-owner integration, zero-before-activation allocation, early/exact/double activation, semantic phase/dimension assertions, report shape, and API/source scans |
 | Joint lane closure | one `NeverActivated`, `Rejected`, or `Candidate` canonical disposition and outcome evidence prepare only under the matching outcome owner; a candidate success additionally requires one freeze contribution paired outside operation with the core handoff token | early-failure and success/rich/minimal matrix, foreign/missing/duplicate tests, compile-fail capability tests, and drop-order probes |
 | Structural preflight | invalid count/width/overflow/table/max-new/attribution plans cause zero set-id, work, account, and allocator side effects | exact/excess boundary and fault-injection counters |
-| Capacity coverage | hostile input cannot make Baozi request beyond the admitted policy-governed envelope; actual may be smaller, over-envelope publishes nothing, and logical output uses semantic length without an exact-RSS claim | desired/actual/envelope allocator probes, source-anchor matching, and subprocess-limit tests |
+| Capacity coverage | hostile input cannot make Baozi request beyond the admitted policy-governed envelope; actual may be smaller, over-envelope publishes nothing, and logical output uses semantic length without an exact-RSS claim | desired/actual/envelope allocator probes qualified by exact source/build, and subprocess-limit tests |
 | Growth complexity | monotonic single-element growth uses geometric allocator/candidate targets; for an empty non-ZST container ending at logical length `N > 0`, successful replacements are at most `ceil(log2(N)) + 1` and total moved source elements are less than `2 * N` | exact replacement/moved-element counters at `N`, `2N`, and `4N`, plus checked byte-total assertions |
 | Retained attribution coupling | before readiness, typed no-mutation second-plane rejection rolls back the complete provisional attribution graph while uncertain second-plane completion preserves it coupled with every possible physical owner; after readiness every side has matching attribution and physical ownership, and no path fabricates an owner | typed-rejection rollback, uncertain second-plane containment, post-ready verified/uncertain cleanup, owner-count, and drop-order probes |
 | Startup allocator taxonomy | ledger control/bookkeeping allocations occur only after their complete ledger-side capacity admission, remain structurally owned by the provisional graph, and are never physical payload; every partial allocation failure and typed no-mutation physical rejection follows storage-first one-lock full-ledger rollback; retained payload/evidence allocator entries remain zero until readiness and the post-ready consuming split itself is allocation-, lock-, and counter-free | fault injection at every backing allocation, independent bookkeeping-versus-retained allocator probes, physical-entry/charge and accepted-operation probes, storage-before-single-lock rollback ordering, and consuming-split transition counters |
@@ -848,7 +848,7 @@ Negative:
 | Live release | Dropping each temporary phase buffer before its `StorageCoveringReservation` reduces current live while preserving its high-water mark. |
 | Peak overlap | Tests retaining snapshot + backend + normalized + Scene storage observe their sum, not their maximum. |
 | Checked admission | Count, scalar width, record fields, count-times-size and aggregate overflow, table capacity, maximum new blocks, and root-plus-actual-new attribution failure precede set-id, work, account, allocator, and backend side effects. |
-| Capacity envelope | Retained `CapacityPlan` is governed by the exact capacity-policy revision; a separate crate-private evidence anchor pairs that policy with the concrete-store revision. A fixed plan sets `desired` to the logical minimum. Growable/replacement wrappers retain that requirement and place the geometric target in the allocator/candidate plan's `desired`. Full allocator-facing envelope admission precedes every Baozi allocation request, each base plan requests only its own desired additional capacity, and `finish` accepts that plan's `desired..=envelope` while retaining conservative charge. A replacement admits its complete candidate envelope while the source remains charged. Over-envelope storage drops before owners with `CapacityEnvelopeViolated`. Repository probe evidence, not a runtime token, binds the anchor plus rustc/libstd/target/profile/allocator identity for strict conformance; unknown/custom paths remain `Unverified`, and OS/subprocess limits are required where hard process memory matters. |
+| Capacity envelope | Retained `CapacityPlan` is governed by the exact capacity-policy revision. A fixed plan sets `desired` to the logical minimum. Growable/replacement wrappers retain that requirement and place the geometric target in the allocator/candidate plan's `desired`. Full allocator-facing envelope admission precedes every Baozi allocation request, each base plan requests only its own desired additional capacity, and `finish` accepts that plan's `desired..=envelope` while retaining conservative charge. A replacement admits its complete candidate envelope while the source remains charged. Over-envelope storage drops before owners with `CapacityEnvelopeViolated`. Strict conformance uses repository probe evidence identifying the exact executed source closure, capacity-policy revision and actual rustc/libstd/target/profile/allocator identity; unknown/custom paths remain `Unverified`, and OS/subprocess limits are required where hard process memory matters. |
 | Operation bootstrap | Invalid/zero/exact limits plus sealed-cell/header semantic layout, per-actual-backing `CapacityPlan`, and checked aggregate requested-envelope/block sums either return an allocation-free start error with no accepted operation or return an operation already owning its fallback envelope. Instrumentation proves one complete ledger aggregate admission followed by one complete physical aggregate admission, non-nested locks, no common cross-plane linearization point, and no retained payload/evidence allocator entry before both succeed. Ledger control/bookkeeping probes may observe graph-owned backings only after complete first-plane capacity admission. Before physical entry, fault injection at every typed bookkeeping backing allocation proves every partial backing is destroyed before one-lock full-ledger rollback and the fixed start error returns with zero physical entry/charge, retained payload/evidence allocator entry, or accepted operation. After physical transition entry, only typed no-mutation second-plane rejection is rollback-eligible and applies the same cleanup to the complete graph; panic, post-mutation poison, or uncertain disposition instead enters coupled fail-closed containment. The semantic aggregate layout is never treated as proof of one allocator backing. |
 | Account poison composition | Across cloned explicit accounts, poison-first operation start/retain/share returns typed `AccountPoisoned` before attempted/consumed/live counters, work permits, set/slot, refcount/range, or allocator effects. If start/admission linearizes first, existing operation evidence and charge remain, later admissions reject, and final publication eligibility returns `FinalizationContainmentError` with no exact prepared wrapper or handoff. Physical snapshots expose one latch/count/evidence; ledger snapshots are not rewritten to fabricate that physical state. |
 | Minimal fallback evidence | Header assertions preserve schema/cause/last-phase/counts plus operation-wide current/peak live, active-reservation, and current/peak evidence-storage values without deriving globals from cells; prepared fallback has all current values zero. Cell shape, key-normalization, producer-unload, and query tests prove every dynamic entry owns only one inert Baozi-domain key plus its snapshot and no external/plugin object, vtable, function pointer, callback, or `Drop`. The Baozi-owned result/evidence owner retains the process-local domain anchor and immutable catalog for the complete query lifetime, plugins receive only host-minted keys, and changing a runtime brand cannot change any semantic transcript, digest, wire, cache/build identity, or user-visible meaning. |
@@ -878,6 +878,17 @@ Negative:
 | Clone and branch admission | Exact/excess transient clone loops and sibling/deep-branch fixtures charge non-refundable work before reference-count changes and cannot bypass retained-handle, container, branch, or generation limits. |
 
 ## Amendment History
+
+### 2026-11-02: Qualify capacity evidence by actual source and build
+
+U12 removes the unused `CONCRETE_STORE_CAPACITY_REVISION` / `CapacityQualificationSubject` tuple
+and its self-only test, and rebases the owned capacity policy from revision 2 to draft revision 1.
+Qualification claims identify the exact executed source closure, policy revision and actual
+rustc/libstd, target, build profile, allocator/runtime and probe evidence. This supersedes the
+anchor requirement in the 2026-07-20 capacity amendment while preserving that historical record.
+Envelope admission, request/observed checks, full charge lifetime, cleanup order and physical versus
+semantic accounting remain unchanged. Unknown/custom paths stay `Unverified`; hard process memory
+still requires OS/subprocess limits. No new qualification framework or runtime token is required.
 
 ### 2026-08-05: Make joint publication use the sole import ledger
 

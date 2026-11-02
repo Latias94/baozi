@@ -103,6 +103,8 @@ const NODE_SCENE_PLANNING_REJECTION_CODE: u32 = 0x5343_110a;
 #[cfg(test)]
 #[derive(Clone, Copy)]
 struct NodeSceneBuildFaults {
+    directory_revision: Option<u32>,
+    evidence_revision: Option<u32>,
     alter_first_authored_transform: bool,
     alter_first_geometry_f32: bool,
     appearance: Option<test_support::AppearanceBuildFault>,
@@ -118,6 +120,8 @@ struct NodeSceneBuildFaults {
 impl NodeSceneBuildFaults {
     const fn none() -> Self {
         Self {
+            directory_revision: None,
+            evidence_revision: None,
             alter_first_authored_transform: false,
             alter_first_geometry_f32: false,
             appearance: None,

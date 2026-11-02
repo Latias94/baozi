@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-08-19
-updated: 2026-11-01
+updated: 2026-11-02
 authors:
   - Codex
 decision_type: architecture
@@ -276,13 +276,14 @@ remains shared by another generation. A refused build action drops partially ini
 before the central admission is released. Each retained owner keeps its buffers and physical lease
 inseparable; public code cannot detach rows, pools, or accounting authority.
 
-All semantic domains use these typed owners under the same Scene root. The private revision-8
+All semantic domains use these typed owners under the same Scene root. The private draft revision-1
 record directory contains seven scalar revision/count fields and no domain-store references. It is
 the sole canonical record block; there are no record-store payload or shareable-leaf blocks. Each
 completed cutover deletes its replaced record schema and conversion/validation projection in the
-same change. Semantic snapshot revision 6 retains its independent, source-faithful encoding,
-including attribute-owned tangent conventions. The
-direct UV index keeps the existing kind-zero/set-value encoding without another revision.
+same change. The draft revision-1 semantic snapshot uses the single core-owned encoder consumed
+through `ValidatedScene`, retaining assignment presence, current material groups and emission
+strength, lights and attribute-owned tangent conventions. The direct UV index keeps the existing
+kind-zero/set-value encoding.
 
 Profile state owns the current typed owner/attachment table, immutable lineage segment handles,
 and owner-bearing metadata descriptors. Each lineage segment and the metadata payload pools have
@@ -381,3 +382,15 @@ Negative:
 - Failure or containment exposes no partial Scene and cannot be relabeled as success.
 - Edits publish a new generation transactionally and never mutate the source generation.
 - Format, import, facade, snapshot, fuzz, and postprocess consumers use this same Scene model.
+
+## Amendment History
+
+### 2026-11-02: Rebase the typed directory and current snapshot to draft v1
+
+U12 rebases the observed directory and snapshot revisions from 8 to draft revision 1. This
+supersedes the revision-8 directory and stale revision-6 snapshot wording above; historical
+revision-qualified evidence retains its original source binding. Seven directory fields, one
+canonical record block and the current typed owner model remain unchanged. Core owns the only
+Scene snapshot encoder through `ValidatedScene`; it retains current material, light and tangent
+semantics. [ADR 0026](0026-validation-snapshot-and-fuzz-gates.md#snapshot-schema-lifecycle) defines
+the exact source-closure and vector-set identity required for draft evidence.

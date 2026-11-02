@@ -21,7 +21,7 @@ impl CanonicalSchema for SceneEditEvidenceTag {
     type StoreKind = RecordBlock;
 }
 
-pub(super) const REVISION: u32 = 4;
+pub(super) const REVISION: u32 = 1;
 pub(super) const OPERATION_TRIANGULATE: u32 = 1;
 #[cfg(test)]
 pub(super) const OPERATION_NORMALS: u32 = 2;

@@ -117,6 +117,9 @@ Each implementation needs its own bounded, reviewed slice before work begins.
 - KTD8. **Measure each metric at its real lifetime.** Stage clocks use uninstrumented optimized binaries. Linux process peak RSS is mandatory for B0/B1; Windows peak working set and private commit are distinct supplementary fields. Use heaptrack on both Linux executables in a separate campaign after verifying interception coverage. Never compare Baozi ledgers/Rust-only allocation requests or Assimp's Scene estimate as cross-engine physical memory (R13).
 - KTD9. **Reuse small existing tools.** Extend `scripts/run_asset_profile.py` for fixed probe commands, timeout/failure collection and reports; keep deterministic resource assertions in Rust and existing scale tools. Do not add a registry, generalized metric schema language, source resolver or proof compiler (R1, R12–R16).
 
+KTD3 retains its original numeric planning baseline. The dated [U12 execution amendment](#u12-rebase-canonical-v1-and-remove-proven-obsolete-paths)
+records the observed snapshot revision at implementation.
+
 ### Assumptions
 
 The required renderer target is one available Windows or Linux adapter/backend, not browser or Apple coverage.
@@ -386,8 +389,15 @@ The dependency column is a start gate, not permission to run Cargo concurrently.
 
 ### U12. Rebase canonical v1 and remove proven obsolete paths
 
+**2026-11-02 execution amendment:** At pre-U12 source `6db9808046645d31c5bd60f2e4bfcfd719659eb0`,
+the production Scene directory and snapshot are both revision 8. KTD3's snapshot 7 is the original
+planning value. U12 rebases both observed revisions to draft 1 within the same eight-family allowlist;
+the snapshot remains the same allowlisted family. The cutover retains each current encoding's
+semantics, the existing dependencies and source-qualified historical evidence. This amendment
+records the execution baseline and grants no additional scope or gate.
+
 - **Goal / requirements:** Complete R1–R2 at one coherent semantic cutover (KTD3).
-- **Files:** Owners in the Version and Deletion Inventory; node-scene `snapshot/tests{.rs,/public_read.rs,/public_deformation.rs,/tangent_attributes.rs}` and `tests/{obj_capability,gltf_capability,profile_closure,spatial_validation}.rs`; `crates/baozi-import/tests/source_scope_outcome.rs`; `crates/baozi-format-gltf/tests/scene_selection.rs`; normal-option vectors; `docs/adr/{0006-public-api-versioning-and-crate-stability-policy,0012-material-texture-image-and-color-space-policy,0017-serialization-snapshot-and-cache-boundary,0026-validation-snapshot-and-fuzz-gates,0032-postprocess-remap-and-derived-data-contract,0039-source-document-scene-selection-and-import-closure,0045-canonical-scene-ownership-construction-and-generation}.md`; current testing/format docs.
+- **Files:** Owners in the Version and Deletion Inventory; node-scene `snapshot/tests{.rs,/public_read.rs,/public_deformation.rs,/tangent_attributes.rs}` and `tests/{obj_capability,gltf_capability,profile_closure,spatial_validation}.rs`; `crates/baozi-import/tests/source_scope_outcome.rs`; `crates/baozi-format-gltf/tests/scene_selection.rs`; normal-option vectors; `docs/adr/{0006-public-api-versioning-and-crate-stability-policy,0008-math-coordinate-units-and-numeric-policy,0012-material-texture-image-and-color-space-policy,0017-serialization-snapshot-and-cache-boundary,0020-import-lifecycle-and-report-contract,0022-per-import-resource-ledger-and-budget-accounting,0026-validation-snapshot-and-fuzz-gates,0030-logical-mesh-primitive-and-attribute-domain,0032-postprocess-remap-and-derived-data-contract,0039-source-document-scene-selection-and-import-closure,0042-shared-canonical-storage-accounts-and-generation-lineage,0045-canonical-scene-ownership-construction-and-generation}.md`; current testing/format docs.
 - **Approach:** Reset the allowlisted owned families together, delete the OBJ migration oracle and unused capacity qualification anchor, and replace current goldens with independently reviewed transcripts. Correct active snapshot ownership to core. Add dated ADR amendments where old numeric claims are historical; do not rewrite past evidence. Schema framing changes may change costs; number-only substitutions do not justify relaxing accounting.
 - **Test scenarios:** Current v1 success and wrong-revision rejection, authored presence/precision/signed bits, tail mutation, bounded/zero preview, generation independence, failure-before-publication and exact release. Normal mode/replacement vectors and composed preparation digest are independent. Already-v1 manifests/identity vectors and arbitrary caller-schema version tests remain unchanged where semantics did not change.
 - **Verification:** Focused behavior tests plus review show one current implementation per family, no legacy migration readers/aliases and no unintended resets. New evidence binds the exact source closure rather than relabelling old v1 artifacts.

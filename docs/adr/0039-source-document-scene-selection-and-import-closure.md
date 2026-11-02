@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-12
-updated: 2026-11-01
+updated: 2026-11-02
 authors:
   - Codex
 decision_type: architecture
@@ -209,6 +209,21 @@ excluded or lossy semantic observable. Chosen.
 - [ADR 0036 source identity and provenance](0036-source-identity-provenance-and-metadata.md)
 
 ## Amendment History
+
+### 2026-11-02: Rebase current selection evidence domains to draft v1
+
+U12 replaces the owned `baozi.source-scope.v3\0` domain with `baozi.source-scope.v1\0` and
+`org.baozi.gltf:projection-root-v2` with `org.baozi.gltf:projection-root-v1`. This supersedes the
+domain names in the 2026-11-01 selection amendment; its original source-qualified evidence remains
+historical. The current import-options codec is already version one and remains a separate family.
+
+Source-scope framing retains tag `0xff`, request/outcome and document framing, little-endian u64
+request indices and ordered full entity observations, including `AnimationSampler = 15` and
+`Light = 16`. Detail collapse and failure transport preserve the full digest. Projection retains
+the 18-byte request/resolution frame, big-endian u64 index lanes, default's zero requested lane and
+actual source parents. Draft evidence binds the exact source closure and vector set under
+[ADR 0026](0026-validation-snapshot-and-fuzz-gates.md#snapshot-schema-lifecycle); selection and
+resource-closure semantics are unchanged.
 
 ### 2026-11-01: Retain unlit fallback closure without unknown-payload loss authority
 

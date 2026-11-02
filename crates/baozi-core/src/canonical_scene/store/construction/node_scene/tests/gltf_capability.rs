@@ -62,7 +62,7 @@ use super::{
 };
 
 pub(in crate::canonical_scene::store) const GLTF_SOURCE_VECTOR_SCHEMA_ID: &str =
-    "baozi.selected-gltf-shape-capability-source.v2";
+    "baozi.selected-gltf-shape-capability-source.v1";
 
 const IMAGE_PNG: [u8; 12] = [
     0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, b'b', b'z', b'0', b'1',
@@ -3669,7 +3669,7 @@ fn gltf_shape_materializes_all_five_canonical_domains() {
     );
 
     let (full, bounded) = capture_gltf_capability_snapshots_for_probe(&parts);
-    assert_eq!(full.schema_revision, 8);
+    assert_eq!(full.schema_revision, 1);
     assert_eq!(bounded.digest, full.digest);
     assert_eq!(bounded.totals, full.totals);
     assert!(bounded.preview.bytes_truncated || bounded.preview.items_truncated);

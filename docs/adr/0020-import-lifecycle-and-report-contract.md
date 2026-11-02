@@ -1,7 +1,7 @@
 ---
 status: superseded
 date: 2026-07-09
-updated: 2026-08-19
+updated: 2026-11-02
 authors:
   - Codex
 decision_type: architecture
@@ -217,11 +217,12 @@ Bootstrap checked-converts both counts, builds
 the complete key, snapshot, alignment, and per-cell padding. The resulting complete layout is an
 aggregate shape/overflow preflight, not a promise of one allocator backing or a stable ABI. The fixed
 header owner and one or more keyed-evidence backings may be separate allocations; every actual
-allocation has its own policy-governed `CapacityPlan` and layout/capacity charge. A separate source
-evidence anchor pairs the concrete-store and capacity-policy revisions. Before the first
-allocator call, bootstrap checked-sums every requested envelope and block count, admits the complete
-attribution aggregate in one ledger transition, and then admits the complete physical aggregate in
-one account transition through the private guard described above. A future single-backing
+allocation has its own policy-governed `CapacityPlan` and layout/capacity charge. Capacity qualification
+evidence identifies the exact executed source closure, capacity-policy revision, rustc/libstd,
+target, build profile and allocator/runtime. Before the first allocator call, bootstrap checked-sums
+every requested envelope and block count, admits the complete attribution aggregate in one ledger
+transition, and then admits the complete physical aggregate in one account transition through the
+private guard described above. A future single-backing
 implementation must preserve the same observable admission, rollback, evidence, query, and failure
 contract without merging the two locks or accounting snapshots.
 
@@ -1008,6 +1009,16 @@ Negative:
 | Crate ownership | Dependency and public-API checks find no backend type or executable backend object in public outcomes/stable schemas, no `baozi-operation` upward dependency, no postprocess-to-import edge, and no reversed core dependency. |
 
 ## Amendment History
+
+### 2026-11-02: Remove the unused capacity qualification anchor
+
+U12 removes `CONCRETE_STORE_CAPACITY_REVISION`, `CapacityQualificationSubject` and their self-only
+tuple test, and rebases the owned capacity policy from revision 2 to draft revision 1. The tuple
+had no live qualification consumer. Qualification claims identify actual source/build-qualified
+probe evidence as described above. Per-allocation plans, full charges, both complete aggregate
+admissions and storage-before-owner cleanup retain their existing contracts. This supersedes only
+the anchor requirement in the 2026-07-19 amendment; that historical record and this ADR's superseded
+status remain intact. No replacement attestation framework is introduced.
 
 ### 2026-08-05: Bootstrap one import session owner and activate canonical storage later
 

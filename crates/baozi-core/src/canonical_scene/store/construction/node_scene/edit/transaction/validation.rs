@@ -301,3 +301,389 @@ impl SceneEditFailureEvidence {
         valid && counts.is_some_and(|counts| self.scene_counts().validate_failure(session, counts))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use baozi_operation::__retained_store_integration::activation::{
+        CanonicalActivationOutcome, CanonicalActivationSeal, CanonicalCentralValidationOutcome,
+        CanonicalFreezePermitIssue, CanonicalValidationProgress, FailureEvidenceOutcome,
+        RootedFailureValidation,
+    };
+    use baozi_operation::__retained_store_integration::authority::{
+        PreparedStoreFailureOutcome, PreparedStoreSuccessOutcome,
+    };
+    use baozi_operation::OperationControl;
+
+    use crate::SceneValidationLimits;
+    use crate::canonical_scene::store::construction::node_scene::edit::tests::{
+        build_single_trs_scene, try_build_single_trs_scene,
+    };
+    use crate::canonical_scene::store::construction::node_scene::materialization::node_scene_activation_roles;
+    use crate::canonical_scene::store::construction::node_scene::snapshot::NodeSceneSnapshotLimits;
+    use crate::canonical_scene::store::construction::node_scene::tests::{
+        test_account, test_factory, test_limits,
+    };
+    use crate::canonical_scene::store::construction::{
+        STORE_DIMENSION, SceneConstructionPhase, SceneConstructionUnit, SceneFailureEvidenceWork,
+        SceneStoreOperation, final_progress, try_plan_scene_operation,
+    };
+    use crate::space_conversion::TargetSpace;
+
+    use super::super::{
+        SceneEditBootstrap, consume_scene_edit_freeze_permit, resolve_scene_space_conversion,
+    };
+    use super::*;
+
+    #[test]
+    fn changed_root_revisions_gate_scene_publication_and_preserve_input() {
+        let factory = test_factory();
+        let account = test_account(&factory, 1_024);
+        // Source and destination must reserve from the same production lineage.
+        let source =
+            try_build_single_trs_scene(&account, crate::identity::SceneGenerationId::reserve)
+                .expect("single-node edit fixture must publish success");
+        let scene = crate::ValidatedScene::from_node_scene(source.scene);
+        let limits = NodeSceneSnapshotLimits::try_new(0, 0, 100_000).unwrap();
+        let before = scene
+            .as_node_scene()
+            .capture_snapshot(limits, None)
+            .unwrap();
+        let generation = scene.generation();
+        let retained = account.snapshot();
+
+        for revision in [1, 0, 4, u32::MAX] {
+            let (writer, failure, admission) = SceneEditBootstrap::try_new().unwrap().into_parts();
+            let start = try_plan_scene_operation(
+                test_limits(),
+                OperationControl::default(),
+                256,
+                SceneFailureEvidenceWork {
+                    max_evidence_members: SceneEditBootstrap::success_evidence_members(),
+                    construction_work_limit: SceneEditBootstrap::failure_field_work(),
+                    validation_work_limit: SceneEditBootstrap::failure_field_work(),
+                },
+            )
+            .unwrap();
+            let operation = SceneStoreOperation::try_start_derived(
+                start.control,
+                start.ledger_plan,
+                &scene.as_node_scene().canonical,
+                start.start_plan,
+            )
+            .unwrap();
+            let owner = operation
+                .into_session_outcome_owner(
+                    node_scene_activation_roles(start.keys).session_policy(),
+                    writer,
+                    failure,
+                )
+                .unwrap();
+            let resolved = resolve_scene_space_conversion(
+                &scene,
+                TargetSpace::STANDARD,
+                Some(TargetSpace::STANDARD),
+            )
+            .unwrap();
+            assert!(!resolved.is_unchanged());
+            let mut transaction =
+                admission.into_space_transaction(resolved, SceneValidationLimits::default());
+            let activated = owner
+                .plan_and_activate_scoped(|mut planning| {
+                    let mut semantic = planning.begin_semantic_work().unwrap();
+                    let sealed = transaction.preflight(&mut semantic).unwrap();
+                    let completion = semantic.finish_exact().unwrap();
+                    match planning.seal_activation(sealed, completion) {
+                        CanonicalActivationSeal::Sealed(permit) => {
+                            permit.activate(|lane, plan| plan.materialize(lane))
+                        }
+                        CanonicalActivationSeal::Unsealed(failure) => failure.finish(),
+                    }
+                })
+                .unwrap();
+            let postflight = transaction.finish();
+            let CanonicalActivationOutcome::Activated(activated) = activated else {
+                panic!("revision {revision}: valid space edit must materialize")
+            };
+            let central = activated
+                .validate_centrally(
+                    CanonicalValidationProgress::new(
+                        SceneConstructionPhase::Validation,
+                        SceneConstructionUnit::WorkUnits,
+                    ),
+                    |lane, output| {
+                        if revision == 1 {
+                            return postflight.build_evidence(lane, output);
+                        }
+                        // Copy only this fixture's current root shape, changing its revision cell.
+                        let recipe = postflight.candidate_evidence(output);
+                        let counts = lane
+                            .try_retain_records(
+                                recipe.counts.record_plan(),
+                                NodeSceneOutcomeEvidenceSchema,
+                                |writer| writer.write_row(|row| recipe.counts.write_row(row)),
+                            )
+                            .unwrap();
+                        let root = lane
+                            .try_retain_records(
+                                postflight.failure_evidence().root_record_plan(),
+                                SceneEditEvidenceTag,
+                                |writer| {
+                                    writer.write_row(|row| {
+                                        row.write_scalar(revision)?;
+                                        row.write_scalar(schema::OUTCOME_CHANGED)?;
+                                        row.write_scalar(schema::OPERATION_SEMANTIC_VERSION)?;
+                                        for word in recipe.facts.words {
+                                            row.write_scalar(word)?;
+                                        }
+                                        for word in recipe.facts.digest {
+                                            row.write_scalar(word)?;
+                                        }
+                                        for unit in recipe.facts.units {
+                                            row.write_scalar(unit)?;
+                                        }
+                                        row.write_record_ref(counts)?;
+                                        row.write_scalar(0_u8)?;
+                                        row.write_scalar(0_u8)
+                                    })
+                                },
+                            )
+                            .unwrap();
+                        lane.complete(root)
+                    },
+                    |planning, output| postflight.validate_candidate(planning, output),
+                )
+                .unwrap();
+            match central {
+                CanonicalCentralValidationOutcome::Candidate(candidate) => {
+                    assert_eq!(revision, 1);
+                    let CanonicalFreezePermitIssue::Ready(permit) =
+                        candidate.try_issue_freeze_permit(final_progress()).unwrap()
+                    else {
+                        panic!("v1 changed root must reach publication")
+                    };
+                    let published = consume_scene_edit_freeze_permit(
+                        permit,
+                        |_| panic!("v1 generation admission"),
+                        |token, joint, seal| {
+                            let PreparedStoreSuccessOutcome::Success(store) =
+                                joint.prepare(seal).unwrap()
+                            else {
+                                panic!("v1 changed root must publish successfully")
+                            };
+                            token.handoff(store).unwrap().into_parts()
+                        },
+                    )
+                    .unwrap();
+                    assert_ne!(published.0.generation(), generation);
+                    let snapshot = published
+                        .0
+                        .as_node_scene()
+                        .capture_snapshot(limits, None)
+                        .unwrap();
+                    assert_eq!(snapshot.schema_revision, 1);
+                    assert_ne!(snapshot.digest, before.digest);
+                    drop(published);
+                }
+                CanonicalCentralValidationOutcome::Rejected(rejected) => {
+                    assert_ne!(revision, 1);
+                    let (prepared, _) = rejected.prepare_minimal_fallback().unwrap().into_parts();
+                    let published = prepared.handoff();
+                    assert_eq!(
+                        published
+                            .ledger_evidence
+                            .dimension_by_semantic(STORE_DIMENSION)
+                            .unwrap()
+                            .committed_canonical_output(),
+                        0
+                    );
+                    drop(published);
+                }
+                _ => panic!("revision {revision}: expected a semantic revision decision"),
+            }
+            assert_eq!(scene.generation(), generation);
+            assert_eq!(
+                scene
+                    .as_node_scene()
+                    .capture_snapshot(limits, None)
+                    .unwrap()
+                    .digest,
+                before.digest
+            );
+            assert_eq!(
+                account.snapshot().live_retained_bytes(),
+                retained.live_retained_bytes()
+            );
+            assert_eq!(
+                account.snapshot().live_retained_allocations(),
+                retained.live_retained_allocations()
+            );
+            assert!(!account.snapshot().poisoned());
+        }
+        drop(scene);
+        drop(source.report);
+        assert_eq!(account.snapshot().live_retained_bytes(), 0);
+        assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    }
+
+    #[test]
+    fn failed_root_revisions_gate_rich_failure_and_preserve_input() {
+        let factory = test_factory();
+        let account = test_account(&factory, 1_024);
+        let generation_source = AtomicU64::new(0);
+        let source = build_single_trs_scene(&account, &generation_source);
+        let scene = crate::ValidatedScene::from_node_scene(source.scene);
+        let limits = NodeSceneSnapshotLimits::try_new(0, 0, 100_000).unwrap();
+        let before = scene
+            .as_node_scene()
+            .capture_snapshot(limits, None)
+            .unwrap();
+        let generation = scene.generation();
+        let retained = account.snapshot();
+
+        for revision in [1, 0, 4, u32::MAX] {
+            let (writer, failure, admission) = SceneEditBootstrap::try_new().unwrap().into_parts();
+            let evidence = admission.failure_evidence();
+            let start = try_plan_scene_operation(
+                test_limits(),
+                OperationControl::default(),
+                256,
+                SceneFailureEvidenceWork {
+                    max_evidence_members: SceneEditBootstrap::success_evidence_members(),
+                    construction_work_limit: SceneEditBootstrap::failure_field_work(),
+                    validation_work_limit: SceneEditBootstrap::failure_field_work(),
+                },
+            )
+            .unwrap();
+            let operation = SceneStoreOperation::try_start_derived(
+                start.control,
+                start.ledger_plan,
+                &scene.as_node_scene().canonical,
+                start.start_plan,
+            )
+            .unwrap();
+            let owner = operation
+                .into_session_outcome_owner(
+                    node_scene_activation_roles(start.keys).session_policy(),
+                    writer,
+                    failure,
+                )
+                .unwrap();
+            let rejected = owner
+                .reject_without_activation::<(), (), RecordBlock, SceneDirectorySchema>(
+                    (),
+                    0x5531_3201,
+                )
+                .unwrap();
+            let CanonicalActivationOutcome::NeverActivated(rejected) = rejected else {
+                panic!("fixed preflight rejection must not activate canonical storage")
+            };
+            let rooted = rejected
+                .build_failure_evidence(|lane| {
+                    let counts = lane
+                        .try_retain_records(
+                            evidence.scene_counts().record_plan(),
+                            NodeSceneOutcomeEvidenceSchema,
+                            |writer| writer.write_row(|row| evidence.scene_counts().write_row(row)),
+                        )
+                        .unwrap();
+                    let root = lane
+                        .try_retain_records(
+                            evidence.root_record_plan(),
+                            SceneEditEvidenceTag,
+                            |writer| {
+                                writer.write_row(|row| {
+                                    if revision == 1 {
+                                        return evidence.write_root_row(row, counts);
+                                    }
+                                    row.write_scalar(revision)?;
+                                    row.write_scalar(schema::OUTCOME_FAILED)?;
+                                    row.write_scalar(schema::OPERATION_SEMANTIC_VERSION)?;
+                                    for _ in schema::field::OPERATION_KIND
+                                        ..schema::field::OPTIONS_DIGEST_FIRST
+                                    {
+                                        row.write_scalar(0_u32)?;
+                                    }
+                                    for _ in schema::field::OPTIONS_DIGEST_FIRST
+                                        ..schema::field::SCENE_COUNTS
+                                    {
+                                        row.write_scalar(0_u64)?;
+                                    }
+                                    row.write_record_ref(counts)?;
+                                    row.write_scalar(0_u8)?;
+                                    row.write_scalar(0_u8)
+                                })
+                            },
+                        )
+                        .unwrap();
+                    lane.complete(root)
+                })
+                .unwrap();
+            let FailureEvidenceOutcome::Rooted(rooted) = rooted else {
+                panic!("revision {revision}: complete two-member failure graph")
+            };
+            assert_eq!(rooted.outcome_evidence_len(), 2);
+            let validation = rooted
+                .validate_rich_failure(|session, root| evidence.validate_failure(session, root))
+                .unwrap();
+            match validation {
+                RootedFailureValidation::Valid(validated) => {
+                    assert_eq!(revision, 1);
+                    let (prepared, _) = validated
+                        .try_prepare(final_progress())
+                        .unwrap()
+                        .into_parts();
+                    let PreparedStoreFailureOutcome::RichFailure(prepared) = prepared else {
+                        panic!("v1 failure root must preserve rich evidence")
+                    };
+                    let published = prepared.handoff();
+                    let evidence = published.outcome_evidence.outcome_evidence();
+                    let root = evidence.root();
+                    assert_eq!((root.rows(), root.fields()), (1, 25));
+                    assert_eq!(root.scalar::<u32>(0, schema::field::REVISION), Some(1));
+                    assert_eq!(
+                        published
+                            .ledger_evidence
+                            .dimension_by_semantic(STORE_DIMENSION)
+                            .unwrap()
+                            .committed_canonical_output(),
+                        0
+                    );
+                    drop(published);
+                }
+                RootedFailureValidation::Rejected(rejected) => {
+                    assert_ne!(revision, 1);
+                    let (prepared, _) = rejected.prepare_minimal_fallback().unwrap().into_parts();
+                    drop(prepared.handoff());
+                }
+                RootedFailureValidation::Fallback(_) => {
+                    panic!("revision {revision}: expected a semantic revision decision")
+                }
+            }
+            assert_eq!(scene.generation(), generation);
+            assert_eq!(
+                scene
+                    .as_node_scene()
+                    .capture_snapshot(limits, None)
+                    .unwrap()
+                    .digest,
+                before.digest
+            );
+            assert_eq!(generation_source.load(Ordering::Relaxed), 1);
+            assert_eq!(
+                account.snapshot().live_retained_bytes(),
+                retained.live_retained_bytes()
+            );
+            assert_eq!(
+                account.snapshot().live_retained_allocations(),
+                retained.live_retained_allocations()
+            );
+            assert!(!account.snapshot().poisoned());
+        }
+        drop(scene);
+        drop(source.report);
+        assert_eq!(account.snapshot().live_retained_bytes(), 0);
+        assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    }
+}

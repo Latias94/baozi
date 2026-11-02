@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use baozi_operation::{CanonicalStoreRef, RecordBlock};
 
-pub(super) const SCENE_SCHEMA_REVISION: u32 = 8;
+pub(super) const SCENE_SCHEMA_REVISION: u32 = 1;
 /// The directory is the only record-store block in a fresh Scene; typed owners are separate.
 pub(super) const SCENE_DIRECTORY_BLOCK_COUNT: u32 = 1;
 pub(super) const SCENE_DIRECTORY_FIELD_COUNT: usize = 7;

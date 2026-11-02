@@ -21,7 +21,8 @@ use crate::entity::{
     AuthoredTransform, CameraProjection, LightDefinition, LightEmission, LightKind,
 };
 use crate::identity::{
-    NodeId, SceneEntityKind, SceneGenerationError, SceneGenerationId, SceneLookupError,
+    NodeId, ReservedSceneGeneration, SceneEntityKind, SceneGenerationError, SceneGenerationId,
+    SceneLookupError,
 };
 use crate::math::{Color, Mat4, Quat, Vec3};
 use crate::provenance::{DIGEST_LEN, OptionsDigest};
@@ -57,13 +58,15 @@ pub(super) fn build_single_trs_scene(
     account: &PhysicalStorageAccount,
     generation_source: &AtomicU64,
 ) -> NodeSceneSuccessParts {
-    try_build_single_trs_scene(account, generation_source)
-        .expect("single-node edit fixture must publish success")
+    try_build_single_trs_scene(account, || {
+        SceneGenerationId::reserve_from(generation_source)
+    })
+    .expect("single-node edit fixture must publish success")
 }
 
-fn try_build_single_trs_scene(
+pub(super) fn try_build_single_trs_scene(
     account: &PhysicalStorageAccount,
-    generation_source: &AtomicU64,
+    reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
 ) -> Option<NodeSceneSuccessParts> {
     let spatial = SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]);
     let nodes = single_trs_batch();
@@ -98,9 +101,7 @@ fn try_build_single_trs_scene(
     .finish_draft()
     .ok()?;
     let terminal = build
-        .publish_with_generation_source_for_test(|| {
-            SceneGenerationId::reserve_from(generation_source)
-        })
+        .publish_with_generation_source_for_test(reserve_generation)
         .ok()?;
     match terminal {
         super::super::NodeSceneConstructionTerminal::Success(parts) => Some(parts),
@@ -1590,7 +1591,9 @@ fn post_materialization_product_graph_rejection_preserves_rich_failure_evidence(
     for max_live_allocations in 1..=128 {
         let account = test_account(&factory, max_live_allocations);
         let generation_source = AtomicU64::new(0);
-        let Some(parts) = try_build_single_trs_scene(&account, &generation_source) else {
+        let Some(parts) = try_build_single_trs_scene(&account, || {
+            SceneGenerationId::reserve_from(&generation_source)
+        }) else {
             assert_eq!(account.snapshot().live_retained_bytes(), 0);
             assert_eq!(account.snapshot().live_retained_allocations(), 0);
             drop(account);

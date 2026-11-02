@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-08
-updated: 2026-11-01
+updated: 2026-11-02
 authors:
   - Codex
 decision_type: architecture
@@ -79,10 +79,12 @@ This one-time reset is not permission to bypass review, evidence, or crate owner
 | Canonical model | invariant-bearing scene types and read-only typed views from `baozi-core` | may break only through an accepted semantic ADR and atomic cutover | validation, snapshot, format, and public workflow evidence | SemVer for fields/types marked stable |
 | Extension | custom importer, IO, option codec, and postprocess contracts in owning crates | experimental; may break without compatibility adapters | multiple real implementations, object-safety/API review, and examples | SemVer only after explicit promotion |
 | Internal/backend | parser ASTs, conversion scratch data, ledgers, builders, proofs, registries, and backend helpers | no compatibility promise | not eligible; expose a narrower owned contract instead | no promise even when its crate is published |
-| Test support | differs, fixtures, fuzz helpers, and snapshot internals | workspace-private by default | separate publication and stability decision | no promise unless explicitly published |
+| Test support | differs, fixtures, and fuzz helpers | workspace-private by default | separate publication and stability decision | no promise unless explicitly published |
 
 An item is not promoted merely because Rust requires it to be `pub` across workspace crate
 boundaries. Stability is an explicit documented property, not a visibility inference.
+`baozi-core` owns the single canonical Scene snapshot encoder consumed through `ValidatedScene`;
+the Test support tier grants no encoder ownership to `baozi-test-support`.
 The unconditional hidden `baozi_core::__scene_integration` namespace remains Internal/backend:
 nameability grants no proof constructor or publication authority, and Cargo features do not
 enforce friend visibility. The standalone `baozi-native-io-candidate` package remains unpublished;
@@ -455,6 +457,18 @@ Transient pass/fail counts, current symbol gaps, and work-unit completion belong
 records. They must not change this ADR's accepted decision status.
 
 ## Amendment History
+
+### 2026-11-02: Rebase the owned unpublished revision families to draft v1
+
+- U12 in the [pre-release evolution plan](../plans/2026-11-02-0923-refactor-pre-release-evolution-plan.md#u12-rebase-canonical-v1-and-remove-proven-obsolete-paths)
+  resets only KTD3's eight owned families, retaining their current semantics and one implementation
+  per family. The observed directory and snapshot revisions are both 8 before the reset to 1.
+- These families remain Draft under [ADR 0026](0026-validation-snapshot-and-fuzz-gates.md#snapshot-schema-lifecycle).
+  Persisted draft evidence binds the exact source closure and vector set as well as domain,
+  revision and algorithm. Prior revision-qualified evidence keeps its original source identity.
+- Cargo packages remain `0.1.0`. This cutover establishes neither a compatibility freeze nor
+  publication authorization. External versions, field/tag IDs and freshness counters retain their
+  existing meanings.
 
 ### 2026-11-01: Retire the placeholder after a usable replacement
 

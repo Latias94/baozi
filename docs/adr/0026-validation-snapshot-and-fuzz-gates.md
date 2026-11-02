@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-08-04
+updated: 2026-11-02
 authors:
   - Codex
 decision_type: testing
@@ -313,10 +313,28 @@ Negative:
 ## Implementation Evidence
 
 Implementation and verification status change over time. Consult the canonical architecture plan,
-test-support snapshot implementation, format/facade test suites, fuzz workspace, and engineering
-verification records. Those artifacts demonstrate progress without changing this accepted decision.
+the single [core-owned Scene encoder](../../crates/baozi-core/src/canonical_scene/store/construction/node_scene/snapshot.rs)
+consumed through `ValidatedScene`, its [independent vector tests](../../crates/baozi-core/src/canonical_scene/store/construction/node_scene/snapshot/tests.rs),
+format/facade test suites, fuzz workspace and engineering verification records. Those artifacts
+demonstrate progress without changing this accepted decision.
 
 ## Amendment History
+
+### 2026-11-02: Rebase the current owned draft families to revision 1
+
+U12 in the [pre-release evolution plan](../plans/2026-11-02-0923-refactor-pre-release-evolution-plan.md#u12-rebase-canonical-v1-and-remove-proven-obsolete-paths)
+rebases the current Scene directory and snapshot from observed revision 8 to draft revision 1.
+The snapshot retains domain `baozi.canonical-scene.snapshot`, algorithm `sha256`, its complete
+current traversal and the single core encoder through `ValidatedScene`. The same bounded cutover
+rebases edit root 4, source-scope v3, projection instruction v2, normal-options v2, capacity policy 2
+and the owned glTF source-vector v2 to draft 1. Already-v1 families remain distinct.
+
+The existing Draft/Frozen rule remains authoritative. Expected transcripts and hashes must be
+independently authored; production output supplies only the actual side. Persisted draft evidence
+binds the exact source-closure digest (or commit when the closure is exactly tracked source) and
+vector-set digest alongside domain, revision and algorithm. Prior numeric claims and evidence keep
+their original source binding. This amendment records the current contract, not an executed pass or
+a compatibility freeze; no second encoder or migration reader is retained.
 
 ### 2026-08-04: Define the snapshot compatibility freeze boundary
 

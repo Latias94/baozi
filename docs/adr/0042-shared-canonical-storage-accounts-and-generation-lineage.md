@@ -1,7 +1,7 @@
 ---
 status: superseded
 date: 2026-07-16
-updated: 2026-07-27
+updated: 2026-11-02
 authors:
   - Codex
 decision_type: architecture
@@ -416,9 +416,9 @@ order and never re-enters startup cleanup or reopens the ledger.
 #### Capacity Envelope Contract
 
 Every fallible backing allocation has a store-created `CapacityPlan` governed by the current
-capacity-policy revision. Separately, a crate-private non-semantic evidence anchor pairs the exact
-concrete-store revision with that policy revision. The sealed typed constructor fixes the physical
-block variant independently.
+capacity-policy revision. Qualification evidence identifies the exact executed source closure and
+policy revision with the actual toolchain, target, build profile and allocator/runtime. The sealed
+typed constructor fixes the physical block variant independently.
 
 A base `CapacityPlan` describes one allocator call and requests only the additional capacity needed
 to reach that plan's own `desired`. A fixed immutable backing sets `desired` to its logical minimum;
@@ -451,16 +451,16 @@ replacement fixture ending at logical length `N > 0`, the policy admits at most
 Checked byte counters and `N`/`2N`/`4N` scale fixtures enforce the same linear movement bound. This
 gate covers candidate append/swap movement; it does not claim control over allocator-internal copying.
 
-The charged retained footprint therefore combines checked Baozi-requested fixed layouts with subject-
-bound capacity envelopes and observed-within-envelope backing capacities. The account calls these
+The charged retained footprint therefore combines checked Baozi-requested fixed layouts with policy-
+governed capacity envelopes and observed-within-envelope backing capacities. The account calls these
 charged retained bytes and blocks, not exact allocator footprint or RSS: allocator-private headers,
 size classes, metadata, hidden overgrant, fragmentation, and page retention are excluded because they
 are not portably observable. `CapacityPlan` is not a platform-attestation token: a Rust library cannot
 prove which `#[global_allocator]` the final root binary selected, and a caller-supplied qualification
-token would be forgeable. Strict conformance therefore requires repository-managed external evidence
-that binds the exact store/policy anchor to rustc commit/libstd hash, native target/build profile, and an
-allocator/runtime fingerprint from a probe binary that explicitly selects its allocator. Unknown or
-custom allocator paths remain `Unverified`; an observed over-envelope result is
+token would be forgeable. Strict conformance therefore requires repository-managed probe evidence
+identifying the exact executed source closure, capacity-policy revision, rustc commit/libstd hash,
+native target/build profile and allocator/runtime fingerprint from a binary that explicitly selects
+its allocator. Unknown or custom allocator paths remain `Unverified`; an observed over-envelope result is
 `CapacityEnvelopeViolated`. Neither state is a semantic Scene value. A host that requires a hard
 process-memory boundary must additionally run the operation under an OS/subprocess memory limit.
 Generation logical footprint remains schema-owned and is computed from semantic presence, lengths,
@@ -1090,10 +1090,9 @@ Negative:
   header is rebuilt even when a sealed scalar/bytes/UTF-8 leaf, including geometry index scalar
   payload, is shared;
 - conservative capacity-envelope charges may exceed the allocator's observed capacity;
-- strict capacity conformance requires repository-managed build/allocator evidence bound to the
-  concrete-store/capacity-policy evidence anchor, and a hard process-memory bound additionally
-  requires an OS/subprocess
-  limit;
+- strict capacity conformance requires repository-managed probe evidence identifying the exact
+  executed source closure, capacity-policy revision and actual toolchain/target/profile/allocator,
+  and a hard process-memory bound additionally requires an OS/subprocess limit;
 - later preparation failure or failed prepared success after reservation may burn invisible
   generation nonce gaps;
 - all canonical storage and published evidence aggregates must carry account lineage; and
@@ -1169,7 +1168,7 @@ Negative:
 | Semantic digest authority | checked-in independent explicit semantic transcripts and per-field mutation vectors cover the first canonical families; layout changes are supplemental and never the sole oracle | hand-authored expected vectors plus block/slot/capacity/padding/share permutation fixtures |
 | Facade boundedness | common facade imports use one runtime-held bounded factory and one private account per import without exposing physical types | default/custom profile, repeated-import, lifetime, and API-shape tests |
 | Shareable-kind closure | only sealed scalar-sequence, bytes, and UTF-8 leaves, including geometry index scalar payload, inherit physical backing; every record/directory/reference/header/generation-local lookup-index structure is rebuilt | positive leaf inheritance plus negative `RecordBlock`/structural-kind compile-fail and runtime probes |
-| Capacity threat boundary | runtime plans are governed by the capacity-policy revision and enforce request/observed envelopes; a separate source anchor pairs that policy with the concrete-store revision for repository-managed rustc/libstd/target/profile/allocator evidence, while unknown/custom paths remain `Unverified`; over-envelope postcheck prevents publication but makes no transient-RSS claim | source-anchor drift, explicit allocator probe, custom/unknown classification, overgrant drop, and subprocess-limit fixtures |
+| Capacity threat boundary | runtime plans are governed by the capacity-policy revision and enforce request/observed envelopes; repository-managed probe evidence identifies the exact executed source closure, policy revision and actual rustc/libstd/target/profile/allocator, while unknown/custom paths remain `Unverified`; over-envelope postcheck prevents publication but makes no transient-RSS claim | exact source/build-qualified allocator probe, custom/unknown classification, overgrant drop, and subprocess-limit fixtures |
 | U4c falsification | the frozen spec proves `0/0` hot-leaf copy/allocation, `0/0` hot-view allocation/decode, fixed `<= 8` logical lookup events plus constant `<= 1` actual member-directory probe at `N/2N/4N`, zero tracer-proven schema-only allocations, producer-event bounds, exact captured repository/toolchain/Cargo-output closure under the declared stage-0 premise, and a sealed no-bypass collector | pinned xtask, allocator/account tracer, exact logical/probe taxonomy, private-capability and AST/source gates, independently frozen transcripts/digests/mutations, closure manifest, strict build JSON plus `OUT_DIR` capture, and toolchain/build/allocator identity |
 | Fallback representation | sealed key-bearing dimension/phase cells plus a complete global-evidence header; checked semantic aggregate layout, independent actual-allocation `CapacityPlan`s, and ledger-first/physical-second complete aggregate admission before retained payload/evidence allocator entry | key normalization/catalog lifetime/post-plugin-unload query, brand-exclusion vectors, full-cell/header layout and global-field tests, actual-backing plan plus aggregate-envelope/block overflow probes, no nested locks, no shared linearization point, no hardcoded ABI, and no single-backing assumption; small account-bound owner after bootstrap and by-value `SessionStartError` before it |
 
@@ -1231,8 +1230,8 @@ Negative:
   partial backing is destroyed before one-lock full-ledger rollback and a fixed start error returns
   with zero physical entry/charge, retained payload/evidence allocator entry, or accepted operation.
   Typed no-mutation physical rejection applies the same cleanup ordering to the complete graph.
-- Every backing allocation uses a `CapacityPlan` governed by the exact capacity-policy revision, and
-  the separate evidence anchor matches that policy to the concrete-store revision. A fixed plan's
+- Every backing allocation uses a `CapacityPlan` governed by the exact capacity-policy revision.
+  Qualification evidence identifies the exact executed source closure and actual build. A fixed plan's
   `desired` is its logical minimum. `GrowableCapacityPlan` and `ReplacementCapacityPlan` preserve
   that requirement and place the geometric target in the allocator/candidate plan's `desired`; each
   base plan requests only its own desired additional capacity. The complete allocator-facing
@@ -1244,7 +1243,8 @@ Negative:
   `CapacityEnvelopeViolated`, and fail that path's conformance, but tests and docs do not claim the
   postcheck prevented transient RSS overgrant. Allocator metadata, size classes, hidden overgrant,
   fragmentation, and page retention are excluded from physical-account bytes. Strict conformance
-  requires separate repository-managed rustc/libstd/target/profile/allocator probe evidence; custom/
+  requires separate repository-managed probe evidence for that source closure, capacity-policy
+  revision and actual rustc/libstd/target/profile/allocator; custom/
   unknown paths remain `Unverified`, and a hard process-memory claim requires an OS/subprocess limit.
 - Monotonic single-element non-ZST replacement fixtures ending at `N`, `2N`, and `4N` record every
   successful candidate and every moved source element/byte. From empty, the count is at most
@@ -1397,6 +1397,18 @@ Negative:
   migrated in the canonical Scene cutover before the legacy reservation-transfer path is deleted.
 
 ## Amendment History
+
+### 2026-11-02: Remove the unused capacity qualification tuple
+
+U12 removes `CONCRETE_STORE_CAPACITY_REVISION`, `CapacityQualificationSubject` and their self-only
+tuple test, and rebases the owned capacity policy from revision 2 to draft revision 1. No live
+qualification consumer used the tuple. Qualification claims identify the exact executed source
+closure, policy revision and actual rustc/libstd, target, build profile, allocator/runtime and probe
+evidence. This supersedes the anchor requirements recorded in the 2026-07-18, 2026-07-19 and
+2026-07-20 amendments; their original source/evidence claims remain historical. Envelope mechanics,
+full charge lifetime and storage-before-owner cleanup retain their contracts. Unknown/custom paths
+remain `Unverified`, and hard process memory still requires an OS/subprocess limit. This removal
+introduces no attestation framework and leaves this ADR's superseded status intact.
 
 ### 2026-07-26: Bind U4c to admitted build outputs and an explicit stage-0 boundary
 

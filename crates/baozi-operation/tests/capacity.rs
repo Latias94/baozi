@@ -1,6 +1,5 @@
 use baozi_operation::{
-    CAPACITY_POLICY_REVISION, CapacityPlan, CapacityPlanError, GrowableCapacityPlan,
-    ReplacementCapacityPlan,
+    CapacityPlan, CapacityPlanError, GrowableCapacityPlan, ReplacementCapacityPlan,
 };
 
 #[test]
@@ -139,7 +138,7 @@ fn plan_rejects_stale_overflow_and_envelope_violation() {
     assert!(matches!(
         plan.finish(0, 5),
         Err(CapacityPlanError::CapacityEnvelopeViolated {
-            policy_revision: CAPACITY_POLICY_REVISION,
+            policy_revision: 1,
             desired_capacity: 3,
             envelope_capacity: 4,
             actual_capacity: 5,

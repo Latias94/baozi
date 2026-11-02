@@ -1531,6 +1531,8 @@ where
         &mut lane,
         plans.directory,
         plans,
+        #[cfg(test)]
+        faults.directory_revision,
     ));
     let draft = NodeSceneDraft { brand, directory };
     let output = NodeSceneActivationOutput {
@@ -1677,7 +1679,12 @@ where
         |lane, _output| match lane.try_retain_records(
             candidate_evidence.record_plan(),
             NodeSceneOutcomeEvidenceSchema,
-            |writer| writer.write_row(|row| candidate_evidence.write_row(row)),
+            |writer| {
+                writer.write_row(|row| {
+                    row.write_scalar(faults.evidence_revision.unwrap_or(SCENE_SCHEMA_REVISION))?;
+                    write_node_scene_evidence_counts(row, central_counts)
+                })
+            },
         ) {
             Ok(evidence) => lane.complete(evidence),
             Err(_) => lane.abort(),
@@ -1747,6 +1754,13 @@ pub(super) fn write_node_scene_evidence_row(
     counts: SceneEvidenceCounts,
 ) -> Result<(), StoreBuildError> {
     row.write_scalar(SCENE_SCHEMA_REVISION)?;
+    write_node_scene_evidence_counts(row, counts)
+}
+
+fn write_node_scene_evidence_counts(
+    row: &mut OutcomeEvidenceRecordRowWriter<'_>,
+    counts: SceneEvidenceCounts,
+) -> Result<(), StoreBuildError> {
     row.write_scalar(NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE)?;
     row.write_scalar(counts.canonical_block_count)?;
     row.write_scalar(counts.node_count)?;
@@ -1786,15 +1800,19 @@ fn retain_node_scene_directory<'lane, O, PP, U, L>(
     lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plan: RecordPlan,
     plans: &NodeSceneMaterializationPlans,
+    #[cfg(test)] revision_override: Option<u32>,
 ) -> Result<CanonicalBlockRef<SceneDirectorySchema>, StoreRuntimeError>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    let revision = SCENE_SCHEMA_REVISION;
+    #[cfg(test)]
+    let revision = revision_override.unwrap_or(revision);
     lane.try_retain_records(plan, SceneDirectorySchema, |control| {
         control.write_row(|row| {
-            row.write_scalar(SCENE_SCHEMA_REVISION)?;
+            row.write_scalar(revision)?;
             row.write_scalar(plans.node_count)?;
             row.write_scalar(plans.source_root_count)?;
             row.write_scalar(plans.geometry.logical_mesh_count())?;

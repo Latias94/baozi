@@ -216,10 +216,11 @@ application output is an explicit conversion choice under ADR 0008.
 F64 values count as one semantic cell and one scalar inspection each, with eight canonical payload
 bytes per scalar. Materialization retains typed F64 leaves; validation never lowers them through
 F32. Semantic snapshots identify `scalar=f64` and encode each scalar's full IEEE 754 `to_bits()`
-value as eight little-endian bytes. Preview values use sixteen hexadecimal digits. Geometry and
-snapshot schema revisions remain 3: scalar tag 3 extends the existing discriminated payload union,
-without changing existing tag meanings, table layouts, or the transcripts of scenes without F64
-attributes. A nonzero F64 scalar total is also included in the preview summary.
+value as eight little-endian bytes. Preview values use sixteen hexadecimal digits. At the earlier
+F64 transition, geometry and snapshot schema revisions remained 3: scalar tag 3 extended the existing
+discriminated payload union without changing existing tag meanings, table layouts or the transcripts
+of scenes without F64 attributes. The 2026-11-02 amendment below records the current typed-directory
+and snapshot revisions. A nonzero F64 scalar total is also included in the preview summary.
 
 ### Borrowed List Application Layout
 
@@ -356,3 +357,14 @@ count. Chosen.
   dense/sparse and F64 values, indexed/implicit/empty streams, and source-Vertex-consistent influence
   and morph reads without reader allocations or source mutation. These are acceptance requirements,
   not a record of executed checks.
+
+## Amendment History
+
+### 2026-11-02: Retain F64 semantics in the current draft-v1 encoding
+
+U12 rebases the current typed Scene directory and core-owned snapshot from revision 8 to draft
+revision 1. The earlier F64 transition's revision-3 statement remains historical. Scalar tag 3,
+eight-byte little-endian F64 bit encoding, signed bits and sparse presence semantics are unchanged.
+The current typed owners are the sole implementation. Snapshot consumers use `ValidatedScene` and
+[ADR 0026](0026-validation-snapshot-and-fuzz-gates.md#snapshot-schema-lifecycle)'s exact draft
+source-closure and vector-set identity; historical evidence retains its original source binding.

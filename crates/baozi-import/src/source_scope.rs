@@ -8,7 +8,7 @@ use baozi_io::AssetPath;
 use sha2::{Digest, Sha256};
 use std::fmt;
 
-const SOURCE_SCOPE_DIGEST_DOMAIN: &[u8] = b"baozi.source-scope.v3\0";
+const SOURCE_SCOPE_DIGEST_DOMAIN: &[u8] = b"baozi.source-scope.v1\0";
 const SOURCE_SCOPE_SELECTION_FRAME_TAG: u8 = 0xff;
 
 /// A source-document entity category counted by source-scope evidence.

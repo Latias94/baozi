@@ -7,58 +7,7 @@ use std::mem::size_of;
 /// about the allocator selected by the final binary, its toolchain, or its target. Those facts are
 /// collected by the repository qualification probe and never enter an operation or semantic
 /// digest.
-pub const CAPACITY_POLICY_REVISION: u32 = 2;
-
-/// Identifies the concrete-store capacity/layout contract covered by the repository qualification
-/// probe.
-///
-/// The value is deliberately separate from semantic catalog and terminal-evidence revisions. It
-/// is a crate-internal qualification subject, not a stable wire or Scene identity.
-#[allow(
-    dead_code,
-    reason = "reserved as a non-runtime evidence anchor for the repository qualification module"
-)]
-pub(crate) const CONCRETE_STORE_CAPACITY_REVISION: u32 = 1;
-
-/// Non-semantic subject used to match repository qualification evidence to the implementation.
-///
-/// The fields and constructor remain private so callers cannot mint a different subject and turn
-/// it into a runtime qualification claim. A matching subject still carries no allocator,
-/// toolchain, target, or RSS authority; those are external evidence dimensions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(
-    dead_code,
-    reason = "reserved as a non-runtime evidence anchor for the repository qualification module"
-)]
-pub(crate) struct CapacityQualificationSubject {
-    concrete_store_revision: u32,
-    capacity_policy_revision: u32,
-}
-
-#[allow(
-    dead_code,
-    reason = "reserved as a non-runtime evidence anchor for the repository qualification module"
-)]
-impl CapacityQualificationSubject {
-    pub(crate) const CURRENT: Self = Self {
-        concrete_store_revision: CONCRETE_STORE_CAPACITY_REVISION,
-        capacity_policy_revision: CAPACITY_POLICY_REVISION,
-    };
-
-    pub(crate) const fn concrete_store_revision(self) -> u32 {
-        self.concrete_store_revision
-    }
-
-    pub(crate) const fn capacity_policy_revision(self) -> u32 {
-        self.capacity_policy_revision
-    }
-
-    /// Checks an evidence tuple without accepting it as a runtime capability.
-    pub(crate) const fn matches(self, concrete_store_revision: u32, policy_revision: u32) -> bool {
-        self.concrete_store_revision == concrete_store_revision
-            && self.capacity_policy_revision == policy_revision
-    }
-}
+pub const CAPACITY_POLICY_REVISION: u32 = 1;
 
 /// A checked, allocation-free plan for one `Vec`-compatible capacity change.
 ///
@@ -466,26 +415,7 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    use super::{CapacityPlan, CapacityQualificationSubject};
-
-    #[test]
-    fn qualification_subject_rejects_mismatch_and_unknown_revisions() {
-        // The subject is intentionally not a runtime capability. It only matches exact repository
-        // evidence and rejects both stale and unknown tuples.
-        let current = CapacityQualificationSubject::CURRENT;
-        assert!(current.matches(
-            current.concrete_store_revision(),
-            current.capacity_policy_revision()
-        ));
-        assert!(!current.matches(
-            current.concrete_store_revision() + 1,
-            current.capacity_policy_revision()
-        ));
-        assert!(!current.matches(
-            current.concrete_store_revision(),
-            current.capacity_policy_revision() + 1
-        ));
-    }
+    use super::CapacityPlan;
 
     #[derive(Debug)]
     struct DropProbe {

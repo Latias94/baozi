@@ -1,7 +1,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use baozi_operation::{CancellationToken, PhysicalStorageAccount, StorePreparationFailureClass};
-use sha2::{Digest, Sha256};
 
 use crate::SceneValidationLimits;
 use crate::attribute::{AttributeDomain, AttributeSemantic};
@@ -38,18 +37,78 @@ use super::{
 const OBJ_POSITIONS: [[f32; 3]; 3] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
 const OBJ_TEXCOORDS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.5, 0.5]];
 const OBJ_NORMALS: [[f32; 3]; 2] = [[0.0, 0.0, 1.0], [0.0, 0.0, -1.0]];
-// Frozen revision 4 oracle for this fixture's test-only migration bridge.
-const REVISION_4_OBJ_CAPABILITY_ORACLE_DIGEST: [u8; 32] = [
-    0x45, 0x12, 0x6f, 0x21, 0x0c, 0x1a, 0x56, 0x40, 0x0c, 0x33, 0xc3, 0x50, 0x2e, 0x64, 0xcd, 0xbc,
-    0xd4, 0x0b, 0x56, 0x43, 0x0d, 0x9c, 0x63, 0xb5, 0x8d, 0x6f, 0xc4, 0x86, 0x70, 0x34, 0x19, 0xc2,
-];
-// Independently SHA-256 checked from the fixture's 2,185-byte semantic encoding:
-// revision 8, no global tangent declarations, unchanged OBJ payload and profile owners.
-// The test below independently restores the revision-4 framing and checks its frozen digest.
+// Independently hand-encoded fixed OBJ facts and draft-v1 framing, using Python
+// struct/hashlib without production capture. The complete 2,185-byte expectation
+// expands six Corner normal/UV rows, Face smoothing [7, 0], empty deformation
+// rows and ten profile owners. Sections below retain reviewable byte boundaries.
+// Profile Node owners use canonical index 1 after the synthetic root; public
+// geometry instance ownership keeps its separate exposed Node index 0.
 const KNOWN_OBJ_CAPABILITY_DIGEST: [u8; 32] = [
-    0x13, 0xd4, 0x9b, 0x87, 0x05, 0x03, 0xcf, 0xf5, 0xa0, 0xe1, 0x4d, 0x08, 0x08, 0xea, 0xd2, 0x2f,
-    0x3e, 0x40, 0x6a, 0xd4, 0x95, 0x99, 0x6b, 0x33, 0xfd, 0xbe, 0x87, 0x8e, 0x33, 0xbd, 0xee, 0x51,
+    0xc2, 0xbf, 0xea, 0x2c, 0x49, 0xeb, 0x0a, 0xc6, 0x01, 0x13, 0x74, 0xb9, 0xd6, 0x18, 0xea, 0x22,
+    0x43, 0x56, 0x5e, 0x99, 0x82, 0xb5, 0x41, 0xfd, 0xab, 0x62, 0xda, 0x1e, 0xa2, 0xca, 0xa8, 0xce,
 ];
+const KNOWN_OBJ_CAPABILITY_TRANSCRIPT_HEX: &str = concat!(
+    // header: bytes 0..59.
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020100000003060000",
+    "0000000000736861323536",
+    // spatial: bytes 59..100.
+    "a60c01a7a800a900aa00ab0c00ac00ad00b30c010b0000000000000000ba0c010b0000000000000000",
+    // roots: bytes 100..122.
+    "040c01080d00000000000000000b0100000000000000",
+    // nodes: bytes 122..226.
+    "050c01060d00000000000000000a020e000000000e000000000e000000000e000000000e000000000e000000000e0000",
+    "803f0e0000803f0e0000803f0e0000803f0b0a00000000000000da0c00c40c00c50c00070c010b00000000000000000b",
+    "0100000000000000",
+    // appearance: bytes 226..289.
+    "330c01340c010b0000000000000000380c010b0000000000000000400c010b0000000000000000100c010b0000000000",
+    "000000440c010b0000000000000000",
+    // geometry: bytes 289..1047.
+    "0f0c01120c01130d0000000000000000d80c002c00000000000000000b01000000000000000b0100000000000000140c",
+    "01150d00000000000000002e042f0300000030060000003102000000160c000b0000000000000000170c013200000000",
+    "320100000032020000003200000000320200000032010000000b0600000000000000180c00192d00000000000000000b",
+    "04000000000000000b0100000000000000190c011a0d00000000000000001b001c00000000dc0c001d001e001f032000",
+    "210022030000002303000000240900000000000000250c010e000000000e000000000e000000000e0000803f0e000000",
+    "000e000000000e000000000e0000803f0e000000000b0900000000000000260c000b0000000000000000270c000b0000",
+    "0000000000001a0d01000000000000001b011c00000000dc0c001d011e001f0320002100220600000023060000002412",
+    "00000000000000250c010e000000000e000000000e0000803f0e000000000e000000000e0000803f0e000000000e0000",
+    "00000e0000803f0e000000000e000000000e000080bf0e000000000e000000000e000080bf0e000000000e000000000e",
+    "000080bf0b1200000000000000260c000b0000000000000000270c000b00000000000000001a0d02000000000000001b",
+    "031c00000000dc0c001d011e001f022000210022060000002306000000240c00000000000000250c010e000000000e00",
+    "0000000e0000803f0e000000000e000000000e0000803f0e0000003f0e0000003f0e000000000e0000803f0e0000803f",
+    "0e000000000b0c00000000000000260c000b0000000000000000270c000b00000000000000001a0d0300000000000000",
+    "1b051c00000000dc0c001d021e011f012000210022020000002302000000240200000000000000250c01320700000032",
+    "000000000b0200000000000000260c000b0000000000000000270c000b00000000000000000b0400000000000000280c",
+    "01290d00000000000000002a00000000000000002b00000000000000000b0100000000000000",
+    // deformation: bytes 1047..1242.
+    "4a0c014b0c010b00000000000000005d0c015e0d00000000000000005f00000000000000000b0000000000000000600c",
+    "010b00000000000000000b0100000000000000610c010b0000000000000000660c01670d0000000000000000680c000b",
+    "00000000000000006e0c000d00000000000000000b00000000000000000b01000000000000006e0c010b000000000000",
+    "0000710c010b0000000000000000280c01290d00000000000000004c0c00600c000b00000000000000000b0100000000",
+    "000000",
+    // animation: bytes 1242..1269.
+    "780c01790c010b00000000000000007f0c010b0000000000000000",
+    // profile: bytes 1269..2185.
+    "c8ce01cb00ce00cf0000000000000000cb01ce00cf0000000000000000cb02ce00cf0000000000000000cb03ce00cf00",
+    "00000000000000cb04ce00cf0000000000000000cb05ce00cf0000000000000000cb06ce00cf0000000000000000c9cc",
+    "01ce01cf0100000000000000cacc01cd0000000000000000cb00ce01d6190000000000000066697874757265732f6e6f",
+    "64652d7363656e652f696e707574cb01d001cb05d000c9cc02ce01cf0100000000000000cacc02cd0000000000000000",
+    "cb00d20000000000000000cb01ce01d611000000000000006f72672e62616f7a692e66697874757265cb02d000cb03d0",
+    "00cb04d20000000000000000cb08ce00cf0000000000000000cb09ce00cf0000000000000000c9cc03ce01cf01000000",
+    "00000000cacc03cd0000000000000000cb00d20100000000000000cb01d20000000000000000cb02ce01cf0000000000",
+    "000000cb03d000cb04d20000000000000000c9cc04ce01cf0000000000000000c9cc05ce01cf0a00000000000000cacc",
+    "05cd0000000000000000cb00d000cb01d100000000cb02d20000000000000000cb03ce01cf0100000000000000d70000",
+    "0000cacc05cd0100000000000000cb00d001cb01d100000000cb02d20100000000000000cb03ce01cf01000000000000",
+    "00d700000000cacc05cd0200000000000000cb00d002cb01d101000000cb02d20200000000000000cb03ce01cf010000",
+    "0000000000d700000000cacc05cd0300000000000000cb00d00acb01d100000000cb02d20300000000000000cb03ce01",
+    "cf0100000000000000d700000000cacc05cd0400000000000000cb00d00bcb01d100000000cb02d20400000000000000",
+    "cb03ce01cf0100000000000000d700000000cacc05cd0500000000000000cb00d00ccb01d100000000cb02d205000000",
+    "00000000cb03ce01cf0100000000000000d700000000cacc05cd0600000000000000cb00d00ccb01d101000000cb02d2",
+    "0600000000000000cb03ce01cf0100000000000000d700000000cacc05cd0700000000000000cb00d00ccb01d1020000",
+    "00cb02d20700000000000000cb03ce01cf0100000000000000d700000000cacc05cd0800000000000000cb00d00ccb01",
+    "d103000000cb02d20800000000000000cb03ce01cf0100000000000000d700000000cacc05cd0900000000000000cb00",
+    "d00dcb01d100000000cb02d20900000000000000cb03ce01cf0100000000000000d700000000c9cc06ce00cf00000000",
+    "00000000",
+);
 const OBJ_FACES: [ObjTriangle; 2] = [
     ObjTriangle {
         corners: [
@@ -848,32 +907,19 @@ fn normalized_obj_corner_fixture_closes_the_canonical_scene_path() {
     assert_eq!(canonical_shape.face_count, 2);
     let (full, bounded) = capture_obj_capability_snapshots_for_probe(&parts);
 
-    // Frozen test-only oracle: this fixture has no Tangent, camera, or light rows.
-    // Restore the two removed global Unknown declarations after UV origin and the
-    // revision 4 word. The old digest then excludes unrelated payload, ordering,
-    // scalar, and provenance changes; it is not a supported compatibility encoder.
-    let (_, transcript) =
+    let (captured, transcript) =
         capture_node_scene_with_test_transcript(&parts.scene, snapshot_limits(8_192, 64), None)
             .expect("bounded complete OBJ transcript");
+    assert_eq!(captured.schema_revision, 1);
+    assert_eq!(captured.digest, KNOWN_OBJ_CAPABILITY_DIGEST);
     assert!(transcript.complete);
-    let mut previous = transcript.bytes;
-    assert_eq!(previous.len(), 2_185);
-    assert_eq!(&previous[40..44], &8_u32.to_le_bytes());
-    // Spatial + SceneSpace; unknown handedness/up/front, absent units, unknown winding/UV.
-    assert_eq!(
-        &previous[59..76],
-        &[
-            0xa6, 0x0c, 0x01, 0xa7, 0xa8, 0x00, 0xa9, 0x00, 0xaa, 0x00, 0xab, 0x0c, 0x00, 0xac,
-            0x00, 0xad, 0x00,
-        ]
-    );
-    assert_eq!(&previous[76..79], &[0xb3, 0x0c, 0x01]); // Camera collection follows.
-    let _ = previous.splice(76..76, [0xaf, 0x00, 0xb2, 0x00]);
-    previous[40..44].copy_from_slice(&4_u32.to_le_bytes());
-    assert_eq!(
-        <[u8; 32]>::from(Sha256::digest(&previous)),
-        REVISION_4_OBJ_CAPABILITY_ORACLE_DIGEST
-    );
+    assert_eq!(transcript.bytes.len(), 2_185);
+    let actual_hex: String = transcript
+        .bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(actual_hex, KNOWN_OBJ_CAPABILITY_TRANSCRIPT_HEX);
     assert_eq!(full.digest, KNOWN_OBJ_CAPABILITY_DIGEST);
     assert_eq!(bounded.digest, full.digest);
     assert_eq!(bounded.totals, full.totals);

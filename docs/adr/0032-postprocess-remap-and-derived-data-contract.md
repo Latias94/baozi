@@ -403,8 +403,8 @@ and typed reason. No rejected domain is silently inherited under a new target de
 
 The public report directly owns `SceneSpaceConversionEvidence`, whose input/output generations,
 source/target facts, assumption mask, and winding effect are backed by the validated evidence
-root. It creates no empty Corner/Face origin sequences. The common root schema is revision 4;
-non-conversion evidence has zeroed conversion fields. Runtime success/failure capacity and work
+root. It creates no empty Corner/Face origin sequences. The current common root schema is draft
+revision 1; non-conversion evidence has zeroed conversion fields. Runtime success/failure capacity and work
 requirements cover the real schema. No independently cached decoded report facts are authoritative.
 
 Application tuple extraction has a separate read-only ownership boundary from the coordinate
@@ -738,6 +738,17 @@ tools. Chosen.
   generation reservation, preparation freeze, and handoff.
 
 ## Amendment History
+
+### 2026-11-02: Rebase current edit and normal-option encodings to draft v1
+
+U12 rebases the common edit root from revision 4 to draft revision 1, preserving its 25 fields,
+operation/outcome IDs, changed/failed distinction, selected remaps and conversion facts. The earlier
+revision-4 transition remains historical. The normal-options domain becomes
+`baozi.generate-normals/v1\0`, retaining both mode and replacement bytes. The composed
+`baozi.prepare-triangles/v1\0` family remains distinct; embedded normal-option digests change with
+their input. Independently authored vectors and exact source-qualified evidence follow
+[ADR 0026](0026-validation-snapshot-and-fuzz-gates.md#snapshot-schema-lifecycle). Number-only changes
+do not relax capacity, work or release requirements.
 
 ### 2026-10-31: Separate borrowed triangle tuples from structural vertex edits
 

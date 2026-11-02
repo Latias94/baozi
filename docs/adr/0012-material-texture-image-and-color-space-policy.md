@@ -38,8 +38,9 @@ opaque and single-sided, with white RGBA base color, metallic and roughness fact
 emissive and no texture bindings or name. An explicit empty source material remains authored.
 The generated default has existing Generated provenance parented by the primary document;
 it does not invent an authored material object or increment authored source-scope counts.
-The assignment tag participates in snapshot revision 7, distinguishing equal effective factors
-with different source presence. A producer with no normative default may retain `Unspecified`.
+The assignment tag participates in the core-owned draft-v1 Scene snapshot consumed through
+`ValidatedScene`, distinguishing equal effective factors with different source presence. A producer
+with no normative default may retain `Unspecified`.
 
 The canonical scene has three separate dense identities:
 
@@ -339,3 +340,14 @@ Rejected.
   material-factor, active color-alpha, texture-sample, and strength composition.
 - Pivot/origin/order variants normalize to the canonical UV formula or produce explicit
   unsupported/loss evidence; none is interpreted with Assimp's or a backend's implicit pivot.
+
+## Amendment History
+
+### 2026-11-02: Rebase current material snapshot coverage to draft v1
+
+U12 rebases the current core snapshot from observed revision 8 to draft revision 1. The earlier
+revision-7 assignment evidence remains historical and source-qualified. The single encoder retains
+assignment presence, optional material groups, forty fixed scalar slots, optional authored strength
+in slot 39 and raw signed bits. [ADR 0026](0026-validation-snapshot-and-fuzz-gates.md#snapshot-schema-lifecycle)
+defines draft source-closure and vector-set identity; changing the revision does not change these
+material semantics or confer a compatibility freeze.

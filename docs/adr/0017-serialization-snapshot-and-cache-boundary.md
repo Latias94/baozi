@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-17
+updated: 2026-11-02
 authors:
   - Codex
 decision_type: architecture
@@ -47,7 +47,8 @@ boundary for any future persistent cache.
 - Baozi exposes no public Serde representation today. Any future Serde support must be opt-in and
   feature-gated; derived representations are unstable unless a separate schema explicitly says
   otherwise.
-- Golden snapshots use a dedicated normalized representation owned by test support.
+- Golden snapshots use the single canonical Scene encoder owned by `baozi-core` and consumed
+  through `ValidatedScene`; test support does not own a second representation or encoder.
 - This ADR does not authorize a persistent cache API, artifact schema, lookup key, storage owner,
   eviction policy, fallback mode, or public feature.
 - Any persistent cache requires a separate Accepted implementation decision with production tracers.
@@ -79,10 +80,11 @@ flowchart TD
 
 ## Snapshot Boundary
 
-Snapshots are test-support representations rather than `Debug`, derived serde, cache, or public
-interchange schemas. Applications must not consume them as compatibility artifacts. ADR 0026 owns
-what snapshot evidence contains and how its determinism, digest, normalization, redaction, bounds,
-mutation sensitivity, and scale behavior are verified.
+The core-owned snapshot is a test-evidence representation consumed through `ValidatedScene`.
+Applications must not consume it as a compatibility artifact. ADR 0026 owns what snapshot evidence
+contains and how its determinism, digest, normalization, redaction, bounds, mutation sensitivity,
+and scale behavior are verified. Debug output, derived serde, cache and interchange schemas retain
+their separate boundaries.
 
 ## Deferred Cache Boundary
 
@@ -166,7 +168,7 @@ Decision: chosen.
 
 | Metric | Target | Measurement |
 | --- | --- | --- |
-| Representation separation | snapshots are produced by test-support adapters, never `Debug` or derived serde | dependency/source audit |
+| Representation separation | snapshots use the single core encoder through `ValidatedScene`, never `Debug` or derived serde | dependency/source audit |
 | Evidence delegation | snapshot schema, digest, coverage, and bounds have one authority in ADR 0026 | Direct ADR review |
 | Cache non-authority | no production API, crate, feature, or docs claim a persistent cache under this ADR | API, feature, and documentation audit |
 | Feature isolation | builds without serde omit serde dependencies, and no persistent-cache feature or dependency exists | feature-tree checks |
@@ -176,7 +178,7 @@ Decision: chosen.
 
 | Risk | Severity | Likelihood | Mitigation |
 | --- | --- | --- | --- |
-| Snapshot becomes accidental public schema | Medium | Medium | keep test-support ownership and explicit non-goal |
+| Snapshot becomes accidental public schema | Medium | Medium | keep the single core encoder and explicit test-evidence scope |
 | Snapshot evidence rules drift between ADRs | High | Medium | delegate all evidence semantics and gates exclusively to ADR 0026 |
 | A speculative cache key becomes accidental architecture | Critical | Medium | defer key and ownership to a separate Accepted decision with a real consumer and tracers |
 | Future cache decode bypasses validation | Critical | Low | retain mandatory central validation as a prerequisite for any later cache decision |
@@ -197,6 +199,14 @@ Negative:
 - Persistent cache implementation remains absent pending a separate Accepted decision and tracers.
 
 ## Amendment History
+
+### 2026-11-02: Correct snapshot ownership for the draft-v1 cutover
+
+The canonical Scene encoder belongs to `baozi-core`; golden, parser and facade tests consume it
+through `ValidatedScene`. This supersedes the earlier test-support ownership wording. U12 rebases
+its current encoding from observed revision 8 to draft revision 1 under ADR 0026's source-closure
+and vector-set rules. Representation, cache and export boundaries remain unchanged; this cutover
+adds no second serializer or compatibility decoder and establishes no compatibility freeze.
 
 ### 2026-07-17: Remove speculative persistent-cache ownership
 

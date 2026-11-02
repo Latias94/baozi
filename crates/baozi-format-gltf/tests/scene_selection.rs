@@ -1,6 +1,6 @@
 mod common;
 
-use baozi_core::{ProvenanceKindRef, ProvenanceOperationKindRef, ProvenanceRef};
+use baozi_core::{DigestAlgorithm, ProvenanceKindRef, ProvenanceOperationKindRef, ProvenanceRef};
 use baozi_format_gltf::{
     FORMAT_ID, GltfFailureCode, GltfImportOptions, GltfImporter, GltfSceneSelection,
 };
@@ -976,6 +976,13 @@ fn requested_mode_changes_root_options_digest_but_keeps_actual_source_parents() 
     let explicit = import_scene(&document, GltfSceneSelection::SceneIndex(1), [])??;
     assert_selection(&default, GltfSceneSelection::DocumentDefault, 1);
     assert_selection(&explicit, GltfSceneSelection::SceneIndex(1), 1);
+    for report in [&default, &explicit] {
+        assert_eq!(report.scene().nodes().len(), 1);
+        let roots = report.scene().roots().collect::<Vec<_>>();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].name(), Some("Chosen"));
+        assert_eq!(report.scene().nodes().next().unwrap().id(), roots[0].id());
+    }
     assert_ne!(
         default.source_scope_record().unwrap().digest(),
         explicit.source_scope_record().unwrap().digest(),
@@ -988,7 +995,25 @@ fn requested_mode_changes_root_options_digest_but_keeps_actual_source_parents() 
     };
     assert_ne!(operation(default_root), operation(explicit_root));
     let mut parent_sets = Vec::new();
-    for root in [default_root, explicit_root] {
+    // Independent SHA-256 of the v1 code (no NUL) and the 18-byte BE64 instruction.
+    for (root, expected) in [
+        (
+            default_root,
+            [
+                0x9b, 0x83, 0x96, 0x59, 0xbb, 0x4e, 0xf2, 0xf3, 0xae, 0xca, 0xa2, 0xe1, 0xdc, 0xa9,
+                0x7b, 0x5e, 0x32, 0xa5, 0x49, 0x19, 0x75, 0x6c, 0x0d, 0x19, 0x8b, 0xd5, 0x18, 0xbf,
+                0xa1, 0x24, 0xc9, 0x74,
+            ],
+        ),
+        (
+            explicit_root,
+            [
+                0x2c, 0xd8, 0x50, 0xec, 0x4c, 0x02, 0x83, 0x5f, 0xcb, 0xd6, 0x74, 0x36, 0x24, 0x43,
+                0x88, 0xc9, 0xa9, 0xf2, 0xa3, 0xa6, 0x43, 0x53, 0xc2, 0x21, 0x9a, 0x4b, 0x08, 0x8a,
+                0x0e, 0xf7, 0xb4, 0x3e,
+            ],
+        ),
+    ] {
         let parents = root
             .parents()
             .map(|parent| match parent.kind() {
@@ -1009,11 +1034,16 @@ fn requested_mode_changes_root_options_digest_but_keeps_actual_source_parents() 
             unreachable!()
         };
         assert_eq!(
-            operation
-                .evidence()
-                .map(|evidence| evidence.code())
-                .collect::<Vec<_>>(),
-            ["org.baozi.gltf:projection-root-v2"],
+            operation.options_digest(),
+            (DigestAlgorithm::Sha256, expected.as_slice()),
+        );
+        let evidence = operation.evidence().collect::<Vec<_>>();
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].code(), "org.baozi.gltf:projection-root-v1");
+        assert_eq!(evidence[0].occurrence_count(), 1);
+        assert_eq!(
+            evidence[0].digest(),
+            Some((DigestAlgorithm::Sha256, expected.as_slice())),
         );
     }
     assert_eq!(parent_sets[0], parent_sets[1]);

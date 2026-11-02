@@ -79,7 +79,7 @@ fn material_factor_presence_and_strength_have_independent_complete_snapshot_fram
             None,
         )
         .unwrap();
-        assert_eq!(full.schema_revision, 8);
+        assert_eq!(full.schema_revision, 1);
         assert!(transcript.complete);
 
         // Independent material-row encoding fixes existing tags, new presence tags, and width.
@@ -716,7 +716,7 @@ fn material_assignment_public_reads_and_snapshot_preserve_source_presence() {
     ] {
         let parts = build(assignment);
         let snapshot = capture_node_scene(&parts.scene, snapshot_limits(16_384, 64), None).unwrap();
-        assert_eq!(snapshot.schema_revision, 8);
+        assert_eq!(snapshot.schema_revision, 1);
         assert!(!digests.contains(&snapshot.digest));
         digests.push(snapshot.digest);
         let scene = ValidatedScene::from_node_scene(parts.scene);
