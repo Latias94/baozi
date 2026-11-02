@@ -449,10 +449,115 @@ and system internals are excluded. The returned output remains detached. This cl
 reference slice only: actual animated renderer readback, final renderer/API integration review
 and complete U10 device acceptance remain open.
 
+## U8/U9/U10/U15: Concrete Device and Render Acceptance
+
+Commit `6db9808046645d31c5bd60f2e4bfcfd719659eb0` adds the excluded
+`tools/consumers/render-wgpu` workspace. It consumes the existing detached asset and explicit
+evaluator frames. Device packets retain source ordinals, every UV stream, field-presence flags,
+material presence, complete influences/palettes and morph correspondence. Whole triangles split
+in stable order on vertex/index/byte/palette/orientation limits. U16 includes index 65,535;
+actual U16/U32 index readback and split/unsplit pixels are checked. Input tables remain borrowed
+until upload, and the uploaded asset outlives every import/application owner.
+
+The finite native profile implements MR/Unlit, emission, clearcoat, bounded Charlie sheen,
+PNG/JPEG images, independent transformed bindings, cameras and punctual lights. Its sheen
+reciprocal normalization and bounded substrate weight are a documented consumer approximation;
+raw independent integrals remain visible and no exact global energy-conservation claim follows.
+CPU full influence rows and explicit evaluated normals/tangents supply lit deformation. No
+second sampler/evaluator, GPU weight truncation, MikkTSpace or transmission renderer is added.
+
+The actual adapter is **NVIDIA GeForce RTX 4090**, Vulkan, vendor 4318, device 9860, driver
+NVIDIA 621.01, on Windows x86_64 MSVC / Rust 1.95. DX12 enumeration returned four identical
+selector matches and does not establish DX12 execution. Browser/Apple rendering is unqualified.
+
+| Check | Actual result | Evidence identity |
+| --- | --- | --- |
+| Final combined CPU and explicitly selected GPU suite | **62/62 pass**, 37 CPU and 25 actual Vulkan tests, no skips | nextest `aae71ecb-d359-4cc8-9be3-66c84301dd5a` |
+| Strict renderer Clippy | All targets pass with `-D warnings` | `renderer-clippy-range-final.log` |
+| Renderer format | Standalone `--all --check` passes | committed source |
+| Independent device review | Original admission/scan/skin findings and subsequent split-capacity/presence findings closed; strengthened distinct-row and nonidentity packed-frame oracles | `renderer-device-final-review.md` |
+| Independent image/shading review | Strict JPEG warning propagation, active closure and capacity fixes reviewed; all named shading/range findings closed | `renderer-image-rereview.md`, `renderer-shading-final-review.md` |
+
+Actual execution found and fixed the original eight-varying pipeline failure, max-F32 distance
+normalization and a large-range quotient that lost cutoff under GPU reciprocal/flush behavior.
+The last witness first returned `.15588379` against independent `.15475573` (tolerance `.0002`),
+nextest `abc4fde7-b34f-4365-b6d7-1f7e1d273a17`. Common power-of-two range scaling preserves the
+fraction; the new witness and eight related spatial/contract cases then pass under
+`37e8c12f-8409-4d36-bfb0-f34d6e94115e`, followed by the complete final run above. Failure logs
+remain evidence. The actual finite profile rejects unrepresentable derived arithmetic by name.
+
+The unchanged pinned RiggedSimple and AnimatedMorphCube files pass source-derived key/midpoint
+position and normal anchors after every source owner is dropped. Their two frames have 1,602
+and 7,396 common opaque pixels, with maximum interior RGB changes `.174911499` and `.003662109`.
+This checks changing surface lighting in addition to silhouette. Separate analytic synthetic
+controls cover texture channels/transfer/strength, coat/sheen/emission, alpha ordering,
+reflections, spot/range boundaries and persistent fragment failures under covering overdraw.
+Fresh uploads recover; the tests do not claim mutation/reset of a failing immutable GPU asset.
+
+PNG uses image 0.25.8. JPEG uses turbojpeg 1.5.1 / turbojpeg-sys 1.1.1, bundled libjpeg-turbo
+3.1.0. The previous decoder accepted entropy truncation despite its strict setting; three
+unweakened truncated-scan controls now fail through the mature codec's warning-to-error path.
+Terminal EOI is checked, without claiming exact JPEG byte consumption. Codec internal scratch,
+allocator and driver storage remain outside application capacity accounting, and within-call
+codec cancellation is unavailable. These are finite application/geometry/encoded/output/work
+limits, not process heap, RSS or physical VRAM bounds.
+
+`target/review/renderer/{committed-source,verification}.json` bind the source closure, shader,
+lock, toolchain, adapter and tests. Original readback PNG/linear/report files are under
+`target/review/renderer/upstream/`. The local evidence archive
+`target/review/renderer-evidence.zip` has SHA-256
+`c605d2c58b3c2e006fbc2d50bda99f4a04ce2f53b3aa4f23c2a8999f931dc0e6`.
+This closes the finite U8/U9/U10 renderer and U15 lobe-use acceptance, without promotion of a
+portable dependency, runtime backend or release target.
+
+## U11: Quantized Accessors Through the Same Import Authority
+
+Commit `8b9716d7ad102350a7345e31832442b85b80a0a6` adds the eighteen base and eight P/N/T morph
+encoding tuples in the pinned `KHR_mesh_quantization` matrix. One classifier governs global
+declaration and selected accessor checks. Both required/used declarations are mandatory,
+including recognized extra encodings in omitted meshes; omitted resources remain unopened.
+One dense/sparse merge produces stored/decoded lanes, with exact-rational nearest-F32 conversion
+unchanged. Optional bounds, including influence bounds, are observed in existing loops; integer
+integrality/range checks precede narrowing and FLOAT ordering uses its rounded component domain.
+Canonical storage remains F32. No dequantization bake, competing reader or UV/color morph
+implementation is introduced. Superseded vector collectors and duplicate morph-bounds code were
+removed.
+
+| Check | Actual result | Evidence identity |
+| --- | --- | --- |
+| Complete glTF profile | **497/497 pass** across 43 binaries | nextest `ee99b50d-35e9-4afd-a4a4-1135224666b7` |
+| New importer matrix after Clippy-only iterator cleanup | **16/16 pass** | nextest `d9fedd7f-6749-4f9d-9d16-641e7175770f` |
+| Complete detached consumer, including six quantization cases | **120/120 pass**, one existing manual export skip | nextest `bc583818-0b0a-462a-8267-3a4c6d030685` |
+| Direct single-format conformance consumer | **8/8 pass**, one manual export skip | nextest `38996f43-db38-43fa-bc85-71308ecb501d` |
+| Actual static and bound skin/PNT-morph quantized/FLOAT rendering | **2/2 pass**, later included in the final 62-test renderer run | nextest `6889fa27-6836-4fa2-8f9c-9568cdb1e427` |
+| Strict lint/format | glTF all targets/features, quantization consumer target and renderer all targets pass; format checks pass | scoped logs under `target/review/` |
+
+Original controls compare decoded and physical FLOAT assets through two palettes, non-unit
+complete weights, morph-before-skin/placement, animated parents, an authored decode leaf and
+independent UV bindings. Actual GPU controls also assert literal geometry, evaluated and packed
+frames, UVs, interior colors and silhouette sentinels. The initial renderer fixture omitted the
+required contiguous UV0; it now carries a distinct inactive zero UV0, preserving all UV1/math/
+pixel expectations. Old original short-component fixtures gained explicit stride declarations;
+their payloads, source orders and independent numeric/cancellation assertions remain. No pinned
+upstream model bytes were changed.
+
+Independent review closed two concrete findings: FLOAT bounds must compare after component
+rounding, and an animated morph sample must differ from authored defaults to expose ignored
+sampler application. The added base/morph valid/reversed bounds controls and a second animated
+time preserve the earlier observations and add an unchanged second-instance control.
+The full 497-test run precedes only an equivalent iterator/conditional Clippy cleanup, followed
+by the focused 16-test run. The final 120-test consumer run includes the second-time assertions
+and all fixture migrations. Fresh portable/sanitizer/package qualification remains U14.
+
+`target/review/quantization/verification.json` records the source-qualified receipts. The local
+`target/review/quantization-evidence.zip` has SHA-256
+`b08e0dbd91e91ecc041ff20f89a42b41eb280a492ec017f98fad6591a146e5f5`.
+
 ## Remaining Verification
 
 Timing/RSS B0, the separate heap observations and the regression policy are now recorded above. Production semantics remained unchanged throughout these campaigns.
-Subsequent render/device/quantization and clearcoat/sheen producer changes, owned-glTF assurance,
-canonical v1 cutover, B1 comparisons and final package/portable qualification remain ahead.
+The finite render/device/quantization, clearcoat/sheen and owned-glTF assurance slices are now
+recorded above. Canonical v1 cutover, measured optimization/B1 comparisons and final integrated
+package/portable qualification remain ahead.
 Historical qualification stays bound to the source in its original record.
 No registry publication/yank, push/PR or native target promotion has occurred in this work.
