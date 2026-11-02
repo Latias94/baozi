@@ -243,6 +243,22 @@ enum SourceMember {
     KhrMaterialsUnlit,
     KhrMaterialsEmissiveStrength,
     EmissiveStrength,
+    KhrMaterialsClearcoat,
+    ClearcoatFactor,
+    ClearcoatRoughnessFactor,
+    ClearcoatTexture,
+    ClearcoatRoughnessTexture,
+    ClearcoatNormalTexture,
+    KhrMaterialsSheen,
+    SheenColorFactor,
+    SheenRoughnessFactor,
+    SheenColorTexture,
+    SheenRoughnessTexture,
+    Index,
+    TexCoord,
+    Offset,
+    Rotation,
+    Scale,
     KhrLightsPunctual,
     Lights,
     Light,
@@ -632,14 +648,27 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                     ..
                 },
             ) => {
+                let unsupported = match site {
+                    SourcePayloadSite::LightSpot => !matches!(
+                        frame.member,
+                        SourceMember::InnerConeAngle | SourceMember::OuterConeAngle
+                    ),
+                    SourcePayloadSite::ClearcoatTexture
+                    | SourcePayloadSite::ClearcoatRoughnessTexture
+                    | SourcePayloadSite::SheenColorTexture
+                    | SourcePayloadSite::SheenRoughnessTexture => {
+                        !matches!(frame.member, SourceMember::Index | SourceMember::TexCoord)
+                    }
+                    SourcePayloadSite::ClearcoatNormalTexture => !matches!(
+                        frame.member,
+                        SourceMember::Index | SourceMember::TexCoord | SourceMember::Scale
+                    ),
+                    _ => false,
+                };
                 if matches!(
                     frame.member,
                     SourceMember::Extensions | SourceMember::Extras
-                ) || (site == SourcePayloadSite::LightSpot
-                    && !matches!(
-                        frame.member,
-                        SourceMember::InnerConeAngle | SourceMember::OuterConeAngle
-                    ))
+                ) || unsupported
                 {
                     return self.begin_source_payload(owner, site, frame);
                 }
@@ -666,20 +695,51 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                         parent_index: None,
                     });
                 }
+                let supported = match site {
+                    SourcePayloadSite::MaterialUnlit => false,
+                    SourcePayloadSite::MaterialEmissiveStrength => {
+                        frame.member == SourceMember::EmissiveStrength
+                    }
+                    SourcePayloadSite::MaterialClearcoat => matches!(
+                        frame.member,
+                        SourceMember::ClearcoatFactor
+                            | SourceMember::ClearcoatRoughnessFactor
+                            | SourceMember::ClearcoatTexture
+                            | SourceMember::ClearcoatRoughnessTexture
+                            | SourceMember::ClearcoatNormalTexture
+                    ),
+                    SourcePayloadSite::MaterialSheen => matches!(
+                        frame.member,
+                        SourceMember::SheenColorFactor
+                            | SourceMember::SheenRoughnessFactor
+                            | SourceMember::SheenColorTexture
+                            | SourceMember::SheenRoughnessTexture
+                    ),
+                    SourcePayloadSite::ClearcoatTextureTransform
+                    | SourcePayloadSite::ClearcoatRoughnessTextureTransform
+                    | SourcePayloadSite::ClearcoatNormalTextureTransform
+                    | SourcePayloadSite::SheenColorTextureTransform
+                    | SourcePayloadSite::SheenRoughnessTextureTransform => matches!(
+                        frame.member,
+                        SourceMember::TexCoord
+                            | SourceMember::Offset
+                            | SourceMember::Rotation
+                            | SourceMember::Scale
+                    ),
+                    SourcePayloadSite::DocumentPunctualLights => {
+                        frame.member == SourceMember::Lights
+                    }
+                    SourcePayloadSite::NodePunctualLight => frame.member == SourceMember::Light,
+                    _ => true,
+                };
                 if matches!(
                     frame.member,
                     SourceMember::Extras | SourceMember::Extensions
-                ) || site == SourcePayloadSite::MaterialUnlit
-                    || (site == SourcePayloadSite::MaterialEmissiveStrength
-                        && frame.member != SourceMember::EmissiveStrength)
-                    || (site == SourcePayloadSite::DocumentPunctualLights
-                        && frame.member != SourceMember::Lights)
-                    || (site == SourcePayloadSite::NodePunctualLight
-                        && frame.member != SourceMember::Light)
+                ) || !supported
                 {
                     self.begin_source_payload(owner, site, frame)
                 } else {
-                    Ok(SourceContext::Other)
+                    Ok(source_property(owner, site, frame.member, first))
                 }
             }
             Some(JsonFrame {
@@ -719,6 +779,8 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                 SourceMember::KhrMaterialsEmissiveStrength => {
                     SourceExtensionKind::KhrMaterialsEmissiveStrength
                 }
+                SourceMember::KhrMaterialsClearcoat => SourceExtensionKind::KhrMaterialsClearcoat,
+                SourceMember::KhrMaterialsSheen => SourceExtensionKind::KhrMaterialsSheen,
                 SourceMember::KhrLightsPunctual => SourceExtensionKind::KhrLightsPunctual,
                 _ => SourceExtensionKind::Other,
             };
@@ -776,6 +838,16 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                 SourcePayloadSite::Entity,
             ) => SourcePayloadSite::MaterialEmissiveStrength,
             (
+                SourcePayloadKind::Extension(SourceExtensionKind::KhrMaterialsClearcoat),
+                SourceEntityKind::Material,
+                SourcePayloadSite::Entity,
+            ) => SourcePayloadSite::MaterialClearcoat,
+            (
+                SourcePayloadKind::Extension(SourceExtensionKind::KhrMaterialsSheen),
+                SourceEntityKind::Material,
+                SourcePayloadSite::Entity,
+            ) => SourcePayloadSite::MaterialSheen,
+            (
                 SourcePayloadKind::Extension(SourceExtensionKind::KhrTextureTransform),
                 _,
                 SourcePayloadSite::BaseColorTexture,
@@ -800,6 +872,31 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                 _,
                 SourcePayloadSite::EmissiveTexture,
             ) => SourcePayloadSite::EmissiveTextureTransform,
+            (
+                SourcePayloadKind::Extension(SourceExtensionKind::KhrTextureTransform),
+                SourceEntityKind::Material,
+                SourcePayloadSite::ClearcoatTexture,
+            ) => SourcePayloadSite::ClearcoatTextureTransform,
+            (
+                SourcePayloadKind::Extension(SourceExtensionKind::KhrTextureTransform),
+                SourceEntityKind::Material,
+                SourcePayloadSite::ClearcoatRoughnessTexture,
+            ) => SourcePayloadSite::ClearcoatRoughnessTextureTransform,
+            (
+                SourcePayloadKind::Extension(SourceExtensionKind::KhrTextureTransform),
+                SourceEntityKind::Material,
+                SourcePayloadSite::ClearcoatNormalTexture,
+            ) => SourcePayloadSite::ClearcoatNormalTextureTransform,
+            (
+                SourcePayloadKind::Extension(SourceExtensionKind::KhrTextureTransform),
+                SourceEntityKind::Material,
+                SourcePayloadSite::SheenColorTexture,
+            ) => SourcePayloadSite::SheenColorTextureTransform,
+            (
+                SourcePayloadKind::Extension(SourceExtensionKind::KhrTextureTransform),
+                SourceEntityKind::Material,
+                SourcePayloadSite::SheenRoughnessTexture,
+            ) => SourcePayloadSite::SheenRoughnessTextureTransform,
             _ => return Ok(SourceContext::Payload { payload_index }),
         };
         Ok(SourceContext::ExtensionProperty {
@@ -1616,6 +1713,22 @@ fn source_member(bytes: &[u8], content_start: usize, content_end: usize) -> Sour
         b"KHR_materials_unlit" => SourceMember::KhrMaterialsUnlit,
         b"KHR_materials_emissive_strength" => SourceMember::KhrMaterialsEmissiveStrength,
         b"emissiveStrength" => SourceMember::EmissiveStrength,
+        b"KHR_materials_clearcoat" => SourceMember::KhrMaterialsClearcoat,
+        b"clearcoatFactor" => SourceMember::ClearcoatFactor,
+        b"clearcoatRoughnessFactor" => SourceMember::ClearcoatRoughnessFactor,
+        b"clearcoatTexture" => SourceMember::ClearcoatTexture,
+        b"clearcoatRoughnessTexture" => SourceMember::ClearcoatRoughnessTexture,
+        b"clearcoatNormalTexture" => SourceMember::ClearcoatNormalTexture,
+        b"KHR_materials_sheen" => SourceMember::KhrMaterialsSheen,
+        b"sheenColorFactor" => SourceMember::SheenColorFactor,
+        b"sheenRoughnessFactor" => SourceMember::SheenRoughnessFactor,
+        b"sheenColorTexture" => SourceMember::SheenColorTexture,
+        b"sheenRoughnessTexture" => SourceMember::SheenRoughnessTexture,
+        b"index" => SourceMember::Index,
+        b"texCoord" => SourceMember::TexCoord,
+        b"offset" => SourceMember::Offset,
+        b"rotation" => SourceMember::Rotation,
+        b"scale" => SourceMember::Scale,
         b"KHR_lights_punctual" => SourceMember::KhrLightsPunctual,
         b"lights" => SourceMember::Lights,
         b"light" => SourceMember::Light,
@@ -1631,7 +1744,7 @@ fn source_member(bytes: &[u8], content_start: usize, content_end: usize) -> Sour
     }
 }
 
-/// These are concrete core property objects, not paths through arbitrary extension JSON.
+/// These are concrete schema property objects, not paths through arbitrary extension JSON.
 fn source_property(
     owner: SourceEntityId,
     parent_site: SourcePayloadSite,
@@ -1661,6 +1774,21 @@ fn source_property(
                 _ => return SourceContext::Other,
             }
         }
+        (SourceEntityKind::Material, SourcePayloadSite::MaterialClearcoat, member) => {
+            match member {
+                SourceMember::ClearcoatTexture => SourcePayloadSite::ClearcoatTexture,
+                SourceMember::ClearcoatRoughnessTexture => {
+                    SourcePayloadSite::ClearcoatRoughnessTexture
+                }
+                SourceMember::ClearcoatNormalTexture => SourcePayloadSite::ClearcoatNormalTexture,
+                _ => return SourceContext::Other,
+            }
+        }
+        (SourceEntityKind::Material, SourcePayloadSite::MaterialSheen, member) => match member {
+            SourceMember::SheenColorTexture => SourcePayloadSite::SheenColorTexture,
+            SourceMember::SheenRoughnessTexture => SourcePayloadSite::SheenRoughnessTexture,
+            _ => return SourceContext::Other,
+        },
         (SourceEntityKind::Accessor, SourcePayloadSite::Entity, SourceMember::Sparse) => {
             SourcePayloadSite::AccessorSparse
         }
@@ -2739,6 +2867,524 @@ mod tests {
                 r#"{"nodes":[{}],"materials":[{}],"extensions":{"KHR_materials_unlit":{}},"KHR_materials_unlit":{"extras":null}}"#,
             );
         })
+    }
+
+    #[test]
+    fn clearcoat_sheen_nested_sites_keep_exact_ranges_and_material_ordinals() -> TestResult {
+        let json = br#"{
+            "materials":[null,{
+                "extras":{"parent":true},
+                "exte\u006esions":{
+                    "KHR_materials_clearc\u006fat" : {
+                        "clearcoatFac\u0074or":0,"clearcoatRoughnessFactor":0.25,
+                        "extr\u0061s" : {"material":"\u0063","nodes":[{}],"extensions":{"KHR_materials_sheen":{"sheenColorTexture":{"extras":1}}}},
+                        "clearcoatText\u0075re":{"index":0,"texCo\u006frd":1,"extr\u0061s" : [0],"extensions":{
+                            "KHR_texture_tran\u0073form" : {"texCoord":1,"offset":[1,2],"rotation":0.5,"scale":[2,3],"extr\u0061s" : { "t" : 0 }}
+                        }},
+                        "clearcoatRoughnessText\u0075re":{"index":1,"extr\u0061s" : {"slot":1},"extensions":{
+                            "KHR_texture_tran\u0073form" : {"extr\u0061s" : [1, 2]}
+                        }},
+                        "clearcoatNormalText\u0075re":{"index":2,"scale":-2,"extr\u0061s" : false,"extensions":{
+                            "KHR_texture_tran\u0073form" : {"extr\u0061s" : null}
+                        }}
+                    },
+                    "KHR_materials_sh\u0065en" : {
+                        "sheenColorFac\u0074or":[0,0.5,1],"sheenRoughnessFactor":0.75,
+                        "extr\u0061s" : null,
+                        "sheenColorText\u0075re":{"index":3,"extr\u0061s" : "sheen","extensions":{
+                            "KHR_texture_tran\u0073form" : {"extr\u0061s" : true}
+                        }},
+                        "sheenRoughnessText\u0075re":{"index":4,"extr\u0061s" : 7,"extensions":{
+                            "KHR_texture_tran\u0073form" : {"extr\u0061s" : "tail"}
+                        }}
+                    }
+                }
+            }]
+        }"#;
+        fn inspect(scope: &ParseScope<'_>, map: &GltfSourceMap<'_>) {
+            use SourcePayloadSite as Site;
+            assert_eq!(map.entities().len(), 2);
+            assert!(map.get(id(SourceEntityKind::Material, None, 0)).is_none());
+            let owner = id(SourceEntityKind::Material, None, 1);
+            assert!(map.get(owner).is_some());
+            let payloads = map.payloads_for(owner);
+            assert_eq!(payloads.len(), 26);
+            assert_eq!(map.payloads().len(), payloads.len());
+            assert!(payloads.iter().all(|payload| {
+                payload.owner == owner && payload.kind != SourcePayloadKind::ExtensionProperty
+            }));
+            for (kind, raw_key) in [
+                (
+                    SourceExtensionKind::KhrMaterialsClearcoat,
+                    r#""KHR_materials_clearc\u006fat""#,
+                ),
+                (
+                    SourceExtensionKind::KhrMaterialsSheen,
+                    r#""KHR_materials_sh\u0065en""#,
+                ),
+            ] {
+                let payload = payloads
+                    .iter()
+                    .find(|payload| payload.kind == SourcePayloadKind::Extension(kind))
+                    .unwrap();
+                assert_eq!(payload.site, Site::Entity);
+                assert_raw(scope, payload.key_range, raw_key);
+                assert_eq!(
+                    payload.value_range.byte_offset,
+                    payload.member_range.byte_offset + raw_key.len() as u64 + 3,
+                );
+            }
+            for (site, value) in [
+                (
+                    Site::MaterialClearcoat,
+                    r#"{"material":"\u0063","nodes":[{}],"extensions":{"KHR_materials_sheen":{"sheenColorTexture":{"extras":1}}}}"#,
+                ),
+                (Site::MaterialSheen, "null"),
+                (Site::ClearcoatTexture, "[0]"),
+                (Site::ClearcoatRoughnessTexture, r#"{"slot":1}"#),
+                (Site::ClearcoatNormalTexture, "false"),
+                (Site::SheenColorTexture, r#""sheen""#),
+                (Site::SheenRoughnessTexture, "7"),
+                (Site::ClearcoatTextureTransform, "{ \"t\" : 0 }"),
+                (Site::ClearcoatRoughnessTextureTransform, "[1, 2]"),
+                (Site::ClearcoatNormalTextureTransform, "null"),
+                (Site::SheenColorTextureTransform, "true"),
+                (Site::SheenRoughnessTextureTransform, r#""tail""#),
+            ] {
+                let payload = payloads
+                    .iter()
+                    .find(|payload| {
+                        payload.site == site && payload.kind == SourcePayloadKind::Extras
+                    })
+                    .unwrap();
+                assert_raw(scope, payload.key_range, r#""extr\u0061s""#);
+                assert_raw(
+                    scope,
+                    payload.member_range,
+                    &format!(r#""extr\u0061s" : {value}"#),
+                );
+                assert_raw(scope, payload.value_range, value);
+            }
+            for (site, value) in [
+                (
+                    Site::ClearcoatTexture,
+                    r#"{"texCoord":1,"offset":[1,2],"rotation":0.5,"scale":[2,3],"extr\u0061s" : { "t" : 0 }}"#,
+                ),
+                (
+                    Site::ClearcoatRoughnessTexture,
+                    r#"{"extr\u0061s" : [1, 2]}"#,
+                ),
+                (Site::ClearcoatNormalTexture, r#"{"extr\u0061s" : null}"#),
+                (Site::SheenColorTexture, r#"{"extr\u0061s" : true}"#),
+                (Site::SheenRoughnessTexture, r#"{"extr\u0061s" : "tail"}"#),
+            ] {
+                let payload = payloads
+                    .iter()
+                    .find(|payload| {
+                        payload.site == site
+                            && payload.kind
+                                == SourcePayloadKind::Extension(
+                                    SourceExtensionKind::KhrTextureTransform,
+                                )
+                    })
+                    .unwrap();
+                assert_raw(scope, payload.key_range, r#""KHR_texture_tran\u0073form""#);
+                assert_raw(
+                    scope,
+                    payload.member_range,
+                    &format!(r#""KHR_texture_tran\u0073form" : {value}"#),
+                );
+                assert_raw(scope, payload.value_range, value);
+            }
+        }
+        inspect_admission(json, inspect)?;
+        inspect_admission(&glb(json), inspect)
+    }
+
+    #[test]
+    fn clearcoat_sheen_payload_shapes_keep_null_and_scalar_ranges() -> TestResult {
+        let json = br#"{"materials":[
+            {"extensions":{"KHR_materials_clearcoat" : {}}},
+            {"extensions":{"KHR_materials_clearcoat" : null}},
+            {"extensions":{"KHR_materials_clearcoat" : 7}},
+            {"extensions":{"KHR_materials_clearcoat" : false}},
+            {"extensions":{"KHR_materials_clearcoat" : "raw"}},
+            {"extensions":{"KHR_materials_clearcoat" : [{"extras":1,"clearcoatTexture":{"extras":2}}]}},
+            {"extensions":{"KHR_materials_sheen" : {}}},
+            {"extensions":{"KHR_materials_sheen" : null}},
+            {"extensions":{"KHR_materials_sheen" : 7}},
+            {"extensions":{"KHR_materials_sheen" : false}},
+            {"extensions":{"KHR_materials_sheen" : "raw"}},
+            {"extensions":{"KHR_materials_sheen" : [{"extras":1,"sheenColorTexture":{"extras":2}}]}},
+            {"extensions":{
+                "KHR_materials_clearcoat":{
+                    "clearcoatTexture":{"extensions":{"KHR_texture_transform":null}},
+                    "clearcoatRoughnessTexture":{"extensions":{"KHR_texture_transform":false}},
+                    "clearcoatNormalTexture":{"extensions":{"KHR_texture_transform":7}}
+                },
+                "KHR_materials_sheen":{
+                    "sheenColorTexture":{"extensions":{"KHR_texture_transform":"raw"}},
+                    "sheenRoughnessTexture":{"extensions":{"KHR_texture_transform":[{"extras":1}]}}
+                }
+            }}
+        ]}"#;
+        fn inspect(scope: &ParseScope<'_>, map: &GltfSourceMap<'_>) {
+            assert_eq!(map.entities().len(), 14);
+            assert_eq!(map.payloads().len(), 37);
+            for (start, kind, name, array) in [
+                (
+                    0,
+                    SourceExtensionKind::KhrMaterialsClearcoat,
+                    "KHR_materials_clearcoat",
+                    r#"[{"extras":1,"clearcoatTexture":{"extras":2}}]"#,
+                ),
+                (
+                    6,
+                    SourceExtensionKind::KhrMaterialsSheen,
+                    "KHR_materials_sheen",
+                    r#"[{"extras":1,"sheenColorTexture":{"extras":2}}]"#,
+                ),
+            ] {
+                for (index, value) in ["{}", "null", "7", "false", r#""raw""#, array]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let owner = id(SourceEntityKind::Material, None, start + index);
+                    let payloads = map.payloads_for(owner);
+                    assert_eq!(payloads.len(), 2);
+                    let payload = payloads
+                        .iter()
+                        .find(|payload| payload.kind == SourcePayloadKind::Extension(kind))
+                        .unwrap();
+                    assert_eq!(payload.site, SourcePayloadSite::Entity);
+                    assert_raw(scope, payload.key_range, &format!(r#""{name}""#));
+                    assert_raw(
+                        scope,
+                        payload.member_range,
+                        &format!(r#""{name}" : {value}"#),
+                    );
+                    assert_raw(scope, payload.value_range, value);
+                }
+            }
+            let payloads = map.payloads_for(id(SourceEntityKind::Material, None, 12));
+            for (site, value) in [
+                (SourcePayloadSite::ClearcoatTexture, "null"),
+                (SourcePayloadSite::ClearcoatRoughnessTexture, "false"),
+                (SourcePayloadSite::ClearcoatNormalTexture, "7"),
+                (SourcePayloadSite::SheenColorTexture, r#""raw""#),
+                (
+                    SourcePayloadSite::SheenRoughnessTexture,
+                    r#"[{"extras":1}]"#,
+                ),
+            ] {
+                let payload = payloads
+                    .iter()
+                    .find(|payload| {
+                        payload.site == site
+                            && payload.kind
+                                == SourcePayloadKind::Extension(
+                                    SourceExtensionKind::KhrTextureTransform,
+                                )
+                    })
+                    .unwrap();
+                assert_raw(scope, payload.key_range, r#""KHR_texture_transform""#);
+                assert_raw(
+                    scope,
+                    payload.member_range,
+                    &format!(r#""KHR_texture_transform":{value}"#),
+                );
+                assert_raw(scope, payload.value_range, value);
+            }
+            assert!(map.payloads().iter().all(|payload| {
+                payload.kind != SourcePayloadKind::Extras
+                    && payload.kind != SourcePayloadKind::ExtensionProperty
+            }));
+        }
+        inspect_admission(json, inspect)?;
+        inspect_admission(&glb(json), inspect)
+    }
+
+    #[test]
+    fn clearcoat_sheen_unknown_direct_properties_keep_opaque_value_ranges() -> TestResult {
+        let json = br#"{"materials":[{"extensions":{
+            "KHR_materials_clearcoat":{
+                "clearcoatFactor":0.5,"clearcoatRoughnessFactor":0.25,
+                "sheenColorFactor" : [0,1,0],
+                "clearcoatRoughnessTextureExtended" : {"extras":0,"materials":[{}]},
+                "clearcoatTexture":{"index":0,"scale" : -1,"extensions":{"KHR_texture_transform":{"index" : 7}}},
+                "clearcoatRoughnessTexture":{"index":1,"unexpected" : [{"extras":1}],"extensions":{"KHR_texture_transform":{"unexpected" : null}}},
+                "clearcoatNormalTexture":{"index":2,"scale":-2,"strength" : false,"extensions":{"KHR_texture_transform":{"unexpected" : {"nodes":[{}],"extras":2}}}}
+            },
+            "KHR_materials_sheen":{
+                "sheenColorFactor":[0,0.5,1],"sheenRoughnessFactor":0,
+                "clearcoatFactor" : null,
+                "sheenColorTexture":{"index":3,"unexpected" : "raw","extensions":{"KHR_texture_transform":{"unexpected" : [true,false]}}},
+                "sheenRoughnessTexture":{"index":4,"unexpected" : 8,"extensions":{"KHR_texture_transform":{"unexpected" : true}}}
+            }
+        }}]}"#;
+        fn inspect(scope: &ParseScope<'_>, map: &GltfSourceMap<'_>) {
+            use SourcePayloadSite as Site;
+            assert_eq!(map.entities().len(), 2);
+            let payloads = map.payloads_for(id(SourceEntityKind::Material, None, 0));
+            let properties = payloads
+                .iter()
+                .filter(|payload| payload.kind == SourcePayloadKind::ExtensionProperty);
+            let expected = [
+                (Site::MaterialClearcoat, "sheenColorFactor", "[0,1,0]"),
+                (
+                    Site::MaterialClearcoat,
+                    "clearcoatRoughnessTextureExtended",
+                    r#"{"extras":0,"materials":[{}]}"#,
+                ),
+                (Site::MaterialSheen, "clearcoatFactor", "null"),
+                (Site::ClearcoatTexture, "scale", "-1"),
+                (
+                    Site::ClearcoatRoughnessTexture,
+                    "unexpected",
+                    r#"[{"extras":1}]"#,
+                ),
+                (Site::ClearcoatNormalTexture, "strength", "false"),
+                (Site::SheenColorTexture, "unexpected", r#""raw""#),
+                (Site::SheenRoughnessTexture, "unexpected", "8"),
+                (Site::ClearcoatTextureTransform, "index", "7"),
+                (
+                    Site::ClearcoatRoughnessTextureTransform,
+                    "unexpected",
+                    "null",
+                ),
+                (
+                    Site::ClearcoatNormalTextureTransform,
+                    "unexpected",
+                    r#"{"nodes":[{}],"extras":2}"#,
+                ),
+                (
+                    Site::SheenColorTextureTransform,
+                    "unexpected",
+                    "[true,false]",
+                ),
+                (Site::SheenRoughnessTextureTransform, "unexpected", "true"),
+            ];
+            assert_eq!(properties.clone().count(), expected.len());
+            for (payload, (site, key, value)) in properties.zip(expected) {
+                assert_eq!(payload.site, site);
+                assert_raw(scope, payload.key_range, &format!(r#""{key}""#));
+                assert_raw(
+                    scope,
+                    payload.member_range,
+                    &format!(r#""{key}" : {value}"#),
+                );
+                assert_raw(scope, payload.value_range, value);
+            }
+            assert!(
+                payloads
+                    .iter()
+                    .all(|payload| payload.kind != SourcePayloadKind::Extras)
+            );
+        }
+        inspect_admission(json, inspect)?;
+        inspect_admission(&glb(json), inspect)
+    }
+
+    #[test]
+    fn clearcoat_sheen_wrong_sites_keep_raw_payloads_without_child_sites() -> TestResult {
+        let json = br#"{
+            "extensions":{"KHR_materials_clearc\u006fat":{"extras":0}},
+            "asset":{"extensions":{"KHR_materials_sheen":{"extras":1}}},
+            "nodes":[{"extensions":{"KHR_materials_clearcoat":{"extras":2}}}],
+            "textures":[{"extensions":{"KHR_materials_sheen":{"extras":3}}}],
+            "materials":[{
+                "pbrMetallicRoughness":{"extensions":{"KHR_materials_clearcoat":{"extras":4}}},
+                "normalTexture":{"extensions":{"KHR_materials_sheen":{"extras":5}}},
+                "extensions":{
+                    "KHR_materials_clearcoat":{
+                        "clearcoatTexture":{"extensions":{
+                            "KHR_materials_sheen":{"extras":6},
+                            "KHR_texture_transform":{"extensions":{"KHR_materials_clearcoat":{"extras":7}},"extras":8}
+                        }},
+                        "extensions":{
+                            "KHR_materials_clearcoat":{"extras":9},
+                            "KHR_texture_transform":{"extras":10}
+                        }
+                    },
+                    "KHR_materials_sheen":{"extensions":{"KHR_materials_sheen":{"extras":11}}}
+                }
+            }]
+        }"#;
+        fn inspect(scope: &ParseScope<'_>, map: &GltfSourceMap<'_>) {
+            use SourceExtensionKind as Extension;
+            use SourcePayloadSite as Site;
+            let document = id(SourceEntityKind::Document, None, 0);
+            let material = id(SourceEntityKind::Material, None, 0);
+            assert_eq!(map.entities().len(), 4);
+            for (owner, site, kind, name, marker) in [
+                (
+                    document,
+                    Site::Entity,
+                    Extension::KhrMaterialsClearcoat,
+                    r#"KHR_materials_clearc\u006fat"#,
+                    0,
+                ),
+                (
+                    document,
+                    Site::Asset,
+                    Extension::KhrMaterialsSheen,
+                    "KHR_materials_sheen",
+                    1,
+                ),
+                (
+                    id(SourceEntityKind::Node, None, 0),
+                    Site::Entity,
+                    Extension::KhrMaterialsClearcoat,
+                    "KHR_materials_clearcoat",
+                    2,
+                ),
+                (
+                    id(SourceEntityKind::Texture, None, 0),
+                    Site::Entity,
+                    Extension::KhrMaterialsSheen,
+                    "KHR_materials_sheen",
+                    3,
+                ),
+                (
+                    material,
+                    Site::MaterialPbrMetallicRoughness,
+                    Extension::KhrMaterialsClearcoat,
+                    "KHR_materials_clearcoat",
+                    4,
+                ),
+                (
+                    material,
+                    Site::NormalTexture,
+                    Extension::KhrMaterialsSheen,
+                    "KHR_materials_sheen",
+                    5,
+                ),
+                (
+                    material,
+                    Site::ClearcoatTexture,
+                    Extension::KhrMaterialsSheen,
+                    "KHR_materials_sheen",
+                    6,
+                ),
+                (
+                    material,
+                    Site::ClearcoatTextureTransform,
+                    Extension::KhrMaterialsClearcoat,
+                    "KHR_materials_clearcoat",
+                    7,
+                ),
+                (
+                    material,
+                    Site::MaterialClearcoat,
+                    Extension::KhrMaterialsClearcoat,
+                    "KHR_materials_clearcoat",
+                    9,
+                ),
+                (
+                    material,
+                    Site::MaterialClearcoat,
+                    Extension::KhrTextureTransform,
+                    "KHR_texture_transform",
+                    10,
+                ),
+                (
+                    material,
+                    Site::MaterialSheen,
+                    Extension::KhrMaterialsSheen,
+                    "KHR_materials_sheen",
+                    11,
+                ),
+            ] {
+                let payload = map
+                    .payloads_for(owner)
+                    .iter()
+                    .find(|payload| {
+                        payload.site == site && payload.kind == SourcePayloadKind::Extension(kind)
+                    })
+                    .unwrap();
+                let value = format!(r#"{{"extras":{marker}}}"#);
+                assert_raw(scope, payload.key_range, &format!(r#""{name}""#));
+                assert_raw(scope, payload.member_range, &format!(r#""{name}":{value}"#));
+                assert_raw(scope, payload.value_range, &value);
+            }
+            assert_eq!(
+                map.payloads()
+                    .iter()
+                    .filter(|payload| matches!(payload.kind, SourcePayloadKind::Extension(_)))
+                    .count(),
+                14,
+            );
+            let extras = map
+                .payloads()
+                .iter()
+                .filter(|payload| payload.kind == SourcePayloadKind::Extras)
+                .collect::<Vec<_>>();
+            assert_eq!(extras.len(), 1);
+            assert_eq!(extras[0].owner, material);
+            assert_eq!(extras[0].site, Site::ClearcoatTextureTransform);
+            assert_raw(scope, extras[0].value_range, "8");
+        }
+        inspect_admission(json, inspect)?;
+        inspect_admission(&glb(json), inspect)
+    }
+
+    #[test]
+    fn clearcoat_sheen_recognition_respects_decoded_key_and_token_bounds() {
+        for (raw, member) in [
+            (
+                r#"KHR_materials_clearc\u006fat"#,
+                SourceMember::KhrMaterialsClearcoat,
+            ),
+            (
+                r#"KHR_materials_sh\u0065en"#,
+                SourceMember::KhrMaterialsSheen,
+            ),
+            (r#"clearcoatFac\u0074or"#, SourceMember::ClearcoatFactor),
+            (
+                r#"clearcoatRoughnessFac\u0074or"#,
+                SourceMember::ClearcoatRoughnessFactor,
+            ),
+            (r#"clearcoatText\u0075re"#, SourceMember::ClearcoatTexture),
+            (
+                r#"clearcoatRoughnessText\u0075re"#,
+                SourceMember::ClearcoatRoughnessTexture,
+            ),
+            (
+                r#"clearcoatNormalText\u0075re"#,
+                SourceMember::ClearcoatNormalTexture,
+            ),
+            (r#"sheenColorFac\u0074or"#, SourceMember::SheenColorFactor),
+            (
+                r#"sheenRoughnessFac\u0074or"#,
+                SourceMember::SheenRoughnessFactor,
+            ),
+            (r#"sheenColorText\u0075re"#, SourceMember::SheenColorTexture),
+            (
+                r#"sheenRoughnessText\u0075re"#,
+                SourceMember::SheenRoughnessTexture,
+            ),
+        ] {
+            let adjacent = format!("!{raw}suffix");
+            assert_eq!(source_member(adjacent.as_bytes(), 1, 1 + raw.len()), member);
+            assert_eq!(
+                source_member(adjacent.as_bytes(), 1, adjacent.len()),
+                SourceMember::Other,
+            );
+        }
+        for raw in [
+            "KHR_materials_clearcoatExtra",
+            "KHR_materials_sheenExtra",
+            "clearcoatRoughnessTextureExtended",
+            r#"clearcoatTexture\u0058"#,
+            r#"sheenColorTexture\u00e9"#,
+            "clearcoat",
+            "sheen",
+        ] {
+            assert_eq!(
+                source_member(raw.as_bytes(), 0, raw.len()),
+                SourceMember::Other,
+            );
+        }
     }
 
     #[test]

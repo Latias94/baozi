@@ -383,6 +383,21 @@ pub(crate) struct Material<'scope> {
     pub(crate) emissive_texture: Option<texture::Info>,
     pub(crate) unlit: Option<crate::json_syntax::ValueId>,
     pub(crate) emissive_strength: Option<crate::json_syntax::ValueId>,
+    pub(crate) clearcoat: Option<crate::json_syntax::ValueId>,
+    pub(crate) sheen: Option<crate::json_syntax::ValueId>,
+}
+pub(crate) struct Clearcoat {
+    pub(crate) factor: f32,
+    pub(crate) roughness: f32,
+    pub(crate) texture: Option<texture::Info>,
+    pub(crate) roughness_texture: Option<texture::Info>,
+    pub(crate) normal_texture: Option<texture::Info>,
+}
+pub(crate) struct Sheen {
+    pub(crate) color: [f32; 3],
+    pub(crate) roughness: f32,
+    pub(crate) color_texture: Option<texture::Info>,
+    pub(crate) roughness_texture: Option<texture::Info>,
 }
 pub(crate) struct Pbr {
     pub(crate) base_color_factor: [f32; 4],

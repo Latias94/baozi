@@ -165,7 +165,18 @@ fn read_normalized_gltf<'scope>(ctx: &'scope ParseScope<'_>) -> Result<Normalize
     let gltf = crate::document::Document::decode(ctx, admission::admit(ctx)?)?;
     let node_graph = preflight_node_graph(ctx, &gltf)?;
     let animation_contracts = animation::preflight(ctx, &gltf, node_graph.selected.as_slice())?;
-    let resource_closure = build_resource_closure(ctx, &gltf, &node_graph, &animation_contracts)?;
+    let mut resource_closure =
+        build_resource_closure(ctx, &gltf, &node_graph, &animation_contracts)?;
+    let material_contracts = materials::preflight(ctx, &gltf, &resource_closure)?;
+    for binding in material_contracts.all_bindings() {
+        ctx.charge_work(1)?;
+        mark_texture(
+            ctx,
+            gltf.tables(),
+            &mut resource_closure,
+            binding.source_texture,
+        )?;
+    }
     source::preflight(
         ctx,
         gltf.source_map(),
@@ -175,15 +186,24 @@ fn read_normalized_gltf<'scope>(ctx: &'scope ParseScope<'_>) -> Result<Normalize
         &animation_contracts,
     )?;
     report_uninterpreted_extension_declarations(ctx, gltf.tables())?;
-    let material_contracts = materials::preflight(ctx, &gltf, &resource_closure)?;
     let lights = lights::prepare(ctx, &gltf, resource_closure.lights.as_slice())?;
     let repeated_mesh_string_bytes =
         preflight_canonical_base_strings(ctx, &gltf, &node_graph, &resource_closure, &lights)?;
-    let resolved_texture_uris =
-        preflight_texture_strings(ctx, &gltf, repeated_mesh_string_bytes, &resource_closure)?;
+    let resolved_texture_uris = preflight_texture_strings(
+        ctx,
+        &gltf,
+        repeated_mesh_string_bytes,
+        &resource_closure,
+        &material_contracts,
+    )?;
     let material_count = with_poll(ctx, || gltf.materials().count())?;
-    let geometry_contracts =
-        preflight_geometry_contracts(ctx, &gltf, material_count, &resource_closure)?;
+    let geometry_contracts = preflight_geometry_contracts(
+        ctx,
+        &gltf,
+        material_count,
+        &resource_closure,
+        &material_contracts,
+    )?;
     let morph_contracts = morph::preflight(
         ctx,
         &gltf,
@@ -386,6 +406,7 @@ fn preflight_texture_strings<'scope>(
     gltf: &crate::document::Document<'_>,
     repeated_mesh_string_bytes: usize,
     closure: &ResourceClosure<'_>,
+    materials: &MaterialContracts<'_>,
 ) -> Result<ResolvedTextureUris<'scope>> {
     with_poll(ctx, || {
         let mut bytes = repeated_mesh_string_bytes;
@@ -445,58 +466,17 @@ fn preflight_texture_strings<'scope>(
                 )?;
                 add_repeated_string_bytes(ctx, &mut bytes, name.len(), limit)?;
             }
-            let pbr = material.pbr_metallic_roughness();
-            if let Some(info) = pbr.base_color_texture() {
+            for binding in materials.bindings(ctx, material_index)? {
+                ctx.charge_work(1)?;
+                let texture = gltf.textures().nth(binding.source_texture).ok_or_else(|| {
+                    gltf_parse_error(ctx, "compiled material texture reference is missing")
+                })?;
                 preflight_texture_reference(
                     ctx,
                     &mut bytes,
                     limit,
-                    info.texture(),
-                    "baseColorTexture",
-                    &mut resolved_uris,
-                    image_count,
-                )?;
-            }
-            if let Some(info) = pbr.metallic_roughness_texture() {
-                preflight_texture_reference(
-                    ctx,
-                    &mut bytes,
-                    limit,
-                    info.texture(),
-                    "metallicRoughnessTexture",
-                    &mut resolved_uris,
-                    image_count,
-                )?;
-            }
-            if let Some(info) = material.normal_texture() {
-                preflight_texture_reference(
-                    ctx,
-                    &mut bytes,
-                    limit,
-                    info.texture(),
-                    "normalTexture",
-                    &mut resolved_uris,
-                    image_count,
-                )?;
-            }
-            if let Some(info) = material.occlusion_texture() {
-                preflight_texture_reference(
-                    ctx,
-                    &mut bytes,
-                    limit,
-                    info.texture(),
-                    "occlusionTexture",
-                    &mut resolved_uris,
-                    image_count,
-                )?;
-            }
-            if let Some(info) = material.emissive_texture() {
-                preflight_texture_reference(
-                    ctx,
-                    &mut bytes,
-                    limit,
-                    info.texture(),
-                    "emissiveTexture",
+                    texture,
+                    binding.source_key,
                     &mut resolved_uris,
                     image_count,
                 )?;
@@ -1416,14 +1396,14 @@ fn build_appearance_storage<'scope>(
             storage.materials.len(),
             "gltf-authoring-material-id",
         )?);
-        let contract = material_contracts.material(ctx, material_index)?;
         materials::add_authoring(
             ctx,
             &mut storage,
+            gltf,
             material,
             resolved_texture_uris,
             external_images,
-            contract,
+            material_contracts,
         )?;
         let Some(slot) = storage.material_ids.as_mut_slice().get_mut(material_index) else {
             return Err(gltf_parse_error(ctx, "glTF material id map is incomplete"));
@@ -1758,6 +1738,7 @@ fn preflight_geometry_contracts<'scope>(
     gltf: &crate::document::Document<'_>,
     material_count: usize,
     closure: &ResourceClosure<'_>,
+    materials: &MaterialContracts<'_>,
 ) -> Result<GeometryContracts<'scope>> {
     let mesh_count = with_poll(ctx, || gltf.meshes().count())?;
     let selected_mesh_count = selected_count(ctx, closure.meshes.as_slice())?;
@@ -1816,6 +1797,19 @@ fn preflight_geometry_contracts<'scope>(
                 primitive.index(),
                 material_count,
             )?;
+            if let Some(material) = contract.material_index {
+                let material = materials.material(ctx, material)?;
+                if material.requires_tangent_space {
+                    let has_normal = primitive.get(&Semantic::Normals).is_some();
+                    let has_tangent = primitive.get(&Semantic::Tangents).is_some();
+                    if !has_normal || !has_tangent {
+                        return Err(gltf_parse_error(
+                            ctx,
+                            "glTF clearcoatNormalTexture requires NORMAL and TANGENT attributes or a base normal texture",
+                        ));
+                    }
+                }
+            }
             needs_default_material |= contract.material_index.is_none();
             total_vertices = checked_add_with_limit(
                 ctx,
@@ -3420,58 +3414,8 @@ fn mark_mesh(
             }
         }
         if let Some(material) = primitive.material {
-            mark_material(ctx, root, closure, material.value())?;
+            mark_bool(ctx, &mut closure.materials, material.value(), "material")?;
         }
-    }
-    Ok(())
-}
-
-fn mark_material(
-    ctx: &ParseScope<'_>,
-    root: &json::Tables<'_>,
-    closure: &mut ResourceClosure<'_>,
-    material_index: usize,
-) -> Result<()> {
-    let was_selected = closure
-        .materials
-        .as_slice()
-        .get(material_index)
-        .copied()
-        .ok_or_else(|| {
-            gltf_parse_error(
-                ctx,
-                format_args!("glTF closure references missing material {material_index}"),
-            )
-        })?;
-    if was_selected {
-        charge_closure_work(ctx)?;
-        return Ok(());
-    }
-    mark_bool(ctx, &mut closure.materials, material_index, "material")?;
-    let material = root.materials.get(material_index).ok_or_else(|| {
-        gltf_parse_error(
-            ctx,
-            format_args!("glTF closure references missing material {material_index}"),
-        )
-    })?;
-    if let Some(info) = material.pbr_metallic_roughness.base_color_texture.as_ref() {
-        mark_texture(ctx, root, closure, info.index.value())?;
-    }
-    if let Some(info) = material
-        .pbr_metallic_roughness
-        .metallic_roughness_texture
-        .as_ref()
-    {
-        mark_texture(ctx, root, closure, info.index.value())?;
-    }
-    if let Some(info) = material.normal_texture.as_ref() {
-        mark_texture(ctx, root, closure, info.index.value())?;
-    }
-    if let Some(info) = material.occlusion_texture.as_ref() {
-        mark_texture(ctx, root, closure, info.index.value())?;
-    }
-    if let Some(info) = material.emissive_texture.as_ref() {
-        mark_texture(ctx, root, closure, info.index.value())?;
     }
     Ok(())
 }

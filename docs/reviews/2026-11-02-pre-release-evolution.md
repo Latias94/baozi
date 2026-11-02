@@ -350,6 +350,62 @@ separate API-contract review. Their reports, final source hashes, exact artifact
 execution logs are indexed by `target/review/gltf-conformance/verification.json`. Integrated
 Linux/sanitizer/renderer qualification remains U14 work on the later complete source.
 
+## U15: Typed Clearcoat and Sheen Producer
+
+The two material extensions now compile through existing `ClearcoatFactors` and `SheenFactors`;
+no second material model or core row-layout revision was added. Source factors enforce their
+unit domains before F32 narrowing, retaining signed zero/subnormals and explicit group presence.
+All five additional bindings retain prescribed channels, transfer, signed normal strength, UV
+selection/transform, shared resources and exact nested extras. Clearcoat-normal-only primitives
+enforce the specification's authored-frame/base-normal prerequisite before dependency IO.
+
+The integration replaces five repeated optional binding chains with one metered flat pool of
+compiled binding contracts and per-material ranges. The fixed order preserves the original five
+slots, then appends coat, coat roughness, coat normal, sheen color and sheen roughness. Structural
+mesh/material selection precedes compilation; the compiled rows then extend resource closure and
+drive URI/string admission, authoring and binding provenance. The obsolete document PBR/texture
+slot convenience wrappers and old material traversal were removed. Independent raw site checks
+and global core references retain their separate trust boundaries.
+
+| Check | Actual result | Evidence identity |
+| --- | --- | --- |
+| Scanner/extras library | 44/44 pass, including six new site/range/key/metadata tests | nextest `9cf78a74-7458-40fe-9f20-c5d65f3c01e8` |
+| Material/scanner/transform/emission/Unlit regression targets | 112/112 pass | nextest `a306e076-bb70-4ba1-96a2-fb25c8e65ad6` |
+| Entire implemented glTF profile at this slice | 481/481 pass across 42 binaries | nextest `38999af1-3061-48ad-a715-6eb2582fc168` |
+| Affected detached material/evaluation/spatial/seam/color targets | 72/72 pass | nextest `7c2adcea-b10d-408f-9b9e-1939999ced6f` |
+| Complete implemented asset consumer | 114/114 pass, one existing manual export skip | nextest `ec4522a3-a4ba-45ab-950c-50a91a1336d5` |
+| glTF and affected asset strict Clippy | Pass with `-D warnings` | `u15-gltf-clippy.log`, `u15-u10-assets-clippy-final.log` |
+
+The 481-test execution names every current test binary explicitly; the concurrently drafted,
+unimplemented U11 `mesh_quantization` target is excluded rather than presented as qualified.
+The analogous asset check excludes the future U11 `quantized_output` draft. The 28 new producer
+tests cover presence, domains, declarations/sites, selected/omitted payloads, invalid references,
+all ten binding ranges/order, resources, exact extras/provenance, mirrored frames and snapshots.
+The two new owned material cases also check coordinate conversion, zero-layer retention,
+sampler/image identity and exact missing-UV ordinal after every original owner is destroyed.
+
+The first focused run passed 111/112: its missing-normal/present-tangent fixture accidentally
+used an invalid implicit-zero tangent. The fixture now supplies a valid stored layout and
+requires the precise clearcoat prerequisite reason, preserving pre-IO checks. No production
+acceptance or error classification was relaxed. Independent adversarial producer review found
+no remaining actionable defect; the reviewed formatted production digest is
+`9cb8ea4f532d344575ea79e8722b4d6c0a53f0bdd66cd480e3c9c02b3d6710e2`.
+Primary README/schema bytes use the existing Khronos pin and are retained under
+`target/gltf-material-extension-preparation/`. Source identities and logs are retained under
+`target/review/u15-materials/`. Actual lobe rendering/layering and emission attenuation remain
+the separate U8 device-readback gate; retained values alone do not close it.
+
+The broader asset run first exposed five outdated fixture assumptions. Two Unlit policy tests
+used newly supported clearcoat as their unsupported-extension witness; they now use transmission
+with an authored nonzero factor. Three world-bounds tests attempted to author a shearing glTF
+node matrix. Their unchanged canonical geometry, shear, exact matrices/AABBs, generation and
+cancellation expectations now enter through the existing public custom-format/static-authoring
+seam, which permits general canonical affine matrices. The format's stricter node-matrix rule is
+not relaxed and the shear coverage is not removed. The custom fixture supplies its encoding and
+positive complete-byte detector. A development-only import dependency names the public authoring
+API; production dependency roots are unchanged. The complete current consumer then passes 114
+tests. The future U11 test draft remains excluded from that execution.
+
 ## Remaining Verification
 
 Timing/RSS B0, the separate heap observations and the regression policy are now recorded above. Production semantics remained unchanged throughout these campaigns.

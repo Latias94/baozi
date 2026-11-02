@@ -36,6 +36,7 @@ version = "0.0.0"
 dependencies = [
  "allocation-counter",
  "baozi",
+ "baozi-import",
  "baozi-native-io-candidate",
  "serde_json",
 ]

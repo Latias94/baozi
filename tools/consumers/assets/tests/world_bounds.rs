@@ -8,62 +8,138 @@ use baozi::{
     },
 };
 use baozi_asset_consumer::{ApplicationAsset, BasePoseSpatialSnapshot, Result};
+use baozi_import::authoring::{
+    AttributeDomain, AttributeSemantic, AuthoredTransform, AuthoringRange, FormatId,
+    GeometryAttributeAuthoring, GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring,
+    GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, LogicalMeshLocalId, Mat4,
+    MaterialAssignment, NodeAuthoringNode, NodeLocalId, NodeParent, Presence, SceneSpace,
+};
+use baozi_import::{
+    DetectionOutcome, DetectionResult, DetectionScope, FormatDescriptor, FormatImporter,
+    ParseResult, ParseScope, Probe, ReadConfidence, ReadHint, SceneDraft,
+};
 use baozi_native_io_candidate::{FileSystemAssetIo, NativeDirectoryCapability};
-use serde_json::json;
 
 fn limits() -> SpatialQueryLimits {
     SpatialQueryLimits::new(100_000, 1_048_576)
 }
 
+struct WorldBoundsFixture;
+
+impl FormatImporter for WorldBoundsFixture {
+    fn descriptor(&self) -> FormatDescriptor {
+        FormatDescriptor::builder(
+            FormatId::new("org.baozi.test.world-bounds").unwrap(),
+            "Original affine spatial fixture",
+        )
+        .extensions(["bounds"])
+        .encoding(baozi::FormatEncoding::Binary)
+        .capabilities([(
+            baozi::FormatCapability::Geometry,
+            baozi::CapabilityStatus::Supported,
+        )])
+        .build()
+        .unwrap()
+    }
+
+    fn detect(
+        &self,
+        probe: &Probe<'_>,
+        _: &ReadHint,
+        _: &DetectionScope<'_>,
+    ) -> DetectionResult<DetectionOutcome> {
+        Ok(if probe.is_complete() && probe.bytes() == b"bounds" {
+            DetectionOutcome::Match(ReadConfidence::Certain)
+        } else {
+            DetectionOutcome::NoMatch
+        })
+    }
+
+    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+        // A canonical affine fixture deliberately exercises shear. glTF node matrices
+        // cannot author it; the public custom-producer seam can retain this meaning.
+        let positions = [
+            -1.0_f32, -2.0, 0.0, 2.0, 0.0, 1.0, 0.0, 3.0, -1.0, 4.0, -5.0, 2.0,
+        ];
+        let indices = [0_u32, 1, 2];
+        let matrix = |cols| AuthoredTransform::try_matrix(Mat4 { cols }).unwrap();
+        let root = NodeLocalId::new(0);
+        let nodes = [
+            NodeAuthoringNode::new(
+                Presence::Absent,
+                matrix([
+                    [2.0, 0.0, 0.0, 0.0],
+                    [0.0, 3.0, 0.0, 0.0],
+                    [0.0, 0.0, -1.0, 0.0],
+                    [10.0, 20.0, 30.0, 1.0],
+                ]),
+                Presence::Absent,
+                Presence::Absent,
+            )
+            .with_name("ancestor"),
+            NodeAuthoringNode::new(
+                Presence::Present(NodeParent::new(root, 0)),
+                matrix([
+                    [-1.0, 0.0, 0.0, 0.0],
+                    [0.0, 2.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [1.0, -2.0, 4.0, 1.0],
+                ]),
+                Presence::Absent,
+                Presence::Absent,
+            )
+            .with_name("first"),
+            NodeAuthoringNode::new(
+                Presence::Present(NodeParent::new(root, 1)),
+                matrix([
+                    [1.0, 0.0, 0.0, 0.0],
+                    [1.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, -2.0, 0.0],
+                    [-3.0, 2.0, -1.0, 1.0],
+                ]),
+                Presence::Absent,
+                Presence::Absent,
+            )
+            .with_name("second"),
+        ];
+        let roots = [root];
+        let attributes = [GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Position,
+            AttributeDomain::Vertex,
+            3,
+            &positions,
+            Presence::Absent,
+        )];
+        let primitives = [GeometryPrimitiveAuthoring::new(
+            GeometryTopologyAuthoring::TriangleList,
+            Presence::Present(&indices),
+            MaterialAssignment::Unspecified,
+            AuthoringRange::new(0, 1),
+        )];
+        let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
+        let instances = [
+            GeometryMeshInstanceAuthoring::new(NodeLocalId::new(1), LogicalMeshLocalId::new(0)),
+            GeometryMeshInstanceAuthoring::new(NodeLocalId::new(2), LogicalMeshLocalId::new(0)),
+        ];
+        let space = SceneSpace {
+            front_axis: baozi::Axis::PositiveZ,
+            uv_origin: baozi::UvOrigin::UpperLeft,
+            ..SceneSpace::STANDARD_TARGET
+        };
+        scope.submit_static_scene(
+            baozi_import::authoring::StaticSceneBuilder::new(Presence::Present(&roots), &nodes)
+                .with_scene_space(&space)
+                .with_geometry(&meshes, &primitives, &attributes, &instances),
+        )
+    }
+}
+
 fn shared_static_scene() -> Result<ValidatedScene> {
-    // This independently authored glTF has two instances of the same mesh under a transformed
-    // ancestor. Vertex 3 is deliberately outside the indexed triangle.
-    let positions: [[f32; 3]; 4] = [
-        [-1.0, -2.0, 0.0],
-        [2.0, 0.0, 1.0],
-        [0.0, 3.0, -1.0],
-        [4.0, -5.0, 2.0],
-    ];
-    let mut payload = Vec::new();
-    for value in positions.into_iter().flatten() {
-        payload.extend_from_slice(&value.to_le_bytes());
-    }
-    for index in [0_u16, 1, 2] {
-        payload.extend_from_slice(&index.to_le_bytes());
-    }
-    assert_eq!(payload.len(), 54);
-    let document = serde_json::to_vec(&json!({
-        "asset": {"version": "2.0"},
-        "scene": 0,
-        "scenes": [{"nodes": [0]}],
-        "nodes": [
-            {"name": "ancestor", "children": [1, 2],
-             "translation": [10.0, 20.0, 30.0], "scale": [2.0, 3.0, -1.0]},
-            {"name": "first", "mesh": 0,
-             "translation": [1.0, -2.0, 4.0], "scale": [-1.0, 2.0, 1.0]},
-            {"name": "second", "mesh": 0,
-             "matrix": [1.0, 0.0, 0.0, 0.0,
-                        1.0, 1.0, 0.0, 0.0,
-                        0.0, 0.0, -2.0, 0.0,
-                        -3.0, 2.0, -1.0, 1.0]}
-        ],
-        "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 1}]}],
-        "buffers": [{"uri": "world-bounds.bin", "byteLength": payload.len()}],
-        "bufferViews": [
-            {"buffer": 0, "byteOffset": 0, "byteLength": 48},
-            {"buffer": 0, "byteOffset": 48, "byteLength": 6}
-        ],
-        "accessors": [
-            {"bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3",
-             "min": [-1.0, -5.0, -1.0], "max": [4.0, 3.0, 2.0]},
-            {"bufferView": 1, "componentType": 5123, "count": 3, "type": "SCALAR"}
-        ]
-    }))?;
-    let source = AssetPath::new("world-bounds.gltf")?;
-    let io = MemoryAssetIo::new();
-    io.try_insert(source.clone(), Arc::from(document))?;
-    io.try_insert(AssetPath::new("world-bounds.bin")?, Arc::from(payload))?;
-    let report = Importer::new()?.read_asset(&io, source)?;
+    let mut builder = Importer::builder();
+    builder.register(WorldBoundsFixture)?;
+    let report = builder
+        .build()?
+        .read_bytes("world-bounds.bounds", b"bounds")?;
     assert!(report.loss_evidence().is_empty());
     Ok(report.into_parts().0)
 }

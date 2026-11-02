@@ -579,6 +579,16 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
                 .map(|id| self.field(id, super::KHR_MATERIALS_EMISSIVE_STRENGTH))
                 .transpose()?
                 .flatten(),
+            clearcoat: self
+                .field(id, "extensions")?
+                .map(|id| self.field(id, super::KHR_MATERIALS_CLEARCOAT))
+                .transpose()?
+                .flatten(),
+            sheen: self
+                .field(id, "extensions")?
+                .map(|id| self.field(id, super::KHR_MATERIALS_SHEEN))
+                .transpose()?
+                .flatten(),
         })
     }
 
@@ -654,6 +664,104 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
             }
         }
         Ok(narrowed)
+    }
+
+    fn material_extension_float(&self, id: ValueId, unit: bool) -> ParseResult<f32> {
+        let value = self.number(id)?;
+        if unit && !(0.0..=1.0).contains(&value) {
+            return Err(self.invalid("glTF material extension factor must be in [0,1]"));
+        }
+        let narrowed = value as f32;
+        if !narrowed.is_finite() || (value != 0.0 && narrowed == 0.0) {
+            return Err(
+                self.invalid("glTF material extension number exceeds the canonical F32 domain")
+            );
+        }
+        if value == 0.0 {
+            let token = self.value(id);
+            let mut mantissa = true;
+            for chunk in self.bytes[token.start..token.end].chunks(4096) {
+                self.ctx.charge_work(chunk.len() as u64)?;
+                for &byte in chunk {
+                    if matches!(byte, b'e' | b'E') {
+                        mantissa = false;
+                    }
+                    if mantissa && matches!(byte, b'1'..=b'9') {
+                        return Err(self.invalid(
+                            "glTF material extension number underflows the canonical F32 domain",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(narrowed)
+    }
+
+    fn material_unit_or(&self, object: ValueId, key: &str, default: f32) -> ParseResult<f32> {
+        self.field(object, key)?
+            .map_or(Ok(default), |id| self.material_extension_float(id, true))
+    }
+
+    fn material_extension_texture(
+        &self,
+        object: ValueId,
+        key: &str,
+        normal: bool,
+    ) -> ParseResult<Option<texture::Info>> {
+        self.field(object, key)?
+            .map(|id| {
+                let mut info = self.texture_info(id, None)?;
+                if normal {
+                    info.strength = self
+                        .field(id, "scale")?
+                        .map_or(Ok(1.0), |id| self.material_extension_float(id, false))?;
+                }
+                Ok(info)
+            })
+            .transpose()
+    }
+
+    pub(super) fn clearcoat(&self, id: ValueId) -> ParseResult<Clearcoat> {
+        self.object(id)?;
+        Ok(Clearcoat {
+            factor: self.material_unit_or(id, "clearcoatFactor", 0.0)?,
+            roughness: self.material_unit_or(id, "clearcoatRoughnessFactor", 0.0)?,
+            texture: self.material_extension_texture(id, "clearcoatTexture", false)?,
+            roughness_texture: self.material_extension_texture(
+                id,
+                "clearcoatRoughnessTexture",
+                false,
+            )?,
+            normal_texture: self.material_extension_texture(id, "clearcoatNormalTexture", true)?,
+        })
+    }
+
+    pub(super) fn sheen(&self, id: ValueId) -> ParseResult<Sheen> {
+        self.object(id)?;
+        let mut color = [0.0; 3];
+        if let Some(id) = self.field(id, "sheenColorFactor")? {
+            self.kind(
+                id,
+                ValueKind::Array,
+                "glTF sheenColorFactor requires an array",
+            )?;
+            if self.value(id).child_count != 3 {
+                return Err(self.invalid("glTF sheenColorFactor requires three components"));
+            }
+            for (lane, id) in color.iter_mut().zip(self.children(id)) {
+                *lane = self.material_extension_float(id, true)?;
+            }
+        }
+        Ok(Sheen {
+            color,
+            roughness: self.material_unit_or(id, "sheenRoughnessFactor", 0.0)?,
+            color_texture: self.material_extension_texture(id, "sheenColorTexture", false)?,
+            roughness_texture: self.material_extension_texture(
+                id,
+                "sheenRoughnessTexture",
+                false,
+            )?,
+        })
     }
 
     pub(super) fn transform(

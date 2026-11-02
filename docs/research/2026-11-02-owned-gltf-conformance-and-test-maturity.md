@@ -82,7 +82,7 @@ is separately identified; it is not substituted for the executed artifact.
 | Extension family | Published gltf-rs 1.4.1 versus current source | Baozi route |
 | --- | --- | --- |
 | Texture transform, Unlit, emissive strength, punctual lights | Typed feature flags in both | Existing typed mappings, including completed U6/U7; source builds and scoped evidence, without maturity promotion |
-| Clearcoat and sheen | Typed flags absent from the published archive, present at HEAD | Required U15 producer and U8 rendering work, not yet complete |
+| Clearcoat and sheen | Typed flags absent from the published archive, present at HEAD | U15 typed producer, complete bindings/closure/provenance and source regressions are implemented; actual U8 rendering remains separately qualified |
 | Animation pointer | Unreleased source support; not in published 1.4.1 | Ratified optional 2.0 extension; needs a separately designed typed animation-target/evaluator slice |
 | Mesh quantization | No dedicated typed feature in the inspected reference manifests | Required U11 finite accessor matrix and consumer/render evidence |
 | Transmission/IOR/specular/volume/variants | Typed flags in both reference manifests | Deliberate consumer-driven follow-ups; retained factor groups alone do not establish producer support |

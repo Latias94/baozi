@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
 use baozi::{
-    AlphaMode, AssetPath, AttributeDomain, ColorInterpretation, Importer, MaterialAssignment,
-    MemoryAssetIo, MipmapFilter, SamplerState, ShadingModel, TexelFilter, TextureAddressMode,
-    TextureBlendOperation, TextureChannel, TextureChannelSwizzle, TextureRole, TextureTransform,
-    UvOrigin,
+    AlphaMode, AssetPath, AttributeDomain, Axis, ColorInterpretation, FrontFaceWinding, Handedness,
+    Importer, MaterialAssignment, MemoryAssetIo, MipmapFilter, SamplerState, ShadingModel,
+    TargetSpace, TexelFilter, TextureAddressMode, TextureBlendOperation, TextureChannel,
+    TextureChannelSwizzle, TextureRole, TextureTransform, UvOrigin,
+    postprocess::{PostProcessControl, SpaceConversionOptions, convert_scene_space},
 };
 use baozi_asset_consumer::{
     ApplicationAsset, Result, TangentBasis, TangentEncoding, UvExtractionError,
@@ -152,6 +153,215 @@ fn detached_emission_keeps_authored_factor_when_strength_is_present() -> Result<
         assert_eq!(asset.images[0].encoded_bytes, PNG);
         assert_eq!(asset.materials[0].bindings.len(), 5);
     }
+    Ok(())
+}
+
+fn layered_document(factor: f32) -> (Value, Vec<u8>) {
+    let (mut document, payload) = document();
+    document["extensionsUsed"].as_array_mut().unwrap().extend([
+        json!("KHR_materials_clearcoat"),
+        json!("KHR_materials_sheen"),
+    ]);
+    document["materials"][0]["extensions"] = json!({
+        "KHR_materials_clearcoat": {
+            "clearcoatFactor":factor, "clearcoatRoughnessFactor":0.125,
+            "clearcoatTexture":{"index":0,"texCoord":1},
+            "clearcoatRoughnessTexture":{"index":2,"texCoord":1},
+            "clearcoatNormalTexture":{
+                "index":1,"texCoord":0,"scale":-0.5,"extras":{"slot":"coatNormal"},
+                "extensions":{"KHR_texture_transform":{
+                    "texCoord":1,"offset":[0.25,-0.125],"scale":[-2,0.5],
+                    "extras":[1,"uv"]
+                }}
+            },
+            "extras":{"owner":"coat"}
+        },
+        "KHR_materials_sheen":{
+            "sheenColorFactor":[0.125,0.25,0.5],"sheenRoughnessFactor":0.875,
+            "sheenColorTexture":{"index":0,"texCoord":1},
+            "sheenRoughnessTexture":{"index":1,"texCoord":1},"extras":null
+        }
+    });
+    (document, payload)
+}
+
+#[test]
+fn layered_materials_keep_all_bindings_and_authored_presence_after_conversion_and_drop()
+-> Result<()> {
+    for factor in [0.0_f32, 0.75] {
+        for convert in [false, true] {
+            let asset = {
+                let (document, payload) = layered_document(factor);
+                let io = memory_io(&document, &payload)?;
+                let importer = Importer::new()?;
+                let (scene, evidence) = importer
+                    .read_asset(&io, AssetPath::new("appearance.gltf")?)?
+                    .into_parts();
+                let scene = if convert {
+                    let (scene, report) = convert_scene_space(
+                        scene,
+                        SpaceConversionOptions {
+                            target: TargetSpace::try_new(
+                                Handedness::Left,
+                                Axis::PositiveY,
+                                Axis::NegativeZ,
+                                0.01,
+                                FrontFaceWinding::CounterClockwise,
+                            )?,
+                            source_assumptions: None,
+                        },
+                        PostProcessControl::default(),
+                    )?
+                    .into_parts();
+                    drop(report);
+                    scene
+                } else {
+                    scene
+                };
+                let asset = ApplicationAsset::from_scene(&scene)?;
+                drop((scene, evidence, importer, io, document, payload));
+                asset
+            };
+            let material = &asset.materials[0];
+            let coat = material
+                .factors
+                .clearcoat()
+                .ok_or("missing explicit coat")?;
+            assert_eq!(coat.factor().to_bits(), factor.to_bits());
+            assert_eq!(coat.roughness(), 0.125);
+            let sheen = material.factors.sheen().ok_or("missing explicit sheen")?;
+            let color = sheen.color();
+            assert_eq!([color.x, color.y, color.z], [0.125, 0.25, 0.5]);
+            assert_eq!(sheen.roughness(), 0.875);
+            assert!(asset.materials[1].factors.clearcoat().is_none());
+            assert!(asset.materials[1].factors.sheen().is_none());
+            assert_eq!(material.bindings.len(), 10);
+            assert_eq!(
+                (
+                    asset.images.len(),
+                    asset.textures.len(),
+                    asset.samplers.len()
+                ),
+                (2, 4, 2)
+            );
+            assert_eq!(asset.images[0].encoded_bytes, PNG);
+            assert_eq!(asset.textures[0].image, asset.textures[1].image);
+            assert_ne!(asset.textures[0].sampler, asset.textures[1].sampler);
+            let slots = [
+                (
+                    TextureRole::Clearcoat,
+                    0,
+                    TextureChannelSwizzle::RED,
+                    ColorInterpretation::Data,
+                    1.0,
+                    "clearcoatTexture",
+                ),
+                (
+                    TextureRole::ClearcoatRoughness,
+                    2,
+                    TextureChannelSwizzle::try_new(&[TextureChannel::Green])?,
+                    ColorInterpretation::Data,
+                    1.0,
+                    "clearcoatRoughnessTexture",
+                ),
+                (
+                    TextureRole::ClearcoatNormal,
+                    1,
+                    TextureChannelSwizzle::RGB,
+                    ColorInterpretation::Data,
+                    -0.5,
+                    "clearcoatNormalTexture",
+                ),
+                (
+                    TextureRole::SheenColor,
+                    0,
+                    TextureChannelSwizzle::RGB,
+                    ColorInterpretation::SrgbColor,
+                    1.0,
+                    "sheenColorTexture",
+                ),
+                (
+                    TextureRole::SheenRoughness,
+                    1,
+                    TextureChannelSwizzle::try_new(&[TextureChannel::Alpha])?,
+                    ColorInterpretation::Data,
+                    1.0,
+                    "sheenRoughnessTexture",
+                ),
+            ];
+            for (binding, (role, texture, channels, transfer, strength, key)) in
+                material.bindings[5..].iter().zip(slots)
+            {
+                assert_eq!(
+                    (binding.role, binding.texture, binding.uv_set),
+                    (role, texture, 1)
+                );
+                assert_eq!(binding.channel_mapping, channels);
+                assert_eq!(binding.color_interpretation, transfer);
+                assert_eq!(binding.strength.get(), strength);
+                assert_eq!(binding.source_key.as_deref(), Some(key));
+                assert_eq!(binding.blend, TextureBlendOperation::Replace);
+            }
+            let coat_normal = &material.bindings[7];
+            let transform = coat_normal.transform;
+            assert_eq!(transform.rotation_radians(), 0.0);
+            let uv = [
+                f64::from(transform.offset().x) + f64::from(transform.scale().x) * 0.25,
+                f64::from(transform.offset().y) + f64::from(transform.scale().y) * 0.125,
+            ];
+            assert_eq!(uv, [-0.25, -0.0625]);
+            for (key, expected) in [
+                ("org.baozi.gltf:clearcoat-extras", json!({"owner":"coat"})),
+                (
+                    "org.baozi.gltf:clearcoat-normal-texture-extras",
+                    json!({"slot":"coatNormal"}),
+                ),
+                (
+                    "org.baozi.gltf:clearcoat-normal-texture-transform-extras",
+                    json!([1, "uv"]),
+                ),
+                ("org.baozi.gltf:sheen-extras", Value::Null),
+            ] {
+                let metadata = asset
+                    .source_json_metadata
+                    .iter()
+                    .find(|row| row.key == key)
+                    .ok_or("missing layered source extras")?;
+                assert_eq!(metadata.media_type, "application/json");
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&metadata.payload)?,
+                    expected
+                );
+            }
+            let tangent = asset.draws[0].vertices[0]
+                .tangent
+                .ok_or("missing tangent")?;
+            assert_eq!(tangent[3], if convert { 1.0 } else { -1.0 });
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn new_layer_binding_missing_uv_retains_its_exact_ordinal_in_owned_output_failure() -> Result<()> {
+    let (mut document, payload) = layered_document(0.0);
+    document["materials"][0]["extensions"]["KHR_materials_sheen"]["sheenRoughnessTexture"]["texCoord"] =
+        json!(9);
+    let io = memory_io(&document, &payload)?;
+    let importer = Importer::new()?;
+    let report = importer.read_asset(&io, AssetPath::new("appearance.gltf")?)?;
+    let failure = ApplicationAsset::from_scene(report.scene()).unwrap_err();
+    drop((report, importer, io, document, payload));
+    assert_eq!(
+        failure.downcast_ref::<UvExtractionError>(),
+        Some(&UvExtractionError {
+            mesh: 0,
+            primitive: 0,
+            binding: Some(9),
+            uv_set: 9,
+            kind: UvExtractionErrorKind::Missing,
+        })
+    );
     Ok(())
 }
 

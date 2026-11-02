@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 const SOURCE: &str = "unlit/model.gltf";
 const UNLIT: &str = "KHR_materials_unlit";
-const UNSUPPORTED: &str = "KHR_materials_clearcoat";
+const UNSUPPORTED: &str = "KHR_materials_transmission";
 const NAMES: [&str; 4] = ["lit", "unlit-opaque", "unlit-mask", "unlit-blend"];
 const BINDINGS: [(TextureRole, &str); 5] = [
     (TextureRole::BaseColor, "baseColorTexture"),
@@ -478,7 +478,7 @@ fn unsupported_optional_selected_payload_stays_a_hard_failure_under_loss_opt_in(
         .as_array_mut()
         .unwrap()
         .push(json!(UNSUPPORTED));
-    document["materials"][1]["extensions"][UNSUPPORTED] = json!({"clearcoatFactor": 0.5});
+    document["materials"][1]["extensions"][UNSUPPORTED] = json!({"transmissionFactor": 0.5});
     let io = memory_io(&document, None)?;
     let importer = Importer::new()?;
     for policy in [

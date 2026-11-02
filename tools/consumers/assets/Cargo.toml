@@ -17,5 +17,8 @@ baozi-native-io-candidate = { path = "../../../candidates/baozi-native-io", vers
 serde_json = "1"
 allocation-counter = { version = "=0.8.1", optional = true }
 
+[dev-dependencies]
+baozi-import = { path = "../../../crates/baozi-import", version = "=0.1.0", default-features = false }
+
 [features]
 allocation-metrics = ["dep:allocation-counter"]

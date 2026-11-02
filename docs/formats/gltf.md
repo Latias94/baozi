@@ -105,9 +105,20 @@ document. Fresh target/sanitizer and archive-consumer evidence belongs to the
 - Typed `KHR_materials_unlit` materials through the existing `ShadingModel::Unlit`, with base color,
   vertex colors, alpha coverage and double-sided state. Original PBR fallback factors, bindings and
   their resources remain retained independently of the active shading model.
+- Typed `KHR_materials_clearcoat` and `KHR_materials_sheen` groups retain authored absence versus
+  an explicit empty/default group. Their source unit-range factors are checked before narrowing;
+  zero factors do not remove authored bindings or resources. Both extensions exclude Unlit;
+  specular-glossiness remains outside this producer profile.
+- Clearcoat intensity samples red as data, coat roughness green as data, and the independent
+  coat normal RGB as data with its finite signed scale. Sheen color samples RGB as sRGB color;
+  sheen roughness samples alpha as data. Each slot retains its own UV selection, texture transform,
+  exact nested extras, texture/image/sampler identity and provenance. Binding order is the existing
+  five core slots followed by coat, coat roughness, coat normal, sheen color and sheen roughness.
+  A clearcoat normal binding requires authored NORMAL and TANGENT attributes or a base normal
+  texture, as the extension specifies. Import does not silently generate the missing frame.
 - Base color, metallic-roughness, normal, occlusion, and emissive texture URI references.
 - The typed `KHR_texture_transform` slice for selected base color, metallic-roughness, normal,
-  occlusion, and emissive texture bindings, including the extension `texCoord` override. Its
+  occlusion, emissive, clearcoat and sheen texture bindings, including the extension `texCoord` override. Its
   finite transform and canonical UV-set bounds are checked before dependency I/O, and the values
   participate in the canonical material-binding snapshot.
 - Y-up, right-handed, +Z asset front, meters scene space metadata, counter-clockwise fronts, and

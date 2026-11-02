@@ -400,34 +400,9 @@ pub(super) fn associate(
         let Some(id) = id else { continue };
         let source = entity(SourceEntityKind::Material, None, index);
         profile.link(ctx, ProfileOwner::Material(id.index()), source)?;
-        let material = root
-            .materials
-            .get(index)
-            .ok_or_else(|| gltf_parse_error(ctx, "glTF material source is missing"))?;
-        let pbr = &material.pbr_metallic_roughness;
-        for texture in [
-            pbr.base_color_texture
-                .as_ref()
-                .map(|info| info.index.value()),
-            pbr.metallic_roughness_texture
-                .as_ref()
-                .map(|info| info.index.value()),
-            material
-                .normal_texture
-                .as_ref()
-                .map(|info| info.index.value()),
-            material
-                .occlusion_texture
-                .as_ref()
-                .map(|info| info.index.value()),
-            material
-                .emissive_texture
-                .as_ref()
-                .map(|info| info.index.value()),
-        ]
-        .into_iter()
-        .flatten()
-        {
+        for binding in prepared.material_contracts.bindings(ctx, index)? {
+            ctx.charge_work(1)?;
+            let texture = binding.source_texture;
             let owner = ProfileOwner::TextureBinding(authoring_u32(
                 ctx,
                 binding_index,

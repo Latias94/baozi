@@ -23,6 +23,8 @@ pub(crate) const KHR_TEXTURE_TRANSFORM: &str = "KHR_texture_transform";
 pub(crate) const KHR_MATERIALS_UNLIT: &str = "KHR_materials_unlit";
 pub(crate) const KHR_MATERIALS_EMISSIVE_STRENGTH: &str = "KHR_materials_emissive_strength";
 pub(crate) const KHR_LIGHTS_PUNCTUAL: &str = "KHR_lights_punctual";
+pub(crate) const KHR_MATERIALS_CLEARCOAT: &str = "KHR_materials_clearcoat";
+pub(crate) const KHR_MATERIALS_SHEEN: &str = "KHR_materials_sheen";
 
 pub(crate) fn is_supported_extension(name: &str) -> bool {
     [
@@ -30,6 +32,8 @@ pub(crate) fn is_supported_extension(name: &str) -> bool {
         KHR_MATERIALS_UNLIT,
         KHR_MATERIALS_EMISSIVE_STRENGTH,
         KHR_LIGHTS_PUNCTUAL,
+        KHR_MATERIALS_CLEARCOAT,
+        KHR_MATERIALS_SHEEN,
     ]
     .contains(&name)
 }
@@ -92,6 +96,26 @@ impl<'scope> Document<'scope> {
             index: &self.index,
         }
         .emissive_strength(id)
+    }
+    pub(crate) fn clearcoat(
+        &self,
+        ctx: &ParseScope<'_>,
+        id: ValueId,
+    ) -> ParseResult<schema::Clearcoat> {
+        decode::Decoder {
+            ctx,
+            bytes: self.json,
+            index: &self.index,
+        }
+        .clearcoat(id)
+    }
+    pub(crate) fn sheen(&self, ctx: &ParseScope<'_>, id: ValueId) -> ParseResult<schema::Sheen> {
+        decode::Decoder {
+            ctx,
+            bytes: self.json,
+            index: &self.index,
+        }
+        .sheen(id)
     }
     pub(crate) fn node(&self, index: usize) -> Option<Node<'_>> {
         self.tables
@@ -561,74 +585,14 @@ impl<'a> Material<'a> {
     fn row(&self) -> &'a schema::Material<'a> {
         &self.doc.tables.materials[self.index]
     }
-    pub(crate) fn index(&self) -> Option<usize> {
-        Some(self.index)
+    pub(crate) fn index(&self) -> usize {
+        self.index
     }
     pub(crate) fn name(&self) -> Option<&'a str> {
         self.row().name.as_ref().map(Text::as_str)
     }
-    pub(crate) fn pbr_metallic_roughness(&self) -> Pbr<'a> {
-        Pbr {
-            doc: self.doc,
-            row: &self.row().pbr_metallic_roughness,
-        }
-    }
     pub(crate) fn double_sided(&self) -> bool {
         self.row().double_sided
-    }
-    pub(crate) fn normal_texture(&self) -> Option<TextureInfo<'a>> {
-        self.row()
-            .normal_texture
-            .as_ref()
-            .map(|row| TextureInfo { doc: self.doc, row })
-    }
-    pub(crate) fn occlusion_texture(&self) -> Option<TextureInfo<'a>> {
-        self.row()
-            .occlusion_texture
-            .as_ref()
-            .map(|row| TextureInfo { doc: self.doc, row })
-    }
-    pub(crate) fn emissive_texture(&self) -> Option<TextureInfo<'a>> {
-        self.row()
-            .emissive_texture
-            .as_ref()
-            .map(|row| TextureInfo { doc: self.doc, row })
-    }
-}
-pub(crate) struct Pbr<'a> {
-    doc: &'a Document<'a>,
-    row: &'a schema::Pbr,
-}
-impl<'a> Pbr<'a> {
-    pub(crate) fn base_color_texture(&self) -> Option<TextureInfo<'a>> {
-        self.row
-            .base_color_texture
-            .as_ref()
-            .map(|row| TextureInfo { doc: self.doc, row })
-    }
-    pub(crate) fn metallic_roughness_texture(&self) -> Option<TextureInfo<'a>> {
-        self.row
-            .metallic_roughness_texture
-            .as_ref()
-            .map(|row| TextureInfo { doc: self.doc, row })
-    }
-}
-pub(crate) struct TextureInfo<'a> {
-    doc: &'a Document<'a>,
-    row: &'a schema::texture::Info,
-}
-impl<'a> TextureInfo<'a> {
-    pub(crate) fn texture(&self) -> Texture<'a> {
-        Texture {
-            doc: self.doc,
-            index: self.row.index.value(),
-        }
-    }
-    pub(crate) fn scale(&self) -> f32 {
-        self.row.strength
-    }
-    pub(crate) fn strength(&self) -> f32 {
-        self.row.strength
     }
 }
 impl<'a> Animation<'a> {

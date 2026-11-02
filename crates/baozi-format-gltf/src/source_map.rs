@@ -81,17 +81,31 @@ pub(crate) enum SourcePayloadSite {
     MaterialUnlit,
     /// Direct payload members inside a material's KHR_materials_emissive_strength.
     MaterialEmissiveStrength,
+    /// Direct payload members inside a material's KHR_materials_clearcoat.
+    MaterialClearcoat,
+    /// Direct payload members inside a material's KHR_materials_sheen.
+    MaterialSheen,
     BaseColorTexture,
     MetallicRoughnessTexture,
     NormalTexture,
     OcclusionTexture,
     EmissiveTexture,
+    ClearcoatTexture,
+    ClearcoatRoughnessTexture,
+    ClearcoatNormalTexture,
+    SheenColorTexture,
+    SheenRoughnessTexture,
     /// Direct payload members inside each recognized binding's KHR_texture_transform.
     BaseColorTextureTransform,
     MetallicRoughnessTextureTransform,
     NormalTextureTransform,
     OcclusionTextureTransform,
     EmissiveTextureTransform,
+    ClearcoatTextureTransform,
+    ClearcoatRoughnessTextureTransform,
+    ClearcoatNormalTextureTransform,
+    SheenColorTextureTransform,
+    SheenRoughnessTextureTransform,
     AccessorSparse,
     AccessorSparseIndices,
     AccessorSparseValues,
@@ -108,6 +122,8 @@ pub(crate) enum SourceExtensionKind {
     KhrTextureTransform,
     KhrMaterialsUnlit,
     KhrMaterialsEmissiveStrength,
+    KhrMaterialsClearcoat,
+    KhrMaterialsSheen,
     KhrLightsPunctual,
     Other,
 }
@@ -119,7 +135,7 @@ pub(crate) enum SourcePayloadKind {
     Extensions,
     /// One direct member of an `extensions` object. Its raw key remains available below.
     Extension(SourceExtensionKind),
-    /// One unsupported direct property of a recognized extension or light object.
+    /// One unsupported direct property of a recognized extension, binding or light object.
     ExtensionProperty,
 }
 

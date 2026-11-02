@@ -3,10 +3,13 @@
 use super::{
     GltfFailure, NodeGraph, ParseScope, ResourceClosure, Result, animation, gltf_parse_error,
 };
-use crate::document::{KHR_LIGHTS_PUNCTUAL, KHR_MATERIALS_EMISSIVE_STRENGTH, KHR_MATERIALS_UNLIT};
+use crate::document::{
+    KHR_LIGHTS_PUNCTUAL, KHR_MATERIALS_CLEARCOAT, KHR_MATERIALS_EMISSIVE_STRENGTH,
+    KHR_MATERIALS_SHEEN, KHR_MATERIALS_UNLIT, KHR_TEXTURE_TRANSFORM,
+};
 use crate::source_map::{
-    GltfSourceMap, SourceEntityId, SourceEntityKind, SourceExtensionKind, SourcePayloadKind,
-    SourcePayloadSite,
+    GltfSourceMap, SourceEntityId, SourceEntityKind, SourceExtensionKind, SourcePayload,
+    SourcePayloadKind, SourcePayloadSite,
 };
 
 pub(super) fn preflight(
@@ -106,12 +109,18 @@ pub(super) fn preflight(
     // Payload ownership comes from scanner contexts, so unknown data cannot disappear in serde.
     let mut unlit_declared = false;
     let mut strength_declared = false;
+    let mut clearcoat_declared = false;
+    let mut sheen_declared = false;
+    let mut transform_declared = false;
     let mut lights_declared = false;
     for name in &document.tables().extensions_used {
         ctx.charge_work(1)?;
         match name.as_str() {
             KHR_MATERIALS_UNLIT => unlit_declared = true,
             KHR_MATERIALS_EMISSIVE_STRENGTH => strength_declared = true,
+            KHR_MATERIALS_CLEARCOAT => clearcoat_declared = true,
+            KHR_MATERIALS_SHEEN => sheen_declared = true,
+            KHR_TEXTURE_TRANSFORM => transform_declared = true,
             KHR_LIGHTS_PUNCTUAL => lights_declared = true,
             _ => {}
         }
@@ -161,39 +170,35 @@ pub(super) fn preflight(
                     }
                 }
                 SourcePayloadKind::Extension(SourceExtensionKind::KhrTextureTransform)
-                    if matches!(
-                        payload.site,
-                        SourcePayloadSite::BaseColorTexture
-                            | SourcePayloadSite::MetallicRoughnessTexture
-                            | SourcePayloadSite::NormalTexture
-                            | SourcePayloadSite::OcclusionTexture
-                            | SourcePayloadSite::EmissiveTexture
-                    ) => {}
+                    if entity.id.kind == SourceEntityKind::Material
+                        && matches!(
+                            payload.site,
+                            SourcePayloadSite::BaseColorTexture
+                                | SourcePayloadSite::MetallicRoughnessTexture
+                                | SourcePayloadSite::NormalTexture
+                                | SourcePayloadSite::OcclusionTexture
+                                | SourcePayloadSite::EmissiveTexture
+                                | SourcePayloadSite::ClearcoatTexture
+                                | SourcePayloadSite::ClearcoatRoughnessTexture
+                                | SourcePayloadSite::ClearcoatNormalTexture
+                                | SourcePayloadSite::SheenColorTexture
+                                | SourcePayloadSite::SheenRoughnessTexture
+                        ) =>
+                {
+                    validate_extension_payload(
+                        ctx,
+                        payload,
+                        KHR_TEXTURE_TRANSFORM,
+                        transform_declared,
+                    )?;
+                }
                 SourcePayloadKind::Extension(SourceExtensionKind::KhrLightsPunctual)
                     if matches!(
                         entity.id.kind,
                         SourceEntityKind::Document | SourceEntityKind::Node
                     ) && payload.site == SourcePayloadSite::Entity =>
                 {
-                    let offset = usize::try_from(range.byte_offset).ok();
-                    if offset.and_then(|offset| ctx.primary_bytes().get(offset)) != Some(&b'{') {
-                        return Err(GltfFailure::invalid_json(
-                            KHR_LIGHTS_PUNCTUAL,
-                            range.byte_offset,
-                            range.byte_length,
-                            "glTF KHR_lights_punctual must be an object",
-                        )
-                        .into());
-                    }
-                    if !lights_declared {
-                        return Err(GltfFailure::invalid_json(
-                            KHR_LIGHTS_PUNCTUAL,
-                            range.byte_offset,
-                            range.byte_length,
-                            "glTF KHR_lights_punctual must be declared in extensionsUsed",
-                        )
-                        .into());
-                    }
+                    validate_extension_payload(ctx, payload, KHR_LIGHTS_PUNCTUAL, lights_declared)?;
                 }
                 SourcePayloadKind::Extension(kind)
                     if entity.id.kind == SourceEntityKind::Material
@@ -206,6 +211,12 @@ pub(super) fn preflight(
                         SourceExtensionKind::KhrMaterialsEmissiveStrength => {
                             (KHR_MATERIALS_EMISSIVE_STRENGTH, strength_declared)
                         }
+                        SourceExtensionKind::KhrMaterialsClearcoat => {
+                            (KHR_MATERIALS_CLEARCOAT, clearcoat_declared)
+                        }
+                        SourceExtensionKind::KhrMaterialsSheen => {
+                            (KHR_MATERIALS_SHEEN, sheen_declared)
+                        }
                         _ => {
                             return Err(fail(
                                 "extension-payload",
@@ -214,25 +225,7 @@ pub(super) fn preflight(
                             .into());
                         }
                     };
-                    let offset = usize::try_from(range.byte_offset).ok();
-                    if offset.and_then(|offset| ctx.primary_bytes().get(offset)) != Some(&b'{') {
-                        return Err(GltfFailure::invalid_json(
-                            name,
-                            range.byte_offset,
-                            range.byte_length,
-                            format_args!("glTF {name} must be an object"),
-                        )
-                        .into());
-                    }
-                    if !declared {
-                        return Err(GltfFailure::invalid_json(
-                            name,
-                            range.byte_offset,
-                            range.byte_length,
-                            format_args!("glTF {name} must be declared in extensionsUsed"),
-                        )
-                        .into());
-                    }
+                    validate_extension_payload(ctx, payload, name, declared)?;
                 }
                 SourcePayloadKind::ExtensionProperty => {
                     return Err(fail(
@@ -250,6 +243,35 @@ pub(super) fn preflight(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_extension_payload(
+    ctx: &ParseScope<'_>,
+    payload: &SourcePayload,
+    name: &'static str,
+    declared: bool,
+) -> Result<()> {
+    let range = payload.value_range;
+    let offset = usize::try_from(range.byte_offset).ok();
+    if offset.and_then(|offset| ctx.primary_bytes().get(offset)) != Some(&b'{') {
+        return Err(GltfFailure::invalid_json(
+            name,
+            range.byte_offset,
+            range.byte_length,
+            format_args!("glTF {name} must be an object"),
+        )
+        .into());
+    }
+    if !declared {
+        return Err(GltfFailure::invalid_json(
+            name,
+            range.byte_offset,
+            range.byte_length,
+            format_args!("glTF {name} must be declared in extensionsUsed"),
+        )
+        .into());
     }
     Ok(())
 }
