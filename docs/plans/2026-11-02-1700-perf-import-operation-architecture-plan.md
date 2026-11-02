@@ -251,6 +251,16 @@ this receipt does not mark the architecture continuation or active goal complete
 
 ## Initial Independent Review (2026-11-02)
 
+The atomic P3 import/P4 [typed-context receipt](../reviews/2026-11-02-typed-format-context-cutover.md)
+qualifies implementation `89f4e0bba832a43be55ce60159cc3b1790040820`: typed options and private
+erasure, self-executing plans, exclusive submission and borrowed execution regions, all four
+format/custom consumer migrations, actual polygon leaves and lifetime-safe storage observation.
+Final workspace nextest passes 3,221/3,221; strict Clippy/fmt, 63 doctests and independent consumer
+refreshes pass. The first full run's obsolete aggregate-budget expectation is replaced with
+hard-stop and permitted-local-omission controls. No second host/backend or public draft remains.
+P4's correctness/locality gate is complete; P3's integrated performance gate awaits ordinary
+six-lane remeasurement. P5/P6, full Linux B1/heap observations and original U14 remain open.
+
 The P3 [bound-execution foundation receipt](../reviews/2026-11-02-bound-execution-and-physical-prefixes.md)
 qualifies implementation `46eb6c27b4f272d956eb5ae4889a0470eec3a26c`: disjoint views, raw parser
 channels, real normal leaves, bounded geometry control, immediate text completion and short
