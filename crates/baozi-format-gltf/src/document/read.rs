@@ -1,4 +1,4 @@
-//! One checked dense/sparse byte binding, independent of document and buffer-owner lifetimes.
+//! One checked dense, sparse or implicit-zero binding, independent of buffer-owner lifetimes.
 
 use super::{
     Accessor,
@@ -53,6 +53,14 @@ pub(crate) fn bind<'bytes>(
         usize::try_from(row.count).map_err(|_| fail("accessor count exceeds host domain"))?;
     if count == 0 {
         return Err(fail("accessor count is zero"));
+    }
+    count
+        .checked_mul(element)
+        .ok_or_else(|| fail("accessor logical byte range overflow"))?;
+    if row.buffer_view.is_none() && row.byte_offset.is_some() {
+        return Err(fail(
+            "accessor without bufferView must not define byteOffset",
+        ));
     }
     let view_bytes = |id: super::schema::Index,
                       buffer: &mut dyn FnMut(usize) -> Option<&'bytes [u8]>|
@@ -142,9 +150,6 @@ pub(crate) fn bind<'bytes>(
             })
         })
         .transpose()?;
-    if base.is_none() && sparse.is_none() {
-        return Err(fail("accessor has neither a base view nor sparse data"));
-    }
     Ok(Bound {
         base,
         sparse,
@@ -180,13 +185,21 @@ fn raw_component(bytes: &[u8], size: usize) -> Option<u32> {
         _ => return None,
     })
 }
+pub(crate) fn normalized_u8(value: u8) -> f32 {
+    (f64::from(value) / 255.0) as f32
+}
+
+pub(crate) fn normalized_u16(value: u16) -> f32 {
+    (f64::from(value) / 65535.0) as f32
+}
+
 fn float(component: C, normalized: bool, bits: u32) -> f32 {
     match (component, normalized) {
         (C::F32, _) => f32::from_bits(bits),
-        (C::U8, true) => bits as f32 * 255.0_f32.recip(),
-        (C::U16, true) => bits as f32 * 65535.0_f32.recip(),
-        (C::I8, true) => ((bits as u8 as i8) as f32 * 127.0_f32.recip()).max(-1.),
-        (C::I16, true) => ((bits as u16 as i16) as f32 * 32767.0_f32.recip()).max(-1.),
+        (C::U8, true) => normalized_u8(bits as u8),
+        (C::U16, true) => normalized_u16(bits as u16),
+        (C::I8, true) => (f64::from((bits as u8 as i8).max(-127)) / 127.0) as f32,
+        (C::I16, true) => (f64::from((bits as u16 as i16).max(-32767)) / 32767.0) as f32,
         (C::I8, false) => (bits as u8 as i8) as f32,
         (C::I16, false) => (bits as u16 as i16) as f32,
         (_, false) | (C::U32, true) => bits as f32,
@@ -351,3 +364,37 @@ impl Iterator for Indices<'_> {
     }
 }
 impl ExactSizeIterator for Indices<'_> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalized_integer_witnesses_round_the_exact_rational_once() {
+        // Independently computed with integer quotient/remainder, not a decoder/helper call.
+        // For 3/255 = 1/85: 2^30 = 85 * 12632256 + 64, so the significand rounds up.
+        for (component, raw, expected) in [
+            (C::U8, 0, 0x0000_0000),
+            (C::U8, 3, 0x3c40_c0c1),
+            (C::U8, 255, 0x3f80_0000),
+            (C::U16, 0, 0x0000_0000),
+            (C::U16, 257, 0x3b80_8081),
+            (C::U16, 65535, 0x3f80_0000),
+            (C::I8, 0, 0x0000_0000),
+            (C::I8, 9, 0x3d91_2245),
+            (C::I8, (-9_i8) as u8 as u32, 0xbd91_2245),
+            (C::I8, 127, 0x3f80_0000),
+            (C::I8, (-127_i8) as u8 as u32, 0xbf80_0000),
+            (C::I8, i8::MIN as u8 as u32, 0xbf80_0000),
+            (C::I16, 0, 0x0000_0000),
+            (C::I16, 513, 0x3c80_4101),
+            (C::I16, (-513_i16) as u16 as u32, 0xbc80_4101),
+            (C::I16, 32767, 0x3f80_0000),
+            (C::I16, (-32767_i16) as u16 as u32, 0xbf80_0000),
+            (C::I16, i16::MIN as u16 as u32, 0xbf80_0000),
+        ] {
+            assert_eq!(float(component, true, raw).to_bits(), expected);
+        }
+        assert_eq!(float(C::F32, false, 0x8000_0000).to_bits(), 0x8000_0000);
+    }
+}

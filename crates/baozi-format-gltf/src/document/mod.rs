@@ -1,8 +1,10 @@
 //! Owned, metered selected-profile rows over the admitted immutable JSON surface.
 
 mod decode;
+mod integer;
 pub(crate) mod read;
 pub(crate) mod schema;
+mod transforms;
 mod validate;
 
 use crate::{

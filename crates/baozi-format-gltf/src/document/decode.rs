@@ -65,12 +65,6 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
         Ok(None)
     }
 
-    fn optional(&self, object: ValueId, key: &str) -> ParseResult<Option<ValueId>> {
-        Ok(self
-            .field(object, key)?
-            .filter(|&id| self.value(id).kind != ValueKind::Null))
-    }
-
     fn required(&self, object: ValueId, key: &'static str) -> ParseResult<ValueId> {
         self.field(object, key)?.ok_or_else(|| self.invalid(key))
     }
@@ -146,21 +140,21 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
     }
 
     fn name(&self, id: ValueId) -> ParseResult<Option<Text<'scope>>> {
-        self.optional(id, "name")?
-            .map(|id| self.text(id))
-            .transpose()
+        self.field(id, "name")?.map(|id| self.text(id)).transpose()
     }
 
-    fn uint(&self, id: ValueId) -> ParseResult<u64> {
+    pub(super) fn uint(&self, id: ValueId) -> ParseResult<u64> {
         self.kind(
             id,
             ValueKind::Number,
             "glTF schema field requires an unsigned integer",
         )?;
-        let text = self.raw_str(id)?;
-        self.ctx.charge_work(text.len() as u64)?;
-        text.parse::<u64>()
-            .map_err(|_| self.invalid("glTF unsigned integer is invalid or out of range"))
+        let value = self.value(id);
+        let bytes = self
+            .bytes
+            .get(value.start..value.end)
+            .ok_or_else(|| self.invalid("invalid admitted number range"))?;
+        super::integer::unsigned(self.ctx, bytes)
     }
 
     fn size(&self, id: ValueId) -> ParseResult<u64> {
@@ -179,9 +173,7 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
     }
 
     fn optional_id(&self, object: ValueId, key: &str) -> ParseResult<Option<Index>> {
-        self.optional(object, key)?
-            .map(|id| self.id(id))
-            .transpose()
+        self.field(object, key)?.map(|id| self.id(id)).transpose()
     }
 
     fn required_id(&self, object: ValueId, key: &'static str) -> ParseResult<Index> {
@@ -230,16 +222,6 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
         Ok(result)
     }
 
-    fn fixed_or<const N: usize>(
-        &self,
-        object: ValueId,
-        key: &str,
-        default: [f32; N],
-    ) -> ParseResult<[f32; N]> {
-        self.optional(object, key)?
-            .map_or(Ok(default), |id| self.fixed(id))
-    }
-
     fn fixed_default<const N: usize>(
         &self,
         object: ValueId,
@@ -272,7 +254,7 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
     }
 
     fn weights(&self, id: ValueId) -> ParseResult<Option<List<'scope, f32>>> {
-        self.optional(id, "weights")?
+        self.field(id, "weights")?
             .map(|id| self.list(Some(id), |id| self.float(id)))
             .transpose()
     }
@@ -314,14 +296,19 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
     }
 
     fn bounds(&self, object: ValueId, key: &str) -> ParseResult<Option<accessor::Bounds>> {
-        let Some(id) = self.optional(object, key)? else {
+        let Some(id) = self.field(object, key)? else {
             return Ok(None);
         };
+        self.kind(
+            id,
+            ValueKind::Array,
+            "glTF accessor bounds require an array",
+        )?;
         let mut bounds = accessor::Bounds {
             values: [0.; 16],
             len: 0,
         };
-        if self.value(id).kind == ValueKind::Array && self.value(id).child_count <= 16 {
+        if self.value(id).child_count <= 16 {
             bounds.len = self.value(id).child_count;
             for (slot, child) in bounds.values.iter_mut().zip(self.children(id)) {
                 if self.value(child).kind != ValueKind::Number {
@@ -341,7 +328,7 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
         Ok(accessor::Accessor {
             buffer_view: self.optional_id(id, "bufferView")?,
             byte_offset: self
-                .optional(id, "byteOffset")?
+                .field(id, "byteOffset")?
                 .map(|id| self.size(id))
                 .transpose()?,
             count: self.size(self.required(id, "count")?)?,
@@ -360,7 +347,7 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
             )?,
             normalized: self.boolean_or(id, "normalized", false)?,
             sparse: self
-                .optional(id, "sparse")?
+                .field(id, "sparse")?
                 .map(|id| self.sparse(id))
                 .transpose()?,
             min: self.bounds(id, "min")?,
@@ -470,7 +457,7 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
                 )
             })?,
             targets: self
-                .optional(id, "targets")?
+                .field(id, "targets")?
                 .map(|id| self.list(Some(id), |id| self.morph_target(id)))
                 .transpose()?,
         })
@@ -497,11 +484,7 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
                     continue;
                 }
             };
-            *slot = if value.kind == ValueKind::Null {
-                None
-            } else {
-                Some(self.id(child)?)
-            };
+            *slot = Some(self.id(child)?);
         }
         Ok(mesh::MorphTarget {
             positions,
@@ -513,7 +496,7 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
 
     fn texture_info(&self, id: ValueId, strength_key: Option<&str>) -> ParseResult<texture::Info> {
         let transform = self
-            .optional(id, "extensions")?
+            .field(id, "extensions")?
             .map(|id| self.field(id, "KHR_texture_transform"))
             .transpose()?
             .flatten();
@@ -542,11 +525,11 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
             metallic_factor: self.float_or(id, "metallicFactor", 1.)?,
             roughness_factor: self.float_or(id, "roughnessFactor", 1.)?,
             base_color_texture: self
-                .optional(id, "baseColorTexture")?
+                .field(id, "baseColorTexture")?
                 .map(|id| self.texture_info(id, None))
                 .transpose()?,
             metallic_roughness_texture: self
-                .optional(id, "metallicRoughnessTexture")?
+                .field(id, "metallicRoughnessTexture")?
                 .map(|id| self.texture_info(id, None))
                 .transpose()?,
         })
@@ -570,29 +553,29 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
                     )
                 })?,
             alpha_cutoff: self
-                .optional(id, "alphaCutoff")?
+                .field(id, "alphaCutoff")?
                 .map(|id| self.float(id))
                 .transpose()?,
             double_sided: self.boolean_or(id, "doubleSided", false)?,
             normal_texture: self
-                .optional(id, "normalTexture")?
+                .field(id, "normalTexture")?
                 .map(|id| self.texture_info(id, Some("scale")))
                 .transpose()?,
             occlusion_texture: self
-                .optional(id, "occlusionTexture")?
+                .field(id, "occlusionTexture")?
                 .map(|id| self.texture_info(id, Some("strength")))
                 .transpose()?,
             emissive_texture: self
-                .optional(id, "emissiveTexture")?
+                .field(id, "emissiveTexture")?
                 .map(|id| self.texture_info(id, None))
                 .transpose()?,
             unlit: self
-                .optional(id, "extensions")?
+                .field(id, "extensions")?
                 .map(|id| self.field(id, "KHR_materials_unlit"))
                 .transpose()?
                 .flatten(),
             emissive_strength: self
-                .optional(id, "extensions")?
+                .field(id, "extensions")?
                 .map(|id| self.field(id, super::KHR_MATERIALS_EMISSIVE_STRENGTH))
                 .transpose()?
                 .flatten(),
@@ -601,7 +584,7 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
 
     fn camera(&self, id: ValueId) -> ParseResult<Camera<'scope>> {
         let orthographic = self
-            .optional(id, "orthographic")?
+            .field(id, "orthographic")?
             .map(|data| -> ParseResult<_> {
                 Ok(Projection::Orthographic {
                     xmag: self.float(self.required(data, "xmag")?)?,
@@ -612,17 +595,17 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
             })
             .transpose()?;
         let perspective = self
-            .optional(id, "perspective")?
+            .field(id, "perspective")?
             .map(|data| -> ParseResult<_> {
                 Ok(Projection::Perspective {
                     yfov: self.float(self.required(data, "yfov")?)?,
                     znear: self.float(self.required(data, "znear")?)?,
                     aspect_ratio: self
-                        .optional(data, "aspectRatio")?
+                        .field(data, "aspectRatio")?
                         .map(|id| self.float(id))
                         .transpose()?,
                     zfar: self
-                        .optional(data, "zfar")?
+                        .field(data, "zfar")?
                         .map(|id| self.float(id))
                         .transpose()?,
                 })
@@ -781,24 +764,40 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
                 })
             })?,
             nodes: self.list(self.field(0, "nodes")?, |id| {
+                let matrix_id = self.field(id, "matrix")?;
+                if matrix_id.is_some() {
+                    for property in ["translation", "rotation", "scale"] {
+                        if self.field(id, property)?.is_some() {
+                            return Err(self.invalid(
+                                "glTF node matrix and TRS properties are mutually exclusive",
+                            ));
+                        }
+                    }
+                }
+                let matrix: Option<[f32; 16]> = matrix_id.map(|id| self.fixed(id)).transpose()?;
+                if let Some(cells) = matrix.as_ref() {
+                    let columns = std::array::from_fn(|column| {
+                        std::array::from_fn(|row| cells[column * 4 + row])
+                    });
+                    self.ctx.charge_work(22)?;
+                    super::transforms::node_matrix(&columns)
+                        .map_err(|reason| self.invalid(reason))?;
+                }
                 Ok(Node {
                     name: self.name(id)?,
-                    children: self.list(self.optional(id, "children")?, |id| self.id(id))?,
+                    children: self.list(self.field(id, "children")?, |id| self.id(id))?,
                     mesh: self.optional_id(id, "mesh")?,
                     skin: self.optional_id(id, "skin")?,
                     camera: self.optional_id(id, "camera")?,
                     punctual_light: self
-                        .optional(id, "extensions")?
+                        .field(id, "extensions")?
                         .map(|id| self.field(id, super::KHR_LIGHTS_PUNCTUAL))
                         .transpose()?
                         .flatten(),
-                    matrix: self
-                        .optional(id, "matrix")?
-                        .map(|id| self.fixed(id))
-                        .transpose()?,
-                    translation: self.fixed_or(id, "translation", [0.; 3])?,
-                    rotation: self.fixed_or(id, "rotation", [0., 0., 0., 1.])?,
-                    scale: self.fixed_or(id, "scale", [1.; 3])?,
+                    matrix,
+                    translation: self.fixed_default(id, "translation", [0.; 3])?,
+                    rotation: self.fixed_default(id, "rotation", [0., 0., 0., 1.])?,
+                    scale: self.fixed_default(id, "scale", [1.; 3])?,
                     weights: self.weights(id)?,
                 })
             })?,
@@ -815,10 +814,7 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
             buffers: self.list(self.field(0, "buffers")?, |id| {
                 let _name = self.name(id)?;
                 Ok(Buffer {
-                    uri: self
-                        .optional(id, "uri")?
-                        .map(|id| self.text(id))
-                        .transpose()?,
+                    uri: self.field(id, "uri")?.map(|id| self.text(id)).transpose()?,
                     byte_length: self
                         .field(id, "byteLength")?
                         .map_or(Ok(0), |id| self.size(id))?,
@@ -827,7 +823,7 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
             buffer_views: self.list(self.field(0, "bufferViews")?, |id| {
                 let _name = self.name(id)?;
                 let stride = self
-                    .optional(id, "byteStride")?
+                    .field(id, "byteStride")?
                     .map(|id| self.size(id))
                     .transpose()?;
                 if stride.is_some_and(|size| !(4..=252).contains(&size)) {
@@ -837,12 +833,12 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
                     buffer: self.required_id(id, "buffer")?,
                     byte_length: self.size(self.required(id, "byteLength")?)?,
                     byte_offset: self
-                        .optional(id, "byteOffset")?
+                        .field(id, "byteOffset")?
                         .map(|id| self.size(id))
                         .transpose()?,
                     byte_stride: stride.map(|size| size as usize),
                     target: self
-                        .optional(id, "target")?
+                        .field(id, "target")?
                         .map(|id| self.enum_uint(id, &[(34962, 34962), (34963, 34963)]))
                         .transpose()?,
                 })
@@ -858,12 +854,9 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
             images: self.list(self.field(0, "images")?, |id| {
                 Ok(Image {
                     name: self.name(id)?,
-                    uri: self
-                        .optional(id, "uri")?
-                        .map(|id| self.text(id))
-                        .transpose()?,
+                    uri: self.field(id, "uri")?.map(|id| self.text(id)).transpose()?,
                     mime_type: self
-                        .optional(id, "mimeType")?
+                        .field(id, "mimeType")?
                         .map(|id| self.text(id))
                         .transpose()?,
                     buffer_view: self.optional_id(id, "bufferView")?,
@@ -880,7 +873,7 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
                 Ok(Sampler {
                     name: self.name(id)?,
                     mag_filter: self
-                        .optional(id, "magFilter")?
+                        .field(id, "magFilter")?
                         .map(|id| {
                             self.enum_uint(
                                 id,
@@ -889,7 +882,7 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
                         })
                         .transpose()?,
                     min_filter: self
-                        .optional(id, "minFilter")?
+                        .field(id, "minFilter")?
                         .map(|id| {
                             self.enum_uint(
                                 id,
@@ -941,7 +934,10 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
                         Ok(animation::Channel {
                             sampler: self.required_id(id, "sampler")?,
                             target: animation::Target {
-                                node: self.required_id(target, "node")?,
+                                node: self
+                                    .field(target, "node")?
+                                    .map(|id| self.id(id))
+                                    .transpose()?,
                                 path: self.enum_text(
                                     self.required(target, "path")?,
                                     &[
@@ -1027,7 +1023,7 @@ impl<'a, 'scope, 'session> Decoder<'a, 'scope, 'session> {
             )));
         }
         for field in ["generator", "copyright"] {
-            if let Some(id) = self.optional(asset, field)? {
+            if let Some(id) = self.field(asset, field)? {
                 self.kind(
                     id,
                     ValueKind::String,

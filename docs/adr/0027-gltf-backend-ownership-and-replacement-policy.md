@@ -176,17 +176,19 @@ ORTHOGONAL_REL_TOLERANCE = 64 * f32::EPSILON
 
 For column-major matrix `m`, affine admission requires `m[0][3]`, `m[1][3]`, and `m[2][3]` to compare
 exactly to zero and `m[3][3]` to compare exactly to one. Signed zero is accepted and preserved. Let
-`c0`, `c1`, and `c2` be the three spatial columns. Every pair of nonzero columns must satisfy the
+`c0`, `c1`, and `c2` be the three spatial columns. All three must be nonzero, counting signed zero
+as zero. Every pair of columns must satisfy the
 inclusive squared test
-`dot(ci, cj)^2 <= ORTHOGONAL_REL_TOLERANCE^2 * norm2(ci) * norm2(cj)`. An exactly zero column is a
-valid zero scale and requires no normalization; a near-zero nonzero column uses the same relative
-test and is never coerced to zero.
+`dot(ci, cj)^2 <= ORTHOGONAL_REL_TOLERANCE^2 * norm2(ci) * norm2(cj)`. A near-zero nonzero column
+uses the same relative test and is never coerced to zero.
 
 This predicate defines Baozi's accepted floating-point representation of decomposable `R * S`
-columns without choosing a decomposition. Consequently one, two, or three zero scales are valid, and
-a negative determinant/reflection is valid because glTF permits negative scale. The predicate neither
-rejects determinant zero nor chooses an axis to carry a negative sign. The authored matrix cells,
-including signed zero, remain unchanged.
+columns without choosing a decomposition. A negative determinant/reflection remains valid because
+glTF permits negative scale; the predicate does not choose an axis to carry a negative sign. Zero
+scales remain valid through authored TRS and may produce singular derived transforms, but the
+current pinned glTF node-matrix contract prohibits a zero spatial column. Canonical matrices and
+inverse binds keep their distinct existing validation. Accepted authored matrix cells, including
+signed zero, remain unchanged.
 Raw admission rejects matrix plus any TRS property before the backend accessor can hide that
 combination; the complete animation-reference pass rejects every matrix-authored target.
 
@@ -283,11 +285,42 @@ Negative:
 | Admission versus maturity | A baseline-unsafe backend slice is absent from first-party registration/all-formats, while fixtures with only missing non-safety evidence remain eligible for Experimental. |
 | Semantic breadth | Fixtures cover multi-primitive meshes, attributes, material/texture sharing, skins, morphs, and animations through normalized and facade layers. |
 | Scene projection | Multi-scene fixtures prove default, explicit, missing-default, shared-root, skin, and animation-closure behavior with source-scope evidence. |
-| Node transforms | Matrix/TRS mutual exclusion, exact affine bottom-row fixtures including signed zero and next-representable nonzero/away-from-one rejection, orthogonality fixtures at 0.5x, exactly 1x inclusive, the next representable value above 1x, and 2x the threshold, one/two/three zero scales, nonzero near-zero scales, odd/even negative scales, matrix decomposability/no-shear, omitted TRS defaults, bit-preserving authored-form retention, backend-independent classification, and matrix-target animation rejection have positive and negative fixtures. |
+| Node transforms | Matrix/TRS mutual exclusion, exact affine bottom-row fixtures including signed zero and next-representable nonzero/away-from-one rejection, orthogonality fixtures at 0.5x, exactly 1x inclusive, the next representable value above 1x, and 2x the threshold, rejected zero matrix columns versus accepted zero TRS scales, nonzero near-zero scales, odd/even negative scales, matrix decomposability/no-shear, omitted TRS defaults, bit-preserving authored-form retention, backend-independent classification, and matrix-target animation rejection have positive and negative fixtures. |
 | Replacement equivalence | Any alternate backend passes identical normalized-model and canonical golden/digest tests. |
 | Maturity truthfulness | Linux sanitizer and subprocess RSS/timeout gates execute before promotion; compile-only evidence cannot satisfy them. |
 
 ## Amendment History
+
+### 2026-11-02: Own the core numeric and absence contracts explicitly
+
+- Node-matrix admission adopts Transformations at Khronos commit
+  `59ecbdba704206bb656965ab4e202881806066f1`, including its nonzero spatial-column rule. This
+  supersedes this ADR's earlier allowance for degenerate matrix-authored transforms under the
+  published 2021 decomposability wording. It does not rewrite that historical source, prohibit
+  explicit zero TRS scales, tighten inverse binds or alter format-independent canonical matrices.
+  The frozen orthogonality tolerance above is Baozi's interpretation of qualitative closeness,
+  not a threshold prescribed by Khronos. The actual format owner must enforce it globally.
+- Schema optionality means an absent member. Authored `null` does not become a default or an
+  absent reference where the field schema requires another type. Exact raw `extras: null` remains
+  descriptive source metadata. Obsolete decoder null-as-absence behavior and its tests are removed.
+- Unsigned schema integers are interpreted exactly from admitted decimal/exponent spellings,
+  including zero fractional parts, cancellation of decimal scale and mathematical negative zero.
+  Fractional/negative nonzero values fail without F64 rounding or underflow-to-zero acceptance;
+  U64 storage, U32 references and host/resource limits remain explicit Baozi domains.
+- A missing accessor view and sparse descriptor provides implicit zeros. It still obeys positive
+  logical count, type, byte/work/storage admission and applicable semantic rules. An authored
+  `byteOffset` requires a view. Pure implicit-zero descriptors have the core's min/max exception;
+  stored dense/sparse morph positions retain their actual-data bounds check.
+- Core animation channels without a node are ignored without inventing node zero or requiring
+  semantic-loss permission. Global structure/references and unsupported target-mechanism checks
+  remain; ignored-only resources, duration and canonical channels are not introduced. Source
+  ordinals of later retained channels remain unchanged.
+- Decoded normalized integer components equal round-to-nearest, ties-to-even F32 of the exact
+  UNORM/SNORM rational, clamping signed minima before division. F64 division followed by one F32
+  cast realizes this rule for the bounded 8/16-bit operands; it is shared by accessor and influence
+  reads. This is a stronger Baozi numeric contract, not a claim that every one-ULP reference-loader
+  difference violates Khronos' at-least-32-bit conversion guidance. Independent literal witnesses
+  and per-engine observations remain separate.
 
 ### 2026-11-01: Admit typed unlit and make optional declaration evidence precise
 

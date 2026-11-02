@@ -329,65 +329,121 @@ fn sparse_topology_indices_match_dense_typed_indices() -> TestResult<()> {
 
 #[test]
 fn normalized_sparse_texcoords_match_dense_integer_attributes_exactly() -> TestResult<()> {
-    for (component, maximum) in [(5121, 255_u32), (5123, 65535_u32)] {
-        let (mut sparse, [mut base, indices, mut values]) = sparse_triangle(5123, true)?;
-        let (mut dense, mut binary) = dense_triangle()?;
-        preserve_first_vertex(&mut binary);
-        let uv = [[maximum, maximum / 4], [maximum / 2, 0], [0, maximum]];
-        base[72..96].fill(0);
-        let first = encoded_indices(&uv[0], component);
-        base[72..72 + first.len()].copy_from_slice(&first);
-        binary[72..96].fill(0);
-        for (vertex, row) in uv.iter().enumerate() {
-            let encoded = encoded_indices(row, component);
-            let offset = 72 + vertex * 4;
-            binary[offset..offset + encoded.len()].copy_from_slice(&encoded);
-        }
-        dense["bufferViews"][2]["byteLength"] = json!(12);
-        dense["bufferViews"][2]["byteStride"] = json!(4);
-        dense["accessors"][2]["componentType"] = json!(component);
-        dense["accessors"][2]["normalized"] = json!(true);
-        let offset = values.len();
-        for row in &uv[1..] {
-            values.extend(encoded_indices(row, component));
-        }
-        sparse["buffers"][2]["byteLength"] = json!(values.len());
-        sparse["bufferViews"][2]["byteLength"] = json!(12);
-        sparse["bufferViews"][2]["byteStride"] = json!(4);
-        sparse["bufferViews"].as_array_mut().unwrap().push(json!({
-            "buffer": 2, "byteOffset": offset, "byteLength": values.len() - offset
-        }));
-        sparse["accessors"][2] = json!({
-            "bufferView": 2, "componentType": component, "normalized": true,
-            "count": 3, "type": "VEC2",
-            "sparse": {
-                "count": 2,
-                "indices": {"bufferView": 4, "byteOffset": 4, "componentType": 5123},
-                "values": {"bufferView": 6}
+    // Literal nearest-F32 results are independent of both dense and sparse decoding.
+    for (component, uv, expected_bits) in [
+        (
+            5121,
+            [[255_u32, 63], [127, 0], [0, 255]],
+            [
+                [0x3f80_0000, 0x3e7c_fcfd],
+                [0x3efe_feff, 0x0000_0000],
+                [0x0000_0000, 0x3f80_0000],
+            ],
+        ),
+        (
+            5123,
+            [[65535, 16383], [32767, 0], [0, 65535]],
+            [
+                [0x3f80_0000, 0x3e7f_fd00],
+                [0x3eff_ff00, 0x0000_0000],
+                [0x0000_0000, 0x3f80_0000],
+            ],
+        ),
+        (
+            5121,
+            [[3, 252], [252, 3], [0, 255]],
+            [
+                [0x3c40_c0c1, 0x3f7c_fcfd],
+                [0x3f7c_fcfd, 0x3c40_c0c1],
+                [0x0000_0000, 0x3f80_0000],
+            ],
+        ),
+        (
+            5123,
+            [[257, 65278], [65278, 257], [0, 65535]],
+            [
+                [0x3b80_8081, 0x3f7e_feff],
+                [0x3f7e_feff, 0x3b80_8081],
+                [0x0000_0000, 0x3f80_0000],
+            ],
+        ),
+    ] {
+        for with_base in [false, true] {
+            let (mut sparse, [mut base, indices, mut values]) = sparse_triangle(5123, with_base)?;
+            let (mut dense, mut binary) = dense_triangle()?;
+            let mut uv = uv;
+            let mut expected_bits = expected_bits;
+            if with_base {
+                preserve_first_vertex(&mut binary);
+            } else {
+                uv[0] = [0; 2];
+                expected_bits[0] = [0; 2];
             }
-        });
-        let actual = import_sparse(&sparse, [base, indices, values])?;
-        let expected = import_dense(&dense, binary)?;
-        assert_geometry_equivalent(&actual, &expected);
-        let primitive = actual
-            .scene()
-            .meshes()
-            .next()
-            .unwrap()
-            .primitives()
-            .next()
-            .unwrap();
-        let texcoords = primitive.texcoords(0, AttributeDomain::Vertex).unwrap();
-        assert_eq!(texcoords.len(), 3);
-        for (vertex, raw) in uv.into_iter().enumerate() {
-            let Some(AttributeElement::F32(actual)) = texcoords.element(vertex) else {
-                panic!("missing normalized UV value");
-            };
-            for (&actual, raw) in actual.iter().zip(raw) {
-                // Compare with an independently evaluated rational value. The existing
-                // normalized conversion may differ by one ULP through F32 multiplication.
-                let expected = (f64::from(raw) / f64::from(maximum)) as f32;
-                assert!(actual.to_bits().abs_diff(expected.to_bits()) <= 1);
+            base[72..96].fill(0);
+            let first = encoded_indices(&uv[0], component);
+            base[72..72 + first.len()].copy_from_slice(&first);
+            binary[72..96].fill(0);
+            for (vertex, row) in uv.iter().enumerate() {
+                let encoded = encoded_indices(row, component);
+                let offset = 72 + vertex * 4;
+                binary[offset..offset + encoded.len()].copy_from_slice(&encoded);
+            }
+            dense["bufferViews"][2]["byteLength"] = json!(12);
+            dense["bufferViews"][2]["byteStride"] = json!(4);
+            dense["accessors"][2]["componentType"] = json!(component);
+            dense["accessors"][2]["normalized"] = json!(true);
+            let offset = values.len();
+            for row in &uv[1..] {
+                values.extend(encoded_indices(row, component));
+            }
+            sparse["buffers"][2]["byteLength"] = json!(values.len());
+            sparse["bufferViews"][2]["byteLength"] = json!(12);
+            sparse["bufferViews"][2]["byteStride"] = json!(4);
+            sparse["bufferViews"].as_array_mut().unwrap().push(json!({
+                "buffer": 2, "byteOffset": offset, "byteLength": values.len() - offset
+            }));
+            sparse["accessors"][2] = json!({
+                "bufferView": 2, "componentType": component, "normalized": true,
+                "count": 3, "type": "VEC2",
+                "sparse": {
+                    "count": 2,
+                    "indices": {"bufferView": 4, "byteOffset": 4, "componentType": 5123},
+                    "values": {"bufferView": 6}
+                }
+            });
+            if !with_base {
+                sparse["accessors"][2]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("bufferView");
+            }
+            let actual = import_sparse(&sparse, [base, indices, values])?;
+            let expected = import_dense(&dense, binary)?;
+            assert_geometry_equivalent(&actual, &expected);
+            for (label, report) in [("dense", &expected), ("sparse", &actual)] {
+                let primitive = report
+                    .scene()
+                    .meshes()
+                    .next()
+                    .unwrap()
+                    .primitives()
+                    .next()
+                    .unwrap();
+                let texcoords = primitive.texcoords(0, AttributeDomain::Vertex).unwrap();
+                assert_eq!(texcoords.len(), 3);
+                for (vertex, expected_bits) in expected_bits.iter().enumerate() {
+                    let Some(AttributeElement::F32(actual)) = texcoords.element(vertex) else {
+                        panic!("missing {label} normalized UV value");
+                    };
+                    assert_eq!(actual.len(), 2);
+                    for (lane, (&actual, &bits)) in actual.iter().zip(expected_bits).enumerate() {
+                        assert_eq!(
+                            actual.to_bits(),
+                            bits,
+                            "{label} component {component}, base {with_base}, vertex {vertex}, lane {lane}"
+                        );
+                    }
+                }
             }
         }
     }

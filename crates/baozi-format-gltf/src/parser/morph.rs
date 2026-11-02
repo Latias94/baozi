@@ -359,6 +359,9 @@ pub(super) fn build_storage<'scope>(
                                 Some(validate_position_bounds(ctx, &document.tables().accessors[accessor.value()], accessor.value())?)
                             } else { None };
                             let accessor = document.accessors().nth(accessor.value()).ok_or_else(|| gltf_parse_error(ctx, "glTF morph accessor disappeared"))?;
+                            // Core permits descriptor bounds unrelated to the zero values when
+                            // neither a base view nor sparse data supplies the accessor.
+                            let require_data_bounds = accessor.view().is_some() || accessor.sparse().is_some();
                             let provenance = accessor_provenance(ctx, buffers, accessor)?;
                             let values = accessor::vectors::<3>(ctx, accessor, buffers)?;
                             let count = vertices.checked_mul(3).ok_or_else(|| ctx.allocation_failure("gltf-morph-value-count"))?;
@@ -370,7 +373,7 @@ pub(super) fn build_storage<'scope>(
                                 if output.len() >= count || value.iter().any(|value| !value.is_finite()) {
                                     return Err(gltf_parse_error(ctx, "glTF morph delta must have the declared finite VEC3 values"));
                                 }
-                                if declared_bounds.is_some() {
+                                if declared_bounds.is_some() && require_data_bounds {
                                     for axis in 0..3 {
                                         minimum[axis] = minimum[axis].min(value[axis]);
                                         maximum[axis] = maximum[axis].max(value[axis]);
@@ -380,7 +383,7 @@ pub(super) fn build_storage<'scope>(
                                 work.complete([3, 3])?;
                             }
                             if output.len() != count { return Err(gltf_parse_error(ctx, "glTF morph delta value count changed after preflight")); }
-                            if declared_bounds.is_some_and(|bounds| bounds != (minimum, maximum)) {
+                            if require_data_bounds && declared_bounds.is_some_and(|bounds| bounds != (minimum, maximum)) {
                                 return Err(gltf_parse_error(ctx, "glTF morph POSITION bounds do not match the delta values"));
                             }
                             storage.deltas.try_push_reserved(MorphDeltaStorage { semantic, values: output, provenance })?;

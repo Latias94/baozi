@@ -2,7 +2,7 @@ mod common;
 
 use baozi_core::{AttributeElement, TextureRole};
 use baozi_format_gltf::GltfFailureCode;
-use baozi_import::ImportDimension;
+use baozi_import::{ImportDimension, ImportTerminalCause, ImportTerminalFailureClass};
 use common::{
     GltfTestOptions, TestResult, assert_gltf_failure, expected_error, glb_with_json, import_assets,
     import_assets_result,
@@ -19,7 +19,7 @@ fn point_document(selected: bool) -> Value {
     json!({
         "asset": {"version": "2.0"},
         "scene": 0,
-        "scenes": [{"nodes": if selected { vec![0] } else { vec![] }}],
+        "scenes": [if selected { json!({"nodes": [0]}) } else { json!({}) }],
         "nodes": [{"mesh": 0}],
         "buffers": [{
             "byteLength": 12,
@@ -183,13 +183,10 @@ fn explicit_null_sparse_offsets_reject_globally_before_dependencies() -> TestRes
 }
 
 #[test]
-fn known_null_morph_references_remain_absent_when_selected_or_omitted() -> TestResult<()> {
+fn empty_morph_targets_remain_valid_when_selected_or_omitted() -> TestResult<()> {
     for selected in [false, true] {
         let mut document = point_document(selected);
-        document["meshes"][0]["primitives"][0]["targets"] = json!([
-            {"POSITION": null}, {"NORMAL": null}, {"TANGENT": null},
-            {"POSITION": null, "NORMAL": null, "TANGENT": null}
-        ]);
+        document["meshes"][0]["primitives"][0]["targets"] = json!([{}, {}, {}, {}]);
         for (source, bytes) in encodings(&document)? {
             let (report, diagnostics) =
                 import_assets(source, [(source, bytes)], GltfTestOptions::memory())?;
@@ -213,6 +210,53 @@ fn known_null_morph_references_remain_absent_when_selected_or_omitted() -> TestR
                 0
             );
             assert_eq!(report.ledger().current_live_bytes(), 0);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn known_null_morph_references_reject_globally_before_dependencies() -> TestResult<()> {
+    for selected in [false, true] {
+        for target in [
+            json!({"POSITION": null}),
+            json!({"NORMAL": null}),
+            json!({"TANGENT": null}),
+            json!({"POSITION": null, "NORMAL": null, "TANGENT": null}),
+        ] {
+            let mut document = point_document(selected);
+            document["buffers"][0]["uri"] = json!("never.bin");
+            document["meshes"][0]["primitives"][0]["targets"] = json!([target]);
+            for (source, bytes) in encodings(&document)? {
+                let (result, diagnostics) =
+                    import_assets_result(source, [(source, bytes)], GltfTestOptions::memory())?;
+                assert!(diagnostics.is_empty());
+                let failure = expected_error(result)?;
+                assert_gltf_failure(
+                    &failure,
+                    GltfFailureCode::InvalidDocument,
+                    Some("requires an unsigned integer"),
+                )?;
+                assert!(failure.source_scope_record().is_none());
+                assert_eq!(failure.ledger().committed_canonical_members(), 0);
+                for dimension in [
+                    ImportDimension::DependencyReference,
+                    ImportDimension::DependencyBytes,
+                ] {
+                    assert_eq!(
+                        failure.ledger().dimension(dimension).unwrap().attempted(),
+                        0
+                    );
+                }
+                assert_eq!(failure.ledger().current_live_bytes(), 0);
+                assert_eq!(failure.ledger().current_evidence_bytes(), 0);
+                assert_eq!(failure.ledger().active_reservations(), 0);
+                assert!(matches!(
+                    failure.ledger().terminal_cause(),
+                    ImportTerminalCause::Failure(terminal)
+                        if terminal.class() == ImportTerminalFailureClass::Requested
+                ));
+            }
         }
     }
     Ok(())

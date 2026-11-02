@@ -28,6 +28,9 @@ const WEIGHT_ROWS: [[f32; 8]; 3] = [
     [0.25, 0.125, -0.0, 0.0, 0.375, 0.125, 0.125, 0.0],
     [0.25, 0.0, 0.125, -0.0, 0.0625, 0.5, 0.0625, 0.0],
 ];
+// Exact-rational nearest-F32 bits for the pinned spec's mixed-width weight example.
+const SPEC_U8_WEIGHT_BITS: [u32; 4] = [0x3b80_8081, 0x3c80_8081, 0x3d80_8081, 0x3e80_8081];
+const SPEC_U16_WEIGHT_BITS: [u32; 4] = [0x3c20_00a0, 0x3d02_0082, 0x3e00_2080, 0x3f00_0280];
 
 fn two_set_triangle() -> TestResult<(Value, Vec<u8>)> {
     let mut document: Value = serde_json::from_slice(&skinned_triangle_gltf())?;
@@ -324,13 +327,14 @@ fn later_set_strided_accessors_skip_padding_and_keep_exact_weight_bits() -> Test
 #[test]
 fn sparse_normalized_later_sets_retain_values_and_complete_typed_provenance() -> TestResult<()> {
     // The mixed U8/U16 numerators are the exact-sum example in the pinned glTF spec.
-    for (low_component, high_component, joint_component, low, high) in [
+    for (low_component, high_component, joint_component, low, high, expected_bits) in [
         (
             5121,
             5123,
             5121,
             [1_u16, 4, 16, 64],
             [640_u16, 2080, 8200, 32770],
+            [SPEC_U8_WEIGHT_BITS, SPEC_U16_WEIGHT_BITS],
         ),
         (
             5123,
@@ -338,15 +342,11 @@ fn sparse_normalized_later_sets_retain_values_and_complete_typed_provenance() ->
             5123,
             [640_u16, 2080, 8200, 32770],
             [1_u16, 4, 16, 64],
+            [SPEC_U16_WEIGHT_BITS, SPEC_U8_WEIGHT_BITS],
         ),
     ] {
         let (mut document, mut binary) = two_set_triangle()?;
         let low_max = if low_component == 5121 {
-            255_u16
-        } else {
-            65535
-        };
-        let high_max = if high_component == 5121 {
             255_u16
         } else {
             65535
@@ -439,34 +439,22 @@ fn sparse_normalized_later_sets_retain_values_and_complete_typed_provenance() ->
         assert_eq!(scene.mesh_count(), 1);
         assert_eq!(scene.mesh_instance_count(), 2);
         let primitive = scene.meshes().next().unwrap().primitives().next().unwrap();
-        let rows = primitive.influences().unwrap();
-        assert_eq!(rows.len(), 3);
-        assert_eq!(
-            rows.get(0).unwrap().joint_indices(),
-            &[0, 1, 2, 3, 0, 0, 0, 0]
-        );
-        assert_eq!(
-            rows.get(0).unwrap().weights(),
-            &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        );
-        let expected_weights = low
-            .map(|value| f32::from(value) / f32::from(low_max))
+        let expected_weights = expected_bits
             .into_iter()
-            .chain(high.map(|value| f32::from(value) / f32::from(high_max)))
+            .flatten()
+            .map(f32::from_bits)
             .collect::<Vec<_>>();
-        for vertex in 0..3 {
-            let row = rows.get(vertex).unwrap();
-            assert_eq!(row.source_orders(), &[0, 1, 2, 3, 4, 5, 6, 7]);
-            if vertex != 0 {
-                assert_eq!(row.joint_indices(), &[0, 1, 2, 3, 4, 5, 6, 7]);
-                for (&actual, &expected) in row.weights().iter().zip(&expected_weights) {
-                    assert!(
-                        (actual - expected).abs() <= f32::EPSILON,
-                        "normalized lane: expected {expected}, got {actual}"
-                    );
-                }
-            }
-        }
+        assert_rows(
+            &report,
+            &[
+                (
+                    &[0, 1, 2, 3, 0, 0, 0, 0],
+                    &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                ),
+                (&[0, 1, 2, 3, 4, 5, 6, 7], &expected_weights),
+                (&[0, 1, 2, 3, 4, 5, 6, 7], &expected_weights),
+            ],
+        );
 
         let mut pending = scene
             .owner_provenance(primitive.metadata_owner())?
@@ -854,15 +842,133 @@ fn duplicate_zero_weight_joints_keep_both_zero_signs() -> TestResult<()> {
 }
 
 #[test]
+fn normalized_integer_witnesses_keep_exact_bits_in_dense_and_sparse_sets() -> TestResult<()> {
+    // Literal results use integer quotient/remainder rounding, independent of the decoder.
+    for (component, maximum, witness, expected_bits) in [
+        (
+            5121,
+            255_u16,
+            [3_u16, 252, 0, 0],
+            [0x3c40_c0c1, 0x3f7c_fcfd, 0x0000_0000, 0x0000_0000],
+        ),
+        (
+            5123,
+            65535,
+            [257, 65278, 0, 0],
+            [0x3b80_8081, 0x3f7e_feff, 0x0000_0000, 0x0000_0000],
+        ),
+    ] {
+        for (sparse, with_base) in [(false, true), (true, true), (true, false)] {
+            let (mut document, mut binary) = two_set_triangle()?;
+            for vertex in 0..3 {
+                for (offset, joints) in [
+                    (42 + vertex * 8, [3_u16, 0, 2, 1]),
+                    (116 + vertex * 8, [7_u16, 4, 6, 5]),
+                ] {
+                    for (lane, joint) in joints.into_iter().enumerate() {
+                        binary[offset + lane * 2..offset + lane * 2 + 2]
+                            .copy_from_slice(&joint.to_le_bytes());
+                    }
+                }
+            }
+            for (accessor, offset, rows) in [
+                (3, 68, [[maximum, 0, 0, 0], [0; 4], [0; 4]]),
+                (5, 140, [[0; 4], witness, witness]),
+            ] {
+                let mut encoded = Vec::new();
+                for row in rows {
+                    for value in row {
+                        if component == 5121 {
+                            encoded.push(u8::try_from(value)?);
+                        } else {
+                            encoded.extend_from_slice(&value.to_le_bytes());
+                        }
+                    }
+                }
+                binary[offset..offset + encoded.len()].copy_from_slice(&encoded);
+                document["bufferViews"][accessor]["byteLength"] = json!(encoded.len());
+                document["accessors"][accessor]["componentType"] = json!(component);
+                document["accessors"][accessor]["normalized"] = json!(true);
+            }
+            if sparse {
+                let row_bytes = if component == 5121 { 4 } else { 8 };
+                let values = binary[140 + row_bytes..140 + 3 * row_bytes].to_vec();
+                // A valid unit-weight base must be replaced, never added or renormalized.
+                binary[140 + row_bytes..140 + 3 * row_bytes].fill(0);
+                for vertex in 1..3 {
+                    let offset = 140 + vertex * row_bytes;
+                    if component == 5121 {
+                        binary[offset] = u8::try_from(maximum)?;
+                    } else {
+                        binary[offset..offset + 2].copy_from_slice(&maximum.to_le_bytes());
+                    }
+                }
+                let index_offset = binary.len();
+                binary.extend_from_slice(&[1, 2]);
+                binary.resize(binary.len().next_multiple_of(4), 0);
+                let value_offset = binary.len();
+                binary.extend_from_slice(&values);
+                document["bufferViews"].as_array_mut().unwrap().extend([
+                    json!({"buffer": 0, "byteOffset": index_offset, "byteLength": 2}),
+                    json!({"buffer": 0, "byteOffset": value_offset, "byteLength": values.len()}),
+                ]);
+                document["accessors"][5]["sparse"] = json!({
+                    "count": 2,
+                    "indices": {"bufferView": 6, "componentType": 5121},
+                    "values": {"bufferView": 7}
+                });
+                if !with_base {
+                    document["accessors"][5]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("bufferView");
+                }
+            }
+            document["buffers"][0]["byteLength"] = json!(binary.len());
+            let report = import_triangle(&document, binary)?;
+            let [a, b, c, d] = expected_bits.map(f32::from_bits);
+            let expected_weights = [0.0, 0.0, 0.0, 0.0, a, b, c, d];
+            let joints = [3, 0, 2, 1, 7, 4, 6, 5];
+            assert_rows(
+                &report,
+                &[
+                    (&joints, &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+                    (&joints, &expected_weights),
+                    (&joints, &expected_weights),
+                ],
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn integer_weight_sets_require_an_exact_sum_for_equal_and_mixed_widths() -> TestResult<()> {
-    for (components, numerators) in [
-        ([5121, 5121], [[1_u16, 2, 4, 8], [16_u16, 32, 64, 128]]),
+    const POWERS_OF_TWO_BITS: [[u32; 4]; 2] = [
+        [0x3b80_8081, 0x3c00_8081, 0x3c80_8081, 0x3d00_8081],
+        [0x3d80_8081, 0x3e00_8081, 0x3e80_8081, 0x3f00_8081],
+    ];
+    for (components, numerators, expected_bits) in [
+        (
+            [5121, 5121],
+            [[1_u16, 2, 4, 8], [16_u16, 32, 64, 128]],
+            POWERS_OF_TWO_BITS,
+        ),
         (
             [5123, 5123],
             [[257, 514, 1028, 2056], [4112, 8224, 16448, 32896]],
+            POWERS_OF_TWO_BITS,
         ),
-        ([5121, 5123], [[1, 4, 16, 64], [640, 2080, 8200, 32770]]),
-        ([5123, 5121], [[640, 2080, 8200, 32770], [1, 4, 16, 64]]),
+        (
+            [5121, 5123],
+            [[1, 4, 16, 64], [640, 2080, 8200, 32770]],
+            [SPEC_U8_WEIGHT_BITS, SPEC_U16_WEIGHT_BITS],
+        ),
+        (
+            [5123, 5121],
+            [[640, 2080, 8200, 32770], [1, 4, 16, 64]],
+            [SPEC_U16_WEIGHT_BITS, SPEC_U8_WEIGHT_BITS],
+        ),
     ] {
         let (mut document, mut binary) = two_set_triangle()?;
         for vertex in 0..3 {
@@ -876,7 +982,6 @@ fn integer_weight_sets_require_an_exact_sum_for_equal_and_mixed_widths() -> Test
                 }
             }
         }
-        let mut expected_weights = Vec::new();
         for (set, offset, accessor) in [(0, 68, 3), (1, 140, 5)] {
             let mut encoded = Vec::new();
             for _ in 0..3 {
@@ -892,31 +997,21 @@ fn integer_weight_sets_require_an_exact_sum_for_equal_and_mixed_widths() -> Test
             document["bufferViews"][accessor]["byteLength"] = json!(encoded.len());
             document["accessors"][accessor]["componentType"] = json!(components[set]);
             document["accessors"][accessor]["normalized"] = json!(true);
-            let denominator = if components[set] == 5121 {
-                255.0_f32
-            } else {
-                65535.0
-            };
-            expected_weights.extend(numerators[set].map(|value| f32::from(value) / denominator));
         }
         let report = import_triangle(&document, binary.clone())?;
-        let rows = report
-            .scene()
-            .meshes()
-            .next()
-            .unwrap()
-            .primitives()
-            .next()
-            .unwrap()
-            .influences()
-            .unwrap();
-        for row in rows.iter() {
-            assert_eq!(row.joint_indices(), &[0, 1, 2, 3, 4, 5, 6, 7]);
-            assert_eq!(row.source_orders(), &[0, 1, 2, 3, 4, 5, 6, 7]);
-            for (&actual, &expected) in row.weights().iter().zip(&expected_weights) {
-                assert!((actual - expected).abs() <= f32::EPSILON);
-            }
-        }
+        let expected_weights = expected_bits
+            .into_iter()
+            .flatten()
+            .map(f32::from_bits)
+            .collect::<Vec<_>>();
+        assert_rows(
+            &report,
+            &[
+                (&[0, 1, 2, 3, 4, 5, 6, 7], &expected_weights),
+                (&[0, 1, 2, 3, 4, 5, 6, 7], &expected_weights),
+                (&[0, 1, 2, 3, 4, 5, 6, 7], &expected_weights),
+            ],
+        );
         // Change only the final later-set component by one source integer unit.
         for delta in [-1_i32, 1] {
             let mut invalid = binary.clone();
@@ -997,7 +1092,7 @@ fn float_weight_sums_warn_once_per_primitive_and_preserve_source_bits() -> TestR
                 assert_eq!(row.source_orders(), &[0, 1, 2, 3, 4, 5, 6, 7]);
                 for (lane, &actual) in row.weights().iter().enumerate() {
                     if integer_later_set && lane == 4 {
-                        assert!((actual - 127.0 / 255.0).abs() <= f32::EPSILON);
+                        assert_eq!(actual.to_bits(), 0x3efe_feff);
                     } else {
                         let expected = if lane == 0 {
                             0.375

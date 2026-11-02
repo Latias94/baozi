@@ -41,12 +41,19 @@ pub(super) fn validate(ctx: &ParseScope<'_>, root: &s::Tables<'_>) -> ParseResul
     for view in &root.buffer_views {
         reference(view.buffer, root.buffers.len())?;
     }
-    for accessor in &root.accessors {
+    for (index, accessor) in root.accessors.iter().enumerate() {
         ctx.charge_work(1)?;
-        if accessor.buffer_view.is_none() && accessor.sparse.is_none() {
-            return Err(fail(
-                "glTF accessor requires a bufferView or sparse descriptor",
-            ));
+        if accessor.count == 0 {
+            return Err(ctx.format_failure(GltfFailure::invalid_accessor(
+                Some(index),
+                "accessor count must be positive",
+            )));
+        }
+        if accessor.buffer_view.is_none() && accessor.byte_offset.is_some() {
+            return Err(ctx.format_failure(GltfFailure::invalid_accessor(
+                Some(index),
+                "accessor without bufferView must not define byteOffset",
+            )));
         }
         if let Some(id) = accessor.buffer_view {
             reference(id, root.buffer_views.len())?;
@@ -143,7 +150,19 @@ pub(super) fn validate(ctx: &ParseScope<'_>, root: &s::Tables<'_>) -> ParseResul
         }
         for channel in &animation.channels {
             reference(channel.sampler, animation.samplers.len())?;
-            reference(channel.target.node, root.nodes.len())?;
+            if let Some(node) = channel.target.node {
+                reference(node, root.nodes.len())?;
+                if root.nodes[node.value()].matrix.is_some()
+                    && !matches!(
+                        channel.target.path,
+                        s::animation::Property::MorphTargetWeights
+                    )
+                {
+                    return Err(ctx.format_failure(GltfFailure::invalid_document(
+                        "glTF TRS animation targets a matrix-authored node",
+                    )));
+                }
+            }
         }
     }
     Ok(())

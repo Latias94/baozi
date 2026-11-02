@@ -238,16 +238,23 @@ pub(super) fn build_rows<'scope>(
     })
 }
 
-/// Keep raw integer sums separate from the existing backend's F32 dequantization.
+/// Keep raw integer sums separate from the shared, single-rounding accessor conversion.
 fn next_weights(weights: &mut ReadWeights<'_>) -> Option<([f32; 4], u64)> {
     match weights {
         ReadWeights::U8(values) => values.next().map(|values| {
             let sum = values.iter().map(|&value| u64::from(value) * 257).sum();
-            (values.map(|value| value as f32 * 255.0_f32.recip()), sum)
+            // Raw carries component bits in U32; this variant's checked source width is U8.
+            (
+                values.map(|value| crate::document::read::normalized_u8(value as u8)),
+                sum,
+            )
         }),
         ReadWeights::U16(values) => values.next().map(|values| {
             let sum = values.iter().map(|&value| u64::from(value)).sum();
-            (values.map(|value| value as f32 * 65535.0_f32.recip()), sum)
+            (
+                values.map(|value| crate::document::read::normalized_u16(value as u16)),
+                sum,
+            )
         }),
         ReadWeights::F32(values) => values.next().map(|values| (values, 0)),
     }

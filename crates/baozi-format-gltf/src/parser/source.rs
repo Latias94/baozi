@@ -119,7 +119,17 @@ pub(super) fn preflight(
     let mut extras = super::extras::ExtrasPreflight::default();
     for entity in map.entities() {
         ctx.charge_work(1)?;
-        if !selected(entity.id, document, graph, closure, animations) {
+        let entity_selected = selected(entity.id, document, graph, closure, animations);
+        // Node absence only permits the core ignore rule. Inspect this channel's extension
+        // containers and members even in an omitted clip, without retaining its extras.
+        let core_ignored_channel = entity.id.kind == SourceEntityKind::AnimationChannel
+            && entity
+                .id
+                .parent_index
+                .and_then(|animation| document.tables().animations.get(animation))
+                .and_then(|animation| animation.channels.get(entity.id.source_index))
+                .is_some_and(|channel| channel.target.node.is_none());
+        if !entity_selected && !core_ignored_channel {
             continue;
         }
         // Every payload occupies primary bytes, so the byte length bounds both searches even
@@ -134,7 +144,9 @@ pub(super) fn preflight(
             };
             match payload.kind {
                 SourcePayloadKind::Extras => {
-                    extras.add(ctx, payload)?;
+                    if entity_selected {
+                        extras.add(ctx, payload)?;
+                    }
                 }
                 SourcePayloadKind::Extensions => {
                     let offset = usize::try_from(range.byte_offset).ok();
@@ -288,7 +300,8 @@ pub(super) fn selected(
                     .animations
                     .get(animation)
                     .and_then(|clip| clip.channels.get(index))
-                    .and_then(|channel| graph.selected.as_slice().get(channel.target.node.value()))
+                    .and_then(|channel| channel.target.node)
+                    .and_then(|node| graph.selected.as_slice().get(node.value()))
                     .copied()
                     .unwrap_or(false)
         }),

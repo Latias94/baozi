@@ -95,6 +95,7 @@ pub(super) struct AnimationContracts<'scope, 'document> {
 pub(super) enum SourceChannelDisposition {
     Retained,
     ScopeOmitted,
+    CoreIgnored,
 }
 
 impl SourceChannelDisposition {
@@ -235,7 +236,13 @@ fn preflight_inner<'scope, 'document>(
                     ),
                 )
             })?;
-            let source_node_index = source_channel.target.node.value();
+            let Some(source_node) = source_channel.target.node else {
+                // Core channels without a node have no effect. Source preflight separately
+                // rejects extension payloads that could introduce another targeting mechanism.
+                source_channels.try_push_reserved(SourceChannelDisposition::CoreIgnored)?;
+                continue;
+            };
+            let source_node_index = source_node.value();
             let Some(selected) = selected_nodes.get(source_node_index).copied() else {
                 return Err(gltf_parse_error(
                     ctx,
@@ -295,27 +302,6 @@ fn preflight_inner<'scope, 'document>(
                 continue;
             }
 
-            let source_node = gltf
-                .tables()
-                .nodes
-                .get(source_node_index)
-                .ok_or_else(|| {
-                    gltf_parse_error(
-                        ctx,
-                        format_args!(
-                            "glTF animation {animation_index} channel {channel_index} targets missing node {source_node_index}"
-                        ),
-                    )
-                })?;
-            if source_node.matrix.is_some() && property != AnimationProperty::MorphWeights {
-                return Err(gltf_parse_error(
-                    ctx,
-                    format_args!(
-                        "glTF animation {animation_index} channel {channel_index} targets matrix-authored node {source_node_index}"
-                    ),
-                ));
-            }
-
             let seen_index = source_node_index
                 .checked_mul(4)
                 .and_then(|base| base.checked_add(property.target_slot()))
@@ -339,6 +325,11 @@ fn preflight_inner<'scope, 'document>(
             *seen = animation_index;
 
             let value_width = if property == AnimationProperty::MorphWeights {
+                let source_node = gltf.tables().nodes.get(source_node_index).ok_or_else(|| {
+                    ContentError::from(super::GltfFailure::internal(
+                        "validated animation node reference is missing",
+                    ))
+                })?;
                 let mesh_index = source_node
                     .mesh
                     .ok_or_else(|| {
@@ -547,7 +538,7 @@ fn record_channel_losses(
             ctx.poll()?;
         }
         let (code, reason) = match disposition {
-            SourceChannelDisposition::Retained => continue,
+            SourceChannelDisposition::Retained | SourceChannelDisposition::CoreIgnored => continue,
             SourceChannelDisposition::ScopeOmitted if !animation_selected => continue,
             SourceChannelDisposition::ScopeOmitted => (
                 "gltf.animation_channel_outside_scene_omitted",

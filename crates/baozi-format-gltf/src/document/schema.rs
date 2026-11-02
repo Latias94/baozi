@@ -312,7 +312,7 @@ pub(crate) mod animation {
         pub(crate) target: Target,
     }
     pub(crate) struct Target {
-        pub(crate) node: Index,
+        pub(crate) node: Option<Index>,
         pub(crate) path: Property,
     }
     pub(crate) struct Sampler {

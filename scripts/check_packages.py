@@ -18,6 +18,7 @@ from check_features import CASES, validate_consumer_features
 
 
 CONSUMER_DEPENDENCIES = ("baozi", "baozi-import")
+GLTF_CONSUMER_DEPENDENCIES = ("baozi-format-gltf", "baozi-import", "baozi-io")
 NATIVE_DEPENDENCY = "baozi-native-io-candidate"
 NATIVE_HELPERS = ("baozi-cap-primitives", "baozi-cap-std", "baozi-cap-fs-ext")
 CRATES_IO = "registry+https://github.com/rust-lang/crates.io-index"
@@ -159,6 +160,34 @@ def stage_native_consumer(destination: Path, artifacts: dict[str, Path]) -> None
         registry_dependency(NATIVE_DEPENDENCY, artifacts), "", "[features]",
         'repository-capture = ["baozi-native-io-candidate/repository-capture"]', "",
     ]), encoding="utf-8")
+
+
+def stage_gltf_consumer(source: Path, destination: Path, artifacts: dict[str, Path]) -> None:
+    """Rehearse the one maintained direct-format consumer with version-only roots."""
+    consumer = read_manifest(source / "Cargo.toml")
+    if set(consumer["dependencies"]) != set(GLTF_CONSUMER_DEPENDENCIES):
+        raise ValueError("Update the fixed glTF staging roots for changed dependencies")
+    development = consumer["dev-dependencies"]
+    if set(development) != {"baozi-core", "gltf"}:
+        raise ValueError("Update the fixed glTF staging development dependencies")
+    reference = development["gltf"]
+    if reference["version"] != "=1.4.1" or reference.get("default-features", True):
+        raise ValueError("The glTF reference must remain exact 1.4.1 without import helpers")
+    shutil.copytree(source, destination, ignore=shutil.ignore_patterns("target", "__pycache__"))
+    if not (destination / "Cargo.lock").is_file():
+        raise ValueError("The direct glTF consumer needs a checked-in Cargo.lock")
+    package = consumer["package"]
+    lines = [
+        "[package]",
+        *(f"{key} = {json.dumps(package[key], ensure_ascii=False)}"
+          for key in ("name", "version", "edition", "rust-version")),
+        "publish = false", "", "[workspace]", 'resolver = "3"', "", "[dependencies]",
+        *(registry_dependency(name, artifacts) for name in GLTF_CONSUMER_DEPENDENCIES),
+        "", "[dev-dependencies]", registry_dependency("baozi-core", artifacts),
+        'gltf = { version = "=1.4.1", default-features = false, features = '
+        + json.dumps(reference.get("features", [])) + " }", "",
+    ]
+    (destination / "Cargo.toml").write_text("\n".join(lines), encoding="utf-8")
 
 
 def stage_helper_consumer(destination: Path, artifacts: dict[str, Path],
@@ -351,6 +380,8 @@ def main() -> None:
                         help="Gather input metadata offline too; all archives and builds are offline")
     parser.add_argument("--native", action="store_true",
                         help="Also rehearse the unregistered native candidate and all helper features")
+    parser.add_argument("--gltf-conformance", action="store_true",
+                        help="Also test direct glTF/import/IO archive roots and the pinned reference")
     parser.add_argument("--features", choices=["repository-capture"],
                         help="Also compile this native feature; runtime exercises only the baseline")
     args = parser.parse_args()
@@ -373,6 +404,9 @@ def main() -> None:
     inputs = [(root / "Cargo.toml", CONSUMER_DEPENDENCIES)]
     if args.native:
         inputs.append((root / "candidates/baozi-native-io/Cargo.toml", (NATIVE_DEPENDENCY,)))
+    if args.gltf_conformance:
+        inputs.append((root / "tools/consumers/gltf-conformance/Cargo.toml",
+                       GLTF_CONSUMER_DEPENDENCIES))
     for manifest, roots in inputs:
         result = run(cargo + [
             "metadata", "--locked", "--format-version", "1", "--all-features",
@@ -448,6 +482,11 @@ def main() -> None:
     consumer = staging / "consumer"
     stage_consumer(source, consumer, artifacts)
     consumers = [(consumer, set(package["name"] for package in package_order(metadata[0])))]
+    if args.gltf_conformance:
+        gltf_consumer = staging / "gltf-consumer"
+        stage_gltf_consumer(root / "tools/consumers/gltf-conformance", gltf_consumer, artifacts)
+        consumers.append((gltf_consumer,
+                          set(GLTF_CONSUMER_DEPENDENCIES) | {"baozi-core", "baozi-operation"}))
     if args.native:
         native_consumer = staging / "native-consumer"
         stage_native_consumer(native_consumer, artifacts)
@@ -481,6 +520,9 @@ def main() -> None:
     # Compile archive contents in a fresh directory, independent of checkout build artifacts.
     operation = "check" if args.check else "build"
     builds = [(consumer, name, features, [expected], operation) for name, features, expected in cases]
+    if args.gltf_conformance:
+        builds.append((gltf_consumer, "direct glTF conformance consumer", ["--all-targets"],
+                       None, "check" if args.check else "test"))
     if args.native:
         builds.append((native_consumer, "native candidate baseline", [], [], operation))
         if args.features:

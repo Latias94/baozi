@@ -264,6 +264,92 @@ numeric tolerances were not relaxed. Final source identities and these runs are 
 `target/review/punctual-lights/`. Full integrated/package/portable/render qualification remains
 later work; imported light definitions alone establish no rendered result.
 
+## Owned glTF Assurance and Core Compatibility
+
+The user requested independent scrutiny of the owned decoder, current Khronos rules and
+gltf-rs issues, together with evidence that another application can use the format package
+directly. R18/R19 and the bounded U14 assurance amendment preserve the full fifteen-unit
+objective. The [research comparison](../research/2026-11-02-owned-gltf-conformance-and-test-maturity.md)
+records the exact specification, published reference, newer reference source and Validator
+artifact identities; these are different comparison authorities.
+
+Original independent cases exposed two actual valid-input regressions: a wholly implicit-zero
+accessor and a core animation channel without a target node. The pinned official Validator
+accepts both unchanged fixtures with zero errors and warnings, while the retained pre-fix
+binary rejects them. The fixes reuse zero/sparse readers and introduce a core-ignored channel
+disposition without inventing node zero, loss permission, ignored-only IO or reordered source
+ordinals. All present global references remain checked.
+
+The same audit replaced null-as-absence for known schema fields, adopted the current source's
+nonzero node-matrix-column rule with a dated ADR amendment, and replaced lexical-u64-only
+parsing with bounded exact decimal/exponent interpretation. Fractional and negative nonzero
+values cannot pass through F64 rounding or underflow. The constant-storage interpreter charges
+each metadata byte and coefficient/zero-append operation and polls between bounded chunks.
+Normalized 8/16-bit integer reads now share exact-rational nearest-F32 conversion, including
+signed-minimum clamping. This is an explicit stronger Baozi rule; separately characterized
+one-ULP gltf-rs observations are not called normative defects.
+
+| Check | Actual result | Evidence identity |
+| --- | --- | --- |
+| Merged glTF regression suite | 444/444 pass across 40 binaries, no skips | nextest `d31c1162-54b4-406f-ac7b-c3eec80546d2` |
+| Direct single-format source consumer | 8/8 pass; one fixture exporter remains manual | nextest `aced12e5-7db7-4c05-9f75-cc6fdbad04e0` |
+| Fixture export | Explicit manual exporter executes successfully | nextest `8e5c951d-e6be-4941-baa6-925387ed7d91` |
+| Separate official Validator | Four original documents, zero errors in each; GLB retains one warning and all reports retain infos | `target/review/gltf-conformance/validator.json`, artifact `2.0.0-dev.3.10` |
+| glTF and direct consumer strict Clippy | Both pass with `-D warnings` | `gltf-core-conformance-clippy-final.log`, `gltf-direct-conformance-clippy.log` |
+| Unchanged-package rehearsal before final review fixes | All twelve facade cases execute; direct-format tests 8/8 pass, manual exporter remains ignored | `target/package-check-lg7fyevu/`, `gltf-conformance-packages.log` |
+| Review-fix focused suite | 94/94 pass, including actual integer decoder entry and global omitted/mixed matrix-animation rejection | nextest `c16d439d-d60f-4b01-b569-97c79f2be0f8` |
+| Final merged glTF source | 447/447 pass, including all public exact-bit UV/influence witnesses and cross-clip source identity | nextest `f06cbcca-48f7-4d1b-a6b5-75939b22acb1` |
+| Final glTF strict Clippy | All targets/features pass | `gltf-core-conformance-final-clippy.log` |
+| Actual 32-bit WASI issue regressions | 3/3 pass on Wasmtime 50.0.0 | `gltf-upstream-issues-wasi.log`, `gltf-conformance/wasi-boundaries.json` |
+| Fresh post-review archive glTF case and direct consumer | Facade executes; direct tests 8/8 pass from ten newly created unchanged package artifacts | `target/package-check-ku8of3e5/`, `gltf-conformance-packages-final.log` |
+
+These are Rust 1.95 / Windows x86_64 MSVC results. The direct consumer's production roots are
+only format/import/IO with defaults disabled. Exact `gltf = 1.4.1` is a development comparator;
+its tests use validated document entry points and independent literal expectations rather
+than one engine's output as the other's oracle. It retains camera/light/material/resource and
+source-selection facts after destroying the Scene, importer and IO. Neither it nor the private
+selected-profile document is advertised as a raw-document library or a gltf-rs API replacement.
+
+The initial integer-focused run `9ea44ec2` passed 44/47 but exposed three test-harness mistakes:
+its intentional format-error stop itself charged work after interpretation. The harness now
+uses a named zero-limit scope stop, keeping admission and interpreter work independently
+observable. Production work charging was unchanged; the subsequent full run includes all
+twelve private and nine public integer tests. One Clippy integer-bound spelling was simplified
+without changing its assertion. The pre-review tested source inventory and ten exact archive
+digests are retained in `target/review/gltf-conformance/tested-source.json` and
+`package-rehearsal-pre-review.json`.
+
+Final independent reviews found two additional production wiring defects: a whole-token UTF-8
+scan before chunked integer admission, and a selected-only matrix-authored TRS animation guard.
+The integer entry now receives admitted bytes directly and its private cancellation/work harness
+calls the actual `Decoder::uint`. The matrix-target guard moved to global reference validation;
+its old selected-only implementation was deleted. Original tests cover omitted-only/mixed clips,
+all three TRS targets, loss permission and both containers before a deliberately missing sidecar.
+The schema review also found a new overflow test whose reason assumed a 64-bit host; it now
+asserts the distinct host-domain rejection on 32-bit targets. The 94-test result above exercises
+these corrections. The earlier full archive result retains its earlier source identity; fresh
+targeted archive and portable execution must qualify the corrections separately.
+
+The final 447-test run includes independent literal nearest-F32 witnesses in both dense and
+sparse UV and full influence-row reads; all lanes, joint identities and source orders remain
+checked, without `EPSILON` acceptance or source-weight renormalization. A cross-clip case checks
+an entirely ignored earlier clip followed by ignored/retained channels sharing one sampler;
+later clip/channel locators, flattened ordinal, duration, cells and selected IO remain exact.
+The source inventory after review fixes and formatting is `tested-source-final.json`. The
+three issue-boundary tests also execute on 32-bit WASI; this is execution of those tests, not
+a general target or maturity promotion. The subsequent focused archive rehearsal recreates all
+ten production artifacts, executes the glTF facade case and passes the eight direct-format tests
+from exact version-only roots under the offline source snapshot, without patches or checkout
+dependencies. The earlier twelve-case execution and this fresh focused run retain separate
+source/artifact identities. Neither is live-registry resolution evidence.
+
+Independent numeric and schema reviews resolved their concrete findings; a final bounded review
+also checked every new public numeric literal and sparse fixture range without finding a remaining
+wrong oracle, masked failure or fixture error. The direct consumer/package seam received a
+separate API-contract review. Their reports, final source hashes, exact artifact digests and
+execution logs are indexed by `target/review/gltf-conformance/verification.json`. Integrated
+Linux/sanitizer/renderer qualification remains U14 work on the later complete source.
+
 ## Remaining Verification
 
 Timing/RSS B0, the separate heap observations and the regression policy are now recorded above. Production semantics remained unchanged throughout these campaigns.

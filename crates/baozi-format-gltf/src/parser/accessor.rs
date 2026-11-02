@@ -1,4 +1,4 @@
-//! Shared dense and sparse accessor validation before typed materialization.
+//! Shared dense, sparse and implicit-zero accessor validation before typed materialization.
 
 use super::*;
 
@@ -146,6 +146,23 @@ pub(super) fn validate_accessor(
         },
     )?;
 
+    // Unreplaced elements without a base view are zero, which cannot be unit directions.
+    // Morph NORMAL/TANGENT deltas use a separate contract and may legitimately be zero.
+    if matches!(owner, AccessorOwner::Primitive { .. })
+        && matches!(label, "NORMAL" | "TANGENT")
+        && accessor.buffer_view.is_none()
+        && accessor
+            .sparse
+            .as_ref()
+            .is_none_or(|sparse| sparse.count < accessor.count)
+    {
+        return Err(GltfFailure::invalid_accessor(
+            Some(accessor_index),
+            format_args!("{owner} {label} accessor has implicit zero direction values"),
+        )
+        .into());
+    }
+
     let count = usize::try_from(accessor.count)
         .map_err(|_| ctx.allocation_failure("gltf-accessor-count"))?;
     Ok(AccessorInfo { count })
@@ -186,8 +203,6 @@ fn validate_accessor_layout(
         validate_base_layout(ctx, gltf, check, component_size, element_size)?;
     } else if check.accessor.byte_offset.is_some() {
         return Err(invalid("accessor without bufferView must not define byteOffset").into());
-    } else if check.accessor.sparse.is_none() {
-        return Err(invalid("accessor has neither bufferView nor sparse data").into());
     }
 
     let Some(sparse) = &check.accessor.sparse else {

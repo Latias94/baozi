@@ -631,7 +631,7 @@ pub(super) fn associate(
                 .get(source_channel_index)
                 .is_some_and(|disposition| disposition.is_retained());
             source_channel_index += 1;
-            if !selected {
+            if !selected || channel.target.node.is_none() {
                 continue;
             }
             let sampler_id = entity(

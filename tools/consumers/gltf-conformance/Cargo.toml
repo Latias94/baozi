@@ -1,0 +1,27 @@
+[package]
+name = "baozi-gltf-conformance-consumer"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[workspace]
+resolver = "3"
+
+[dependencies]
+baozi-format-gltf = { path = "../../../crates/baozi-format-gltf", default-features = false }
+baozi-import = { path = "../../../crates/baozi-import", default-features = false }
+baozi-io = { path = "../../../crates/baozi-io", default-features = false }
+
+[dev-dependencies]
+baozi-core = { path = "../../../crates/baozi-core", default-features = false }
+gltf = { version = "=1.4.1", default-features = false, features = [
+    "utils",
+    "names",
+    "extras",
+    "extensions",
+    "KHR_materials_emissive_strength",
+    "KHR_materials_unlit",
+    "KHR_texture_transform",
+    "KHR_lights_punctual",
+] }

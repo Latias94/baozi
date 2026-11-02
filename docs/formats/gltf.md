@@ -58,7 +58,26 @@ document. Fresh target/sanitizer and archive-consumer evidence belongs to the
   accept an optional base bufferView or implicit zero source components and apply replacements
   before normalized integer conversion. Canonical materialization uses the existing bounded
   dense collectors; source sparsity does not reduce logical cardinality or allocation admission.
+- Accessors with neither a buffer view nor a sparse descriptor read as implicit zeros without
+  allocating a source zero buffer. Positive logical counts and semantic constraints still apply;
+  zero normals, tangents or rotation keys do not become valid through this storage form. An
+  authored `byteOffset` requires a view. Pure implicit-zero descriptors retain the specification's
+  min/max exception; stored dense/sparse morph positions retain actual-data bounds validation.
+- Known schema fields distinguish absence from authored `null`. Null is rejected where another
+  type is required, including in structurally checked omitted objects; `extras: null` remains
+  exact descriptive JSON. Unsigned integer fields accept mathematically integral JSON decimal
+  and exponent spellings without an F64 intermediate. Fractional or negative nonzero values and
+  values outside the U64/reference/host domains fail explicitly.
+- Normalized I8/U8/I16/U16 reads use the nearest, ties-to-even F32 value of the exact rational,
+  with signed minima clamped before division. Accessor and influence reads share this rule;
+  source influence rows are not renormalized. This stronger Baozi rule can differ by one ULP
+  from a reference implementation without establishing a Khronos conformance defect there.
 - Node hierarchy, node transforms, mesh binding, node-level skin binding, and camera binding.
+- Every declared node observes matrix/TRS mutual exclusion, even for an authored identity matrix
+  or omitted node. Matrix-authored transforms require an exact affine bottom row, nonzero spatial
+  columns and the frozen orthogonality tolerance in ADR 0027. Reflections and nonzero subnormal
+  scales retain source bits. Explicit zero TRS scales and inverse-bind matrices have their separate
+  contracts; the node-matrix test does not tighten them.
 - Frozen format-owned scene selection through `GltfImportOptions`: `DocumentDefault` uses a
   declared default, otherwise a sole scene or a validated parentless-node projection when no
   scenes are declared. Multiple declared scenes without a default require an explicit
@@ -109,6 +128,10 @@ document. Fresh target/sanitizer and archive-consumer evidence belongs to the
   Baozi policy rejection; see the [source and boundary adjudication](../research/2026-11-02-quaternion-compatibility.md).
   Accepted source bits remain unchanged. Temporary application evaluation can normalize an
   effective interpolation sample under its documented policy; it does not rewrite stored keys.
+- A core animation channel without `target.node` contributes no runtime channel, duration or
+  channel-only resource closure. Its structure, present references and extension mechanisms remain
+  checked; later retained channels preserve their original source ordinals. This core ignore rule
+  neither grants semantic-loss authority nor implements `KHR_animation_pointer`.
 - Morph-weight animation targets the mesh instance attached to the authored source node, even when
   several nodes share a logical mesh. Step, Linear, and CubicSpline retain key-major weight vectors;
   cubic input/value/output parts each contain a complete target-width vector. Output is SCALAR F32

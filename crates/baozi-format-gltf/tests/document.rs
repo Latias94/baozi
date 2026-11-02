@@ -187,7 +187,7 @@ fn cancellation_releases_indexed_unknown_values_typed_rows_and_decoded_names() -
 fn omitted_core_rows_still_validate_references_hooks_and_unused_samplers() -> TestResult<()> {
     let invalid_rows = [
         r#""nodes":[{"mesh":0}]"#,
-        r#""accessors":[{"componentType":5126,"count":1,"type":"VEC3"}]"#,
+        r#""accessors":[{"bufferView":0,"componentType":5126,"count":1,"type":"VEC3"}]"#,
         r#""cameras":[{"type":"perspective","orthographic":{"xmag":1,"ymag":1,"znear":0,"zfar":10}}]"#,
         r#""textures":[{}]"#,
         r#""buffers":[{"byteLength":4}],"bufferViews":[{"buffer":0,"byteLength":4,"byteStride":256}]"#,

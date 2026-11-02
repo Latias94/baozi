@@ -3177,7 +3177,12 @@ fn build_resource_closure<'scope, 'document>(
             source_channel_index = source_channel_index
                 .checked_add(1)
                 .ok_or_else(|| ctx.allocation_failure("gltf-closure-channel-index"))?;
-            if !animation_selected {
+            if !animation_selected
+                || matches!(
+                    disposition,
+                    animation::SourceChannelDisposition::CoreIgnored
+                )
+            {
                 continue;
             }
             let sampler = animation.samplers.get(channel.sampler.value()).ok_or_else(|| {

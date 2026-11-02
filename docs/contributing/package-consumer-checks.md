@@ -21,6 +21,7 @@ python scripts/check_packages.py --toolchain 1.95.0 --release
 python scripts/check_packages.py --toolchain 1.95.0 --case all --target x86_64-pc-windows-msvc --check
 python scripts/check_packages.py --toolchain 1.95.0 --native --features repository-capture
 python scripts/check_packages.py --toolchain 1.95.0 --native --features repository-capture --offline
+python scripts/check_packages.py --toolchain 1.95.0 --case gltf --gltf-conformance --offline
 ```
 
 Without `--case`, the script runs the fixed matrix from `scripts/check_features.py`.
@@ -126,6 +127,17 @@ ten-package production closure. Every local production package is checked as its
 `.crate` artifact; no consumer-root patch or checkout dependency substitutes for those artifacts.
 The owning maintainer updates `check_features.py` and the supported-format list when
 changing admission. A command-line flag cannot admit another format.
+
+`--gltf-conformance` additionally stages the fixed standalone direct-format consumer. Its
+production roots are exact version-only `baozi-format-gltf`, `baozi-import` and `baozi-io`,
+without the facade. The copied tests name `baozi-core` as a development dependency and compare
+with exact `gltf = 1.4.1`, with default import/pixel helpers disabled. Registry snapshots include
+that locked development closure separately; reference libraries do not enter Baozi's production
+archives or portable feature union. The driver tests the extracted consumer with all targets,
+or checks all targets without execution under `--check`. It preserves the existing twelve
+facade cases and exact-archive source verification. Separate official Validator results remain
+a distinct evidence requirement; a successful package rehearsal establishes neither full glTF
+conformance nor live registry availability.
 
 Native package and feature checks have separate scopes:
 
