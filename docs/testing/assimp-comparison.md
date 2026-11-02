@@ -39,6 +39,10 @@ PROBE ROOT RELATIVE_ASSET --comparison STAGE --io-mode MODE --fields FIELDS --no
 - The comparison API is private to these tools. It is not another public Scene or GPU ABI.
 
 Assimp includes its built-in ScenePreprocessor even with zero optional flags.
+The native Scenes also differ in layout, validation, retained source/evidence and resource-control
+obligations. Import results compare the cost of each actual public contract on the same input;
+they do not isolate parser cost or claim identical retained storage. The selected detached-output
+task establishes its own shared semantics without suppressing either library's required work.
 For glTF UV0, Assimp's native V convention is retained in import observations and restored to source convention as explicit preparation work for subsequent endpoints.
 The initial corpus contains only triangle lists and points; point cases have no preparation endpoint.
 Both workers reject unsupported topology or missing requested fields rather than fabricate values.
@@ -74,6 +78,9 @@ Each worker writes one JSON object on stdout, with diagnostics on stderr:
   "fields": "position-normal",
   "normal_policy": "missing",
   "scalar_bytes": 4,
+  "computation_scalar_bytes": null,
+  "observation_scalar_bytes": 8,
+  "output_scalar_bytes": 8,
   "stage_ns": 1000,
   "observation": {
     "draws": 1,
@@ -85,12 +92,14 @@ Each worker writes one JSON object on stdout, with diagnostics on stderr:
     "uv0_bounds": null,
     "translation_x_sum": 0
   },
-  "output": {"logical_bytes": 144, "capacity_bytes": 144}
+  "output": {"logical_bytes": 280, "capacity_bytes": 384}
 }
 ```
 
 `scalar_bytes` identifies retained/source geometry width where the worker can establish it; mixed/unknown widths require an explicit diagnostic rather than claiming F64 based on its destination.
 All copied comparison geometry/instance transforms use F64, and each report records computation/output widths separately.
+An engine without one global native arithmetic width reports it as null and explains the scope;
+F64 observation or output storage does not imply F64 native parsing or preparation.
 `draws` counts primitive definitions (Assimp's primitive meshes), and `placements` counts draw placements; no count is multiplied into the unique draw payload.
 `tuples` counts expanded triangle corners or points.
 Draw positions remain mesh-local; separate column-major F64 world transforms identify placements.

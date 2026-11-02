@@ -417,13 +417,13 @@ jobs:
       - name: Collect advisory real-asset release profile
         if: runner.os == 'Linux'
         run: >-
-          python scripts/run_asset_profile.py --toolchain 1.95.0
+          python scripts/run_asset_profile.py --toolchain 1.95.0 --timeout 1800
           --artifact-root "target/asset-profiles/${{ github.run_id }}-${{ github.run_attempt }}/normal"
 
       - name: Collect advisory real-asset allocation-metrics release profile
         if: runner.os == 'Linux'
         run: >-
-          python scripts/run_asset_profile.py --toolchain 1.95.0 --allocation-metrics
+          python scripts/run_asset_profile.py --toolchain 1.95.0 --allocation-metrics --timeout 1800
           --artifact-root "target/asset-profiles/${{ github.run_id }}-${{ github.run_attempt }}/allocation-metrics"
 
       - name: Retain real-asset profile reports and logs

@@ -230,14 +230,16 @@ successful fixture. Python 3.10 or newer is required. These measurements are obs
 performance thresholds:
 
 ```text
-python scripts/run_asset_profile.py --toolchain 1.95.0
-python scripts/run_asset_profile.py --toolchain 1.95.0 --allocation-metrics
-python scripts/run_asset_profile.py --toolchain 1.95.0 --root /path/to/assets --asset model.obj --assume-standard-space
-python scripts/run_asset_profile.py --toolchain 1.95.0 --root target/asset-workloads-v1 --asset static-quads-128.obj --asset static-quads-256.obj --assume-standard-space --max-work-units 200000000 --repetitions 3
+python scripts/run_asset_profile.py --toolchain 1.95.0 --timeout 1800
+python scripts/run_asset_profile.py --toolchain 1.95.0 --allocation-metrics --timeout 1800
+python scripts/run_asset_profile.py --toolchain 1.95.0 --root /path/to/assets --asset model.obj --assume-standard-space --timeout 1800
+python scripts/run_asset_profile.py --toolchain 1.95.0 --root target/asset-workloads-v1 --asset static-quads-128.obj --asset static-quads-256.obj --assume-standard-space --max-work-units 200000000 --repetitions 3 --timeout 1800
 ```
 
 `--asset` can be repeated. `--artifact-root NEW_DIR` selects a new output directory; the default is
 `target/asset-profiles/<UTC timestamp>`. An existing directory is rejected to preserve prior evidence.
+`--timeout SECONDS` is required and applies to every tool/build/worker child. Choose a finite
+positive value that accommodates the release build; timeouts retain logs and allow other cases to run.
 Reports include Git revision/dirty state, `rustc -vV`, actual argv, return codes, elapsed process time,
 per-stage consumer summaries, and separate stdout/stderr logs. On a failure, the partial report is
 retained and the nonzero result is propagated. CI exercises the consumer on the three exact native
@@ -259,6 +261,24 @@ The V1 families and semantic expectations are described in
 [fixtures/README.md](fixtures/README.md#v1-workload-definitions-and-regressions); actual executed
 measurements belong to the revision-qualified
 [expansion review](../../../docs/reviews/2026-11-01-asset-workflow-expansion.md).
+
+The separate geometry-only [Assimp comparison protocol](../../../docs/testing/assimp-comparison.md)
+uses `--comparison` in this executable. It measures explicit import/preparation/extraction/pipeline
+lifetimes in source space and copies only selected F64 fields plus independent draw placements.
+It does not perform the full material/image/animation extraction or provenance tracing above.
+Generate its original single-file inputs before collecting measurements, supply the two prebuilt
+probes and retain their exact build metadata:
+
+```text
+python scripts/generate_asset_workloads.py --comparison --output-dir target/assimp-comparison/corpus
+python scripts/run_asset_profile.py --comparison-cases target/assimp-comparison/corpus/comparison-cases.json --baozi-probe /path/to/baozi-asset-consumer --assimp-probe /path/to/baozi-assimp-probe --assimp-double-probe /path/to/double/baozi-assimp-probe --timeout 120 --repetitions 20 --artifact-root target/assimp-comparison/B0
+```
+
+The comparator builds separately through [its CMake consumer](../assimp/README.md).
+Three fresh warmups precede the retained observations, serial AB/BA order balances engine order,
+and semantic/precision/IO failures remain visible without contributing ratios.
+Process RSS and optional independently verified heap observations remain distinct from stage time.
+Generated-case counts or a working invocation are not comparative performance results.
 
 The memory measurements answer different questions:
 
