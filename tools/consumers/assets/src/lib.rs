@@ -3,6 +3,7 @@
 //! A concrete offline consumer using only public Baozi and native-candidate APIs.
 
 mod buffers;
+pub mod comparison;
 mod evaluation;
 
 pub use buffers::*;

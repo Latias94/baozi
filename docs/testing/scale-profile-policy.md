@@ -55,6 +55,11 @@ earlier measurements. The default creates a timestamped directory below `target/
 Commands run sequentially in the repository and reuse Cargo's normal target directory.
 `CARGO_BUILD_JOBS` defaults to 1 when unset.
 
+The `obj_face_import_scale` Criterion loop includes default-request compilation, import and output
+destruction. Importer registration and fixture generation are outside that loop. The scale probe's
+process peak also includes fixture construction and owned snapshot capture; it is not import-only
+memory. Cross-engine comparisons use the separate [Assimp comparison protocol](assimp-comparison.md).
+
 The driver runs both deterministic nextest targets, the `obj_face_import_scale` Criterion group, and a
 build of the existing `import_scale_probe` benchmark. Every Cargo invocation uses `--locked`,
 `--no-default-features`, and `--features format-obj`. Criterion uses a one-second warm-up, three-second

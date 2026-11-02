@@ -3,7 +3,69 @@ use std::{path::PathBuf, process::ExitCode};
 use baozi_asset_consumer::{Options, Result, process_file};
 use serde_json::json;
 
+fn compare(args: &[std::ffi::OsString]) -> Result<()> {
+    use baozi_asset_consumer::comparison::{self, Fields, IoMode, Stage};
+    let mut options = comparison::Options::default();
+    let result = (|| {
+        let root = args.first().map(PathBuf::from).ok_or("missing root")?;
+        let source = args
+            .get(1)
+            .and_then(|arg| arg.to_str())
+            .ok_or("missing UTF-8 asset path")?;
+        let mut remaining = args[2..].iter();
+        while let Some(flag) = remaining.next() {
+            let value = remaining
+                .next()
+                .and_then(|arg| arg.to_str())
+                .ok_or("missing comparison option value")?;
+            match flag.to_str() {
+                Some("--comparison") => options.stage = Stage::parse(value)?,
+                Some("--io-mode") => {
+                    options.io_mode = match value {
+                        "file" => IoMode::File,
+                        "memory" => IoMode::Memory,
+                        _ => return Err("unknown comparison IO mode".into()),
+                    }
+                }
+                Some("--fields") => {
+                    options.fields = match value {
+                        "position" => Fields::Position,
+                        "position-normal" => Fields::PositionNormal,
+                        "position-normal-uv0" => Fields::PositionNormalUv0,
+                        _ => return Err("unknown comparison fields".into()),
+                    }
+                }
+                Some("--normals") => {
+                    options.generate_missing_normals = match value {
+                        "missing" => true,
+                        "preserve" => false,
+                        _ => return Err("unknown comparison normal policy".into()),
+                    }
+                }
+                Some("--max-work-units") => options.max_work_units = value.parse()?,
+                _ => return Err("unknown comparison option".into()),
+            }
+        }
+        comparison::measure_file(&root, source, options)
+    })();
+    match result {
+        Ok(measurement) => {
+            println!("{}", measurement.summary);
+            std::hint::black_box(&measurement.output);
+            Ok(())
+        }
+        Err(error) => {
+            println!("{}", comparison::failure(error.as_ref(), options));
+            Err(error)
+        }
+    }
+}
+
 fn run() -> Result<()> {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.iter().any(|arg| arg == "--comparison") {
+        return compare(&args);
+    }
     let mut args = std::env::args_os().skip(1);
     let root = args.next().map(PathBuf::from).ok_or("usage: baozi-asset-consumer ROOT RELATIVE_ASSET [--assume-standard-space] [--max-work-units N] [--postprocess-work N] [--postprocess-bytes N]")?;
     let source = args

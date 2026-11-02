@@ -975,7 +975,7 @@ fn select_domain(
     Ok(domain)
 }
 
-fn numeric<const N: usize>(element: AttributeElement<'_>) -> Result<[f64; N]> {
+pub(crate) fn numeric<const N: usize>(element: AttributeElement<'_>) -> Result<[f64; N]> {
     let mut result = [0.0; N];
     match element {
         AttributeElement::F32(values) if values.len() == N => {

@@ -3,6 +3,10 @@ use baozi_test_support::{ObjScale, ObjScaleFixture};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 
+// These microbenchmarks include default-request compilation and destruction of each import
+// report/Scene because Criterion::Bencher::iter drops the returned value inside its timer.
+// Importer registration and fixture construction stay outside the loop. The independent
+// comparison worker defines separate import/preparation/extraction/pipeline endpoints.
 fn bench_obj_triangle(c: &mut Criterion) {
     let importer = Importer::new().expect("default format registry should freeze");
     let bytes = b"o triangle
