@@ -2119,6 +2119,8 @@ impl std::error::Error for ImportStoreBootstrapError {
 
 #[cfg(test)]
 mod tests {
+    mod execution_gate;
+
     use super::scene_activation::{
         IMPORT_SCENE_NOT_SUBMITTED_CODE, ImportPendingScene, ImportStoreActivationTransition,
         ImportStorePreparedScene,

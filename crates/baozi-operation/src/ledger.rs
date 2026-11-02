@@ -1526,6 +1526,7 @@ where
             .consume_observed_in_order([amount])
     }
 
+    #[cfg(test)]
     pub(crate) fn try_admit_linear_work(
         &self,
         dimension: D,

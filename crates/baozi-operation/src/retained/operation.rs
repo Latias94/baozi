@@ -465,7 +465,7 @@ where
     ledger: &'a crate::ledger::Ledger<O, P, D>,
     dimension: D,
     reservation_dimension: D,
-    failure_terminal_work_dimension: Option<D>,
+    work: Result<crate::ledger::BoundWorkGroup<'a, D, 1>, LedgerCause<D>>,
     #[allow(
         dead_code,
         reason = "ordinary linear permits are enabled only for the U4 activation consumer"
@@ -957,13 +957,9 @@ where
     }
 
     pub(crate) fn charge_observed(&mut self, amount: u64) -> Result<(), LedgerCause<D>> {
-        let result = if self.failure_terminal_work_dimension == Some(self.dimension) {
-            Err(LedgerCause::UnknownDimension {
-                dimension: self.dimension,
-            })
-        } else {
-            self.ledger
-                .charge_observed_batch(&[(self.dimension, amount)])
+        let result = match &self.work {
+            Ok(work) => work.charge_observed_ordered([amount]),
+            Err(cause) => Err(cause.clone()),
         };
         result.inspect_err(|_| {
             record_terminal_cause_with_precedence(
@@ -994,13 +990,9 @@ where
             return Err(RetainedWorkStartError::Outstanding);
         }
         self.poll().map_err(RetainedWorkStartError::Control)?;
-        let ledger = self.ledger;
-        let result = if self.failure_terminal_work_dimension == Some(self.dimension) {
-            Err(LedgerCause::UnknownDimension {
-                dimension: self.dimension,
-            })
-        } else {
-            ledger.try_admit_linear_work(self.dimension, amount.get())
+        let result = match &self.work {
+            Ok(work) => work.admit_observed([amount.get()], crate::ledger::WorkLane::Internal),
+            Err(cause) => Err(cause.clone()),
         };
         let work = result.map_err(|cause| {
             record_terminal_cause_with_precedence(
@@ -1814,13 +1806,21 @@ where
             ..
         } = self;
         let (poll, ledger) = coordinator.split_poll_checkpoint_and_retained_ledger();
+        // Defer binding rejection until work is used, after the existing control checks.
+        let work = if *failure_terminal_work_dimension == Some(work_dimension) {
+            Err(LedgerCause::UnknownDimension {
+                dimension: work_dimension,
+            })
+        } else {
+            ledger.bind_work([work_dimension])
+        };
         (
             RetainedWorkControl {
                 poll,
                 ledger,
                 dimension: work_dimension,
                 reservation_dimension,
-                failure_terminal_work_dimension: *failure_terminal_work_dimension,
+                work,
                 ordinary_work_permit_outstanding,
                 ordinary_work_permit_partially_resolved,
                 sticky_terminal_cause,
