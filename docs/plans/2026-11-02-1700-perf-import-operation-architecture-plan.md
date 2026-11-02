@@ -203,6 +203,23 @@ OBJ source-index remaps/unique-source channel staging and stable vertex buckets 
 nonzero smoothing groups. Review ordering, source-sparse memory, failure ownership and exact
 completion before implementation; retain only candidates that pass ordinary native comparison.
 
+The bounded source review accepts two data-dependent algorithm candidates. OBJ uses per-segment
+dense remaps only when every needed source domain fits the corner count and the combined lookup
+plus unique-ID capacity envelopes fit the replaced reference-only temporaries. This keeps
+initialization bounded by total corners and avoids an input-wide cache, arbitrary size ceiling,
+or repeated global-source scans. The existing occurrence sort remains the general algorithm
+for source-sparse domains. Actual admission/allocation failure is terminal, never a reason to
+retry another algorithm. Preserve first-use position identity/order, ascending unique channel
+source order, referenced UV width and immediate actual completion.
+
+Smooth normal ordering may use a stable vertex histogram/prefix/forward scatter when indexed
+input has `0 < V <= C` and absent or uniform nonzero smoothing groups. Its cursor tail shares
+the order allocation and contains at most C entries. The kernel proves group uniformity after
+existing position/face validation. Mixed/zero groups retain the general key sort; accumulation,
+precision, source identity and publication remain shared. Additional bounded scratch can change
+the admitted peak and failure site; do not catch rejection and silently retry. Each candidate
+must preserve the existing sparse-storage protections and pass physical-prefix/control probes.
+
 ### P6. Complete native comparison and the original final qualification
 
 Retain per-change Windows measured variants against `4455d03`, then run the unchanged complete
