@@ -35,7 +35,9 @@ scalar slices of exactly the attribute's lane count. Dense selection is O(1); sp
 O(log explicit count), borrowing either the explicit value or the retained default. An out-of-range
 index returns `None`. F64 precision, integer values, signed zeros, and scalar bits are unchanged.
 The original `attribute.data()` remains available when source sparse representation matters; an
-element read does not create or retain a dense expansion.
+element read does not create or retain a dense expansion. Attribute inspection and element reads
+borrow the resolved descriptor; the selected scalar slice keeps the Scene lifetime even after a
+temporary descriptor view is dropped.
 
 `attribute.tangent_conventions()` returns `Some(TangentConventionsRef { basis, encoding })` for a
 Tangent attribute and `None` for every other semantic. Each semantic/domain stream owns its own
@@ -97,6 +99,8 @@ The layout and its tuple views are `Copy` and borrow the current primitive:
 | `vertex(index: usize)` | `Option<ListVertex>` with an out-of-range check |
 | `vertices()` | An independent exact-size, double-ended, cloneable iterator |
 | `indices()` | Allocation-free `Range<u32>` from zero to output tuple count |
+| `attribute(semantic, domain)` | One selected `Option<ListAttribute<'scene>>`, bound once |
+| `attributes()` | Lazy, retained-order, exact-size and double-ended bound field streams |
 
 Points and native lists retain their Corner order. For source Face `f` and source Corner count `n`,
 assembly uses these exact Corner ordinals before resolving source indices:
@@ -135,6 +139,22 @@ dense/sparse representation, while `field.element()` returns the selected borrow
 Corner normals or UVs with the same semantic remain separate; Face/custom fields are available
 without shadowing another domain. Full-field iteration visits each descriptor once per tuple
 instead of repeating keyed searches. No input-sized field inventory is allocated.
+
+For a selected field across a complete draw, bind `layout.attribute(semantic, domain)` once.
+Its `ListAttribute::element(&self, draw_index)` maps the draw ordinal to the original Vertex,
+Corner or Face and calls the same core element reader. `elements(self)` owns the borrowed view
+and returns an exact-size, double-ended, cloneable iterator of `AttributeElement<'scene>`.
+This keeps descriptor lookup outside the per-tuple loop without a payload cache or allocation.
+For example, select `Position` in `AttributeDomain::Vertex` once, then visit
+`positions.elements()` while performing the application's chosen scalar conversion/copy.
+
+The bound stream's `len()` counts draw occurrences; `attribute().len()` counts logical elements
+in its original source domain. A present field on an empty draw remains `Some`; a missing key is
+`None`. Out-of-range draw indices, including `usize::MAX`, return `None` before sparse-default
+selection. Explicit/default slice identity, repeated indices, seams and all scalar bits are
+preserved in both forward and backward reads. `attribute()` exposes the original descriptor,
+and `layout()` retains its owning primitive. Streams and elements may outlive temporary layout
+wrappers while remaining tied to the original Scene.
 
 `vertex.influences()` borrows the complete row at `source_vertex().index`, preserving absence, empty
 rows, every influence, weights, and source order. `vertex.morph_delta(target_id, semantic)` returns

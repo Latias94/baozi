@@ -34,6 +34,8 @@ use baozi_postprocess::{
 
 #[path = "vertices/lists.rs"]
 mod lists;
+#[path = "vertices/streams.rs"]
+mod streams;
 
 const FORMAT: &str = "dev.baozi.test.triangle-vertices";
 const PATH: &str = "fixtures/tuple.vertices";
@@ -57,6 +59,7 @@ const SPARSE_U32: [u32; 4] = [u32::MAX, 0x8000_0001, 7, 11];
 #[derive(Debug, Clone, Copy)]
 enum Fixture {
     Rich,
+    Streams,
     Implicit,
     Empty {
         indexed: bool,
@@ -109,6 +112,7 @@ impl Format for TupleImporter {
     fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
         match self.0 {
             Fixture::Rich => submit_rich(context),
+            Fixture::Streams => streams::submit(context),
             Fixture::Deformed => submit_deformed(context, GeometryTopologyAuthoring::TriangleList),
             Fixture::DeformedAssembly(topology) => submit_deformed(context, topology),
             Fixture::Assembly {
@@ -265,6 +269,7 @@ fn submit_simple(context: &mut ParseContext<'_>, fixture: Fixture) -> ParseResul
         ),
         Fixture::Unsupported(topology) => (topology, &positions, Presence::Absent),
         Fixture::Rich
+        | Fixture::Streams
         | Fixture::Deformed
         | Fixture::Assembly { .. }
         | Fixture::DeformedAssembly(_) => {

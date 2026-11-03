@@ -141,7 +141,7 @@ impl PositionSource for &[[f64; 3]] {
 
 impl PositionSource for AttributeRef<'_> {
     fn len(self) -> usize {
-        AttributeRef::len(self)
+        AttributeRef::len(&self)
     }
 
     fn is_f64(self) -> bool {

@@ -415,30 +415,36 @@ fn visit_draw(
     {
         return Err(Unsupported("requested field is missing").into());
     }
-    for tuple in list_vertices(primitive)?.vertices() {
+    let tuples = list_vertices(primitive)?;
+    let positions = tuples.attribute(AttributeSemanticRef::Position, AttributeDomain::Vertex);
+    let normal_stream =
+        normal.and_then(|domain| tuples.attribute(AttributeSemanticRef::Normal, domain));
+    let uv_stream =
+        uv.and_then(|domain| tuples.attribute(AttributeSemanticRef::Texcoord(0), domain));
+    for index in 0..tuples.len() {
         let position = numeric(
-            tuple
-                .attribute(AttributeSemanticRef::Position, AttributeDomain::Vertex)
-                .ok_or(Unsupported("position tuple is missing"))?
-                .element(),
+            positions
+                .as_ref()
+                .and_then(|stream| stream.element(index))
+                .ok_or(Unsupported("position tuple is missing"))?,
         )?;
         let normal = normal
-            .map(|domain| {
+            .map(|_| {
                 numeric(
-                    tuple
-                        .attribute(AttributeSemanticRef::Normal, domain)
-                        .ok_or(Unsupported("normal tuple is missing"))?
-                        .element(),
+                    normal_stream
+                        .as_ref()
+                        .and_then(|stream| stream.element(index))
+                        .ok_or(Unsupported("normal tuple is missing"))?,
                 )
             })
             .transpose()?;
         let uv = uv
-            .map(|domain| {
+            .map(|_| {
                 numeric(
-                    tuple
-                        .attribute(AttributeSemanticRef::Texcoord(0), domain)
-                        .ok_or(Unsupported("UV tuple is missing"))?
-                        .element(),
+                    uv_stream
+                        .as_ref()
+                        .and_then(|stream| stream.element(index))
+                        .ok_or(Unsupported("UV tuple is missing"))?,
                 )
             })
             .transpose()?;
@@ -648,5 +654,264 @@ impl Output {
             }
         }
         (logical, capacity)
+    }
+}
+
+#[cfg(test)]
+mod reader_adoption_tests {
+    use super::*;
+    use baozi_import::authoring::{
+        AttributeSemantic, AuthoringRange, GeometryAttributeAuthoring,
+        GeometryLogicalMeshAuthoring, GeometryPrimitiveAuthoring, GeometryTopologyAuthoring,
+        Presence, StaticSceneBuilder,
+    };
+    use baozi_import::{
+        CompiledOptions, DetectionOutcome, DetectionResult, DetectionScope, Format,
+        FormatDescriptor, NoFormatOptions, OptionCompileError, ParseContext, ParseResult, Probe,
+        ReadConfidence, ReadHint, RegistryBuildScope,
+    };
+
+    struct ReaderFixture {
+        empty: bool,
+        normal_domains: usize,
+        uv_lanes: u8,
+    }
+
+    impl Format for ReaderFixture {
+        type Options = NoFormatOptions;
+
+        fn compile_defaults(
+            &self,
+            scope: &mut RegistryBuildScope<'_>,
+        ) -> std::result::Result<CompiledOptions<Self::Options>, OptionCompileError> {
+            NoFormatOptions::compile_defaults(scope)
+        }
+
+        fn descriptor(&self) -> FormatDescriptor {
+            FormatDescriptor::builder(
+                baozi::FormatId::new("org.baozi.test.reader-adoption").unwrap(),
+                "Bound reader consumer fixture",
+            )
+            .extensions(["reader"])
+            .encoding(baozi::FormatEncoding::Binary)
+            .capabilities([(
+                baozi::FormatCapability::Geometry,
+                baozi::CapabilityStatus::Supported,
+            )])
+            .build()
+            .unwrap()
+        }
+
+        fn detect(
+            &self,
+            _: &Probe<'_>,
+            _: &ReadHint,
+            _: &DetectionScope<'_>,
+        ) -> DetectionResult<DetectionOutcome> {
+            Ok(DetectionOutcome::Match(ReadConfidence::Certain))
+        }
+
+        fn parse(&self, _: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
+            let positions = [
+                1.0,
+                -0.0,
+                0.0,
+                f64::from_bits(0x3ff0_0000_0040_0000),
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+                0.0,
+            ];
+            let normals = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+            let uvs = [0.0, -0.0, 1.0, 0.0, 0.0, 1.0];
+            let mut attributes = Vec::new();
+            if !self.empty {
+                attributes.push(GeometryAttributeAuthoring::f64(
+                    AttributeSemantic::Position,
+                    AttributeDomain::Vertex,
+                    3,
+                    &positions,
+                ));
+            }
+            for domain in [AttributeDomain::Vertex, AttributeDomain::Corner]
+                .into_iter()
+                .take(self.normal_domains)
+            {
+                attributes.push(GeometryAttributeAuthoring::f32(
+                    AttributeSemantic::Normal,
+                    domain,
+                    3,
+                    if self.empty { &[] } else { &normals },
+                    Presence::Absent,
+                ));
+            }
+            if self.uv_lanes != 0 {
+                let count = if self.empty {
+                    0
+                } else {
+                    3 * usize::from(self.uv_lanes)
+                };
+                attributes.push(GeometryAttributeAuthoring::f32(
+                    AttributeSemantic::Texcoord(0),
+                    AttributeDomain::Vertex,
+                    self.uv_lanes,
+                    &uvs[..count],
+                    Presence::Absent,
+                ));
+            }
+            let primitives = [GeometryPrimitiveAuthoring::new(
+                GeometryTopologyAuthoring::TriangleList,
+                Presence::Absent,
+                baozi::MaterialAssignment::Unspecified,
+                AuthoringRange::new(0, attributes.len() as u32),
+            )];
+            let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
+            scope.submit(
+                StaticSceneBuilder::new(Presence::Present(&[]), &[]).with_geometry(
+                    &meshes,
+                    &primitives,
+                    &attributes,
+                    &[],
+                ),
+            )
+        }
+    }
+
+    fn scene(empty: bool, normal_domains: usize, uv_lanes: u8) -> Result<ValidatedScene> {
+        let mut builder = Importer::builder();
+        builder.register(ReaderFixture {
+            empty,
+            normal_domains,
+            uv_lanes,
+        })?;
+        Ok(builder
+            .build()?
+            .read_bytes("fields.reader", b"reader")?
+            .into_parts()
+            .0)
+    }
+
+    #[test]
+    fn empty_draw_does_not_eagerly_require_positions_but_keeps_optional_field_policy() -> Result<()>
+    {
+        let scene = scene(true, 0, 0)?;
+        let primitive = scene.meshes().next().unwrap().primitives().next().unwrap();
+        visit_draw(primitive, Fields::Position, false, |_, _, _| {
+            panic!("empty draw")
+        })?;
+        visit_draw(primitive, Fields::PositionNormalUv0, true, |_, _, _| {
+            panic!("empty draw")
+        })?;
+        let error = visit_draw(primitive, Fields::PositionNormalUv0, false, |_, _, _| {
+            panic!("missing fields")
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "requested field is missing");
+        Ok(())
+    }
+
+    #[test]
+    fn normal_domain_ambiguity_still_precedes_missing_uv_and_tuple_reads() -> Result<()> {
+        let scene = scene(false, 2, 0)?;
+        let primitive = scene.meshes().next().unwrap().primitives().next().unwrap();
+        for allow_missing in [false, true] {
+            let error = visit_draw(
+                primitive,
+                Fields::PositionNormalUv0,
+                allow_missing,
+                |_, _, _| panic!("ambiguity must precede visit"),
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "ambiguous simultaneous field domains");
+        }
+        let mut visits = 0;
+        visit_draw(primitive, Fields::Position, false, |_, normal, uv| {
+            assert!(normal.is_none() && uv.is_none());
+            visits += 1;
+            Ok(())
+        })?;
+        assert_eq!(visits, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn wrong_uv_width_is_a_tuple_error_and_unselected_uv_remains_unread() -> Result<()> {
+        let scene = scene(false, 1, 1)?;
+        let primitive = scene.meshes().next().unwrap().primitives().next().unwrap();
+        let error = visit_draw(primitive, Fields::PositionNormalUv0, false, |_, _, _| {
+            panic!("invalid UV must precede visit")
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "application field requires floating scalars with the expected width"
+        );
+        let mut visits = 0;
+        visit_draw(primitive, Fields::PositionNormal, false, |_, normal, uv| {
+            assert_eq!(normal, Some([0.0, 0.0, 1.0]));
+            assert!(uv.is_none());
+            visits += 1;
+            Ok(())
+        })?;
+        assert_eq!(visits, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn visitor_error_stops_in_order_and_detached_payload_keeps_literal_bits() -> Result<()> {
+        let scene = scene(false, 1, 2)?;
+        let primitive = scene.meshes().next().unwrap().primitives().next().unwrap();
+        let mut positions = Vec::new();
+        let error = visit_draw(
+            primitive,
+            Fields::PositionNormalUv0,
+            false,
+            |position, normal, uv| {
+                assert_eq!(normal, Some([0.0, 0.0, 1.0]));
+                positions.push(position.map(f64::to_bits));
+                assert_eq!(
+                    uv,
+                    Some(if positions.len() == 1 {
+                        [0.0, -0.0]
+                    } else {
+                        [1.0, 0.0]
+                    })
+                );
+                if positions.len() == 2 {
+                    return Err("visitor stopped at tuple one".into());
+                }
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "visitor stopped at tuple one");
+        assert_eq!(
+            positions,
+            [
+                [1.0_f64.to_bits(), (-0.0_f64).to_bits(), 0.0_f64.to_bits()],
+                [0x3ff0_0000_0040_0000, 0.0_f64.to_bits(), 0.0_f64.to_bits()],
+            ]
+        );
+        let output = extract(&scene, Fields::PositionNormalUv0)?;
+        drop(scene);
+        assert_eq!(output.draws.len(), 1);
+        assert_eq!(
+            output.draws[0].positions[1][0].to_bits(),
+            0x3ff0_0000_0040_0000
+        );
+        assert_eq!(
+            output.draws[0].positions[0][1].to_bits(),
+            (-0.0_f64).to_bits()
+        );
+        assert_eq!(
+            output.draws[0].normals.as_ref().unwrap(),
+            &[[0.0, 0.0, 1.0]; 3]
+        );
+        assert_eq!(
+            output.draws[0].uv0.as_ref().unwrap()[0].map(f64::to_bits),
+            [0.0_f64.to_bits(), (-0.0_f64).to_bits()]
+        );
+        Ok(())
     }
 }

@@ -5,12 +5,12 @@ use baozi::{
     AttributeData, AttributeDomain, AttributeElement, AttributeRef, AttributeSemanticRef,
     AuthoredTransform, BasePoseWorldTransforms, CameraProjection, CancellationToken,
     ColorInterpretation, LightDefinition, Mat4, MaterialAssignment, MaterialFactors,
-    MetadataOwnerRef, MetadataValueRef, MorphDeltaSemantic, PrimitiveId, PrimitiveRef,
-    SamplerState, SceneProfileOwner, SceneSpaceRef, SkinMatrixSpaces, SourceObjectLocatorRef,
-    SpatialQueryError, SpatialQueryLimits, TangentBasisRef, TangentEncodingRef,
-    TextureBlendOperation, TextureChannelSwizzle, TextureRole, TextureStrength, TextureTransform,
-    TopologyKind, ValidatedScene,
-    postprocess::{PrimitiveVertex, list_vertices},
+    MetadataOwnerRef, MetadataValueRef, MorphDeltaSemantic, PrimitiveId, SamplerState,
+    SceneProfileOwner, SceneSpaceRef, SkinMatrixSpaces, SourceObjectLocatorRef, SpatialQueryError,
+    SpatialQueryLimits, TangentBasisRef, TangentEncodingRef, TextureBlendOperation,
+    TextureChannelSwizzle, TextureRole, TextureStrength, TextureTransform, TopologyKind,
+    ValidatedScene,
+    postprocess::{ListAttribute, ListVertices, PrimitiveVertex, list_vertices},
 };
 
 use crate::Result;
@@ -79,7 +79,7 @@ impl IndexedVertices {
     fn new(
         tuple_count: usize,
         has_influences: bool,
-        uv_sets: &[(u32, AttributeDomain)],
+        uv_sets: impl ExactSizeIterator<Item = (u32, AttributeDomain)>,
     ) -> Result<Self> {
         let mut indices = Vec::new();
         indices.try_reserve_exact(tuple_count)?;
@@ -96,7 +96,7 @@ impl IndexedVertices {
         };
         let mut uv_streams = Vec::new();
         uv_streams.try_reserve_exact(uv_sets.len())?;
-        for &(set, domain) in uv_sets {
+        for (set, domain) in uv_sets {
             uv_streams.push(UvStream {
                 set,
                 domain,
@@ -532,9 +532,14 @@ impl ApplicationAsset {
                 let bindings = material
                     .effective()
                     .map_or(&[][..], |index| materials[index].bindings.as_slice());
-                let uv_sets = select_uv_sets(primitive, bindings, mesh_index, primitive_index)?;
-                let mut indexed =
-                    IndexedVertices::new(tuples.len(), primitive.influences().is_some(), &uv_sets)?;
+                let uv_sets = select_uv_sets(tuples, bindings, mesh_index, primitive_index)?;
+                let mut indexed = IndexedVertices::new(
+                    tuples.len(),
+                    primitive.influences().is_some(),
+                    uv_sets
+                        .iter()
+                        .map(|(set, stream)| (*set, stream.attribute().domain())),
+                )?;
                 // The app selects one normal, tangent, each UV set and COLOR_0 field. Ambiguous
                 // simultaneous domains require an explicit application policy, never priority.
                 let normal = select_domain(
@@ -555,57 +560,68 @@ impl ApplicationAsset {
                         .filter(|a| a.semantic() == AttributeSemanticRef::Color(0))
                         .map(|a| a.domain()),
                 )?;
+                let positions =
+                    tuples.attribute(AttributeSemanticRef::Position, AttributeDomain::Vertex);
+                let normal_stream = normal
+                    .and_then(|domain| tuples.attribute(AttributeSemanticRef::Normal, domain));
+                let tangent_stream = tangent
+                    .and_then(|domain| tuples.attribute(AttributeSemanticRef::Tangent, domain));
+                let color_stream = color
+                    .and_then(|domain| tuples.attribute(AttributeSemanticRef::Color(0), domain));
                 let tangent_conventions = tangent
-                    .map(|domain| {
+                    .map(|_| {
                         copy_tangent_conventions(
-                            primitive
-                                .attribute(AttributeSemanticRef::Tangent, domain)
-                                .ok_or("missing selected tangent descriptor")?,
+                            tangent_stream
+                                .as_ref()
+                                .ok_or("missing selected tangent descriptor")?
+                                .attribute(),
                         )
                     })
                     .transpose()?
                     .flatten();
                 let mut uv_values = Vec::new();
                 uv_values.try_reserve_exact(uv_sets.len())?;
-                for tuple in tuples.vertices() {
-                    let position = tuple
-                        .attribute(AttributeSemanticRef::Position, AttributeDomain::Vertex)
+                for (index, tuple) in tuples.vertices().enumerate() {
+                    let position = positions
+                        .as_ref()
+                        .and_then(|stream| stream.element(index))
                         .ok_or("application requires vertex positions")?;
                     let vertex = Vertex {
-                        position: numeric(position.element())?,
+                        position: numeric(position)?,
                         normal: normal
-                            .map(|domain| {
+                            .map(|_| {
                                 numeric(
-                                    tuple
-                                        .attribute(AttributeSemanticRef::Normal, domain)
-                                        .expect("selected field exists")
-                                        .element(),
+                                    normal_stream
+                                        .as_ref()
+                                        .and_then(|stream| stream.element(index))
+                                        .expect("selected field exists"),
                                 )
                             })
                             .transpose()?,
                         tangent: tangent
-                            .map(|domain| {
+                            .map(|_| {
                                 numeric(
-                                    tuple
-                                        .attribute(AttributeSemanticRef::Tangent, domain)
-                                        .expect("selected field exists")
-                                        .element(),
+                                    tangent_stream
+                                        .as_ref()
+                                        .and_then(|stream| stream.element(index))
+                                        .expect("selected field exists"),
                                 )
                             })
                             .transpose()?,
                         color: color
-                            .map(|domain| {
+                            .map(|_| {
                                 numeric_color(
-                                    tuple
-                                        .attribute(AttributeSemanticRef::Color(0), domain)
-                                        .expect("selected field exists")
-                                        .element(),
+                                    color_stream
+                                        .as_ref()
+                                        .and_then(|stream| stream.element(index))
+                                        .expect("selected field exists"),
                                 )
                             })
                             .transpose()?,
                     };
                     uv_values.clear();
-                    for &(set, domain) in &uv_sets {
+                    for (set, stream) in &uv_sets {
+                        let set = *set;
                         let error = |kind| UvExtractionError {
                             mesh: mesh_index,
                             primitive: primitive_index,
@@ -615,10 +631,10 @@ impl ApplicationAsset {
                             uv_set: set,
                             kind,
                         };
-                        let field = tuple
-                            .attribute(AttributeSemanticRef::Texcoord(set), domain)
+                        let field = stream
+                            .element(index)
                             .ok_or_else(|| error(UvExtractionErrorKind::Missing))?;
-                        let value = numeric(field.element())
+                        let value = numeric(field)
                             .map_err(|_| error(UvExtractionErrorKind::UnsupportedFormat))?;
                         uv_values.push(value);
                     }
@@ -893,25 +909,32 @@ fn copy_text(source: &str) -> Result<String> {
     Ok(output)
 }
 
-fn select_uv_sets(
-    primitive: PrimitiveRef<'_>,
+fn select_uv_sets<'scene>(
+    tuples: ListVertices<'scene>,
     bindings: &[Binding],
     mesh: usize,
     primitive_index: usize,
-) -> Result<Vec<(u32, AttributeDomain)>> {
+) -> Result<Vec<(u32, ListAttribute<'scene>)>> {
     let mut selected = Vec::new();
-    for attribute in primitive.attributes() {
-        if let AttributeSemanticRef::Texcoord(set) = attribute.semantic() {
+    for stream in tuples.attributes() {
+        if let AttributeSemanticRef::Texcoord(set) = stream.attribute().semantic() {
             selected.try_reserve(1)?;
-            selected.push((set, attribute.domain()));
+            selected.push((set, stream));
         }
     }
     selected.sort_unstable_by_key(|&(set, _)| set);
-    validate_uv_sets(&selected, bindings, mesh, primitive_index)?;
-    for &(set, domain) in &selected {
-        let attribute = primitive
-            .attribute(AttributeSemanticRef::Texcoord(set), domain)
-            .ok_or("missing selected UV descriptor")?;
+    validate_uv_sets(
+        selected
+            .iter()
+            .map(|(set, stream)| (*set, stream.attribute().domain())),
+        bindings,
+        mesh,
+        primitive_index,
+    )?;
+    for (set, stream) in &selected {
+        let set = *set;
+        let attribute = stream.attribute();
+        let domain = attribute.domain();
         if domain == AttributeDomain::Instance
             || attribute.lanes() != 2
             || !matches!(
@@ -938,7 +961,7 @@ fn select_uv_sets(
 }
 
 fn validate_uv_sets(
-    selected: &[(u32, AttributeDomain)],
+    selected: impl Iterator<Item = (u32, AttributeDomain)> + Clone,
     bindings: &[Binding],
     mesh: usize,
     primitive_index: usize,
@@ -946,8 +969,8 @@ fn validate_uv_sets(
     for (index, binding) in bindings.iter().enumerate() {
         let set = u32::from(binding.uv_set);
         let count = selected
-            .iter()
-            .filter(|&&(candidate, _)| candidate == set)
+            .clone()
+            .filter(|&(candidate, _)| candidate == set)
             .count();
         if count != 1 {
             return Err(UvExtractionError {
@@ -964,17 +987,19 @@ fn validate_uv_sets(
             .into());
         }
     }
-    for pair in selected.windows(2) {
-        if pair[0].0 == pair[1].0 {
+    let mut previous = None;
+    for (set, _) in selected {
+        if previous == Some(set) {
             return Err(UvExtractionError {
                 mesh,
                 primitive: primitive_index,
                 binding: None,
-                uv_set: pair[0].0,
+                uv_set: set,
                 kind: UvExtractionErrorKind::AmbiguousDomain,
             }
             .into());
         }
+        previous = Some(set);
     }
     Ok(())
 }
@@ -1147,7 +1172,7 @@ mod tests {
                 base.clone(),
             ];
             for _ in 0..2 {
-                let mut packed = IndexedVertices::new(corners.len(), false, &[])?;
+                let mut packed = IndexedVertices::new(corners.len(), false, std::iter::empty())?;
                 for (&index, vertex) in [0, 1, 2, 0, 2, 1].iter().zip(&corners) {
                     packed.push(
                         PrimitiveVertex { primitive, index },
@@ -1178,8 +1203,11 @@ mod tests {
         corners[6].tangent = Some([1.0, 0.0, 0.0, -1.0]);
         let mut uvs = vec![[0.0, 0.0]; sources.len()];
         uvs[8] = [-0.0, 0.0];
-        let mut packed =
-            IndexedVertices::new(corners.len(), true, &[(0, AttributeDomain::Vertex)])?;
+        let mut packed = IndexedVertices::new(
+            corners.len(),
+            true,
+            [(0, AttributeDomain::Vertex)].into_iter(),
+        )?;
         for ((&index, vertex), &uv) in sources.iter().zip(&corners).zip(&uvs) {
             let source = usize::try_from(index)?;
             packed.push(
@@ -1235,7 +1263,7 @@ mod tests {
             for lane in 0..2 {
                 let mut changed = baseline;
                 changed[set][lane] = f64::from_bits(changed[set][lane].to_bits() ^ 1);
-                let mut packed = IndexedVertices::new(3, false, &sets)?;
+                let mut packed = IndexedVertices::new(3, false, sets.iter().copied())?;
                 for uv in [baseline, changed, baseline] {
                     packed.push(
                         PrimitiveVertex {
@@ -1256,7 +1284,7 @@ mod tests {
                 }
             }
         }
-        let mut packed = IndexedVertices::new(2, false, &sets)?;
+        let mut packed = IndexedVertices::new(2, false, sets.iter().copied())?;
         let mut signed_zero = baseline;
         signed_zero[1][0] = -0.0;
         let mut positive_zero = baseline;
@@ -1290,7 +1318,7 @@ mod tests {
             blend: TextureBlendOperation::Replace,
             source_key: None,
         };
-        let error = validate_uv_sets(&selected, &[binding], 2, 3).unwrap_err();
+        let error = validate_uv_sets(selected.iter().copied(), &[binding], 2, 3).unwrap_err();
         assert_eq!(
             error.downcast_ref::<UvExtractionError>(),
             Some(&UvExtractionError {
@@ -1301,7 +1329,7 @@ mod tests {
                 kind: UvExtractionErrorKind::AmbiguousDomain,
             })
         );
-        let error = validate_uv_sets(&selected, &[], 2, 3).unwrap_err();
+        let error = validate_uv_sets(selected.iter().copied(), &[], 2, 3).unwrap_err();
         assert_eq!(
             error.downcast_ref::<UvExtractionError>().unwrap().binding,
             None
@@ -1355,7 +1383,7 @@ mod tests {
 
     #[test]
     fn allocation_and_index_overflow_return_structured_failures() -> Result<()> {
-        let error = IndexedVertices::new(usize::MAX, false, &[])
+        let error = IndexedVertices::new(usize::MAX, false, std::iter::empty())
             .err()
             .ok_or("oversized allocation unexpectedly succeeded")?;
         assert!(
@@ -1368,7 +1396,7 @@ mod tests {
             let error = vertex_index(overflow).unwrap_err();
             assert!(error.downcast_ref::<std::num::TryFromIntError>().is_some());
         }
-        let empty = IndexedVertices::new(0, true, &[])?;
+        let empty = IndexedVertices::new(0, true, std::iter::empty())?;
         assert!(empty.vertices.is_empty());
         assert!(empty.indices.is_empty());
         assert_eq!(empty.influences.ok_or("missing empty CSR")?.offsets, [0]);

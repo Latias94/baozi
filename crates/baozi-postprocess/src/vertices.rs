@@ -158,7 +158,8 @@ impl ListAssembly {
 /// Constructing the layout and selecting a vertex take constant work. Reading every attribute
 /// visits that primitive's actual descriptor sequence once per tuple; dense element reads are
 /// constant time and sparse reads use binary search. No full-attribute lookup is repeated while
-/// iterating the complete field sequence.
+/// iterating the complete field sequence. Bind selected fields with [`Self::attribute`] or
+/// [`Self::attributes`] to resolve descriptors once for a complete draw stream.
 #[derive(Debug, Clone, Copy)]
 pub struct ListVertices<'scene> {
     primitive: PrimitiveRef<'scene>,
@@ -221,6 +222,153 @@ impl<'scene> ListVertices<'scene> {
     {
         (0..self.len())
             .map(move |index| self.vertex(index).expect("checked list draw corner exists"))
+    }
+
+    /// Resolves one exact semantic/domain key once, without reading its scalar elements.
+    ///
+    /// Missing fields are `None`; a present field on an empty draw layout is still `Some`.
+    /// Vertex, Corner and Face streams retain their distinct authored domains. Primitive
+    /// attributes never have the Instance domain.
+    pub fn attribute(
+        self,
+        semantic: AttributeSemanticRef<'_>,
+        domain: AttributeDomain,
+    ) -> Option<ListAttribute<'scene>> {
+        self.primitive
+            .attribute(semantic, domain)
+            .map(|attribute| ListAttribute::new(self, attribute))
+    }
+
+    /// Binds fields lazily in their retained descriptor order, without visiting scalar data.
+    ///
+    /// Each yielded stream owns its small borrowed view and may outlive this layout and iterator.
+    pub fn attributes(
+        self,
+    ) -> impl ExactSizeIterator<Item = ListAttribute<'scene>> + DoubleEndedIterator + Clone + 'scene
+    {
+        self.primitive
+            .attributes()
+            .map(move |attribute| ListAttribute::new(self, attribute))
+    }
+}
+
+/// One attribute resolved once against its owning list layout.
+///
+/// Sampling follows the same source coordinates as [`ListVertices::vertex`]. Vertex fields use
+/// the source index stream; Corner fields retain seams and repeated strip/fan/loop occurrences;
+/// Face fields follow the source Face. Dense reads are constant time and sparse reads use binary
+/// search, preserving the exact explicit or default slice. No cache, projection, normalization,
+/// scalar conversion or allocation is performed.
+///
+/// The descriptor and iterator borrow the Scene, not a temporary layout or stream wrapper:
+///
+/// ```
+/// use baozi_core::{AttributeDomain, AttributeElement, AttributeSemanticRef, PrimitiveRef};
+/// use baozi_postprocess::list_vertices;
+///
+/// fn positions<'scene>(primitive: PrimitiveRef<'scene>)
+///     -> impl ExactSizeIterator<Item = AttributeElement<'scene>> + 'scene
+/// {
+///     list_vertices(primitive).unwrap()
+///         .attribute(AttributeSemanticRef::Position, AttributeDomain::Vertex).unwrap()
+///         .elements()
+/// }
+/// ```
+///
+/// A stream cannot escape its owning Scene:
+///
+/// ```compile_fail,E0515
+/// use baozi_core::{AttributeDomain, AttributeSemanticRef, ValidatedScene};
+/// use baozi_postprocess::{ListAttribute, list_vertices};
+///
+/// fn escape(scene: ValidatedScene) -> ListAttribute<'static> {
+///     let primitive = scene.meshes().next().unwrap().primitives().next().unwrap();
+///     list_vertices(primitive).unwrap()
+///         .attribute(AttributeSemanticRef::Position, AttributeDomain::Vertex).unwrap()
+/// }
+/// ```
+///
+/// Borrowed elements cannot escape it either:
+///
+/// ```compile_fail,E0515
+/// use baozi_core::{AttributeDomain, AttributeElement, AttributeSemanticRef, ValidatedScene};
+/// use baozi_postprocess::list_vertices;
+///
+/// fn escape(scene: ValidatedScene) -> AttributeElement<'static> {
+///     let primitive = scene.meshes().next().unwrap().primitives().next().unwrap();
+///     list_vertices(primitive).unwrap()
+///         .attribute(AttributeSemanticRef::Position, AttributeDomain::Vertex).unwrap()
+///         .element(0).unwrap()
+/// }
+/// ```
+///
+/// An owning iterator also remains tied to the Scene:
+///
+/// ```compile_fail,E0515
+/// use baozi_core::{AttributeDomain, AttributeElement, AttributeSemanticRef, ValidatedScene};
+/// use baozi_postprocess::list_vertices;
+///
+/// fn escape(scene: ValidatedScene)
+///     -> impl Iterator<Item = AttributeElement<'static>>
+/// {
+///     let primitive = scene.meshes().next().unwrap().primitives().next().unwrap();
+///     list_vertices(primitive).unwrap()
+///         .attribute(AttributeSemanticRef::Position, AttributeDomain::Vertex).unwrap()
+///         .elements()
+/// }
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct ListAttribute<'scene> {
+    layout: ListVertices<'scene>,
+    attribute: AttributeRef<'scene>,
+}
+
+impl<'scene> ListAttribute<'scene> {
+    fn new(layout: ListVertices<'scene>, attribute: AttributeRef<'scene>) -> Self {
+        Self { layout, attribute }
+    }
+
+    /// The original descriptor, including scalar representation, declarations and source owner.
+    pub const fn attribute(&self) -> AttributeRef<'scene> {
+        self.attribute
+    }
+
+    /// The original layout, retaining the primitive and its generation-qualified source endpoints.
+    pub const fn layout(&self) -> ListVertices<'scene> {
+        self.layout
+    }
+
+    /// Number of draw occurrences, which may differ from the descriptor's logical element count.
+    pub const fn len(&self) -> usize {
+        self.layout.len()
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.layout.is_empty()
+    }
+
+    /// Borrows one typed element at a draw ordinal without copying the full descriptor.
+    ///
+    /// Out-of-range ordinals, including `usize::MAX`, return `None` even for default-only sparse
+    /// fields. The returned slice remains valid after this view is dropped, while the Scene lives.
+    pub fn element(&self, index: usize) -> Option<AttributeElement<'scene>> {
+        let vertex = self.layout.vertex(index)?;
+        let source = vertex.source_index(self.attribute.domain())?;
+        self.attribute.element(source as usize)
+    }
+
+    /// Iterates typed elements in draw order, owning one copy of the bound view.
+    ///
+    /// Clones have independent traversal state; backward and random access do not change sparse
+    /// lookup state. Dropping an iterator early has no deferred work or storage to reconcile.
+    pub fn elements(
+        self,
+    ) -> impl ExactSizeIterator<Item = AttributeElement<'scene>> + DoubleEndedIterator + Clone + 'scene
+    {
+        (0..self.len()).map(move |index| {
+            self.element(index)
+                .expect("validated list attribute element exists")
+        })
     }
 }
 
@@ -318,19 +466,23 @@ impl<'scene> ListVertex<'scene> {
             }))
     }
 
+    fn source_index(&self, domain: AttributeDomain) -> Option<u32> {
+        match domain {
+            AttributeDomain::Vertex => Some(self.vertex),
+            AttributeDomain::Corner => Some(self.corner),
+            AttributeDomain::Face => Some(self.face),
+            AttributeDomain::Instance => None,
+        }
+    }
+
     fn read_attribute(self, attribute: AttributeRef<'scene>) -> VertexAttribute<'scene> {
-        let index = match attribute.domain() {
-            AttributeDomain::Vertex => self.vertex,
-            AttributeDomain::Corner => self.corner,
-            AttributeDomain::Face => self.face,
-            AttributeDomain::Instance => {
-                unreachable!("validated primitive attributes exclude the Instance domain")
-            }
-        };
+        let source = self
+            .source_index(attribute.domain())
+            .expect("validated primitive attributes exclude the Instance domain");
         VertexAttribute {
             attribute,
             element: attribute
-                .element(index as usize)
+                .element(source as usize)
                 .expect("validated attribute covers its source domain"),
         }
     }

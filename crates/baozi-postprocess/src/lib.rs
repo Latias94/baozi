@@ -59,5 +59,6 @@ pub use tangents::{
     TangentOptions, generate_tangents,
 };
 pub use vertices::{
-    ListVertex, ListVertices, VertexAttribute, VertexLayoutError, list_vertices, triangle_vertices,
+    ListAttribute, ListVertex, ListVertices, VertexAttribute, VertexLayoutError, list_vertices,
+    triangle_vertices,
 };

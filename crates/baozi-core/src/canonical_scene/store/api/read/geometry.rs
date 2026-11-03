@@ -127,6 +127,9 @@ pub enum AttributeElement<'s> {
 }
 
 /// One primitive attribute, borrowing its descriptor and payload from the Scene.
+///
+/// Descriptor inspection and element reads borrow this view. Returned payloads retain the
+/// Scene's lifetime independently of the temporary view used to read them.
 #[derive(Debug, Clone, Copy)]
 pub struct AttributeRef<'s> {
     metadata_owner: super::EntityMetadataOwner,
@@ -255,31 +258,31 @@ impl<'s> AttributeRef<'s> {
         }
     }
 
-    pub const fn semantic(self) -> AttributeSemanticRef<'s> {
+    pub const fn semantic(&self) -> AttributeSemanticRef<'s> {
         self.semantic
     }
-    pub const fn metadata_owner(self) -> super::EntityMetadataOwner {
+    pub const fn metadata_owner(&self) -> super::EntityMetadataOwner {
         self.metadata_owner
     }
-    pub const fn domain(self) -> AttributeDomain {
+    pub const fn domain(&self) -> AttributeDomain {
         self.domain
     }
-    pub const fn lanes(self) -> u8 {
+    pub const fn lanes(&self) -> u8 {
         self.lanes
     }
     /// Number of logical elements, including implicit sparse defaults.
-    pub const fn len(self) -> usize {
+    pub const fn len(&self) -> usize {
         self.count as usize
     }
-    pub const fn is_empty(self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.count == 0
     }
     /// Returns explicit declarations for Tangent; other attribute semantics return `None`.
-    pub const fn tangent_conventions(self) -> Option<TangentConventionsRef<'s>> {
+    pub const fn tangent_conventions(&self) -> Option<TangentConventionsRef<'s>> {
         self.tangent_conventions
     }
 
-    pub const fn data(self) -> AttributeData<'s> {
+    pub const fn data(&self) -> AttributeData<'s> {
         self.data
     }
 
@@ -288,22 +291,24 @@ impl<'s> AttributeRef<'s> {
     /// Returns `None` outside the logical element range. Sparse defaults and explicit values
     /// retain their original source slices even when their scalar values are equal. Use
     /// [`Self::data`] to inspect the authored dense/sparse representation and explicit indices.
-    pub fn element(self, index: usize) -> Option<AttributeElement<'s>> {
+    /// The descriptor is borrowed for the read; returned slices borrow the Scene and may outlive
+    /// a temporary attribute view.
+    pub fn element(&self, index: usize) -> Option<AttributeElement<'s>> {
         if index >= self.len() {
             return None;
         }
-        match self.data {
+        match &self.data {
             AttributeData::DenseF32 { lanes, values } => {
-                dense_element(values, lanes, index).map(AttributeElement::F32)
+                dense_element(values, *lanes, index).map(AttributeElement::F32)
             }
             AttributeData::DenseF64 { lanes, values } => {
-                dense_element(values, lanes, index).map(AttributeElement::F64)
+                dense_element(values, *lanes, index).map(AttributeElement::F64)
             }
             AttributeData::DenseU32 { lanes, values } => {
-                dense_element(values, lanes, index).map(AttributeElement::U32)
+                dense_element(values, *lanes, index).map(AttributeElement::U32)
             }
             AttributeData::DenseI32 { lanes, values } => {
-                dense_element(values, lanes, index).map(AttributeElement::I32)
+                dense_element(values, *lanes, index).map(AttributeElement::I32)
             }
             AttributeData::SparseF32 {
                 lanes,
@@ -311,28 +316,28 @@ impl<'s> AttributeRef<'s> {
                 values,
                 default,
                 ..
-            } => sparse_element(indices, values, default, lanes, index).map(AttributeElement::F32),
+            } => sparse_element(indices, values, default, *lanes, index).map(AttributeElement::F32),
             AttributeData::SparseF64 {
                 lanes,
                 indices,
                 values,
                 default,
                 ..
-            } => sparse_element(indices, values, default, lanes, index).map(AttributeElement::F64),
+            } => sparse_element(indices, values, default, *lanes, index).map(AttributeElement::F64),
             AttributeData::SparseU32 {
                 lanes,
                 indices,
                 values,
                 default,
                 ..
-            } => sparse_element(indices, values, default, lanes, index).map(AttributeElement::U32),
+            } => sparse_element(indices, values, default, *lanes, index).map(AttributeElement::U32),
             AttributeData::SparseI32 {
                 lanes,
                 indices,
                 values,
                 default,
                 ..
-            } => sparse_element(indices, values, default, lanes, index).map(AttributeElement::I32),
+            } => sparse_element(indices, values, default, *lanes, index).map(AttributeElement::I32),
         }
     }
 }

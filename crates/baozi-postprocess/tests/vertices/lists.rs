@@ -166,6 +166,41 @@ fn all_seven_modes_have_handwritten_list_order_and_distinct_source_domains() {
                 assert_eq!(layout.vertices().len(), expected.len());
                 assert!(layout.vertex(expected.len()).is_none());
                 assert!(layout.vertex(usize::MAX).is_none());
+                let position_stream = layout
+                    .attribute(AttributeSemanticRef::Position, AttributeDomain::Vertex)
+                    .unwrap();
+                let corner_stream = layout
+                    .attribute(
+                        AttributeSemanticRef::Custom("test:corner"),
+                        AttributeDomain::Corner,
+                    )
+                    .unwrap();
+                let face_stream = layout
+                    .attribute(
+                        AttributeSemanticRef::Custom("test:face"),
+                        AttributeDomain::Face,
+                    )
+                    .unwrap();
+                let vertex_stream = layout
+                    .attribute(
+                        AttributeSemanticRef::Custom("test:vertex"),
+                        AttributeDomain::Vertex,
+                    )
+                    .unwrap();
+                let AttributeData::DenseF32 {
+                    values: source_positions,
+                    ..
+                } = position_stream.attribute().data()
+                else {
+                    panic!("dense F32 position fixture")
+                };
+                assert_eq!(layout.attributes().len(), 4);
+                for stream in layout.attributes() {
+                    assert_eq!(stream.len(), expected.len());
+                    assert_eq!(stream.elements().len(), expected.len());
+                    assert!(stream.element(expected.len()).is_none());
+                    assert!(stream.element(usize::MAX).is_none());
+                }
                 for (index, &corner) in expected.iter().enumerate() {
                     let tuple = layout.vertex(index).unwrap();
                     let vertex = if indexed {
@@ -174,6 +209,27 @@ fn all_seven_modes_have_handwritten_list_order_and_distinct_source_domains() {
                         corner
                     };
                     let face = index / width;
+                    let expected_positions = [
+                        [0.0, -0.0, 0.0],
+                        [1.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0],
+                        [2.0, 0.0, 0.0],
+                        [3.0, 0.0, 0.0],
+                        [2.0, 1.0, 0.0],
+                    ];
+                    let sampled_position = f32_values(position_stream.element(index).unwrap());
+                    assert_f32(sampled_position, &expected_positions[vertex as usize]);
+                    assert!(std::ptr::eq(
+                        sampled_position,
+                        &source_positions[vertex as usize * 3..vertex as usize * 3 + 3],
+                    ));
+                    assert!(matches!(corner_stream.element(index),
+                        Some(AttributeElement::I32(value))
+                            if value == [match corner { 1 => -101, 4 => -404, _ => -7 }]));
+                    assert!(matches!(face_stream.element(index),
+                        Some(AttributeElement::F64(value)) if value == [face as f64 + 0.5]));
+                    assert!(matches!(vertex_stream.element(index),
+                        Some(AttributeElement::U32(value)) if value == [vertex * 11]));
                     assert_eq!(tuple.index(), index as u32);
                     assert_eq!(
                         tuple.source_corner(),
@@ -244,6 +300,17 @@ fn all_seven_modes_have_handwritten_list_order_and_distinct_source_domains() {
                 assert_eq!(ends.next().unwrap().index(), 0);
                 assert_eq!(ends.next_back().unwrap().index(), expected.len() as u32 - 1);
                 assert_eq!(ends.len(), expected.len() - 2);
+                for (element, &corner) in vertex_stream.elements().rev().zip(expected.iter().rev())
+                {
+                    let vertex = if indexed {
+                        INDICES[corner as usize]
+                    } else {
+                        corner
+                    };
+                    assert!(
+                        matches!(element, AttributeElement::U32(value) if value == [vertex * 11])
+                    );
+                }
             });
             assert_eq!(allocations.count_total, 0);
             assert_eq!(allocations.bytes_total, 0);
@@ -279,6 +346,25 @@ fn short_core_topologies_produce_no_assembled_tuples_and_keep_source_data() {
                 assert_eq!(layout.vertices().len(), 0);
                 assert!(layout.vertex(0).is_none());
                 assert!(layout.vertices().next_back().is_none());
+                let positions = layout
+                    .attribute(AttributeSemanticRef::Position, AttributeDomain::Vertex)
+                    .expect("present-empty draw stream is distinct from a missing field");
+                assert_eq!(positions.len(), 0);
+                assert!(positions.is_empty());
+                assert!(positions.element(0).is_none());
+                assert!(positions.element(usize::MAX).is_none());
+                assert_eq!(positions.elements().len(), 0);
+                assert!(positions.elements().next().is_none());
+                assert!(positions.elements().next_back().is_none());
+                assert_eq!(
+                    positions.attribute().len(),
+                    if indexed { 6 } else { corners as usize }
+                );
+                assert!(
+                    layout
+                        .attribute(AttributeSemanticRef::Normal, AttributeDomain::Corner)
+                        .is_none()
+                );
                 assert_eq!(
                     primitive.vertex_count(),
                     if indexed { 6 } else { u32::from(corners) }
@@ -315,6 +401,13 @@ fn loops_keep_two_directions_and_a_degenerate_authored_closure() {
     assert_eq!(layout.vertex(10).unwrap().source_vertex().index, 0);
     assert_eq!(layout.vertex(11).unwrap().source_vertex().index, 0);
     assert_eq!(layout.vertex(10).unwrap().source_face().index, 5);
+    let positions = layout
+        .attribute(AttributeSemanticRef::Position, AttributeDomain::Vertex)
+        .unwrap();
+    let a = f32_values(positions.element(10).unwrap());
+    let b = f32_values(positions.element(11).unwrap());
+    assert_f32(a, &[0.0, -0.0, 0.0]);
+    assert!(std::ptr::eq(a, b));
 }
 
 #[test]
