@@ -2,7 +2,7 @@ use std::fmt;
 use std::iter::FusedIterator;
 
 use super::super::super::construction::node_scene::semantic::{
-    NodeSceneChildCursor, NodeSceneSemanticNode,
+    NodeSceneChildCursor, NodeSceneNodeView, NodeSceneSemanticNode,
 };
 use super::{ValidatedScene, checked_index, expect_validated};
 use crate::entity::AuthoredTransform;
@@ -107,7 +107,42 @@ impl<'s> Iterator for NodeChildren<'s> {
 impl ExactSizeIterator for NodeChildren<'_> {}
 impl FusedIterator for NodeChildren<'_> {}
 
+/// Reuses one complete semantic binding for an immutable node query.
+pub(crate) struct NodeQuery<'s> {
+    scene: &'s ValidatedScene,
+    view: NodeSceneNodeView<'s>,
+}
+
+impl<'s> NodeQuery<'s> {
+    fn read(&self, node: NodeRef<'s>) -> NodeSceneSemanticNode<'s> {
+        assert!(
+            std::ptr::eq(self.scene, node.scene),
+            "node query received a node from another Scene"
+        );
+        expect_validated(self.view.node_at(node.index))
+    }
+
+    pub(crate) fn roots(&self) -> NodeChildren<'s> {
+        NodeChildren::new(self.scene, expect_validated(self.view.roots()))
+    }
+
+    pub(crate) fn authored_transform(&self, node: NodeRef<'s>) -> AuthoredTransform {
+        self.read(node).authored_transform()
+    }
+
+    pub(crate) fn children(&self, node: NodeRef<'s>) -> NodeChildren<'s> {
+        NodeChildren::new(self.scene, self.read(node).into_children())
+    }
+}
+
 impl ValidatedScene {
+    pub(crate) fn bind_node_query(&self) -> NodeQuery<'_> {
+        NodeQuery {
+            scene: self,
+            view: expect_validated(self.as_node_scene().semantic_view()).node_view(),
+        }
+    }
+
     /// Returns the source node count, excluding the internal synthetic root.
     pub fn node_count(&self) -> usize {
         self.as_node_scene().read_proof().source_node_count()

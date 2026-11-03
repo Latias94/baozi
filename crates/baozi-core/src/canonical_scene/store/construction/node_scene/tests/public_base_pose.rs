@@ -1,4 +1,5 @@
 use std::mem::size_of;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::AtomicU64;
 
 use baozi_operation::{CancellationToken, PhysicalStorageAccount};
@@ -8,7 +9,11 @@ use super::{
     SINGLE_TRS_NODES, SINGLE_TRS_ROOTS, parent, profile_fixture, successful_parts, test_account,
     test_factory, test_limits,
 };
-use crate::canonical_scene::store::construction::node_scene::NodeSceneTestTransaction;
+use crate::base_pose::{QueryBoundary, cancel_at_query_boundary_for_test};
+use crate::canonical_scene::store::construction::node_scene::semantic::NodeSceneSemanticReadFault;
+use crate::canonical_scene::store::construction::node_scene::{
+    NodeSceneSuccessParts, NodeSceneTestTransaction,
+};
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationClipAuthoring,
     AnimationTargetAuthoring, AppearanceAuthoringBatch, AuthoringRange, DeformationAuthoringBatch,
@@ -1553,5 +1558,364 @@ fn numeric_position_failures_identify_instance_primitive_and_logical_vertex() {
             drop(scene);
             assert_eq!(account.snapshot().live_retained_bytes(), 0);
         }
+    }
+}
+
+fn node_query_parts(
+    account: &PhysicalStorageAccount,
+    nodes: NodeAuthoringBatch<'_>,
+) -> NodeSceneSuccessParts {
+    successful_parts(
+        super::finish_node_batch(
+            account,
+            test_limits(),
+            nodes,
+            SceneValidationLimits::default(),
+        )
+        .publish_for_test()
+        .expect("node-query fixture publication"),
+    )
+}
+
+fn node_query_scene(parts: NodeSceneSuccessParts) -> ValidatedScene {
+    let scene = ValidatedScene::from_node_scene(parts.scene);
+    drop(parts.report);
+    scene
+}
+
+fn assert_panic_message(expected: &str, action: impl FnOnce()) {
+    let cause = catch_unwind(AssertUnwindSafe(action)).expect_err("expected invariant panic");
+    let message = cause
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| cause.downcast_ref::<&str>().copied())
+        .expect("invariant panic carries a message");
+    assert_eq!(message, expected);
+}
+
+fn assert_storage_panic(reason: &str, action: impl FnOnce()) {
+    assert_panic_message(
+        &format!("validated Scene storage invariant failed: {reason}"),
+        action,
+    );
+}
+
+fn node_query_chain(account: &PhysicalStorageAccount) -> NodeSceneSuccessParts {
+    let nodes = [
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            AuthoredTransform::identity_trs(),
+            Presence::Absent,
+            Presence::Absent,
+        ),
+        NodeAuthoringNode::new(
+            parent(0, 0),
+            AuthoredTransform::identity_trs(),
+            Presence::Absent,
+            Presence::Absent,
+        ),
+    ];
+    node_query_parts(
+        account,
+        NodeAuthoringBatch::new(Presence::Present(&SINGLE_TRS_ROOTS), &nodes),
+    )
+}
+
+#[test]
+fn node_query_binding_keeps_admission_and_physical_failure_priority() {
+    let factory = test_factory();
+    let account = test_account(&factory, 2048);
+    let batch = || NodeAuthoringBatch::new(Presence::Present(&SINGLE_TRS_ROOTS), &SINGLE_TRS_NODES);
+    let donor = node_query_parts(&account, batch());
+    let mut layout = node_query_parts(&account, batch());
+    assert!(layout.scene.install_semantic_layout_fault_for_test(1, 0));
+    let mut foreign = node_query_parts(&account, batch());
+    foreign
+        .scene
+        .install_foreign_semantic_proof_for_test(&donor.scene);
+    let scenes = [node_query_scene(layout), node_query_scene(foreign)];
+    for scene in &scenes {
+        let retained = account.snapshot();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let allocations = allocation_counter::measure(|| {
+            assert_eq!(
+                scene
+                    .base_pose_world_transforms(SpatialQueryLimits::new(1, 128), None)
+                    .unwrap_err(),
+                SpatialQueryError::LimitExceeded {
+                    limit: SpatialQueryLimit::Work,
+                    actual: 2,
+                    maximum: 1,
+                }
+            );
+            assert_eq!(
+                scene
+                    .base_pose_world_transforms(SpatialQueryLimits::new(2, 127), None)
+                    .unwrap_err(),
+                SpatialQueryError::LimitExceeded {
+                    limit: SpatialQueryLimit::Bytes,
+                    actual: 128,
+                    maximum: 127,
+                }
+            );
+            assert_eq!(
+                scene
+                    .base_pose_world_transforms(SpatialQueryLimits::new(0, 0), Some(&cancellation))
+                    .unwrap_err(),
+                SpatialQueryError::Cancelled
+            );
+        });
+        assert_eq!(allocations.count_total, 0);
+        assert_eq!(allocations.bytes_total, 0);
+        assert_storage_panic(
+            "typed node storage disagrees with central validation proof",
+            || {
+                let _ = scene.base_pose_world_transforms(SpatialQueryLimits::new(2, 128), None);
+            },
+        );
+        assert_eq!(account.snapshot(), retained);
+    }
+    drop(scenes);
+    drop(donor);
+    let empty_batch = || NodeAuthoringBatch::new(Presence::Present(&[]), &[]);
+    let donor = node_query_parts(&account, empty_batch());
+    let mut empty = node_query_parts(&account, empty_batch());
+    empty
+        .scene
+        .install_foreign_semantic_proof_for_test(&donor.scene);
+    let empty = node_query_scene(empty);
+    let retained = account.snapshot();
+    assert_storage_panic(
+        "typed node storage disagrees with central validation proof",
+        || {
+            let _ = empty.base_pose_world_transforms(SpatialQueryLimits::new(0, 0), None);
+        },
+    );
+    assert_eq!(account.snapshot(), retained);
+    drop(empty);
+    drop(donor);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+}
+
+#[test]
+fn node_query_binding_leaves_root_child_and_transform_reads_lazy() {
+    let factory = test_factory();
+    let account = test_account(&factory, 2048);
+    for fault in [
+        NodeSceneSemanticReadFault::ChildReferenceRow(0),
+        NodeSceneSemanticReadFault::ChildReferenceRow(1),
+        NodeSceneSemanticReadFault::AuthoredTransformNode(0),
+        NodeSceneSemanticReadFault::AuthoredTransformNode(1),
+    ] {
+        let mut parts = node_query_chain(&account);
+        let reason = match fault {
+            NodeSceneSemanticReadFault::ChildReferenceRow(row) => {
+                parts.scene.install_child_reference_read_fault_for_test(row);
+                "injected child-reference read failure"
+            }
+            NodeSceneSemanticReadFault::AuthoredTransformNode(node) => {
+                parts
+                    .scene
+                    .install_authored_transform_read_fault_for_test(node);
+                "injected authored-transform read failure"
+            }
+        };
+        let scene = node_query_scene(parts);
+        let retained = account.snapshot();
+        {
+            let query = scene.bind_node_query();
+            let mut roots = query.roots();
+            assert_storage_panic(reason, || match fault {
+                NodeSceneSemanticReadFault::ChildReferenceRow(0) => {
+                    let _ = roots.next();
+                }
+                NodeSceneSemanticReadFault::ChildReferenceRow(_) => {
+                    let root = roots.next().unwrap();
+                    let _ = query.children(root).next();
+                }
+                NodeSceneSemanticReadFault::AuthoredTransformNode(0) => {
+                    let root = roots.next().unwrap();
+                    // Reading children must still decode the authored transform.
+                    let _ = query.children(root);
+                }
+                NodeSceneSemanticReadFault::AuthoredTransformNode(_) => {
+                    let root = roots.next().unwrap();
+                    let child = query.children(root).next().unwrap();
+                    let _ = query.authored_transform(child);
+                }
+            });
+        }
+        assert_storage_panic(reason, || {
+            let _ = scene.base_pose_world_transforms(SpatialQueryLimits::new(4, 256), None);
+        });
+        assert_eq!(account.snapshot(), retained);
+        drop(scene);
+        assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    }
+}
+
+#[test]
+fn node_query_reference_failure_precedes_the_following_cancelled_step() {
+    let factory = test_factory();
+    let account = test_account(&factory, 2048);
+    for (boundary, row) in [
+        (QueryBoundary::RootReferences, 0),
+        (QueryBoundary::ChildReferences, 1),
+    ] {
+        let mut parts = node_query_chain(&account);
+        parts.scene.install_child_reference_read_fault_for_test(row);
+        let scene = node_query_scene(parts);
+        let retained = account.snapshot();
+        let cancellation = CancellationToken::new();
+        let _hook = cancel_at_query_boundary_for_test(boundary, cancellation.clone());
+        assert_storage_panic("injected child-reference read failure", || {
+            let _ = scene
+                .base_pose_world_transforms(SpatialQueryLimits::new(4, 256), Some(&cancellation));
+        });
+        assert!(cancellation.is_cancelled());
+        assert_eq!(account.snapshot(), retained);
+        drop(scene);
+        assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    }
+}
+
+#[test]
+fn node_query_final_poll_rejects_completed_empty_and_nonempty_tables() {
+    let factory = test_factory();
+    let account = test_account(&factory, 2048);
+    let empty = node_query_scene(node_query_parts(
+        &account,
+        NodeAuthoringBatch::new(Presence::Present(&[]), &[]),
+    ));
+    let scene = node_query_scene(node_query_parts(
+        &account,
+        NodeAuthoringBatch::new(Presence::Present(&SINGLE_TRS_ROOTS), &SINGLE_TRS_NODES),
+    ));
+    for (scene, limits) in [
+        (&empty, SpatialQueryLimits::new(0, 0)),
+        (&scene, SpatialQueryLimits::new(2, 128)),
+    ] {
+        let before = snapshot_digest(scene);
+        let retained = account.snapshot();
+        let cancellation = CancellationToken::new();
+        let _hook = cancel_at_query_boundary_for_test(QueryBoundary::Return, cancellation.clone());
+        assert_eq!(
+            scene
+                .base_pose_world_transforms(limits, Some(&cancellation))
+                .unwrap_err(),
+            SpatialQueryError::Cancelled
+        );
+        assert!(cancellation.is_cancelled());
+        assert_eq!(snapshot_digest(scene), before);
+        assert_eq!(account.snapshot(), retained);
+    }
+    let allocations = allocation_counter::measure(|| {
+        let table = empty
+            .base_pose_world_transforms(SpatialQueryLimits::new(0, 0), None)
+            .unwrap();
+        assert_eq!(table.node_count(), 0);
+        assert_eq!(table.allocated_bytes(), 0);
+    });
+    assert_eq!(allocations.count_total, 0);
+    assert_eq!(allocations.bytes_total, 0);
+    drop(empty);
+    drop(scene);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+}
+
+#[test]
+fn node_query_rejects_a_foreign_scene_handle_and_keeps_owned_output() {
+    let factory = test_factory();
+    let account = test_account(&factory, 2048);
+    let batch = || NodeAuthoringBatch::new(Presence::Present(&SINGLE_TRS_ROOTS), &SINGLE_TRS_NODES);
+    let scene = node_query_scene(node_query_parts(&account, batch()));
+    let other = node_query_scene(node_query_parts(&account, batch()));
+    let node = scene.nodes().next().unwrap();
+    let id = node.id();
+    let before = snapshot_digest(&scene);
+    let retained = account.snapshot();
+    {
+        let query = scene.bind_node_query();
+        let foreign = other.nodes().next().unwrap();
+        assert_panic_message("node query received a node from another Scene", || {
+            let _ = query.authored_transform(foreign);
+        });
+        assert_panic_message("node query received a node from another Scene", || {
+            let _ = query.children(foreign);
+        });
+        assert!(
+            query
+                .authored_transform(node)
+                .has_same_authored_bits(node.authored_transform())
+        );
+    }
+    let table = scene
+        .base_pose_world_transforms(SpatialQueryLimits::new(2, 128), None)
+        .unwrap();
+    assert_eq!(snapshot_digest(&scene), before);
+    assert_eq!(account.snapshot(), retained);
+    drop(other);
+    drop(scene);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(
+        table.node_transform(id).unwrap(),
+        Mat4::IDENTITY.cols.map(|column| column.map(f64::from))
+    );
+}
+
+#[test]
+fn node_query_keeps_earlier_numeric_error_before_a_later_existing_fault() {
+    let factory = test_factory();
+    let account = test_account(&factory, 2048);
+    for (scale, source) in [
+        (2.0_f32.powi(100), NumericConversionError::NonFiniteOutput),
+        (2.0_f32.powi(-100), NumericConversionError::UnderflowToZero),
+    ] {
+        let nodes: Vec<_> = (0..12)
+            .map(|index| {
+                NodeAuthoringNode::new(
+                    if index == 0 {
+                        Presence::Absent
+                    } else {
+                        parent(index - 1, 0)
+                    },
+                    AuthoredTransform::try_trs(
+                        Vec3::ZERO,
+                        Quat::IDENTITY,
+                        Vec3::new(scale, 1.0, 1.0),
+                    )
+                    .unwrap(),
+                    Presence::Absent,
+                    Presence::Absent,
+                )
+            })
+            .collect();
+        let mut parts = node_query_parts(
+            &account,
+            NodeAuthoringBatch::new(Presence::Present(&SINGLE_TRS_ROOTS), &nodes),
+        );
+        parts
+            .scene
+            .install_authored_transform_read_fault_for_test(11);
+        let scene = node_query_scene(parts);
+        let retained = account.snapshot();
+        assert_eq!(scene.node_count(), 12);
+        assert_eq!(
+            scene
+                .base_pose_world_transforms(SpatialQueryLimits::new(24, 1536), None)
+                .unwrap_err(),
+            SpatialQueryError::TransformNumeric {
+                node: NodeId::new(scene.generation(), 10),
+                source,
+            }
+        );
+        let later = scene.nodes().nth(11).unwrap();
+        assert_storage_panic("injected authored-transform read failure", || {
+            let _ = scene.bind_node_query().authored_transform(later);
+        });
+        assert_eq!(account.snapshot(), retained);
+        drop(scene);
+        assert_eq!(account.snapshot().live_retained_bytes(), 0);
     }
 }

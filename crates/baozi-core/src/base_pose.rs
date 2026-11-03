@@ -366,9 +366,13 @@ impl ValidatedScene {
             query.step()?;
             transforms.push(IDENTITY);
         }
-        for root in self.roots() {
+        let nodes = self.bind_node_query();
+        let roots = nodes.roots();
+        #[cfg(test)]
+        query_boundary_for_test(QueryBoundary::RootReferences);
+        for root in roots {
             query.step()?;
-            transforms[root.id().index() as usize] = checked_local(root.authored_transform())
+            transforms[root.id().index() as usize] = checked_local(nodes.authored_transform(root))
                 .map_err(|source| SpatialQueryError::TransformNumeric {
                     node: root.id(),
                     source,
@@ -379,9 +383,12 @@ impl ValidatedScene {
         for node in self.nodes() {
             query.poll()?;
             let parent = transforms[node.id().index() as usize];
-            for child in node.children() {
+            let children = nodes.children(node);
+            #[cfg(test)]
+            query_boundary_for_test(QueryBoundary::ChildReferences);
+            for child in children {
                 query.step()?;
-                let world = checked_local(child.authored_transform())
+                let world = checked_local(nodes.authored_transform(child))
                     .and_then(|local| compose(parent, local))
                     .map_err(|source| SpatialQueryError::TransformNumeric {
                         node: child.id(),
@@ -390,6 +397,8 @@ impl ValidatedScene {
                 transforms[child.id().index() as usize] = world;
             }
         }
+        #[cfg(test)]
+        query_boundary_for_test(QueryBoundary::Return);
         query.poll()?;
         Ok(BasePoseWorldTransforms {
             generation: self.generation(),
@@ -539,6 +548,67 @@ fn include_point(bounds: &mut Option<Aabb>, point: [f64; 3]) {
             min: point,
             max: point,
         });
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QueryBoundary {
+    RootReferences,
+    ChildReferences,
+    Return,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static CANCEL_AT_QUERY_BOUNDARY: std::cell::Cell<Option<QueryBoundary>> =
+        const { std::cell::Cell::new(None) };
+    static QUERY_BOUNDARY_CANCELLATION: std::cell::RefCell<Option<CancellationToken>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+#[must_use]
+pub(crate) struct QueryCancellationHook;
+
+#[cfg(test)]
+pub(crate) fn cancel_at_query_boundary_for_test(
+    boundary: QueryBoundary,
+    cancellation: CancellationToken,
+) -> QueryCancellationHook {
+    CANCEL_AT_QUERY_BOUNDARY.with(|pending| {
+        assert!(
+            pending.get().is_none(),
+            "query cancellation hook is already installed"
+        );
+    });
+    QUERY_BOUNDARY_CANCELLATION.with(|pending| *pending.borrow_mut() = Some(cancellation));
+    CANCEL_AT_QUERY_BOUNDARY.with(|pending| pending.set(Some(boundary)));
+    QueryCancellationHook
+}
+
+#[cfg(test)]
+fn query_boundary_for_test(boundary: QueryBoundary) {
+    let reached = CANCEL_AT_QUERY_BOUNDARY.with(|pending| {
+        let reached = pending.get() == Some(boundary);
+        if reached {
+            pending.set(None);
+        }
+        reached
+    });
+    if reached {
+        let cancellation = QUERY_BOUNDARY_CANCELLATION.with(|pending| pending.borrow_mut().take());
+        cancellation
+            .expect("installed query cancellation token")
+            .cancel();
+    }
+}
+
+#[cfg(test)]
+impl Drop for QueryCancellationHook {
+    fn drop(&mut self) {
+        CANCEL_AT_QUERY_BOUNDARY.with(|pending| pending.set(None));
+        QUERY_BOUNDARY_CANCELLATION.with(|pending| *pending.borrow_mut() = None);
     }
 }
 

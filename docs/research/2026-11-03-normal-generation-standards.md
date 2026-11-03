@@ -23,6 +23,15 @@ semantics. The frozen comparison separately requests Smooth only when its
 `generate_missing_normals` option is enabled; its workload must remain unchanged.
 See [Baozi policy and proposed corrections](#baozi-policy-and-proposed-corrections).
 
+Subsequent implementation at `509b80de4fff2494d5315f7a17e086cb7afe2f26` corrects that consumer
+decision with explicit Preserve, SourceFormat and GeometryEdit intents. The
+[implementation receipt](../reviews/2026-11-03-consumer-normal-intent.md) records 138 consumer
+tests, strict lint and CLI checks. SourceFormat selects Flat for supported static glTF inputs
+and returns owned typed failures for its unsupported tangent/morph/bound-skin cases. It does
+not implement MikkTSpace or animated implicit-flat evaluation. The source audit and proposed
+oracles below retain their original inspection scope; they are not claims of remaining default
+Smooth behavior or of full rendering conformance after that correction.
+
 ## glTF: Normative Behavior and Its Scope
 
 The published registry page retrieved on 2026-11-03 identifies itself as **2.0.1**, dated

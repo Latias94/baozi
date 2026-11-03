@@ -242,4 +242,9 @@ negative case only for a genuinely new boundary, not for incidental private layo
   proof, not caller cutover or a performance keep. Phase-2 design must preserve owner-specific
   incomplete-success/unwind exit polling and accounted format-error construction before
   replacing real parser services; the provisional first-proof cause is not an import classifier.
+- [Query-owned node binding](../reviews/2026-11-03-query-owned-node-view.md) is source-qualified:
+  972 core/postprocess and 138 consumer tests, affected compiler contracts, strict lint and
+  formatting pass. One complete checked view and one shared row decoder preserve the query's
+  existing admission, read, numeric and control order. Independent application review closes
+  the formatting delta; fresh ordinary control/candidate measurement remains pending.
 - Complete release-convergence qualification: pending; all final gates remain closed.

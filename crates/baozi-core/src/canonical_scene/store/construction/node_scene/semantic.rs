@@ -169,6 +169,15 @@ impl SceneStorage {
 }
 
 impl<'scene> NodeSceneSemanticView<'scene> {
+    pub(in crate::canonical_scene::store) fn node_view(&self) -> NodeSceneNodeView<'scene> {
+        NodeSceneNodeView {
+            nodes: self.nodes,
+            proof: self.proof,
+            #[cfg(test)]
+            read_fault: self.read_fault,
+        }
+    }
+
     fn try_new(scene: &'scene SceneStorage) -> NodeSceneSemanticResult<Self> {
         let proof = scene.read_proof();
         let nodes = scene.read_nodes();
@@ -322,14 +331,7 @@ impl<'scene> NodeSceneSemanticView<'scene> {
     pub(in crate::canonical_scene::store) fn into_cursor(
         self,
     ) -> NodeSceneSemanticResult<NodeSceneSemanticCursor<'scene>> {
-        let roots = NodeSceneChildCursor::try_new(
-            &self.nodes.children,
-            0,
-            self.proof.source_root_count(),
-            self.proof.source_root_count(),
-            #[cfg(test)]
-            self.read_fault,
-        )?;
+        let roots = self.node_view().roots()?;
         Ok(NodeSceneSemanticCursor {
             nodes: self.nodes,
             appearance: Some(self.appearance.into_cursor()),
@@ -401,54 +403,14 @@ impl<'scene> NodeSceneSemanticCursor<'scene> {
             ));
         }
 
-        let source_index = self.next_node_index;
-        let row = source_index
-            .checked_add(1)
-            .ok_or_else(|| invariant("canonical node row index overflows"))?;
-        let node = self
-            .nodes
-            .nodes
-            .get(row)
-            .ok_or_else(|| invariant("validated typed node row is unavailable"))?;
-        #[cfg(test)]
-        if matches!(self.read_fault, Some(NodeSceneSemanticReadFault::AuthoredTransformNode(index)) if index == source_index)
-        {
-            return Err(invariant("injected authored-transform read failure"));
-        }
-        let authored_transform = node
-            .transform
-            .authored()
-            .ok_or_else(|| invariant("validated authored transform is unreadable"))?;
-        let name = node
-            .name
-            .map(|range| {
-                range
-                    .get(&self.nodes.names)
-                    .ok_or_else(|| invariant("validated node name is unreadable"))
-            })
-            .transpose()?;
-        let child_end = node
-            .children
-            .start()
-            .checked_add(node.children.len())
-            .ok_or_else(|| invariant("validated child range overflows"))?;
-        let children = NodeSceneChildCursor::try_new(
-            &self.nodes.children,
-            node.children.start(),
-            child_end,
-            node.children.len(),
+        let node = read_node_row(
+            self.nodes,
+            self.next_node_index,
             #[cfg(test)]
             self.read_fault,
         )?;
         self.next_node_index += 1;
-        Ok(Some(NodeSceneSemanticNode {
-            source_index,
-            name,
-            authored_transform,
-            camera: node.camera.map(|index| index as usize),
-            light: node.light.map(|index| index as usize),
-            children,
-        }))
+        Ok(Some(node))
     }
 
     /// Advances into appearance after the node graph has been exhausted.
@@ -742,19 +704,177 @@ impl<'scene> NodeSceneSemanticView<'scene> {
         self,
         source_index: usize,
     ) -> NodeSceneSemanticResult<NodeSceneSemanticNode<'scene>> {
-        if source_index >= self.proof.source_node_count() {
-            return Err(invariant("node row is outside the validated Scene"));
-        }
-        let mut cursor = self.into_cursor()?;
-        cursor.roots = None;
-        cursor.next_node_index = source_index;
-        cursor
-            .next_node()?
-            .ok_or_else(|| invariant("node row is absent"))
+        self.node_view().node_at(source_index)
     }
     pub(in crate::canonical_scene::store) fn roots(
         self,
     ) -> NodeSceneSemanticResult<NodeSceneChildCursor<'scene>> {
-        self.into_cursor()?.take_roots()
+        self.node_view().roots()
+    }
+}
+
+/// The node projection of one fully checked immutable semantic view.
+pub(in crate::canonical_scene::store) struct NodeSceneNodeView<'scene> {
+    nodes: &'scene NodeStorage,
+    proof: &'scene NodeSceneValidationProof,
+    #[cfg(test)]
+    read_fault: Option<NodeSceneSemanticReadFault>,
+}
+
+impl<'scene> NodeSceneNodeView<'scene> {
+    pub(in crate::canonical_scene::store) fn node_at(
+        &self,
+        source_index: usize,
+    ) -> NodeSceneSemanticResult<NodeSceneSemanticNode<'scene>> {
+        if source_index >= self.proof.source_node_count() {
+            return Err(invariant("node row is outside the validated Scene"));
+        }
+        // Random access previously checked this range before decoding through a full cursor.
+        let _ = self.roots()?;
+        read_node_row(
+            self.nodes,
+            source_index,
+            #[cfg(test)]
+            self.read_fault,
+        )
+    }
+
+    pub(in crate::canonical_scene::store) fn roots(
+        &self,
+    ) -> NodeSceneSemanticResult<NodeSceneChildCursor<'scene>> {
+        NodeSceneChildCursor::try_new(
+            &self.nodes.children,
+            0,
+            self.proof.source_root_count(),
+            self.proof.source_root_count(),
+            #[cfg(test)]
+            self.read_fault,
+        )
+    }
+}
+
+fn read_node_row(
+    nodes: &NodeStorage,
+    source_index: usize,
+    #[cfg(test)] read_fault: Option<NodeSceneSemanticReadFault>,
+) -> NodeSceneSemanticResult<NodeSceneSemanticNode<'_>> {
+    let row = source_index
+        .checked_add(1)
+        .ok_or_else(|| invariant("canonical node row index overflows"))?;
+    let node = nodes
+        .nodes
+        .get(row)
+        .ok_or_else(|| invariant("validated typed node row is unavailable"))?;
+    #[cfg(test)]
+    if matches!(read_fault, Some(NodeSceneSemanticReadFault::AuthoredTransformNode(index)) if index == source_index)
+    {
+        return Err(invariant("injected authored-transform read failure"));
+    }
+    let authored_transform = node
+        .transform
+        .authored()
+        .ok_or_else(|| invariant("validated authored transform is unreadable"))?;
+    let name = node
+        .name
+        .map(|range| {
+            range
+                .get(&nodes.names)
+                .ok_or_else(|| invariant("validated node name is unreadable"))
+        })
+        .transpose()?;
+    let child_end = node
+        .children
+        .start()
+        .checked_add(node.children.len())
+        .ok_or_else(|| invariant("validated child range overflows"))?;
+    let children = NodeSceneChildCursor::try_new(
+        &nodes.children,
+        node.children.start(),
+        child_end,
+        node.children.len(),
+        #[cfg(test)]
+        read_fault,
+    )?;
+    Ok(NodeSceneSemanticNode {
+        source_index,
+        name,
+        authored_transform,
+        camera: node.camera.map(|index| index as usize),
+        light: node.light.map(|index| index as usize),
+        children,
+    })
+}
+
+#[cfg(test)]
+mod node_read_tests {
+    use super::*;
+    use crate::canonical_scene::store::typed_storage::{
+        StoredNode, StoredTransform, TableRange, TextRange,
+    };
+
+    fn failure_reason(
+        nodes: &NodeStorage,
+        fault: Option<NodeSceneSemanticReadFault>,
+    ) -> &'static str {
+        match read_node_row(nodes, 0, fault) {
+            Err(cause) => cause.reason(),
+            Ok(_) => panic!("malformed source node must fail"),
+        }
+    }
+
+    #[test]
+    fn complete_decoder_keeps_transform_name_and_child_range_failure_order() {
+        let root = StoredNode {
+            children: TableRange::new(0, 0),
+            transform: StoredTransform::Synthetic,
+            name: None,
+            camera: None,
+            light: None,
+        };
+        let mut nodes = NodeStorage {
+            transform_scalar_count: 16,
+            nodes: vec![
+                root,
+                StoredNode {
+                    transform: StoredTransform::Matrix(crate::Mat4::IDENTITY),
+                    name: Some(TextRange(TableRange::new(0, 1))),
+                    children: TableRange::new(usize::MAX, 1),
+                    ..root
+                },
+            ],
+            children: vec![],
+            names: vec![0xff],
+        };
+        assert_eq!(
+            failure_reason(
+                &nodes,
+                Some(NodeSceneSemanticReadFault::AuthoredTransformNode(0))
+            ),
+            "injected authored-transform read failure"
+        );
+        nodes.nodes[1].transform = StoredTransform::Synthetic;
+        assert_eq!(
+            failure_reason(&nodes, None),
+            "validated authored transform is unreadable"
+        );
+        nodes.nodes[1].transform = StoredTransform::Matrix(crate::Mat4::IDENTITY);
+        assert_eq!(
+            failure_reason(&nodes, None),
+            "validated node name is unreadable"
+        );
+        nodes.names[0] = b'a';
+        assert_eq!(
+            failure_reason(&nodes, None),
+            "validated child range overflows"
+        );
+        nodes.nodes[1].children = TableRange::new(0, 1);
+        assert_eq!(
+            failure_reason(&nodes, None),
+            "validated child range exceeds typed storage"
+        );
+        nodes.nodes[1].children = TableRange::new(0, 0);
+        let node = read_node_row(&nodes, 0, None).unwrap();
+        assert_eq!(node.name(), Some("a"));
+        assert_eq!(node.child_count(), 0);
     }
 }
