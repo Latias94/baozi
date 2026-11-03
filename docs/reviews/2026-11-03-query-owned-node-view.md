@@ -3,7 +3,7 @@
 Main rejects the ordinary candidate after the complete initial and reverse-order confirmation
 campaigns: no repeated target gain offsets the repeated small extraction costs. Only this
 experiment's four runtime paths are restored exactly to `45a09d1`; source qualification and
-all measurements remain retained. Independent raw-evidence disposition is pending below.
+all measurements remain retained. Independent raw-evidence review supports this rejection.
 
 Repeated node getters in `base_pose_world_transforms` bind a full semantic view and create
 disposable cross-domain cursors. This slice binds one complete checked view at the query's
@@ -112,16 +112,22 @@ Main's all-lane triage records these selected medians in milliseconds, control /
 | glTF1 / extract | 0.01090 / 0.01130 | +3.67% | 0.01080 / 0.01150 | +6.48% |
 | glTF8 / extract | 0.01425 / 0.01500 | +5.26% | 0.01530 / 0.01520 | -0.65% |
 
-This table is a rejection triage, not an assertion that every percentage is a separately
-confirmed causal regression. Complete ranges, dispersion, half/order splits, control drift,
-parent/tails and memory still require independent raw review. The repeated OBJ improvement
-does not reproduce, while several small extraction medians rise in both orders. Source-level
-binding reduction and a correct result do not establish the required native benefit. No
-code-layout, allocator or Rust-versus-C++ explanation is inferred from these times.
+Independent raw review reconstructs all retained summaries and checks every stdout/stderr,
+including 744 warmups and 4,960 retained children, with no excluded sample. F64, glTF1 and
+glTF32 extraction rise in both half-campaign and engine-order groups in both rounds. The
+repeated OBJ improvement does not reproduce; its first control is locally nonstationary and
+confirmation retains an extraction maximum of 1.1576 versus 0.6955 ms. Favorable glTF8/STL/
+glTF1 pipeline observations, Assimp drift and mixed tails remain in the full receipt. Source
+versions are whole campaigns, not interleaved source pairs, so these data do not prove a
+universal instruction-path regression or a code-layout/allocator/Rust-versus-C++ mechanism.
+They suffice to reject this candidate without a repeated target benefit.
 
-Both candidate rounds still have 23/31 timing lanes above 3x same-campaign Assimp, with maximum
-pipeline ratios 12.25x / 12.38x. Whole-child working-set/commit samples remain in every report;
-they are not stage heap or retained-payload measurements. No memory-saving claim is made.
+All four campaigns have 23/31 timing lanes above 3x Assimp by matched ratio medians. Main's
+ratio-of-medians pipeline maxima are 12.25x / 12.38x for the two candidate rounds; these are
+distinct statistics. Working-set medians decrease 16--88 / 24--88 KiB, without an established
+cause. Commit is mixed: glTF32 extraction rises 58 / 64 KiB and pipeline 60 / 64 KiB, while
+glTF1/STL/points decrease. Every comparable memory ratio stays below 3x. Whole-child lifetime
+peaks are not stage heap or retained-payload sizes; no storage-optimization credit is claimed.
 
 Reports under `target/assimp-comparison/` are immutable:
 
@@ -139,3 +145,13 @@ Main's complete 62-row before/after summary is
 equality to `45a09d1`. The original qualified source and binary remain available. Further
 profiling is unnecessary to reject a candidate without a repeated native benefit; no Linux
 instruction result is claimed for it. The all-endpoint release target remains open.
+
+The independent final report is
+`.git/baozi-review/performance-convergence/node-view-measurement-review.md`, SHA-256
+`9cde67e9bd18f9a1501d8582d5012c20d0243db27c2e2143c1907f67d395a371`. Its all-lane raw summary
+is `node-view-independent-raw-summary.json`, SHA-256
+`d35dc7c3a4cf5f033fae29f657af11ff5e3068697ab461c607eee5904fd9f641`. It independently checks
+source/build/task identities, matched ratios, all ranges/percentiles, half/order groups, parent
+wall, memory and control drift. The runtime removal is committed as
+`24c533effa287e279025fd5025e4691eb0f23b35`; qualified source and failed experiment artifacts
+are preserved under their original identities.

@@ -9,6 +9,9 @@ pub enum SceneValidationWork {
     Entity,
     Reference,
     PayloadCell,
+    /// One fixed-step checked update of an already derived logical payload cardinality.
+    /// Positive cardinalities use one action, without reading the payload or visiting each cell.
+    PayloadCardinality,
     MetadataEntry,
     MetadataByte,
     Traversal,

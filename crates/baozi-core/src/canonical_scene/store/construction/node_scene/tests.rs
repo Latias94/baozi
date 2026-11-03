@@ -88,7 +88,9 @@ pub(in crate::canonical_scene::store) use gltf_capability::{
 
 // These phase boundaries are black-box accounting evidence for the complete scoped rail. They
 // include operation-owned startup and retained-share work, not only core semantic actions.
-const SINGLE_TRS_AUTHORING_COMPLETED_PREFIX_WORK: u64 = 80;
+// The empty-parent Generated operation now uses one cardinality action in place of five dummy
+// payload-cell increments, removing four authoring actions from the former 80-action prefix.
+const SINGLE_TRS_AUTHORING_COMPLETED_PREFIX_WORK: u64 = 76;
 const SINGLE_TRS_ROOTS: [NodeLocalId; 1] = [NodeLocalId::new(0)];
 const SINGLE_TRS_NODES: [NodeAuthoringNode; 1] = [NodeAuthoringNode::new(
     Presence::Absent,

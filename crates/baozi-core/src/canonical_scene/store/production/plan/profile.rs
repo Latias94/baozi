@@ -1295,6 +1295,40 @@ impl ProfileMetrics {
         Ok(())
     }
 
+    fn add_payload_cardinality(
+        &mut self,
+        cells: u64,
+        maximum: u64,
+    ) -> Result<(), ProfileAuthoringSemanticError> {
+        if cells == 0 {
+            return Ok(());
+        }
+        let first = self.payload_cells.checked_add(1).ok_or(
+            ProfileAuthoringSemanticError::AccountingOverflow {
+                dimension: "profile payload cells",
+            },
+        )?;
+        require_limit(ProfileAuthoringLimit::PayloadCells, first, maximum)?;
+        let room = maximum.checked_sub(self.payload_cells).ok_or(
+            ProfileAuthoringSemanticError::AccountingOverflow {
+                dimension: "profile payload cells",
+            },
+        )?;
+        if cells <= room {
+            return checked_add(&mut self.payload_cells, cells, "profile payload cells");
+        }
+
+        // Preserve the accepted logical prefix and its first rejected successor, not a visit count.
+        self.payload_cells = maximum;
+        let rejected =
+            maximum
+                .checked_add(1)
+                .ok_or(ProfileAuthoringSemanticError::AccountingOverflow {
+                    dimension: "profile payload cells",
+                })?;
+        require_limit(ProfileAuthoringLimit::PayloadCells, rejected, maximum)
+    }
+
     fn add_relation<C>(
         &mut self,
         context: &mut ProfileValidationContext<'_, C>,
@@ -1321,13 +1355,13 @@ impl ProfileMetrics {
     where
         C: CanonicalAuthoringControl,
     {
-        let maximum = context.limits.max_payload_cells();
-        for _ in 0..cells {
-            context.run_semantic_unit(SceneValidationWork::PayloadCell, || {
-                self.add_payload_cell(maximum)
-            })?;
+        if cells == 0 {
+            return Ok(());
         }
-        Ok(())
+        let maximum = context.limits.max_payload_cells();
+        context.run_semantic_unit(SceneValidationWork::PayloadCardinality, || {
+            self.add_payload_cardinality(cells, maximum)
+        })
     }
 }
 

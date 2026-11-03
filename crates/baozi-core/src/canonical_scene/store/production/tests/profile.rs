@@ -12,7 +12,7 @@ use crate::provenance::{
     SourceObjectKind, SourceObjectLocator,
 };
 use crate::scene_space::SceneSpace;
-use crate::{FormatId, SceneValidationLimits};
+use crate::{FormatId, SceneValidationLimits, SceneValidationWork};
 
 use super::super::plan::animation::validate_animation_batch_with_control;
 use super::super::plan::appearance::validate_appearance_batch_with_control;
@@ -747,6 +747,7 @@ fn duplicate_metadata_keys_and_non_finite_values_are_rejected() {
     )
     .expect("the profile without metadata must validate");
     let baseline_cells = baseline.payload_cell_count();
+    let baseline_work = baseline.validation_work();
     drop(baseline);
     let vector_key = NamespacedName::new("gltf:vectors").expect("metadata key must be canonical");
     let vectors = [Vec3::new(1.0, 2.0, 3.0), Vec3::new(4.0, 5.0, 6.0)];
@@ -767,6 +768,11 @@ fn duplicate_metadata_keys_and_non_finite_values_are_rejected() {
         dense.payload_cell_count() - baseline_cells,
         u64::try_from(vector_key.as_str().len()).expect("key length must fit") + 6,
         "dense vector cells must count every scalar component"
+    );
+    assert_eq!(
+        dense.validation_work() - baseline_work,
+        59,
+        "retain 24 key visits, 24 value-byte visits, six scalar checks and five metadata actions"
     );
     drop(dense);
 
@@ -1198,6 +1204,11 @@ fn profile_work_budget_is_preflighted_and_exact() {
     )
     .expect("the baseline profile must validate");
     let exact_work = baseline.validation_work();
+    assert_eq!(baseline.payload_cell_count(), 71);
+    assert_eq!(
+        exact_work, 38,
+        "three owner initializations, ten lineage actions, nine attachment actions and 16 metadata traversals"
+    );
     drop(baseline);
 
     let mut exact_control = TestControl::default();
@@ -1252,12 +1263,241 @@ fn profile_work_budget_is_preflighted_and_exact() {
     assert_eq!(zero_control.reserves, 0);
     assert_eq!(zero_control.work, 0);
 
+    let mut entry_control = TestControl {
+        cancel_on_poll: Some(1),
+        ..TestControl::default()
+    };
+    assert!(matches!(
+        validate_profile_batch_with_control(
+            lineage,
+            MetadataAuthoringBatch::empty(),
+            owners,
+            SceneValidationLimits::default(),
+            &mut entry_control,
+        ),
+        Err(ProfileAuthoringFailure::Control(
+            TestControlError::Cancelled
+        ))
+    ));
+    assert_eq!(entry_control.work, 0);
+    assert_eq!(entry_control.reserves, 0);
+
+    let mut final_control = TestControl {
+        cancel_on_poll: Some(2),
+        ..TestControl::default()
+    };
+    assert!(matches!(
+        validate_profile_batch_with_control(
+            lineage,
+            MetadataAuthoringBatch::empty(),
+            owners,
+            SceneValidationLimits::default(),
+            &mut final_control,
+        ),
+        Err(ProfileAuthoringFailure::Control(
+            TestControlError::Cancelled
+        ))
+    ));
+    assert_eq!(final_control.work, 38);
+    assert_eq!(final_control.polls, 2);
+
     drop(domains);
     assert_eq!(domain_control.live.get(), 0);
     assert_eq!(baseline_control.live.get(), 0);
     assert_eq!(exact_control.live.get(), 0);
     assert_eq!(one_short_control.live.get(), 0);
     assert_eq!(zero_control.live.get(), 0);
+    assert_eq!(entry_control.live.get(), 0);
+    assert_eq!(final_control.live.get(), 0);
+}
+
+#[test]
+fn payload_cardinality_denial_preserves_only_prior_actions() {
+    let mut domain_control = TestControl::default();
+    let domains = validated_domains(&[], &[], &mut domain_control);
+    assert_eq!(domains.owners().owner_count(), 2);
+    let identity = ResourceIdentity::new("r").expect("one-byte resource identity must be valid");
+    let resource =
+        ObservedResourceAuthoring::session_opaque(&identity, SessionOpaqueReason::CallerLabel);
+    let resources = [resource; 4];
+    let lineage = LineageAuthoringBatch::new(&resources, &[], &[], &[]);
+
+    let mut local_control = TestControl::default();
+    let local_denial = validate_profile_batch_with_control(
+        lineage,
+        MetadataAuthoringBatch::empty(),
+        domains.owners(),
+        SceneValidationLimits::default().with_max_work(9),
+        &mut local_control,
+    );
+    assert!(matches!(
+        local_denial,
+        Err(ProfileAuthoringFailure::Semantic(
+            ProfileAuthoringSemanticError::LimitExceeded {
+                limit: ProfileAuthoringLimit::Work,
+                actual: 10,
+                maximum: 9,
+            }
+        ))
+    ));
+    assert_eq!(local_control.work, 9);
+    assert_eq!(local_control.last_work(), Some(SceneValidationWork::Entity));
+
+    let mut outer_control = TestControl {
+        reject_work_after: Some(5),
+        ..TestControl::default()
+    };
+    let outer_denial = validate_profile_batch_with_control(
+        LineageAuthoringBatch::new(&resources[..2], &[], &[], &[]),
+        MetadataAuthoringBatch::empty(),
+        domains.owners(),
+        SceneValidationLimits::default().with_max_payload_cells(3),
+        &mut outer_control,
+    );
+    assert!(matches!(
+        outer_denial,
+        Err(ProfileAuthoringFailure::Control(
+            TestControlError::WorkRejected
+        ))
+    ));
+    assert_eq!(outer_control.work, 5);
+    assert_eq!(outer_control.last_work(), Some(SceneValidationWork::Entity));
+    assert_eq!(local_control.polls, 1);
+    assert_eq!(outer_control.polls, 1);
+    assert_eq!(local_control.live.get(), 0);
+    assert_eq!(outer_control.live.get(), 0);
+    drop(domains);
+    assert_eq!(domain_control.live.get(), 0);
+}
+
+#[test]
+fn payload_cardinality_semantic_error_completes_before_the_due_poll() {
+    let mut domain_control = TestControl::default();
+    let domains = validated_domains(&[], &[], &mut domain_control);
+    assert_eq!(domains.owners().owner_count(), 2);
+    let identity = ResourceIdentity::new("r").expect("one-byte resource identity must be valid");
+    let resources =
+        [ObservedResourceAuthoring::session_opaque(&identity, SessionOpaqueReason::CallerLabel);
+            127];
+    let lineage = LineageAuthoringBatch::new(&resources, &[], &[], &[]);
+    // Two owner initializations plus 127 Entity/Cardinality pairs end at literal action 256.
+    // Each resource contributes three logical cells; the first 126 reach the exact limit 378.
+    let limits = SceneValidationLimits::default().with_max_payload_cells(378);
+    let mut semantic_control = TestControl::default();
+    let semantic_error = validate_profile_batch_with_control(
+        lineage,
+        MetadataAuthoringBatch::empty(),
+        domains.owners(),
+        limits,
+        &mut semantic_control,
+    );
+    assert!(matches!(
+        semantic_error,
+        Err(ProfileAuthoringFailure::Semantic(
+            ProfileAuthoringSemanticError::LimitExceeded {
+                limit: ProfileAuthoringLimit::PayloadCells,
+                actual: 379,
+                maximum: 378,
+            }
+        ))
+    ));
+    assert_eq!(semantic_control.work, 256);
+    assert_eq!(semantic_control.polls, 2);
+    assert_eq!(
+        semantic_control.last_work(),
+        Some(SceneValidationWork::PayloadCardinality)
+    );
+
+    let mut cancelled_control = TestControl {
+        cancel_on_poll: Some(2),
+        ..TestControl::default()
+    };
+    let cancelled = validate_profile_batch_with_control(
+        lineage,
+        MetadataAuthoringBatch::empty(),
+        domains.owners(),
+        limits,
+        &mut cancelled_control,
+    );
+    assert!(matches!(
+        cancelled,
+        Err(ProfileAuthoringFailure::Control(
+            TestControlError::Cancelled
+        ))
+    ));
+    assert_eq!(cancelled_control.work, 256);
+    assert_eq!(cancelled_control.polls, 2);
+    assert_eq!(
+        cancelled_control.last_work(),
+        Some(SceneValidationWork::PayloadCardinality)
+    );
+    assert_eq!(semantic_control.live.get(), 0);
+    assert_eq!(cancelled_control.live.get(), 0);
+    drop(domains);
+    assert_eq!(domain_control.live.get(), 0);
+}
+
+#[test]
+fn source_references_precede_their_payload_cardinality() {
+    let mut domain_control = TestControl::default();
+    let domains = validated_domains(&[], &[], &mut domain_control);
+    let resources = resource_rows();
+    let foreign_sources = [source_row(ResourceIdentityLocalId::new(1))];
+    let mut resource_control = TestControl::default();
+    let foreign_resource = validate_profile_batch_with_control(
+        LineageAuthoringBatch::new(&resources, &foreign_sources, &[], &[]),
+        MetadataAuthoringBatch::empty(),
+        domains.owners(),
+        SceneValidationLimits::default().with_max_payload_cells(28),
+        &mut resource_control,
+    );
+    assert!(matches!(
+        foreign_resource,
+        Err(ProfileAuthoringFailure::Semantic(
+            ProfileAuthoringSemanticError::ResourceOutOfRange {
+                source_index: 0,
+                resource: 1,
+                resource_count: 1,
+            }
+        ))
+    ));
+    assert_eq!(resource_control.work, 7);
+    assert_eq!(
+        resource_control.last_work(),
+        Some(SceneValidationWork::Reference)
+    );
+
+    let sources = [source_row(RESOURCE_ID)];
+    let provenance = [ProvenanceNodeAuthoring::source(SourceIdentityLocalId::new(
+        1,
+    ))];
+    let mut source_control = TestControl::default();
+    let foreign_source = validate_profile_batch_with_control(
+        LineageAuthoringBatch::new(&resources, &sources, &provenance, &[]),
+        MetadataAuthoringBatch::empty(),
+        domains.owners(),
+        SceneValidationLimits::default().with_max_payload_cells(70),
+        &mut source_control,
+    );
+    assert!(matches!(
+        foreign_source,
+        Err(ProfileAuthoringFailure::Semantic(
+            ProfileAuthoringSemanticError::SourceIdentityOutOfRange {
+                node: 0,
+                source_index: 1,
+                source_count: 1,
+            }
+        ))
+    ));
+    assert_eq!(source_control.work, 11);
+    assert_eq!(
+        source_control.last_work(),
+        Some(SceneValidationWork::Reference)
+    );
+    assert_eq!(resource_control.live.get(), 0);
+    assert_eq!(source_control.live.get(), 0);
+    drop(domains);
+    assert_eq!(domain_control.live.get(), 0);
 }
 
 #[test]

@@ -151,8 +151,8 @@ pub(super) fn source_identity_cells(
 fn source_locator_cells(
     locator: &SourceObjectLocator,
 ) -> Result<u64, ProfileAuthoringSemanticError> {
-    // Preserve the semantic work contract: one tag cell and one cell per numeric byte or text byte.
-    // These counts do not describe the inline StoredSourceLocator layout.
+    // Logical payload size is one tag cell plus numeric/text byte cells, independently of work.
+    // These counts do not describe the inline StoredSourceLocator layout or physical cell visits.
     match locator {
         SourceObjectLocator::Indexed { .. } => Ok(9),
         SourceObjectLocator::Namespaced(locator) => {

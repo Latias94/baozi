@@ -68,3 +68,156 @@ fn semantic_counts_still_obey_the_canonical_u32_domain() {
         })
     ));
 }
+
+#[test]
+fn zero_payload_cardinality_never_enters_control_or_validates_the_existing_metric() {
+    struct NoControlCalls;
+
+    impl CanonicalAuthoringControl for NoControlCalls {
+        type Error = std::convert::Infallible;
+        type Reservation = ();
+
+        fn poll(&mut self) -> Result<(), Self::Error> {
+            panic!("zero cardinality must not poll");
+        }
+
+        fn run_unit<R>(
+            &mut self,
+            _work: SceneValidationWork,
+            _action: impl FnMut() -> R,
+        ) -> Result<R, Self::Error> {
+            panic!("zero cardinality must not admit an action");
+        }
+
+        fn reserve_scratch(&mut self, _bytes: u64) -> Result<(), Self::Error> {
+            panic!("zero cardinality must not reserve scratch");
+        }
+
+        fn validate_scratch(&mut self, _reservation: &()) -> Result<(), Self::Error> {
+            panic!("zero cardinality must not validate scratch");
+        }
+
+        fn resize_scratch(
+            &mut self,
+            _reservation: &mut (),
+            _bytes: u64,
+        ) -> Result<(), Self::Error> {
+            panic!("zero cardinality must not resize scratch");
+        }
+    }
+
+    let mut metrics = ProfileMetrics {
+        payload_cells: 3,
+        ..ProfileMetrics::default()
+    };
+    metrics
+        .add_payload_cardinality(0, 2)
+        .expect("zero must preserve an already excessive metric");
+    let mut control = NoControlCalls;
+    let limits = SceneValidationLimits::default()
+        .with_max_payload_cells(2)
+        .with_max_work(0);
+    let mut context = ProfileValidationContext::new(limits, &mut control);
+    context.work = u64::MAX;
+    context.work_since_poll = 255;
+    metrics
+        .add_payload(0, &mut context)
+        .expect("zero must skip even local work overflow and a pending poll");
+    assert_eq!(metrics.payload_cells, 3);
+    assert_eq!(context.work, u64::MAX);
+    assert_eq!(context.work_since_poll, 255);
+}
+
+#[test]
+fn payload_cardinality_accepts_the_entire_u64_domain_without_visiting_cells() {
+    let mut metrics = ProfileMetrics::default();
+    metrics
+        .add_payload_cardinality(u64::MAX, u64::MAX)
+        .expect("one bounded arithmetic update must accept the exact maximum");
+    assert_eq!(metrics.payload_cells, u64::MAX);
+}
+
+#[test]
+fn payload_cardinality_limit_is_inclusive() {
+    let mut metrics = ProfileMetrics {
+        payload_cells: 3,
+        ..ProfileMetrics::default()
+    };
+    metrics
+        .add_payload_cardinality(4, 7)
+        .expect("the exact logical cell limit must be inclusive");
+    assert_eq!(metrics.payload_cells, 7);
+}
+
+#[test]
+fn payload_cardinality_rejection_keeps_the_accepted_prefix() {
+    let mut metrics = ProfileMetrics {
+        payload_cells: 3,
+        ..ProfileMetrics::default()
+    };
+    assert!(matches!(
+        metrics.add_payload_cardinality(9, 7),
+        Err(ProfileAuthoringSemanticError::LimitExceeded {
+            limit: ProfileAuthoringLimit::PayloadCells,
+            actual: 8,
+            maximum: 7,
+        })
+    ));
+    assert_eq!(metrics.payload_cells, 7);
+}
+
+#[test]
+fn payload_cardinality_limit_precedes_a_later_total_overflow() {
+    let mut metrics = ProfileMetrics {
+        payload_cells: u64::MAX - 3,
+        ..ProfileMetrics::default()
+    };
+    assert!(matches!(
+        metrics.add_payload_cardinality(10, u64::MAX - 1),
+        Err(ProfileAuthoringSemanticError::LimitExceeded {
+            limit: ProfileAuthoringLimit::PayloadCells,
+            actual: u64::MAX,
+            maximum,
+        }) if maximum == u64::MAX - 1
+    ));
+    assert_eq!(metrics.payload_cells, u64::MAX - 1);
+}
+
+#[test]
+fn payload_cardinality_overflow_keeps_the_representable_prefix() {
+    let mut metrics = ProfileMetrics {
+        payload_cells: u64::MAX - 2,
+        ..ProfileMetrics::default()
+    };
+    assert!(matches!(
+        metrics.add_payload_cardinality(3, u64::MAX),
+        Err(ProfileAuthoringSemanticError::AccountingOverflow {
+            dimension: "profile payload cells",
+        })
+    ));
+    assert_eq!(metrics.payload_cells, u64::MAX);
+    assert!(matches!(
+        metrics.add_payload_cardinality(1, u64::MAX - 1),
+        Err(ProfileAuthoringSemanticError::AccountingOverflow {
+            dimension: "profile payload cells",
+        })
+    ));
+    assert_eq!(metrics.payload_cells, u64::MAX);
+}
+
+#[test]
+fn payload_cardinality_rejects_an_excessive_first_successor_without_mutation() {
+    let mut metrics = ProfileMetrics {
+        payload_cells: 9,
+        ..ProfileMetrics::default()
+    };
+    assert!(matches!(
+        metrics.add_payload_cardinality(1, 7),
+        Err(ProfileAuthoringSemanticError::LimitExceeded {
+            limit: ProfileAuthoringLimit::PayloadCells,
+            actual: 10,
+            maximum: 7,
+        })
+    ));
+    assert_eq!(metrics.payload_cells, 9);
+}

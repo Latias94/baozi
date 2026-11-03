@@ -249,5 +249,16 @@ negative case only for a genuinely new boundary, not for incidental private layo
   the formatting delta. Main rejects the ordinary experiment after four eight-case/31-lane
   campaigns: repeated OBJ extraction's initial gain does not reproduce and small F64/glTF
   extraction medians repeatedly increase. The four runtime paths are restored exactly to
-  `45a09d1`; all source and measured evidence remains. Independent raw disposition is pending.
+  `45a09d1` at `24c533e`; all source and measured evidence remains. Independent reconstruction
+  of all 5,704 children supports rejection and retains favorable pipelines, drift/tails and
+  glTF32's 58--64 KiB extraction-commit cost. No further reader experiment is selected from
+  this source-level opportunity; exclusive lifecycle and actual count-only work take priority.
+- [Profile payload cardinality](../reviews/2026-11-03-profile-cardinality-actions.md) replaces
+  the count-only per-cell loop with one bounded arithmetic action per positive call, preserving
+  logical first-limit/overflow and all real metadata/data visits. The breaking work category
+  records physical arithmetic rather than fictional visits. Core/import/postprocess 1430,
+  all four formats 853, consumer 138, exact semantic-owner boundaries, doctests and strict
+  lint/formatting pass. Independent source/application review and the source-derived 80-to-76
+  test-boundary correction are closed; the initial failed check remains. Ordinary measurement
+  and instruction attribution are pending; no native benefit is claimed from source alone.
 - Complete release-convergence qualification: pending; all final gates remain closed.
