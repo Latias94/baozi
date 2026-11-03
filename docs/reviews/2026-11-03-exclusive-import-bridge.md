@@ -116,6 +116,17 @@ results, not a Linux runtime campaign, ordinary performance result or repaired g
 admission policy. The separately [reproduced direction-value P2](../research/2026-11-03-normal-generation-standards.md#subsequent-selected-value-audit-and-windows-reproduction)
 remains open.
 
+The same committed source subsequently passes **Linux operation/import 1371/1371**, with
+no skips, nextest run `5625317f-b404-41ee-a4e0-52e8566bbbf2`. Import 25 + operation 54
+doctests and strict all-target/all-feature Clippy also pass using Rust 1.95.0, locked/offline
+dependencies and one build job. All 18 file identities remain identical before/after each
+check. The five new import negative examples again fail for their intended borrow, lifetime,
+invariant-owner or thread-trait reasons, without unintended missing symbols. Aggregate receipt
+`target/review/convergence/bridge-linux-qualification-1.json` has SHA-256
+`fd0f347560b011a2eadf8780e939510adcc01eee67151ecb9b00dfe006078ba8`.
+This is an additional Linux bridge qualification, not the full Linux formats/consumer matrix
+or an ordinary performance/memory campaign. The preceding Windows receipt remains unchanged.
+
 ## Remaining Caller Cutover
 
 Formats, metered ordinary storage/text services, typed canonical writers and postprocess still

@@ -204,6 +204,10 @@ proof, widen budgets, weaken mathematical results or move benchmark work outside
   common owner; the failed pending-consumed oracle is replaced without changing the kernel.
   This is real retained-owner/registry/submission qualification, with caller cutover and native
   performance keep still pending.
+- The identical committed bridge then passes Linux operation/import 1371/1371, 25 + 54
+  doctests and strict all-target/all-feature lint, with exact 18-path before/after identities.
+  This additional bridge qualification does not claim the full Linux consumer/format matrix
+  or clear any native timing/memory gate.
 - The first real caller design, 86 lines, SHA-256
   `cc0012a53d580c78626adc1b6a5a0a5bacbdc56ea2a6d7f9dfff834f2964d8fd`, selects the entire
   binary STL decode function and one shared ordinary vector/string growth owner. Independent
