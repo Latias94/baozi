@@ -260,6 +260,53 @@ admission/callback traffic around bounded actions while preserving the mathemati
 error projection and control bounds. This research supplies no basis to retune them, and no
 evidence that a semantic policy change closes the all-endpoint 3x performance goal.
 
+## Subsequent Selected-Value Audit and Windows Reproduction
+
+A separate audit at `77a8aaba850acf4e51d3fe38e36ee436e69b493e` finds a **P2 glTF
+source-direction admission/assurance gap**. The selected base-attribute collector checks
+finite values, actual bounds and TANGENT.w, but does not check NORMAL/TANGENT.xyz length.
+The storage-form check rejecting implicit zero directions does not reject an explicitly
+stored zero. The format-independent core deliberately accepts finite authored directions;
+the stronger generated-normal predicate is a different producer contract.
+
+Main reproduced the NORMAL case on Windows with Rust 1.95.0, locked/offline dependencies,
+one build job and one test thread. The probe uses the existing triangle document, binary and
+PNG. It changes only the three normal-z F32 cells at byte offsets **44, 56 and 68** from
+`1.0` to `2.0`; no accessor, position, index or resource descriptor changes.
+
+| Probe | Actual result |
+| --- | --- |
+| Original unit normals, read through the public attribute API | Passed; all three tuples retain bits `00000000,00000000,3f800000`. |
+| Same asset with NORMAL `(0,0,2)`, requiring `InvalidAccessor` | Failed with `expected glTF import to fail`: the current importer accepts the asset. |
+
+Nextest run **`4d98a903-046a-4765-b8b2-dd9bc59b4244`** runs both probes with no skips.
+This is a deliberately failing contract probe, not a passing regression qualification or
+a repaired parser. Its source SHA-256 is
+`618a76b1473268eef43130c21e817ca7cd25e338deaf9de53eecf79fdb168f52`.
+Exact inputs, command and output are retained in
+`target/review/convergence/normal-format-reproduction-1.{json,log}` and the isolated
+`normal_format_contract_probe.rs`. The glTF production source matches the audited revision;
+the complete isolated tree additionally contains the independently qualified import-bridge
+checkpoint 4. The probe is outside that bridge's 18-path scope and is not applied to main.
+
+The specification defines normalized base directions, but does not require every tolerant
+importer to reject every malformed asset. Baozi does not claim full conformance. The concrete
+follow-up is to specify its FLOAT source-direction tolerance and rejection/diagnostic policy,
+then enforce that policy at the existing selected sample-collection owner. Do not infer a
+normative epsilon from the generated-normal kernel or the official Validator's tool policy.
+[Published attribute definitions][gltf-meshes].
+
+Keep quantized directions and morph deltas separate. Quantization explicitly allows length
+error and expects lighting consumers to normalize; retained decoded magnitudes must not be
+rewritten. Morph NORMAL/TANGENT values are signed displacements, including zero and nonunit
+values. Dense and sparse base counterexamples, valid quantized controls, tangent w priority,
+signed/zero morph controls, failure cleanup and exact work/control prefixes belong in the
+follow-up. It must use the existing pass, preserve authored bits, and avoid a global core
+unit-vector restriction. [Quantization extension][quantization]; [Morph Targets][gltf-morphs].
+No generation algorithm, benchmark task, admission allowance or performance gate changes in
+this audit/reproduction. MikkTSpace and animated implicit-flat evaluation remain separate
+capability work; this finding does not justify replacing the area-weighted Smooth estimator.
+
 ## Retrieval and Source Identity
 
 The research skill's primary-source rule was applied without additional agents. General web
@@ -267,7 +314,8 @@ search was unavailable under the reported allowance limit; it was not retried. S
 read directly over HTTPS through the configured local HTTP proxy. Crossref supplied publisher
 metadata; a DOI-keyed OpenAlex lookup was used only to locate the author's institutional copy,
 not as evidence for an algorithm. Unavailable URLs and their failures are retained alongside
-successful receipts. No Rust, Cargo, tests, benchmark or profiler was run.
+successful receipts. That initial retrieval ran no Rust, Cargo, tests, benchmark or profiler;
+the later Windows reproduction is qualified separately above.
 
 Evidence is retained under `target/review/convergence/normal-standards/` in
 `reviewer-primary-fetch-{1..9}.json` and their downloaded files. The registry body fetched by
@@ -299,6 +347,7 @@ directory. These are source-reading identities, not fresh correctness qualificat
 [gltf-current-note]: https://github.com/KhronosGroup/glTF/blob/59ecbdba704206bb656965ab4e202881806066f1/specification/2.0/Specification.adoc#L30-L39
 [gltf-current-usage]: https://github.com/KhronosGroup/glTF/blob/59ecbdba704206bb656965ab4e202881806066f1/specification/2.0/Specification.adoc#L1808-L1825
 [gltf-current-morphs]: https://github.com/KhronosGroup/glTF/blob/59ecbdba704206bb656965ab4e202881806066f1/specification/2.0/Specification.adoc#L1961-L2002
+[quantization]: https://github.com/KhronosGroup/glTF/blob/59ecbdba704206bb656965ab4e202881806066f1/extensions/2.0/Khronos/KHR_mesh_quantization/README.md
 [unlit]: https://github.com/KhronosGroup/glTF/blob/59ecbdba704206bb656965ab4e202881806066f1/extensions/2.0/Khronos/KHR_materials_unlit/README.md#extending-materials
 [obj]: https://www.martinreddy.net/gfx/3d/OBJ.spec
 [loc]: https://www.loc.gov/preservation/digital/formats/fdd/fdd000507.shtml

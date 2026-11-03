@@ -278,3 +278,10 @@ negative case only for a genuinely new boundary, not for incidental private layo
   limits. It supports investigating real-region ownership and deleting obsolete adaptation;
   it is not a measured benefit of future exclusive adoption or Windows code-generation cause.
 - Complete release-convergence qualification: pending; all final gates remain closed.
+- The [normal source-value follow-up](../research/2026-11-03-normal-generation-standards.md#subsequent-selected-value-audit-and-windows-reproduction)
+  reproduces selected FLOAT NORMAL `(0,0,2)` acceptance on Windows with a passing bit-exact
+  unit control. This P2 requires an explicit glTF admission tolerance/policy and selected-owner
+  regression coverage before claiming direction-length validation. Preserve quantized decoded
+  magnitudes, signed morph deltas, generic core authored contracts and the frozen benchmark
+  task. This is independent correctness work after the current bridge cut, not a normal
+  estimator change or performance keep; the failed probe and source-qualified receipts remain.
