@@ -229,7 +229,6 @@ impl<'scene> ListVertices<'scene> {
     /// Missing fields are `None`; a present field on an empty draw layout is still `Some`.
     /// Vertex, Corner and Face streams retain their distinct authored domains. Primitive
     /// attributes never have the Instance domain.
-    #[inline]
     pub fn attribute(
         self,
         semantic: AttributeSemanticRef<'_>,
@@ -352,7 +351,6 @@ impl<'scene> ListAttribute<'scene> {
     ///
     /// Out-of-range ordinals, including `usize::MAX`, return `None` even for default-only sparse
     /// fields. The returned slice remains valid after this view is dropped, while the Scene lives.
-    #[inline]
     pub fn element(&self, index: usize) -> Option<AttributeElement<'scene>> {
         let vertex = self.layout.vertex(index)?;
         let source = vertex.source_index(self.attribute.domain())?;

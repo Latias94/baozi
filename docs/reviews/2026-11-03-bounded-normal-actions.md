@@ -192,3 +192,28 @@ Raw profiles, annotations and the exact summary remain under
 Further investigation must use actual call subtrees before choosing the next replacement.
 Neither this attribution nor the intermediate Windows keep clears the full fourteen-case,
 110-lane ordinary Windows/Linux endpoint, pipeline, memory and correctness gates.
+
+The subsequent read-only call-edge investigation independently rechecks all twelve R4/R5 raw
+hashes and exclusive sums. In the repeated R5 worker, the `prepare_triangles` subtree is
+384,159,274 Ir: normal input/generation contributes 97,468,246 and Scene edit contributes
+286,570,373. These are nested function costs, not elapsed-stage fractions. Measured normal
+Begin calls fall from 573,463 to 121,870; the previous design estimate is now corroborated by
+actual successful call edges. Within that normal subtree, Begin/Complete children still cost
+54,078,410 Ir. The emitted generic wrapper also contains numerical work and cannot be counted
+as pure dispatch overhead.
+
+Scene edit's canonical semantic adapter still performs 262,189 fresh permit lifecycles. Its
+admit/complete/finish children contribute a disjoint 135,289,524 Ir at that caller. Planning,
+materialization and correspondence each traverse generated normal payload through their real
+writer modes; this is one normal computation followed by three required transaction
+traversals. The next owner refactor must address that execution/writer boundary while retaining
+admission, correspondence, validation and immediate physical prefixes. Replacing the normal
+formula alone cannot remove this larger remaining route.
+
+Other workers' instruction increases also have a concrete common route: their unchanged
+cost-one `before_action` calls now pay twelve additional Ir per emitted call for the checked
+weighted contract. Full control-poll counts are unchanged on those five profiles. Newly
+emitted completion functions partly replace previously inlined work, so their full cost is
+not all net new work. Preserve one checked control owner while simplifying its composition;
+a second unweighted backend or relaxed cancellation is not justified. Exact edges and inline
+limitations are in `.git/baozi-review/performance-convergence/r5-normal-cost-investigation.md`.
