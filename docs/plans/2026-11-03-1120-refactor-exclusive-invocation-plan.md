@@ -164,3 +164,36 @@ Use existing suites and literal output/state oracles. Required new boundaries in
 
 No test/script may approximate Rust name resolution, turn stale missing symbols into an ownership
 proof, widen budgets, weaken mathematical results or move benchmark work outside its clock.
+
+## Execution Record
+
+- First proof is qualified at `45a09d19d948600d9b2a4261eb2e3394fe594ef1`: operation 905,
+  core/import/postprocess 1420, glTF profile comparisons 9, control 9 and independent consumer
+  138 tests pass, with affected doctests and strict lint/formatting. The
+  [receipt](../reviews/2026-11-03-exclusive-invocation-proof.md) pins actual source, intended
+  compiler diagnostics, physical-prefix/Drop oracles and the independent integration review.
+  This is one kernel and a lifetime/owner proof, not real caller cutover or a performance keep.
+- The 240-line caller migration map, SHA-256
+  `5358d7b9ac30233812bb3efe794a8b850f5d9e09b2d512b41d47cc2d67009b9e`, closes its independent
+  incomplete-success/importer-unwind exit-order and accounted-format-error host-service P2s.
+  Known execution failure is distinct from terminal cause selection; private prescribed exit
+  polling remains available while client bodies stay stopped. Ordinary semantic returns,
+  verified parser pieces, backend Err/EOF and caught extension panic retain different rules.
+- An operation-only exit implementation is deliberately not produced: the actual cold scope
+  abort, registration poison and session post-parse selection cannot be inferred from generic
+  `E` or the numeric cause slot. Its empty patch is a scoped stop receipt, not an implementation
+  or qualification candidate. The next vertical cut must include the real import bridge.
+- The concrete 138-line bridge design, SHA-256
+  `2ff7ee5652f5968588bf6da0d3ef2a40be6c9701a3bcf41236767ae63204e864`, forwards the actual Dormant
+  outcome owner's operation into the one executor. Stopped numeric state remains with that
+  operation; registry disposition is disjoint session data that survives Dormant-to-Pending
+  submission. A real registered Format path must prove the new parser roles, accounted failure,
+  incomplete success, caught/uncaught panic, poison and late control before broader migration.
+  Independent bounded design review accepts this frozen hash with no actionable P1/P2.
+  Isolated implementation must also gate `submit_complete` and activation before the first
+  mutation, preserve Pending's real post-submit panic/poison rejection, and keep disposition
+  outside the moved root. No shadow counters, second runner or generic exit-policy framework
+  is authorized to substitute for this real-owner proof. Actual compiler/runtime qualification
+  is pending; no bridge source is yet applied.
+- Fixed/dynamic roots, honest administrative payload/capacity metric, consuming attachment,
+  cleanup-before-finish, indexed selection and removal of transitional permits remain pending.

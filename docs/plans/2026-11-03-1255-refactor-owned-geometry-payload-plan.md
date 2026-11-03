@@ -199,11 +199,13 @@ reasoning. Frozen R5/R7 evidence cannot qualify this future implementation.
 | A numerical change is hidden as ownership work | Kernel expressions, orientation, rounding and both existing predicates remain; independent literal bits/errors and source review. |
 | Overlapping opportunity is double-counted | Re-profile after exclusive caller migration and before adoption measurement; separate actual owners and never add nested Ir. |
 
-Independent plan review accepts this direction with no P1/P2 defect. The concrete owner/state,
-proof and lease design remains a required pre-Rust gate; no adoption code or measured gain
-follows from plan acceptance. User authorization covers necessary breaking development;
-the remaining gates are concrete design, source and measured qualification, not a new
-conversational approval requirement.
+Independent plan and final bounded concrete-design reviews find no open P1/P2 at their
+reviewed revisions. Fresh/edit issuance, single-leaf consolidation, publication-local
+inventory and typed capacity rejection before structural freeze are specified below. The
+root-bearing issuer and protected storage transition must still be implemented and qualified
+before adoption; the exclusive first proof does not supply those APIs. User authorization
+covers necessary breaking development; the remaining gates are source, compiler, accounting
+and measured qualification, not a new conversational approval requirement.
 
 ## Execution Record
 
@@ -213,5 +215,53 @@ conversational approval requirement.
   paths and accepts the bounded module/representation replacement without a compatibility
   layer. It emphasizes authored-versus-generated predicates, actual attachment identity,
   same-invocation transfer, retained source correspondence and the concrete design gate.
-- Concrete ownership/proof/lease signatures: pending. Payload adoption implementation and
-  performance qualification: pending. Exclusive first-proof qualification remains separate.
+- The initial 315-line concrete design, SHA-256
+  `61c18166dc30389e5c04013d5746d885b91f5c713f441d5c50fc7dc5ef73e3cd`, is superseded during
+  review by the final revision below; it has no separate completed acceptance receipt. The
+  concrete direction has core own independently leased typed blocks
+  from birth, including the imported pools; no published aggregate yields a child Vec.
+  `WritableNormals -> ImmutableNormals -> CheckedNormals` separates final mutation, tangent
+  borrowing and the original core-check position. One private block/inventory identity and
+  consuming attachment receipt establish actual owner/range/binding correspondence; central
+  schema/source/graph checks remain. Finite facts do not strengthen authored normals.
+- The proposed retained-build and adoption methods reuse existing storage authority. The
+  additional shared header and inventory are admitted separately, while original backing
+  stays continuously leased through Scratch-to-Canonical transition. Both methods depend
+  on the real root/protected-role cutover. Private finite coverage needs ordered block cursors,
+  not a general certificate, per-scalar bitmap or interval engine. Detailed design/review are
+  retained under `.git/baozi-review/performance-convergence/generated-payload-ownership-concrete-*`.
+- The first frozen 300-line revision, SHA-256
+  `2c7ece13b37de6db4a5b825a9c20ad7b3eb1d8c0dcad252ade50dcb3dc4cb9fe`, identifies that existing
+  shared-storage admission covers the outer allocation, not automatically the nested child
+  backing. Independent review requires a concrete durable pair/source-coverage record, both
+  capacities' final eligibility and explicit nested-release outcomes, or a fully specified
+  consolidation alternative. Matching accounts and the old outer share call do not suffice.
+  It also requires a fresh-admission issuer without a source Scene, sharing the same private
+  request/ordinal authority with source-bound edits. The v2/v3 decisions below supersede
+  those owner/signature proposals; there is no payload implementation or qualified adoption API.
+- Exclusive first-proof source qualifies at `45a09d19d948600d9b2a4261eb2e3394fe594ef1`;
+  real caller/root migration, payload adoption and performance qualification remain pending.
+- Concrete v2, 213 lines, SHA-256
+  `6ca865fce5bb4f54f9e1b21fadcd645604024a2fbf4b58162b7351b0b83ce0e8`, chooses one ordinary
+  shared leaf: atomic backing/header consolidation preserves physical bytes/allocations,
+  combines classified logical tokens without refund/re-admission, and uses the existing
+  final-owner release outcome. Fresh and source-bound edit issuers share one private counter.
+  Independent review accepts those old P2 corrections and requires two further actual-caller
+  closures: declaration-only space conversion cannot share an immutable inventory while
+  restamping its children, and configured late capacity denial must retain its typed resource
+  cause rather than become `TerminalEvidenceFreezeUnverified` containment. No payload Rust
+  or measured gain is claimed.
+- Concrete v3, 126 lines, SHA-256
+  `425f29a157b39381cda0463ed17ecb7c67accf4681e821d9057ebb16fb54068d`, closes both v2 findings
+  in independent bounded review. `SceneTables.geometry` owns shareable descriptors plus a
+  publication-local inventory by value. One assembly path admits a new inventory for every
+  changed publication, including declaration-only space conversion, and shares each exact
+  source leaf once with current full-G attribution. Identity descriptors may be shared only
+  with identity slot mapping. Source wrappers are never restamped.
+- V3 moves the new capacity check into the existing commitment-pair staging transaction.
+  Healthy denial retains the exact typed ledger cause and intact ordinary failure route;
+  successful staging seals ordinary work/policy before final control and structural freeze.
+  This preserves the input Scene and distinguishes configured limits from malformed-graph
+  containment. No extra final poll, fabricated commitment bytes or general policy framework
+  is introduced. V3 supersedes those specific base/v2 owner/failure proposals; all unchanged
+  mathematical, value/correspondence, cancellation and cleanup obligations remain.
