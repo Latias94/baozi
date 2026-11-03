@@ -319,6 +319,134 @@ fn group_and_partial_permit_survive_real_storage_and_progress() {
 }
 
 #[test]
+fn idle_sequence_keeps_retained_share_work_and_storage_on_the_same_authority() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (mut operation, keys) = operation_with_work_policy(
+        &account,
+        OperationControl::default(),
+        DimensionPolicy::counter(16, 16, 0),
+    );
+    let baseline = operation
+        .producer_host()
+        .dimension_state(keys.dimension)
+        .unwrap();
+    let physical = account.snapshot();
+    let mut output = [0; 2];
+    {
+        let (work, storage, mut control) = operation.execution().unwrap();
+        let group = work.bind_group([keys.dimension]).unwrap();
+        control.before_action().unwrap();
+        let mut permit = group.admit_observed([1]).unwrap();
+        output[0] = 1;
+        permit.complete([1]).unwrap();
+        control.completed_action();
+
+        let plan = CapacityPlan::for_type::<u8>(0, 0, 5).unwrap();
+        let mut reservation = storage
+            .reserve_retained(
+                &mut control,
+                keys.phase,
+                keys.dimension,
+                plan.envelope_delta_bytes().unwrap(),
+                1,
+            )
+            .unwrap();
+        let mut values = Vec::<u8>::new();
+        values
+            .try_reserve_exact(plan.allocator_additional())
+            .unwrap();
+        let bytes = plan.finish(values.len(), values.capacity()).unwrap();
+        storage.resize(&mut reservation, bytes).unwrap();
+        values.extend_from_slice(&[2, 3, 4, 5, 6]);
+        let retained = reservation.bind_storage(values).unwrap();
+        assert_eq!(retained.as_ref(), &[2, 3, 4, 5, 6]);
+        assert_eq!(physical_delta(physical, account.snapshot()), (bytes, 1));
+        assert_eq!(permit.remaining(), [0]);
+
+        control.before_action().unwrap();
+        permit.replenish_one().unwrap();
+        output[1] = retained.as_ref()[0];
+        permit.complete([1]).unwrap();
+        control.completed_action();
+        permit.finish().unwrap();
+        drop(retained);
+        let state = work.dimension_state(keys.dimension).unwrap();
+        assert_eq!(state.attempted(), baseline.attempted() + 4);
+        assert_eq!(state.consumed(), baseline.consumed() + 4);
+        assert_eq!(state.live_bytes(), baseline.live_bytes());
+        work.finish_region().unwrap();
+        control.checkpoint().unwrap();
+    }
+    assert_eq!(output, [1, 2]);
+    assert_eq!(physical_delta(physical, account.snapshot()), (0, 0));
+    let published = operation.prepare_minimal_fallback(71).unwrap().handoff();
+    assert_work(
+        &published.ledger_evidence,
+        keys.dimension,
+        baseline.attempted() + 4,
+        baseline.consumed() + 4,
+    );
+    assert_eq!(
+        store_failure_cause(&published.ledger_evidence).class(),
+        StorePreparationFailureClass::Requested
+    );
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    assert!(!account.snapshot().poisoned());
+}
+
+#[test]
+fn tightened_policy_rejects_refill_once_and_preserves_the_written_prefix() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (mut operation, keys) = operation_with_work_policy(
+        &account,
+        OperationControl::default(),
+        DimensionPolicy::counter(8, 8, 0),
+    );
+    let mut output = [73; 3];
+    {
+        let (work, _storage, mut control) = operation.execution().unwrap();
+        let group = work.bind_group([keys.other_dimension]).unwrap();
+        let mut permit = group.admit_observed([0]).unwrap();
+        for destination in output.iter_mut().take(2) {
+            control.before_action().unwrap();
+            permit.replenish_one().unwrap();
+            *destination = 1;
+            permit.complete([1]).unwrap();
+            control.completed_action();
+        }
+        work.tighten_dimension_policy(keys.other_dimension, DimensionPolicy::counter(2, 2, 0))
+            .unwrap();
+        let denied = permit.replenish_one();
+        if denied.is_ok() {
+            output[2] = 1;
+        }
+        assert!(matches!(
+            denied,
+            Err(StoreRuntimeError::Ledger(LedgerCause::LimitExceeded {
+                dimension,
+                class: CounterClass::Attempted,
+                value: 3,
+                limit: 2,
+            })) if dimension == keys.other_dimension
+        ));
+        assert!(matches!(
+            permit.replenish_one(),
+            Err(StoreRuntimeError::FallbackOnly)
+        ));
+        assert_eq!(permit.remaining(), [0]);
+        permit.finish_partial().unwrap();
+        work.finish_region().unwrap();
+    }
+    assert_eq!(output, [1, 1, 73]);
+    let evidence = rejected_success_evidence(operation, StorePreparationFailureClass::Ledger);
+    assert_work(&evidence, keys.other_dimension, 3, 2);
+}
+
+#[test]
 fn exact_work_is_independent_of_entry_periodic_and_final_poll_counts() {
     for (actions, expected_polls) in [(0, 2), (1, 2), (255, 2), (256, 2), (257, 3)] {
         let factory = factory(1);
@@ -340,9 +468,15 @@ fn exact_work_is_independent_of_entry_periodic_and_final_poll_counts() {
             let (work, _storage, mut control) = operation.execution().unwrap();
             assert_eq!(signal.polls.load(Ordering::SeqCst), 1);
             let group = work.bind_group([keys.other_dimension]).unwrap();
+            let mut permit = group.admit_observed([0]).unwrap();
             for destination in physical.iter_mut().take(actions) {
-                write_unit(&group, &mut control, destination).unwrap();
+                control.before_action().unwrap();
+                permit.replenish_one().unwrap();
+                *destination = 1;
+                permit.complete([1]).unwrap();
+                control.completed_action();
             }
+            permit.finish().unwrap();
             assert_eq!(signal.polls.load(Ordering::SeqCst), expected_polls - 1);
             work.finish_region().unwrap();
             assert_eq!(signal.polls.load(Ordering::SeqCst), expected_polls - 1);
@@ -413,9 +547,12 @@ fn cancellation_is_observed_at_entry_or_within_the_explicit_action_bound() {
         } else {
             let (work, _storage, mut control) = operation.execution().unwrap();
             let group = work.bind_group([keys.other_dimension]).unwrap();
+            let mut permit = group.admit_observed([0]).unwrap();
             let mut stopped = false;
             for (index, destination) in physical.iter_mut().enumerate() {
-                let result = write_unit(&group, &mut control, destination);
+                let result = control
+                    .before_action()
+                    .and_then(|()| permit.replenish_one());
                 if result.is_err() {
                     assert!(matches!(
                         result,
@@ -427,6 +564,9 @@ fn cancellation_is_observed_at_entry_or_within_the_explicit_action_bound() {
                     stopped = true;
                     break;
                 }
+                *destination = 1;
+                permit.complete([1]).unwrap();
+                control.completed_action();
                 if index + 1 == cancel_after {
                     signal.token.cancel();
                 }
@@ -436,6 +576,11 @@ fn cancellation_is_observed_at_entry_or_within_the_explicit_action_bound() {
                 "cancellation must be observed within the finite action bound"
             );
             assert!(expected_actions - cancel_after <= 256);
+            assert!(matches!(
+                permit.replenish_one(),
+                Err(StoreRuntimeError::FallbackOnly)
+            ));
+            permit.finish_partial().unwrap();
             assert!(matches!(
                 group.admit_observed([0]),
                 Err(StoreRuntimeError::FallbackOnly)
@@ -580,11 +725,21 @@ fn every_action_checks_attempted_and_consumed_budgets_between_control_polls() {
             {
                 let (work, _storage, mut control) = operation.execution().unwrap();
                 let group = work.bind_group([keys.other_dimension]).unwrap();
+                let mut permit = group.admit_observed([0]).unwrap();
                 for destination in physical.iter_mut().take(allowed) {
-                    write_unit(&group, &mut control, destination).unwrap();
+                    control.before_action().unwrap();
+                    permit.replenish_one().unwrap();
+                    *destination = 1;
+                    permit.complete([1]).unwrap();
+                    control.completed_action();
+                }
+                control.before_action().unwrap();
+                let rejected = permit.replenish_one();
+                if rejected.is_ok() {
+                    physical[allowed] = 1;
                 }
                 assert!(matches!(
-                    write_unit(&group, &mut control, &mut physical[allowed]),
+                    rejected,
                     Err(StoreRuntimeError::Ledger(LedgerCause::LimitExceeded {
                         class: rejected_class,
                         dimension,
@@ -595,6 +750,8 @@ fn every_action_checks_attempted_and_consumed_budgets_between_control_polls() {
                         && value == allowed as u64 + 1
                         && limit == allowed as u64
                 ));
+                assert_eq!(permit.remaining(), [0]);
+                permit.finish_partial().unwrap();
                 assert!(matches!(
                     group.admit_observed([0]),
                     Err(StoreRuntimeError::FallbackOnly)
@@ -637,10 +794,11 @@ fn finish_region_rejects_forgotten_fully_completed_and_zero_amount_permits() {
         {
             let (work, _storage, mut control) = operation.execution().unwrap();
             let group = work.bind_group([keys.other_dimension]).unwrap();
-            let mut permit = group.admit_observed([amount]).unwrap();
+            let mut permit = group.admit_observed([0]).unwrap();
             let mut physical = [0; 3];
             for destination in physical.iter_mut().take(amount as usize) {
                 control.before_action().unwrap();
+                permit.replenish_one().unwrap();
                 *destination = 1;
                 permit.complete([1]).unwrap();
                 control.completed_action();
@@ -679,10 +837,11 @@ fn dropping_fully_completed_and_zero_amount_permits_still_prevents_success() {
         {
             let (work, _storage, mut control) = operation.execution().unwrap();
             let group = work.bind_group([keys.other_dimension]).unwrap();
-            let mut permit = group.admit_observed([amount]).unwrap();
+            let mut permit = group.admit_observed([0]).unwrap();
             let mut physical = [0; 3];
             for destination in physical.iter_mut().take(amount as usize) {
                 control.before_action().unwrap();
+                permit.replenish_one().unwrap();
                 *destination = 1;
                 permit.complete([1]).unwrap();
                 control.completed_action();

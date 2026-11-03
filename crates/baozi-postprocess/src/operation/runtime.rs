@@ -208,7 +208,9 @@ pub(crate) struct ActiveRuntime<'op> {
         PostProcessProgressPhase,
         PostProcessProgressUnit,
     >,
+    // The envelope stays owned between leaves; action state is tracked separately.
     pending: Option<StoreExecutionPermit<'op, 1>>,
+    action_pending: bool,
 }
 
 pub(crate) fn with_execution<R, E: From<StoreRuntimeError>>(
@@ -224,15 +226,36 @@ pub(crate) fn with_execution<R, E: From<StoreRuntimeError>>(
         storage,
         control,
         pending: None,
+        action_pending: false,
     };
-    // Known errors return unchanged; trusted permit Drop also cleans up on unwind.
-    let value = action(&mut runtime)?;
-    if runtime.pending.is_some() {
-        return Err(StoreRuntimeError::ObservedWorkIncomplete.into());
+    let result = action(&mut runtime);
+    if runtime.action_pending {
+        // Unmatched Begin keeps abandonment even if the permit was completed behind the adapter.
+        return match result {
+            Ok(_) => Err(StoreRuntimeError::ObservedWorkIncomplete.into()),
+            Err(cause) => Err(cause),
+        };
     }
-    runtime.work.finish_region()?;
-    runtime.control.checkpoint()?;
-    Ok(value)
+    let closed = match runtime.pending.take() {
+        Some(work) => match &result {
+            Ok(_) => work.finish(),
+            Err(_) => work.finish_partial(),
+        },
+        None => Ok(()),
+    };
+    let resolved = match closed {
+        Ok(()) => runtime.work.finish_region(),
+        Err(cause) => Err(cause),
+    };
+    match result {
+        Ok(value) => {
+            resolved?;
+            runtime.control.checkpoint()?;
+            Ok(value)
+        }
+        // Explicit cleanup retains its own sticky faults without replacing the original error.
+        Err(cause) => Err(cause),
+    }
 }
 
 #[allow(
@@ -245,22 +268,38 @@ impl ActiveRuntime<'_> {
     }
 
     pub(crate) fn begin_action(&mut self) -> Result<(), StoreRuntimeError> {
-        if self.pending.is_some() {
+        if self.action_pending {
             return Err(StoreRuntimeError::ObservedWorkOutstanding);
         }
         self.control.before_action()?;
-        self.pending = Some(self.group.admit_observed([1])?);
+        match &mut self.pending {
+            Some(work) => work.replenish_one()?,
+            None => self.pending = Some(self.group.admit_observed([1])?),
+        }
+        self.action_pending = true;
         Ok(())
     }
 
     pub(crate) fn complete_action(&mut self) -> Result<(), StoreRuntimeError> {
-        let mut work = self
+        if !self.action_pending {
+            return Err(StoreRuntimeError::ObservedWorkIncomplete);
+        }
+        let work = self
             .pending
-            .take()
+            .as_mut()
             .ok_or(StoreRuntimeError::ObservedWorkIncomplete)?;
-        // Preserve completion failure; trusted Drop resolves any unfinished suffix.
-        work.complete([1])?;
-        work.finish()?;
+        if work.remaining() != [1] {
+            return Err(StoreRuntimeError::ObservedWorkIncomplete);
+        }
+        if let Err(cause) = work.complete([1]) {
+            self.action_pending = false;
+            // Completion errors resolve now, so callers can immediately check region quiescence.
+            if let Some(work) = self.pending.take() {
+                let _ = work.finish_partial();
+            }
+            return Err(cause);
+        }
+        self.action_pending = false;
         self.control.completed_action();
         Ok(())
     }

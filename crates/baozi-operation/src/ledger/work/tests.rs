@@ -633,9 +633,12 @@ fn corrupt_unrepresentable_group_completion_changes_no_counter_or_remaining() {
 fn fully_completed_permit_is_open_until_finish_and_forgetting_is_detected() {
     let work = owner([(1, 10, 10)]);
     let mut permit = group(&work, [1])
-        .admit_observed([3], WorkLane::Producer)
+        .admit_observed([0], WorkLane::Producer)
         .unwrap();
-    permit.complete(0, 3).unwrap();
+    for _ in 0..3 {
+        permit.replenish_one().unwrap();
+        permit.complete(0, 1).unwrap();
+    }
     assert_eq!(permit.remaining(), [0]);
     assert_eq!(counters(&work), [(3, 3, 0)]);
     assert_eq!(
@@ -674,6 +677,220 @@ fn zero_and_empty_envelopes_still_own_persistent_channels() {
         work.check_quiescent(),
         Err(LedgerCause::OutstandingLinearWorkPermits { count: 1 })
     );
+}
+
+#[test]
+fn replenishment_keeps_one_envelope_and_records_each_immediate_prefix() {
+    let work = owner([(10, 8, 8), (90, 8, 8)]);
+    let roles = group(&work, [90]);
+    let mut permit = roles.admit_observed([0], WorkLane::Producer).unwrap();
+    for completed in [1, 2, 3] {
+        permit.replenish_one().unwrap();
+        assert_eq!(permit.remaining(), [1]);
+        assert_eq!(counters(&work), [(0, 0, 0), (completed, completed - 1, 1)]);
+        assert_eq!(
+            permit.replenish_one(),
+            Err(LedgerCause::InactiveLinearWorkPermit)
+        );
+        permit.complete(0, 1).unwrap();
+        assert_eq!(permit.remaining(), [0]);
+        assert_eq!(counters(&work), [(0, 0, 0), (completed, completed, 0)]);
+        let state = work.borrow_state().unwrap();
+        assert_eq!(state.open_envelopes, 1);
+        assert!(state.producer_open);
+    }
+    assert!(matches!(
+        roles.admit_observed([0], WorkLane::Producer),
+        Err(LedgerCause::InactiveLinearWorkPermit)
+    ));
+    assert!(matches!(
+        roles.begin_parser_child([0], [None]),
+        Err(ParserWorkError::Ledger(
+            LedgerCause::InactiveLinearWorkPermit
+        ))
+    ));
+    permit.finish().unwrap();
+    work.check_quiescent().unwrap();
+    assert_eq!(counters(&work), [(0, 0, 0), (3, 3, 0)]);
+}
+
+#[test]
+fn rejected_refill_and_fresh_admission_keep_the_same_attempted_prefix() {
+    for (attempted, consumed, class) in [
+        (1, 20, CounterClass::Attempted),
+        (20, 1, CounterClass::Consumed),
+        (1, 1, CounterClass::Attempted),
+    ] {
+        let expected = LedgerCause::LimitExceeded {
+            class,
+            dimension: 90,
+            value: 2,
+            limit: 1,
+        };
+        let fresh = owner([(90, attempted, consumed)]);
+        let fresh_group = group(&fresh, [90]);
+        let mut first = fresh_group.admit_observed([1], WorkLane::Producer).unwrap();
+        first.complete(0, 1).unwrap();
+        first.finish().unwrap();
+        assert!(matches!(
+            fresh_group.admit_observed([1], WorkLane::Producer),
+            Err(cause) if cause == expected
+        ));
+        assert_eq!(counters(&fresh), [(2, 1, 0)]);
+        fresh.check_quiescent().unwrap();
+
+        let sequence = owner([(90, attempted, consumed)]);
+        let mut permit = group(&sequence, [90])
+            .admit_observed([1], WorkLane::Producer)
+            .unwrap();
+        permit.complete(0, 1).unwrap();
+        assert_eq!(permit.replenish_one(), Err(expected));
+        assert_eq!(permit.remaining(), [0]);
+        assert_eq!(counters(&sequence), [(2, 1, 0)]);
+        assert_eq!(
+            sequence.check_quiescent(),
+            Err(LedgerCause::OutstandingLinearWorkPermits { count: 1 })
+        );
+        permit.finish_partial().unwrap();
+        sequence.check_quiescent().unwrap();
+    }
+}
+
+#[test]
+fn refill_overflow_keeps_the_last_representable_prefix_without_pending_credit() {
+    let work = owner([(90, u64::MAX, u64::MAX)]);
+    let mut permit = group(&work, [90])
+        .admit_observed([0], WorkLane::Producer)
+        .unwrap();
+    work.borrow_state_mut().unwrap().rows[0].state = WorkDimensionState {
+        attempted: u64::MAX,
+        consumed: u64::MAX,
+        pending_consumed: 0,
+    };
+    assert_eq!(
+        permit.replenish_one(),
+        Err(LedgerCause::ArithmeticOverflow {
+            class: CounterClass::Attempted,
+            dimension: 90,
+        })
+    );
+    assert_eq!(permit.remaining(), [0]);
+    assert_eq!(counters(&work), [(u64::MAX, u64::MAX, 0)]);
+    permit.finish_partial().unwrap();
+    work.check_quiescent().unwrap();
+}
+
+#[test]
+fn refill_counts_internal_pending_and_current_policy_without_refunding_attempts() {
+    let work = owner([(90, 20, 20)]);
+    let roles = group(&work, [90]);
+    let mut producer = roles.admit_observed([1], WorkLane::Producer).unwrap();
+    producer.complete(0, 1).unwrap();
+    let internal = roles.admit_observed([2], WorkLane::Internal).unwrap();
+    work.borrow_state_mut().unwrap().rows[0]
+        .policy
+        .consumed_limit = 3;
+    assert_eq!(
+        producer.replenish_one(),
+        Err(LedgerCause::LimitExceeded {
+            class: CounterClass::Consumed,
+            dimension: 90,
+            value: 4,
+            limit: 3,
+        })
+    );
+    assert_eq!(producer.remaining(), [0]);
+    assert_eq!(counters(&work), [(4, 1, 2)]);
+    producer.finish_partial().unwrap();
+    assert_eq!(counters(&work), [(4, 1, 2)]);
+    internal.finish_partial().unwrap();
+    assert_eq!(counters(&work), [(4, 1, 0)]);
+    work.check_quiescent().unwrap();
+}
+
+#[test]
+fn refill_rechecks_revoked_mode_and_protected_position_even_at_zero_remaining() {
+    for mode in [
+        WorkMode::OrdinarySealed,
+        WorkMode::Protected,
+        WorkMode::Closed,
+    ] {
+        let work = owner([(10, 20, 20), (90, 20, 20)]);
+        let mut permit = group(&work, [90])
+            .admit_observed([0], WorkLane::Producer)
+            .unwrap();
+        work.borrow_state_mut().unwrap().mode = mode;
+        let expected = if mode == WorkMode::Closed {
+            LedgerCause::PublicationAlreadyCompleted
+        } else {
+            LedgerCause::PublicationAlreadyPending
+        };
+        assert_eq!(permit.replenish_one(), Err(expected));
+        assert_eq!(counters(&work), [(0, 0, 0); 2]);
+        permit.finish_partial().unwrap();
+        work.check_quiescent().unwrap();
+    }
+    let work = owner([(10, 20, 20), (90, 20, 20)]);
+    let mut permit = group(&work, [90])
+        .admit_observed([0], WorkLane::Producer)
+        .unwrap();
+    work.borrow_state_mut().unwrap().protected_dimension = Some(1);
+    assert_eq!(
+        permit.replenish_one(),
+        Err(LedgerCause::UnknownDimension { dimension: 90 })
+    );
+    assert_eq!(counters(&work), [(0, 0, 0); 2]);
+    permit.finish_partial().unwrap();
+    work.check_quiescent().unwrap();
+}
+
+#[test]
+fn internal_protected_and_faulted_permits_cannot_replenish() {
+    let work = owner([(90, 20, 20)]);
+    let mut internal = group(&work, [90])
+        .admit_observed([0], WorkLane::Internal)
+        .unwrap();
+    assert_eq!(
+        internal.replenish_one(),
+        Err(LedgerCause::InactiveLinearWorkPermit)
+    );
+    internal.finish().unwrap();
+    {
+        let mut state = work.borrow_state_mut().unwrap();
+        state.mode = WorkMode::Protected;
+        state.protected_dimension = Some(0);
+    }
+    let mut protected = work
+        .bind([90], WorkGrant::Protected)
+        .unwrap()
+        .admit_observed([0], WorkLane::Protected)
+        .unwrap();
+    assert_eq!(
+        protected.replenish_one(),
+        Err(LedgerCause::InactiveLinearWorkPermit)
+    );
+    protected.finish().unwrap();
+    assert_eq!(counters(&work), [(0, 0, 0)]);
+
+    let work = owner([(90, 20, 20)]);
+    let mut permit = group(&work, [90])
+        .admit_observed([1], WorkLane::Producer)
+        .unwrap();
+    work.borrow_state_mut().unwrap().rows[0]
+        .policy
+        .consumed_limit = 0;
+    assert!(matches!(
+        permit.complete_with_outcome(0, 1),
+        LinearWorkCompletion::CompletedWithLedgerFailure(LedgerCause::LimitExceeded { .. })
+    ));
+    assert_eq!(permit.remaining(), [0]);
+    assert_eq!(
+        permit.replenish_one(),
+        Err(LedgerCause::InactiveLinearWorkPermit)
+    );
+    assert_eq!(counters(&work), [(1, 1, 0)]);
+    permit.finish_partial().unwrap();
+    work.check_quiescent().unwrap();
 }
 
 #[test]

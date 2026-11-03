@@ -249,6 +249,18 @@ impl<D: Copy, const N: usize> ExecutionPermit<'_, D, N> {
     }
 }
 
+impl<D: Copy> ExecutionPermit<'_, D, 1> {
+    pub(crate) fn replenish_one(&mut self) -> Result<(), ExecutionError<D>> {
+        ensure_running(self.failure)?;
+        let result = self
+            .work
+            .as_mut()
+            .expect("an unresolved execution envelope owns its work")
+            .replenish_one();
+        preserve_ledger(self.failure, result)
+    }
+}
+
 impl<D: Copy, const N: usize> Drop for ExecutionPermit<'_, D, N> {
     fn drop(&mut self) {
         if let Some(work) = self.work.take() {

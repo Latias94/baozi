@@ -299,6 +299,14 @@ impl<const N: usize> StoreExecutionPermit<'_, N> {
     }
 }
 
+impl StoreExecutionPermit<'_, 1> {
+    /// Admits one next ordinary producer unit only after the prior unit completed.
+    /// The envelope remains outstanding until explicitly finished, including at zero remaining.
+    pub fn replenish_one(&mut self) -> Result<(), StoreRuntimeError> {
+        self.raw.replenish_one().map_err(map_execution_error)
+    }
+}
+
 impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreExecutionControl<'_, O, PP, U> {
     /// Performs a full poll at entry, external, allocation, IO, semantic and terminal boundaries.
     pub fn checkpoint(&mut self) -> Result<(), StoreRuntimeError> {

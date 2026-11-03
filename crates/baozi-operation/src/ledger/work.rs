@@ -470,6 +470,28 @@ impl<'op, D: Copy, const N: usize> BoundWorkGroup<'op, D, N> {
             .open_envelopes
             .checked_add(1)
             .ok_or(LedgerCause::FinalSnapshotShapeMismatch)?;
+        self.admit_observed_totals(&mut state, totals)?;
+        state.open_envelopes = open_envelopes;
+        match lane {
+            WorkLane::Producer => state.producer_open = true,
+            WorkLane::Protected => state.protected_open = true,
+            WorkLane::Internal => {}
+        }
+        Ok(LinearWorkBatchPermit {
+            group: *self,
+            remaining: amounts,
+            lane,
+            active: true,
+            faulted: false,
+        })
+    }
+
+    /// Shares numeric admission between initial envelopes and singleton replenishment.
+    fn admit_observed_totals(
+        &self,
+        state: &mut WorkState<D>,
+        totals: [u64; N],
+    ) -> Result<(), LedgerCause<D>> {
         let mut attempted = [0; N];
         let mut pending = [0; N];
         let mut attempted_failure = None;
@@ -517,19 +539,7 @@ impl<'op, D: Copy, const N: usize> BoundWorkGroup<'op, D, N> {
                 state.rows[self.positions[index]].state.pending_consumed = pending[index];
             }
         }
-        state.open_envelopes = open_envelopes;
-        match lane {
-            WorkLane::Producer => state.producer_open = true,
-            WorkLane::Protected => state.protected_open = true,
-            WorkLane::Internal => {}
-        }
-        Ok(LinearWorkBatchPermit {
-            group: *self,
-            remaining: amounts,
-            lane,
-            active: true,
-            faulted: false,
-        })
+        Ok(())
     }
 }
 
@@ -714,6 +724,29 @@ impl<D: Copy, const N: usize> LinearWorkBatchPermit<'_, D, N> {
             WorkLane::Internal => {}
         }
         self.active = false;
+        Ok(())
+    }
+}
+
+impl<D: Copy> LinearWorkBatchPermit<'_, D, 1> {
+    /// Admits only the next real leaf, retaining the same explicitly owned envelope.
+    pub(crate) fn replenish_one(&mut self) -> Result<(), LedgerCause<D>> {
+        if !self.active
+            || self.faulted
+            || self.lane != WorkLane::Producer
+            || self.group.grant != WorkGrant::Ordinary
+            || self.remaining != [0]
+        {
+            return Err(LedgerCause::InactiveLinearWorkPermit);
+        }
+        let mut state = self.group.borrow_active()?;
+        if !lane_is_open(&state, self.lane) || state.parser_parent_open || state.parser_child_open {
+            state.integrity_fault = true;
+            self.faulted = true;
+            return Err(LedgerCause::InactiveLinearWorkPermit);
+        }
+        self.group.admit_observed_totals(&mut state, [1])?;
+        self.remaining = [1];
         Ok(())
     }
 }
