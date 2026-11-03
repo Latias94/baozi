@@ -104,11 +104,12 @@ again or assume text allocation is now the leading cost.
    consuming attachment/finish seam. Then integrate indexed classification in place of redundant
    full-Scene selection, attaching retained write resources to that same authority when needed
    without restarting counters or replaying validation.
-   Compare an exclusive host-owned execution context against the current split capabilities:
-   prefer static borrowing where it can replace unnecessary runtime reentry/mode checks without
-   removing real parser nesting, resource-release or failure obligations. Shared authority is
-   still needed for genuinely escaping leases. The initial promotion design is not code-go:
-   resolve allocation-before-state-move safety and an honest administrative footprint contract.
+   Adopt the reviewed [exclusive invocation plan](2026-11-03-1120-refactor-exclusive-invocation-plan.md):
+   host-owned contexts over lexical fixed/dynamic roots replace unnecessary numeric reentry/mode
+   checks while preserving real parser nesting, resource-release and failure obligations. Shared
+   authority remains for genuinely escaping leases. That plan supersedes the initial promotion
+   proposal with shell allocation before state movement and an explicitly named portable
+   administrative payload/capacity metric; existing physical charges stay intact.
    Specify consuming attachment and cleanup-before-terminal before integrating selection; do
    not create a temporary second start/coordinator to bridge that seam.
    Empty/single unchanged default calls should need no new allocation, generation or retained
