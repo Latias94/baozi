@@ -7,6 +7,10 @@ use crate::document::mesh_encoding::{
 
 pub(super) const MESH_SAMPLE_WORK_PER_LANE: u64 = 8;
 
+// Baozi's FLOAT base-direction admission policy, not a glTF-specified epsilon.
+// Quantized directions and signed morph displacements have separate contracts.
+const FLOAT_BASE_DIRECTION_SQUARED_LENGTH_TOLERANCE: f64 = 1.0e-4;
+
 pub(super) fn bind<'bytes>(
     ctx: &mut ParseExecution<'_, '_>,
     accessor: crate::document::Accessor<'_>,
@@ -306,6 +310,15 @@ pub(super) fn collect_mesh_attribute<'scope, const N: usize>(
             let values = bind(ctx, accessor, buffers)?
                 .samples::<N>()
                 .ok_or_else(|| invalid("mesh accessor shape differs from its checked contract"))?;
+            let direction_reason = match (accessor.row().component_type, semantic) {
+                (json::accessor::ComponentType::F32, Semantic::Normals) => {
+                    Some("NORMAL must be unit length")
+                }
+                (json::accessor::ComponentType::F32, Semantic::Tangents) => {
+                    Some("TANGENT XYZ must be unit length")
+                }
+                _ => None,
+            };
             let pad_alpha = matches!(semantic, Semantic::Colors(_)) && N == 3;
             let scalar_count = expected
                 .checked_mul(N + usize::from(pad_alpha))
@@ -330,6 +343,17 @@ pub(super) fn collect_mesh_attribute<'scope, const N: usize>(
                         .is_none_or(|&sign| sign != -1.0 && sign != 1.0)
                 {
                     return Err(invalid("TANGENT W must be -1 or +1").into());
+                }
+                if let Some(reason) = direction_reason {
+                    let [x, y, z, ..] = sample.decoded.as_slice() else {
+                        return Err(invalid("base direction sample lacks XYZ components").into());
+                    };
+                    let (x, y, z) = (f64::from(*x), f64::from(*y), f64::from(*z));
+                    let squared_length = (x * x + y * y) + z * z;
+                    if (squared_length - 1.0).abs() > FLOAT_BASE_DIRECTION_SQUARED_LENGTH_TOLERANCE
+                    {
+                        return Err(invalid(reason).into());
+                    }
                 }
                 output.try_extend_from_slice_reserved(&sample.decoded)?;
                 if pad_alpha {

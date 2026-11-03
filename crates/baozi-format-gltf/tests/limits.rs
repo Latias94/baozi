@@ -6,6 +6,7 @@ use baozi_import::{
     ScopeAbortCause,
 };
 use baozi_operation::{CancellationOrigin, ControlCause};
+use base64::Engine as _;
 use common::{
     GltfTestOptions, TestResult, append_glb_chunk, assert_gltf_failure, controlled_import,
     expected_error, glb_with_json, import_assets_result_with_control, sidecar_options,
@@ -165,11 +166,20 @@ fn data_uri(encoded: &str) -> String {
     format!("data:application/octet-stream;base64,{encoded}")
 }
 
-fn zero_payload_document(uri: &str, byte_length: usize) -> Vec<u8> {
+fn degenerate_triangle_payload(byte_length: usize) -> Vec<u8> {
+    let mut bytes = vec![0; byte_length];
+    // Keep finite zero positions and unit normals in the otherwise zero decode/copy fixture.
+    for offset in [44, 56, 68] {
+        bytes[offset..offset + 4].copy_from_slice(&1.0_f32.to_le_bytes());
+    }
+    bytes
+}
+
+fn degenerate_triangle_document(uri: &str, byte_length: usize) -> Vec<u8> {
     let document = String::from_utf8(triangle_gltf_with_buffer_uri(uri, byte_length))
         .expect("fixture is UTF-8");
-    // These decode/copy controls supply zero bytes rather than triangle_bin().
-    // Keep the declared POSITION extrema truthful without changing logical work.
+    // These decode/copy controls use zero positions rather than triangle_bin().
+    // Keep their extrema truthful without changing cardinality or logical work.
     assert!(document.contains(r#""max": [1, 1, 0]"#));
     document
         .replace(r#""max": [1, 1, 0]"#, r#""max": [0, 0, 0]"#)
@@ -458,10 +468,13 @@ fn data_uri_base64_scan_cancellation_is_bounded_by_scan_chunks() -> TestResult<(
 
 #[test]
 fn data_uri_base64_decode_cancellation_is_bounded_by_decode_chunks() -> TestResult<()> {
-    let encoded = encoded_payload_with_chunks(CANCELLATION_FIXTURE_CHUNKS);
-    let decoded_bytes = base64::decoded_len_estimate(encoded.len());
+    let encoded_bytes = SCAN_CHUNK_BYTES * CANCELLATION_FIXTURE_CHUNKS;
+    let decoded_bytes = base64::decoded_len_estimate(encoded_bytes);
+    let encoded = base64::engine::general_purpose::STANDARD
+        .encode(degenerate_triangle_payload(decoded_bytes));
+    assert_eq!(encoded.len(), encoded_bytes);
     let uri = data_uri(&encoded);
-    let document = zero_payload_document(&uri, decoded_bytes);
+    let document = degenerate_triangle_document(&uri, decoded_bytes);
     let document_decode_work = document.len() as u64;
     let (calibration_control, calibration_polls) = controlled_import(None);
     let (calibration_result, calibration_diagnostics) = import_assets_result_with_control(
@@ -580,15 +593,18 @@ fn external_buffer_snapshot_size_does_not_add_copy_decode_work() -> TestResult<(
     const SMALL_BUFFER_BYTES: usize = 128 * 1024;
     const LARGE_BUFFER_BYTES: usize = 256 * 1024;
 
-    let small_document = zero_payload_document("payload.bin", SMALL_BUFFER_BYTES);
-    let large_document = zero_payload_document("payload.bin", LARGE_BUFFER_BYTES);
+    let small_document = degenerate_triangle_document("payload.bin", SMALL_BUFFER_BYTES);
+    let large_document = degenerate_triangle_document("payload.bin", LARGE_BUFFER_BYTES);
     assert_eq!(small_document.len(), large_document.len());
 
     let (small_result, small_diagnostics) = import_assets_result_with_control(
         "external-borrowed-small.gltf",
         [
             ("external-borrowed-small.gltf", small_document),
-            ("payload.bin", vec![0_u8; SMALL_BUFFER_BYTES]),
+            (
+                "payload.bin",
+                degenerate_triangle_payload(SMALL_BUFFER_BYTES),
+            ),
         ],
         sidecar_options(),
         ImportOperationControl::default(),
@@ -597,7 +613,10 @@ fn external_buffer_snapshot_size_does_not_add_copy_decode_work() -> TestResult<(
         "external-borrowed-large.gltf",
         [
             ("external-borrowed-large.gltf", large_document),
-            ("payload.bin", vec![0_u8; LARGE_BUFFER_BYTES]),
+            (
+                "payload.bin",
+                degenerate_triangle_payload(LARGE_BUFFER_BYTES),
+            ),
         ],
         sidecar_options(),
         ImportOperationControl::default(),

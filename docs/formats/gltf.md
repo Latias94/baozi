@@ -53,6 +53,14 @@ document. Fresh target/sanitizer and archive-consumer evidence belongs to the
 - Positions, normals, tangents, texture coordinates, colors, indices, and complete paired
   `JOINTS_n` / `WEIGHTS_n` streams when present. Influence set indices start at zero without gaps;
   the existing attribute, cell, work and storage limits bound their count.
+- Selected FLOAT base NORMAL and TANGENT.xyz must have an absolute squared-length error at
+  most `1e-4`, evaluated from decoded F32 components in F64. This is Baozi's admission tolerance,
+  not a normative glTF epsilon. Invalid directions return `InvalidAccessor`; admitted values
+  retain their authored bits. Existing finite-value and TANGENT.w checks precede the length
+  check. It runs in the existing sample traversal after sparse replacement. Quantized directions
+  retain their separate decoded-magnitude policy, and morph directions are signed displacements
+  rather than unit vectors. Import preserves a missing normal stream; format-faithful flat
+  shading is a separate consumer policy.
 - Dense and sparse accessors for every admitted accessor use, including geometry, indices,
   influences, morph deltas, animation inputs/outputs and inverse bind matrices. Sparse accessors
   accept an optional base bufferView or implicit zero source components and apply replacements

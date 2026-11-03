@@ -26,6 +26,10 @@ The [exact selected profile](https://github.com/Latias94/baozi/blob/main/docs/fo
 - Decode dense and sparse accessors throughout the admitted profile, with an optional base
   or implicit zero values, normalized conversion, bounded layout/index validation and complete
   base/indices/values buffer provenance.
+- Check selected FLOAT base NORMAL and TANGENT.xyz for unit length using a Baozi-defined
+  absolute squared-length tolerance of `1e-4` in F64, preserving admitted source bits. This
+  same-pass check follows sparse replacement and existing finite/TANGENT.w checks; quantized
+  directions and signed morph deltas keep their separate contracts.
 - Support the finite `KHR_mesh_quantization` base and POSITION/NORMAL/TANGENT morph encodings.
   Both extension declarations are required. Stored-domain bounds are checked before normalized
   conversion; canonical attributes remain F32, and authored node/skin/UV transforms apply once.
