@@ -84,6 +84,15 @@ again or assume text allocation is now the leading cost.
    meter actual completed invocations and keep separate conservative control debt within the
    existing scheduling envelope. Borrow resolved fields through the existing core sampler rather
    than adding a second dense/sparse sampler to postprocess merely to avoid a by-value receiver.
+   Apply the [normal standards research](../research/2026-11-03-normal-generation-standards.md)
+   separately from this performance vocabulary change.
+   Distinguish normative missing-field rendering behavior, authored normals/smoothing intent,
+   and explicit generic weighting choices. The official glTF 2.0 specification requires flat
+   normals when rendering missing NORMAL and ignores supplied tangents in that case; merely
+   preserving absence during import is a separate contract. Audit the real asset consumer's
+   unconditional default Smooth request. Require noncoplanar-face, authored-normal, hard-group,
+   tangent and relevant morph/unlit regression evidence before a rendering-policy fix. Preserve
+   the frozen comparison's explicitly selected normal algorithm and task at this cutover.
 5. **Small-task lifecycle.** Locate setup/fallback/evidence cost separately from scaling work.
    A reused-plan workload may be added as a separately named experiment for both engines; it
    never replaces the frozen complete pipeline or moves setup outside its clock.
