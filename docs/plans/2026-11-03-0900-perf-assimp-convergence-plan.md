@@ -218,4 +218,21 @@ negative case only for a genuinely new boundary, not for incidental private layo
   +0.69% to +2.11%; they do not clear native-time or memory gates. Fifteen of 23 timing lanes
   and four of six pipelines still exceed 3x Assimp. Consumer normal policy and later owner
   candidates remain separately qualified sources, not part of these measurements.
+- The [two-hint reader experiment](../reviews/2026-11-03-reader-composition-experiment.md)
+  is rejected after four ordinary campaigns: F64 extraction rises 17.91% / 17.33% despite
+  large extraction gains. Only those two attributes are removed at `8f89e4f`; qualified reader
+  semantics remain. Linux executed inlining does not clear Windows native regressions.
+- R7 [bound glTF profile comparisons](../reviews/2026-11-03-bound-gltf-profile-comparisons.md)
+  are source-qualified at `ae11d58a6702a4f2a54910b277043d9aa9dbfbc2`, after 517 glTF and
+  138 consumer tests, strict lint, formatting and actual-source review. Four eight-case,
+  31-lane Windows campaigns support a named intermediate keep: glTF32 import improves
+  24.97% / 23.79% and pipeline 22.72% / 22.79%. Repeated glTF1/8 and F64 extraction costs,
+  glTF32's confirmation concern and small process-commit increases remain repair obligations.
+  Eight exact-reconciled Linux instruction profiles remain separate evidence. Twenty-three
+  of 31 timing lanes and six of eight pipelines still exceed 3x Assimp.
+- The reviewed [owned geometry payload plan](2026-11-03-1255-refactor-owned-geometry-payload-plan.md)
+  addresses the ownership erased by borrowed-only generated edits and global scalar pools.
+  The audit distinguishes core and kernel validation predicates; immutable value/attachment
+  proof and lease transfer require independent design review before implementation. Exclusive
+  runner v3 restores compact catalog projection before actual first-proof qualification.
 - Complete release-convergence qualification: pending; all final gates remain closed.
