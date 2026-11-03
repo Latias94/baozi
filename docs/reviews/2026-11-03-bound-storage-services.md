@@ -9,6 +9,9 @@ Runtime is source-qualified on Windows at
 `314d0fe3855cdd53159d2ffc0d6e10206d299b9f`. The ordinary worker is prepared separately;
 no native performance disposition belongs to this receipt yet.
 
+The subsequent [ordinary measurement review](2026-11-03-bound-storage-performance-hold.md)
+records **HOLD performance keep**. Source qualification remains a distinct result.
+
 ## Owner Replacement
 
 The [matched call-owner investigation](../research/2026-11-03-ordinary-storage-binding-costs.md)
@@ -130,8 +133,25 @@ It preserves the failed checkpoints and supplied Windows gates; later ordinary a
 Linux results are separate artifacts. Bundle 2 corrects bundle 1's scope metadata
 by removing its one ordinary-worker identity member; the original bundle is retained.
 
-Affected Linux qualification is pending. No ordinary candidate/control campaign has
-run for this replacement at this source-qualification checkpoint.
+At the preceding Windows source-qualification checkpoint, affected Linux checks and
+ordinary candidate/control campaigns had not run for this replacement.
+
+## Subsequent Affected Linux Qualification
+
+The exact committed archive then passes operation/import/STL nextest **1459/1459**,
+zero skips, run `889b948f-1eb4-4fbc-8719-4594b804eac9`; import **34** + operation
+**56** doctests and strict all-target/all-feature Clippy pass. All three checks record
+the same archive-derived file identities before and after. The independent offline
+review verifies all 1396 regular archive members against Git and reproduces their
+sorted compact JSON path-to-file-SHA dictionary identity
+`e1c831701bf25efe7f66510fef5a4935ca68d994b1feb74cc2235fe77b8cdb13`.
+This encoding is distinct from the 21-path NUL-separated source-set identity above.
+
+Aggregate `target/review/convergence/bound-owner-linux-qualification-1.json` has
+SHA-256 `eaa453749b51c3dca934df4f0d7a389bae407cc78f888ccaff54a573cedb6613`.
+The affected-package result does not supply the full Linux format/asset matrix or
+ordinary timing/memory qualification. Windows ordinary measurements and separate
+whole-worker instruction diagnostics are evaluated in subsequent evidence.
 
 ## Performance Boundary
 

@@ -314,3 +314,20 @@ negative case only for a genuinely new boundary, not for incidental private layo
   magnitudes, signed morph deltas, generic core authored contracts and the frozen benchmark
   task. This is independent correctness work after the current bridge cut, not a normal
   estimator change or performance keep; the failed probe and source-qualified receipts remain.
+- [Bound storage services](../reviews/2026-11-03-bound-storage-services.md) qualify
+  `314d0fe3855cdd53159d2ffc0d6e10206d299b9f`: final Windows integrated 2357, formats 855,
+  control 9, assets 138, actual loan compiler contracts and strict lint/formatting pass;
+  exact-archive Linux affected 1459, docs 34 + 56 and strict lint pass. The old split
+  storage/control views and arbitrary-sibling joins are removed, retaining one growth and
+  numeric implementation. Independent [ordinary raw review](../reviews/2026-11-03-bound-storage-performance-hold.md)
+  of all 5704 children keeps performance HOLD: repeated import's pilot gain does not repeat,
+  both OBJ extraction costs repeat, and glTF confirmation/tails plus whole-child memory
+  costs remain explicit. Preserve grid/STL pipeline and no-op preparation improvements.
+  The source remains a structural prerequisite, with 23/31 timing lanes and 6/8 pipelines
+  still above 3x; neither this slice nor small Linux Ir reductions clear the release gate.
+  [Exact instruction attribution](../research/2026-11-03-bound-storage-instruction-costs.md)
+  verifies constructor self cost 90-to-23 Ir per captured entry, unchanged real polls and
+  numeric kernels, and whole-worker OBJ reductions of about 1.3%. It also identifies
+  remaining canonical action owners and grid parser completion/active-borrow work.
+  Preserve those distinct owners; a removed descriptor constructor is not a complete
+  lifecycle, canonical payload or parser replacement.

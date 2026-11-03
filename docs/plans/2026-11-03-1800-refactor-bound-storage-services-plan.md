@@ -89,7 +89,15 @@ complete 14-case/110-lane Windows/Linux release target remains open throughout.
   qualifies exact source `314d0fe3855cdd53159d2ffc0d6e10206d299b9f` on Windows:
   integrated 2357, formats 855, control 9, assets 138, actual loan compiler probes and
   strict lint/formatting pass. Original failed checks and test-coverage corrections
-  remain explicit. Affected Linux and ordinary performance disposition remain pending.
+  remain explicit. The identical archive subsequently passes Linux operation/import/STL
+  1459/1459, zero skips, docs 34 + 56 and strict lint, with all archive-file identities
+  unchanged. Full Linux format/asset and ordinary performance disposition remain separate.
+- Independent reconstruction of all four Windows campaigns, 5704 successful children,
+  records [HOLD performance keep](../reviews/2026-11-03-bound-storage-performance-hold.md).
+  Repeated/grid extraction costs, unreproduced repeated-import gain, glTF confirmation
+  pipeline/tails and whole-child memory costs remain open. Grid/STL pipeline and several
+  preparation improvements are preserved without aggregation. The qualified owner stays
+  a structural prerequisite; 23/31 timing lanes and 6/8 pipelines still exceed 3x Assimp.
 
 
 ## Concrete Owner Design
