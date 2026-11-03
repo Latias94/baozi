@@ -246,5 +246,8 @@ negative case only for a genuinely new boundary, not for incidental private layo
   972 core/postprocess and 138 consumer tests, affected compiler contracts, strict lint and
   formatting pass. One complete checked view and one shared row decoder preserve the query's
   existing admission, read, numeric and control order. Independent application review closes
-  the formatting delta; fresh ordinary control/candidate measurement remains pending.
+  the formatting delta. Main rejects the ordinary experiment after four eight-case/31-lane
+  campaigns: repeated OBJ extraction's initial gain does not reproduce and small F64/glTF
+  extraction medians repeatedly increase. The four runtime paths are restored exactly to
+  `45a09d1`; all source and measured evidence remains. Independent raw disposition is pending.
 - Complete release-convergence qualification: pending; all final gates remain closed.
