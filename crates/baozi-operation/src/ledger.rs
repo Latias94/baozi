@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 mod commitment;
 mod evidence;
 mod exclusive;
-pub(crate) use exclusive::{ExclusiveLedger, ExclusiveStorage};
+pub(crate) use exclusive::{ExclusiveStorage, ExclusiveWork};
 mod reservation;
 mod snapshot;
 mod startup;

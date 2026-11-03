@@ -52,8 +52,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 mod execution;
 pub(crate) use execution::{
-    ExecutionControl, ExecutionError, ExecutionGroup, ExecutionOrdinaryStorage,
-    ExecutionParserScope, ExecutionPermit, ExecutionStorage, ExecutionWork, check_execution_state,
+    ExecutionError, ExecutionGroup, ExecutionOrdinaryStorage, ExecutionParserScope,
+    ExecutionPermit, ExecutionServices, ExecutionStorage, ExecutionWork, check_execution_state,
     poll_execution,
 };
 
@@ -89,13 +89,10 @@ impl StoreExecutionState {
 }
 
 pub(crate) struct ExclusiveOperationParts<'op, O, P, PP, U, D> {
-    pub(crate) ledger: crate::ledger::ExclusiveLedger<'op, O, P, D>,
-    pub(crate) poll: OperationPollCheckpoint<'op, PP, U>,
+    pub(crate) work: crate::ledger::ExclusiveWork<'op, D>,
+    pub(crate) ordinary: ExecutionOrdinaryStorage<'op, O, P, PP, U, D>,
     pub(crate) account: &'op PhysicalStorageAccount,
     pub(crate) share_work: RetainedHandleSharePlan<D>,
-    pub(crate) failure: &'op Cell<Option<PreparationFailureCode>>,
-    pub(crate) debt: &'op Cell<u16>,
-    pub(crate) execution_state: &'op Cell<StoreExecutionState>,
 }
 
 /// One checked weighted-debt calculation for the exclusive runner and migration adapters.
@@ -374,7 +371,7 @@ where
             ..
         } = self;
         let (poll, ledger) = coordinator.split_exclusive_poll_and_ledger();
-        let ledger = ledger.exclusive().map_err(|cause| {
+        let (work, storage) = ledger.exclusive().map_err(|cause| {
             record_terminal_cause_with_precedence(
                 sticky_terminal_cause,
                 PreparationFailureCode::ledger(),
@@ -382,13 +379,16 @@ where
             ExecutionError::Ledger(cause)
         })?;
         Ok(ExclusiveOperationParts {
-            ledger,
-            poll,
+            work,
+            ordinary: ExecutionOrdinaryStorage {
+                storage,
+                poll,
+                failure: sticky_terminal_cause,
+                debt: control_action_debt,
+                execution_state,
+            },
             account: baseline.account(),
             share_work: *terminal_account_share_work,
-            failure: sticky_terminal_cause,
-            debt: control_action_debt,
-            execution_state,
         })
     }
 
@@ -2289,7 +2289,12 @@ where
         allocations: u64,
     ) -> Result<(LiveReservation<O, P, D>, super::RetainedStorageLease), RetainedWriterError<D>>
     {
-        let (_, storage, _) = self.execution();
+        let storage = ExecutionStorage {
+            ledger: self.coordinator.retained_ledger(),
+            account: self.baseline.account(),
+            share_work: self.terminal_account_share_work,
+            failure: &self.sticky_terminal_cause,
+        };
         storage.reserve_retained(phase, dimension, bytes, allocations)
     }
 

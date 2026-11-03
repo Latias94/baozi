@@ -3,8 +3,8 @@
 use super::*;
 mod exclusive;
 use crate::retained::{
-    ExecutionControl, ExecutionError, ExecutionGroup, ExecutionOrdinaryStorage,
-    ExecutionParserScope, ExecutionPermit, ExecutionStorage, ExecutionWork,
+    ExecutionError, ExecutionGroup, ExecutionOrdinaryStorage, ExecutionParserScope,
+    ExecutionPermit, ExecutionServices, ExecutionWork,
 };
 pub use exclusive::{
     StoreExtensionResult, StoreFailureStorage, StoreImporterBoundary, StoreInvocation,
@@ -17,21 +17,41 @@ pub struct StoreExecutionWork<'op, O> {
     domain: &'op StoreKeyDomain,
 }
 
-/// Storage authority borrowed from the same invocation and physical account.
-pub struct StoreExecutionStorage<'op, O> {
-    raw: ExecutionStorage<'op, O, StorePhaseKey, StoreDimensionKey>,
+/// Bound storage, control and progress services from one actual invocation.
+///
+/// An ordinary loan ends before the services are used again:
+/// ```
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit, StoreRuntimeError};
+/// use baozi_operation::__retained_store_integration::activation::StoreExecutionServices;
+/// fn sequential<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     services: &mut StoreExecutionServices<'_, O, P, U>,
+/// ) -> Result<(), StoreRuntimeError> {
+///     { let mut loan = services.ordinary(); loan.checkpoint()?; }
+///     services.checkpoint()
+/// }
+/// ```
+///
+/// A live loan excludes reuse of its services owner:
+/// ```compile_fail,E0499
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit, StoreRuntimeError};
+/// use baozi_operation::__retained_store_integration::activation::StoreExecutionServices;
+/// fn overlap<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     services: &mut StoreExecutionServices<'_, O, P, U>,
+/// ) -> Result<(), StoreRuntimeError> {
+///     let mut loan = services.ordinary();
+///     services.checkpoint()?;
+///     loan.checkpoint()
+/// }
+/// ```
+pub struct StoreExecutionServices<'op, O, PP, U> {
+    raw: ExecutionServices<'op, O, StorePhaseKey, PP, U, StoreDimensionKey>,
     domain: &'op StoreKeyDomain,
 }
 
 /// Ordinary storage and real poll authority, borrowing no numeric work or progress state.
-pub struct StoreOrdinaryStorage<'b, O, PP, U> {
-    raw: ExecutionOrdinaryStorage<'b, O, StorePhaseKey, PP, U, StoreDimensionKey>,
-    domain: &'b StoreKeyDomain,
-}
-
-/// Exclusive callback authority and invocation-wide bounded action cadence.
-pub struct StoreExecutionControl<'op, O, PP, U> {
-    raw: ExecutionControl<'op, O, StorePhaseKey, PP, U, StoreDimensionKey>,
+pub struct StoreOrdinaryStorage<'b, 'op: 'b, O, PP, U> {
+    raw: &'b mut ExecutionOrdinaryStorage<'op, O, StorePhaseKey, PP, U, StoreDimensionKey>,
+    domain: &'op StoreKeyDomain,
 }
 
 /// Fixed owner-bound work layout with no per-action key lookup or comparison.
@@ -318,7 +338,7 @@ impl StoreExecutionPermit<'_, 1> {
     }
 }
 
-impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreExecutionControl<'_, O, PP, U> {
+impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreExecutionServices<'_, O, PP, U> {
     /// Performs a full poll at entry, external, allocation, IO, semantic and terminal boundaries.
     pub fn checkpoint(&mut self) -> Result<(), StoreRuntimeError> {
         self.raw.checkpoint().map_err(map_execution_error)
@@ -353,13 +373,14 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreExecutionContro
     }
 }
 
-impl<O: OperationOwner> StoreExecutionStorage<'_, O> {
+impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreExecutionServices<'_, O, PP, U> {
     /// Verifies a live reservation belongs to this invocation's shared storage owner.
     pub fn validate_live_owner(
         &self,
         reservation: &RetainedStoreReservation<O>,
     ) -> Result<(), StoreRuntimeError> {
         self.raw
+            .retained
             .validate_live_owner(&reservation.raw)
             .map_err(map_execution_error)
     }
@@ -378,10 +399,11 @@ impl<O: OperationOwner> StoreExecutionStorage<'_, O> {
             .as_ref()
             .is_some_and(|lease| bytes > lease.admitted_bytes())
         {
-            self.raw.reject_binding();
+            self.raw.retained.reject_binding();
             return Err(StoreRuntimeError::ConstructionInvariantUnverified);
         }
         self.raw
+            .retained
             .transition(&mut reservation.raw, phase, dimension, bytes)
             .map_err(map_execution_error)?;
         if let Some(physical) = &mut reservation.physical {
@@ -398,32 +420,28 @@ impl<O: OperationOwner> StoreExecutionStorage<'_, O> {
         dimension: StoreDimensionKey,
     ) -> Result<(), StoreRuntimeError> {
         if !self.domain.owns_phase(phase) {
-            self.raw.reject_binding();
+            self.raw.retained.reject_binding();
             return Err(StoreRuntimeError::ForeignPhaseDomain { phase });
         }
         if !self.domain.owns_dimension(dimension) {
-            self.raw.reject_binding();
+            self.raw.retained.reject_binding();
             return Err(StoreRuntimeError::ForeignDimensionDomain { dimension });
         }
         Ok(())
     }
 
     /// Polls, then admits physical backing without borrowing the work or control state.
-    pub fn reserve_retained<PP: ProgressPhase, U: ProgressUnit>(
-        &self,
-        control: &mut StoreExecutionControl<'_, O, PP, U>,
+    pub fn reserve_retained(
+        &mut self,
         phase: StorePhaseKey,
         dimension: StoreDimensionKey,
         bytes: u64,
         allocations: u64,
     ) -> Result<RetainedStoreReservation<O>, StoreRuntimeError> {
         self.validate(phase, dimension)?;
-        if !self.raw.shares_invocation(&control.raw) {
-            self.raw.reject_binding();
-            return Err(StoreRuntimeError::ConstructionInvariantUnverified);
-        }
-        control.checkpoint()?;
+        self.checkpoint()?;
         self.raw
+            .retained
             .reserve_retained(phase, dimension, bytes, allocations)
             .and_then(|(mut raw, physical)| {
                 if let Err(cause) = raw.retain_for_output() {
@@ -438,18 +456,6 @@ impl<O: OperationOwner> StoreExecutionStorage<'_, O> {
             .map_err(|cause| map_writer_error(&cause))
     }
 
-    /// Admits temporary live bytes before an external allocator or IO seam.
-    pub fn reserve<PP: ProgressPhase, U: ProgressUnit>(
-        &self,
-        control: &mut StoreExecutionControl<'_, O, PP, U>,
-        phase: StorePhaseKey,
-        dimension: StoreDimensionKey,
-        bytes: u64,
-    ) -> Result<RetainedStoreReservation<O>, StoreRuntimeError> {
-        self.validate(phase, dimension)?;
-        self.ordinary(control)?.reserve(phase, dimension, bytes)
-    }
-
     /// Reconciles actual capacity after allocation, preserving the source on rejection.
     pub fn resize(
         &self,
@@ -457,28 +463,23 @@ impl<O: OperationOwner> StoreExecutionStorage<'_, O> {
         bytes: u64,
     ) -> Result<(), StoreRuntimeError> {
         resize_store_reservation(
-            &self.raw.storage_view(),
-            self.raw.failure(),
+            &self.raw.retained.storage_view(),
+            self.raw.retained.failure(),
             reservation,
             bytes,
         )
     }
 }
 
-impl<'op, O: OperationOwner> StoreExecutionStorage<'op, O> {
-    /// Joins only actual sibling storage/control; constructing the loan does not poll.
-    pub fn ordinary<'b, PP: ProgressPhase, U: ProgressUnit>(
-        &'b self,
-        control: &'b mut StoreExecutionControl<'_, O, PP, U>,
-    ) -> Result<StoreOrdinaryStorage<'b, O, PP, U>, StoreRuntimeError> {
-        if !self.raw.shares_invocation(&control.raw) {
-            self.raw.reject_binding();
-            return Err(StoreRuntimeError::ConstructionInvariantUnverified);
-        }
-        Ok(StoreOrdinaryStorage {
-            raw: self.raw.ordinary(&mut control.raw),
+impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit>
+    StoreExecutionServices<'op, O, PP, U>
+{
+    /// Borrows the already bound ordinary field without polling or rebuilding its descriptors.
+    pub fn ordinary(&mut self) -> StoreOrdinaryStorage<'_, 'op, O, PP, U> {
+        StoreOrdinaryStorage {
+            raw: &mut self.raw.ordinary,
             domain: self.domain,
-        })
+        }
     }
 }
 
@@ -516,18 +517,14 @@ fn resize_store_reservation<O: OperationOwner>(
     Ok(())
 }
 
-impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreOrdinaryStorage<'_, O, PP, U> {
+impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit>
+    StoreOrdinaryStorage<'_, 'op, O, PP, U>
+{
     /// Shortens only storage/poll fields for a local compound service.
-    pub fn reborrow(&mut self) -> StoreOrdinaryStorage<'_, O, PP, U> {
+    pub fn reborrow(&mut self) -> StoreOrdinaryStorage<'_, 'op, O, PP, U> {
         StoreOrdinaryStorage {
             domain: self.domain,
-            raw: ExecutionOrdinaryStorage {
-                storage: self.raw.storage.reborrow(),
-                poll: self.raw.poll.reborrow(),
-                failure: self.raw.failure,
-                debt: self.raw.debt,
-                execution_state: self.raw.execution_state,
-            },
+            raw: &mut *self.raw,
         }
     }
     /// Uses this invocation's actual ordinary checkpoint without delivering progress.
@@ -582,8 +579,7 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, L> RetainedStoreOper
     ) -> Result<
         (
             StoreExecutionWork<'_, O>,
-            StoreExecutionStorage<'_, O>,
-            StoreExecutionControl<'_, O, PP, U>,
+            StoreExecutionServices<'_, O, PP, U>,
         ),
         StoreRuntimeError,
     > {
@@ -593,19 +589,18 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, L> RetainedStoreOper
         if self.raw.is_terminal_only() {
             return Err(StoreRuntimeError::FallbackOnly);
         }
-        let (work, storage, control) = self.raw.execution();
-        let mut control = StoreExecutionControl { raw: control };
-        control.checkpoint()?;
+        let (work, services) = self.raw.execution();
+        let mut services = StoreExecutionServices {
+            raw: services,
+            domain: &self.domain,
+        };
+        services.checkpoint()?;
         Ok((
             StoreExecutionWork {
                 raw: work,
                 domain: &self.domain,
             },
-            StoreExecutionStorage {
-                raw: storage,
-                domain: &self.domain,
-            },
-            control,
+            services,
         ))
     }
 }

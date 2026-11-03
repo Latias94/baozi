@@ -1,10 +1,9 @@
 //! One exclusive numeric view plus disjoint shared release storage. No full-Ledger alias is lent.
 use super::*;
 
-pub(crate) struct ExclusiveLedger<'op, O, P, D> {
+pub(crate) struct ExclusiveWork<'op, D> {
     pub(crate) catalog: &'op [D],
     pub(crate) work: work::WorkView<'op, D>,
-    pub(crate) storage: ExclusiveStorage<'op, O, P, D>,
 }
 
 pub(crate) struct ExclusiveStorage<'op, O, P, D> {
@@ -14,6 +13,8 @@ pub(crate) struct ExclusiveStorage<'op, O, P, D> {
     operation_live_byte_limit: u64,
     owner: PhantomData<fn() -> O>,
 }
+
+type WorkAndStorage<'op, O, P, D> = (ExclusiveWork<'op, D>, ExclusiveStorage<'op, O, P, D>);
 
 impl<O: OperationOwner, P: Copy + Ord, D: Copy + Ord + fmt::Debug> Ledger<O, P, D> {
     /// Transitional storage-only adapter: numeric work is never borrowed by this view.
@@ -27,23 +28,22 @@ impl<O: OperationOwner, P: Copy + Ord, D: Copy + Ord + fmt::Debug> Ledger<O, P, 
         }
     }
 
-    pub(crate) fn exclusive(&mut self) -> Result<ExclusiveLedger<'_, O, P, D>, LedgerCause<D>> {
+    pub(crate) fn exclusive(&mut self) -> Result<WorkAndStorage<'_, O, P, D>, LedgerCause<D>> {
         let (catalog, work) = self.work.exclusive()?;
-        Ok(ExclusiveLedger {
-            catalog,
-            work,
-            storage: ExclusiveStorage {
+        Ok((
+            ExclusiveWork { catalog, work },
+            ExclusiveStorage {
                 state: &self.state,
                 phases: &self.phase_catalogue,
                 catalog,
                 operation_live_byte_limit: self.operation_live_byte_limit,
                 owner: PhantomData,
             },
-        })
+        ))
     }
 }
 
-impl<O: OperationOwner, P: Copy + Ord, D: Copy + Ord + fmt::Debug> ExclusiveLedger<'_, O, P, D> {
+impl<D: Copy + Ord + fmt::Debug> ExclusiveWork<'_, D> {
     pub(crate) fn bind<const N: usize>(
         &self,
         dimensions: [D; N],
@@ -60,8 +60,9 @@ impl<O: OperationOwner, P: Copy + Ord, D: Copy + Ord + fmt::Debug> ExclusiveLedg
         work::check_quiescent(self.work.rows, self.work.header)
     }
 
-    pub(crate) fn tighten_policy(
+    pub(crate) fn tighten_policy<O: OperationOwner, P: Copy + Ord>(
         &mut self,
+        storage: &ExclusiveStorage<'_, O, P, D>,
         dimension: D,
         policy: DimensionPolicy,
     ) -> Result<(), LedgerCause<D>> {
@@ -70,7 +71,7 @@ impl<O: OperationOwner, P: Copy + Ord, D: Copy + Ord + fmt::Debug> ExclusiveLedg
             .catalog
             .binary_search(&dimension)
             .map_err(|_| LedgerCause::UnknownDimension { dimension })?;
-        let mut storage = lock(self.storage.state);
+        let mut storage = lock(storage.state);
         Ledger::<O, P, D>::tighten_policy_in(
             &mut self.work,
             &mut storage,
@@ -92,16 +93,6 @@ impl<O: OperationOwner, P: Copy + Ord, D: Copy + Ord + fmt::Debug> ExclusiveLedg
 }
 
 impl<O: OperationOwner, P: Copy + Ord, D: Copy + Ord + fmt::Debug> ExclusiveStorage<'_, O, P, D> {
-    pub(crate) fn reborrow(&self) -> ExclusiveStorage<'_, O, P, D> {
-        ExclusiveStorage {
-            state: self.state,
-            phases: self.phases,
-            catalog: self.catalog,
-            operation_live_byte_limit: self.operation_live_byte_limit,
-            owner: PhantomData,
-        }
-    }
-
     pub(crate) fn reserve(
         &self,
         phase: P,

@@ -27,7 +27,7 @@ fn actual_ledger() -> (Ledger<Owner, u8, StoreDimensionKey>, StoreDimensionKey) 
 #[test]
 fn host_completion_failure_cleans_the_suffix_before_any_result_is_disposed() {
     let (mut owner, key) = actual_ledger();
-    let mut exclusive = owner.exclusive().unwrap();
+    let (mut exclusive, storage) = owner.exclusive().unwrap();
     let layout = exclusive.bind([key]).unwrap();
     let frame = layout
         .admit_observed(&mut exclusive.work, [4], WorkLane::Producer)
@@ -36,7 +36,7 @@ fn host_completion_failure_cleans_the_suffix_before_any_result_is_disposed() {
     // pending-policy violation. This probes the same completion category as the legacy live alias.
     assert!(
         exclusive
-            .tighten_policy(key, DimensionPolicy::counter(8, 2, 0))
+            .tighten_policy(&storage, key, DimensionPolicy::counter(8, 2, 0))
             .is_err()
     );
     let physical = Cell::new(0);
@@ -73,7 +73,7 @@ fn host_completion_failure_cleans_the_suffix_before_any_result_is_disposed() {
 #[test]
 fn unapplied_completion_failure_has_no_invented_consumption_and_no_later_abandonment() {
     let (mut owner, key) = actual_ledger();
-    let mut exclusive = owner.exclusive().unwrap();
+    let (mut exclusive, _storage) = owner.exclusive().unwrap();
     let layout = exclusive.bind([key]).unwrap();
     let frame = layout
         .admit_observed(&mut exclusive.work, [1], WorkLane::Producer)
@@ -103,7 +103,7 @@ fn unapplied_completion_failure_has_no_invented_consumption_and_no_later_abandon
 #[test]
 fn an_internal_frame_does_not_claim_or_close_the_attempted_only_parser_channels() {
     let (mut owner, key) = actual_ledger();
-    let mut exclusive = owner.exclusive().unwrap();
+    let (mut exclusive, _storage) = owner.exclusive().unwrap();
     let parent_layout = exclusive.bind([key]).unwrap();
     let mut parent = parent_layout
         .begin_parser(&mut exclusive.work, [2], [None], ParserChannel::Parent)
@@ -145,7 +145,7 @@ fn an_internal_frame_does_not_claim_or_close_the_attempted_only_parser_channels(
 #[test]
 fn real_import_boundary_defers_only_unclassified_unwind_and_caught_return_is_sticky() {
     let (mut owner, key) = actual_ledger();
-    let mut exclusive = owner.exclusive().unwrap();
+    let (mut exclusive, _storage) = owner.exclusive().unwrap();
     let layout = exclusive.bind([key]).unwrap();
     let failure = Cell::new(None);
     let execution_state = Cell::new(StoreExecutionState::Running);
@@ -208,7 +208,7 @@ fn real_import_boundary_defers_only_unclassified_unwind_and_caught_return_is_sti
 #[test]
 fn cleanup_fault_precedes_later_import_disposition_and_preserves_the_actual_prefix() {
     let (mut owner, key) = actual_ledger();
-    let mut exclusive = owner.exclusive().unwrap();
+    let (mut exclusive, _storage) = owner.exclusive().unwrap();
     let layout = exclusive.bind([key]).unwrap();
     let failure = Cell::new(Some(PreparationFailureCode::ledger()));
     let state = Cell::new(StoreExecutionState::Running);
@@ -298,19 +298,20 @@ fn failure_materializer_observes_active_frame_before_resolution() {
     let execution_state = Cell::new(StoreExecutionState::Running);
     let share_work = RetainedHandleSharePlan::new(internal_key, internal_key);
     let (poll, ledger) = coordinator.split_exclusive_poll_and_ledger();
-    let ledger = ledger.exclusive().unwrap();
-    let share_layout = ledger
-        .bind(share_work.charges().map(|(key, _)| key))
-        .unwrap();
+    let (work, storage) = ledger.exclusive().unwrap();
+    let share_layout = work.bind(share_work.charges().map(|(key, _)| key)).unwrap();
     let mut context = StoreInvocation {
         parts: ExclusiveOperationParts {
-            ledger,
-            poll,
+            work,
+            ordinary: crate::retained::ExecutionOrdinaryStorage {
+                storage,
+                poll,
+                failure: &failure,
+                debt: &debt,
+                execution_state: &execution_state,
+            },
             account: &account,
             share_work,
-            failure: &failure,
-            debt: &debt,
-            execution_state: &execution_state,
         },
         domain: &domain,
         share_layout,
@@ -368,7 +369,7 @@ fn failure_materializer_observes_active_frame_before_resolution() {
         assert_eq!(parent.work_counters(child_key).unwrap(), (2, 1, 0));
         result
     });
-    context.parts.ledger.check_quiescent().unwrap();
+    context.parts.work.check_quiescent().unwrap();
     assert_eq!(context.work_counters(parent_key).unwrap(), (1, 0, 0));
     assert_eq!(context.work_counters(child_key).unwrap(), (2, 1, 0));
     assert_eq!(context.work_counters(internal_key).unwrap(), (0, 0, 0));
@@ -392,14 +393,14 @@ fn failure_materializer_observes_active_frame_before_resolution() {
 #[test]
 fn parser_completion_failure_after_real_write_resolves_suffix_without_abandonment() {
     let (mut owner, key) = actual_ledger();
-    let mut exclusive = owner.exclusive().unwrap();
+    let (mut exclusive, storage) = owner.exclusive().unwrap();
     let layout = exclusive.bind([key]).unwrap();
     let frame = layout
         .begin_parser(&mut exclusive.work, [2], [None], ParserChannel::Child)
         .unwrap();
     // Tightening uses the actual owner before borrowing its action guard. No outside alias.
     exclusive
-        .tighten_policy(key, DimensionPolicy::counter(8, 0, 0))
+        .tighten_policy(&storage, key, DimensionPolicy::counter(8, 0, 0))
         .unwrap();
     let failure = Cell::new(None);
     let execution_state = Cell::new(StoreExecutionState::Running);

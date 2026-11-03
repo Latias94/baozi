@@ -6,17 +6,16 @@
 )]
 
 use baozi_operation::__retained_store_integration::activation::{
-    StoreBoundWorkGroup, StoreExecutionControl, StoreExecutionPermit, StoreExecutionStorage,
-    StoreExecutionWork, StoreFailureStorage, StoreInvocation, StoreOrdinaryStorage,
-    StoreParserWorkError, StoreParserWorkScope,
+    StoreBoundWorkGroup, StoreExecutionPermit, StoreExecutionServices, StoreExecutionWork,
+    StoreFailureStorage, StoreInvocation, StoreOrdinaryStorage, StoreParserWorkError,
+    StoreParserWorkScope,
 };
 
 use super::*;
 
 pub(crate) struct ImportStoreExecution<'region> {
     work: StoreExecutionWork<'region, ImportOperationOwner>,
-    storage: StoreExecutionStorage<'region, ImportOperationOwner>,
-    control: StoreExecutionControl<
+    services: StoreExecutionServices<
         'region,
         ImportOperationOwner,
         ImportProgressPhase,
@@ -25,14 +24,21 @@ pub(crate) struct ImportStoreExecution<'region> {
     vocabulary: &'region ImportStoreVocabulary,
 }
 
-pub(crate) struct ImportOrdinaryStorage<'b> {
-    raw: StoreOrdinaryStorage<'b, ImportOperationOwner, ImportProgressPhase, ImportProgressUnit>,
+pub(crate) struct ImportOrdinaryStorage<'b, 'op: 'b> {
+    raw: StoreOrdinaryStorage<
+        'b,
+        'op,
+        ImportOperationOwner,
+        ImportProgressPhase,
+        ImportProgressUnit,
+    >,
     vocabulary: &'b ImportStoreVocabulary,
 }
-impl<'b> ImportOrdinaryStorage<'b> {
+impl<'b, 'op: 'b> ImportOrdinaryStorage<'b, 'op> {
     pub(crate) fn new(
         raw: StoreOrdinaryStorage<
             'b,
+            'op,
             ImportOperationOwner,
             ImportProgressPhase,
             ImportProgressUnit,
@@ -211,25 +217,20 @@ impl ImportStoreSessionOwner {
         owner
             .check_execution_running()
             .map_err(|cause| project_store_runtime_error(vocabulary, cause))?;
-        let (work, storage, control) = owner
+        let (work, services) = owner
             .execution()
             .map_err(|cause| project_store_runtime_error(vocabulary, cause))?;
         Ok(ImportStoreExecution {
             work,
-            storage,
-            control,
+            services,
             vocabulary,
         })
     }
 }
 
 impl<'region> ImportStoreExecution<'region> {
-    pub(crate) fn ordinary(&mut self) -> Result<ImportOrdinaryStorage<'_>, ImportStoreHostError> {
-        let raw = self
-            .storage
-            .ordinary(&mut self.control)
-            .map_err(|cause| project_store_runtime_error(self.vocabulary, cause))?;
-        Ok(ImportOrdinaryStorage::new(raw, self.vocabulary))
+    pub(crate) fn ordinary(&mut self) -> ImportOrdinaryStorage<'_, 'region> {
+        ImportOrdinaryStorage::new(self.services.ordinary(), self.vocabulary)
     }
 
     #[cfg(test)]
@@ -248,7 +249,7 @@ impl<'region> ImportStoreExecution<'region> {
         &self,
         reservation: &ImportStoreReservation,
     ) -> Result<(), ImportStoreHostError> {
-        self.storage
+        self.services
             .validate_live_owner(reservation.raw.as_ref().expect("live reservation"))
             .map_err(|cause| self.runtime_error(cause))
     }
@@ -261,7 +262,7 @@ impl<'region> ImportStoreExecution<'region> {
         dimension: ImportDimension,
         bytes: u64,
     ) -> Result<(), ImportStoreHostError> {
-        self.storage
+        self.services
             .transition(
                 reservation.raw.as_mut().expect("live reservation"),
                 self.vocabulary.phase(phase),
@@ -297,19 +298,19 @@ impl<'region> ImportStoreExecution<'region> {
     }
 
     pub(crate) fn poll(&mut self) -> Result<(), ImportStoreHostError> {
-        self.control
+        self.services
             .checkpoint()
             .map_err(|cause| self.runtime_error(cause))
     }
 
     pub(crate) fn before_action(&mut self, max_cost: u16) -> Result<(), ImportStoreHostError> {
-        self.control
+        self.services
             .before_action(max_cost)
             .map_err(|cause| self.runtime_error(cause))
     }
 
     pub(crate) fn completed_action(&mut self, max_cost: u16) -> Result<(), ImportStoreHostError> {
-        self.control
+        self.services
             .completed_action(max_cost)
             .map_err(|cause| self.runtime_error(cause))
     }
@@ -321,7 +322,7 @@ impl<'region> ImportStoreExecution<'region> {
         completed: u64,
         total: Option<u64>,
     ) -> Result<(), ImportStoreHostError> {
-        self.control
+        self.services
             .report_progress(phase, unit, completed, total)
             .map_err(|cause| self.runtime_error(cause))
     }
@@ -351,15 +352,16 @@ impl<'region> ImportStoreExecution<'region> {
         dimension: ImportDimension,
         bytes: u64,
     ) -> Result<ImportStoreReservation, ImportStoreHostError> {
+        let vocabulary = self.vocabulary;
         let raw = self
-            .storage
+            .services
+            .ordinary()
             .reserve(
-                &mut self.control,
-                self.vocabulary.phase(phase),
-                self.vocabulary.dimension(dimension),
+                vocabulary.phase(phase),
+                vocabulary.dimension(dimension),
                 bytes,
             )
-            .map_err(|cause| self.runtime_error(cause))?;
+            .map_err(|cause| project_store_runtime_error(vocabulary, cause))?;
         Ok(ImportStoreReservation {
             raw: Some(raw),
             bytes,
@@ -374,9 +376,8 @@ impl<'region> ImportStoreExecution<'region> {
         allocations: u64,
     ) -> Result<ImportStoreReservation, ImportStoreHostError> {
         let raw = self
-            .storage
+            .services
             .reserve_retained(
-                &mut self.control,
                 self.vocabulary.phase(phase),
                 self.vocabulary.dimension(dimension),
                 bytes,
@@ -394,7 +395,7 @@ impl<'region> ImportStoreExecution<'region> {
         reservation: &mut ImportStoreReservation,
         bytes: u64,
     ) -> Result<(), ImportStoreHostError> {
-        self.storage
+        self.services
             .resize(
                 reservation
                     .raw

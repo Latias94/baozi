@@ -170,10 +170,10 @@ pub mod activation;
 mod batch;
 mod execution;
 pub use execution::{
-    StoreBoundWorkGroup, StoreExecutionControl, StoreExecutionPermit, StoreExecutionStorage,
-    StoreExecutionWork, StoreExtensionResult, StoreFailureStorage, StoreImporterBoundary,
-    StoreInvocation, StoreInvocationError, StoreInvocationLayout, StoreInvocationParser,
-    StoreOrdinaryStorage, StoreParserWorkError, StoreParserWorkScope,
+    StoreBoundWorkGroup, StoreExecutionPermit, StoreExecutionServices, StoreExecutionWork,
+    StoreExtensionResult, StoreFailureStorage, StoreImporterBoundary, StoreInvocation,
+    StoreInvocationError, StoreInvocationLayout, StoreInvocationParser, StoreOrdinaryStorage,
+    StoreParserWorkError, StoreParserWorkScope,
 };
 mod terminal_output;
 mod transcript;
@@ -1847,7 +1847,7 @@ where
 /// fn outlive<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
 ///     mut operation: RetainedStoreOperation<O, P, U>, dimension: StoreDimensionKey,
 /// ) {
-///     let (work, _, _) = operation.execution().unwrap();
+///     let (work, _) = operation.execution().unwrap();
 ///     let observation = work.storage_observation(dimension).unwrap();
 ///     drop(operation);
 ///     let _ = observation.live_bytes();

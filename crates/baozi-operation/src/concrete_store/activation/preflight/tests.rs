@@ -462,7 +462,7 @@ fn prior_outstanding_zero_or_completed_permit_cannot_use_the_healthy_failure_exi
     for admitted in [0_u64, 1] {
         let (mut operation, keys, account) = operation(4096, 4096, OperationControl::default());
         {
-            let (work, _, _) = operation.execution().unwrap();
+            let (work, _) = operation.execution().unwrap();
             let group = work.bind_group([keys.work]).unwrap();
             let mut permit = group.admit_observed([admitted]).unwrap();
             permit.complete([admitted]).unwrap();

@@ -18,17 +18,16 @@ pub(crate) struct ExecutionWork<'op, O, P, D> {
 }
 
 pub(crate) struct ExecutionStorage<'op, O, P, D> {
-    ledger: &'op Ledger<O, P, D>,
-    account: &'op PhysicalStorageAccount,
-    share_work: RetainedHandleSharePlan<D>,
-    failure: &'op Cell<Option<PreparationFailureCode>>,
+    pub(super) ledger: &'op Ledger<O, P, D>,
+    pub(super) account: &'op PhysicalStorageAccount,
+    pub(super) share_work: RetainedHandleSharePlan<D>,
+    pub(super) failure: &'op Cell<Option<PreparationFailureCode>>,
 }
 
-pub(crate) struct ExecutionControl<'op, O, P, PP, U, D> {
-    progress: OperationProgressCheckpoint<'op, O, P, PP, U, D>,
-    failure: &'op Cell<Option<PreparationFailureCode>>,
-    actions_since_poll: &'op Cell<u16>,
-    execution_state: &'op Cell<StoreExecutionState>,
+pub(crate) struct ExecutionServices<'op, O, P, PP, U, D> {
+    pub(crate) ordinary: ExecutionOrdinaryStorage<'op, O, P, PP, U, D>,
+    pub(crate) retained: ExecutionStorage<'op, O, P, D>,
+    progress: crate::coordinator::OperationProgressState<'op, O, P, PP, U, D>,
 }
 
 pub(crate) struct ExecutionOrdinaryStorage<'b, O, P, PP, U, D> {
@@ -340,7 +339,7 @@ impl<D: Copy, const N: usize> Drop for ExecutionPermit<'_, D, N> {
     }
 }
 
-impl<O, P, PP, U, D> ExecutionControl<'_, O, P, PP, U, D>
+impl<O, P, PP, U, D> ExecutionServices<'_, O, P, PP, U, D>
 where
     O: OperationOwner,
     P: Copy + Ord,
@@ -350,25 +349,19 @@ where
 {
     /// Entry, allocation, IO, external callback and region completion use this full checkpoint.
     pub(crate) fn checkpoint(&mut self) -> Result<(), ExecutionError<D>> {
-        check_execution_state(self.failure, self.execution_state, || {
-            self.progress.recorded_control_cause()
-        })?;
-        poll_execution(
-            &mut self.progress.reborrow_poll(),
-            self.failure,
-            self.actions_since_poll,
-        )
+        self.ordinary.checkpoint()
     }
 
     pub(crate) fn before_action(&mut self, max_cost: u16) -> Result<(), ExecutionError<D>> {
-        if self.failure.get().is_some() {
+        if self.ordinary.failure.get().is_some() {
             return Err(self
-                .progress
+                .ordinary
+                .poll
                 .recorded_control_cause()
                 .map_or(ExecutionError::Stopped, ExecutionError::Control));
         }
-        ensure_running(self.failure)?;
-        match checked_action_debt(self.actions_since_poll.get(), max_cost) {
+        ensure_running(self.ordinary.failure)?;
+        match checked_action_debt(self.ordinary.debt.get(), max_cost) {
             Err(()) => return self.reject_action_cost(),
             Ok(None) => self.checkpoint()?,
             Ok(Some(_)) => {}
@@ -378,9 +371,9 @@ where
 
     /// Advances conservative control cost after actual work completion, never ledger consumption.
     pub(crate) fn completed_action(&mut self, max_cost: u16) -> Result<(), ExecutionError<D>> {
-        match checked_action_debt(self.actions_since_poll.get(), max_cost) {
+        match checked_action_debt(self.ordinary.debt.get(), max_cost) {
             Ok(Some(next)) => {
-                self.actions_since_poll.set(next);
+                self.ordinary.debt.set(next);
                 Ok(())
             }
             Err(()) | Ok(None) => self.reject_action_cost(),
@@ -389,7 +382,7 @@ where
 
     fn reject_action_cost(&self) -> Result<(), ExecutionError<D>> {
         record_terminal_cause_with_precedence(
-            self.failure,
+            self.ordinary.failure,
             PreparationFailureCode::product_graph(0x4143_4f53),
         );
         Err(ExecutionError::Stopped)
@@ -404,10 +397,10 @@ where
     ) -> Result<(), ExecutionError<D>> {
         self.checkpoint()?;
         self.progress
-            .report_progress(phase, unit, completed, total)
+            .report_progress(&mut self.ordinary.poll, phase, unit, completed, total)
             .map_err(|cause| {
                 record_terminal_cause_with_precedence(
-                    self.failure,
+                    self.ordinary.failure,
                     PreparationFailureCode::from_control(&cause),
                 );
                 ExecutionError::Control(cause)
@@ -421,34 +414,11 @@ where
     P: Copy + Ord,
     D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
 {
-    pub(crate) fn ordinary<'b, PP, U>(
-        &'b self,
-        control: &'b mut ExecutionControl<'_, O, P, PP, U, D>,
-    ) -> ExecutionOrdinaryStorage<'b, O, P, PP, U, D>
-    where
-        PP: ProgressPhase,
-        U: ProgressUnit,
-    {
-        ExecutionOrdinaryStorage {
-            storage: self.ledger.storage_view(),
-            poll: control.progress.reborrow_poll(),
-            failure: self.failure,
-            debt: control.actions_since_poll,
-            execution_state: control.execution_state,
-        }
-    }
     pub(crate) fn storage_view(&self) -> ExclusiveStorage<'_, O, P, D> {
         self.ledger.storage_view()
     }
     pub(crate) fn failure(&self) -> &Cell<Option<PreparationFailureCode>> {
         self.failure
-    }
-
-    pub(crate) fn shares_invocation<PP, U>(
-        &self,
-        control: &ExecutionControl<'_, O, P, PP, U, D>,
-    ) -> bool {
-        std::ptr::eq(self.failure, control.failure)
     }
 
     pub(crate) fn reject_binding(&self) {
@@ -534,8 +504,7 @@ where
         &mut self,
     ) -> (
         ExecutionWork<'_, O, P, D>,
-        ExecutionStorage<'_, O, P, D>,
-        ExecutionControl<'_, O, P, PP, U, D>,
+        ExecutionServices<'_, O, P, PP, U, D>,
     ) {
         let Self {
             coordinator,
@@ -547,22 +516,27 @@ where
             ..
         } = self;
         let (progress, ledger) = coordinator.split_progress_checkpoint_and_retained_ledger();
+        let (poll, progress) = progress.into_parts();
         (
             ExecutionWork {
                 ledger,
                 failure: sticky_terminal_cause,
             },
-            ExecutionStorage {
-                ledger,
-                account: baseline.account(),
-                share_work: *terminal_account_share_work,
-                failure: sticky_terminal_cause,
-            },
-            ExecutionControl {
+            ExecutionServices {
+                ordinary: ExecutionOrdinaryStorage {
+                    storage: ledger.storage_view(),
+                    poll,
+                    failure: sticky_terminal_cause,
+                    debt: control_action_debt,
+                    execution_state,
+                },
+                retained: ExecutionStorage {
+                    ledger,
+                    account: baseline.account(),
+                    share_work: *terminal_account_share_work,
+                    failure: sticky_terminal_cause,
+                },
                 progress,
-                failure: sticky_terminal_cause,
-                actions_since_poll: control_action_debt,
-                execution_state,
             },
         )
     }

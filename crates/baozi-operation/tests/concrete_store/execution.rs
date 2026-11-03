@@ -6,7 +6,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use baozi_operation::__retained_store_integration::activation::{
-    StoreBoundWorkGroup, StoreExecutionControl,
+    StoreBoundWorkGroup, StoreExecutionServices,
 };
 use baozi_operation::__retained_store_integration::authority::PreparedStoreEvidenceOnlyOutcome;
 use baozi_operation::{
@@ -91,14 +91,14 @@ fn operation_with_work_policy(
 
 fn write_unit(
     group: &StoreBoundWorkGroup<'_, 1>,
-    control: &mut StoreExecutionControl<'_, TestOwner, TestProgress, TestUnit>,
+    services: &mut StoreExecutionServices<'_, TestOwner, TestProgress, TestUnit>,
     destination: &mut u8,
 ) -> Result<(), StoreRuntimeError> {
-    control.before_action(1)?;
+    services.before_action(1)?;
     let mut permit = group.admit_observed([1])?;
     *destination = 1;
     permit.complete([1])?;
-    control.completed_action(1)?;
+    services.completed_action(1)?;
     permit.finish()
 }
 
@@ -138,18 +138,20 @@ fn borrowed_storage_observation_reads_logical_capacity_before_operation_detach()
     let (mut operation, keys) = operation(&account);
     let physical = account.snapshot();
     {
-        let (work, storage, mut control) = operation.execution().unwrap();
+        let (work, mut services) = operation.execution().unwrap();
         let baseline = work.dimension_state(keys.dimension).unwrap().live_bytes();
         let observation = work.storage_observation(keys.dimension).unwrap();
-        let mut first = storage
-            .reserve(&mut control, keys.phase, keys.dimension, 17)
+        let mut first = services
+            .ordinary()
+            .reserve(keys.phase, keys.dimension, 17)
             .unwrap();
         let cloned = observation;
         assert_eq!(observation.live_bytes(), baseline + 17);
-        storage.resize(&mut first, 9).unwrap();
+        services.resize(&mut first, 9).unwrap();
         assert_eq!(cloned.live_bytes(), baseline + 9);
-        let second = storage
-            .reserve(&mut control, keys.phase, keys.dimension, 31)
+        let second = services
+            .ordinary()
+            .reserve(keys.phase, keys.dimension, 31)
             .unwrap();
         assert_eq!(observation.live_bytes(), baseline + 40);
         assert_eq!(account.snapshot(), physical);
@@ -200,25 +202,25 @@ fn group_and_partial_permit_survive_real_storage_and_progress() {
     let mut output = [0; 3];
 
     let (retained, retained_bytes) = {
-        let (work, storage, mut control) = operation.execution().unwrap();
+        let (work, mut services) = operation.execution().unwrap();
         let group = work.bind_group([keys.other_dimension]).unwrap();
         // Moving the view proves that the group borrows the invocation, not this wrapper.
         let region = work;
         let mut permit = group.admit_observed([3]).unwrap();
 
-        control.before_action(1).unwrap();
+        services.before_action(1).unwrap();
         output[0] = 1;
         permit.complete([1]).unwrap();
-        control.completed_action(1).unwrap();
-        control
+        services.completed_action(1).unwrap();
+        services
             .report_progress(TestProgress::Build, TestUnit::Items, 1, None)
             .unwrap();
         assert_eq!(callbacks.load(Ordering::SeqCst), 1);
 
         let temporary_plan = CapacityPlan::for_type::<u8>(0, 0, 17).unwrap();
-        let mut temporary = storage
+        let mut temporary = services
+            .ordinary()
             .reserve(
-                &mut control,
                 keys.phase,
                 keys.dimension,
                 temporary_plan.envelope_delta_bytes().unwrap(),
@@ -231,16 +233,15 @@ fn group_and_partial_permit_survive_real_storage_and_progress() {
         let scratch_bytes = temporary_plan
             .finish(scratch.len(), scratch.capacity())
             .unwrap();
-        storage.resize(&mut temporary, scratch_bytes).unwrap();
+        services.resize(&mut temporary, scratch_bytes).unwrap();
         scratch.resize(temporary_plan.desired_capacity(), 7);
         assert_eq!(scratch, [7; 17]);
         drop(scratch);
         drop(temporary);
 
         let retained_plan = CapacityPlan::for_type::<u8>(0, 0, 31).unwrap();
-        let mut reservation = storage
+        let mut reservation = services
             .reserve_retained(
-                &mut control,
                 keys.phase,
                 keys.dimension,
                 retained_plan.envelope_delta_bytes().unwrap(),
@@ -252,19 +253,19 @@ fn group_and_partial_permit_survive_real_storage_and_progress() {
             .try_reserve_exact(retained_plan.allocator_additional())
             .unwrap();
         let retained_bytes = retained_plan.finish(value.len(), value.capacity()).unwrap();
-        storage.resize(&mut reservation, retained_bytes).unwrap();
+        services.resize(&mut reservation, retained_bytes).unwrap();
         value.resize(retained_plan.desired_capacity(), 9);
         let retained = reservation.bind_storage(value).unwrap();
 
         assert_eq!(permit.remaining(), [2]);
-        control.before_action(1).unwrap();
+        services.before_action(1).unwrap();
         output[1] = 2;
         permit.complete([1]).unwrap();
-        control.completed_action(1).unwrap();
+        services.completed_action(1).unwrap();
         permit.finish_partial().unwrap();
-        write_unit(&group, &mut control, &mut output[2]).unwrap();
+        write_unit(&group, &mut services, &mut output[2]).unwrap();
         region.finish_region().unwrap();
-        control.checkpoint().unwrap();
+        services.checkpoint().unwrap();
         (retained, retained_bytes)
     };
 
@@ -334,18 +335,17 @@ fn idle_sequence_keeps_retained_share_work_and_storage_on_the_same_authority() {
     let physical = account.snapshot();
     let mut output = [0; 2];
     {
-        let (work, storage, mut control) = operation.execution().unwrap();
+        let (work, mut services) = operation.execution().unwrap();
         let group = work.bind_group([keys.dimension]).unwrap();
-        control.before_action(1).unwrap();
+        services.before_action(1).unwrap();
         let mut permit = group.admit_observed([1]).unwrap();
         output[0] = 1;
         permit.complete([1]).unwrap();
-        control.completed_action(1).unwrap();
+        services.completed_action(1).unwrap();
 
         let plan = CapacityPlan::for_type::<u8>(0, 0, 5).unwrap();
-        let mut reservation = storage
+        let mut reservation = services
             .reserve_retained(
-                &mut control,
                 keys.phase,
                 keys.dimension,
                 plan.envelope_delta_bytes().unwrap(),
@@ -357,18 +357,18 @@ fn idle_sequence_keeps_retained_share_work_and_storage_on_the_same_authority() {
             .try_reserve_exact(plan.allocator_additional())
             .unwrap();
         let bytes = plan.finish(values.len(), values.capacity()).unwrap();
-        storage.resize(&mut reservation, bytes).unwrap();
+        services.resize(&mut reservation, bytes).unwrap();
         values.extend_from_slice(&[2, 3, 4, 5, 6]);
         let retained = reservation.bind_storage(values).unwrap();
         assert_eq!(retained.as_ref(), &[2, 3, 4, 5, 6]);
         assert_eq!(physical_delta(physical, account.snapshot()), (bytes, 1));
         assert_eq!(permit.remaining(), [0]);
 
-        control.before_action(1).unwrap();
+        services.before_action(1).unwrap();
         permit.replenish_one().unwrap();
         output[1] = retained.as_ref()[0];
         permit.complete([1]).unwrap();
-        control.completed_action(1).unwrap();
+        services.completed_action(1).unwrap();
         permit.finish().unwrap();
         drop(retained);
         let state = work.dimension_state(keys.dimension).unwrap();
@@ -376,7 +376,7 @@ fn idle_sequence_keeps_retained_share_work_and_storage_on_the_same_authority() {
         assert_eq!(state.consumed(), baseline.consumed() + 4);
         assert_eq!(state.live_bytes(), baseline.live_bytes());
         work.finish_region().unwrap();
-        control.checkpoint().unwrap();
+        services.checkpoint().unwrap();
     }
     assert_eq!(output, [1, 2]);
     assert_eq!(physical_delta(physical, account.snapshot()), (0, 0));
@@ -408,15 +408,15 @@ fn tightened_policy_rejects_refill_once_and_preserves_the_written_prefix() {
     );
     let mut output = [73; 3];
     {
-        let (work, _storage, mut control) = operation.execution().unwrap();
+        let (work, mut services) = operation.execution().unwrap();
         let group = work.bind_group([keys.other_dimension]).unwrap();
         let mut permit = group.admit_observed([0]).unwrap();
         for destination in output.iter_mut().take(2) {
-            control.before_action(1).unwrap();
+            services.before_action(1).unwrap();
             permit.replenish_one().unwrap();
             *destination = 1;
             permit.complete([1]).unwrap();
-            control.completed_action(1).unwrap();
+            services.completed_action(1).unwrap();
         }
         work.tighten_dimension_policy(keys.other_dimension, DimensionPolicy::counter(2, 2, 0))
             .unwrap();
@@ -465,22 +465,22 @@ fn exact_work_is_independent_of_entry_periodic_and_final_poll_counts() {
         signal.polls.store(0, Ordering::SeqCst);
         let mut physical = [0; 257];
         {
-            let (work, _storage, mut control) = operation.execution().unwrap();
+            let (work, mut services) = operation.execution().unwrap();
             assert_eq!(signal.polls.load(Ordering::SeqCst), 1);
             let group = work.bind_group([keys.other_dimension]).unwrap();
             let mut permit = group.admit_observed([0]).unwrap();
             for destination in physical.iter_mut().take(actions) {
-                control.before_action(1).unwrap();
+                services.before_action(1).unwrap();
                 permit.replenish_one().unwrap();
                 *destination = 1;
                 permit.complete([1]).unwrap();
-                control.completed_action(1).unwrap();
+                services.completed_action(1).unwrap();
             }
             permit.finish().unwrap();
             assert_eq!(signal.polls.load(Ordering::SeqCst), expected_polls - 1);
             work.finish_region().unwrap();
             assert_eq!(signal.polls.load(Ordering::SeqCst), expected_polls - 1);
-            control.checkpoint().unwrap();
+            services.checkpoint().unwrap();
             assert_eq!(signal.polls.load(Ordering::SeqCst), expected_polls);
             assert_eq!(progress_events.load(Ordering::SeqCst), 0);
         }
@@ -545,12 +545,12 @@ fn cancellation_is_observed_at_entry_or_within_the_explicit_action_bound() {
                 }))
             ));
         } else {
-            let (work, _storage, mut control) = operation.execution().unwrap();
+            let (work, mut services) = operation.execution().unwrap();
             let group = work.bind_group([keys.other_dimension]).unwrap();
             let mut permit = group.admit_observed([0]).unwrap();
             let mut stopped = false;
             for (index, destination) in physical.iter_mut().enumerate() {
-                let result = control
+                let result = services
                     .before_action(1)
                     .and_then(|()| permit.replenish_one());
                 if result.is_err() {
@@ -566,7 +566,7 @@ fn cancellation_is_observed_at_entry_or_within_the_explicit_action_bound() {
                 }
                 *destination = 1;
                 permit.complete([1]).unwrap();
-                control.completed_action(1).unwrap();
+                services.completed_action(1).unwrap();
                 if index + 1 == cancel_after {
                     signal.token.cancel();
                 }
@@ -587,13 +587,13 @@ fn cancellation_is_observed_at_entry_or_within_the_explicit_action_bound() {
             ));
             work.finish_region().unwrap();
             assert!(matches!(
-                control.checkpoint(),
+                services.checkpoint(),
                 Err(StoreRuntimeError::Control(ControlCause::Cancelled {
                     origin: CancellationOrigin::Signal,
                 }))
             ));
             assert!(matches!(
-                control.before_action(1),
+                services.before_action(1),
                 Err(StoreRuntimeError::Control(ControlCause::Cancelled {
                     origin: CancellationOrigin::Signal,
                 }))
@@ -632,19 +632,19 @@ fn final_checkpoint_preserves_partial_envelope_prefixes_including_a_zero_action_
         signal.polls.store(0, Ordering::SeqCst);
         let mut physical = [0; 257];
         {
-            let (work, _storage, mut control) = operation.execution().unwrap();
+            let (work, mut services) = operation.execution().unwrap();
             let group = work.bind_group([keys.other_dimension]).unwrap();
             let mut permit = group.admit_observed([attempted]).unwrap();
             for destination in physical.iter_mut().take(actions) {
-                control.before_action(1).unwrap();
+                services.before_action(1).unwrap();
                 *destination = 1;
                 permit.complete([1]).unwrap();
-                control.completed_action(1).unwrap();
+                services.completed_action(1).unwrap();
             }
             signal.token.cancel();
             assert_eq!(signal.polls.load(Ordering::SeqCst), expected_polls - 1);
             assert!(matches!(
-                control.checkpoint(),
+                services.checkpoint(),
                 Err(StoreRuntimeError::Control(ControlCause::Cancelled {
                     origin: CancellationOrigin::Signal,
                 }))
@@ -674,22 +674,22 @@ fn explicit_checkpoint_resets_the_debt_shared_by_nested_control_reborrows() {
     signal.polls.store(0, Ordering::SeqCst);
     let mut physical = [0; 512];
     {
-        let (work, _storage, mut control) = operation.execution().unwrap();
+        let (work, mut services) = operation.execution().unwrap();
         let group = work.bind_group([keys.other_dimension]).unwrap();
         for destination in &mut physical[..255] {
-            write_unit(&group, &mut control, destination).unwrap();
+            write_unit(&group, &mut services, destination).unwrap();
         }
         assert_eq!(signal.polls.load(Ordering::SeqCst), 1);
-        control.checkpoint().unwrap();
+        services.checkpoint().unwrap();
         assert_eq!(signal.polls.load(Ordering::SeqCst), 2);
         for destination in &mut physical[255..511] {
-            write_unit(&group, &mut control, destination).unwrap();
+            write_unit(&group, &mut services, destination).unwrap();
         }
         assert_eq!(signal.polls.load(Ordering::SeqCst), 2);
-        write_unit(&group, &mut control, &mut physical[511]).unwrap();
+        write_unit(&group, &mut services, &mut physical[511]).unwrap();
         assert_eq!(signal.polls.load(Ordering::SeqCst), 3);
         work.finish_region().unwrap();
-        control.checkpoint().unwrap();
+        services.checkpoint().unwrap();
         assert_eq!(signal.polls.load(Ordering::SeqCst), 4);
     }
     assert_eq!(physical, [1; 512]);
@@ -723,17 +723,17 @@ fn every_action_checks_attempted_and_consumed_budgets_between_control_polls() {
             signal.polls.store(0, Ordering::SeqCst);
             let mut physical = [0; 256];
             {
-                let (work, _storage, mut control) = operation.execution().unwrap();
+                let (work, mut services) = operation.execution().unwrap();
                 let group = work.bind_group([keys.other_dimension]).unwrap();
                 let mut permit = group.admit_observed([0]).unwrap();
                 for destination in physical.iter_mut().take(allowed) {
-                    control.before_action(1).unwrap();
+                    services.before_action(1).unwrap();
                     permit.replenish_one().unwrap();
                     *destination = 1;
                     permit.complete([1]).unwrap();
-                    control.completed_action(1).unwrap();
+                    services.completed_action(1).unwrap();
                 }
-                control.before_action(1).unwrap();
+                services.before_action(1).unwrap();
                 let rejected = permit.replenish_one();
                 if rejected.is_ok() {
                     physical[allowed] = 1;
@@ -757,12 +757,12 @@ fn every_action_checks_attempted_and_consumed_budgets_between_control_polls() {
                     Err(StoreRuntimeError::FallbackOnly)
                 ));
                 assert!(matches!(
-                    control.before_action(1),
+                    services.before_action(1),
                     Err(StoreRuntimeError::FallbackOnly)
                 ));
                 work.finish_region().unwrap();
                 assert!(matches!(
-                    control.checkpoint(),
+                    services.checkpoint(),
                     Err(StoreRuntimeError::FallbackOnly)
                 ));
             }
@@ -792,16 +792,16 @@ fn finish_region_rejects_forgotten_fully_completed_and_zero_amount_permits() {
             DimensionPolicy::counter(16, 16, 0),
         );
         {
-            let (work, _storage, mut control) = operation.execution().unwrap();
+            let (work, mut services) = operation.execution().unwrap();
             let group = work.bind_group([keys.other_dimension]).unwrap();
             let mut permit = group.admit_observed([0]).unwrap();
             let mut physical = [0; 3];
             for destination in physical.iter_mut().take(amount as usize) {
-                control.before_action(1).unwrap();
+                services.before_action(1).unwrap();
                 permit.replenish_one().unwrap();
                 *destination = 1;
                 permit.complete([1]).unwrap();
-                control.completed_action(1).unwrap();
+                services.completed_action(1).unwrap();
             }
             assert_eq!(u64::from(physical.iter().sum::<u8>()), amount);
             assert_eq!(permit.remaining(), [0]);
@@ -813,7 +813,7 @@ fn finish_region_rejects_forgotten_fully_completed_and_zero_amount_permits() {
                 ))
             ));
             assert!(matches!(
-                control.checkpoint(),
+                services.checkpoint(),
                 Err(StoreRuntimeError::FallbackOnly)
             ));
         }
@@ -835,16 +835,16 @@ fn dropping_fully_completed_and_zero_amount_permits_still_prevents_success() {
             DimensionPolicy::counter(16, 16, 0),
         );
         {
-            let (work, _storage, mut control) = operation.execution().unwrap();
+            let (work, mut services) = operation.execution().unwrap();
             let group = work.bind_group([keys.other_dimension]).unwrap();
             let mut permit = group.admit_observed([0]).unwrap();
             let mut physical = [0; 3];
             for destination in physical.iter_mut().take(amount as usize) {
-                control.before_action(1).unwrap();
+                services.before_action(1).unwrap();
                 permit.replenish_one().unwrap();
                 *destination = 1;
                 permit.complete([1]).unwrap();
-                control.completed_action(1).unwrap();
+                services.completed_action(1).unwrap();
             }
             assert_eq!(u64::from(physical.iter().sum::<u8>()), amount);
             drop(permit);
@@ -854,7 +854,7 @@ fn dropping_fully_completed_and_zero_amount_permits_still_prevents_success() {
                 Err(StoreRuntimeError::FallbackOnly)
             ));
             assert!(matches!(
-                control.checkpoint(),
+                services.checkpoint(),
                 Err(StoreRuntimeError::FallbackOnly)
             ));
         }
@@ -875,13 +875,13 @@ fn ignored_incomplete_finish_keeps_the_exact_prefix_and_sticky_failure() {
     );
     let mut physical = 0;
     {
-        let (work, _storage, mut control) = operation.execution().unwrap();
+        let (work, mut services) = operation.execution().unwrap();
         let group = work.bind_group([keys.other_dimension]).unwrap();
         let mut permit = group.admit_observed([3]).unwrap();
-        control.before_action(1).unwrap();
+        services.before_action(1).unwrap();
         physical += 1;
         permit.complete([1]).unwrap();
-        control.completed_action(1).unwrap();
+        services.completed_action(1).unwrap();
         assert!(matches!(
             permit.finish(),
             Err(StoreRuntimeError::FallbackOnly)
@@ -892,7 +892,7 @@ fn ignored_incomplete_finish_keeps_the_exact_prefix_and_sticky_failure() {
         ));
         work.finish_region().unwrap();
         assert!(matches!(
-            control.checkpoint(),
+            services.checkpoint(),
             Err(StoreRuntimeError::FallbackOnly)
         ));
     }
@@ -918,7 +918,7 @@ fn binding_rejects_foreign_unplanned_and_protected_keys_before_zero_work() {
             _ => unreachable!(),
         };
         {
-            let (work, _storage, mut control) = operation.execution().unwrap();
+            let (work, mut services) = operation.execution().unwrap();
             match work.bind_group([keys.dimension, invalid_dimension]) {
                 Err(StoreRuntimeError::ForeignDimensionDomain { dimension }) => {
                     assert_eq!(invalid_role, 0);
@@ -936,7 +936,7 @@ fn binding_rejects_foreign_unplanned_and_protected_keys_before_zero_work() {
             ));
             work.finish_region().unwrap();
             assert!(matches!(
-                control.checkpoint(),
+                services.checkpoint(),
                 Err(StoreRuntimeError::FallbackOnly)
             ));
         }
@@ -961,7 +961,7 @@ fn parser_parent_child_and_storage_share_one_owner_without_callback_borrows() {
     );
     let physical_before = account.snapshot();
     {
-        let (work, storage, mut control) = operation.execution().unwrap();
+        let (work, mut services) = operation.execution().unwrap();
         let group = work.bind_group([keys.other_dimension]).unwrap();
         let mut parent = group.begin_parser_parent([2], [None]).unwrap();
         let mut child = group.begin_parser_child([3], [None]).unwrap();
@@ -969,9 +969,8 @@ fn parser_parent_child_and_storage_share_one_owner_without_callback_borrows() {
         decoded[0] = 8;
         child.complete([1]).unwrap();
         let plan = CapacityPlan::for_type::<u8>(0, 0, 8).unwrap();
-        let mut reservation = storage
+        let mut reservation = services
             .reserve_retained(
-                &mut control,
                 keys.phase,
                 keys.dimension,
                 plan.envelope_delta_bytes().unwrap(),
@@ -982,20 +981,20 @@ fn parser_parent_child_and_storage_share_one_owner_without_callback_borrows() {
         bytes
             .try_reserve_exact(plan.allocator_additional())
             .unwrap();
-        storage
+        services
             .resize(
                 &mut reservation,
                 plan.finish(bytes.len(), bytes.capacity()).unwrap(),
             )
             .unwrap();
         let retained = reservation.bind_storage(bytes).unwrap();
-        control
+        services
             .report_progress(TestProgress::Build, TestUnit::Items, 1, Some(3))
             .unwrap();
         decoded[1..].copy_from_slice(&[9, 10]);
         child.complete_all().unwrap();
         child.finish_exact().unwrap();
-        control.checkpoint().unwrap();
+        services.checkpoint().unwrap();
         parent.complete_all().unwrap();
         parent.finish_exact().unwrap();
         work.finish_region().unwrap();
@@ -1019,7 +1018,7 @@ fn ignored_parser_item_rejection_keeps_ordered_attempts_and_stops_success() {
         DimensionPolicy::counter(16, 16, 0),
     );
     {
-        let (work, _storage, mut control) = operation.execution().unwrap();
+        let (work, mut services) = operation.execution().unwrap();
         let group = work.bind_group([keys.other_dimension; 2]).unwrap();
         assert!(matches!(
             group.begin_parser_child([1, 3], [None, Some(2)]),
@@ -1031,7 +1030,7 @@ fn ignored_parser_item_rejection_keeps_ordered_attempts_and_stops_success() {
         ));
         work.finish_region().unwrap();
         assert!(matches!(
-            control.checkpoint(),
+            services.checkpoint(),
             Err(StoreRuntimeError::FallbackOnly)
         ));
     }
@@ -1050,7 +1049,7 @@ fn ignored_parser_completion_and_incomplete_finish_errors_remain_terminal() {
             DimensionPolicy::counter(16, 16, 0),
         );
         {
-            let (work, _storage, mut control) = operation.execution().unwrap();
+            let (work, mut services) = operation.execution().unwrap();
             let group = work.bind_group([keys.other_dimension]).unwrap();
             let mut channel = group.begin_parser_child([4], [None]).unwrap();
             let mut decoded = [0; 4];
@@ -1077,7 +1076,7 @@ fn ignored_parser_completion_and_incomplete_finish_errors_remain_terminal() {
                 Err(StoreRuntimeError::FallbackOnly)
             ));
             assert!(matches!(
-                control.checkpoint(),
+                services.checkpoint(),
                 Err(StoreRuntimeError::FallbackOnly)
             ));
         }
@@ -1097,7 +1096,7 @@ fn forgotten_zero_and_completed_parser_channels_prevent_finalization() {
             DimensionPolicy::counter(16, 16, 0),
         );
         {
-            let (work, _storage, _control) = operation.execution().unwrap();
+            let (work, _services) = operation.execution().unwrap();
             let group = work.bind_group([keys.other_dimension]).unwrap();
             let mut channel = group.begin_parser_child([amount], [None]).unwrap();
             channel.complete_all().unwrap();
@@ -1117,48 +1116,224 @@ fn forgotten_zero_and_completed_parser_channels_prevent_finalization() {
 }
 
 #[test]
-fn storage_rejects_foreign_control_before_polling_or_admitting_bytes() {
+fn bound_storage_rejects_foreign_keys_before_polling_or_admitting_bytes() {
     for retained in [false, true] {
-        let factory = factory(1);
-        let account = account(&factory);
-        let (mut source, keys) = operation_with_work_policy(
-            &account,
-            OperationControl::default(),
-            DimensionPolicy::counter(16, 16, 0),
-        );
-        let signal = CountedCancellation::default();
-        let (mut foreign, _) = operation_with_work_policy(
-            &account,
-            OperationControl::default().with_cancellation(signal.clone()),
-            DimensionPolicy::counter(16, 16, 0),
-        );
-        let before = account.snapshot();
-        {
-            let (_work, storage, mut source_control) = source.execution().unwrap();
-            let (_foreign_work, _foreign_storage, mut foreign_control) =
-                foreign.execution().unwrap();
-            let polls = signal.polls.load(Ordering::SeqCst);
-            let result = if retained {
-                storage.reserve_retained(&mut foreign_control, keys.phase, keys.dimension, 8, 1)
-            } else {
-                storage.reserve(&mut foreign_control, keys.phase, keys.dimension, 8)
-            };
-            assert!(matches!(
-                result,
-                Err(StoreRuntimeError::ConstructionInvariantUnverified)
-            ));
-            assert_eq!(signal.polls.load(Ordering::SeqCst), polls);
-            assert!(matches!(
-                source_control.checkpoint(),
-                Err(StoreRuntimeError::FallbackOnly)
-            ));
-            foreign_control.checkpoint().unwrap();
+        for invalid_phase in [false, true] {
+            let factory = factory(1);
+            let account = account(&factory);
+            let signal = CountedCancellation::default();
+            let (mut operation, keys) = operation_with_work_policy(
+                &account,
+                OperationControl::default().with_cancellation(signal.clone()),
+                DimensionPolicy::counter(16, 16, 0),
+            );
+            let baseline = operation
+                .producer_host()
+                .dimension_state(keys.dimension)
+                .unwrap();
+            let before = account.snapshot();
+            {
+                let (work, mut services) = operation.execution().unwrap();
+                let polls = signal.polls.load(Ordering::SeqCst);
+                let phase = if invalid_phase {
+                    foreign_phase()
+                } else {
+                    keys.phase
+                };
+                let dimension = foreign_dimension();
+                let result = if retained {
+                    services.reserve_retained(phase, dimension, 8, 1)
+                } else {
+                    services.ordinary().reserve(phase, dimension, 8)
+                };
+                match result {
+                    Err(StoreRuntimeError::ForeignPhaseDomain { phase: rejected }) => {
+                        assert!(invalid_phase);
+                        assert_eq!(rejected, phase);
+                    }
+                    Err(StoreRuntimeError::ForeignDimensionDomain {
+                        dimension: rejected,
+                    }) => {
+                        assert!(!invalid_phase);
+                        assert_eq!(rejected, dimension);
+                    }
+                    _ => panic!("foreign keys must reject in phase/dimension order"),
+                }
+                assert_eq!(signal.polls.load(Ordering::SeqCst), polls);
+                assert!(matches!(
+                    services.checkpoint(),
+                    Err(StoreRuntimeError::FallbackOnly)
+                ));
+                assert_eq!(signal.polls.load(Ordering::SeqCst), polls);
+                work.finish_region().unwrap();
+            }
+            assert_eq!(physical_delta(before, account.snapshot()), (0, 0));
+            let evidence =
+                rejected_success_evidence(operation, StorePreparationFailureClass::Ledger);
+            assert_work(
+                &evidence,
+                keys.dimension,
+                baseline.attempted(),
+                baseline.consumed(),
+            );
+            assert!(!account.snapshot().poisoned());
         }
-        assert_eq!(physical_delta(before, account.snapshot()), (0, 0));
-        let _ = rejected_success_evidence(source, StorePreparationFailureClass::Ledger);
-        let _ = foreign.prepare_minimal_fallback(71).unwrap().handoff();
-        assert!(!account.snapshot().poisoned());
     }
+}
+
+#[test]
+fn bound_services_reject_foreign_live_tokens_without_changing_the_source_capacity() {
+    for retained in [false, true] {
+        for action in 0..4 {
+            let factory = factory(1);
+            let account = account(&factory);
+            let (mut source, source_keys) = operation_with_work_policy(
+                &account,
+                OperationControl::default(),
+                DimensionPolicy::counter(16, 16, 0),
+            );
+            let signal = CountedCancellation::default();
+            let (mut receiver, receiver_keys) = operation_with_work_policy(
+                &account,
+                OperationControl::default().with_cancellation(signal.clone()),
+                DimensionPolicy::counter(16, 16, 0),
+            );
+            let before = account.snapshot();
+            {
+                let (source_work, mut source_services) = source.execution().unwrap();
+                let (receiver_work, mut receiver_services) = receiver.execution().unwrap();
+                let observation = source_work
+                    .storage_observation(source_keys.dimension)
+                    .unwrap();
+                let baseline = observation.live_bytes();
+                let mut reservation = if retained {
+                    source_services
+                        .reserve_retained(source_keys.phase, source_keys.dimension, 8, 1)
+                        .unwrap()
+                } else {
+                    source_services
+                        .ordinary()
+                        .reserve(source_keys.phase, source_keys.dimension, 8)
+                        .unwrap()
+                };
+                let expected_physical = if retained { (8, 1) } else { (0, 0) };
+                assert_eq!(observation.live_bytes(), baseline + 8);
+                assert_eq!(
+                    physical_delta(before, account.snapshot()),
+                    expected_physical
+                );
+                let polls = signal.polls.load(Ordering::SeqCst);
+                let result = match action {
+                    0 => receiver_services.validate_live_owner(&reservation),
+                    1 => receiver_services.ordinary().resize(&mut reservation, 4),
+                    2 => receiver_services.resize(&mut reservation, 4),
+                    3 => receiver_services.transition(
+                        &mut reservation,
+                        receiver_keys.phase,
+                        receiver_keys.dimension,
+                        4,
+                    ),
+                    _ => unreachable!(),
+                };
+                assert!(matches!(
+                    result,
+                    Err(StoreRuntimeError::Ledger(LedgerCause::OwnerMismatch))
+                ));
+                assert_eq!(signal.polls.load(Ordering::SeqCst), polls);
+                assert_eq!(observation.live_bytes(), baseline + 8);
+                assert_eq!(
+                    physical_delta(before, account.snapshot()),
+                    expected_physical
+                );
+                source_services.checkpoint().unwrap();
+                source_services.validate_live_owner(&reservation).unwrap();
+                source_services.resize(&mut reservation, 4).unwrap();
+                assert_eq!(observation.live_bytes(), baseline + 4);
+                assert_eq!(
+                    physical_delta(before, account.snapshot()),
+                    if retained { (4, 1) } else { (0, 0) }
+                );
+                reservation.release_storage(());
+                assert_eq!(observation.live_bytes(), baseline);
+                assert_eq!(physical_delta(before, account.snapshot()), (0, 0));
+                assert!(matches!(
+                    receiver_services.checkpoint(),
+                    Err(StoreRuntimeError::FallbackOnly)
+                ));
+                assert_eq!(signal.polls.load(Ordering::SeqCst), polls);
+                receiver_work.finish_region().unwrap();
+                source_work.finish_region().unwrap();
+            }
+            assert_eq!(physical_delta(before, account.snapshot()), (0, 0));
+            let _ = rejected_success_evidence(receiver, StorePreparationFailureClass::Ledger);
+            let published = source.prepare_minimal_fallback(71).unwrap().handoff();
+            assert_eq!(
+                store_failure_cause(&published.ledger_evidence).class(),
+                StorePreparationFailureClass::Requested
+            );
+            assert_eq!(store_failure_cause(&published.ledger_evidence).code(), 71);
+            assert!(!account.snapshot().poisoned());
+        }
+    }
+}
+
+#[test]
+fn ordinary_loans_end_before_progress_and_keep_the_same_poll_frontiers() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let signal = CountedCancellation::default();
+    let callbacks = Arc::new(AtomicUsize::new(0));
+    let callback_count = Arc::clone(&callbacks);
+    let control = OperationControl::default()
+        .with_cancellation(signal.clone())
+        .with_progress_observer(move |event: ProgressEvent<TestProgress, TestUnit>| {
+            let index = callback_count.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(event.completed(), (index + 1) as u64);
+            ProgressDecision::Continue
+        });
+    let (mut operation, keys) =
+        operation_with_work_policy(&account, control, DimensionPolicy::counter(16, 16, 0));
+    let physical = account.snapshot();
+    {
+        let (work, mut services) = operation.execution().unwrap();
+        let observation = work.storage_observation(keys.dimension).unwrap();
+        let baseline = observation.live_bytes();
+        let polls = signal.polls.load(Ordering::SeqCst);
+        let first = {
+            let mut loan = services.ordinary();
+            assert_eq!(signal.polls.load(Ordering::SeqCst), polls);
+            let first = {
+                let mut short = loan.reborrow();
+                let mut reservation = short.reserve(keys.phase, keys.dimension, 8).unwrap();
+                short.resize(&mut reservation, 4).unwrap();
+                reservation
+            };
+            loan.checkpoint().unwrap();
+            first
+        };
+        services
+            .report_progress(TestProgress::Build, TestUnit::Items, 1, Some(2))
+            .unwrap();
+        assert_eq!(signal.polls.load(Ordering::SeqCst), polls + 4);
+        assert_eq!(callbacks.load(Ordering::SeqCst), 1);
+        assert_eq!(observation.live_bytes(), baseline + 4);
+        let second = services
+            .ordinary()
+            .reserve(keys.phase, keys.dimension, 16)
+            .unwrap();
+        services
+            .report_progress(TestProgress::Build, TestUnit::Items, 2, Some(2))
+            .unwrap();
+        assert_eq!(signal.polls.load(Ordering::SeqCst), polls + 7);
+        assert_eq!(callbacks.load(Ordering::SeqCst), 2);
+        assert_eq!(observation.live_bytes(), baseline + 20);
+        drop((first, second));
+        assert_eq!(observation.live_bytes(), baseline);
+        work.finish_region().unwrap();
+    }
+    assert_eq!(physical_delta(physical, account.snapshot()), (0, 0));
+    let _ = operation.prepare_minimal_fallback(71).unwrap().handoff();
+    assert!(!account.snapshot().poisoned());
 }
 
 #[test]
@@ -1181,12 +1356,12 @@ fn weighted_control_frontiers_do_not_charge_estimated_inner_work() {
         );
         let mut physical = vec![0; costs.len()];
         {
-            let (work, _storage, mut control) = operation.execution().unwrap();
+            let (work, mut services) = operation.execution().unwrap();
             let group = work.bind_group([keys.other_dimension]).unwrap();
             let mut permit = group.admit_observed([0]).unwrap();
             let entry_polls = signal.polls.load(Ordering::SeqCst);
             for (index, (&cost, destination)) in costs.iter().zip(&mut physical).enumerate() {
-                control.before_action(cost).unwrap();
+                services.before_action(cost).unwrap();
                 assert_eq!(
                     signal.polls.load(Ordering::SeqCst),
                     entry_polls + usize::from(index + 1 == costs.len())
@@ -1194,7 +1369,7 @@ fn weighted_control_frontiers_do_not_charge_estimated_inner_work() {
                 permit.replenish_one().unwrap();
                 *destination = 1;
                 permit.complete([1]).unwrap();
-                control.completed_action(cost).unwrap();
+                services.completed_action(cost).unwrap();
             }
             permit.finish().unwrap();
             work.finish_region().unwrap();
@@ -1223,19 +1398,19 @@ fn weighted_frontier_cancellation_precedes_next_action_and_retains_cause_on_regi
     let mut output = [0; 3];
     let polls;
     {
-        let (work, _storage, mut control) = operation.execution().unwrap();
+        let (work, mut services) = operation.execution().unwrap();
         let group = work.bind_group([keys.other_dimension]).unwrap();
         let mut permit = group.admit_observed([0]).unwrap();
         for destination in output.iter_mut().take(2) {
-            control.before_action(118).unwrap();
+            services.before_action(118).unwrap();
             permit.replenish_one().unwrap();
             *destination = 1;
             permit.complete([1]).unwrap();
-            control.completed_action(118).unwrap();
+            services.completed_action(118).unwrap();
         }
         polls = signal.polls.load(Ordering::SeqCst);
         signal.token.cancel();
-        let next = control.before_action(35);
+        let next = services.before_action(35);
         if next.is_ok() {
             output[2] = 1;
         }
@@ -1268,9 +1443,9 @@ fn invalid_control_cost_is_sticky_without_running_or_charging_work() {
             DimensionPolicy::counter(8, 8, 0),
         );
         {
-            let (work, _storage, mut control) = operation.execution().unwrap();
+            let (work, mut services) = operation.execution().unwrap();
             assert!(matches!(
-                control.before_action(invalid),
+                services.before_action(invalid),
                 Err(StoreRuntimeError::FallbackOnly)
             ));
             work.finish_region().unwrap();

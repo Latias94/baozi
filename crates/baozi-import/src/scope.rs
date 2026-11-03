@@ -789,13 +789,10 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
     }
 
     /// Borrows ordinary capacity and poll services without numeric authority.
-    pub fn storage(&mut self) -> ParseResult<ParseStorage<'_, 'session>> {
+    pub fn storage(&mut self) -> ParseResult<ParseStorage<'_, 'region, 'session>> {
         self.preflight_active()?;
         let identity = self.storage_identity();
-        let raw = self
-            .store
-            .ordinary()
-            .map_err(|cause| latch_abort(self.terminal, cause.into_scope_abort_cause()))?;
+        let raw = self.store.ordinary();
         Ok(ParseStorage::new(raw, identity, self.callback_active))
     }
 

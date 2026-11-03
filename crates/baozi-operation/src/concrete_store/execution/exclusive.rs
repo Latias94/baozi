@@ -365,15 +365,18 @@ impl AdmittedShareWork<StoreDimensionKey> for ActionHost<'_, '_, 2> {
 impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation<'op, O, PP, U> {
     fn running(&self) -> Result<(), StoreInvocationError> {
         crate::retained::check_execution_state(
-            self.parts.failure,
-            self.parts.execution_state,
-            || self.parts.poll.recorded_control_cause(),
+            self.parts.ordinary.failure,
+            self.parts.ordinary.execution_state,
+            || self.parts.ordinary.poll.recorded_control_cause(),
         )
         .map_err(|cause| map_execution_error(cause).into())
     }
 
     fn reject(&self, cause: StoreRuntimeError) -> StoreInvocationError {
-        record(self.parts.failure, PreparationFailureCode::ledger());
+        record(
+            self.parts.ordinary.failure,
+            PreparationFailureCode::ledger(),
+        );
         cause.into()
     }
 
@@ -388,7 +391,10 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation
                 return Err(self.reject(StoreRuntimeError::ForeignDimensionDomain { dimension }));
             }
         }
-        let raw = ledger(self.parts.failure, self.parts.ledger.bind(dimensions))?;
+        let raw = ledger(
+            self.parts.ordinary.failure,
+            self.parts.work.bind(dimensions),
+        )?;
         Ok(StoreInvocationLayout {
             raw,
             brand: PhantomData,
@@ -404,29 +410,27 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation
 
     /// Trusted host-only exit poll. It never reopens body execution or clears a cause.
     pub fn prescribed_exit_checkpoint(&mut self) -> Result<(), StoreInvocationError> {
-        crate::retained::poll_execution(&mut self.parts.poll, self.parts.failure, self.parts.debt)
-            .map_err(|cause| map_execution_error(cause).into())
+        crate::retained::poll_execution(
+            &mut self.parts.ordinary.poll,
+            self.parts.ordinary.failure,
+            self.parts.ordinary.debt,
+        )
+        .map_err(|cause| map_execution_error(cause).into())
     }
 
     /// Borrows ordinary storage and poll fields, excluding work and progress.
-    pub fn ordinary_storage(&mut self) -> StoreOrdinaryStorage<'_, O, PP, U> {
+    pub fn ordinary_storage(&mut self) -> StoreOrdinaryStorage<'_, 'op, O, PP, U> {
         StoreOrdinaryStorage {
             domain: self.domain,
-            raw: ExecutionOrdinaryStorage {
-                storage: self.parts.ledger.storage.reborrow(),
-                poll: self.parts.poll.reborrow(),
-                failure: self.parts.failure,
-                debt: self.parts.debt,
-                execution_state: self.parts.execution_state,
-            },
+            raw: &mut self.parts.ordinary,
         }
     }
 
     fn before(&mut self, cost: u16) -> Result<(), StoreInvocationError> {
         self.running()?;
-        let next = checked_action_debt(self.parts.debt.get(), cost).map_err(|()| {
+        let next = checked_action_debt(self.parts.ordinary.debt.get(), cost).map_err(|()| {
             record(
-                self.parts.failure,
+                self.parts.ordinary.failure,
                 PreparationFailureCode::product_graph(INVALID_COST),
             );
             StoreInvocationError::from(StoreRuntimeError::FallbackOnly)
@@ -438,14 +442,14 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation
     }
 
     fn completed(&mut self, captured_cost: u16) -> Result<(), StoreInvocationError> {
-        match checked_action_debt(self.parts.debt.get(), captured_cost) {
+        match checked_action_debt(self.parts.ordinary.debt.get(), captured_cost) {
             Ok(Some(next)) => {
-                self.parts.debt.set(next);
+                self.parts.ordinary.debt.set(next);
                 Ok(())
             }
             _ => {
                 record(
-                    self.parts.failure,
+                    self.parts.ordinary.failure,
                     PreparationFailureCode::product_graph(INVALID_COST),
                 );
                 Err(StoreRuntimeError::FallbackOnly.into())
@@ -465,18 +469,18 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation
         let captured_cost = control_cost;
         self.before(captured_cost)?;
         let frame = ledger(
-            self.parts.failure,
+            self.parts.ordinary.failure,
             layout
                 .raw
-                .admit_observed(&mut self.parts.ledger.work, amounts, WorkLane::Producer),
+                .admit_observed(&mut self.parts.work.work, amounts, WorkLane::Producer),
         )?;
         let mut host = ActionHost {
-            work: &mut self.parts.ledger.work,
+            work: &mut self.parts.work.work,
             layout: layout.raw,
             frame,
             admitted: amounts,
-            failure: self.parts.failure,
-            execution_state: self.parts.execution_state,
+            failure: self.parts.ordinary.failure,
+            execution_state: self.parts.ordinary.execution_state,
             boundary: self.boundary,
         };
         let value = action();
@@ -485,7 +489,7 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation
         if let Err(cause) = completion {
             return Err(StoreRuntimeError::Ledger(cause).into());
         }
-        ledger(self.parts.failure, host.finish())?;
+        ledger(self.parts.ordinary.failure, host.finish())?;
         self.completed(captured_cost)?;
         Ok(value)
     }
@@ -501,8 +505,10 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation
             return Err(self.reject(StoreRuntimeError::ForeignDimensionDomain { dimension }));
         }
         ledger(
-            self.parts.failure,
-            self.parts.ledger.tighten_policy(dimension, policy),
+            self.parts.ordinary.failure,
+            self.parts
+                .work
+                .tighten_policy(&self.parts.ordinary.storage, dimension, policy),
         )
     }
 
@@ -514,7 +520,10 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation
         if !self.domain.owns_dimension(dimension) {
             return Err(self.reject(StoreRuntimeError::ForeignDimensionDomain { dimension }));
         }
-        ledger(self.parts.failure, self.parts.ledger.counters(dimension))
+        ledger(
+            self.parts.ordinary.failure,
+            self.parts.work.counters(dimension),
+        )
     }
 
     /// Actual Vec allocation, logical capacity reservation and physical Internal clone/handle work.
@@ -543,7 +552,7 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation
         self.checkpoint()?;
         let mut reservation =
             self.reserve_backing(phase, dimension, bytes, u64::from(bytes != 0))?;
-        let failure = self.parts.failure;
+        let failure = self.parts.ordinary.failure;
         let (values, capacity) = match try_allocate_vec::<u8>(plan) {
             Ok(values) => values,
             Err(cause) => {
@@ -555,7 +564,7 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation
         let actual_bytes = capacity as u64;
         let resize = self
             .parts
-            .ledger
+            .ordinary
             .storage
             .resize(&mut reservation.raw, actual_bytes)
             .map_err(StoreRuntimeError::Ledger)
@@ -592,13 +601,13 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation
         allocations: u64,
     ) -> Result<RetainedStoreReservation<O>, StoreInvocationError> {
         let charges = self.parts.share_work.charges().map(|(_, amount)| amount);
-        let work = &mut self.parts.ledger.work;
-        let failure = self.parts.failure;
-        let execution_state = self.parts.execution_state;
+        let work = &mut self.parts.work.work;
+        let failure = self.parts.ordinary.failure;
+        let execution_state = self.parts.ordinary.execution_state;
         let boundary = self.boundary;
         let share_layout = self.share_layout;
         let result = crate::retained::reserve_exclusive_backing(
-            &self.parts.ledger.storage,
+            &self.parts.ordinary.storage,
             self.parts.account,
             phase,
             dimension,
@@ -642,9 +651,9 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation
         bytes: u64,
         allocations: u64,
     ) -> Result<RetainedStoreReservation<O>, StoreInvocationError> {
-        if self.parts.failure.get().is_some()
+        if self.parts.ordinary.failure.get().is_some()
             || !matches!(
-                self.parts.execution_state.get(),
+                self.parts.ordinary.execution_state.get(),
                 StoreExecutionState::Running | StoreExecutionState::KnownError
             )
         {
@@ -658,7 +667,10 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation
         }
         self.prescribed_exit_checkpoint()?;
         let mut reservation = self.reserve_backing(phase, dimension, bytes, allocations)?;
-        if let Err(cause) = ledger(self.parts.failure, reservation.raw.retain_for_output()) {
+        if let Err(cause) = ledger(
+            self.parts.ordinary.failure,
+            reservation.raw.retain_for_output(),
+        ) {
             reservation.release_storage(());
             return Err(cause);
         }
@@ -679,9 +691,9 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation
             return Err(self.reject(StoreRuntimeError::ConstructionInvariantUnverified));
         }
         ledger(
-            self.parts.failure,
+            self.parts.ordinary.failure,
             self.parts
-                .ledger
+                .ordinary
                 .storage
                 .resize(&mut reservation.raw, bytes),
         )?;
@@ -699,11 +711,17 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation
 
     /// A normal closed callback proves that any retained numeric unwind was caught locally.
     pub fn settle_returned_callback(&self) {
-        StoreExecutionState::settle_caught_unwind(self.parts.execution_state, self.parts.failure);
+        StoreExecutionState::settle_caught_unwind(
+            self.parts.ordinary.execution_state,
+            self.parts.ordinary.failure,
+        );
     }
 
     pub fn stop_known_error(&self) {
-        StoreExecutionState::stop(self.parts.execution_state, StoreExecutionState::KnownError);
+        StoreExecutionState::stop(
+            self.parts.ordinary.execution_state,
+            StoreExecutionState::KnownError,
+        );
     }
 
     /// Catch inside the host guard: returned Err/EOF complete, extension panic does not.
@@ -716,30 +734,30 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation
     ) -> Result<StoreExtensionResult<T>, StoreInvocationError> {
         self.before(control_cost)?;
         let frame = ledger(
-            self.parts.failure,
+            self.parts.ordinary.failure,
             layout
                 .raw
-                .admit_observed(&mut self.parts.ledger.work, amounts, WorkLane::Producer),
+                .admit_observed(&mut self.parts.work.work, amounts, WorkLane::Producer),
         )?;
         let mut host = ActionHost {
-            work: &mut self.parts.ledger.work,
+            work: &mut self.parts.work.work,
             layout: layout.raw,
             frame,
             admitted: amounts,
-            failure: self.parts.failure,
-            execution_state: self.parts.execution_state,
+            failure: self.parts.ordinary.failure,
+            execution_state: self.parts.ordinary.execution_state,
             boundary: self.boundary,
         };
         match catch_unwind(AssertUnwindSafe(action)) {
             Ok(value) => {
-                ledger(self.parts.failure, host.complete(amounts))?;
-                ledger(self.parts.failure, host.finish())?;
+                ledger(self.parts.ordinary.failure, host.complete(amounts))?;
+                ledger(self.parts.ordinary.failure, host.finish())?;
                 self.completed(control_cost)?;
                 Ok(StoreExtensionResult::Returned(value))
             }
             Err(payload) => {
                 // Deliberately resolve before panic-payload disposal and concrete projection.
-                ledger(self.parts.failure, host.finish())?;
+                ledger(self.parts.ordinary.failure, host.finish())?;
                 self.stop_known_error();
                 crate::control::discard_untrusted_panic_payload(payload);
                 Ok(StoreExtensionResult::Panicked)
@@ -787,9 +805,12 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation
         };
         let frame = layout
             .raw
-            .begin_parser(&mut self.parts.ledger.work, amounts, limits, channel)
+            .begin_parser(&mut self.parts.work.work, amounts, limits, channel)
             .map_err(|cause| {
-                record(self.parts.failure, PreparationFailureCode::ledger());
+                record(
+                    self.parts.ordinary.failure,
+                    PreparationFailureCode::ledger(),
+                );
                 match cause {
                     crate::ledger::ParserWorkError::Ledger(cause) => {
                         StoreInvocationError::from(StoreRuntimeError::Ledger(cause))
@@ -812,8 +833,8 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation
         };
         let result = body(&mut StoreInvocationParser { host: &mut host });
         StoreExecutionState::settle_caught_unwind(
-            host.context.parts.execution_state,
-            host.context.parts.failure,
+            host.context.parts.ordinary.execution_state,
+            host.context.parts.ordinary.failure,
         );
         if result.is_err() {
             host.context.stop_known_error();
@@ -851,19 +872,19 @@ impl<O, PP, U, const N: usize> ParserHost<'_, '_, O, PP, U, N> {
         let incomplete = exact && self.frame.remaining.iter().any(|amount| *amount != 0);
         if incomplete {
             StoreExecutionState::stop(
-                self.context.parts.execution_state,
+                self.context.parts.ordinary.execution_state,
                 StoreExecutionState::IncompleteSuccess,
             );
             if self.context.boundary.is_none() {
                 record(
-                    self.context.parts.failure,
+                    self.context.parts.ordinary.failure,
                     PreparationFailureCode::product_graph(ABANDONED),
                 );
             }
         }
         ledger(
-            self.context.parts.failure,
-            self.frame.resolve(&mut self.context.parts.ledger.work),
+            self.context.parts.ordinary.failure,
+            self.frame.resolve(&mut self.context.parts.work.work),
         )?;
         if incomplete {
             return Err(StoreRuntimeError::ObservedWorkIncomplete.into());
@@ -876,8 +897,8 @@ impl<O, PP, U, const N: usize> Drop for ParserHost<'_, '_, O, PP, U, N> {
     fn drop(&mut self) {
         if self.frame.active {
             mark_unwind(
-                self.context.parts.execution_state,
-                self.context.parts.failure,
+                self.context.parts.ordinary.execution_state,
+                self.context.parts.ordinary.failure,
                 self.context.boundary,
             );
             let _ = self.close(false);
@@ -1007,7 +1028,7 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, const N: usize,
         action: impl FnOnce() -> Result<T, P>,
         materialize: impl FnOnce(&mut Self, P) -> E,
     ) -> Result<T, E> {
-        let mut slot = Some(|_storage: StoreOrdinaryStorage<'_, O, PP, U>| action());
+        let mut slot = Some(|_storage: StoreOrdinaryStorage<'_, 'op, O, PP, U>| action());
         self.run_prefix_with_storage(amounts, control_cost, &mut slot, E::from, materialize)
     }
 
@@ -1021,7 +1042,7 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, const N: usize,
         materialize: impl FnOnce(&mut Self, P) -> E,
     ) -> Result<T, E>
     where
-        F: for<'s> FnOnce(StoreOrdinaryStorage<'s, O, PP, U>) -> Result<T, P>,
+        F: for<'s> FnOnce(StoreOrdinaryStorage<'s, 'op, O, PP, U>) -> Result<T, P>,
     {
         let captured_cost = control_cost;
         let entry = if self.host.context.boundary.is_none() {
@@ -1051,25 +1072,19 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, const N: usize,
                 .reject(StoreRuntimeError::ObservedWorkExceedsAdmitted);
             return Err(project(cause));
         }
-        let failure = self.host.context.parts.failure;
+        let failure = self.host.context.parts.ordinary.failure;
         let mut prefix = ParserActionHost {
-            work: &mut self.host.context.parts.ledger.work,
+            work: &mut self.host.context.parts.work.work,
             frame: &mut self.host.frame,
             layout: self.host.layout,
             failure,
-            execution_state: self.host.context.parts.execution_state,
+            execution_state: self.host.context.parts.ordinary.execution_state,
             boundary: self.host.context.boundary,
             armed: true,
         };
         let storage = StoreOrdinaryStorage {
             domain: self.host.context.domain,
-            raw: ExecutionOrdinaryStorage {
-                storage: self.host.context.parts.ledger.storage.reborrow(),
-                poll: self.host.context.parts.poll.reborrow(),
-                failure,
-                debt: self.host.context.parts.debt,
-                execution_state: self.host.context.parts.execution_state,
-            },
+            raw: &mut self.host.context.parts.ordinary,
         };
         let action = action
             .take()
@@ -1083,10 +1098,10 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, const N: usize,
                 let owned = materialize(self, cause);
                 if self.host.frame.active {
                     let _ = ledger(
-                        self.host.context.parts.failure,
+                        self.host.context.parts.ordinary.failure,
                         self.host
                             .frame
-                            .resolve(&mut self.host.context.parts.ledger.work),
+                            .resolve(&mut self.host.context.parts.work.work),
                     );
                 }
                 return Err(owned);
@@ -1106,7 +1121,7 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, const N: usize,
     }
 
     /// A live loan excludes reentry of this parser role.
-    pub fn ordinary_storage(&mut self) -> StoreOrdinaryStorage<'_, O, PP, U> {
+    pub fn ordinary_storage(&mut self) -> StoreOrdinaryStorage<'_, 'op, O, PP, U> {
         self.host.context.ordinary_storage()
     }
 
@@ -1176,10 +1191,10 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, const N: usize>
         self.host.context.running()?;
         let remaining = self.host.frame.remaining;
         ledger(
-            self.host.context.parts.failure,
+            self.host.context.parts.ordinary.failure,
             self.host.frame.complete(
                 &self.host.layout,
-                &mut self.host.context.parts.ledger.work,
+                &mut self.host.context.parts.work.work,
                 remaining,
             ),
         )
@@ -1208,8 +1223,8 @@ impl<O, PP, U> Drop for RegionHost<'_, O, PP, U> {
     fn drop(&mut self) {
         if !self.resolved && std::thread::panicking() {
             mark_unwind(
-                self.context.parts.execution_state,
-                self.context.parts.failure,
+                self.context.parts.ordinary.execution_state,
+                self.context.parts.ordinary.failure,
                 self.context.boundary,
             );
         }
@@ -1244,9 +1259,9 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, L> RetainedStoreOper
             .exclusive_parts()
             .map_err(|cause| StoreInvocationError::from(map_execution_error(cause)))?;
         let share_layout = ledger(
-            parts.failure,
+            parts.ordinary.failure,
             parts
-                .ledger
+                .work
                 .bind(parts.share_work.charges().map(|(dimension, _)| dimension)),
         )?;
         let context = StoreInvocation {
@@ -1264,23 +1279,23 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, L> RetainedStoreOper
         host.context.checkpoint()?;
         let result = body(&mut host.context);
         StoreExecutionState::settle_caught_unwind(
-            host.context.parts.execution_state,
-            host.context.parts.failure,
+            host.context.parts.ordinary.execution_state,
+            host.context.parts.ordinary.failure,
         );
         if result.is_err() {
             host.context.stop_known_error();
         }
         let mut close = ledger(
-            host.context.parts.failure,
-            host.context.parts.ledger.check_quiescent(),
+            host.context.parts.ordinary.failure,
+            host.context.parts.work.check_quiescent(),
         );
         if result.is_ok() && close.is_ok() {
             if boundary.is_none()
-                && host.context.parts.execution_state.get()
+                && host.context.parts.ordinary.execution_state.get()
                     == StoreExecutionState::IncompleteSuccess
             {
                 record(
-                    host.context.parts.failure,
+                    host.context.parts.ordinary.failure,
                     PreparationFailureCode::product_graph(ABANDONED),
                 );
             }

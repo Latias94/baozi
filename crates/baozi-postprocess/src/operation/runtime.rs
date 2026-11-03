@@ -5,8 +5,8 @@ use std::num::{NonZeroU32, NonZeroU64};
 use baozi_core::__scene_integration::integration::SceneEditBootstrap;
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalActivationSessionPolicy, CanonicalMaterializationRole, CanonicalValidationRole,
-    RetainedStoreWriterRole, StoreBoundWorkGroup, StoreExecutionControl, StoreExecutionPermit,
-    StoreExecutionStorage, StoreExecutionWork,
+    RetainedStoreWriterRole, StoreBoundWorkGroup, StoreExecutionPermit, StoreExecutionServices,
+    StoreExecutionWork,
 };
 use baozi_operation::__retained_store_integration::authority::{
     CanonicalInheritanceSource, RetainedStoreOperation, RetainedStoreReservation,
@@ -203,8 +203,7 @@ pub(crate) const fn final_progress()
 pub(crate) struct ActiveRuntime<'op> {
     work: StoreExecutionWork<'op, PostProcessOwner>,
     group: StoreBoundWorkGroup<'op, 1>,
-    storage: StoreExecutionStorage<'op, PostProcessOwner>,
-    control: StoreExecutionControl<
+    services: StoreExecutionServices<
         'op,
         PostProcessOwner,
         PostProcessProgressPhase,
@@ -220,13 +219,12 @@ pub(crate) fn with_execution<R, E: From<StoreRuntimeError>>(
     keys: RuntimeKeys,
     action: impl FnOnce(&mut ActiveRuntime<'_>) -> Result<R, E>,
 ) -> Result<R, E> {
-    let (work, storage, control) = operation.execution()?;
+    let (work, services) = operation.execution()?;
     let group = work.bind_group([keys.work])?;
     let mut runtime = ActiveRuntime {
         work,
         group,
-        storage,
-        control,
+        services,
         pending: None,
         action_pending: None,
     };
@@ -252,7 +250,7 @@ pub(crate) fn with_execution<R, E: From<StoreRuntimeError>>(
     match result {
         Ok(value) => {
             resolved?;
-            runtime.control.checkpoint()?;
+            runtime.services.checkpoint()?;
             Ok(value)
         }
         // Explicit cleanup retains its own sticky faults without replacing the original error.
@@ -266,14 +264,14 @@ pub(crate) fn with_execution<R, E: From<StoreRuntimeError>>(
 )]
 impl ActiveRuntime<'_> {
     pub(crate) fn checkpoint(&mut self) -> Result<(), StoreRuntimeError> {
-        self.control.checkpoint()
+        self.services.checkpoint()
     }
 
     pub(crate) fn begin_action(&mut self, max_cost: u16) -> Result<(), StoreRuntimeError> {
         if self.action_pending.is_some() {
             return Err(StoreRuntimeError::ObservedWorkOutstanding);
         }
-        self.control.before_action(max_cost)?;
+        self.services.before_action(max_cost)?;
         match &mut self.pending {
             Some(work) => work.replenish_one()?,
             None => self.pending = Some(self.group.admit_observed([1])?),
@@ -302,7 +300,7 @@ impl ActiveRuntime<'_> {
             return Err(cause);
         }
         self.action_pending = None;
-        if let Err(cause) = self.control.completed_action(max_cost) {
+        if let Err(cause) = self.services.completed_action(max_cost) {
             if let Some(work) = self.pending.take() {
                 let _ = work.finish_partial();
             }
@@ -348,8 +346,7 @@ impl<T> ScratchVec<T> {
         let bytes = plan
             .envelope_delta_bytes()
             .map_err(|cause| StoreRuntimeError::Plan(cause.into()))?;
-        let mut reservation = operation.storage.reserve_retained(
-            &mut operation.control,
+        let mut reservation = operation.services.reserve_retained(
             keys.planning,
             keys.scratch,
             bytes,
@@ -370,7 +367,7 @@ impl<T> ScratchVec<T> {
                 return Err(StoreRuntimeError::Plan(cause.into()));
             }
         };
-        if let Err(cause) = operation.storage.resize(&mut reservation, actual) {
+        if let Err(cause) = operation.services.resize(&mut reservation, actual) {
             reservation.release_storage(values);
             return Err(cause);
         }

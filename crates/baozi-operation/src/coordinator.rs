@@ -146,14 +146,6 @@ pub(crate) struct OperationPollCheckpoint<'a, PP, U> {
 }
 
 impl<PP, U> OperationPollCheckpoint<'_, PP, U> {
-    pub(crate) fn reborrow(&mut self) -> OperationPollCheckpoint<'_, PP, U> {
-        OperationPollCheckpoint {
-            control: self.control,
-            terminal: self.terminal,
-            allow_preexisting_terminal: self.allow_preexisting_terminal,
-        }
-    }
-
     pub(crate) fn recorded_control_cause(&self) -> Option<ControlCause> {
         self.terminal.clone()
     }
@@ -172,8 +164,12 @@ impl<PP, U> OperationPollCheckpoint<'_, PP, U> {
 /// A producer can retain a borrowed work envelope while polling or reporting progress.
 /// No callback runs while either accounting state is borrowed.
 pub(crate) struct OperationProgressCheckpoint<'a, O, LP, PP, U, D> {
-    control: &'a mut OperationControl<PP, U>,
-    terminal: &'a mut Option<ControlCause>,
+    poll: OperationPollCheckpoint<'a, PP, U>,
+    state: OperationProgressState<'a, O, LP, PP, U, D>,
+}
+
+/// Progress metadata can move independently of the invocation's unique control borrow.
+pub(crate) struct OperationProgressState<'a, O, LP, PP, U, D> {
     ledger: &'a Ledger<O, LP, D>,
     progress: &'a mut Vec<((PP, U), ProgressState)>,
     progress_evidence_bytes: &'a mut u64,
@@ -183,7 +179,12 @@ pub(crate) struct OperationProgressCheckpoint<'a, O, LP, PP, U, D> {
     next_sequence: &'a mut u64,
 }
 
-impl<O, LP, PP, U, D> OperationProgressCheckpoint<'_, O, LP, PP, U, D>
+type SplitProgress<'a, O, LP, PP, U, D> = (
+    OperationPollCheckpoint<'a, PP, U>,
+    OperationProgressState<'a, O, LP, PP, U, D>,
+);
+
+impl<'a, O, LP, PP, U, D> OperationProgressCheckpoint<'a, O, LP, PP, U, D>
 where
     O: OperationOwner,
     LP: Copy + Ord,
@@ -191,20 +192,12 @@ where
     U: ProgressUnit,
     D: Copy + Ord + fmt::Debug,
 {
-    pub(crate) fn reborrow_poll(&mut self) -> OperationPollCheckpoint<'_, PP, U> {
-        OperationPollCheckpoint {
-            control: self.control,
-            terminal: self.terminal,
-            allow_preexisting_terminal: false,
-        }
-    }
-
-    pub(crate) fn recorded_control_cause(&self) -> Option<ControlCause> {
-        self.terminal.clone()
+    pub(crate) fn into_parts(self) -> SplitProgress<'a, O, LP, PP, U, D> {
+        (self.poll, self.state)
     }
 
     pub(crate) fn poll(&mut self) -> Result<(), ControlCause> {
-        poll_operation_control(self.control, self.terminal)
+        self.poll.poll()
     }
 
     pub(crate) fn report_progress(
@@ -231,19 +224,71 @@ where
         total: Option<u64>,
         delivery: ProgressDelivery,
     ) -> Result<(), ControlCause> {
-        self.poll()?;
+        self.state.report_progress_with_delivery(
+            &mut self.poll,
+            phase,
+            unit,
+            completed,
+            total,
+            delivery,
+        )
+    }
+}
+
+impl<O, LP, PP, U, D> OperationProgressState<'_, O, LP, PP, U, D>
+where
+    O: OperationOwner,
+    LP: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    pub(crate) fn report_progress(
+        &mut self,
+        poll: &mut OperationPollCheckpoint<'_, PP, U>,
+        phase: PP,
+        unit: U,
+        completed: u64,
+        total: Option<u64>,
+    ) -> Result<(), ControlCause> {
+        self.report_progress_with_delivery(
+            poll,
+            phase,
+            unit,
+            completed,
+            total,
+            ProgressDelivery::Transient,
+        )
+    }
+
+    fn report_progress_with_delivery(
+        &mut self,
+        poll: &mut OperationPollCheckpoint<'_, PP, U>,
+        phase: PP,
+        unit: U,
+        completed: u64,
+        total: Option<u64>,
+        delivery: ProgressDelivery,
+    ) -> Result<(), ControlCause> {
+        poll.poll()?;
         if total.is_some_and(|total| completed > total) {
-            return self.fail(ControlCause::InvalidProgress {
-                violation: ProgressViolation::CompletedExceededTotal,
-            });
+            return self.fail(
+                poll,
+                ControlCause::InvalidProgress {
+                    violation: ProgressViolation::CompletedExceededTotal,
+                },
+            );
         }
         if self
             .last_phase_order
             .is_some_and(|last| phase.order() < last)
         {
-            return self.fail(ControlCause::InvalidProgress {
-                violation: ProgressViolation::PhaseRegressed,
-            });
+            return self.fail(
+                poll,
+                ControlCause::InvalidProgress {
+                    violation: ProgressViolation::PhaseRegressed,
+                },
+            );
         }
 
         let key = (phase, unit);
@@ -257,16 +302,22 @@ where
             .is_some_and(|previous| previous.completed == completed && previous.total == total);
         if let Some(previous) = previous {
             if completed < previous.completed {
-                return self.fail(ControlCause::InvalidProgress {
-                    violation: ProgressViolation::CompletedRegressed,
-                });
+                return self.fail(
+                    poll,
+                    ControlCause::InvalidProgress {
+                        violation: ProgressViolation::CompletedRegressed,
+                    },
+                );
             }
             if matches!((previous.total, total), (Some(old), Some(new)) if new < old)
                 || matches!((previous.total, total), (Some(_), None))
             {
-                return self.fail(ControlCause::InvalidProgress {
-                    violation: ProgressViolation::TotalRegressed,
-                });
+                return self.fail(
+                    poll,
+                    ControlCause::InvalidProgress {
+                        violation: ProgressViolation::TotalRegressed,
+                    },
+                );
             }
         }
 
@@ -276,7 +327,7 @@ where
                 !unchanged
                     && previous_delivery.is_none_or(|previous| {
                         completed.saturating_sub(previous)
-                            >= self.control.progress_limits.min_work_delta()
+                            >= poll.control.progress_limits.min_work_delta()
                             || total == Some(completed)
                     })
             }
@@ -293,25 +344,30 @@ where
                 position
             }
             Err(position) => {
-                if let Err(cause) = self.try_insert_progress(position, key, progress_state) {
-                    return self.fail(ControlCause::ProgressStorage { cause });
+                if let Err(cause) = self.try_insert_progress(
+                    position,
+                    key,
+                    progress_state,
+                    poll.control.progress_limits.max_states(),
+                ) {
+                    return self.fail(poll, ControlCause::ProgressStorage { cause });
                 }
                 position
             }
         };
         *self.last_phase_order = Some(phase.order());
 
-        if !should_deliver || self.control.observer.is_none() {
+        if !should_deliver || poll.control.observer.is_none() {
             return Ok(());
         }
         let encoded_bytes = match delivery {
             ProgressDelivery::Transient => {
-                if *self.delivered_events >= self.control.progress_limits.max_events() {
+                if *self.delivered_events >= poll.control.progress_limits.max_events() {
                     return Ok(());
                 }
                 let encoded_bytes = estimated_event_bytes(phase, unit);
                 if self.delivered_bytes.saturating_add(encoded_bytes)
-                    > self.control.progress_limits.max_encoded_bytes()
+                    > poll.control.progress_limits.max_encoded_bytes()
                 {
                     return Ok(());
                 }
@@ -321,19 +377,19 @@ where
         };
 
         let event = ProgressEvent::new(phase, unit, completed, total, *self.next_sequence);
-        let Some(mut observer) = self.control.observer.take() else {
+        let Some(mut observer) = poll.control.observer.take() else {
             return Ok(());
         };
         let decision = catch_unwind(AssertUnwindSafe(|| observer.observe(event)));
         let decision = match decision {
             Ok(decision) => {
-                self.control.observer = Some(observer);
+                poll.control.observer = Some(observer);
                 decision
             }
             Err(payload) => {
                 discard_extension(observer);
                 discard_untrusted_panic_payload(payload);
-                return self.fail(ControlCause::ObserverPanicked);
+                return self.fail(poll, ControlCause::ObserverPanicked);
             }
         };
 
@@ -344,15 +400,22 @@ where
         *self.next_sequence = self.next_sequence.saturating_add(1);
         self.progress[progress_position].1.last_delivered = Some(completed);
         if decision == ProgressDecision::Cancel {
-            return self.fail(ControlCause::Cancelled {
-                origin: CancellationOrigin::Observer,
-            });
+            return self.fail(
+                poll,
+                ControlCause::Cancelled {
+                    origin: CancellationOrigin::Observer,
+                },
+            );
         }
         Ok(())
     }
 
-    fn fail(&mut self, cause: ControlCause) -> Result<(), ControlCause> {
-        *self.terminal = Some(cause.clone());
+    fn fail(
+        &mut self,
+        poll: &mut OperationPollCheckpoint<'_, PP, U>,
+        cause: ControlCause,
+    ) -> Result<(), ControlCause> {
+        *poll.terminal = Some(cause.clone());
         Err(cause)
     }
 
@@ -361,9 +424,9 @@ where
         position: usize,
         key: (PP, U),
         state: ProgressState,
+        limit: usize,
     ) -> Result<(), ProgressStorageError> {
         let desired_capacity = self.progress.len().saturating_add(1);
-        let limit = self.control.progress_limits.max_states();
         if desired_capacity > limit {
             return Err(ProgressStorageError::StateLimitExceeded {
                 value: desired_capacity,
@@ -704,15 +767,20 @@ where
         } = self;
         (
             OperationProgressCheckpoint {
-                control,
-                terminal,
-                ledger,
-                progress,
-                progress_evidence_bytes,
-                last_phase_order,
-                delivered_events,
-                delivered_bytes,
-                next_sequence,
+                poll: OperationPollCheckpoint {
+                    control,
+                    terminal,
+                    allow_preexisting_terminal: false,
+                },
+                state: OperationProgressState {
+                    ledger,
+                    progress,
+                    progress_evidence_bytes,
+                    last_phase_order,
+                    delivered_events,
+                    delivered_bytes,
+                    next_sequence,
+                },
             },
             ledger,
         )

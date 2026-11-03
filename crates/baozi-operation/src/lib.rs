@@ -294,11 +294,10 @@ pub mod __retained_store_integration {
         };
         pub use crate::concrete_store::{
             RetainedStoreDimensionState, RetainedStoreObservedWork, RetainedStoreWriterRole,
-            StoreBoundWorkGroup, StoreExecutionControl, StoreExecutionPermit,
-            StoreExecutionStorage, StoreExecutionWork, StoreExtensionResult, StoreFailureStorage,
-            StoreImporterBoundary, StoreInvocation, StoreInvocationError, StoreInvocationLayout,
-            StoreInvocationParser, StoreOrdinaryStorage, StoreParserWorkError,
-            StoreParserWorkScope,
+            StoreBoundWorkGroup, StoreExecutionPermit, StoreExecutionServices, StoreExecutionWork,
+            StoreExtensionResult, StoreFailureStorage, StoreImporterBoundary, StoreInvocation,
+            StoreInvocationError, StoreInvocationLayout, StoreInvocationParser,
+            StoreOrdinaryStorage, StoreParserWorkError, StoreParserWorkScope,
         };
     }
 

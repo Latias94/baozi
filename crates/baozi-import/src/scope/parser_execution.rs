@@ -9,8 +9,8 @@ use baozi_operation::__retained_store_integration::activation::{
 
 type Numeric<'op> =
     StoreInvocation<'op, ImportOperationOwner, ImportProgressPhase, ImportProgressUnit>;
-type OrdinaryStorage<'b> =
-    StoreOrdinaryStorage<'b, ImportOperationOwner, ImportProgressPhase, ImportProgressUnit>;
+type OrdinaryStorage<'b, 'op> =
+    StoreOrdinaryStorage<'b, 'op, ImportOperationOwner, ImportProgressPhase, ImportProgressUnit>;
 type FailureStorage<'b, 'op> =
     StoreFailureStorage<'b, 'op, ImportOperationOwner, ImportProgressPhase, ImportProgressUnit>;
 
@@ -270,7 +270,7 @@ impl<'session> ParseContext<'session> {
 
 impl<'op, 'session> ParseRoot<'_, 'op, 'session> {
     /// Borrows ordinary storage/poll services without lending numeric work.
-    pub fn storage(&mut self) -> ParseResult<ParseStorage<'_, 'session>> {
+    pub fn storage(&mut self) -> ParseResult<ParseStorage<'_, 'op, 'session>> {
         self.views.preflight()?;
         Ok(ParseStorage::new(
             crate::store::ImportOrdinaryStorage::new(
@@ -484,7 +484,7 @@ impl<'op, 'session, const N: usize, const CHILD: bool>
     ParseParser<'_, '_, '_, 'op, 'session, N, CHILD>
 {
     /// The live storage loan prevents reentry of this parser role.
-    pub fn storage(&mut self) -> ParseResult<ParseStorage<'_, 'session>> {
+    pub fn storage(&mut self) -> ParseResult<ParseStorage<'_, 'op, 'session>> {
         self.views.preflight()?;
         Ok(ParseStorage::new(
             crate::store::ImportOrdinaryStorage::new(
@@ -506,7 +506,7 @@ impl<'op, 'session, const N: usize, const CHILD: bool>
         self.views.preflight()?;
         let views = self.views;
         let vocabulary = self.vocabulary;
-        let mut slot = Some(|mut raw: OrdinaryStorage<'_>| {
+        let mut slot = Some(|mut raw: OrdinaryStorage<'_, 'op>| {
             let mut storage = ParseStorage::new(
                 crate::store::ImportOrdinaryStorage::new(raw.reborrow(), vocabulary),
                 views.identity(),
@@ -533,7 +533,7 @@ impl<'op, 'session, const N: usize, const CHILD: bool>
         self.views.preflight()?;
         let views = self.views;
         let vocabulary = self.vocabulary;
-        let mut slot = Some(|mut raw: OrdinaryStorage<'_>| {
+        let mut slot = Some(|mut raw: OrdinaryStorage<'_, 'op>| {
             let mut storage = ParseStorage::new(
                 crate::store::ImportOrdinaryStorage::new(raw.reborrow(), vocabulary),
                 views.identity(),
@@ -562,7 +562,7 @@ impl<'op, 'session, const N: usize, const CHILD: bool>
         self.views.preflight().map_err(E::from)?;
         let views = self.views;
         let vocabulary = self.vocabulary;
-        let mut slot = Some(|_storage: OrdinaryStorage<'_>| action());
+        let mut slot = Some(|_storage: OrdinaryStorage<'_, 'op>| action());
         self.numeric.run_prefix_with_storage(
             amounts,
             1,
@@ -600,7 +600,7 @@ impl<'op, 'session, const N: usize, const CHILD: bool>
         self.views.preflight()?;
         let views = self.views;
         let vocabulary = self.vocabulary;
-        let mut slot = Some(|_storage: OrdinaryStorage<'_>| action());
+        let mut slot = Some(|_storage: OrdinaryStorage<'_, 'op>| action());
         self.numeric.run_prefix_with_storage(
             amounts,
             1,

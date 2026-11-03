@@ -1,5 +1,5 @@
 use super::*;
-use crate::concrete_store::{StoreExecutionControl, StoreExecutionStorage, StoreExecutionWork};
+use crate::concrete_store::{StoreExecutionServices, StoreExecutionWork};
 
 #[cfg(test)]
 mod tests;
@@ -159,8 +159,7 @@ where
     ) -> Result<
         (
             StoreExecutionWork<'_, O>,
-            StoreExecutionStorage<'_, O>,
-            StoreExecutionControl<'_, O, PP, U>,
+            StoreExecutionServices<'_, O, PP, U>,
         ),
         StoreRuntimeError,
     > {
@@ -721,14 +720,13 @@ where
                 );
             }
         };
-        let (work, storage, control) =
-            match preserve_first_fault(first_fault, operation.execution()) {
-                Ok(execution) => execution,
-                Err(cause) => {
-                    *semantic_state = ScopedSemanticState::Rejected;
-                    return Err(cause);
-                }
-            };
+        let (work, services) = match preserve_first_fault(first_fault, operation.execution()) {
+            Ok(execution) => execution,
+            Err(cause) => {
+                *semantic_state = ScopedSemanticState::Rejected;
+                return Err(cause);
+            }
+        };
         let work_group = match preserve_first_fault(first_fault, work.bind_group([work_dimension]))
         {
             Ok(group) => group,
@@ -741,8 +739,7 @@ where
         Ok(CanonicalSemanticWorkSession {
             work,
             work_group,
-            storage,
-            control,
+            services,
             first_fault,
             phase,
             scratch_dimension,
@@ -1609,7 +1606,7 @@ where
         if let Some(cause) = preserved_fault(self.first_fault) {
             return Err(cause);
         }
-        preserve_first_fault(self.first_fault, self.control.checkpoint())
+        preserve_first_fault(self.first_fault, self.services.checkpoint())
     }
 
     /// Polls when the invocation's bounded action checkpoint has been reached.
@@ -1617,7 +1614,7 @@ where
         if let Some(cause) = preserved_fault(self.first_fault) {
             return Err(cause);
         }
-        preserve_first_fault(self.first_fault, self.control.before_action(1))
+        preserve_first_fault(self.first_fault, self.services.before_action(1))
     }
 
     fn finish_checkpoint(&mut self) -> Result<(), StoreRuntimeError> {
@@ -1701,7 +1698,7 @@ where
             return self.finish_action_callback(action, result);
         }
         self.completed_any = true;
-        if let Err(cause) = self.control.completed_action(1) {
+        if let Err(cause) = self.services.completed_action(1) {
             let result = preserve_runtime_fault_then_drop_result(self.first_fault, cause, result);
             return self.finish_action_callback(action, result);
         }
@@ -1718,8 +1715,9 @@ where
         }
         preserve_first_fault(
             self.first_fault,
-            self.storage
-                .reserve(&mut self.control, self.phase, self.scratch_dimension, bytes),
+            self.services
+                .ordinary()
+                .reserve(self.phase, self.scratch_dimension, bytes),
         )
         .map(|raw| CanonicalReservation {
             raw,
@@ -1736,7 +1734,7 @@ where
         self.poll_now()?;
         preserve_first_fault(
             self.first_fault,
-            self.storage.resize(&mut reservation.raw, bytes),
+            self.services.resize(&mut reservation.raw, bytes),
         )
     }
 
@@ -1748,7 +1746,7 @@ where
         self.poll_now()?;
         preserve_first_fault(
             self.first_fault,
-            self.storage.validate_live_owner(&reservation.raw),
+            self.services.validate_live_owner(&reservation.raw),
         )
     }
 

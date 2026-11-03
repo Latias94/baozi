@@ -19,6 +19,43 @@ use crate::store::ImportOrdinaryStorage;
 /// }
 /// ```
 ///
+/// The inner operation lifetime does not extend a temporary root or vocabulary borrow:
+/// ```
+/// use baozi_import::{ParseRoot, ParseResult, ParseStorage};
+/// fn short<'b, 'op: 'b, 's: 'b>(
+///     root: &'b mut ParseRoot<'_, 'op, 's>,
+/// ) -> ParseResult<ParseStorage<'b, 'op, 's>> {
+///     root.storage()
+/// }
+/// ```
+///
+/// A legacy storage loan ends before reporting progress through the same control owner:
+/// ```
+/// use baozi_import::{ImportProgressPhase, ImportProgressUnit, ParseExecution, ParseResult};
+/// fn sequential(exec: &mut ParseExecution<'_, '_>) -> ParseResult<()> {
+///     { let mut loan = exec.storage()?; loan.poll()?; }
+///     exec.report_progress(ImportProgressPhase::Decode, ImportProgressUnit::Bytes, 1, None)
+/// }
+/// ```
+///
+/// A live legacy loan excludes that progress call until its last use:
+/// ```compile_fail
+/// use baozi_import::{ImportProgressPhase, ImportProgressUnit, ParseExecution, ParseResult};
+/// fn overlap(exec: &mut ParseExecution<'_, '_>) -> ParseResult<()> {
+///     let mut loan = exec.storage()?;
+///     exec.report_progress(ImportProgressPhase::Decode, ImportProgressUnit::Bytes, 1, None)?;
+///     loan.poll()
+/// }
+/// ```
+///
+/// A loan cannot leave its legacy execution region, although its owned container can:
+/// ```compile_fail
+/// use baozi_import::{ParseContext, ParseFailure};
+/// fn escape(context: &mut ParseContext<'_>) {
+///     let _loan = context.with_execution::<_, ParseFailure>(|exec| exec.storage());
+/// }
+/// ```
+///
 /// The temporary storage borrow cannot escape its region:
 /// ```compile_fail
 /// use baozi_import::{ParseContext, ParseFailure};
@@ -55,14 +92,14 @@ use crate::store::ImportOrdinaryStorage;
 ///     loan.poll()
 /// }
 /// ```
-pub struct ParseStorage<'b, 'session: 'b> {
-    raw: ImportOrdinaryStorage<'b>,
+pub struct ParseStorage<'b, 'op: 'b, 'session: 'b> {
+    raw: ImportOrdinaryStorage<'b, 'op>,
     identity: StorageIdentity<'session>,
     callback_active: &'b Cell<bool>,
 }
-impl<'b, 'session: 'b> ParseStorage<'b, 'session> {
+impl<'b, 'op: 'b, 'session: 'b> ParseStorage<'b, 'op, 'session> {
     pub(super) fn new(
-        raw: ImportOrdinaryStorage<'b>,
+        raw: ImportOrdinaryStorage<'b, 'op>,
         identity: StorageIdentity<'session>,
         callback_active: &'b Cell<bool>,
     ) -> Self {
@@ -300,7 +337,7 @@ impl<'b, 'session: 'b> ParseStorage<'b, 'session> {
 }
 
 pub(super) fn append_metered_string(
-    exec: &mut ParseStorage<'_, '_>,
+    exec: &mut ParseStorage<'_, '_, '_>,
     output: &mut String,
     value: &str,
 ) -> ParseResult<()> {

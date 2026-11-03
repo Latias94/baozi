@@ -121,7 +121,7 @@ fn observed_unit_protocol_with_empty_actions_preserves_exact_work_evidence() {
             .dimension_state(keys.work)
             .expect("initial work state");
         let elapsed = {
-            let (work, _storage, mut control) = operation
+            let (work, mut services) = operation
                 .execution()
                 .expect("borrow the scene edit execution region");
             let group = work
@@ -129,7 +129,7 @@ fn observed_unit_protocol_with_empty_actions_preserves_exact_work_evidence() {
                 .expect("bind one ordinary work role");
             let start = Instant::now();
             for _ in 0..ACTIONS {
-                control
+                services
                     .before_action(1)
                     .expect("admit bounded control debt");
                 let mut permit = group.admit_observed([1]).expect("admit one empty action");
@@ -138,10 +138,10 @@ fn observed_unit_protocol_with_empty_actions_preserves_exact_work_evidence() {
                     .complete([1])
                     .expect("record the physically completed empty action");
                 permit.finish().expect("resolve the completed envelope");
-                control.completed_action(1).expect("checked control cost");
+                services.completed_action(1).expect("checked control cost");
             }
             let elapsed = start.elapsed().as_nanos();
-            control
+            services
                 .checkpoint()
                 .expect("final empty-action control checkpoint");
             work.finish_region()
