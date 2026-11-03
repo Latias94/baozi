@@ -988,6 +988,245 @@ fn work_validation_preserves_effective_attempted_then_consumed_precedence() {
 }
 
 #[test]
+fn successful_numeric_helpers_never_resolve_diagnostic_keys() {
+    let calls = Cell::new(0);
+    let dimension = || {
+        calls.set(calls.get() + 1);
+        37_u8
+    };
+    assert_eq!(add_attempted(2, 3, dimension), Ok(5));
+    assert_eq!(add_consumed(2, 3, dimension), Ok(5));
+    assert_eq!(
+        check_limit(CounterClass::Attempted, dimension, 5, 5),
+        Ok(())
+    );
+    assert_eq!(check_effective(dimension, 2, 3, 5, 5), Ok(()));
+    let mut row = WorkEntry {
+        dimension: 37,
+        policy: WorkPolicy {
+            attempted_limit: 5,
+            consumed_limit: 5,
+        },
+        state: WorkDimensionState::default(),
+    };
+    assert_eq!(charge_attempted_entry(&mut row, dimension, 2), Ok(()));
+    assert_eq!(consume_observed_entry(&mut row, dimension, 2), Ok(()));
+    assert_eq!(
+        row.state,
+        WorkDimensionState {
+            attempted: 2,
+            consumed: 2,
+            pending_consumed: 0,
+        }
+    );
+    assert_eq!(calls.get(), 0);
+}
+
+#[test]
+fn numeric_helper_errors_resolve_their_exact_key_once() {
+    let calls = Cell::new(0);
+    let dimension = || {
+        calls.set(calls.get() + 1);
+        37_u8
+    };
+    assert_eq!(
+        add_attempted(u64::MAX, 1, dimension),
+        Err(LedgerCause::ArithmeticOverflow {
+            class: CounterClass::Attempted,
+            dimension: 37,
+        })
+    );
+    assert_eq!(calls.replace(0), 1);
+    assert_eq!(
+        add_consumed(u64::MAX, 1, dimension),
+        Err(LedgerCause::ArithmeticOverflow {
+            class: CounterClass::Consumed,
+            dimension: 37,
+        })
+    );
+    assert_eq!(calls.replace(0), 1);
+    assert_eq!(
+        check_limit(CounterClass::Attempted, dimension, 6, 5),
+        Err(LedgerCause::LimitExceeded {
+            class: CounterClass::Attempted,
+            dimension: 37,
+            value: 6,
+            limit: 5,
+        })
+    );
+    assert_eq!(calls.replace(0), 1);
+    assert_eq!(
+        check_effective(dimension, u64::MAX, 1, u64::MAX, u64::MAX),
+        Err(LedgerCause::ArithmeticOverflow {
+            class: CounterClass::Consumed,
+            dimension: 37,
+        })
+    );
+    assert_eq!(calls.replace(0), 1);
+    assert_eq!(
+        check_effective(dimension, 2, 3, 4, 0),
+        Err(LedgerCause::ConsumedExceedsAttempted {
+            dimension: 37,
+            consumed: 5,
+            attempted: 4,
+        })
+    );
+    assert_eq!(calls.replace(0), 1);
+    assert_eq!(
+        check_effective(dimension, 2, 3, 5, 4),
+        Err(LedgerCause::LimitExceeded {
+            class: CounterClass::Consumed,
+            dimension: 37,
+            value: 5,
+            limit: 4,
+        })
+    );
+    assert_eq!(calls.replace(0), 1);
+    let mut row = WorkEntry {
+        dimension: 37,
+        policy: WorkPolicy {
+            attempted_limit: 1,
+            consumed_limit: 1,
+        },
+        state: WorkDimensionState::default(),
+    };
+    assert_eq!(
+        charge_attempted_entry(&mut row, dimension, 2),
+        Err(LedgerCause::LimitExceeded {
+            class: CounterClass::Attempted,
+            dimension: 37,
+            value: 2,
+            limit: 1,
+        })
+    );
+    assert_eq!(calls.replace(0), 1);
+    assert_eq!(row.state.attempted, 2);
+    assert_eq!(
+        consume_observed_entry(&mut row, dimension, 2),
+        Err(LedgerCause::LimitExceeded {
+            class: CounterClass::Consumed,
+            dimension: 37,
+            value: 2,
+            limit: 1,
+        })
+    );
+    assert_eq!(calls.replace(0), 1);
+    assert_eq!(row.state.consumed, 2);
+    assert_eq!(
+        consume_observed_entry(&mut row, dimension, 1),
+        Err(LedgerCause::ConsumedExceedsAttempted {
+            dimension: 37,
+            consumed: 3,
+            attempted: 2,
+        })
+    );
+    assert_eq!(calls.get(), 1);
+    assert_eq!(row.state.consumed, 2);
+}
+
+#[test]
+fn duplicate_bound_lanes_recheck_noncontiguous_protected_keys_without_work() {
+    let work = owner([(10, 20, 20), (30, 20, 20), (90, 20, 20)]);
+    let roles = group(&work, [30, 90, 30, 10]);
+    work.borrow_state_mut().unwrap().protected_dimension = Some(2);
+    assert_eq!(
+        roles.charge_attempted_in_order([0; 4]),
+        Err(LedgerCause::UnknownDimension { dimension: 90 })
+    );
+    assert_eq!(
+        roles.preflight_repeated_observed([0; 4], NonZeroU64::new(1).unwrap()),
+        Err(LedgerCause::UnknownDimension { dimension: 90 })
+    );
+    assert_eq!(counters(&work), [(0, 0, 0); 3]);
+    work.check_quiescent().unwrap();
+}
+
+#[test]
+fn bound_numeric_errors_name_registered_keys_and_binding_errors_keep_caller_keys() {
+    #[derive(Debug, Clone, Copy)]
+    struct DiagnosticKey {
+        id: u8,
+        label: &'static str,
+    }
+
+    impl PartialEq for DiagnosticKey {
+        fn eq(&self, other: &Self) -> bool {
+            self.id == other.id
+        }
+    }
+
+    impl Eq for DiagnosticKey {}
+
+    impl PartialOrd for DiagnosticKey {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl Ord for DiagnosticKey {
+        fn cmp(&self, other: &Self) -> Ordering {
+            self.id.cmp(&other.id)
+        }
+    }
+
+    let registered = DiagnosticKey {
+        id: 90,
+        label: "registered",
+    };
+    let caller = DiagnosticKey {
+        id: 90,
+        label: "caller",
+    };
+    let work = LocalWork::new(
+        vec![registered],
+        vec![WorkEntry {
+            dimension: registered,
+            policy: WorkPolicy {
+                attempted_limit: 1,
+                consumed_limit: 1,
+            },
+            state: WorkDimensionState::default(),
+        }],
+    );
+    let roles = work.bind([caller], WorkGrant::Ordinary).unwrap();
+    let Err(LedgerCause::LimitExceeded {
+        class: CounterClass::Attempted,
+        dimension,
+        value: 2,
+        limit: 1,
+    }) = roles.charge_attempted_in_order([2])
+    else {
+        panic!("expected the bound attempted limit failure");
+    };
+    assert_eq!(dimension.id, registered.id);
+    assert_eq!(dimension.label, registered.label);
+
+    work.borrow_state_mut().unwrap().protected_dimension = Some(0);
+    let Err(LedgerCause::UnknownDimension { dimension }) = roles.charge_attempted_in_order([0])
+    else {
+        panic!("expected the revoked bound role");
+    };
+    assert_eq!(dimension.label, registered.label);
+    let Err(LedgerCause::UnknownDimension { dimension }) = work.bind([caller], WorkGrant::Ordinary)
+    else {
+        panic!("expected the protected role to reject binding");
+    };
+    assert_eq!(dimension.label, caller.label);
+
+    let missing = DiagnosticKey {
+        id: 30,
+        label: "missing caller",
+    };
+    let Err(LedgerCause::UnknownDimension { dimension }) =
+        work.bind([missing], WorkGrant::Ordinary)
+    else {
+        panic!("expected the absent caller key");
+    };
+    assert_eq!(dimension.id, missing.id);
+    assert_eq!(dimension.label, missing.label);
+}
+
+#[test]
 fn owner_and_numeric_interfaces_accept_keys_without_debug() {
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     struct OpaqueKey(u8);

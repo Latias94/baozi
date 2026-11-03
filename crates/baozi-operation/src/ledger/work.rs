@@ -2,6 +2,8 @@
 //!
 //! The parent must keep row identities and positions immutable, and may change numeric policy
 //! only through its joint work/storage transaction. No user code may run while a guard is held.
+//! Numeric errors after successful binding name the registered catalog key; absent-key binding
+//! errors retain the supplied key.
 
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::num::NonZeroU64;
@@ -230,7 +232,6 @@ impl<D: Copy + Ord> LocalWork<D> {
         }
         Ok(BoundWorkGroup {
             owner: self,
-            dimensions,
             positions,
             representatives,
             completion_order,
@@ -243,7 +244,6 @@ impl<D: Copy + Ord> LocalWork<D> {
 #[derive(Clone, Copy)]
 pub(crate) struct BoundWorkGroup<'op, D: Copy, const N: usize> {
     owner: &'op LocalWork<D>,
-    dimensions: [D; N],
     positions: [usize; N],
     representatives: [usize; N],
     completion_order: [usize; N],
@@ -251,6 +251,10 @@ pub(crate) struct BoundWorkGroup<'op, D: Copy, const N: usize> {
 }
 
 impl<'op, D: Copy, const N: usize> BoundWorkGroup<'op, D, N> {
+    fn dimension(&self, index: usize) -> D {
+        self.owner.catalog[self.positions[index]]
+    }
+
     fn aggregate(
         &self,
         amounts: [u64; N],
@@ -259,13 +263,12 @@ impl<'op, D: Copy, const N: usize> BoundWorkGroup<'op, D, N> {
         let mut totals = [0_u64; N];
         for (index, amount) in amounts.into_iter().enumerate() {
             let first = self.representatives[index];
-            totals[first] =
-                totals[first]
-                    .checked_add(amount)
-                    .ok_or(LedgerCause::ArithmeticOverflow {
-                        class,
-                        dimension: self.dimensions[index],
-                    })?;
+            totals[first] = totals[first].checked_add(amount).ok_or_else(|| {
+                LedgerCause::ArithmeticOverflow {
+                    class,
+                    dimension: self.dimension(index),
+                }
+            })?;
         }
         Ok(totals)
     }
@@ -286,7 +289,7 @@ impl<'op, D: Copy, const N: usize> BoundWorkGroup<'op, D, N> {
                     .position(|position| Some(*position) == state.protected_dimension)
                 {
                     return Err(LedgerCause::UnknownDimension {
-                        dimension: self.dimensions[index],
+                        dimension: self.dimension(index),
                     });
                 }
             }
@@ -311,7 +314,7 @@ impl<'op, D: Copy, const N: usize> BoundWorkGroup<'op, D, N> {
         for (index, amount) in amounts.into_iter().enumerate() {
             charge_attempted_entry(
                 &mut state.rows[self.positions[index]],
-                self.dimensions[index],
+                || self.dimension(index),
                 amount,
             )?;
         }
@@ -334,7 +337,7 @@ impl<'op, D: Copy, const N: usize> BoundWorkGroup<'op, D, N> {
         while cursor < N {
             let index = self.completion_order[cursor];
             let position = self.positions[index];
-            let dimension = self.dimensions[index];
+            let dimension = || self.dimension(index);
             let mut total = 0_u64;
             while cursor < N && self.positions[self.completion_order[cursor]] == position {
                 total = add_consumed(total, amounts[self.completion_order[cursor]], dimension)?;
@@ -363,7 +366,7 @@ impl<'op, D: Copy, const N: usize> BoundWorkGroup<'op, D, N> {
         let mut state = self.borrow_active()?;
         for (index, amount) in amounts.into_iter().enumerate() {
             let row = &mut state.rows[self.positions[index]];
-            let dimension = self.dimensions[index];
+            let dimension = || self.dimension(index);
             charge_attempted_entry(row, dimension, amount)?;
             consume_observed_entry(row, dimension, amount)?;
         }
@@ -379,7 +382,7 @@ impl<'op, D: Copy, const N: usize> BoundWorkGroup<'op, D, N> {
         for (index, amount) in amounts.into_iter().enumerate() {
             consume_observed_entry(
                 &mut state.rows[self.positions[index]],
-                self.dimensions[index],
+                || self.dimension(index),
                 amount,
             )?;
         }
@@ -406,20 +409,19 @@ impl<'op, D: Copy, const N: usize> BoundWorkGroup<'op, D, N> {
         self.validate_role(state)?;
         let mut repeated = amounts;
         for (index, amount) in repeated.iter_mut().enumerate() {
-            *amount =
-                amount
-                    .checked_mul(repetitions.get())
-                    .ok_or(LedgerCause::ArithmeticOverflow {
-                        class: CounterClass::Attempted,
-                        dimension: self.dimensions[index],
-                    })?;
+            *amount = amount.checked_mul(repetitions.get()).ok_or_else(|| {
+                LedgerCause::ArithmeticOverflow {
+                    class: CounterClass::Attempted,
+                    dimension: self.dimension(index),
+                }
+            })?;
         }
         for index in 0..N {
             if self.representatives[index] != index {
                 continue;
             }
             let row = &state.rows[self.positions[index]];
-            let dimension = self.dimensions[index];
+            let dimension = || self.dimension(index);
             // Preserve caller-first projection precedence, including a later group's overflow.
             let mut amount = 0;
             for (other, repeated_amount) in repeated.iter().copied().enumerate() {
@@ -478,7 +480,7 @@ impl<'op, D: Copy, const N: usize> BoundWorkGroup<'op, D, N> {
                 continue;
             }
             let row = &state.rows[self.positions[index]];
-            let dimension = self.dimensions[index];
+            let dimension = || self.dimension(index);
             attempted[index] = add_attempted(row.state.attempted, amount, dimension)?;
             pending[index] = add_consumed(row.state.pending_consumed, amount, dimension)?;
             let effective = add_consumed(row.state.consumed, pending[index], dimension)?;
@@ -610,7 +612,8 @@ impl<D: Copy, const N: usize> LinearWorkBatchPermit<'_, D, N> {
                 continue;
             }
             let row = &state.rows[self.group.positions[index]];
-            let dimension = self.group.dimensions[index];
+            let group = &self.group;
+            let dimension = || group.dimension(index);
             let Some(next_pending) = row.state.pending_consumed.checked_sub(amount) else {
                 state.integrity_fault = true;
                 self.faulted = true;
@@ -733,34 +736,43 @@ fn lane_is_open<D>(state: &WorkState<D>, lane: WorkLane) -> bool {
         }
 }
 
-fn add_attempted<D>(value: u64, amount: u64, dimension: D) -> Result<u64, LedgerCause<D>> {
+// Resolvers only copy immutable catalog metadata or a known key; never pass user callbacks.
+fn add_attempted<D>(
+    value: u64,
+    amount: u64,
+    dimension: impl Fn() -> D + Copy,
+) -> Result<u64, LedgerCause<D>> {
     value
         .checked_add(amount)
-        .ok_or(LedgerCause::ArithmeticOverflow {
+        .ok_or_else(|| LedgerCause::ArithmeticOverflow {
             class: CounterClass::Attempted,
-            dimension,
+            dimension: dimension(),
         })
 }
 
-fn add_consumed<D>(value: u64, amount: u64, dimension: D) -> Result<u64, LedgerCause<D>> {
+fn add_consumed<D>(
+    value: u64,
+    amount: u64,
+    dimension: impl Fn() -> D + Copy,
+) -> Result<u64, LedgerCause<D>> {
     value
         .checked_add(amount)
-        .ok_or(LedgerCause::ArithmeticOverflow {
+        .ok_or_else(|| LedgerCause::ArithmeticOverflow {
             class: CounterClass::Consumed,
-            dimension,
+            dimension: dimension(),
         })
 }
 
 fn check_limit<D>(
     class: CounterClass,
-    dimension: D,
+    dimension: impl Fn() -> D + Copy,
     value: u64,
     limit: u64,
 ) -> Result<(), LedgerCause<D>> {
     if value > limit {
         return Err(LedgerCause::LimitExceeded {
             class,
-            dimension,
+            dimension: dimension(),
             value,
             limit,
         });
@@ -769,7 +781,7 @@ fn check_limit<D>(
 }
 
 fn check_effective<D: Copy>(
-    dimension: D,
+    dimension: impl Fn() -> D + Copy,
     consumed: u64,
     pending: u64,
     attempted: u64,
@@ -778,7 +790,7 @@ fn check_effective<D: Copy>(
     let effective = add_consumed(consumed, pending, dimension)?;
     if effective > attempted {
         return Err(LedgerCause::ConsumedExceedsAttempted {
-            dimension,
+            dimension: dimension(),
             consumed: effective,
             attempted,
         });
@@ -788,7 +800,7 @@ fn check_effective<D: Copy>(
 
 fn charge_attempted_entry<D: Copy>(
     row: &mut WorkEntry<D>,
-    dimension: D,
+    dimension: impl Fn() -> D + Copy,
     amount: u64,
 ) -> Result<(), LedgerCause<D>> {
     row.state.attempted = add_attempted(row.state.attempted, amount, dimension)?;
@@ -802,13 +814,13 @@ fn charge_attempted_entry<D: Copy>(
 
 fn consume_observed_entry<D: Copy>(
     row: &mut WorkEntry<D>,
-    dimension: D,
+    dimension: impl Fn() -> D + Copy,
     amount: u64,
 ) -> Result<(), LedgerCause<D>> {
     let consumed = add_consumed(row.state.consumed, amount, dimension)?;
     if consumed > row.state.attempted {
         return Err(LedgerCause::ConsumedExceedsAttempted {
-            dimension,
+            dimension: dimension(),
             consumed,
             attempted: row.state.attempted,
         });
@@ -829,7 +841,7 @@ pub(super) fn validate_work_state<D: Copy>(
     policy: WorkPolicy,
     state: WorkDimensionState,
 ) -> Result<(), LedgerCause<D>> {
-    let effective = add_consumed(state.consumed, state.pending_consumed, dimension)?;
+    let effective = add_consumed(state.consumed, state.pending_consumed, || dimension)?;
     if effective > state.attempted {
         return Err(LedgerCause::ConsumedExceedsAttempted {
             dimension,
@@ -839,13 +851,13 @@ pub(super) fn validate_work_state<D: Copy>(
     }
     check_limit(
         CounterClass::Attempted,
-        dimension,
+        || dimension,
         state.attempted,
         policy.attempted_limit,
     )?;
     check_limit(
         CounterClass::Consumed,
-        dimension,
+        || dimension,
         effective,
         policy.consumed_limit,
     )

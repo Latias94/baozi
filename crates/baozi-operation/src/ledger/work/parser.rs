@@ -81,7 +81,7 @@ impl<'op, D: Copy, const N: usize> BoundWorkGroup<'op, D, N> {
         for (index, amount) in amounts.into_iter().enumerate() {
             charge_attempted_entry(
                 &mut state.rows[self.positions[index]],
-                self.dimensions[index],
+                || self.dimension(index),
                 amount,
             )?;
             if let Some(limit) = item_limits[index]
@@ -212,7 +212,7 @@ impl<D: Copy> ParserWorkScope<'_, D, 1> {
             }
             charge_attempted_entry(
                 &mut state.rows[self.group.positions[0]],
-                self.group.dimensions[0],
+                || self.group.dimension(0),
                 amount,
             )?;
         }

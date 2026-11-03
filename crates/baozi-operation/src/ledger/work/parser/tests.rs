@@ -678,19 +678,23 @@ fn protected_grant_cannot_open_parser_channels() {
 
 #[test]
 fn zero_completion_rechecks_bound_role_and_cleanup_preserves_its_cause() {
-    let work = owner([(1, 20, 20)]);
-    let mut scope = group(&work, [1]).begin_parser_child([0], [None]).unwrap();
-    work.borrow_state_mut().unwrap().protected_dimension = Some(0);
+    let work = owner([(10, 20, 20), (30, 20, 20), (90, 20, 20)]);
+    let mut scope = group(&work, [90]).begin_parser_child([0], [None]).unwrap();
+    work.borrow_state_mut().unwrap().protected_dimension = Some(2);
     assert_eq!(
         scope.complete([0]),
-        Err(LedgerCause::UnknownDimension { dimension: 1 })
+        Err(LedgerCause::UnknownDimension { dimension: 90 })
+    );
+    assert_eq!(
+        scope.replenish(0),
+        Err(LedgerCause::UnknownDimension { dimension: 90 })
     );
     assert_eq!(
         scope.finish_partial(),
-        Err(LedgerCause::UnknownDimension { dimension: 1 })
+        Err(LedgerCause::UnknownDimension { dimension: 90 })
     );
     assert_eq!(channels(&work), (false, false, 0));
-    assert_eq!(counters(&work), [(0, 0, 0)]);
+    assert_eq!(counters(&work), [(0, 0, 0); 3]);
 }
 
 #[test]
@@ -711,7 +715,6 @@ fn parser_numeric_methods_need_neither_debug_nor_ordering_on_dimension_keys() {
     );
     let roles = BoundWorkGroup {
         owner: &work,
-        dimensions: [Dimension(1)],
         positions: [0],
         representatives: [0],
         completion_order: [0],
