@@ -207,4 +207,15 @@ negative case only for a genuinely new boundary, not for incidental private layo
   correcting promotion and its footprint contract before implementation. A host-owned exclusive
   execution-context alternative is being assessed; no design is called optimal merely because
   it passes the borrow checker or has fewer allocations.
+- R5 [bounded normal actions](../reviews/2026-11-03-bounded-normal-actions.md) are source-qualified
+  at `57c33b2447a296c28f5f5817a36debd248bd4280`: 2,297 affected tests, compiler contracts,
+  strict lint, 124 asset-consumer tests, control assurance and scene/fuzz compilation pass.
+  Independent four-campaign ordinary Windows review supports an intermediate keep for the
+  repeated-OBJ preparation gain of 26.48% in both orders and pipeline gains of 14.93% / 12.75%.
+  Grid extraction's +5.36% confirmation cost, the original R4 F64 regression, noisy/positive
+  small lanes and parent/tail observations remain explicit repair/confirmation obligations.
+  Six exact reconciled Linux instruction profiles show repeated -15.14% and other workers
+  +0.69% to +2.11%; they do not clear native-time or memory gates. Fifteen of 23 timing lanes
+  and four of six pipelines still exceed 3x Assimp. Consumer normal policy and later owner
+  candidates remain separately qualified sources, not part of these measurements.
 - Complete release-convergence qualification: pending; all final gates remain closed.

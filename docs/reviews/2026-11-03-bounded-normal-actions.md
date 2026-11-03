@@ -98,6 +98,97 @@ the cleaned source. This delta is disclosed rather than attributing the initial 
 later bytes. Exact commands, logs, source hashes and check reconciliation remain in
 `target/review/convergence/r5-*.json` and matching logs, including `r5-tested-source.json`.
 
-Ordinary performance evidence remains a separate pending gate. Neither a speedup nor release
-readiness follows from the smaller work count. The previously confirmed R4 F64 extraction
-regression and the full Windows/Linux all-endpoint convergence target remain open.
+This table records correctness qualification. Neither a speedup nor release readiness follows
+from the smaller work count; ordinary evidence is assessed separately below. The previously
+confirmed R4 F64 extraction regression and the full Windows/Linux convergence target remain open.
+
+## Ordinary Windows Evidence and Retained Costs
+
+Qualified runtime source is `57c33b2447a296c28f5f5817a36debd248bd4280`. The ordinary Windows
+worker has SHA-256 `b583f6a58191fb8f5e8ba00351c5f4f08e3d8d4081b3b9a5736f7f7ba311e053`,
+and its source archive is
+`3f4d6acf8611064720b748b632eaeeba2e4b70153de9ed47c2c8831d018fe2b9`.
+Four serial six-case, 23-lane memory-input campaigns compare retained R4 and R5 in both version
+orders, each with twenty retained alternating AB/BA engine pairs after three warmup pairs.
+All 4,232 children succeed. Build/profiling runs do not overlap ordinary collection.
+
+Independent review reconstructs every raw observation, engine/output statistic and paired
+summary, with unchanged collector, corpus, comparator, selected F64 output and comparison
+adapter. Its intermediate keep basis is the repeated-OBJ preparation and pipeline gains,
+which have disjoint old/new Baozi sample ranges in both rounds and persist in half/order
+splits. Source semantics, correctness and the observed gain support retention while the
+explicit costs below remain repair obligations. This is not a general no-regression result.
+
+Times are milliseconds; changes are R5/R4 minus one:
+
+| Endpoint | Initial R4 / R5 | Change | Reverse R4 / R5 | Change | Reverse R5 / Assimp |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Repeated OBJ prepare | 24.10805 / 17.72435 | -26.48% | 23.88190 / 17.55690 | -26.48% | 16.21x |
+| Repeated OBJ pipeline | 59.02360 / 50.20880 | -14.93% | 57.20780 / 49.91380 | -12.75% | 5.16x |
+| Grid OBJ pipeline | 155.05620 / 154.99765 | -0.04% | 154.31165 / 154.93725 | +0.41% | 6.00x |
+| Shared glTF pipeline | 4.55935 / 4.42050 | -3.05% | 4.64800 / 4.65705 | +0.19% | 13.46x |
+| Repeated STL pipeline | 3.00455 / 2.89505 | -3.64% | 3.08250 / 2.99200 | -2.94% | 12.00x |
+| PLY points pipeline | 1.66450 / 1.56945 | -5.71% | 1.69775 / 1.65490 | -2.52% | 2.14x |
+| F64 neighbors pipeline | 1.38835 / 1.33595 | -3.77% | 1.39440 / 1.36370 | -2.20% | 2.25x |
+| Grid OBJ extract | 2.30050 / 2.03095 | -11.72% | 1.96200 / 2.06710 | +5.36% | 1.96x |
+| F64 neighbors extract | 0.01285 / 0.01065 | -17.12% | 0.01295 / 0.01085 | -16.22% | 9.86x |
+
+The grid-extraction confirmation increase is 105.10 us. Its Q1/Q3 bands are separated, and
+half/order splits retain the increase. The first pilot instead improves alongside substantial
+control movement. Preserve this as a localized confirmation cost, not a reproducible
+two-round causal regression, and keep its source-qualified explanation/correction and
+ordinary confirmation open. Neither the pilot nor pipeline median clears it. Repeated
+extraction also changes sign, glTF pipeline is effectively flat, and overlapping small-lane
+distributions do not establish independent material gains.
+
+F64 extraction improves in both current comparisons, but its archived public reader is
+unchanged. These observations do not establish a reader repair or a fresh matched R3/R5
+comparison. Historical R3 medians cannot close R4's confirmed regression by comparison across
+campaigns. Both the original evidence and its repair obligation remain. Assimp drift is
+reported without causal subtraction; repeated-OBJ pipeline control changes -21.88% initially
+and -1.64% in confirmation. The initial candidate improvement alone is not the reason to keep.
+
+The six pipeline medians sum to -4.13% / -3.07%. Fifteen of 23 timing lanes and four of six
+pipelines still exceed 3x Assimp in both rounds. Maximum endpoint ratios are 102.59x / 93.37x;
+maximum pipeline ratios are 13.18x / 13.46x. Short no-op preparation remains a major cost.
+Parent process timing and tails are retained separately: a candidate grid pipeline tail and
+440.58 ms preparation parent observation, and a 2,441.49 ms R4 extraction parent observation,
+prevent a whole-process or tail-safety claim. No outlier is trimmed and no p95 SLO is inferred
+from twenty samples.
+
+Comparable whole-child Windows working-set and commit high-water marks include setup, earlier
+stages, observation and cleanup. Median changes stay within 0.67% / 1.07%, with maximum
+same-campaign Baozi/Assimp working-set ratio 1.66782x. There is no material confirmed memory
+regression in these selected lanes. This is not stage heap, retained storage or Linux RSS,
+and small process-level decreases are not attributed to a storage optimization.
+
+| Report under `target/assimp-comparison/` | SHA-256 |
+| --- | --- |
+| `convergence-windows-r5-r4-control/report.json` | `8cf75f995f1acd9403ae5a9095e64a4203967a5894d3b244165c8150f5ab5901` |
+| `convergence-windows-r5/report.json` | `b56a47fbe19255c3336093454f859b499ddae3dc465eca2b53af115eb34a5378` |
+| `convergence-windows-r5-confirm/report.json` | `671a941628727add3721a75bd5ed1f8c1047f82e137b047c4344cc0ba4e7f458` |
+| `convergence-windows-r5-r4-control-confirm/report.json` | `09869405dce12df26b130676939a785a820b86e6d8cefeedd7f97b5c581920c1` |
+
+The detailed independent disposition is
+`.git/baozi-review/performance-convergence/normal-actions-measurement-review.md`. These
+artifacts qualify R5 alone; later consumer-policy, reader-codegen, glTF-profile and exclusive
+invocation candidates need their own source and evidence identities.
+
+## Refreshed Linux Instruction Attribution
+
+Six separate whole-worker Callgrind profiles run after ordinary collection, using the same
+R5 source archive and symbol-worker SHA-256
+`d3d7c1ed09e191101c89701b2b241ec35d6c049a4ac2975db7176020842ef391`.
+Main reconciles every flat exclusive sum with raw totals and reproduces the previous owner's
+classification exactly on all six R4 profiles. Repeated OBJ Ir falls 15.14%; grid, glTF, STL,
+points and F64 instead increase 1.26%, 2.11%, 2.11%, 1.66% and 0.69%. Those increases remain
+explicit costs for investigation, not native-time conclusions. Operation-owned exclusive
+instructions still account for about 64% of the repeated worker and 56% of grid. These are
+whole-worker instruction owners, including setup/checking/teardown, not stage CPU fractions.
+
+Raw profiles, annotations and the exact summary remain under
+`target/review/convergence/r5-attribution/`; summary SHA-256 is
+`deecd8faf2f1920f273737d9af87a4b5d782e3a499f5139fee291a503185e985`.
+Further investigation must use actual call subtrees before choosing the next replacement.
+Neither this attribution nor the intermediate Windows keep clears the full fourteen-case,
+110-lane ordinary Windows/Linux endpoint, pipeline, memory and correctness gates.
