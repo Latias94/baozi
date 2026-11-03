@@ -9,13 +9,16 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 mod commitment;
 mod evidence;
+mod exclusive;
+pub(crate) use exclusive::{ExclusiveLedger, ExclusiveStorage};
 mod reservation;
 mod snapshot;
 mod startup;
 mod work;
 
 pub(crate) use work::{
-    BoundWorkGroup, LinearWorkBatchPermit, ParserWorkError, ParserWorkScope, WorkLane,
+    BoundWorkGroup, LinearWorkBatchPermit, ParserChannel, ParserFrame, ParserWorkError,
+    ParserWorkScope, WorkFrame, WorkLane, WorkLayout, WorkView,
 };
 use work::{LocalWork, WorkDimensionState, WorkEntry, WorkGrant, WorkMode, WorkPolicy, WorkState};
 
@@ -1300,7 +1303,7 @@ where
 
     pub(crate) fn ensure_work_open(&self) -> Result<(), LedgerCause<D>> {
         self.work.validate_integrity()?;
-        match self.work.borrow_state()?.mode {
+        match self.work.borrow_state()?.header.mode {
             WorkMode::Ordinary => Ok(()),
             WorkMode::OrdinarySealed => Err(LedgerCause::PublicationAlreadyPending),
             WorkMode::Protected | WorkMode::Closed => Err(LedgerCause::PublicationAlreadyCompleted),
@@ -1332,7 +1335,7 @@ where
     pub(crate) fn ordinary_work_is_sealed(&self) -> bool {
         self.work
             .borrow_state()
-            .map_or(true, |work| work.mode != WorkMode::Ordinary)
+            .map_or(true, |work| work.header.mode != WorkMode::Ordinary)
     }
 
     pub(crate) fn check_work_quiescent(&self) -> Result<(), LedgerCause<D>> {
@@ -1344,12 +1347,12 @@ where
         self.work.check_quiescent()?;
         let mut work = self.work.borrow_state_mut()?;
         let mut storage = lock(&self.state);
-        match work.mode {
+        match work.header.mode {
             WorkMode::Ordinary => {
                 if storage.publication == PublicationState::Open {
                     storage.publication = PublicationState::Closing;
                 }
-                work.mode = WorkMode::OrdinarySealed;
+                work.header.mode = WorkMode::OrdinarySealed;
             }
             WorkMode::OrdinarySealed | WorkMode::Protected => {}
             WorkMode::Closed => {}
@@ -1365,10 +1368,10 @@ where
             .map_err(|_| LedgerCause::UnknownDimension { dimension })?;
         self.work.check_quiescent()?;
         let mut work = self.work.borrow_state_mut()?;
-        if work.mode != WorkMode::Ordinary || work.protected_dimension.is_some() {
+        if work.header.mode != WorkMode::Ordinary || work.header.protected_dimension.is_some() {
             return Err(LedgerCause::InactiveLinearWorkPermit);
         }
-        work.protected_dimension = Some(position);
+        work.header.protected_dimension = Some(position);
         Ok(())
     }
 
@@ -1381,10 +1384,12 @@ where
             .map_err(|_| LedgerCause::UnknownDimension { dimension })?;
         self.seal_ordinary_work()?;
         let mut work = self.work.borrow_state_mut()?;
-        if work.mode != WorkMode::OrdinarySealed || work.protected_dimension != Some(position) {
+        if work.header.mode != WorkMode::OrdinarySealed
+            || work.header.protected_dimension != Some(position)
+        {
             return Err(LedgerCause::InactiveLinearWorkPermit);
         }
-        work.mode = WorkMode::Protected;
+        work.header.mode = WorkMode::Protected;
         Ok(())
     }
 
@@ -1392,10 +1397,10 @@ where
     pub(crate) fn close_work(&self) -> Result<(), LedgerCause<D>> {
         self.work.check_quiescent()?;
         let mut work = self.work.borrow_state_mut()?;
-        match work.mode {
+        match work.header.mode {
             WorkMode::Ordinary => return Err(LedgerCause::InactiveLinearWorkPermit),
             WorkMode::OrdinarySealed | WorkMode::Protected | WorkMode::Closed => {
-                work.mode = WorkMode::Closed;
+                work.header.mode = WorkMode::Closed;
             }
         }
         Ok(())
@@ -1434,8 +1439,24 @@ where
             .map_err(|_| LedgerCause::UnknownDimension { dimension })?;
         let mut work = self.work.borrow_state_mut()?;
         let mut storage = lock(&self.state);
-        Self::ensure_open(&storage)?;
-        if work.mode != WorkMode::Ordinary {
+        Self::tighten_policy_in(
+            &mut work.view(self.work.catalogue()),
+            &mut storage,
+            position,
+            dimension,
+            upper_bound,
+        )
+    }
+
+    fn tighten_policy_in(
+        work: &mut work::WorkView<'_, D>,
+        storage: &mut LedgerState<P, D>,
+        position: usize,
+        dimension: D,
+        upper_bound: DimensionPolicy,
+    ) -> Result<(), LedgerCause<D>> {
+        Self::ensure_open(storage)?;
+        if work.header.mode != WorkMode::Ordinary {
             return Err(LedgerCause::PublicationAlreadyCompleted);
         }
         let work_row = &mut work.rows[position];
@@ -1481,7 +1502,7 @@ where
         let mut work = self.work.borrow_state_mut()?;
         let storage = lock(&self.state);
         Self::ensure_open(&storage)?;
-        if work.mode != WorkMode::Ordinary {
+        if work.header.mode != WorkMode::Ordinary {
             return Err(LedgerCause::PublicationAlreadyPending);
         }
         for index in [ordinary, terminal] {
@@ -1558,7 +1579,7 @@ where
         &self,
         charges: &[(D, u64); N],
     ) -> Result<LinearWorkBatchPermit<'_, D, N>, LedgerCause<D>> {
-        let grant = match self.work.borrow_state()?.mode {
+        let grant = match self.work.borrow_state()?.header.mode {
             WorkMode::Protected => WorkGrant::Protected,
             _ => WorkGrant::Ordinary,
         };
@@ -1659,7 +1680,7 @@ where
         &self,
     ) -> Result<StorageAdmission, LedgerCause<D>> {
         self.work.validate_integrity()?;
-        match self.work.borrow_state()?.mode {
+        match self.work.borrow_state()?.header.mode {
             WorkMode::Ordinary => Ok(StorageAdmission::Ordinary),
             WorkMode::Protected if Destination::IS_OUTCOME_EVIDENCE => {
                 Ok(StorageAdmission::ProtectedEvidence)
@@ -1689,7 +1710,7 @@ where
         state: &LedgerState<P, D>,
         work: &WorkState<D>,
     ) -> Result<(), LedgerCause<D>> {
-        if state.publication == PublicationState::Closing && work.mode == WorkMode::Closed {
+        if state.publication == PublicationState::Closing && work.header.mode == WorkMode::Closed {
             Ok(())
         } else {
             Self::ensure_open(state)
@@ -1714,19 +1735,38 @@ where
         bytes: u64,
         admission: StorageAdmission,
     ) -> Result<ReservationCore<O, P, D>, LedgerCause<D>> {
-        let dimension_position = self.bound_dimension_position(dimension);
-        let phase_position = self.bound_phase_position(phase);
-        let mut state = lock(&self.state);
-        let projection = self.project_reservation(
+        Self::reserve_core_in(
+            &self.state,
+            self.operation_live_byte_limit,
+            phase,
+            dimension,
+            bytes,
+            admission,
+            ReservationPositions {
+                dimension: self.bound_dimension_position(dimension),
+                phase: self.bound_phase_position(phase),
+            },
+        )
+    }
+
+    fn reserve_core_in(
+        storage: &Arc<Mutex<LedgerState<P, D>>>,
+        operation_live_byte_limit: u64,
+        phase: P,
+        dimension: D,
+        bytes: u64,
+        admission: StorageAdmission,
+        positions: ReservationPositions<D>,
+    ) -> Result<ReservationCore<O, P, D>, LedgerCause<D>> {
+        let mut state = lock(storage);
+        let projection = Self::project_reservation_in(
+            operation_live_byte_limit,
             &state,
             dimension,
             bytes,
             NonZeroU64::MIN,
             admission,
-            ReservationPositions {
-                dimension: dimension_position,
-                phase: phase_position,
-            },
+            positions,
         )?;
         let ReservationProjection {
             dimension_position,
@@ -1748,7 +1788,7 @@ where
         state.active_reservations = active_reservations;
 
         Ok(ReservationCore::new(
-            Arc::clone(&self.state),
+            Arc::clone(storage),
             phase,
             phase_position,
             dimension,
@@ -1757,8 +1797,8 @@ where
         ))
     }
 
-    fn project_reservation(
-        &self,
+    fn project_reservation_in(
+        operation_live_byte_limit: u64,
         state: &LedgerState<P, D>,
         dimension: D,
         bytes: u64,
@@ -1797,12 +1837,12 @@ where
                     class: CounterClass::Live,
                     dimension,
                 })?;
-        if operation_live > self.operation_live_byte_limit {
+        if operation_live > operation_live_byte_limit {
             return Err(LedgerCause::LimitExceeded {
                 class: CounterClass::Live,
                 dimension,
                 value: operation_live,
-                limit: self.operation_live_byte_limit,
+                limit: operation_live_byte_limit,
             });
         }
         let phase_position = positions.phase?;
@@ -1847,7 +1887,8 @@ where
         let dimension_position = self.bound_dimension_position(dimension);
         let phase_position = self.bound_phase_position(phase);
         let state = lock(&self.state);
-        self.project_reservation(
+        Self::project_reservation_in(
+            self.operation_live_byte_limit,
             &state,
             dimension,
             bytes,
@@ -2099,7 +2140,23 @@ where
         bytes: u64,
         admission: StorageAdmission,
     ) -> Result<(), LedgerCause<D>> {
-        let mut state = lock(&self.state);
+        Self::resize_core_in(
+            &self.state,
+            self.operation_live_byte_limit,
+            reservation,
+            bytes,
+            admission,
+        )
+    }
+
+    fn resize_core_in(
+        storage: &Arc<Mutex<LedgerState<P, D>>>,
+        operation_live_byte_limit: u64,
+        reservation: &mut ReservationCore<O, P, D>,
+        bytes: u64,
+        admission: StorageAdmission,
+    ) -> Result<(), LedgerCause<D>> {
+        let mut state = lock(storage);
         Self::ensure_storage_admission(&state, admission)?;
         if bytes == reservation.bytes {
             return Ok(());
@@ -2142,12 +2199,12 @@ where
         }
 
         let operation_live = project(state.current_live_bytes)?;
-        if operation_live > self.operation_live_byte_limit {
+        if operation_live > operation_live_byte_limit {
             return Err(LedgerCause::LimitExceeded {
                 class: CounterClass::Live,
                 dimension,
                 value: operation_live,
-                limit: self.operation_live_byte_limit,
+                limit: operation_live_byte_limit,
             });
         }
 
@@ -2443,7 +2500,7 @@ where
                 .pending_publication += commitment.amount;
         }
         storage.publication = PublicationState::Pending;
-        work.mode = WorkMode::OrdinarySealed;
+        work.header.mode = WorkMode::OrdinarySealed;
         drop(storage);
         drop(work);
         let (commitments, evidence_bytes) = aggregate.into_parts();
@@ -2463,7 +2520,7 @@ where
         transaction_live_bytes: u64,
     ) -> Result<(), LedgerCause<D>> {
         Self::ensure_open(storage)?;
-        if work.mode != WorkMode::Ordinary {
+        if work.header.mode != WorkMode::Ordinary {
             return Err(LedgerCause::PublicationAlreadyPending);
         }
         validate_final_snapshot_shape(storage, work)?;
@@ -3766,7 +3823,7 @@ where
         state: &LedgerState<P, D>,
         work: &WorkState<D>,
     ) -> Result<Option<P>, TypedFreezeQualificationError> {
-        if state.publication != PublicationState::Closing || work.mode != WorkMode::Closed {
+        if state.publication != PublicationState::Closing || work.header.mode != WorkMode::Closed {
             return Err(TypedFreezeQualificationError::PublicationState);
         }
         if !typed_terminal_snapshot_positions_are_valid(state, work) {

@@ -1,9 +1,13 @@
 //! Concrete execution views for trusted import and geometry adapters.
 
 use super::*;
+mod exclusive;
 use crate::retained::{
     ExecutionControl, ExecutionError, ExecutionGroup, ExecutionParserScope, ExecutionPermit,
     ExecutionStorage, ExecutionWork,
+};
+pub use exclusive::{
+    StoreInvocation, StoreInvocationError, StoreInvocationLayout, StoreInvocationParser,
 };
 
 /// Work authority borrowed from one active invocation, separate from its storage and control.

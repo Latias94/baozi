@@ -398,18 +398,18 @@ pub(super) fn validate_final_snapshot_shape<P: Copy + PartialEq, D>(
     state: &LedgerState<P, D>,
     work: &WorkState<D>,
 ) -> Result<(), LedgerCause<D>> {
-    if work.integrity_fault {
+    if work.header.integrity_fault {
         return Err(LedgerCause::FinalSnapshotShapeMismatch);
     }
-    if work.open_envelopes != 0
-        || work.producer_open
-        || work.parser_parent_open
-        || work.parser_child_open
-        || work.protected_open
+    if work.header.open_envelopes != 0
+        || work.header.producer_open
+        || work.header.parser_parent_open
+        || work.header.parser_child_open
+        || work.header.protected_open
         || work.rows.iter().any(|row| row.state.pending_consumed != 0)
     {
         return Err(LedgerCause::OutstandingLinearWorkPermits {
-            count: work.open_envelopes.max(1),
+            count: work.header.open_envelopes.max(1),
         });
     }
     if state.dimensions.len() != work.rows.len()
@@ -429,12 +429,12 @@ pub(super) fn typed_terminal_snapshot_positions_are_valid<P, D>(
     state: &LedgerState<P, D>,
     work: &WorkState<D>,
 ) -> bool {
-    !work.integrity_fault
-        && work.open_envelopes == 0
-        && !work.producer_open
-        && !work.parser_parent_open
-        && !work.parser_child_open
-        && !work.protected_open
+    !work.header.integrity_fault
+        && work.header.open_envelopes == 0
+        && !work.header.producer_open
+        && !work.header.parser_parent_open
+        && !work.header.parser_child_open
+        && !work.header.protected_open
         && work.rows.iter().all(|row| row.state.pending_consumed == 0)
         && state.dimensions.len() == work.rows.len()
         && state.dimensions.len() == state.dimension_snapshot_staging.len()

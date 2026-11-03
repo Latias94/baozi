@@ -786,7 +786,7 @@ fn producer_consumed_batch_preserves_membership_precedence_and_atomic_snapshots(
                 },
             ]
         );
-        assert_eq!(state.open_envelopes, 0);
+        assert_eq!(state.header.open_envelopes, 0);
     }
 }
 
@@ -895,7 +895,7 @@ fn producer_consumed_batch_numeric_failures_leave_every_counter_unchanged() {
         {
             let state = ledger.work.borrow_state().unwrap();
             assert_eq!([state.rows[0].state, state.rows[1].state], before);
-            assert_eq!(state.open_envelopes, u64::from(pending != 0));
+            assert_eq!(state.header.open_envelopes, u64::from(pending != 0));
         }
         if let Some(permit) = permit {
             permit.finish_partial().unwrap();
@@ -1044,7 +1044,7 @@ fn producer_membership_precedes_publication_without_changing_general_entry_order
         );
         let state = ledger.work.borrow_state().unwrap();
         assert_eq!([state.rows[0].state, state.rows[1].state], before);
-        assert_eq!(state.open_envelopes, 0);
+        assert_eq!(state.header.open_envelopes, 0);
     }
 }
 
@@ -1065,7 +1065,7 @@ fn producer_consumed_batch_preserves_pending_capacity_through_partial_completion
         {
             let state = ledger.work.borrow_state().unwrap();
             assert_eq!(state.rows[0].state, expected);
-            assert_eq!(state.open_envelopes, 1);
+            assert_eq!(state.header.open_envelopes, 1);
         }
         assert_eq!(
             ledger.charge_producer_consumed_batch(&[(Dimension::Records, 1)], None),
@@ -1079,7 +1079,7 @@ fn producer_consumed_batch_preserves_pending_capacity_through_partial_completion
         {
             let state = ledger.work.borrow_state().unwrap();
             assert_eq!(state.rows[0].state, expected);
-            assert_eq!(state.open_envelopes, 1);
+            assert_eq!(state.header.open_envelopes, 1);
         }
         if consumed == 0 {
             permit.complete(0, 1).unwrap();
@@ -1096,8 +1096,8 @@ fn producer_consumed_batch_preserves_pending_capacity_through_partial_completion
                 ..WorkDimensionState::default()
             }
         );
-        assert_eq!(state.open_envelopes, 0);
-        assert!(!state.integrity_fault);
+        assert_eq!(state.header.open_envelopes, 0);
+        assert!(!state.header.integrity_fault);
     }
     ledger
         .charge_producer_consumed_batch(&[(Dimension::Records, 1)], None)
@@ -1111,7 +1111,7 @@ fn producer_consumed_batch_preserves_pending_capacity_through_partial_completion
             ..WorkDimensionState::default()
         }
     );
-    assert_eq!(state.open_envelopes, 0);
+    assert_eq!(state.header.open_envelopes, 0);
 }
 
 #[test]
@@ -1371,7 +1371,7 @@ fn linear_work_pending_capacity_prevents_oversell_and_partial_finish_releases_th
             .find(|entry| entry.dimension == Dimension::Records)
             .expect("record dimension remains frozen");
         assert_eq!(entry.state.pending_consumed, 2);
-        assert_eq!(state.open_envelopes, 1);
+        assert_eq!(state.header.open_envelopes, 1);
     }
 
     first.finish_partial().unwrap();
@@ -1383,7 +1383,7 @@ fn linear_work_pending_capacity_prevents_oversell_and_partial_finish_releases_th
             .find(|entry| entry.dimension == Dimension::Records)
             .expect("record dimension remains frozen");
         assert_eq!(entry.state.pending_consumed, 0);
-        assert_eq!(state.open_envelopes, 0);
+        assert_eq!(state.header.open_envelopes, 0);
     }
     ledger
         .charge_consumed(Dimension::Records, 1)
@@ -1438,8 +1438,8 @@ fn linear_completion_preserves_prefix_after_competing_observed_work() {
             .find(|entry| entry.dimension == Dimension::Records)
             .expect("record dimension remains frozen");
         assert_eq!(entry.state.pending_consumed, 0);
-        assert_eq!(state.open_envelopes, 0);
-        assert!(!state.integrity_fault);
+        assert_eq!(state.header.open_envelopes, 0);
+        assert!(!state.header.integrity_fault);
     }
     let snapshot = ledger
         .finish()
@@ -3640,7 +3640,10 @@ fn included_zero_byte_attribution_freezes_to_zero_active_capabilities() {
             Err(_) => panic!("exact zero-byte baseline must be admitted"),
         };
     assert_eq!(lock(&ledger.state).publication, PublicationState::Open);
-    assert_eq!(ledger.work.borrow_state().unwrap().mode, WorkMode::Ordinary);
+    assert_eq!(
+        ledger.work.borrow_state().unwrap().header.mode,
+        WorkMode::Ordinary
+    );
     ledger
         .seal_ordinary_work()
         .expect("ordinary work resolves before terminal sealing");
@@ -3648,7 +3651,10 @@ fn included_zero_byte_attribution_freezes_to_zero_active_capabilities() {
         .close_work()
         .expect("work closes before typed terminal qualification");
     assert_eq!(lock(&ledger.state).publication, PublicationState::Closing);
-    assert_eq!(ledger.work.borrow_state().unwrap().mode, WorkMode::Closed);
+    assert_eq!(
+        ledger.work.borrow_state().unwrap().header.mode,
+        WorkMode::Closed
+    );
     let qualified = match baseline
         .into_fallback_proof(ledger, None, None)
         .try_into_qualified_discards()
@@ -4092,7 +4098,7 @@ fn consumed_batch_binds_every_dimension_before_its_numeric_mutation_tail() {
             [observation.rows[0].state, observation.rows[1].state],
             before
         );
-        assert_eq!(observation.open_envelopes, 0);
+        assert_eq!(observation.header.open_envelopes, 0);
         drop(observation);
         ledger
             .work

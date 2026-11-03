@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+use super::kernel::check_effective;
 use super::*;
 
 fn owner<const N: usize>(policies: [(u8, u64, u64); N]) -> LocalWork<u8> {
@@ -80,8 +81,8 @@ fn consuming_owner_preserves_exact_rows_and_outstanding_ownership() {
             pending_consumed: 3,
         }
     );
-    assert_eq!(state.open_envelopes, 1);
-    assert!(state.producer_open);
+    assert_eq!(state.header.open_envelopes, 1);
+    assert!(state.header.producer_open);
 }
 
 #[test]
@@ -95,7 +96,7 @@ fn consuming_owner_retains_prior_borrow_fault_without_replacing_numeric_state() 
     ));
     drop(guard);
     let (_catalogue, state) = work.into_state();
-    assert!(state.integrity_fault);
+    assert!(state.header.integrity_fault);
     assert_eq!(
         state.rows[0].state,
         WorkDimensionState {
@@ -113,7 +114,7 @@ fn consuming_owner_detects_forgotten_exclusive_guard_and_keeps_last_counters() {
     std::mem::forget(work.borrow_state_mut().unwrap());
     assert!(!work.borrow_fault.get());
     let (_catalogue, state) = work.into_state();
-    assert!(state.integrity_fault);
+    assert!(state.header.integrity_fault);
     assert_eq!(
         state.rows[0].state,
         WorkDimensionState {
@@ -127,7 +128,7 @@ fn consuming_owner_detects_forgotten_exclusive_guard_and_keeps_last_counters() {
 #[test]
 fn binding_validates_all_members_in_caller_order_before_mode() {
     let work = owner([(1, 10, 10)]);
-    work.borrow_state_mut().unwrap().mode = WorkMode::OrdinarySealed;
+    work.borrow_state_mut().unwrap().header.mode = WorkMode::OrdinarySealed;
     assert!(matches!(
         work.bind([3, 2], WorkGrant::Ordinary),
         Err(LedgerCause::UnknownDimension { dimension: 3 })
@@ -457,7 +458,7 @@ fn consumed_admission_failure_keeps_attempts_without_claiming_a_lane() {
         })
     ));
     assert_eq!(counters(&work), [(3, 0, 0)]);
-    assert!(!work.borrow_state().unwrap().producer_open);
+    assert!(!work.borrow_state().unwrap().header.producer_open);
     work.check_quiescent().unwrap();
 }
 
@@ -646,7 +647,7 @@ fn fully_completed_permit_is_open_until_finish_and_forgetting_is_detected() {
         Err(LedgerCause::OutstandingLinearWorkPermits { count: 1 })
     );
     std::mem::forget(permit);
-    assert!(work.borrow_state().unwrap().producer_open);
+    assert!(work.borrow_state().unwrap().header.producer_open);
     assert_eq!(
         work.check_quiescent(),
         Err(LedgerCause::OutstandingLinearWorkPermits { count: 1 })
@@ -696,8 +697,8 @@ fn replenishment_keeps_one_envelope_and_records_each_immediate_prefix() {
         assert_eq!(permit.remaining(), [0]);
         assert_eq!(counters(&work), [(0, 0, 0), (completed, completed, 0)]);
         let state = work.borrow_state().unwrap();
-        assert_eq!(state.open_envelopes, 1);
-        assert!(state.producer_open);
+        assert_eq!(state.header.open_envelopes, 1);
+        assert!(state.header.producer_open);
     }
     assert!(matches!(
         roles.admit_observed([0], WorkLane::Producer),
@@ -819,7 +820,7 @@ fn refill_rechecks_revoked_mode_and_protected_position_even_at_zero_remaining() 
         let mut permit = group(&work, [90])
             .admit_observed([0], WorkLane::Producer)
             .unwrap();
-        work.borrow_state_mut().unwrap().mode = mode;
+        work.borrow_state_mut().unwrap().header.mode = mode;
         let expected = if mode == WorkMode::Closed {
             LedgerCause::PublicationAlreadyCompleted
         } else {
@@ -834,7 +835,7 @@ fn refill_rechecks_revoked_mode_and_protected_position_even_at_zero_remaining() 
     let mut permit = group(&work, [90])
         .admit_observed([0], WorkLane::Producer)
         .unwrap();
-    work.borrow_state_mut().unwrap().protected_dimension = Some(1);
+    work.borrow_state_mut().unwrap().header.protected_dimension = Some(1);
     assert_eq!(
         permit.replenish_one(),
         Err(LedgerCause::UnknownDimension { dimension: 90 })
@@ -857,8 +858,8 @@ fn internal_protected_and_faulted_permits_cannot_replenish() {
     internal.finish().unwrap();
     {
         let mut state = work.borrow_state_mut().unwrap();
-        state.mode = WorkMode::Protected;
-        state.protected_dimension = Some(0);
+        state.header.mode = WorkMode::Protected;
+        state.header.protected_dimension = Some(0);
     }
     let mut protected = work
         .bind([90], WorkGrant::Protected)
@@ -902,7 +903,7 @@ fn abandoned_drop_releases_only_pending_and_persistently_faults_even_after_full_
     permit.complete_batch([1, 2]).unwrap();
     drop(permit);
     assert_eq!(counters(&work), [(5, 3, 0)]);
-    assert_eq!(work.borrow_state().unwrap().open_envelopes, 0);
+    assert_eq!(work.borrow_state().unwrap().header.open_envelopes, 0);
     assert_eq!(
         work.check_quiescent(),
         Err(LedgerCause::FinalSnapshotShapeMismatch)
@@ -943,8 +944,8 @@ fn drop_during_borrow_conflict_neither_panics_nor_invents_pending_release() {
         .unwrap();
     let state = work.borrow_state().unwrap();
     drop(permit);
-    assert_eq!(state.open_envelopes, 1);
-    assert!(state.producer_open);
+    assert_eq!(state.header.open_envelopes, 1);
+    assert!(state.header.producer_open);
     assert_eq!(state.rows[0].state.pending_consumed, 3);
     drop(state);
     assert_eq!(counters(&work), [(3, 0, 3)]);
@@ -1005,7 +1006,7 @@ fn modes_invalidate_old_groups_and_protected_work_needs_private_grant_and_lane()
         Err(LedgerCause::InactiveLinearWorkPermit)
     ));
     work.check_quiescent().unwrap();
-    work.borrow_state_mut().unwrap().mode = WorkMode::OrdinarySealed;
+    work.borrow_state_mut().unwrap().header.mode = WorkMode::OrdinarySealed;
     assert_eq!(
         ordinary.charge_attempted_in_order([0]),
         Err(LedgerCause::PublicationAlreadyPending)
@@ -1032,8 +1033,8 @@ fn modes_invalidate_old_groups_and_protected_work_needs_private_grant_and_lane()
     ));
     {
         let mut state = work.borrow_state_mut().unwrap();
-        state.protected_dimension = Some(0);
-        state.mode = WorkMode::Protected;
+        state.header.protected_dimension = Some(0);
+        state.header.mode = WorkMode::Protected;
     }
     assert_eq!(
         ordinary.charge_attempted_in_order([1]),
@@ -1054,7 +1055,7 @@ fn modes_invalidate_old_groups_and_protected_work_needs_private_grant_and_lane()
     permit.complete(0, 2).unwrap();
     permit.finish().unwrap();
     work.check_quiescent().unwrap();
-    work.borrow_state_mut().unwrap().mode = WorkMode::Closed;
+    work.borrow_state_mut().unwrap().header.mode = WorkMode::Closed;
     assert_eq!(
         protected.charge_attempted_in_order([0]),
         Err(LedgerCause::PublicationAlreadyCompleted)
@@ -1066,7 +1067,7 @@ fn modes_invalidate_old_groups_and_protected_work_needs_private_grant_and_lane()
 fn parser_channels_and_orphan_pending_also_prevent_quiescence() {
     let work = owner([(1, 10, 10)]);
     let roles = group(&work, [1]);
-    work.borrow_state_mut().unwrap().parser_parent_open = true;
+    work.borrow_state_mut().unwrap().header.parser_parent_open = true;
     assert_eq!(
         work.check_quiescent(),
         Err(LedgerCause::OutstandingLinearWorkPermits { count: 1 })
@@ -1079,8 +1080,8 @@ fn parser_channels_and_orphan_pending_also_prevent_quiescence() {
     internal.finish_partial().unwrap();
     {
         let mut state = work.borrow_state_mut().unwrap();
-        state.parser_parent_open = false;
-        state.parser_child_open = true;
+        state.header.parser_parent_open = false;
+        state.header.parser_child_open = true;
     }
     assert_eq!(
         work.check_quiescent(),
@@ -1088,7 +1089,7 @@ fn parser_channels_and_orphan_pending_also_prevent_quiescence() {
     );
     {
         let mut state = work.borrow_state_mut().unwrap();
-        state.parser_child_open = false;
+        state.header.parser_child_open = false;
         state.rows[0].state.pending_consumed = 1;
     }
     assert_eq!(
@@ -1123,7 +1124,7 @@ fn shape_mismatch_and_open_count_overflow_are_contained_without_numeric_changes(
 
     let work = owner([(1, 10, 10)]);
     let roles = group(&work, [1]);
-    work.borrow_state_mut().unwrap().open_envelopes = u64::MAX;
+    work.borrow_state_mut().unwrap().header.open_envelopes = u64::MAX;
     assert!(matches!(
         roles.admit_observed([2], WorkLane::Internal),
         Err(LedgerCause::FinalSnapshotShapeMismatch)
@@ -1345,7 +1346,7 @@ fn numeric_helper_errors_resolve_their_exact_key_once() {
 fn duplicate_bound_lanes_recheck_noncontiguous_protected_keys_without_work() {
     let work = owner([(10, 20, 20), (30, 20, 20), (90, 20, 20)]);
     let roles = group(&work, [30, 90, 30, 10]);
-    work.borrow_state_mut().unwrap().protected_dimension = Some(2);
+    work.borrow_state_mut().unwrap().header.protected_dimension = Some(2);
     assert_eq!(
         roles.charge_attempted_in_order([0; 4]),
         Err(LedgerCause::UnknownDimension { dimension: 90 })
@@ -1418,7 +1419,7 @@ fn bound_numeric_errors_name_registered_keys_and_binding_errors_keep_caller_keys
     assert_eq!(dimension.id, registered.id);
     assert_eq!(dimension.label, registered.label);
 
-    work.borrow_state_mut().unwrap().protected_dimension = Some(0);
+    work.borrow_state_mut().unwrap().header.protected_dimension = Some(0);
     let Err(LedgerCause::UnknownDimension { dimension }) = roles.charge_attempted_in_order([0])
     else {
         panic!("expected the revoked bound role");
@@ -1472,7 +1473,7 @@ fn owner_and_numeric_interfaces_accept_keys_without_debug() {
     assert!(permit.complete(0, 1).is_ok());
     assert!(permit.finish().is_ok());
     assert!(work.check_quiescent().is_ok());
-    assert!(!work.into_state().1.integrity_fault);
+    assert!(!work.into_state().1.header.integrity_fault);
 }
 
 #[derive(Debug, Clone, Copy)]

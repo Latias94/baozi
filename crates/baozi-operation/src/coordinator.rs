@@ -146,6 +146,10 @@ pub(crate) struct OperationPollCheckpoint<'a, PP, U> {
 }
 
 impl<PP, U> OperationPollCheckpoint<'_, PP, U> {
+    pub(crate) fn recorded_control_cause(&self) -> Option<ControlCause> {
+        self.terminal.clone()
+    }
+
     pub(crate) fn poll(&mut self) -> Result<(), ControlCause> {
         if self.allow_preexisting_terminal {
             Ok(())
@@ -696,6 +700,25 @@ where
     pub(crate) fn split_poll_checkpoint_and_retained_ledger(
         &mut self,
     ) -> (OperationPollCheckpoint<'_, PP, U>, &Ledger<O, LP, D>) {
+        let Self {
+            control,
+            ledger,
+            terminal,
+            ..
+        } = self;
+        (
+            OperationPollCheckpoint {
+                control,
+                terminal,
+                allow_preexisting_terminal: false,
+            },
+            ledger,
+        )
+    }
+
+    pub(crate) fn split_exclusive_poll_and_ledger(
+        &mut self,
+    ) -> (OperationPollCheckpoint<'_, PP, U>, &mut Ledger<O, LP, D>) {
         let Self {
             control,
             ledger,

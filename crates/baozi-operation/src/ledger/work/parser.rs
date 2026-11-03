@@ -1,8 +1,8 @@
-//! Attempted-only parser channels over the invocation's authoritative work rows.
-
-use std::cell::RefMut;
-
-use super::{BoundWorkGroup, LedgerCause, WorkGrant, WorkState, charge_attempted_entry};
+//! Transitional aliasable parser adapters; all arithmetic and flags live in kernel.
+#[cfg(test)]
+use super::WorkGrant;
+use super::kernel::{ParserChannel, ParserFrame};
+use super::{BoundWorkGroup, LedgerCause};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ParserWorkError<D> {
@@ -20,32 +20,6 @@ impl<D> From<LedgerCause<D>> for ParserWorkError<D> {
     }
 }
 
-#[derive(Clone, Copy)]
-enum ParserChannel {
-    Parent,
-    Child,
-}
-
-impl ParserChannel {
-    fn is_open<D>(self, state: &WorkState<D>) -> bool {
-        match self {
-            Self::Parent => state.parser_parent_open,
-            Self::Child => state.parser_child_open,
-        }
-    }
-
-    fn set_open<D>(self, state: &mut WorkState<D>, open: bool) {
-        match self {
-            Self::Parent => state.parser_parent_open = open,
-            Self::Child => state.parser_child_open = open,
-        }
-    }
-
-    fn has_child<D>(self, state: &WorkState<D>) -> bool {
-        matches!(self, Self::Parent) && state.parser_child_open
-    }
-}
-
 impl<'op, D: Copy, const N: usize> BoundWorkGroup<'op, D, N> {
     pub(crate) fn begin_parser_parent(
         &self,
@@ -54,7 +28,6 @@ impl<'op, D: Copy, const N: usize> BoundWorkGroup<'op, D, N> {
     ) -> Result<ParserWorkScope<'op, D, N>, ParserWorkError<D>> {
         self.begin_parser(amounts, item_limits, ParserChannel::Parent)
     }
-
     pub(crate) fn begin_parser_child(
         &self,
         amounts: [u64; N],
@@ -62,45 +35,21 @@ impl<'op, D: Copy, const N: usize> BoundWorkGroup<'op, D, N> {
     ) -> Result<ParserWorkScope<'op, D, N>, ParserWorkError<D>> {
         self.begin_parser(amounts, item_limits, ParserChannel::Child)
     }
-
     fn begin_parser(
         &self,
         amounts: [u64; N],
         item_limits: [Option<u64>; N],
         channel: ParserChannel,
     ) -> Result<ParserWorkScope<'op, D, N>, ParserWorkError<D>> {
-        let mut state = self.borrow_active()?;
-        if self.grant != WorkGrant::Ordinary
-            || state.producer_open
-            || state.protected_open
-            || channel.is_open(&state)
-            || channel.has_child(&state)
-        {
-            return Err(LedgerCause::InactiveLinearWorkPermit.into());
-        }
-        for (index, amount) in amounts.into_iter().enumerate() {
-            charge_attempted_entry(
-                &mut state.rows[self.positions[index]],
-                || self.dimension(index),
-                amount,
-            )?;
-            if let Some(limit) = item_limits[index]
-                && amount > limit
-            {
-                return Err(ParserWorkError::ItemLimit {
-                    index,
-                    value: amount,
-                    limit,
-                });
-            }
-        }
-        channel.set_open(&mut state, true);
-        Ok(ParserWorkScope {
-            group: *self,
-            remaining: amounts,
+        let frame = self.layout.begin_parser(
+            &mut self.borrow_active()?.view(&self.owner.catalog),
+            amounts,
             item_limits,
             channel,
-            active: true,
+        )?;
+        Ok(ParserWorkScope {
+            group: *self,
+            frame,
         })
     }
 }
@@ -108,123 +57,74 @@ impl<'op, D: Copy, const N: usize> BoundWorkGroup<'op, D, N> {
 #[must_use = "finish the parser channel explicitly, even after completing every prefix"]
 pub(crate) struct ParserWorkScope<'op, D: Copy, const N: usize> {
     group: BoundWorkGroup<'op, D, N>,
-    remaining: [u64; N],
-    item_limits: [Option<u64>; N],
-    channel: ParserChannel,
-    active: bool,
+    frame: ParserFrame<N>,
 }
 
-impl<'op, D: Copy, const N: usize> ParserWorkScope<'op, D, N> {
+impl<D: Copy, const N: usize> ParserWorkScope<'_, D, N> {
     pub(crate) fn remaining(&self) -> [u64; N] {
-        self.remaining
+        self.frame.remaining
     }
-
-    /// Records one exact group prefix without reserving a pending-consumed envelope.
     pub(crate) fn complete(&mut self, amounts: [u64; N]) -> Result<(), LedgerCause<D>> {
-        let mut state = self.borrow_active()?;
-        if amounts
-            .iter()
-            .zip(self.remaining)
-            .any(|(amount, remaining)| *amount > remaining)
-        {
-            return Err(LedgerCause::InactiveLinearWorkPermit);
-        }
-        if amounts.iter().all(|amount| *amount == 0) {
-            return Ok(());
-        }
-        // Channel validation and numeric completion share one short borrow. No callback or
-        // physical action runs while it is held; the ordinary group uses this same kernel.
-        self.group
-            .consume_direct_atomic_in_state(&mut state, amounts)?;
-        for (remaining, amount) in self.remaining.iter_mut().zip(amounts) {
-            *remaining -= amount;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn complete_all(&mut self) -> Result<(), LedgerCause<D>> {
-        self.complete(self.remaining)
-    }
-
-    /// Closes ownership even when incomplete; the domain wrapper must latch that error.
-    pub(crate) fn finish_exact(mut self) -> Result<(), LedgerCause<D>> {
-        self.resolve()?;
-        if self.remaining.iter().any(|amount| *amount != 0) {
-            return Err(LedgerCause::InactiveLinearWorkPermit);
-        }
-        Ok(())
-    }
-
-    pub(crate) fn finish_partial(mut self) -> Result<(), LedgerCause<D>> {
-        self.resolve()
-    }
-
-    fn borrow_active(&self) -> Result<RefMut<'op, WorkState<D>>, LedgerCause<D>> {
-        if !self.active {
+        if !self.frame.active {
             return Err(LedgerCause::InactiveLinearWorkPermit);
         }
         let mut state = self.group.borrow_active()?;
-        if !self.channel.is_open(&state) || state.producer_open || state.protected_open {
-            state.integrity_fault = true;
-            return Err(LedgerCause::InactiveLinearWorkPermit);
-        }
-        if self.channel.has_child(&state) {
-            return Err(LedgerCause::InactiveLinearWorkPermit);
-        }
-        Ok(state)
+        self.frame.complete(
+            &self.group.layout,
+            &mut state.view(&self.group.owner.catalog),
+            amounts,
+        )
     }
-
+    pub(crate) fn complete_all(&mut self) -> Result<(), LedgerCause<D>> {
+        self.complete(self.frame.remaining)
+    }
+    pub(crate) fn finish_exact(mut self) -> Result<(), LedgerCause<D>> {
+        self.resolve()?;
+        if self.frame.remaining.iter().any(|amount| *amount != 0) {
+            return Err(LedgerCause::InactiveLinearWorkPermit);
+        }
+        Ok(())
+    }
+    pub(crate) fn finish_partial(mut self) -> Result<(), LedgerCause<D>> {
+        self.resolve()
+    }
     fn resolve(&mut self) -> Result<(), LedgerCause<D>> {
-        if !self.active {
+        if !self.frame.active {
             return Err(LedgerCause::InactiveLinearWorkPermit);
         }
         let mut state = self.group.owner.borrow_state_mut()?;
-        // Cleanup remains possible after mode revocation or a prior integrity failure.
         let validity = self
             .group
             .owner
-            .ensure_active(&state, self.group.grant)
-            .and_then(|()| self.group.validate_role(&state));
-        let invalid_channel = !self.channel.is_open(&state)
-            || self.channel.has_child(&state)
-            || state.producer_open
-            || state.protected_open;
-        if invalid_channel {
-            state.integrity_fault = true;
-        }
-        self.channel.set_open(&mut state, false);
-        self.active = false;
+            .ensure_active(&state, self.group.layout.grant)
+            .and_then(|()| {
+                self.group
+                    .layout
+                    .validate_role_header(&self.group.owner.catalog, &state.header)
+            });
+        let resolution = self
+            .frame
+            .resolve(&mut state.view(&self.group.owner.catalog));
         validity?;
-        if invalid_channel {
+        resolution
+    }
+}
+impl<D: Copy> ParserWorkScope<'_, D, 1> {
+    pub(crate) fn replenish(&mut self, amount: u64) -> Result<(), LedgerCause<D>> {
+        if !self.frame.active {
             return Err(LedgerCause::InactiveLinearWorkPermit);
         }
-        Ok(())
+        let mut state = self.group.borrow_active()?;
+        self.frame.replenish(
+            &self.group.layout,
+            &mut state.view(&self.group.owner.catalog),
+            amount,
+        )
     }
 }
-
-impl<D: Copy> ParserWorkScope<'_, D, 1> {
-    /// Admits another chunk only for a fully consumed scope without a per-item limit.
-    pub(crate) fn replenish(&mut self, amount: u64) -> Result<(), LedgerCause<D>> {
-        {
-            let mut state = self.borrow_active()?;
-            if self.item_limits[0].is_some() || self.remaining[0] != 0 {
-                return Err(LedgerCause::InactiveLinearWorkPermit);
-            }
-            charge_attempted_entry(
-                &mut state.rows[self.group.positions[0]],
-                || self.group.dimension(0),
-                amount,
-            )?;
-        }
-        self.remaining[0] = amount;
-        Ok(())
-    }
-}
-
 impl<D: Copy, const N: usize> Drop for ParserWorkScope<'_, D, N> {
     fn drop(&mut self) {
-        if self.active {
-            // Failed borrows latch LocalWork's fault and leave persistent channels untouched.
+        if self.frame.active {
             let _ = self.resolve();
         }
     }

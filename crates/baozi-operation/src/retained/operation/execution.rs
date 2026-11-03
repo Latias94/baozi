@@ -309,27 +309,23 @@ where
                 .map_or(ExecutionError::Stopped, ExecutionError::Control));
         }
         ensure_running(self.failure)?;
-        if max_cost == 0 || usize::from(max_cost) > crate::MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS {
-            return self.reject_action_cost();
-        }
-        let next = self.actions_since_poll.get().checked_add(max_cost);
-        if next.is_none_or(|next| usize::from(next) > crate::MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS) {
-            self.checkpoint()?;
+        match checked_action_debt(self.actions_since_poll.get(), max_cost) {
+            Err(()) => return self.reject_action_cost(),
+            Ok(None) => self.checkpoint()?,
+            Ok(Some(_)) => {}
         }
         Ok(())
     }
 
     /// Advances conservative control cost after actual work completion, never ledger consumption.
     pub(crate) fn completed_action(&mut self, max_cost: u16) -> Result<(), ExecutionError<D>> {
-        let next = self.actions_since_poll.get().checked_add(max_cost);
-        if max_cost == 0
-            || next.is_none_or(|next| usize::from(next) > crate::MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS)
-        {
-            return self.reject_action_cost();
+        match checked_action_debt(self.actions_since_poll.get(), max_cost) {
+            Ok(Some(next)) => {
+                self.actions_since_poll.set(next);
+                Ok(())
+            }
+            Err(()) | Ok(None) => self.reject_action_cost(),
         }
-        self.actions_since_poll
-            .set(next.expect("the checked control cost fits"));
-        Ok(())
     }
 
     fn reject_action_cost(&self) -> Result<(), ExecutionError<D>> {
@@ -394,43 +390,16 @@ where
         self.ledger
             .ensure_work_open()
             .map_err(RetainedWriterError::Ledger)?;
-        let result = (|| {
-            let preflight = self
-                .account
-                .try_begin_account_preflight()
-                .map_err(RetainedWriterError::AccountPoisoned)?;
-            let reservation = self
-                .ledger
-                .reserve(phase, dimension, bytes)
-                .map_err(RetainedWriterError::Ledger)?;
-            let action = preflight
-                .admit_action()
-                .map_err(super::super::map_account_action_admission_error)?;
-            let share = super::super::try_admit_retained_share_work_before_physical(
-                self.ledger,
-                self.account,
-                self.share_work,
-            )?;
-            let mut admission = self
-                .account
-                .try_admit_retained_after_action(
-                    action,
-                    super::super::AdmissionCharge::new(bytes, allocations),
-                    share,
-                )
-                .map_err(|cause| match cause {
-                    super::super::RetainedShareAdmissionError::Physical(cause) => {
-                        RetainedWriterError::Physical(cause)
-                    }
-                    super::super::RetainedShareAdmissionError::Ledger(cause) => {
-                        RetainedWriterError::Ledger(cause)
-                    }
-                })?;
-            Ok((
-                reservation,
-                super::super::RetainedStorageLease::from_admission(&mut admission),
-            ))
-        })();
+        let storage = self.ledger.storage_view();
+        let result = super::super::reserve_exclusive_backing(
+            &storage,
+            self.account,
+            phase,
+            dimension,
+            bytes,
+            allocations,
+            || super::super::try_admit_retained_share_work(self.ledger, self.share_work),
+        );
         if let Err(cause) = &result {
             let code = match cause {
                 RetainedWriterError::Ledger(_) => PreparationFailureCode::ledger(),

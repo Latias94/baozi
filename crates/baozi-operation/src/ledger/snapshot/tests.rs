@@ -92,8 +92,8 @@ fn interim_joins_active_work_without_key_comparison_or_debug_bounds() {
     let (storage, work) = fixture(NoComparison);
     {
         let mut state = work.state.borrow_mut();
-        state.open_envelopes = 1;
-        state.producer_open = true;
+        state.header.open_envelopes = 1;
+        state.header.producer_open = true;
     }
     let snapshot = try_snapshot(&storage, &work).expect("active work remains observable");
     let dimension = snapshot.dimensions[0].1;
@@ -170,13 +170,13 @@ fn terminal_checks_reject_pending_and_completed_unfinished_channels() {
     let mut state = lock(&storage);
     assert!(!typed_terminal_snapshot_positions_are_valid(&state, &work));
     work.rows[0].state.pending_consumed = 0;
-    work.parser_parent_open = true;
+    work.header.parser_parent_open = true;
     assert!(!typed_terminal_snapshot_positions_are_valid(&state, &work));
     assert_eq!(
         validate_final_snapshot_shape(&state, &work),
         Err(LedgerCause::OutstandingLinearWorkPermits { count: 1 })
     );
-    work.parser_parent_open = false;
+    work.header.parser_parent_open = false;
     assert!(typed_terminal_snapshot_positions_are_valid(&state, &work));
     let snapshot = take_typed_final_snapshot(&mut state, &work, None);
     drop(state);

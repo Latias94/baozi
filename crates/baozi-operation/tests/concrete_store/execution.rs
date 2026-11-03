@@ -1280,3 +1280,6 @@ fn invalid_control_cost_is_sticky_without_running_or_charging_work() {
         assert_work(&evidence, keys.other_dimension, 0, 0);
     }
 }
+
+#[path = "execution/exclusive.rs"]
+mod exclusive;

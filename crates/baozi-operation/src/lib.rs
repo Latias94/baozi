@@ -295,7 +295,9 @@ pub mod __retained_store_integration {
         pub use crate::concrete_store::{
             RetainedStoreDimensionState, RetainedStoreObservedWork, RetainedStoreWriterRole,
             StoreBoundWorkGroup, StoreExecutionControl, StoreExecutionPermit,
-            StoreExecutionStorage, StoreExecutionWork, StoreParserWorkError, StoreParserWorkScope,
+            StoreExecutionStorage, StoreExecutionWork, StoreInvocation, StoreInvocationError,
+            StoreInvocationLayout, StoreInvocationParser, StoreParserWorkError,
+            StoreParserWorkScope,
         };
     }
 

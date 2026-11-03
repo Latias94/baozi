@@ -40,9 +40,9 @@ fn counters<const N: usize>(owner: &LocalWork<u8>) -> [(u64, u64, u64); N] {
 fn channels(owner: &LocalWork<u8>) -> (bool, bool, u64) {
     let state = owner.borrow_state().unwrap();
     (
-        state.parser_parent_open,
-        state.parser_child_open,
-        state.open_envelopes,
+        state.header.parser_parent_open,
+        state.header.parser_child_open,
+        state.header.open_envelopes,
     )
 }
 
@@ -324,7 +324,7 @@ fn parent_cannot_complete_or_replenish_while_even_an_unused_zero_child_is_open()
     );
     assert_eq!(parent.remaining(), [0]);
     assert_eq!(counters(&work), [(0, 0, 0)]);
-    assert!(!work.borrow_state().unwrap().integrity_fault);
+    assert!(!work.borrow_state().unwrap().header.integrity_fault);
     child.finish_exact().unwrap();
     parent.replenish(2).unwrap();
     parent.complete_all().unwrap();
@@ -347,7 +347,7 @@ fn parent_resolution_with_an_open_child_faults_and_closes_only_the_parent() {
         };
         assert_eq!(result, Err(LedgerCause::InactiveLinearWorkPermit));
         assert_eq!(channels(&work), (false, true, 0));
-        assert!(work.borrow_state().unwrap().integrity_fault);
+        assert!(work.borrow_state().unwrap().header.integrity_fault);
         assert_eq!(
             child.complete([0]),
             Err(LedgerCause::FinalSnapshotShapeMismatch)
@@ -381,7 +381,7 @@ fn forgetting_a_fully_completed_child_still_blocks_its_parent() {
         assert_eq!(counters(&work), [(3 + amount, amount, 0)]);
         drop(parent);
         assert_eq!(channels(&work), (false, true, 0));
-        assert!(work.borrow_state().unwrap().integrity_fault);
+        assert!(work.borrow_state().unwrap().header.integrity_fault);
         assert!(matches!(
             roles.begin_parser_parent([0], [None]),
             Err(ParserWorkError::Ledger(
@@ -469,8 +469,8 @@ fn forgetting_full_or_zero_parser_scopes_preserves_persistent_ownership() {
             scope.complete_all().unwrap();
             assert_eq!(scope.remaining(), [0]);
             std::mem::forget(scope);
-            assert!(channel.is_open(&work.borrow_state().unwrap()));
-            assert_eq!(work.borrow_state().unwrap().open_envelopes, 0);
+            assert!(channel.is_open(&work.borrow_state().unwrap().header));
+            assert_eq!(work.borrow_state().unwrap().header.open_envelopes, 0);
             assert_eq!(counters(&work), [(amount, amount, 0)]);
             assert_eq!(
                 work.check_quiescent(),
@@ -510,8 +510,8 @@ fn drop_borrow_conflict_latches_the_existing_fault_and_guesses_no_release() {
     let state = work.borrow_state_mut().unwrap();
     drop(scope);
     assert!(work.borrow_fault.get());
-    assert!(state.parser_child_open);
-    assert_eq!(state.open_envelopes, 1);
+    assert!(state.header.parser_child_open);
+    assert_eq!(state.header.open_envelopes, 1);
     assert_eq!(state.rows[0].state.attempted, 5);
     assert_eq!(state.rows[0].state.consumed, 0);
     assert_eq!(state.rows[0].state.pending_consumed, 2);
@@ -615,7 +615,7 @@ fn parser_methods_recheck_current_mode_even_for_zero_amounts() {
         let work = owner([(1, 20, 20)]);
         let roles = group(&work, [1]);
         let mut scope = roles.begin_parser_child([0], [None]).unwrap();
-        work.borrow_state_mut().unwrap().mode = mode;
+        work.borrow_state_mut().unwrap().header.mode = mode;
         let expected = if mode == WorkMode::Closed {
             LedgerCause::PublicationAlreadyCompleted
         } else {
@@ -642,7 +642,7 @@ fn parser_methods_recheck_current_mode_even_for_zero_amounts() {
 fn incomplete_exact_finish_preserves_an_existing_mode_failure() {
     let work = owner([(1, 20, 20)]);
     let scope = group(&work, [1]).begin_parser_child([2], [None]).unwrap();
-    work.borrow_state_mut().unwrap().mode = WorkMode::OrdinarySealed;
+    work.borrow_state_mut().unwrap().header.mode = WorkMode::OrdinarySealed;
     assert_eq!(
         scope.finish_exact(),
         Err(LedgerCause::PublicationAlreadyPending)
@@ -656,8 +656,8 @@ fn protected_grant_cannot_open_parser_channels() {
     let work = owner([(1, 20, 20)]);
     {
         let mut state = work.borrow_state_mut().unwrap();
-        state.mode = WorkMode::Protected;
-        state.protected_dimension = Some(0);
+        state.header.mode = WorkMode::Protected;
+        state.header.protected_dimension = Some(0);
     }
     let roles = work.bind([1], WorkGrant::Protected).unwrap();
     assert!(matches!(
@@ -680,7 +680,7 @@ fn protected_grant_cannot_open_parser_channels() {
 fn zero_completion_rechecks_bound_role_and_cleanup_preserves_its_cause() {
     let work = owner([(10, 20, 20), (30, 20, 20), (90, 20, 20)]);
     let mut scope = group(&work, [90]).begin_parser_child([0], [None]).unwrap();
-    work.borrow_state_mut().unwrap().protected_dimension = Some(2);
+    work.borrow_state_mut().unwrap().header.protected_dimension = Some(2);
     assert_eq!(
         scope.complete([0]),
         Err(LedgerCause::UnknownDimension { dimension: 90 })
@@ -715,10 +715,12 @@ fn parser_numeric_methods_need_neither_debug_nor_ordering_on_dimension_keys() {
     );
     let roles = BoundWorkGroup {
         owner: &work,
-        positions: [0],
-        representatives: [0],
-        completion_order: [0],
-        grant: WorkGrant::Ordinary,
+        layout: super::super::WorkLayout {
+            positions: [0],
+            representatives: [0],
+            completion_order: [0],
+            grant: WorkGrant::Ordinary,
+        },
     };
     let mut parent = match roles.begin_parser_parent([2], [None]) {
         Ok(scope) => scope,

@@ -33,14 +33,59 @@ where
     _ledger: PhantomData<&'ledger Ledger<O, P, D>>,
 }
 
-pub(in crate::retained) struct RetainedShareWorkCompletionFailure<T, D> {
+pub(crate) struct RetainedShareWorkCompletionFailure<T, D> {
     owner: T,
     cause: crate::ledger::LedgerCause<D>,
 }
 
 impl<T, D> RetainedShareWorkCompletionFailure<T, D> {
-    pub(in crate::retained) fn into_parts(self) -> (T, crate::ledger::LedgerCause<D>) {
+    pub(crate) fn into_parts(self) -> (T, crate::ledger::LedgerCause<D>) {
         (self.owner, self.cause)
+    }
+}
+
+/// Static completion adapter for the single physical clone/typed-handle implementation.
+/// The exclusive host lends its private frame; legacy callers lend their transitional permit.
+pub(crate) trait AdmittedShareWork<D>: Sized {
+    fn complete_reference_clone(&mut self) -> Result<(), crate::ledger::LedgerCause<D>>;
+    fn complete_typed_handle(self) -> Result<(), crate::ledger::LedgerCause<D>>;
+    fn finish_partial(self) -> Result<(), crate::ledger::LedgerCause<D>>;
+
+    fn try_share_account(
+        mut self,
+        account: &PhysicalStorageAccount,
+    ) -> Result<PhysicalStorageAccount, RetainedShareWorkCompletionFailure<PhysicalStorageAccount, D>>
+    {
+        let inner = account.inner.share();
+        if let Err(cause) = self.complete_reference_clone() {
+            let cause = self.finish_partial().err().unwrap_or(cause);
+            return Err(RetainedShareWorkCompletionFailure {
+                owner: PhysicalStorageAccount { inner },
+                cause,
+            });
+        }
+        let owner = PhysicalStorageAccount { inner };
+        if let Err(cause) = self.complete_typed_handle() {
+            return Err(RetainedShareWorkCompletionFailure { owner, cause });
+        }
+        Ok(owner)
+    }
+}
+
+impl<O, P, D> AdmittedShareWork<D> for RetainedShareWorkPermit<'_, O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
+{
+    fn complete_reference_clone(&mut self) -> Result<(), crate::ledger::LedgerCause<D>> {
+        RetainedShareWorkPermit::complete_reference_clone(self)
+    }
+    fn complete_typed_handle(self) -> Result<(), crate::ledger::LedgerCause<D>> {
+        RetainedShareWorkPermit::complete_typed_handle(self)
+    }
+    fn finish_partial(self) -> Result<(), crate::ledger::LedgerCause<D>> {
+        RetainedShareWorkPermit::finish_partial(self)
     }
 }
 
@@ -69,23 +114,11 @@ where
     }
 
     pub(in crate::retained) fn try_share_account(
-        mut self,
+        self,
         account: &PhysicalStorageAccount,
     ) -> Result<PhysicalStorageAccount, RetainedShareWorkCompletionFailure<PhysicalStorageAccount, D>>
     {
-        let inner = account.inner.share();
-        if let Err(cause) = self.complete_reference_clone() {
-            let cause = self.finish_partial().err().unwrap_or(cause);
-            return Err(RetainedShareWorkCompletionFailure {
-                owner: PhysicalStorageAccount { inner },
-                cause,
-            });
-        }
-        let owner = PhysicalStorageAccount { inner };
-        if let Err(cause) = self.complete_typed_handle() {
-            return Err(RetainedShareWorkCompletionFailure { owner, cause });
-        }
-        Ok(owner)
+        AdmittedShareWork::try_share_account(self, account)
     }
 
     pub(in crate::retained) fn try_share_allocation<T>(

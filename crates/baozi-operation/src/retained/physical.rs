@@ -1212,16 +1212,14 @@ impl PhysicalStorageAccount {
     /// The second account lock only commits the physical counter; it deliberately does not
     /// re-check the poison latch.  The single-use action capability is the proof that this retain
     /// began before any later poison transition.
-    pub(super) fn try_admit_retained_after_action<O, P, D>(
+    pub(super) fn try_admit_retained_after_action<D, W>(
         &self,
         action: PendingAccountActionAdmission<'_>,
         charge: AdmissionCharge,
-        admitted_share_work: RetainedShareWorkPermit<'_, O, P, D>,
+        admitted_share_work: W,
     ) -> Result<PendingRetainedAdmission<'_>, RetainedShareAdmissionError<D>>
     where
-        O: OperationOwner,
-        P: Copy + Ord,
-        D: Copy + Ord + fmt::Debug,
+        W: AdmittedShareWork<D>,
     {
         if !action.account().is_same_account(self) {
             let poisoned = self.record_poison(AccountPoisonReason::OwnershipGraphUnverified);

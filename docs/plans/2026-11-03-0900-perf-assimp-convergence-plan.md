@@ -235,4 +235,11 @@ negative case only for a genuinely new boundary, not for incidental private layo
   The audit distinguishes core and kernel validation predicates; immutable value/attachment
   proof and lease transfer require independent design review before implementation. Exclusive
   runner v3 restores compact catalog projection before actual first-proof qualification.
+- The [actual exclusive invocation first proof](../reviews/2026-11-03-exclusive-invocation-proof.md)
+  qualifies one numeric kernel and host-owned branded contexts: operation 905, affected 1420,
+  glTF comparison 9, control 9, consumer 138, affected doctests and strict lint/formatting pass.
+  Independent actual-source review closes the compiler/format delta. This is a structural
+  proof, not caller cutover or a performance keep. Phase-2 design must preserve owner-specific
+  incomplete-success/unwind exit polling and accounted format-error construction before
+  replacing real parser services; the provisional first-proof cause is not an import classifier.
 - Complete release-convergence qualification: pending; all final gates remain closed.

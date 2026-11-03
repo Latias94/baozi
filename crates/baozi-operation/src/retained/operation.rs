@@ -56,6 +56,26 @@ pub(crate) use execution::{
     ExecutionStorage, ExecutionWork,
 };
 
+pub(crate) struct ExclusiveOperationParts<'op, O, P, PP, U, D> {
+    pub(crate) ledger: crate::ledger::ExclusiveLedger<'op, O, P, D>,
+    pub(crate) poll: OperationPollCheckpoint<'op, PP, U>,
+    pub(crate) account: &'op PhysicalStorageAccount,
+    pub(crate) share_work: RetainedHandleSharePlan<D>,
+    pub(crate) failure: &'op Cell<Option<PreparationFailureCode>>,
+    pub(crate) debt: &'op Cell<u16>,
+}
+
+/// One checked weighted-debt calculation for the exclusive runner and migration adapters.
+/// Err is an invalid action cost; None means a full checkpoint is required first.
+pub(crate) fn checked_action_debt(current: u16, cost: u16) -> Result<Option<u16>, ()> {
+    if cost == 0 || usize::from(cost) > crate::MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS {
+        return Err(());
+    }
+    Ok(current
+        .checked_add(cost)
+        .filter(|next| usize::from(*next) <= crate::MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS))
+}
+
 const FAILURE_WORK_PERMIT_ABANDONED_CODE: u32 = 0x4657_5041;
 const FAILURE_WORK_PERMIT_OVERRUN_CODE: u32 = 0x4657_504f;
 const ORDINARY_WORK_PERMIT_ABANDONED_CODE: u32 = 0x4f57_5041;
@@ -215,7 +235,7 @@ struct FailureTerminalWorkCapability<D> {
 /// A requested semantic cause remains authoritative only until the operation observes its first
 /// trusted runtime failure. Once Control, ProductGraph, or Ledger is recorded, later causes cannot
 /// replace it.
-fn record_terminal_cause_with_precedence(
+pub(crate) fn record_terminal_cause_with_precedence(
     slot: &Cell<Option<PreparationFailureCode>>,
     cause: PreparationFailureCode,
 ) {
@@ -287,6 +307,54 @@ where
     D: Copy + Ord + fmt::Debug,
     F: Send + Sync + 'static,
 {
+    pub(crate) fn exclusive_parts(
+        &mut self,
+    ) -> Result<ExclusiveOperationParts<'_, O, P, PP, U, D>, ExecutionError<D>>
+    where
+        P: TerminalEvidenceKey,
+        D: TerminalEvidenceKey,
+    {
+        // Transitional aliases may have forgotten an envelope or RefMut. Qualify these before
+        // the legacy terminal predicate can collapse a failed dynamic borrow into "sealed".
+        self.coordinator
+            .retained_ledger()
+            .check_work_quiescent()
+            .map_err(|cause| {
+                record_terminal_cause_with_precedence(
+                    &self.sticky_terminal_cause,
+                    PreparationFailureCode::ledger(),
+                );
+                ExecutionError::Ledger(cause)
+            })?;
+        if self.is_terminal_only() {
+            return Err(ExecutionError::Stopped);
+        }
+        let Self {
+            coordinator,
+            baseline,
+            terminal_account_share_work,
+            sticky_terminal_cause,
+            control_action_debt,
+            ..
+        } = self;
+        let (poll, ledger) = coordinator.split_exclusive_poll_and_ledger();
+        let ledger = ledger.exclusive().map_err(|cause| {
+            record_terminal_cause_with_precedence(
+                sticky_terminal_cause,
+                PreparationFailureCode::ledger(),
+            );
+            ExecutionError::Ledger(cause)
+        })?;
+        Ok(ExclusiveOperationParts {
+            ledger,
+            poll,
+            account: baseline.account(),
+            share_work: *terminal_account_share_work,
+            failure: sticky_terminal_cause,
+            debt: control_action_debt,
+        })
+    }
+
     pub(crate) fn record_terminal_cause(&mut self, cause: PreparationFailureCode) {
         record_terminal_cause_with_precedence(&self.sticky_terminal_cause, cause);
     }

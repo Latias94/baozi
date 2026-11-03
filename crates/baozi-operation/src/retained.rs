@@ -58,6 +58,59 @@ pub(crate) fn release_owned_storage<T>(lease: RetainedStorageLease, value: T) ->
         FinalOwnerReleaseOutcome::Clean
     )
 }
+
+/// The logical reservation and its corresponding admitted physical lease.
+type RetainedStorageAdmission<O, P, D> = (
+    crate::ledger::LiveReservation<O, P, D>,
+    RetainedStorageLease,
+);
+
+/// The split work owner uses the existing logical/physical admission and share executor.
+/// `admit_share` is a crate-owned numeric transaction, never an extension callback.
+pub(crate) fn reserve_exclusive_backing<O, P, D, W>(
+    storage: &crate::ledger::ExclusiveStorage<'_, O, P, D>,
+    account: &PhysicalStorageAccount,
+    phase: P,
+    dimension: D,
+    bytes: u64,
+    allocations: u64,
+    admit_share: impl FnOnce() -> Result<W, RetainedWriterError<D>>,
+) -> Result<RetainedStorageAdmission<O, P, D>, RetainedWriterError<D>>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
+    W: AdmittedShareWork<D>,
+{
+    let preflight = account
+        .try_begin_account_preflight()
+        .map_err(RetainedWriterError::AccountPoisoned)?;
+    let reservation = storage
+        .reserve(phase, dimension, bytes)
+        .map_err(RetainedWriterError::Ledger)?;
+    let action = preflight
+        .admit_action()
+        .map_err(map_account_action_admission_error)?;
+    let share = match catch_unwind(AssertUnwindSafe(admit_share)) {
+        Ok(result) => result?,
+        Err(payload) => {
+            let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            discard_untrusted_panic_payload(payload);
+            return Err(RetainedWriterError::AccountPoisoned(poisoned));
+        }
+    };
+    let mut admission = account
+        .try_admit_retained_after_action(action, AdmissionCharge::new(bytes, allocations), share)
+        .map_err(|cause| match cause {
+            RetainedShareAdmissionError::Physical(cause) => RetainedWriterError::Physical(cause),
+            RetainedShareAdmissionError::Ledger(cause) => RetainedWriterError::Ledger(cause),
+        })?;
+    Ok((
+        reservation,
+        RetainedStorageLease::from_admission(&mut admission),
+    ))
+}
+
 #[cfg(test)]
 use allocation::{LeafRetainedPolicy, RetainedFinalOwnerInner, test_retained_set_id_requests};
 #[allow(
@@ -166,17 +219,19 @@ use triomphe::{Arc, UniqueArc};
 #[cfg(test)]
 pub(crate) use operation::panic_next_publication_account_open;
 pub(crate) use operation::{
-    BorrowedRetainedWorkPermit, ExecutionControl, ExecutionError, ExecutionGroup,
-    ExecutionParserScope, ExecutionPermit, ExecutionStorage, ExecutionWork,
+    BorrowedRetainedWorkPermit, ExclusiveOperationParts, ExecutionControl, ExecutionError,
+    ExecutionGroup, ExecutionParserScope, ExecutionPermit, ExecutionStorage, ExecutionWork,
     RetainedFailureWorkConsumeError, RetainedFailureWorkFinishError, RetainedFailureWorkPermit,
     RetainedFailureWorkStartError, RetainedPlanningBaseline, RetainedPlanningContainmentAnchor,
     RetainedProducerHost, RetainedProducerWorkFinishError, RetainedProducerWorkPermit,
     RetainedProducerWorkStartError, RetainedWorkConsumeError, RetainedWorkFinishError,
-    RetainedWorkPermit, RetainedWorkStartError,
+    RetainedWorkPermit, RetainedWorkStartError, checked_action_debt,
+    record_terminal_cause_with_precedence,
 };
 pub(crate) use operation::{
     RetainedControlCheckpoint, RetainedFailureWorkControl, RetainedOperation, RetainedWorkControl,
 };
+pub(crate) use operation_start::AdmittedShareWork;
 #[cfg(test)]
 use operation_start::map_qualified_startup_batch_error;
 pub(crate) use operation_start::{
@@ -185,7 +240,7 @@ pub(crate) use operation_start::{
     RetainedWriterPlan,
 };
 use operation_start::{
-    RetainedShareWorkPermit, StartupRetainedPartGuard, StartupTerminalEvidenceBuildError,
+    StartupRetainedPartGuard, StartupTerminalEvidenceBuildError,
     map_account_action_admission_error, map_batch_error, map_faulted_pending_rollback,
     map_pending_rollback_or, try_admit_retained_share_work,
     try_admit_retained_share_work_before_physical, try_open_publication_account,
