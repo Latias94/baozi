@@ -145,3 +145,13 @@ The concrete v2 sidecar and independent source review are frozen under
 They support design code-go for this connected implementation, without claiming compiler
 feasibility, source qualification, an optimization keep or release readiness. No new user
 permission is needed to execute the reviewed work.
+
+## Isolated Implementation Checkpoint, 2026-11-04
+
+Actual retained/assembly fields now live in the caller-owned root, and core, postprocess, both import
+entries and their format/consumer callers compile through that root. The [source-qualified receipt](../reviews/2026-11-04-lexical-root-fields-and-callers.md)
+records source2's complete 3,413-test runtime and final source3's six test-only cleanup statements,
+683-test core rerun, strict lint, rustdoc and consumer gates. The isolated Rust changes are not
+applied to main. Canonical payload/recovery slots, outer terminal/capture authority, borrowed numeric
+backing, current-state attachment and ordinary performance qualification remain open; this plan is
+still in progress.
