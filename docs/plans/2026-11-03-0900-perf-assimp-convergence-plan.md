@@ -290,8 +290,23 @@ negative case only for a genuinely new boundary, not for incidental private layo
   formats 855, control 9 and independent consumer 138 pass, with docs 30 + 54, strict lint,
   formatting and actual new-test/artifact association. One ordinary storage/growth owner and
   one guarded compound service replace duplicated bodies and binary's old adapter. No normal
-  math, benchmark task or allowance changes. Ordinary candidate/control comparison is next;
-  source qualification supplies no speedup, Linux caller result or release-gate clearance.
+  math, benchmark task or allowance changes. The subsequent
+  [ordinary performance hold](../reviews/2026-11-03-binary-stl-performance-hold.md)
+  independently reconstructs all 5704 children from four Windows campaigns: repeated OBJ
+  import +7.66/+7.59%, grid import +5.13/+5.08%, with both pipelines positive twice.
+  Preserve favorable extraction observations and all preparation/memory/tail costs.
+  Performance keep is HOLD; the source remains only a structural prerequisite for correction.
+  Exact matched Linux whole-worker Ir is +3.53% repeated OBJ, +3.62% grid and -0.84% STL;
+  raw/exclusive totals reconcile without establishing Windows causation or native keep.
+  Investigate per-call ordinary storage/control rebinding and common checkpoint state work
+  at their actual owners. The [independent shallow-route review](../research/2026-11-03-ordinary-storage-binding-costs.md)
+  separates 90 Ir per loan construction from scope checkpoint 93-to-104 Ir growth, with
+  unchanged real poll counts, unchanged reserve kernel and unchanged vector-growth memcpy.
+  It does not identify Windows causation or clear any cost. Twenty-three of 31 selected timing lanes and six of eight pipelines
+  still exceed 3x; all earlier named costs and the complete release gate remain open.
+  The exact caller archive also passes Linux operation/import/STL 1457/1457, no skips,
+  docs 30 + 54 and strict all-target/all-feature lint. All archive-file identities match before
+  and after each check; this is affected correctness evidence, separate from ordinary keep.
 - The [normal source-value follow-up](../research/2026-11-03-normal-generation-standards.md#subsequent-selected-value-audit-and-windows-reproduction)
   reproduces selected FLOAT NORMAL `(0,0,2)` acceptance on Windows with a passing bit-exact
   unit control. This P2 requires an explicit glTF admission tolerance/policy and selected-owner

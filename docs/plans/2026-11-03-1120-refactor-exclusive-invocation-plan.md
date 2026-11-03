@@ -230,6 +230,16 @@ proof, widen budgets, weaken mathematical results or move benchmark work outside
   `48d6f17e2f0829bdd5d50c8d7c48cea72ce343a1`: affected 2355, formats 855, control 9, independent
   consumer 138, docs 30 + 54, strict lint and formatting pass on Windows. Eleven critical
   new tests are independently present in actual main binaries with matching dep-info origins.
-  Linux caller qualification and ordinary native performance disposition remain pending.
+  The [subsequent ordinary review](../reviews/2026-11-03-binary-stl-performance-hold.md)
+  independently reconstructs all four Windows campaigns and records HOLD performance keep:
+  repeated OBJ and grid import/pipelines regress twice, despite favorable extraction results.
+  Keep every preparation, memory and tail cost explicit. Matched Linux whole-worker profiles
+  reconcile all six raw/exclusive totals; their instruction changes do not clear Windows
+  regressions. Investigate binding ordinary storage/control once at its real owner rather
+  than rebuilding loans on each legacy push, with one growth implementation and unchanged
+  control/failure/Drop obligations. The identical archived caller subsequently passes Linux
+  operation/import/STL 1457/1457 with no skips, docs 30 + 54 and strict all-target/all-feature
+  lint; all archive-file before/after identities agree. This does not supply Linux ordinary
+  timing/memory qualification or the full independent asset/format matrix.
 - Fixed/dynamic roots, honest administrative payload/capacity metric, consuming attachment,
   cleanup-before-finish, indexed selection and removal of transitional permits remain pending.

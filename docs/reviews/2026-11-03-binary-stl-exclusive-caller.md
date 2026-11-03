@@ -145,14 +145,28 @@ dep-info records associate them with main, without the prior compiler-workspace 
 `37f79a52782ba8e15ee2d23353ca39187b8ee00c1d7cfc70cece68470d81afb7`.
 Inventory is not another full runtime campaign; the completed suites supply runtime evidence.
 Individual commands/logs remain under `target/review/convergence/binary-stl-main-*`.
-These are Windows correctness/compiler results; the new caller has no Linux runtime or native
-performance qualification in this receipt yet.
+These are Windows correctness/compiler results. Subsequent qualification uses the exact
+candidate archive `169d3fda4c70ab084264c0dda986e7e20bdc78fb251b69ebe4fecb36e3aedca4`
+in the fresh Linux candidate source/target used after the matched instruction profiles.
+Operation/import/STL nextest passes 1457/1457, no skips, run
+`74741f2b-f40a-46a0-b2c3-b5f196045101`; import 30 + operation 54 doctests and strict
+all-target/all-feature Clippy pass. Every archive-file identity matches before and after
+all three checks. The aggregate `target/review/convergence/binary-stl-linux-qualification-1.json`
+has SHA-256 `ca50ba3b9080ba6c4a22d8b0216d08de27d2966cf1eb7492fa9fa9610b09660a`.
+This supplies affected Linux caller correctness/compiler evidence, not the full Linux
+format/asset matrix or ordinary timing/memory qualification.
 
 ## Performance and Remaining Cutover
 
 The ordinary Windows control is retained from runtime `67b5ca6`/documentation head `37e8005`,
 binary SHA-256 `a3ec752a0060f5db24d5ba5a524645051ab07effe2e0145bf7adbe64907c806c`.
-No ordinary candidate or paired campaign is qualified by this document yet. The frozen task,
+The subsequent [ordinary performance review](2026-11-03-binary-stl-performance-hold.md)
+independently reconstructs four completed Windows campaigns, 5704 children, and records
+**HOLD performance keep**. Repeated OBJ import worsens +7.66/+7.59% and grid import
++5.13/+5.08%; both pipelines also worsen twice. Favorable extraction observations, all
+preparation/memory costs and exact matched Linux instruction totals remain visible there.
+This source-qualified caller remains a structural prerequisite for further owner correction;
+it is not a measured optimization acceptance. The frozen task,
 selected detached fields, allocation/cleanup boundaries and explicit Smooth workload remain.
 Normal mathematics and source-format normal intent do not change to manufacture a speedup.
 
