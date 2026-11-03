@@ -85,7 +85,11 @@ complete 14-case/110-lane Windows/Linux release target remains open throughout.
 - Independent v1 review accepts the owner direction with one P2: shorten the import
   vocabulary reference to the loan lifetime. Corrected v2 applies exactly that field
   correction, preserving the invariant inner owner lifetime and existing ParseViews.
-  Compiler/runtime proof and native performance remain unqualified.
+  The [implementation receipt](../reviews/2026-11-03-bound-storage-services.md)
+  qualifies exact source `314d0fe3855cdd53159d2ffc0d6e10206d299b9f` on Windows:
+  integrated 2357, formats 855, control 9, assets 138, actual loan compiler probes and
+  strict lint/formatting pass. Original failed checks and test-coverage corrections
+  remain explicit. Affected Linux and ordinary performance disposition remain pending.
 
 
 ## Concrete Owner Design
