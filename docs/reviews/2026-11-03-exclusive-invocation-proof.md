@@ -117,3 +117,13 @@ The owned geometry payload plan remains a separate change: Count/Build/Compare, 
 numeric predicates, physical accounting and selected-payload correspondence are unchanged here.
 The parent plan's Windows/Linux 14-case/110-lane, all-endpoint/pipeline and whole-child-memory
 3x gates remain open. No publication, push/PR or native target promotion is implied.
+
+Later [cardinality qualification](2026-11-03-profile-cardinality-actions.md#separate-exact-control-instruction-evidence)
+builds a matched `45a09d1` Linux symbol worker and separates this kernel extraction from that
+next algorithm change. Relative to R7, this first proof adds whole-worker instructions on all
+eight inspected cases: about 4--9% on most, 1.45% on F64. This is the measured whole-worker
+cost of the structural revision while transitional callers remain; the totals alone do not
+attribute it to adapters or specific kernel functions. Locate and repair the contributing
+execution paths during caller cutover; the source/lifetime proof is not a performance keep.
+Preserve those profiles rather than hiding the cost under the next algorithm's savings. Linux instructions
+establish neither Windows elapsed-time causation nor a release result.

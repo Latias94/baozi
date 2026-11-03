@@ -259,6 +259,16 @@ negative case only for a genuinely new boundary, not for incidental private layo
   records physical arithmetic rather than fictional visits. Core/import/postprocess 1430,
   all four formats 853, consumer 138, exact semantic-owner boundaries, doctests and strict
   lint/formatting pass. Independent source/application review and the source-derived 80-to-76
-  test-boundary correction are closed; the initial failed check remains. Ordinary measurement
-  and instruction attribution are pending; no native benefit is claimed from source alone.
+  test-boundary correction are closed; the initial failed check remains. Source is
+  `0001bd8ab5ccf0c6c1b16754a1c2016ad8a76684`. Independent four-campaign Windows raw review
+  supports an intermediate keep for repeated glTF import/pipeline gains of about 6--8%,
+  retaining six extraction repairs, glTF8 prepare, glTF1 commit and named tails/parent costs.
+  Twenty-three of 31 timing lanes and six of eight pipelines still exceed 3x Assimp.
+- Exact matched Linux instruction workers separate the cardinality algorithm from the
+  structural kernel extraction: glTF1/8/32 whole-worker Ir falls 17.74% / 14.07% / 10.91%
+  against `45a09d1`. R7-to-45a adds about 4--9% on most cases while transitional callers remain;
+  these whole-worker totals do not locate contributing call owners. Carry that structural
+  revision cost as a caller-cutover investigation/repair obligation. Every raw/exclusive total reconciles. Neither
+  instruction gain nor intermediate native keep clears Windows extraction costs or the
+  final all-endpoint/pipeline/memory target.
 - Complete release-convergence qualification: pending; all final gates remain closed.
