@@ -3,7 +3,7 @@
 This unpublished standalone application exercises the public Baozi API with unchanged upstream
 assets and actual capability-bound filesystem access. It imports a model and calls
 `prepare_triangles` once for all primitive IDs acquired from the imported Scene. Preparation lowers
-topology and preserves authored normals or generates missing normals together in one selected transaction. The application
+topology and applies the selected normal intent in one atomic transaction. The application
 then converts the complete prepared Scene to the requested target space once, copies buffers and
 destroys the Scene before returning those buffers and detached import evidence.
 Before extraction it walks the retained provenance of each primitive through the public borrowed
@@ -12,11 +12,53 @@ inventing a persistent application provenance graph.
 
 `process_file` and `process` use the shared triangle preparation workflow: TriangleList primitives
 are accepted, TriangleStrip/TriangleFan primitives are lowered to lists, and polygons are triangulated.
-Points and line modes, including LineLoop, are rejected during preparation. The normal policy is
-`NormalOptions::default()` with `NormalOrientation::SceneFrontFace`, using `Options::source_assumptions`
-when supplied: generated normals follow the source Scene's front-face declaration or explicit source
-assumption, and existing normals are preserved. The default tangent policy preserves existing tangents and rejects invalidating normal
-changes unless the caller chooses an explicit replacement/removal policy through the preparation API.
+Points and line modes, including LineLoop, are rejected during preparation.
+`Options::normal_intent` chooses the field task independently of lowering and space conversion:
+
+- `SourceFormat` (default) reads the successful import's registered FormatId. Static glTF/GLB
+  surfaces without NORMAL receive Flat Corner normals; authored normals in any domain remain
+  preserved. No filename or source-JSON heuristic selects this policy. Other formats retain
+  authored normals, but a surface with no normal field returns `FormatNormalRuleUnavailable`;
+  choose Preserve or an explicit edit for that task. Empty surfaces need no missing-field rule.
+- `Preserve` retains source shading fields and absence, without generating normals. It remains
+  suitable for an unlit-only or position-only task; lowering and conversion still run.
+- `GeometryEdit { normals, tangents }` explicitly selects the existing Flat or area-weighted
+  Smooth algorithm, Preserve/Replace treatment of authored normals and the existing tangent
+  policy. Smooth is a geometry-processing choice, not glTF's implicit-normal rule.
+
+Generated normals use `NormalOrientation::SceneFrontFace`, with `Options::source_assumptions`
+when needed. The default full-field completion may also generate Flat fields for static Unlit
+triangles; Unlit material behavior and all retained lighting fallback resources remain unchanged.
+There is no per-material second pipeline or silent switch to Smooth.
+
+SourceFormat rejects implicit Flat completion when the primitive has authored tangents,
+declared morph targets (even at zero weights), or a mesh used by a bound-skin instance.
+`NormalPolicyFailure` retains the complete original ImportReport, including Scene, format,
+diagnostics, source identity and ledger; `report()`, `cause()` and `into_parts()` support
+inspection and recovery. Policy-planning allocation errors keep their real allocation cause
+through this same boundary. No postprocess report or success subset is fabricated. The
+registered format, tangent, morph and bound-skin decisions precede the one preparation
+invocation in canonical mesh/primitive order; unsupported input is not retried.
+
+A static generated base field does not supply geometric flat normals after morphing or
+skinning. Preserve plus PositionOnly evaluation remains available. An explicit base-normal
+edit does not manufacture missing Normal morph deltas: every normal-consuming evaluator
+mode still rejects active nonzero Position deltas without the required Normal coverage.
+Authored-normal deformation retains the evaluator's existing frozen-weight contract.
+Unbound influence rows and unused skins alone do not trigger the implicit-flat skin exclusion.
+
+Preserving a tangent invalidated by normal generation remains an error. A caller can request
+an explicit geometry edit with `TangentPolicy::Remove`; that policy applies to its complete
+selection, and dependent authored shading deltas still reject. SourceFormat does not remove
+valid tangents from other primitives to work around one unsupported input.
+
+This workflow copies selected fields, not a renderer or normal-map conformance certificate.
+Normal-map bindings retain their exact UV set/transform, and missing tangents remain absent;
+no UV0 tangent is guessed. glTF's recommended MikkTSpace generation is not implemented by
+this workflow. The optional public tangent generator is **Triangle UV Derivative v1**, with
+that actual basis retained in the output; imported Unknown is not relabeled MikkTSpace.
+The renderer's derivative-frame and evaluator policies keep their own explicit contracts.
+
 `ApplicationAsset::from_scene` is a separate direct extraction path for an already validated Scene.
 It explicitly uses `list_vertices`
 to accept all seven glTF modes without editing the Scene, generating attributes, converting units
@@ -38,7 +80,7 @@ Run from the repository root, reusing its target directory:
 
 ```text
 cargo +1.95.0 run --locked --release --manifest-path tools/consumers/assets/Cargo.toml --target-dir target -- tools/consumers/assets/fixtures upstream/Models/BoxTextured/glTF/BoxTextured.gltf
-cargo +1.95.0 run --locked --release --manifest-path tools/consumers/assets/Cargo.toml --target-dir target -- /path/to/assets model.obj --assume-standard-space
+cargo +1.95.0 run --locked --release --manifest-path tools/consumers/assets/Cargo.toml --target-dir target -- /path/to/assets model.obj --assume-standard-space --normal-intent smooth
 cargo +1.95.0 nextest run --locked --manifest-path tools/consumers/assets/Cargo.toml --target-dir target --all-features --build-jobs 1 --test-threads 1
 cargo +1.95.0 nextest run --locked --manifest-path tools/consumers/assets/Cargo.toml --target-dir target --test primitive_modes --build-jobs 1 --test-threads 1
 cargo +1.95.0 nextest run --locked --manifest-path tools/consumers/assets/Cargo.toml --target-dir target --test material_output --test indexing --test unlit_materials --test deformation_seams --build-jobs 1 --test-threads 1
@@ -48,7 +90,11 @@ cargo +1.95.0 nextest run --locked --manifest-path tools/consumers/assets/Cargo.
 `ROOT` is an ambient directory used to acquire the native capability; the asset path is relative to
 it. Dependencies resolve through the same capability. A successful invocation emits one JSON
 summary. Failures emit a cause chain on stderr and return a nonzero exit code. There is no automatic
-retry, hidden coordinate assumption, or automatic budget increase. `--max-work-units N` explicitly
+retry, hidden coordinate assumption, or automatic budget increase. `--normal-intent` accepts
+`source-format`, `preserve`, `flat` and `smooth`; the last two select explicit generation with
+preserved authored normals/tangents. The Rust GeometryEdit variant can additionally authorize
+replacement or removal. This real-workflow option does not alter the separate comparison CLI.
+`--max-work-units N` explicitly
 sets only the import work allowance through `Options::max_work_units`; its default is 200,000,000,
 including filesystem accounting. `--postprocess-actions N` and `--postprocess-bytes N` set
 `Options::postprocess_budgets.max_work_actions` and `.storage_bytes` for the single `prepare_triangles` call.
@@ -56,6 +102,10 @@ The default `PostProcessBudgets` allows 100,000,000 bounded work actions and 1,0
 bytes. These preparation budgets are separate from import limits and from application buffer
 allocations. Coordinate conversion retains its documented default operation limits; the two
 postprocess flags apply to triangle preparation, not conversion or a combined pipeline ledger.
+Normal-policy planning is included in postprocess time. Its fallible application metadata
+allocations, like detached buffers, are outside the library preparation storage ledger.
+The process API still uses default import/postprocess controls; it adds no application-wide
+cancellation promise and does not split or reset a preparation budget for individual targets.
 
 `bounded-normal-actions/v2` identifies the postprocess action vocabulary. One normally returned
 bounded normal operation, including a semantic error, consumes one action; a denied admission
@@ -302,8 +352,6 @@ performance thresholds:
 ```text
 python scripts/run_asset_profile.py --toolchain 1.95.0 --timeout 1800
 python scripts/run_asset_profile.py --toolchain 1.95.0 --allocation-metrics --timeout 1800
-python scripts/run_asset_profile.py --toolchain 1.95.0 --root /path/to/assets --asset model.obj --assume-standard-space --timeout 1800
-python scripts/run_asset_profile.py --toolchain 1.95.0 --root target/asset-workloads-v1 --asset static-quads-128.obj --asset static-quads-256.obj --assume-standard-space --max-work-units 200000000 --repetitions 3 --timeout 1800
 ```
 
 `--asset` can be repeated. `--artifact-root NEW_DIR` selects a new output directory; the default is
@@ -317,6 +365,11 @@ candidate hosts and retains both Linux release profile variants.
 `--repetitions N` starts a new consumer process for every selected asset in each repetition;
 it does not reuse an imported Scene or average away individual observations. Normal timing and
 the separately built `--allocation-metrics` variant belong in different artifact directories.
+
+The full-asset collector currently uses the consumer default SourceFormat intent and does not
+forward `--normal-intent`. Use the direct consumer command above for an explicit missing-normal
+OBJ edit. Historical Smooth workload measurements remain bound to their original task; this
+policy correction does not migrate the collector or reinterpret those observations.
 
 Consumer summaries separate import, postprocess, provenance traversal and buffer extraction time.
 `postprocess_work_actions` sums the coordinate-conversion and triangle-preparation reports,

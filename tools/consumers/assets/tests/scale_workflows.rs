@@ -1,8 +1,11 @@
 use std::{collections::BTreeSet, path::PathBuf, process::Command, time::SystemTime};
 
-use baozi::{AnimationInterpolation, TargetSpace, TextureRole};
+use baozi::{
+    AnimationInterpolation, TargetSpace, TextureRole,
+    postprocess::{NormalOptions, TangentPolicy},
+};
 use baozi_asset_consumer::{
-    ApplicationAsset, ChannelTarget, Options, Output, Result, process_file,
+    ApplicationAsset, ChannelTarget, NormalIntent, Options, Output, Result, process_file,
 };
 use serde_json::Value;
 
@@ -227,6 +230,14 @@ fn generated_workflows(grids: &[usize], primitives: &[usize]) -> Result<()> {
     let mut outputs = Vec::new();
     for case in cases {
         let options = Options {
+            normal_intent: if case["family"] == "static-quads" {
+                NormalIntent::GeometryEdit {
+                    normals: NormalOptions::default(),
+                    tangents: TangentPolicy::Preserve,
+                }
+            } else {
+                NormalIntent::SourceFormat
+            },
             source_assumptions: if case["family"] == "static-quads" {
                 Some(TargetSpace::STANDARD)
             } else {

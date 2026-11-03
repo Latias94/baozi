@@ -8,8 +8,8 @@ use baozi::{
     postprocess::{PostProcessControl, SpaceConversionOptions, convert_scene_space},
 };
 use baozi_asset_consumer::{
-    ApplicationAsset, Result, TangentBasis, TangentEncoding, UvExtractionError,
-    UvExtractionErrorKind,
+    ApplicationAsset, Options, Result, TangentBasis, TangentEncoding, UvExtractionError,
+    UvExtractionErrorKind, process,
 };
 use serde_json::{Value, json};
 
@@ -788,5 +788,113 @@ fn public_obj_legacy_factors_are_owned_independently_from_pbr_groups() -> Result
     assert!(material.factors.sheen().is_none());
     assert!(material.factors.emission().strength().is_none());
     assert!(material.bindings.is_empty());
+    Ok(())
+}
+
+#[test]
+fn source_format_keeps_real_uv1_normal_map_fields_without_inventing_mikk_tangents() -> Result<()> {
+    for without_tangent in [false, true] {
+        let (mut document, payload) = document();
+        if without_tangent {
+            for primitive in document["meshes"][0]["primitives"].as_array_mut().unwrap() {
+                primitive["attributes"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("TANGENT");
+            }
+        }
+        let output = {
+            let io = memory_io(&document, &payload)?;
+            process(&io, AssetPath::new("appearance.gltf")?, Options::default())?
+        };
+        assert_eq!(output.metrics.selected_geometry_reconstructions, 0);
+        let asset = output.asset;
+        drop(output.import_evidence);
+        let binding = asset.materials[0]
+            .bindings
+            .iter()
+            .find(|b| b.role == TextureRole::Normal)
+            .unwrap();
+        assert_eq!(binding.uv_set, 1);
+        let draw = &asset.draws[0];
+        assert_eq!(draw.vertices.len(), 4);
+        assert_eq!(
+            draw.uv_stream(1).unwrap().values[0],
+            [f64::from(UV1[0]), f64::from(UV1[1])]
+        );
+        for vertex in &draw.vertices {
+            assert_eq!(vertex.normal, Some([0.0, 0.0, -1.0]));
+            assert_eq!(
+                vertex.tangent,
+                if without_tangent {
+                    None
+                } else {
+                    Some([1.0, 0.0, 0.0, 1.0])
+                }
+            );
+        }
+        if without_tangent {
+            assert!(draw.tangent_conventions.is_none());
+        } else {
+            let conventions = draw.tangent_conventions.as_ref().unwrap();
+            assert_eq!(conventions.basis, TangentBasis::Unknown);
+            assert_eq!(conventions.encoding, TangentEncoding::SignInW);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn explicit_tangent_removal_rejects_authored_tangent_morphs_atomically() -> Result<()> {
+    use baozi::postprocess::{
+        NormalOptions, PostProcessRunError, PostProcessRunFailure, PreparationCause, TangentPolicy,
+    };
+    use baozi_asset_consumer::NormalIntent;
+    let (mut document, payload) = document();
+    document["meshes"][0]["weights"] = json!([0.5]);
+    for primitive in document["meshes"][0]["primitives"].as_array_mut().unwrap() {
+        primitive["targets"] = json!([{ "TANGENT": 3 }]);
+    }
+    let io = memory_io(&document, &payload)?;
+    let error = process(
+        &io,
+        AssetPath::new("appearance.gltf")?,
+        Options {
+            normal_intent: NormalIntent::GeometryEdit {
+                normals: NormalOptions::default(),
+                tangents: TangentPolicy::Remove,
+            },
+            ..Options::default()
+        },
+    )
+    .unwrap_err();
+    let failure = error.downcast::<PostProcessRunFailure>().unwrap();
+    let PostProcessRunError::Preparation { failure: reason } = failure.error() else {
+        panic!("expected original preparation failure: {failure:?}");
+    };
+    assert!(matches!(
+        reason.cause(),
+        PreparationCause::MorphDependency(baozi::MorphDeltaSemantic::Tangent)
+    ));
+    assert_eq!(failure.input().primitive_count(), 2);
+    for primitive in failure.input().meshes().next().unwrap().primitives() {
+        assert!(primitive.normals(AttributeDomain::Vertex).is_some());
+        assert!(
+            primitive
+                .attribute(
+                    baozi::AttributeSemanticRef::Tangent,
+                    AttributeDomain::Vertex
+                )
+                .is_some()
+        );
+        assert!(
+            primitive
+                .morph_targets()
+                .next()
+                .unwrap()
+                .delta(baozi::MorphDeltaSemantic::Tangent)
+                .is_some()
+        );
+    }
     Ok(())
 }

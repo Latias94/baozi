@@ -9,8 +9,9 @@ use baozi::{
     },
 };
 use baozi_asset_consumer::{
-    ApplicationAsset, EvaluationLimits, EvaluationRequest, FramePolicy, Result, SampleTime,
-    evaluate,
+    ApplicationAsset, EvaluationError, EvaluationLimits, EvaluationRequest, FrameFailure,
+    FramePolicy, NormalIntent, NormalPolicyCause, NormalPolicyFailure, Options, Output, Result,
+    SampleTime, evaluate, process,
 };
 use serde_json::json;
 
@@ -204,6 +205,10 @@ const BOUND_DELTAS: [[f32; 3]; 4] = [
 ];
 
 fn bound_folded_quad_io() -> Result<MemoryAssetIo> {
+    bound_folded_quad_policy_io(false)
+}
+
+fn bound_folded_quad_policy_io(without_morphs: bool) -> Result<MemoryAssetIo> {
     let mut payload = Vec::new();
     for value in POSITIONS.iter().flatten() {
         payload.extend_from_slice(&value.to_le_bytes());
@@ -234,7 +239,7 @@ fn bound_folded_quad_io() -> Result<MemoryAssetIo> {
     assert_eq!(payload.len(), 652);
     // A's effective joint-bind translations alternate 10/12. B's reverse-ordered palette
     // alternates 22/20. Every inverse bind has its own nonidentity translation.
-    let document = json!({
+    let mut document = json!({
         "asset": {"version": "2.0"}, "scene": 0,
         "scenes": [{"nodes": [0, 1, 2]}],
         "nodes": [
@@ -287,6 +292,9 @@ fn bound_folded_quad_io() -> Result<MemoryAssetIo> {
             {"bufferView": 7, "componentType": 5126, "count": 6, "type": "MAT4"}
         ]
     });
+    if without_morphs {
+        remove_folded_morphs(&mut document);
+    }
     let io = MemoryAssetIo::new();
     io.try_insert(
         AssetPath::new("bound-seams.gltf")?,
@@ -510,5 +518,495 @@ fn bound_skin_morph_and_flat_normal_seams_evaluate_after_every_source_owner_is_d
             }
         }
     }
+    Ok(())
+}
+
+// Policy tests reuse the original payload and constants; removing the declarations, not just
+// setting a weight to zero, establishes a static surface. Unbound influence rows remain.
+fn remove_folded_morphs(document: &mut serde_json::Value) {
+    document["meshes"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("weights");
+    document["meshes"][0]["primitives"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("targets");
+    for node in document["nodes"].as_array_mut().unwrap() {
+        node.as_object_mut().unwrap().remove("weights");
+    }
+}
+
+fn folded_policy_io(
+    mut document: serde_json::Value,
+    frame: Option<(&str, &str, &[f32])>,
+) -> Result<MemoryAssetIo> {
+    let io = MemoryAssetIo::new();
+    if let Some((semantic, kind, values)) = frame {
+        let mut bytes = Vec::new();
+        for value in values {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let buffer = document["buffers"].as_array().unwrap().len();
+        let view = document["bufferViews"].as_array().unwrap().len();
+        let accessor = document["accessors"].as_array().unwrap().len();
+        document["buffers"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"uri":"frame.bin","byteLength":bytes.len()}));
+        document["bufferViews"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"buffer":buffer,"byteLength":bytes.len()}));
+        document["accessors"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"bufferView":view,"componentType":5126,"count":4,"type":kind}));
+        document["meshes"][0]["primitives"][0]["attributes"][semantic] = json!(accessor);
+        io.try_insert(AssetPath::new("frame.bin")?, Arc::from(bytes))?;
+    }
+    // Content detection must supply the registered format; this suffix is not a glTF hint.
+    io.try_insert(
+        AssetPath::new("policy.payload")?,
+        Arc::from(serde_json::to_vec(&document)?),
+    )?;
+    Ok(io)
+}
+
+fn static_folded_document() -> Result<serde_json::Value> {
+    let mut document = serde_json::from_slice(&folded_quad_gltf()?)?;
+    remove_folded_morphs(&mut document);
+    Ok(document)
+}
+
+fn run_folded(io: &MemoryAssetIo, normal_intent: NormalIntent) -> Result<Output> {
+    process(
+        io,
+        AssetPath::new("policy.payload")?,
+        Options {
+            normal_intent,
+            ..Options::default()
+        },
+    )
+}
+
+#[test]
+fn default_source_completion_keeps_the_folded_edge_flat_after_owner_destruction() -> Result<()> {
+    let output = {
+        let io = folded_policy_io(static_folded_document()?, None)?;
+        process(&io, AssetPath::new("policy.payload")?, Options::default())?
+    };
+    assert_eq!(
+        output.import_evidence.format().id(),
+        &baozi::FormatId::new("org.baozi.gltf")?
+    );
+    assert_eq!(output.metrics.selected_geometry_reconstructions, 1);
+    assert_eq!(output.metrics.changed_operations, 2);
+    assert!(output.metrics.postprocess_work_actions > 0);
+    assert_eq!(
+        output.metrics.postprocess_work_action_contract,
+        Some("bounded-normal-actions/v2")
+    );
+    assert!(output.metrics.max_postprocess_peak_live_bytes > 0);
+    assert_eq!(output.import_evidence.ledger().current_live_bytes(), 0);
+    assert_eq!(output.import_evidence.ledger().active_reservations(), 0);
+    let asset = output.asset;
+    drop(output.import_evidence);
+    let draw = &asset.draws[0];
+    assert_eq!(
+        (draw.vertices.len(), draw.indices.as_slice()),
+        (6, &[0, 1, 2, 3, 4, 5][..])
+    );
+    let positions = [
+        [0.0, 100.0, 0.0],
+        [100.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [100.0, 0.0, 0.0],
+        [0.0, 0.0, -100.0],
+        [0.0, 0.0, 0.0],
+    ];
+    for (corner, vertex) in draw.vertices.iter().enumerate() {
+        assert_eq!(vertex.position, positions[corner]);
+        assert_eq!(
+            vertex.normal,
+            Some(if corner < 3 {
+                [0.0, 0.0, -1.0]
+            } else {
+                [0.0, 1.0, 0.0]
+            })
+        );
+        assert!(vertex.tangent.is_none());
+    }
+    assert!(draw.morphs.is_empty());
+    let rows = draw.influences.as_ref().unwrap();
+    assert_eq!(rows.offsets, [0, 4, 8, 12, 16, 20, 24]);
+    for (corner, source) in [2, 1, 0, 1, 3, 0].into_iter().enumerate() {
+        let range = rows.offsets[corner]..rows.offsets[corner + 1];
+        assert_eq!(&rows.joints[range.clone()], &JOINTS[source]);
+        assert_eq!(
+            rows.weights[range]
+                .iter()
+                .copied()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>(),
+            WEIGHTS[source].map(f32::to_bits)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn explicit_smooth_and_preserve_keep_their_distinct_normal_tasks() -> Result<()> {
+    let io = folded_policy_io(static_folded_document()?, None)?;
+    let smooth = run_folded(
+        &io,
+        NormalIntent::GeometryEdit {
+            normals: NormalOptions::default(),
+            tangents: TangentPolicy::Preserve,
+        },
+    )?
+    .asset;
+    let draw = &smooth.draws[0];
+    assert_eq!(draw.vertices.len(), 4);
+    assert_eq!(draw.indices, [0, 1, 2, 1, 3, 2]);
+    let shared = f64::from(f32::from_bits(0x3f3504f3));
+    for index in [1, 2] {
+        let normal = draw.vertices[index].normal.unwrap();
+        assert_eq!(normal[1].to_bits(), shared.to_bits());
+        assert_eq!(normal[2].to_bits(), (-shared).to_bits());
+    }
+    assert_eq!(draw.vertices[0].normal, Some([0.0, 0.0, -1.0]));
+    assert_eq!(draw.vertices[3].normal, Some([0.0, 1.0, 0.0]));
+    let preserved = run_folded(&io, NormalIntent::Preserve)?.asset;
+    assert!(
+        preserved.draws[0]
+            .vertices
+            .iter()
+            .all(|v| v.normal.is_none())
+    );
+    Ok(())
+}
+
+#[test]
+fn authored_nongeometric_normals_are_preserved_with_their_bits() -> Result<()> {
+    let normals = [
+        1.0, -0.0, 0.0, 1.0, -0.0, 0.0, 1.0, -0.0, 0.0, 1.0, -0.0, 0.0,
+    ];
+    let io = folded_policy_io(
+        static_folded_document()?,
+        Some(("NORMAL", "VEC3", &normals)),
+    )?;
+    let target = TargetSpace::try_new(
+        Handedness::Right,
+        Axis::PositiveY,
+        Axis::PositiveZ,
+        1.0,
+        FrontFaceWinding::CounterClockwise,
+    )?;
+    let output = process(
+        &io,
+        AssetPath::new("policy.payload")?,
+        Options {
+            target,
+            ..Options::default()
+        },
+    )?;
+    assert_eq!(output.metrics.selected_geometry_reconstructions, 0);
+    assert_eq!(output.metrics.changed_operations, 0);
+    for vertex in &output.asset.draws[0].vertices {
+        assert_eq!(
+            vertex.normal.unwrap().map(f64::to_bits),
+            [1.0_f64, -0.0, 0.0].map(f64::to_bits)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn implicit_flat_morph_rejection_recovers_the_original_report_and_position_path() -> Result<()> {
+    let io = folded_policy_io(serde_json::from_slice(&folded_quad_gltf()?)?, None)?;
+    let error = run_folded(&io, NormalIntent::SourceFormat).unwrap_err();
+    let failure = error.downcast::<NormalPolicyFailure>().unwrap();
+    assert!(matches!(
+        failure.cause(),
+        NormalPolicyCause::ImplicitFlatMorphTargetsUnsupported {
+            mesh: 0,
+            primitive: 0
+        }
+    ));
+    assert!(
+        failure
+            .report()
+            .evidence()
+            .matches_scene(failure.report().scene())
+    );
+    let (report, _) = failure.into_parts();
+    let primitive = report
+        .scene()
+        .meshes()
+        .next()
+        .unwrap()
+        .primitives()
+        .next()
+        .unwrap();
+    assert_eq!(primitive.indices(), Some(CORNERS.as_slice()));
+    assert!(primitive.normals(AttributeDomain::Corner).is_none());
+    assert!(primitive.normals(AttributeDomain::Vertex).is_none());
+    assert_eq!(primitive.mesh().default_morph_weights(), [0.5]);
+    let delta = primitive
+        .morph_targets()
+        .next()
+        .unwrap()
+        .delta(MorphDeltaSemantic::Position)
+        .unwrap();
+    let baozi::MorphDeltaData::Dense { values } = delta.data() else {
+        panic!("dense Position deltas")
+    };
+    assert_eq!(
+        values.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        POSITION_DELTAS
+            .into_iter()
+            .flatten()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(report.ledger().current_live_bytes(), 0);
+    assert_eq!(report.ledger().active_reservations(), 0);
+    drop(report);
+    let preserved = run_folded(&io, NormalIntent::Preserve)?.asset;
+    let evaluated = evaluate(
+        &preserved,
+        None,
+        SampleTime::Declared(0.0),
+        EvaluationRequest {
+            frames: FramePolicy::PositionOnly,
+            limits: EvaluationLimits::default(),
+            cancellation: None,
+        },
+    )?;
+    assert_eq!(evaluated.morph_weights[0], [0.5]);
+    assert_eq!(evaluated.draws[0].world_positions[0], [-12.5, 137.5, -6.25]);
+    assert!(evaluated.draws[0].world_normals.is_none());
+    let edited = run_folded(
+        &io,
+        NormalIntent::GeometryEdit {
+            normals: NormalOptions {
+                mode: NormalMode::Flat,
+                ..NormalOptions::default()
+            },
+            tangents: TangentPolicy::Preserve,
+        },
+    )?
+    .asset;
+    for frames in [
+        FramePolicy::FrozenWeight,
+        FramePolicy::FrozenWeightNormalsOnly,
+        FramePolicy::TriangleUvDerivative,
+    ] {
+        assert!(matches!(
+            evaluate(
+                &edited,
+                None,
+                SampleTime::Declared(0.0),
+                EvaluationRequest {
+                    frames,
+                    limits: EvaluationLimits::default(),
+                    cancellation: None,
+                }
+            ),
+            Err(EvaluationError::Frame {
+                reason: FrameFailure::MissingMorphShadingDeltas,
+                ..
+            })
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn actual_bound_skin_is_rejected_without_confusing_unbound_rows_with_skinning() -> Result<()> {
+    let io = bound_folded_quad_policy_io(true)?;
+    let error = process(&io, AssetPath::new("bound-seams.gltf")?, Options::default()).unwrap_err();
+    let failure = error.downcast::<NormalPolicyFailure>().unwrap();
+    assert!(matches!(
+        failure.cause(),
+        NormalPolicyCause::ImplicitFlatSkinUnsupported {
+            mesh: 0,
+            primitive: 0
+        }
+    ));
+    assert_eq!(failure.report().scene().skin_count(), 2);
+    let primitive = failure
+        .report()
+        .scene()
+        .meshes()
+        .next()
+        .unwrap()
+        .primitives()
+        .next()
+        .unwrap();
+    assert_eq!(primitive.morph_target_count(), 0);
+    assert_eq!(primitive.indices(), Some(CORNERS.as_slice()));
+    assert_eq!(
+        failure.report().diagnostics()[0].code().as_str(),
+        "gltf.influence_weight_sum"
+    );
+    assert_eq!(failure.report().ledger().active_reservations(), 0);
+    Ok(())
+}
+
+#[test]
+fn implicit_flat_tangent_precedes_morph_and_explicit_removal_is_supported() -> Result<()> {
+    let tangents = [
+        1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0,
+    ];
+    let io = folded_policy_io(
+        serde_json::from_slice(&folded_quad_gltf()?)?,
+        Some(("TANGENT", "VEC4", &tangents)),
+    )?;
+    let error = run_folded(&io, NormalIntent::SourceFormat).unwrap_err();
+    let failure = error.downcast::<NormalPolicyFailure>().unwrap();
+    assert!(matches!(
+        failure.cause(),
+        NormalPolicyCause::ImplicitFlatTangentsUnsupported {
+            mesh: 0,
+            primitive: 0
+        }
+    ));
+    assert_eq!(
+        failure
+            .report()
+            .scene()
+            .meshes()
+            .next()
+            .unwrap()
+            .primitives()
+            .next()
+            .unwrap()
+            .morph_target_count(),
+        1
+    );
+    let io = folded_policy_io(
+        static_folded_document()?,
+        Some(("TANGENT", "VEC4", &tangents)),
+    )?;
+    let output = run_folded(
+        &io,
+        NormalIntent::GeometryEdit {
+            normals: NormalOptions {
+                mode: NormalMode::Flat,
+                ..NormalOptions::default()
+            },
+            tangents: TangentPolicy::Remove,
+        },
+    )?;
+    assert_eq!(output.metrics.selected_geometry_reconstructions, 1);
+    assert!(
+        output.asset.draws[0]
+            .vertices
+            .iter()
+            .all(|v| v.normal.is_some() && v.tangent.is_none())
+    );
+    assert!(output.asset.draws[0].tangent_conventions.is_none());
+    Ok(())
+}
+
+#[test]
+fn static_completion_budget_denial_keeps_the_real_producer_failure_and_input() -> Result<()> {
+    let io = folded_policy_io(static_folded_document()?, None)?;
+    for budgets in [
+        baozi::postprocess::PostProcessBudgets {
+            max_work_actions: 1,
+            ..Default::default()
+        },
+        baozi::postprocess::PostProcessBudgets {
+            storage_bytes: 1,
+            ..Default::default()
+        },
+    ] {
+        let error = process(
+            &io,
+            AssetPath::new("policy.payload")?,
+            Options {
+                postprocess_budgets: budgets,
+                ..Options::default()
+            },
+        )
+        .unwrap_err();
+        let failure = error
+            .downcast::<baozi::postprocess::PostProcessRunFailure>()
+            .unwrap();
+        let primitive = failure
+            .input()
+            .meshes()
+            .next()
+            .unwrap()
+            .primitives()
+            .next()
+            .unwrap();
+        assert_eq!(primitive.indices(), Some(CORNERS.as_slice()));
+        assert!(primitive.normals(AttributeDomain::Vertex).is_none());
+        assert!(primitive.normals(AttributeDomain::Corner).is_none());
+        if let baozi::postprocess::PostProcessRunError::Preparation { failure } = failure.error()
+            && let Some(resources) = failure.resources()
+        {
+            assert_eq!(resources.current_live_bytes(), 0);
+            assert_eq!(resources.active_reservations(), 0);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn explicit_normal_replacement_keeps_dependent_authored_morph_rejection() -> Result<()> {
+    let normals = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    let mut document: serde_json::Value = serde_json::from_slice(&folded_quad_gltf()?)?;
+    document["meshes"][0]["primitives"][0]["targets"][0]["NORMAL"] = json!(2);
+    let io = folded_policy_io(document, Some(("NORMAL", "VEC3", &normals)))?;
+    let error = run_folded(
+        &io,
+        NormalIntent::GeometryEdit {
+            normals: NormalOptions {
+                mode: NormalMode::Flat,
+                existing: baozi::postprocess::ExistingNormals::Replace,
+            },
+            tangents: TangentPolicy::Preserve,
+        },
+    )
+    .unwrap_err();
+    let failure = error
+        .downcast::<baozi::postprocess::PostProcessRunFailure>()
+        .unwrap();
+    let baozi::postprocess::PostProcessRunError::Preparation { failure: reason } = failure.error()
+    else {
+        panic!("expected original preparation failure: {failure:?}");
+    };
+    assert!(matches!(
+        reason.cause(),
+        baozi::postprocess::PreparationCause::MorphDependency(MorphDeltaSemantic::Normal)
+    ));
+    let primitive = failure
+        .input()
+        .meshes()
+        .next()
+        .unwrap()
+        .primitives()
+        .next()
+        .unwrap();
+    assert!(primitive.normals(AttributeDomain::Vertex).is_some());
+    assert!(primitive.normals(AttributeDomain::Corner).is_none());
+    assert!(
+        primitive
+            .morph_targets()
+            .next()
+            .unwrap()
+            .delta(MorphDeltaSemantic::Normal)
+            .is_some()
+    );
+    let resources = reason
+        .resources()
+        .expect("dependent-delta rejection retains terminal evidence");
+    assert_eq!(resources.current_live_bytes(), 0);
+    assert_eq!(resources.active_reservations(), 0);
     Ok(())
 }

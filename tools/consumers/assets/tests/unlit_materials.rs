@@ -10,7 +10,7 @@ use baozi::{
         PostProcessControl, PostProcessRunDisposition, SpaceConversionOptions, convert_scene_space,
     },
 };
-use baozi_asset_consumer::{ApplicationAsset, Options, Result};
+use baozi_asset_consumer::{ApplicationAsset, NormalIntent, Options, Result, process};
 use serde_json::{Value, json};
 
 const SOURCE: &str = "unlit/model.gltf";
@@ -544,5 +544,57 @@ fn declaration_without_selected_payload_warns_without_semantic_loss() -> Result<
     drop(report);
     assert_eq!(asset.materials[1].shading_model, ShadingModel::Unlit);
     assert_eq!(asset.materials[1].bindings.len(), BINDINGS.len());
+    Ok(())
+}
+
+#[test]
+fn real_workflow_intent_preserves_unlit_absence_or_completes_static_flat_fields() -> Result<()> {
+    for normal_intent in [NormalIntent::Preserve, NormalIntent::SourceFormat] {
+        let output = {
+            let io = memory_io(&document(false), None)?;
+            process(
+                &io,
+                AssetPath::new(SOURCE)?,
+                Options {
+                    normal_intent,
+                    ..Options::default()
+                },
+            )?
+        };
+        let asset = output.asset;
+        drop(output.import_evidence);
+        assert_eq!(
+            asset
+                .materials
+                .iter()
+                .map(|m| m.shading_model)
+                .collect::<Vec<_>>(),
+            [
+                ShadingModel::PbrMetallicRoughness,
+                ShadingModel::Unlit,
+                ShadingModel::Unlit,
+                ShadingModel::Unlit
+            ]
+        );
+        assert_eq!(asset.materials[1].bindings.len(), BINDINGS.len());
+        assert_eq!(asset.materials[2].alpha_mode, AlphaMode::mask(0.375)?);
+        assert!(asset.materials[2].double_sided);
+        assert_eq!(asset.materials[3].alpha_mode, AlphaMode::Blend);
+        assert_eq!(asset.images.len(), BINDINGS.len());
+        for draw in &asset.draws {
+            assert_eq!(draw.uv_streams.len(), 2);
+            for vertex in &draw.vertices {
+                assert_eq!(
+                    vertex.normal,
+                    if normal_intent == NormalIntent::Preserve {
+                        None
+                    } else {
+                        Some([0.0, 0.0, -1.0])
+                    }
+                );
+                assert!(vertex.tangent.is_none());
+            }
+        }
+    }
     Ok(())
 }

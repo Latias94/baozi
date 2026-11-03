@@ -4,9 +4,12 @@ use baozi::{
     AnimationInterpolation, AssetPath, AttributeSemanticRef, FormatFailureDetailValue,
     FrontFaceWinding, ImportCause, Importer, MemoryAssetIo, MorphDeltaSemantic, TangentBasisRef,
     TangentEncodingRef, TargetSpace, UvOrigin,
-    postprocess::{PostProcessControl, SpaceConversionOptions, convert_scene_space},
+    postprocess::{
+        NormalOptions, PostProcessControl, SpaceConversionOptions, TangentPolicy,
+        convert_scene_space,
+    },
 };
-use baozi_asset_consumer::{ChannelTarget, Options, Result, process, process_file};
+use baozi_asset_consumer::{ChannelTarget, NormalIntent, Options, Result, process, process_file};
 use baozi_native_io_candidate::{FileSystemAssetIo, NativeDirectoryCapability};
 use serde_json::Value;
 
@@ -556,6 +559,10 @@ fn polygon_selection_uses_one_geometry_publication_before_space_conversion() -> 
         path,
         Options {
             source_assumptions: Some(TargetSpace::STANDARD),
+            normal_intent: NormalIntent::GeometryEdit {
+                normals: NormalOptions::default(),
+                tangents: TangentPolicy::Preserve,
+            },
             ..Options::default()
         },
     )?;
@@ -605,6 +612,10 @@ fn missing_normals_follow_the_declared_source_and_target_fronts() -> Result<()> 
                 Options {
                     source_assumptions: Some(with_winding(TargetSpace::STANDARD, source_winding)?),
                     target: with_winding(Options::default().target, target_winding)?,
+                    normal_intent: NormalIntent::GeometryEdit {
+                        normals: NormalOptions::default(),
+                        tangents: TangentPolicy::Preserve,
+                    },
                     ..Options::default()
                 },
             )?;
@@ -620,6 +631,67 @@ fn missing_normals_follow_the_declared_source_and_target_fronts() -> Result<()> 
             let cross_z = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
             assert_eq!(cross_z > 0.0, target_winding == CounterClockwise);
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn unknown_missing_normal_rule_is_recoverable_and_requires_a_named_intent() -> Result<()> {
+    use baozi_asset_consumer::{NormalPolicyCause, NormalPolicyFailure};
+    let io = MemoryAssetIo::new();
+    let path = AssetPath::new("missing.obj")?;
+    io.try_insert(
+        path.clone(),
+        Arc::from(b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n".as_slice()),
+    )?;
+    let options = Options {
+        source_assumptions: Some(TargetSpace::STANDARD),
+        ..Options::default()
+    };
+    let error = process(&io, path.clone(), options).unwrap_err();
+    let failure = error.downcast::<NormalPolicyFailure>().unwrap();
+    assert!(matches!(
+        failure.cause(),
+        NormalPolicyCause::FormatNormalRuleUnavailable {
+            mesh: 0,
+            primitive: 0
+        }
+    ));
+    let (report, _) = failure.into_parts();
+    assert_eq!(report.source(), &path);
+    assert_eq!(
+        report.format().id(),
+        &baozi::FormatId::new("org.baozi.obj")?
+    );
+    assert!(report.evidence().matches_scene(report.scene()));
+    assert!(report.diagnostics().is_empty());
+    assert!(report.loss_evidence().is_empty());
+    assert_eq!(report.ledger().current_live_bytes(), 0);
+    assert_eq!(report.ledger().active_reservations(), 0);
+    for normal_intent in [
+        NormalIntent::Preserve,
+        NormalIntent::GeometryEdit {
+            normals: NormalOptions::default(),
+            tangents: TangentPolicy::Preserve,
+        },
+    ] {
+        let asset = process(
+            &io,
+            path.clone(),
+            Options {
+                normal_intent,
+                ..options
+            },
+        )?
+        .asset;
+        assert_eq!(asset.draws[0].indices, [0, 1, 2]);
+        assert_eq!(asset.draws[0].vertices.len(), 3);
+        assert!(
+            asset.draws[0]
+                .vertices
+                .iter()
+                .all(|v| v.normal.is_some() == (normal_intent != NormalIntent::Preserve))
+        );
     }
     Ok(())
 }

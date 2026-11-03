@@ -5,9 +5,11 @@
 mod buffers;
 pub mod comparison;
 mod evaluation;
+mod normal_policy;
 
 pub use buffers::*;
 pub use evaluation::*;
+pub use normal_policy::{NormalIntent, NormalPolicyCause, NormalPolicyFailure};
 
 use std::{collections::HashSet, path::Path, time::Instant};
 
@@ -16,9 +18,8 @@ use baozi::{
     ImportEvidence, ImportOperationControl, ImportRequest, ImportRequestLayer, Importer,
     OptionCompileLimits, ProvenanceKindRef, ResourceLimitsOverlay, TargetSpace, ValidatedScene,
     postprocess::{
-        NormalOptions, NormalOrientation, PostProcessBudgets, PostProcessControl,
-        PostProcessReport, SpaceConversionOptions, TrianglePreparationOptions, convert_scene_space,
-        prepare_triangles,
+        NormalOrientation, PostProcessBudgets, PostProcessControl, PostProcessReport,
+        SpaceConversionOptions, TrianglePreparationOptions, convert_scene_space, prepare_triangles,
     },
 };
 use baozi_native_io_candidate::{FileSystemAssetIo, NativeDirectoryCapability};
@@ -31,6 +32,8 @@ pub struct Options {
     pub source_assumptions: Option<TargetSpace>,
     pub max_work_units: u64,
     pub postprocess_budgets: PostProcessBudgets,
+    /// Field completion or an explicit geometry edit; this does not certify rendered shading.
+    pub normal_intent: NormalIntent,
 }
 
 impl Default for Options {
@@ -47,6 +50,7 @@ impl Default for Options {
             source_assumptions: None,
             max_work_units: 200_000_000,
             postprocess_budgets: PostProcessBudgets::default(),
+            normal_intent: NormalIntent::SourceFormat,
         }
     }
 }
@@ -112,20 +116,22 @@ pub fn process(io: &dyn AssetIo, source: AssetPath, options: Options) -> Result<
             .map_or(0, |d| d.consumed()),
         ..Metrics::default()
     };
-    let (mut scene, import_evidence) = report.into_parts();
     let started = Instant::now();
-    let mut targets = Vec::new();
-    targets.try_reserve_exact(scene.primitive_count())?;
-    for mesh in scene.meshes() {
-        for primitive in mesh.primitives() {
-            targets.push(primitive.id());
-        }
-    }
+    let normal_policy::PreparationPlan {
+        targets,
+        normals,
+        tangents,
+    } = match normal_policy::plan(&report, options.normal_intent) {
+        Ok(plan) => plan,
+        Err(cause) => return Err(Box::new(NormalPolicyFailure::new(report, cause))),
+    };
+    let (mut scene, import_evidence) = report.into_parts();
     let (prepared, report) = prepare_triangles(
         scene,
         &targets,
         TrianglePreparationOptions {
-            normals: Some(NormalOptions::default()),
+            normals,
+            tangents,
             orientation: NormalOrientation::SceneFrontFace {
                 assume_unknown: options
                     .source_assumptions

@@ -1,6 +1,6 @@
 use std::{path::PathBuf, process::ExitCode};
 
-use baozi_asset_consumer::{Options, Result, process_file};
+use baozi_asset_consumer::{NormalIntent, Options, Result, process_file};
 use serde_json::json;
 
 fn compare(args: &[std::ffi::OsString]) -> Result<()> {
@@ -67,7 +67,7 @@ fn run() -> Result<()> {
         return compare(&args);
     }
     let mut args = std::env::args_os().skip(1);
-    let root = args.next().map(PathBuf::from).ok_or("usage: baozi-asset-consumer ROOT RELATIVE_ASSET [--assume-standard-space] [--max-work-units N] [--postprocess-actions N] [--postprocess-bytes N]")?;
+    let root = args.next().map(PathBuf::from).ok_or("usage: baozi-asset-consumer ROOT RELATIVE_ASSET [--normal-intent preserve|source-format|flat|smooth] [--assume-standard-space] [--max-work-units N] [--postprocess-actions N] [--postprocess-bytes N]")?;
     let source = args
         .next()
         .ok_or("missing relative asset path")?
@@ -76,6 +76,26 @@ fn run() -> Result<()> {
     let mut options = Options::default();
     while let Some(arg) = args.next() {
         match arg.to_str() {
+            Some("--normal-intent") => {
+                use baozi::postprocess::{NormalMode, NormalOptions, TangentPolicy};
+                let value = args.next().ok_or("missing normal intent")?;
+                options.normal_intent = match value.to_str() {
+                    Some("preserve") => NormalIntent::Preserve,
+                    Some("source-format") => NormalIntent::SourceFormat,
+                    Some("flat") | Some("smooth") => NormalIntent::GeometryEdit {
+                        normals: NormalOptions {
+                            mode: if value == "flat" {
+                                NormalMode::Flat
+                            } else {
+                                NormalMode::Smooth
+                            },
+                            ..NormalOptions::default()
+                        },
+                        tangents: TangentPolicy::Preserve,
+                    },
+                    _ => return Err("unknown normal intent".into()),
+                };
+            }
             Some("--assume-standard-space") => {
                 options.source_assumptions = Some(baozi::TargetSpace::STANDARD)
             }
