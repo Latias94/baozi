@@ -13,10 +13,50 @@ use baozi_import::authoring::{
     AttributeSemantic, ExtensionSchemaId, ProfileOwner, SourceLocatorValue, SourceObjectLocator,
 };
 use baozi_import::{
-    CapacityPlan, ImportStorageClass, MeteredOpaqueAllowance, MeteredVec, ParseExecution,
+    CapacityPlan, ImportStorageClass, ImportWorkScope, MeteredOpaqueAllowance, MeteredVec,
+    ParseExecution, ParseResult,
 };
 
 const SOURCE_SCHEMA: &str = "org.baozi.gltf:source-object";
+const COMPARISONS_BETWEEN_POLLS: u64 = 64;
+
+#[cfg(test)]
+mod tests;
+
+// Each original composite comparison remains one WorkUnit. Production callers compare only
+// fixed owner/source ordinals and validated NamespacedName keys of at most 64 ASCII bytes.
+struct ProfileComparisonWork<'meter, 'region> {
+    work: &'meter mut ImportWorkScope<'region, 1>,
+    comparisons_until_poll: u64,
+}
+
+impl<'meter, 'region> ProfileComparisonWork<'meter, 'region> {
+    fn new(work: &'meter mut ImportWorkScope<'region, 1>) -> Self {
+        Self {
+            work,
+            comparisons_until_poll: COMPARISONS_BETWEEN_POLLS,
+        }
+    }
+
+    fn run<T>(
+        &mut self,
+        ctx: &mut ParseExecution<'region, '_>,
+        compare: impl FnOnce() -> T,
+    ) -> ParseResult<T> {
+        // Admit only this comparison; no later work precedes its physical completion.
+        self.work.replenish(1)?;
+        let value = compare();
+        self.work.complete([1])?;
+        #[cfg(test)]
+        tests::comparison_completed();
+        self.comparisons_until_poll -= 1;
+        if self.comparisons_until_poll == 0 {
+            ctx.poll()?;
+            self.comparisons_until_poll = COMPARISONS_BETWEEN_POLLS;
+        }
+        Ok(value)
+    }
+}
 
 /// Schema v1 has five ordered fields: `kind;parent;index;offset;length`.
 /// Fields are labelled, decimal integers use no leading zeroes, and `-` means no parent.
@@ -102,13 +142,22 @@ impl<'scope> SelectedSourceProfile<'scope> {
                 }
             }
         }
-        extras.try_sort_unstable_by(|left, right| -> Result<_> {
-            ctx.charge_work(1)?;
-            Ok(left
-                .source
-                .cmp(&right.source)
-                .then_with(|| left.key.cmp(&right.key)))
-        })?;
+        ctx.poll()?;
+        if extras.len() > 1 {
+            ctx.with_work(&work_group, [0], |ctx, ledger_work| {
+                let mut work = ProfileComparisonWork::new(ledger_work);
+                #[cfg(test)]
+                tests::comparison_scope(tests::ComparisonSite::ExtrasSort);
+                extras.try_sort_unstable_by(|left, right| {
+                    work.run(ctx, || {
+                        left.source
+                            .cmp(&right.source)
+                            .then_with(|| left.key.cmp(&right.key))
+                    })
+                })
+            })?;
+        }
+        ctx.poll()?;
         let profile = Self {
             entries,
             links: ctx.metered_vec(
@@ -165,18 +214,26 @@ impl<'scope> SelectedSourceProfile<'scope> {
     }
 
     pub(super) fn finish(&mut self, ctx: &mut ParseExecution<'_, '_>) -> Result<()> {
-        self.links
-            .try_sort_unstable_by(|left, right| -> Result<_> {
-                ctx.charge_work(1)?;
-                Ok(left.cmp(right))
+        ctx.poll()?;
+        if self.links.len() > 1 {
+            let group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
+            ctx.with_work(&group, [0], |ctx, ledger_work| {
+                let mut work = ProfileComparisonWork::new(ledger_work);
+                #[cfg(test)]
+                tests::comparison_scope(tests::ComparisonSite::LinkSort);
+                self.links
+                    .try_sort_unstable_by(|left, right| work.run(ctx, || left.cmp(right)))
             })?;
-        let retained = self
-            .links
-            .try_partition_dedup_by(|left, right| -> Result<_> {
-                ctx.charge_work(1)?;
-                Ok(left == right)
+            let retained = ctx.with_work(&group, [0], |ctx, ledger_work| {
+                let mut work = ProfileComparisonWork::new(ledger_work);
+                #[cfg(test)]
+                tests::comparison_scope(tests::ComparisonSite::LinkDedup);
+                self.links
+                    .try_partition_dedup_by(|left, right| work.run(ctx, || left == right))
             })?;
-        self.links.truncate(retained);
+            self.links.truncate(retained);
+        }
+        ctx.poll()?;
         Ok(())
     }
 
