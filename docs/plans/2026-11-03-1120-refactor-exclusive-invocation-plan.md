@@ -243,3 +243,9 @@ proof, widen budgets, weaken mathematical results or move benchmark work outside
   timing/memory qualification or the full independent asset/format matrix.
 - Fixed/dynamic roots, honest administrative payload/capacity metric, consuming attachment,
   cleanup-before-finish, indexed selection and removal of transitional permits remain pending.
+- The next [bound storage services slice](2026-11-03-1800-refactor-bound-storage-services-plan.md)
+  replaces per-call ordinary descriptor construction with one owner-bound field and a short
+  mutable loan. Independent concrete design review closes the import vocabulary-lifetime P2
+  without extending the invariant numeric lifetime. Implementation and caller migration are
+  underway; existing state/control/failure checks remain. No performance keep follows from
+  the design or its initial compiler checkpoint.
