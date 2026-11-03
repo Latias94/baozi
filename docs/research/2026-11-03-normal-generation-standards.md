@@ -307,6 +307,15 @@ No generation algorithm, benchmark task, admission allowance or performance gate
 this audit/reproduction. MikkTSpace and animated implicit-flat evaluation remain separate
 capability work; this finding does not justify replacing the area-weighted Smooth estimator.
 
+The selected FLOAT follow-up is subsequently implemented at
+`0484dcb581869afef106f43721ffbb1589e1b631`, using an explicitly named Baozi `1e-4` squared-length
+tolerance in the existing sample collector. It preserves admitted bits and the separate
+quantized/morph/core contracts. Windows qualification passes all 525 glTF tests and all 138
+asset-consumer tests, strict lint and fmt; the earlier deliberate failures remain history.
+The [source-qualified receipt](../reviews/2026-11-03-gltf-base-directions.md) records exact
+scope, original logs, corrected cancellation/fixture oracles and remaining limits. It is not
+a new performance or full-conformance result.
+
 ## Retrieval and Source Identity
 
 The research skill's primary-source rule was applied without additional agents. General web
