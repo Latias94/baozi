@@ -277,6 +277,13 @@ negative case only for a genuinely new boundary, not for incidental private layo
   control child edges add 30,937,278 Ir. Preserve that shallow-cut scope and copy/inlining
   limits. It supports investigating real-region ownership and deleting obsolete adaptation;
   it is not a measured benefit of future exclusive adoption or Windows code-generation cause.
+- [Actual import bridge qualification](../reviews/2026-11-03-exclusive-import-bridge.md) at
+  `67b5ca609470268b124fd1915741ee81105c4a24` connects Dormant, real registry disposition and
+  consuming submission to the same exclusive executor. Operation/core/import/postprocess 2346,
+  formats 853, control 9 and independent consumer 138 pass with compiler examples, strict lint,
+  formatting and independent production/oracle/application review. Exact Control causes,
+  failure materialization before frame close, owned errors and stopped-state entry gates are
+  qualified. This is an unmeasured structural slice; all prior performance costs remain open.
 - Complete release-convergence qualification: pending; all final gates remain closed.
 - The [normal source-value follow-up](../research/2026-11-03-normal-generation-standards.md#subsequent-selected-value-audit-and-windows-reproduction)
   reproduces selected FLOAT NORMAL `(0,0,2)` acceptance on Windows with a passing bit-exact

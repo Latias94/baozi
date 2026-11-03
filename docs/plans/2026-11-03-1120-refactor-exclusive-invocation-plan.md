@@ -193,7 +193,25 @@ proof, widen budgets, weaken mathematical results or move benchmark work outside
   Isolated implementation must also gate `submit_complete` and activation before the first
   mutation, preserve Pending's real post-submit panic/poison rejection, and keep disposition
   outside the moved root. No shadow counters, second runner or generic exit-policy framework
-  is authorized to substitute for this real-owner proof. Actual compiler/runtime qualification
-  is pending; no bridge source is yet applied.
+  is authorized to substitute for this real-owner proof. The subsequent
+  [bridge receipt](../reviews/2026-11-03-exclusive-import-bridge.md) distinguishes isolated
+  compiler/runtime qualification from actual main application and integrated checks.
+- Actual bridge source is qualified at `67b5ca609470268b124fd1915741ee81105c4a24`:
+  operation/core/import/postprocess 2346, all four formats 853, facade control 9 and independent
+  asset consumer 138 pass, with 25 + 54 doctests, strict affected/consumer lint and formatting.
+  Independent production, corrected private-frame oracle and exact 18-path application reviews
+  close with no actionable P1/P2. The preserved Control-reentry regression is fixed at the
+  common owner; the failed pending-consumed oracle is replaced without changing the kernel.
+  This is real retained-owner/registry/submission qualification, with caller cutover and native
+  performance keep still pending.
+- The first real caller design, 86 lines, SHA-256
+  `cc0012a53d580c78626adc1b6a5a0a5bacbdc56ea2a6d7f9dfff834f2964d8fd`, selects the entire
+  binary STL decode function and one shared ordinary vector/string growth owner. Independent
+  design review finds no actionable P1/P2. A concrete storage/poll reborrow and compound-host
+  lifetime/error-order supplement must close before Rust implementation. Preserve existing
+  allocation overlap, issuer checks, real poll/copy frontiers, exact five-lane facet prefixes,
+  authored bits and canonical NaN errors. Remove binary's old execution-taking helpers and
+  duplicated growth bodies in that cut; ASCII/text, other formats and canonical authoring
+  remain genuine later callers. This is a reviewed next slice, not implemented cutover.
 - Fixed/dynamic roots, honest administrative payload/capacity metric, consuming attachment,
   cleanup-before-finish, indexed selection and removal of transitional permits remain pending.
