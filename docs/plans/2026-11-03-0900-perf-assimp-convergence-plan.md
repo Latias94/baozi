@@ -79,9 +79,38 @@ again or assume text allocation is now the leading cost.
    the refreshed measured cost. Preserve source identity, signed zero, exact accumulation order,
    partial-channel policy, finite checks and bounded scratch. Replace a representation at its
    owner and remove superseded paths; avoid benchmark-only or format-specific escape hatches.
+   Current normal call paths justify a versioned vocabulary of bounded face, smoothing-candidate,
+   output-element and at-most-32-record scan actions. Preserve the numerical expressions/order;
+   meter actual completed invocations and keep separate conservative control debt within the
+   existing scheduling envelope. Borrow resolved fields through the existing core sampler rather
+   than adding a second dense/sparse sampler to postprocess merely to avoid a by-value receiver.
 5. **Small-task lifecycle.** Locate setup/fallback/evidence cost separately from scaling work.
    A reused-plan workload may be added as a separately named experiment for both engines; it
    never replaces the frozen complete pipeline or moves setup outside its clock.
+   The independent lifecycle review rejects deferring only retained assembly while keeping
+   allocationful generic startup as the final architecture. Design one invocation owner with
+   fixed inline state for the finite postprocess vocabulary, sharing the entire numeric work,
+   storage and control implementation with dynamic import. Defer publication attachment until
+   real writes are needed. First specify backing and release-token ownership and extract the
+   consuming attachment/finish seam. Then integrate indexed classification in place of redundant
+   full-Scene selection, attaching retained write resources to that same authority when needed
+   without restarting counters or replaying validation.
+   Compare an exclusive host-owned execution context against the current split capabilities:
+   prefer static borrowing where it can replace unnecessary runtime reentry/mode checks without
+   removing real parser nesting, resource-release or failure obligations. Shared authority is
+   still needed for genuinely escaping leases. The initial promotion design is not code-go:
+   resolve allocation-before-state-move safety and an honest administrative footprint contract.
+   Specify consuming attachment and cleanup-before-terminal before integrating selection; do
+   not create a temporary second start/coordinator to bridge that seam.
+   Empty/single unchanged default calls should need no new allocation, generation or retained
+   terminal graph. Larger selections may use honestly admitted scratch. Replace mandatory
+   retained-ledger report ownership with owned inline facts, and delete the superseded startup,
+   selection and terminal representation paths when the consuming attachment qualifies.
+   Preserve semantic validation and error order rather than getter-by-getter historical work
+   units. Define and meter bounded physical actions before changing that vocabulary. No action
+   denial may execute the action; normal returned prefixes, panic containment, current policy,
+   same-account scratch and first-cause/control history remain mandatory. This is a substantial
+   breaking owner refactor with separate design/source/measurement gates, not a no-op shortcut.
 6. **Integrated convergence.** Run the complete ordinary Windows/Linux matrices, matching heap
    diagnostics for representative failures and all applicable regression gates. If a target is
    unmet, record the precise remaining owner and continue the next measured replacement. Do not
@@ -132,5 +161,21 @@ negative case only for a genuinely new boundary, not for incidental private layo
   six reconciled current-source instruction profiles. This is an intermediate keep, not release
   convergence or a per-lane no-regression assertion.
 - R2 compact owner-bound numeric capabilities and lazy diagnostic-key projection: independently
-  source-reviewed; runtime/doctest/lint validation in progress. No R2 timing claim yet.
+  source-reviewed and committed at `4010bd205c7f712278bcda7b9378cd5b8019375d` after 2,266 affected
+  tests, compiler contracts, strict lint, control assurance and 120 asset-consumer tests passed.
+  Four Windows campaigns and the targeted eight-lane Linux ordinary check are independently
+  reviewed. Retain a modest intermediate gain with endpoint/control-drift/tail qualifications;
+  the [receipt](../reviews/2026-11-03-compact-numeric-work.md) retains the grid instruction increase
+  and unresolved repeated-extraction observation. Full release convergence remains open.
+- Read-only lifecycle design review identifies two independent costs: allocationful invocation
+  and mandatory retained terminal construction, plus redundant selection traversal. Delaying
+  only terminal construction cannot establish endpoint convergence. Fixed invocation backing,
+  one shared accounting authority, indexed semantic classification and consuming retained
+  attachment are being designed before production implementation.
+- [Pinned Assimp principles and Rust ownership audit](../research/2026-11-03-assimp-principles-and-rust-ownership.md)
+  distinguishes loader-specific buffering, different normal algorithms, genuinely escaping
+  storage ownership and removable per-getter/lifecycle work. Independent design review requires
+  correcting promotion and its footprint contract before implementation. A host-owned exclusive
+  execution-context alternative is being assessed; no design is called optimal merely because
+  it passes the borrow checker or has fewer allocations.
 - Complete release-convergence qualification: pending; all final gates remain closed.
