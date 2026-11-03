@@ -9,7 +9,7 @@ use baozi_operation::{StorePlanError, StoreRuntimeError};
 
 use super::kernel;
 use super::options::NormalMode;
-use crate::operation::runtime::{ActiveRuntime, RuntimeKeys, ScratchVec, run_unit};
+use crate::operation::runtime::{ActiveRuntime, RuntimeKeys, ScratchVec};
 
 #[derive(Debug)]
 pub(crate) enum InputError {
@@ -60,14 +60,14 @@ impl GeneratedNormals {
             match &mut self.normals {
                 NormalValues::F32(values) => {
                     for value in values.values_mut() {
-                        run_unit(operation, || {
+                        run_copy_action(operation, kernel::Action::OrientElement, || {
                             *value = value.map(|v| if v == 0.0 { v } else { -v })
                         })?;
                     }
                 }
                 NormalValues::F64(values) => {
                     for value in values.values_mut() {
-                        run_unit(operation, || {
+                        run_copy_action(operation, kernel::Action::OrientElement, || {
                             *value = value.map(|v| if v == 0.0 { v } else { -v })
                         })?;
                     }
@@ -98,14 +98,24 @@ pub(crate) fn generate(
     };
     let mut normals = if source.wide_output {
         let mut values = ScratchVec::new(operation, keys, corners as usize)?;
-        for _ in 0..corners {
-            run_unit(operation, || values.values_mut().push([0.0_f64; 3]))?;
+        for start in (0..corners).step_by(32) {
+            let count = (corners - start).min(32);
+            run_copy_action(operation, kernel::Action::ScratchChunk, || {
+                for _ in 0..count {
+                    values.values_mut().push([0.0_f64; 3]);
+                }
+            })?;
         }
         NormalValues::F64(values)
     } else {
         let mut values = ScratchVec::new(operation, keys, corners as usize)?;
-        for _ in 0..corners {
-            run_unit(operation, || values.values_mut().push([0.0_f32; 3]))?;
+        for start in (0..corners).step_by(32) {
+            let count = (corners - start).min(32);
+            run_copy_action(operation, kernel::Action::ScratchChunk, || {
+                for _ in 0..count {
+                    values.values_mut().push([0.0_f32; 3]);
+                }
+            })?;
         }
         NormalValues::F32(values)
     };
@@ -124,17 +134,25 @@ pub(crate) fn generate(
         None
     };
     if let Some(order) = &mut order {
-        for _ in 0..order_count {
-            run_unit(operation, || order.values_mut().push(0_usize))?;
+        for start in (0..order_count).step_by(32) {
+            let count = (order_count - start).min(32);
+            run_copy_action(operation, kernel::Action::ScratchChunk, || {
+                for _ in 0..count {
+                    order.values_mut().push(0_usize);
+                }
+            })?;
         }
     }
     if let Some(crosses) = &mut crosses {
-        for _ in 0..faces {
-            run_unit(operation, || {
-                crosses.values_mut().push(crate::precision::Estimate3 {
-                    value: [0.0; 3],
-                    abs_error: [0.0; 3],
-                });
+        for start in (0..faces).step_by(32) {
+            let count = (faces - start).min(32);
+            run_copy_action(operation, kernel::Action::ScratchChunk, || {
+                for _ in 0..count {
+                    crosses.values_mut().push(crate::precision::Estimate3 {
+                        value: [0.0; 3],
+                        abs_error: [0.0; 3],
+                    });
+                }
             })?;
         }
     }
@@ -160,11 +178,7 @@ pub(crate) fn generate(
                 .as_mut()
                 .map(|crosses| crosses.values_mut().as_mut_slice()),
         },
-        |event| match event {
-            kernel::WorkEvent::Begin => operation.begin_action(),
-            kernel::WorkEvent::Complete => operation.complete_action(),
-            kernel::WorkEvent::Checkpoint => operation.checkpoint(),
-        },
+        |event| observe(operation, event),
     )
     .map_err(InputError::Kernel)?;
     drop(crosses);
@@ -190,4 +204,28 @@ impl<'a> NormalInput<'a> {
             wide_output,
         }
     }
+}
+
+fn observe(
+    operation: &mut ActiveRuntime<'_>,
+    event: kernel::WorkEvent,
+) -> Result<(), StoreRuntimeError> {
+    match event {
+        kernel::WorkEvent::Begin(kind) => operation.begin_action(kind.control_cost()),
+        kernel::WorkEvent::Complete => operation.complete_action(),
+        kernel::WorkEvent::Checkpoint => operation.checkpoint(),
+    }
+}
+
+fn run_copy_action<R>(
+    operation: &mut ActiveRuntime<'_>,
+    kind: kernel::Action,
+    action: impl FnOnce() -> R,
+) -> Result<R, InputError> {
+    kernel::run_action(
+        &mut |event| observe(operation, event),
+        kind,
+        || Ok(action()),
+    )
+    .map_err(InputError::Kernel)
 }

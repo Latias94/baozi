@@ -219,7 +219,15 @@ most one generation. A later target failure, exhausted work/storage or cancellat
 original Scene. Single-target triangulation, Normal and Tangent functions delegate to this engine;
 the previous production reconstruction implementations are deleted.
 
-`PostProcessBudgets` supplies hard operation work and storage limits. `NormalOptions` contains only
+`PostProcessBudgets::max_work_actions` and `storage_bytes` supply hard operation action and storage
+limits. Resource evidence names attempted/consumed work actions and exposes
+`work_action_contract() == "bounded-normal-actions/v2"`. A normally returned bounded normal
+operation consumes one action even on semantic error; an unwind does not fabricate completion.
+The catalog includes bounded face/candidate/output operations and at-most-32-record Copy scans,
+plus the existing delegated selection/core/share/protected-terminal units. Conservative control
+debt is separate from this budget and preserves the previous scheduling envelope. The retired
+getter-count vocabulary has no supported numeric conversion or compatibility alias.
+`NormalOptions` contains only
 mode and existing-field policy; `TangentPolicy::{Preserve, Remove, Generate}` is the sole Tangent
 decision. The direct Normal function receives that policy as a separate argument.
 `NormalOrientation::StoredOrder` uses the retained tuple cross product.

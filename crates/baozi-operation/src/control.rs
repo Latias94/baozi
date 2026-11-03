@@ -5,9 +5,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-/// Maximum fixed-cost library geometry actions between required control polls.
+/// Maximum conservative geometry control-cost credits between required polls.
 ///
-/// A vector row, scalar, comparison or index step must have a bounded amount of work.
+/// A compound action declares a checked upper bound in fixed-cost row/scalar/comparison bodies.
+/// The next action polls before its bound would exceed this debt. Ledger work counts actual
+/// semantic actions independently; these credits are never estimated physical completion.
 /// Text scanners use a separate byte frontier. This is not an elapsed-time guarantee
 /// for IO, allocation, extension callbacks or other blocking operations.
 pub const MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS: usize = 256;

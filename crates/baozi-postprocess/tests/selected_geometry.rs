@@ -548,11 +548,11 @@ fn fixed_primitive_reconstruction_is_linear_at_32_128_512_and_publishes_once() {
             assert_eq!(p.output_target().generation(), scene.generation());
         }
         if let Some((old_work, old_reconstruction)) = previous {
-            assert!(report.resources().consumed_work_items() <= old_work * 6);
+            assert!(report.resources().consumed_work_actions() <= old_work * 6);
             assert!(proof.reconstruction_work_items() <= old_reconstruction * 4 + 32);
         }
         previous = Some((
-            report.resources().consumed_work_items(),
+            report.resources().consumed_work_actions(),
             proof.reconstruction_work_items(),
         ));
     }
@@ -565,16 +565,16 @@ fn later_target_failure_and_limits_return_exact_original_generation_and_payload(
     let baseline =
         prepare_triangles(baseline, &ids, recipe(), PostProcessControl::default()).unwrap();
     let tight_storage = baseline.report().resources().peak_live_bytes() - 1;
-    let tight_work = baseline.report().resources().attempted_work_items() - 1;
+    let tight_work = baseline.report().resources().attempted_work_actions() - 1;
     drop(baseline);
     for budgets in [
         None,
         Some(PostProcessBudgets {
-            work: PostProcessBudgets::default().work,
+            max_work_actions: PostProcessBudgets::default().max_work_actions,
             storage_bytes: tight_storage,
         }),
         Some(PostProcessBudgets {
-            work: tight_work,
+            max_work_actions: tight_work,
             storage_bytes: PostProcessBudgets::default().storage_bytes,
         }),
     ] {
@@ -606,8 +606,8 @@ fn later_target_failure_and_limits_return_exact_original_generation_and_payload(
         assert_eq!(resources.active_reservations(), 0);
         assert_eq!(resources.committed_canonical_bytes(), 0);
         // Attempted includes the denied envelope; no work from it may complete.
-        assert!(resources.attempted_work_items() >= resources.consumed_work_items());
-        assert!(resources.consumed_work_items() <= options.budgets.work);
+        assert!(resources.attempted_work_actions() >= resources.consumed_work_actions());
+        assert!(resources.consumed_work_actions() <= options.budgets.max_work_actions);
     }
 }
 

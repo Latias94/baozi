@@ -42,7 +42,7 @@ fn triangulation_publishes_changed_scene_and_retains_rooted_remap() {
     assert_eq!(report.resources().active_reservations(), 0);
     assert!(report.resources().peak_staging_bytes() > 0);
     assert!(report.resources().committed_canonical_bytes() > 0);
-    assert!(report.resources().attempted_work_items() > 0);
+    assert!(report.resources().attempted_work_actions() > 0);
 
     let remap = report
         .triangulation_remap()

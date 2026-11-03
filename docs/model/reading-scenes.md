@@ -59,7 +59,11 @@ imported base Tangent attribute.
 one finite request. `TriangleLowering::Lists` lowers polygons, strips and fans; optional
 `NormalOptions` and `TangentPolicy` then generate or preserve the requested fields. One admitted
 geometry reconstruction and central validation publish at most one new generation. Work and
-storage caps come from `PostProcessBudgets`. Duplicate/stale targets, unsupported dependencies,
+storage caps come from `PostProcessBudgets::max_work_actions` and `storage_bytes`. Resource
+evidence exposes attempted/consumed work actions with its explicit `work_action_contract`;
+normal operations and bounded Copy chunks use `bounded-normal-actions/v2`, with delegated
+core/share/terminal units on the same ledger. Control-cost credits are separate from consumed
+actions. Duplicate/stale targets, unsupported dependencies,
 a later target's numerical failure or cancellation return the original immutable Scene.
 Consumed work never exceeds the supplied cap. Attempted-work evidence also retains the final
 denied envelope, so a rejected request may report a larger attempted count without executing it.

@@ -995,7 +995,9 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
                     })));
                 }
                 work.finish_exact().map_err(E::from)?;
-                self.store.completed_action();
+                self.store
+                    .completed_action(1)
+                    .map_err(|cause| E::from(self.abort(cause.into_scope_abort_cause())))?;
                 self.poll_active().map_err(E::from)?;
                 Ok(value)
             }
@@ -1026,7 +1028,9 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
                     return Err(E::from(failure));
                 }
                 work.finish_exact().map_err(E::from)?;
-                self.store.completed_action();
+                self.store
+                    .completed_action(1)
+                    .map_err(|cause| E::from(self.abort(cause.into_scope_abort_cause())))?;
                 self.poll_active().map_err(E::from)?;
                 Ok(value)
             }
@@ -1075,7 +1079,7 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
     ) -> ParseResult<ImportWorkScope<'region, N>> {
         self.check_session(group.issuer)?;
         self.store
-            .before_action()
+            .before_action(1)
             .map_err(|cause| self.abort(cause.into_scope_abort_cause()))?;
         let limits = group.item_limits.map(|limit| limit.map(|(_, limit)| limit));
         let result = if parent {

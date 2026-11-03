@@ -139,14 +139,16 @@ impl<'region> ImportStoreExecution<'region> {
             .map_err(|cause| self.runtime_error(cause))
     }
 
-    pub(crate) fn before_action(&mut self) -> Result<(), ImportStoreHostError> {
+    pub(crate) fn before_action(&mut self, max_cost: u16) -> Result<(), ImportStoreHostError> {
         self.control
-            .before_action()
+            .before_action(max_cost)
             .map_err(|cause| self.runtime_error(cause))
     }
 
-    pub(crate) fn completed_action(&mut self) {
-        self.control.completed_action();
+    pub(crate) fn completed_action(&mut self, max_cost: u16) -> Result<(), ImportStoreHostError> {
+        self.control
+            .completed_action(max_cost)
+            .map_err(|cause| self.runtime_error(cause))
     }
 
     pub(crate) fn report_progress(

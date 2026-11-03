@@ -40,7 +40,11 @@ fn unchanged_operation_preserves_input_identity_and_import_evidence() {
     assert!(report.matches_scene(&scene));
     assert!(report.triangulation_remap().is_none());
     assert_no_canonical_write(report.resources());
-    assert!(report.resources().consumed_work_items() > 0);
+    assert_eq!(
+        report.resources().work_action_contract(),
+        "bounded-normal-actions/v2"
+    );
+    assert!(report.resources().consumed_work_actions() > 0);
 
     drop(scene);
     drop(evidence);

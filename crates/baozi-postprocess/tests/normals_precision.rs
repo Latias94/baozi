@@ -720,8 +720,8 @@ fn sparse_f64_logical_domain_is_scanned_without_densifying_positions() {
     let resources = result.report().resources();
     assert!(resources.peak_staging_bytes() < 64 * 1024);
     assert!(resources.committed_canonical_bytes() < 64 * 1024);
-    assert!(resources.attempted_work_items() > u64::from(logical_count));
-    assert!(resources.attempted_work_items() < 8 * u64::from(logical_count) + 10_000);
+    assert!(resources.attempted_work_actions() > u64::from(logical_count));
+    assert!(resources.attempted_work_actions() < 8 * u64::from(logical_count) + 10_000);
 }
 
 #[test]

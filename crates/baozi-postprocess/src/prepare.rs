@@ -386,7 +386,7 @@ pub(crate) fn run(
             mappings,
             digest: options.digest(),
             limits: baozi_core::SceneValidationLimits::default()
-                .with_max_work(options.budgets.work)
+                .with_max_work(options.budgets.max_work_actions)
                 .with_max_scratch_bytes(options.budgets.storage_bytes)
                 .with_max_canonical_bytes(options.budgets.storage_bytes),
         },
@@ -685,8 +685,10 @@ mod terminal_work_tests {
         let resources = result.report().resources();
         assert_eq!(resources.current_live_bytes(), 0);
         assert_eq!(resources.active_reservations(), 0);
-        assert!(resources.attempted_work_items() <= PostProcessBudgets::default().work);
-        assert!(resources.consumed_work_items() <= resources.attempted_work_items());
+        assert!(
+            resources.attempted_work_actions() <= PostProcessBudgets::default().max_work_actions
+        );
+        assert!(resources.consumed_work_actions() <= resources.attempted_work_actions());
         assert!(resources.published_outcome_evidence_bytes() > 0);
     }
 
@@ -712,7 +714,7 @@ mod terminal_work_tests {
             .attempted_work_limit();
         let options = TrianglePreparationOptions {
             budgets: PostProcessBudgets {
-                work: reserve + 10,
+                max_work_actions: reserve + 10,
                 ..Default::default()
             },
             ..Default::default()
@@ -727,8 +729,8 @@ mod terminal_work_tests {
         let resources = failure
             .resources()
             .expect("startup admitted the minimal terminal guarantee");
-        assert!(resources.attempted_work_items() > 0);
-        assert!(resources.consumed_work_items() > 0);
+        assert!(resources.attempted_work_actions() > 0);
+        assert!(resources.consumed_work_actions() > 0);
         assert_eq!(resources.current_live_bytes(), 0);
         assert_eq!(resources.active_reservations(), 0);
     }

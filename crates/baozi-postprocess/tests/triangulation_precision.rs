@@ -320,7 +320,7 @@ fn precision_contract_sparse_f64_large_logical_domain_keeps_work_and_storage_bou
     let resources = outcome.report().resources();
     assert!(resources.peak_staging_bytes() < 64 * 1024);
     assert!(resources.committed_canonical_bytes() < 64 * 1024);
-    assert!(resources.attempted_work_items() < 100_000);
+    assert!(resources.attempted_work_actions() < 100_000);
 }
 
 #[test]

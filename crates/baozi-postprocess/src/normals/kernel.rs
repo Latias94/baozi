@@ -19,24 +19,109 @@ pub(crate) enum VertexIds<'a> {
     NonIndexed,
 }
 
-/// One physical bounded action, or an explicit full control checkpoint.
+/// Closed normal-work vocabulary. Cost bounds old fixed-size bodies for control only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Action {
+    PositionValidate {
+        sparse: bool,
+    },
+    PrimitiveScale,
+    FaceEvaluate {
+        sparse: bool,
+        wide: bool,
+        cached: bool,
+        flat: bool,
+    },
+    BucketStart,
+    SmoothCandidate {
+        sparse: bool,
+        wide: bool,
+        cached: bool,
+    },
+    BucketFinish,
+    OutputElement,
+    OrientElement,
+    ScratchChunk,
+    UniformGroupChunk,
+    CursorResetChunk,
+    HistogramChunk,
+    PrefixChunk,
+    ScatterChunk,
+    OrderInitChunk,
+    HeapStep,
+    HeapExtract,
+}
+
+impl Action {
+    pub(crate) const fn control_cost(self) -> u16 {
+        // Face: IDs1 + canonicalization3 + tuples3 + cross1; sparse adds3*33,
+        // wide adds9 scales and1 unit check; Flat narrow adds1 unit; cache adds1.
+        // Candidate: membership1 + face-cross or cache + one three-axis accumulation.
+        // Copy scans reserve their literal32-row maximum even on a shorter tail.
+        match self {
+            Self::PositionValidate { sparse } => {
+                if sparse {
+                    35
+                } else {
+                    2
+                }
+            }
+            Self::FaceEvaluate {
+                sparse,
+                wide,
+                cached,
+                flat,
+            } => {
+                8 + if sparse { 99 } else { 0 }
+                    + if wide { 9 } else { 0 }
+                    + if wide || flat { 1 } else { 0 }
+                    + if cached { 1 } else { 0 }
+            }
+            Self::SmoothCandidate {
+                sparse,
+                wide,
+                cached,
+            } => {
+                if cached {
+                    3
+                } else {
+                    10 + if sparse { 99 } else { 0 } + if wide { 9 } else { 0 }
+                }
+            }
+            Self::ScratchChunk
+            | Self::UniformGroupChunk
+            | Self::CursorResetChunk
+            | Self::HistogramChunk
+            | Self::PrefixChunk
+            | Self::ScatterChunk
+            | Self::OrderInitChunk => 32,
+            Self::HeapStep => 3,
+            Self::PrimitiveScale
+            | Self::BucketStart
+            | Self::BucketFinish
+            | Self::OutputElement
+            | Self::OrientElement
+            | Self::HeapExtract => 1,
+        }
+    }
+}
+
+/// One bounded semantic operation, with a separate conservative control-cost bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkEvent {
-    /// Admit exactly one bounded leaf before physical work. An error prevents that work.
-    Begin,
-    /// Resolve that leaf immediately after normal return, including a semantic error.
+    Begin(Action),
     Complete,
-    /// Full poll outside every leaf; never counted as physical work.
     Checkpoint,
 }
 
-fn run_action<E, T>(
+pub(super) fn run_action<E, T>(
     control: &mut impl FnMut(WorkEvent) -> Result<(), E>,
+    kind: Action,
     action: impl FnOnce() -> Result<T, Error<E>>,
 ) -> Result<T, Error<E>> {
-    control(WorkEvent::Begin).map_err(Error::Control)?;
+    control(WorkEvent::Begin(kind)).map_err(Error::Control)?;
     let result = action();
-    // A semantic error still completed the action. Unwinding must not emit completion.
+    // One normally returned invocation completed, including a semantic error, never on unwind.
     control(WorkEvent::Complete).map_err(Error::Control)?;
     result
 }
@@ -80,98 +165,80 @@ impl<P: PositionSource> Input<'_, P> {
     }
 }
 
-/// Only the normal kernel's logical Position read seam; arithmetic dispatch follows storage.
-/// Reads emit their own leaf events. Callers must not enclose a read in another action.
+/// Pure logical reads, bounded by the validated u32 sparse domain; never emit work events.
 pub(crate) trait PositionSource: Copy {
-    fn len(self) -> usize;
-    fn is_f64(self) -> bool;
-    fn read<E>(
-        self,
-        vertex: usize,
-        control: &mut impl FnMut(WorkEvent) -> Result<(), E>,
-    ) -> Result<[f64; 3], Error<E>>;
+    fn len(&self) -> usize;
+    fn is_f64(&self) -> bool;
+    fn is_sparse(&self) -> bool;
+    fn read<E>(&self, vertex: usize) -> Result<[f64; 3], Error<E>>;
 }
 
 #[cfg(test)]
 impl PositionSource for &[[f32; 3]] {
-    fn len(self) -> usize {
+    fn len(&self) -> usize {
         <[[f32; 3]]>::len(self)
     }
-
-    fn is_f64(self) -> bool {
+    fn is_f64(&self) -> bool {
         false
     }
-
-    fn read<E>(
-        self,
-        vertex: usize,
-        control: &mut impl FnMut(WorkEvent) -> Result<(), E>,
-    ) -> Result<[f64; 3], Error<E>> {
-        run_action(control, || {
-            self.get(vertex)
-                .copied()
-                .map(|value| value.map(f64::from))
-                .ok_or(Error::InvalidPositionStorage { vertex })
-        })
+    fn is_sparse(&self) -> bool {
+        false
+    }
+    fn read<E>(&self, vertex: usize) -> Result<[f64; 3], Error<E>> {
+        self.get(vertex)
+            .copied()
+            .map(|value| value.map(f64::from))
+            .ok_or(Error::InvalidPositionStorage { vertex })
     }
 }
 
 #[cfg(test)]
 impl PositionSource for &[[f64; 3]] {
-    fn len(self) -> usize {
+    fn len(&self) -> usize {
         <[[f64; 3]]>::len(self)
     }
-
-    fn is_f64(self) -> bool {
+    fn is_f64(&self) -> bool {
         true
     }
-
-    fn read<E>(
-        self,
-        vertex: usize,
-        control: &mut impl FnMut(WorkEvent) -> Result<(), E>,
-    ) -> Result<[f64; 3], Error<E>> {
-        run_action(control, || {
-            self.get(vertex)
-                .copied()
-                .ok_or(Error::InvalidPositionStorage { vertex })
-        })
+    fn is_sparse(&self) -> bool {
+        false
+    }
+    fn read<E>(&self, vertex: usize) -> Result<[f64; 3], Error<E>> {
+        self.get(vertex)
+            .copied()
+            .ok_or(Error::InvalidPositionStorage { vertex })
     }
 }
 
 impl PositionSource for AttributeRef<'_> {
-    fn len(self) -> usize {
-        AttributeRef::len(&self)
+    fn len(&self) -> usize {
+        AttributeRef::len(self)
     }
-
-    fn is_f64(self) -> bool {
+    fn is_f64(&self) -> bool {
         matches!(
             self.data(),
             AttributeData::DenseF64 { .. } | AttributeData::SparseF64 { .. }
         )
     }
-
-    fn read<E>(
-        self,
-        vertex: usize,
-        control: &mut impl FnMut(WorkEvent) -> Result<(), E>,
-    ) -> Result<[f64; 3], Error<E>> {
-        read_position_data(self.data(), vertex, control)
+    fn is_sparse(&self) -> bool {
+        matches!(
+            self.data(),
+            AttributeData::SparseF32 { .. } | AttributeData::SparseF64 { .. }
+        )
+    }
+    fn read<E>(&self, vertex: usize) -> Result<[f64; 3], Error<E>> {
+        read_position_data(self.data(), vertex)
     }
 }
 
-fn read_position_data<E>(
-    data: AttributeData<'_>,
-    vertex: usize,
-    control: &mut impl FnMut(WorkEvent) -> Result<(), E>,
-) -> Result<[f64; 3], Error<E>> {
+fn read_position_data<E>(data: AttributeData<'_>, vertex: usize) -> Result<[f64; 3], Error<E>> {
     let index = match data {
         AttributeData::SparseF32 { indices, .. } | AttributeData::SparseF64 { indices, .. } => {
-            sparse_index(indices, vertex, control)?
+            sparse_index(indices, vertex)?
         }
         _ => Some(vertex),
     };
-    run_action(control, || match (data, index) {
+    match (data, index) {
         (AttributeData::DenseF32 { lanes: 3, values }, Some(index))
         | (
             AttributeData::SparseF32 {
@@ -199,7 +266,7 @@ fn read_position_data<E>(
             None,
         ) => position_tuple(default, 0, vertex),
         _ => Err(Error::InvalidPositionStorage { vertex }),
-    })
+    }
 }
 
 fn position_tuple<T: Copy + Into<f64>, E>(
@@ -215,21 +282,16 @@ fn position_tuple<T: Copy + Into<f64>, E>(
     Ok([tuple[0].into(), tuple[1].into(), tuple[2].into()])
 }
 
-fn sparse_index<E>(
-    indices: &[u32],
-    vertex: usize,
-    control: &mut impl FnMut(WorkEvent) -> Result<(), E>,
-) -> Result<Option<usize>, Error<E>> {
+fn sparse_index<E>(indices: &[u32], vertex: usize) -> Result<Option<usize>, Error<E>> {
     let logical = u32::try_from(vertex).map_err(|_| Error::InvalidPositionStorage { vertex })?;
     let (mut low, mut high) = (0, indices.len());
-    // Validated sparse indices have a u32 logical domain. Each comparison is separately charged.
+    // Central validation proves unique u32-domain indices. Retain a literal bound even on errors.
     for _ in 0..33 {
         if low == high {
             return Ok(None);
         }
         let middle = low + (high - low) / 2;
-        let ordering = run_action(control, || Ok(indices[middle].cmp(&logical)))?;
-        match ordering {
+        match indices[middle].cmp(&logical) {
             std::cmp::Ordering::Less => low = middle + 1,
             std::cmp::Ordering::Greater => high = middle,
             std::cmp::Ordering::Equal => return Ok(Some(middle)),
@@ -368,12 +430,12 @@ pub(crate) enum Error<E> {
 /// The input slices are never modified. Output and workspace are provisional on any error.
 ///
 /// Dense work is O(V + C) for Flat or vertex-bucket Smooth, O(V + C log C) for general Smooth.
-/// Sparse reads retain their separately metered search cost. Smooth uses C caller-owned usize
+/// Sparse lookup has at most 33 comparisons per tuple. Smooth uses C caller-owned usize
 /// entries, optional V count/cursor entries bounded by C, an optional C / 3 cross cache, and
 /// constant stack space; Flat needs no corner scratch.
-/// Every input-sized loop exposes bounded leaf actions, including sift-down and output.
-/// Begin admits one action; Complete follows its normal return, including a semantic error.
-/// No action encloses another action or a checkpoint. The callback owns polling cadence;
+/// Every input-sized loop exposes semantic actions: one face/candidate/output or <=32 Copy rows.
+/// Begin carries a conservative control cost, independently of one ledger action. Complete follows
+/// normal return, including semantic error. No action encloses another action or checkpoint;
 /// Checkpoint requests a full poll at entry, phase boundaries and successful completion.
 /// A callback error stops immediately and is returned unchanged, ahead of an action error
 /// if its Complete callback fails. Panics do not emit Complete during unwinding.
@@ -430,28 +492,34 @@ pub(crate) fn generate_into<E, P: PositionSource>(
     let wide = input.positions.is_f64();
     let mut maximum = 0.0_f64;
     for vertex in 0..input.positions.len() {
-        let position = input.positions.read(vertex, &mut control)?;
-        run_action(&mut control, || {
-            for (component, value) in position.into_iter().enumerate() {
-                if !value.is_finite() {
-                    return Err(Error::NonFinitePosition { vertex, component });
+        run_action(
+            &mut control,
+            Action::PositionValidate {
+                sparse: input.positions.is_sparse(),
+            },
+            || {
+                let position = input.positions.read(vertex)?;
+                for (component, value) in position.into_iter().enumerate() {
+                    if !value.is_finite() {
+                        return Err(Error::NonFinitePosition { vertex, component });
+                    }
+                    if wide {
+                        precision::observe_magnitude(&mut maximum, value).map_err(|issue| {
+                            Error::PositionNumerical {
+                                vertex,
+                                component,
+                                issue,
+                            }
+                        })?;
+                    }
                 }
-                if wide {
-                    precision::observe_magnitude(&mut maximum, value).map_err(|issue| {
-                        Error::PositionNumerical {
-                            vertex,
-                            component,
-                            issue,
-                        }
-                    })?;
-                }
-            }
-            Ok(())
-        })?;
+                Ok(())
+            },
+        )?;
     }
     // Every face and smoothing bucket uses this single scale, retaining relative areas.
     let scale = if wide {
-        Some(run_action(&mut control, || {
+        Some(run_action(&mut control, Action::PrimitiveScale, || {
             Ok(precision::common_scale(maximum))
         })?)
     } else {
@@ -460,31 +528,31 @@ pub(crate) fn generate_into<E, P: PositionSource>(
 
     control(WorkEvent::Checkpoint).map_err(Error::Control)?;
     for face in 0..faces {
-        let cross = read_face_cross(input, face, scale, &mut control)?;
-        let wide_normal = if wide {
-            Some(run_action(&mut control, || {
-                Ok(precision::unit_estimate(cross)
-                    .map_err(|issue| Error::Numerical { face, issue })?
-                    .value)
-            })?)
-        } else {
-            None
-        };
-        if let Some(crosses) = workspace.face_crosses.as_deref_mut() {
-            run_action(&mut control, || {
-                crosses[face] = cross;
-                Ok(())
-            })?;
-        }
-        if mode == Mode::Flat {
-            let normal = match wide_normal {
-                Some(normal) => normal,
-                None => run_action(&mut control, || {
-                    unit_exact_source(cross.value).ok_or(Error::InvalidFaceCross { face })
-                })?,
-            };
+        let flat_normal = run_action(
+            &mut control,
+            Action::FaceEvaluate {
+                sparse: input.positions.is_sparse(),
+                wide,
+                cached: workspace.face_crosses.is_some(),
+                flat: mode == Mode::Flat,
+            },
+            || {
+                let cross = read_face_cross(input, face, scale)?;
+                finish_face(
+                    cross,
+                    face,
+                    wide,
+                    mode,
+                    workspace
+                        .face_crosses
+                        .as_deref_mut()
+                        .map(|crosses| &mut crosses[face]),
+                )
+            },
+        )?;
+        if let Some(normal) = flat_normal {
             for corner in 3 * face..3 * face + 3 {
-                run_action(&mut control, || {
+                run_action(&mut control, Action::OutputElement, || {
                     output
                         .publish(corner, normal)
                         .map_err(|issue| Error::Numerical { face, issue })
@@ -501,9 +569,11 @@ pub(crate) fn generate_into<E, P: PositionSource>(
         {
             stable_vertex_order(input, workspace.corner_order, cursors, &mut control)?;
         } else {
-            for (corner, slot) in workspace.corner_order.iter_mut().enumerate() {
-                run_action(&mut control, || {
-                    *slot = corner;
+            for (chunk_index, chunk) in workspace.corner_order.chunks_mut(32).enumerate() {
+                run_action(&mut control, Action::OrderInitChunk, || {
+                    for (offset, slot) in chunk.iter_mut().enumerate() {
+                        *slot = chunk_index * 32 + offset;
+                    }
                     Ok(())
                 })?;
             }
@@ -512,7 +582,7 @@ pub(crate) fn generate_into<E, P: PositionSource>(
         control(WorkEvent::Checkpoint).map_err(Error::Control)?;
         let mut start = 0;
         while start < corners {
-            let (first, key) = run_action(&mut control, || {
+            let (first, key) = run_action(&mut control, Action::BucketStart, || {
                 let first = workspace.corner_order[start];
                 Ok((first, smoothing_key(input, first)))
             })?;
@@ -527,28 +597,36 @@ pub(crate) fn generate_into<E, P: PositionSource>(
                 issue,
             };
             while end < corners {
-                let (corner, same_bucket) = run_action(&mut control, || {
-                    let corner = workspace.corner_order[end];
-                    Ok((corner, smoothing_key(input, corner) == key))
-                })?;
+                let same_bucket = run_action(
+                    &mut control,
+                    Action::SmoothCandidate {
+                        sparse: input.positions.is_sparse(),
+                        wide,
+                        cached: workspace.face_crosses.is_some(),
+                    },
+                    || {
+                        let corner = workspace.corner_order[end];
+                        if smoothing_key(input, corner) != key {
+                            return Ok(false);
+                        }
+                        let cross = match workspace.face_crosses.as_deref() {
+                            Some(crosses) => crosses[corner / 3],
+                            None => read_face_cross(input, corner / 3, scale)?,
+                        };
+                        if wide {
+                            precision::area_add(&mut area, cross).map_err(numeric_error)?;
+                        } else {
+                            accumulate(&mut sum, &mut correction, cross.value);
+                        }
+                        Ok(true)
+                    },
+                )?;
                 if !same_bucket {
                     break;
                 }
-                let cross = match workspace.face_crosses.as_deref() {
-                    Some(crosses) => run_action(&mut control, || Ok(crosses[corner / 3]))?,
-                    None => read_face_cross(input, corner / 3, scale, &mut control)?,
-                };
-                run_action(&mut control, || {
-                    if wide {
-                        precision::area_add(&mut area, cross).map_err(numeric_error)?;
-                    } else {
-                        accumulate(&mut sum, &mut correction, cross.value);
-                    }
-                    Ok(())
-                })?;
                 end += 1;
             }
-            let normal = run_action(&mut control, || {
+            let normal = run_action(&mut control, Action::BucketFinish, || {
                 if wide {
                     let estimate = precision::area_finish(&area).map_err(numeric_error)?;
                     Ok(precision::unit_estimate(estimate)
@@ -575,7 +653,7 @@ pub(crate) fn generate_into<E, P: PositionSource>(
                 }
             })?;
             for &corner in &workspace.corner_order[start..end] {
-                run_action(&mut control, || {
+                run_action(&mut control, Action::OutputElement, || {
                     output.publish(corner, normal).map_err(numeric_error)
                 })?;
             }
@@ -583,6 +661,37 @@ pub(crate) fn generate_into<E, P: PositionSource>(
         }
     }
     control(WorkEvent::Checkpoint).map_err(Error::Control)
+}
+
+/// Keeps the width-dependent validation/cache order shared by every normal face evaluation.
+fn finish_face<E>(
+    cross: Estimate3,
+    face: usize,
+    wide: bool,
+    mode: Mode,
+    cache: Option<&mut Estimate3>,
+) -> Result<Option<[f64; 3]>, Error<E>> {
+    let wide_normal = if wide {
+        Some(
+            precision::unit_estimate(cross)
+                .map_err(|issue| Error::Numerical { face, issue })?
+                .value,
+        )
+    } else {
+        None
+    };
+    if let Some(cache) = cache {
+        *cache = cross;
+    }
+    if mode == Mode::Flat {
+        let normal = match wide_normal {
+            Some(normal) => normal,
+            None => unit_exact_source(cross.value).ok_or(Error::InvalidFaceCross { face })?,
+        };
+        Ok(Some(normal))
+    } else {
+        Ok(None)
+    }
 }
 
 fn check_length<E>(buffer: Buffer, expected: usize, actual: usize) -> Result<(), Error<E>> {
@@ -598,17 +707,16 @@ fn check_length<E>(buffer: Buffer, expected: usize, actual: usize) -> Result<(),
 
 #[cfg(test)]
 fn face_cross<E>(input: Input<'_>, face: usize) -> Result<[f64; 3], Error<E>> {
-    read_face_cross(input, face, None, &mut |_| Ok(())).map(|cross| cross.value)
+    read_face_cross(input, face, None).map(|cross| cross.value)
 }
 
 fn read_face_cross<E, P: PositionSource>(
     input: Input<'_, P>,
     face: usize,
     scale: Option<Pow2Scale>,
-    control: &mut impl FnMut(WorkEvent) -> Result<(), E>,
 ) -> Result<Estimate3, Error<E>> {
     let first = 3 * face;
-    let mut vertices = run_action(control, || {
+    let mut vertices = {
         let vertices = [
             input.vertex(first),
             input.vertex(first + 1),
@@ -623,68 +731,59 @@ fn read_face_cross<E, P: PositionSource>(
                 });
             }
         }
-        Ok(vertices)
-    })?;
+        vertices
+    };
     // One exact determinant can have different floating expansion estimates under permutation.
     // Fix the product order by Vertex identity, then restore winding with an exact sign change.
     // Opposite faces must cancel bit-for-bit instead of normalizing a rounding residual.
     let mut reversed = false;
     for (left, right) in [(0, 1), (1, 2), (0, 1)] {
-        run_action(control, || {
-            if vertices[left] > vertices[right] {
-                vertices.swap(left, right);
-                reversed = !reversed;
-            }
-            Ok(())
-        })?;
+        if vertices[left] > vertices[right] {
+            vertices.swap(left, right);
+            reversed = !reversed;
+        }
     }
     let mut positions = [[0.0; 3]; 3];
     for (row, vertex) in positions.iter_mut().zip(vertices) {
-        *row = input.positions.read(vertex, control)?;
+        *row = input.positions.read(vertex)?;
         if let Some(scale) = scale {
             for (component, value) in row.iter_mut().enumerate() {
-                run_action(control, || {
-                    *value = precision::scale_exact(*value, scale).map_err(|issue| {
-                        Error::PositionNumerical {
-                            vertex,
-                            component,
-                            issue,
-                        }
-                    })?;
-                    Ok(())
+                *value = precision::scale_exact(*value, scale).map_err(|issue| {
+                    Error::PositionNumerical {
+                        vertex,
+                        component,
+                        issue,
+                    }
                 })?;
             }
         }
     }
-    run_action(control, || {
-        let mut cross = if scale.is_some() {
-            precision::face_cross_f64(positions)
-                .map_err(|issue| Error::Numerical { face, issue })?
-        } else {
-            // Two finite F32 coordinate factors multiply exactly in F64 at every exponent.
-            // Preserve the original six-product expansion, including its operation order.
-            let [a, b, c] = positions;
-            let value = [
-                determinant(a, b, c, 1, 2),
-                determinant(a, b, c, 2, 0),
-                determinant(a, b, c, 0, 1),
-            ];
-            if value.iter().any(|value| !value.is_finite()) {
-                return Err(Error::InvalidFaceCross { face });
-            }
-            if value == [0.0; 3] {
-                return Err(Error::DegenerateFace { face });
-            }
-            Estimate3 {
-                value,
-                abs_error: [0.0; 3],
-            }
-        };
-        if reversed {
-            cross.value = cross.value.map(|value| -value);
+    let mut cross = if scale.is_some() {
+        precision::face_cross_f64(positions).map_err(|issue| Error::Numerical { face, issue })?
+    } else {
+        // Two finite F32 coordinate factors multiply exactly in F64 at every exponent.
+        // Preserve the original six-product expansion, including its operation order.
+        let [a, b, c] = positions;
+        let value = [
+            determinant(a, b, c, 1, 2),
+            determinant(a, b, c, 2, 0),
+            determinant(a, b, c, 0, 1),
+        ];
+        if value.iter().any(|value| !value.is_finite()) {
+            return Err(Error::InvalidFaceCross { face });
         }
-        Ok(cross)
-    })
+        if value == [0.0; 3] {
+            return Err(Error::DegenerateFace { face });
+        }
+        Estimate3 {
+            value,
+            abs_error: [0.0; 3],
+        }
+    };
+    if reversed {
+        cross.value = cross.value.map(|value| -value);
+    }
+    Ok(cross)
 }
 
 fn determinant(a: [f64; 3], b: [f64; 3], c: [f64; 3], i: usize, j: usize) -> f64 {
@@ -777,10 +876,14 @@ fn uniform_smoothing_groups<E>(
         return Ok(true);
     };
     let mut first = None;
-    for group in groups {
-        if !run_action(control, || {
-            let group = *group;
-            Ok(group != 0 && group == *first.get_or_insert(group))
+    for chunk in groups.chunks(32) {
+        if !run_action(control, Action::UniformGroupChunk, || {
+            for &group in chunk {
+                if group == 0 || group != *first.get_or_insert(group) {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
         })? {
             return Ok(false);
         }
@@ -794,34 +897,42 @@ fn stable_vertex_order<E>(
     cursors: &mut [usize],
     control: &mut impl FnMut(WorkEvent) -> Result<(), E>,
 ) -> Result<(), Error<E>> {
-    for slot in cursors.iter_mut() {
-        run_action(control, || {
-            *slot = 0;
+    for chunk in cursors.chunks_mut(32) {
+        run_action(control, Action::CursorResetChunk, || {
+            chunk.fill(0);
             Ok(())
         })?;
     }
-    for corner in 0..order.len() {
-        run_action(control, || {
-            cursors[input.vertex(corner)] += 1;
+    for start in (0..order.len()).step_by(32) {
+        let count = (order.len() - start).min(32);
+        run_action(control, Action::HistogramChunk, || {
+            for corner in start..start + count {
+                cursors[input.vertex(corner)] += 1;
+            }
             Ok(())
         })?;
     }
     let mut next = 0;
-    for slot in cursors.iter_mut() {
-        run_action(control, || {
-            let count = *slot;
-            *slot = next;
-            next += count;
+    for chunk in cursors.chunks_mut(32) {
+        run_action(control, Action::PrefixChunk, || {
+            for slot in chunk {
+                let count = *slot;
+                *slot = next;
+                next += count;
+            }
             Ok(())
         })?;
     }
     // All IDs were checked by face validation. Ascending scatter preserves the corner tie-break.
-    for corner in 0..order.len() {
-        run_action(control, || {
-            let vertex = input.vertex(corner);
-            let destination = cursors[vertex];
-            order[destination] = corner;
-            cursors[vertex] = destination + 1;
+    for start in (0..order.len()).step_by(32) {
+        let count = (order.len() - start).min(32);
+        run_action(control, Action::ScatterChunk, || {
+            for corner in start..start + count {
+                let vertex = input.vertex(corner);
+                let destination = cursors[vertex];
+                order[destination] = corner;
+                cursors[vertex] = destination + 1;
+            }
             Ok(())
         })?;
     }
@@ -837,7 +948,7 @@ fn heapsort<E>(
         sift_down(input, order, root, order.len(), control)?;
     }
     for end in (1..order.len()).rev() {
-        run_action(control, || {
+        run_action(control, Action::HeapExtract, || {
             order.swap(0, end);
             Ok(())
         })?;
@@ -855,20 +966,21 @@ fn sift_down<E>(
 ) -> Result<(), Error<E>> {
     // This bound also keeps 2 * root + 1 in range without overflowing.
     while root < end / 2 {
-        let mut child = 2 * root + 1;
-        if child + 1 < end
-            && run_action(control, || Ok(less(input, order[child], order[child + 1])))?
-        {
-            child += 1;
-        }
-        if !run_action(control, || Ok(less(input, order[root], order[child])))? {
-            break;
-        }
-        run_action(control, || {
+        let next = run_action(control, Action::HeapStep, || {
+            let mut child = 2 * root + 1;
+            if child + 1 < end && less(input, order[child], order[child + 1]) {
+                child += 1;
+            }
+            if !less(input, order[root], order[child]) {
+                return Ok(None);
+            }
             order.swap(root, child);
-            Ok(())
+            Ok(Some(child))
         })?;
-        root = child;
+        let Some(next) = next else {
+            break;
+        };
+        root = next;
     }
     Ok(())
 }

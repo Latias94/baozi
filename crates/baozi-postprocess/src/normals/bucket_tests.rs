@@ -1,7 +1,7 @@
 use std::convert::Infallible;
 
 use super::{
-    Buffer, Error, Input, Mode, Output, PositionSource, VertexIds, WorkEvent, Workspace,
+    Action, Buffer, Error, Input, Mode, Output, PositionSource, VertexIds, WorkEvent, Workspace,
     generate_into, stable_vertex_order, uniform_smoothing_groups,
 };
 use crate::GeometryNumericIssue;
@@ -178,12 +178,12 @@ fn supplied_cursor_shapes_are_checked_before_any_workspace_mutation() {
 }
 
 #[test]
-fn uniform_group_proof_charges_reads_and_never_converts_rejection_into_general_sort() {
-    for (groups, uniform, reads) in [
+fn uniform_group_chunks_never_convert_rejection_into_general_sort() {
+    for (groups, uniform, chunks) in [
         (None, true, 0),
-        (Some([7, 7, 7].as_slice()), true, 3),
-        (Some([7, 7, 9].as_slice()), false, 3),
-        (Some([7, 0, 7].as_slice()), false, 2),
+        (Some([7, 7, 7].as_slice()), true, 1),
+        (Some([7, 7, 9].as_slice()), false, 1),
+        (Some([7, 0, 7].as_slice()), false, 1),
         (Some([0, 7, 7].as_slice()), false, 1),
     ] {
         let mut events = Vec::new();
@@ -196,66 +196,76 @@ fn uniform_group_proof_charges_reads_and_never_converts_rejection_into_general_s
         );
         assert_eq!(
             events,
-            [WorkEvent::Begin, WorkEvent::Complete].repeat(reads)
+            [
+                WorkEvent::Begin(Action::UniformGroupChunk),
+                WorkEvent::Complete
+            ]
+            .repeat(chunks)
         );
-        for fail_event in [WorkEvent::Begin, WorkEvent::Complete] {
-            for stop in 1..=reads {
-                let mut matching = 0;
+        if chunks != 0 {
+            for reject_begin in [true, false] {
                 assert_eq!(
                     uniform_smoothing_groups(groups, &mut |event| {
-                        if event == fail_event {
-                            matching += 1;
-                            if matching == stop {
-                                return Err(stop);
-                            }
+                        if matches!(event, WorkEvent::Begin(_)) == reject_begin {
+                            Err(1)
+                        } else {
+                            Ok(())
                         }
-                        Ok(())
                     }),
-                    Err(Error::Control(stop))
+                    Err(Error::Control(1))
                 );
-                assert_eq!(matching, stop);
             }
         }
+    }
+    let mut groups = [7; 33];
+    groups[32] = 0;
+    for reject_begin in [false, true] {
+        let mut begins = 0;
+        let result = uniform_smoothing_groups(Some(&groups), &mut |event| {
+            begins += usize::from(matches!(event, WorkEvent::Begin(_)));
+            if reject_begin && begins == 2 && matches!(event, WorkEvent::Begin(_)) {
+                Err(2)
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(begins, 2);
+        assert_eq!(
+            result,
+            if reject_begin {
+                Err(Error::Control(2))
+            } else {
+                Ok(false)
+            }
+        );
     }
 }
 
 #[test]
-fn ordering_admission_and_completion_failures_keep_exact_physical_prefixes() {
+fn ordering_chunk_denial_and_completion_keep_literal_physical_prefixes() {
     const U: usize = usize::MAX;
-    // Fixed fixture facts: three resets, six corner counts, three starts, six scatter writes.
-    for (event, stop, expected_cursors, expected_order) in [
-        (WorkEvent::Begin, 1, [U, U, U], [U; 6]),
-        (WorkEvent::Complete, 1, [0, U, U], [U; 6]),
-        (WorkEvent::Begin, 4, [0, 0, 0], [U; 6]),
-        (WorkEvent::Complete, 4, [0, 0, 1], [U; 6]),
-        (WorkEvent::Begin, 10, [2, 2, 2], [U; 6]),
-        (WorkEvent::Complete, 10, [0, 2, 2], [U; 6]),
-        (WorkEvent::Begin, 13, [0, 2, 4], [U; 6]),
-        (WorkEvent::Complete, 13, [0, 2, 5], [U, U, U, U, 0, U]),
-        (WorkEvent::Begin, 18, [1, 4, 6], [1, U, 2, 3, 0, 4]),
-        (WorkEvent::Complete, 18, [2, 4, 6], [1, 5, 2, 3, 0, 4]),
+    // This fixture has four operations: reset, six histogram records, prefix, six scatter records.
+    for (reject_begin, stop, expected_cursors, expected_order) in [
+        (true, 1, [U, U, U], [U; 6]),
+        (false, 1, [0, 0, 0], [U; 6]),
+        (true, 2, [0, 0, 0], [U; 6]),
+        (false, 2, [2, 2, 2], [U; 6]),
+        (true, 3, [2, 2, 2], [U; 6]),
+        (false, 3, [0, 2, 4], [U; 6]),
+        (true, 4, [0, 2, 4], [U; 6]),
+        (false, 4, [2, 4, 6], [1, 5, 2, 3, 0, 4]),
     ] {
         let mut order = [U; 6];
         let mut cursors = [U; 3];
-        let mut begins = 0;
-        let mut completes = 0;
+        let (mut begins, mut completes) = (0, 0);
         let result = stable_vertex_order(
             input(&POSITIONS, None),
             &mut order,
             &mut cursors,
-            &mut |e| {
-                match e {
-                    WorkEvent::Begin => {
-                        assert_eq!(begins, completes);
-                        begins += 1;
-                    }
-                    WorkEvent::Complete => {
-                        completes += 1;
-                        assert_eq!(begins, completes);
-                    }
-                    WorkEvent::Checkpoint => panic!("no poll belongs inside a leaf"),
-                }
-                if e == event && begins == stop {
+            &mut |event| {
+                begins += usize::from(matches!(event, WorkEvent::Begin(_)));
+                completes += usize::from(event == WorkEvent::Complete);
+                if begins == stop && matches!(event, WorkEvent::Begin(_)) == reject_begin {
                     Err(stop)
                 } else {
                     Ok(())
@@ -263,10 +273,51 @@ fn ordering_admission_and_completion_failures_keep_exact_physical_prefixes() {
             },
         );
         assert_eq!(result, Err(Error::Control(stop)));
-        assert_eq!(begins, stop);
-        assert_eq!(completes, stop - usize::from(event == WorkEvent::Begin));
+        assert_eq!(
+            (begins, completes),
+            (stop, stop - usize::from(reject_begin))
+        );
         assert_eq!(cursors, expected_cursors);
         assert_eq!(order, expected_order);
+    }
+}
+
+#[test]
+fn copy_scan_boundaries_admit_no_part_of_the_denied_chunk() {
+    for corners in [0, 1, 31, 32, 33] {
+        let ids = vec![0_u32; corners];
+        let mut order = vec![usize::MAX; corners];
+        let mut cursors = [usize::MAX];
+        let mut scatters = 0;
+        let result = stable_vertex_order(
+            Input {
+                positions: &POSITIONS[..1],
+                vertex_ids: VertexIds::Indexed(&ids),
+                smoothing_groups: None,
+            },
+            &mut order,
+            &mut cursors,
+            &mut |event| {
+                if matches!(event, WorkEvent::Begin(Action::ScatterChunk)) {
+                    scatters += 1;
+                    if scatters == 2 {
+                        return Err("second scatter denied");
+                    }
+                }
+                Ok(())
+            },
+        );
+        if corners == 33 {
+            assert_eq!(result, Err(Error::Control("second scatter denied")));
+            assert_eq!(cursors, [32]);
+            assert_eq!(order[32], usize::MAX);
+        } else {
+            result.unwrap();
+            assert_eq!(cursors, [corners]);
+        }
+        for (index, value) in order.iter().take(corners.min(32)).enumerate() {
+            assert_eq!(*value, index);
+        }
     }
 }
 

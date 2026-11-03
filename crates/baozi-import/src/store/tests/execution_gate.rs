@@ -89,11 +89,11 @@ fn concrete_parser_channels_return_owned_storage_before_scene_submission() {
             child
                 .complete([1, 1])
                 .expect("the callback must immediately record its actual physical prefix");
-            exec.completed_action();
+            exec.completed_action(1).unwrap();
         };
 
         for value in [7_u8, 11] {
-            exec.before_action()
+            exec.before_action(1)
                 .expect("each child must pass the existing bounded control cadence");
             let mut child = child_group
                 .begin_parser_child([1, 1], [None, None])

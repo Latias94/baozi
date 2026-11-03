@@ -67,7 +67,7 @@ fn run() -> Result<()> {
         return compare(&args);
     }
     let mut args = std::env::args_os().skip(1);
-    let root = args.next().map(PathBuf::from).ok_or("usage: baozi-asset-consumer ROOT RELATIVE_ASSET [--assume-standard-space] [--max-work-units N] [--postprocess-work N] [--postprocess-bytes N]")?;
+    let root = args.next().map(PathBuf::from).ok_or("usage: baozi-asset-consumer ROOT RELATIVE_ASSET [--assume-standard-space] [--max-work-units N] [--postprocess-actions N] [--postprocess-bytes N]")?;
     let source = args
         .next()
         .ok_or("missing relative asset path")?
@@ -87,15 +87,15 @@ fn run() -> Result<()> {
                     .ok_or("work limit must be UTF-8")?
                     .parse()?
             }
-            Some("--postprocess-work") | Some("--postprocess-bytes") => {
+            Some("--postprocess-actions") | Some("--postprocess-bytes") => {
                 let value: u64 = args
                     .next()
                     .ok_or("missing postprocess limit")?
                     .to_str()
                     .ok_or("postprocess limit must be UTF-8")?
                     .parse()?;
-                if arg == "--postprocess-work" {
-                    options.postprocess_budgets.work = value;
+                if arg == "--postprocess-actions" {
+                    options.postprocess_budgets.max_work_actions = value;
                 } else {
                     options.postprocess_budgets.storage_bytes = value;
                 }
@@ -144,7 +144,9 @@ fn run() -> Result<()> {
             "traced_provenance_nodes": metrics.traced_provenance_nodes,
             "traced_source_objects": metrics.traced_source_objects,
             "buffers_micros": metrics.buffers_micros, "import_work": metrics.import_work,
-            "postprocess_work": metrics.postprocess_work, "import_peak_live_bytes": metrics.import_peak_live_bytes,
+            "postprocess_work_actions": metrics.postprocess_work_actions,
+            "postprocess_work_action_contract": metrics.postprocess_work_action_contract,
+            "import_peak_live_bytes": metrics.import_peak_live_bytes,
             "max_postprocess_peak_live_bytes": metrics.max_postprocess_peak_live_bytes,
             "opened_assets": metrics.opened_assets, "changed_operations": metrics.changed_operations,
             "selected_geometry_reconstructions": metrics.selected_geometry_reconstructions,

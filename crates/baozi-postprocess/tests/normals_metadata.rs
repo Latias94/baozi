@@ -570,7 +570,7 @@ fn assert_output_geometry(scene: &ValidatedScene, output_target: PrimitiveId) {
 fn assert_finished(resources: &PostProcessResourceEvidence) {
     assert_eq!(resources.current_live_bytes(), 0);
     assert_eq!(resources.active_reservations(), 0);
-    assert!(resources.consumed_work_items() > 0);
+    assert!(resources.consumed_work_actions() > 0);
 }
 
 fn assert_changed_report(

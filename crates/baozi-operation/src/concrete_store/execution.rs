@@ -313,14 +313,19 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreExecutionContro
         self.raw.checkpoint().map_err(map_execution_error)
     }
 
-    /// Polls when due before a bounded library action; budgets are still checked per action.
-    pub fn before_action(&mut self) -> Result<(), StoreRuntimeError> {
-        self.raw.before_action().map_err(map_execution_error)
+    /// Polls before the action's conservative control cost would exceed the invocation bound.
+    /// Cost affects cancellation cadence only; each real action has its own work admission.
+    pub fn before_action(&mut self, max_cost: u16) -> Result<(), StoreRuntimeError> {
+        self.raw
+            .before_action(max_cost)
+            .map_err(map_execution_error)
     }
 
     /// Advances only the cadence debt after exact physical completion has been recorded.
-    pub fn completed_action(&mut self) {
-        self.raw.completed_action();
+    pub fn completed_action(&mut self, max_cost: u16) -> Result<(), StoreRuntimeError> {
+        self.raw
+            .completed_action(max_cost)
+            .map_err(map_execution_error)
     }
 
     /// Reports progress at an explicit full checkpoint.

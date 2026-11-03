@@ -1591,7 +1591,7 @@ where
         if let Some(cause) = preserved_fault(self.first_fault) {
             return Err(cause);
         }
-        preserve_first_fault(self.first_fault, self.control.before_action())
+        preserve_first_fault(self.first_fault, self.control.before_action(1))
     }
 
     fn finish_checkpoint(&mut self) -> Result<(), StoreRuntimeError> {
@@ -1675,7 +1675,10 @@ where
             return self.finish_action_callback(action, result);
         }
         self.completed_any = true;
-        self.control.completed_action();
+        if let Err(cause) = self.control.completed_action(1) {
+            let result = preserve_runtime_fault_then_drop_result(self.first_fault, cause, result);
+            return self.finish_action_callback(action, result);
+        }
         self.finish_action_callback(action, Ok(result))
     }
 

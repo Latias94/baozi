@@ -658,7 +658,7 @@ fn tight_selected_work_budget_rejects_indexed_generation_before_output_allocatio
         baozi_postprocess::TrianglePreparationOptions {
             tangents: baozi_postprocess::TangentPolicy::Generate(vertex_options()),
             budgets: baozi_postprocess::PostProcessBudgets {
-                work: 150,
+                max_work_actions: 150,
                 ..Default::default()
             },
             ..Default::default()
@@ -692,8 +692,8 @@ fn tight_selected_work_budget_rejects_indexed_generation_before_output_allocatio
         "expected a work admission failure, found {preparation:?}"
     );
     let resources = preparation.resources().unwrap();
-    assert!(resources.consumed_work_items() <= 150);
-    assert!(resources.attempted_work_items() >= resources.consumed_work_items());
+    assert!(resources.consumed_work_actions() <= 150);
+    assert!(resources.attempted_work_actions() >= resources.consumed_work_actions());
     assert!(resources.peak_staging_bytes() < 909_093 * std::mem::size_of::<[f32; 4]>() as u64);
     assert_eq!(resources.current_live_bytes(), 0);
     assert_eq!(resources.active_reservations(), 0);

@@ -50,12 +50,21 @@ it. Dependencies resolve through the same capability. A successful invocation em
 summary. Failures emit a cause chain on stderr and return a nonzero exit code. There is no automatic
 retry, hidden coordinate assumption, or automatic budget increase. `--max-work-units N` explicitly
 sets only the import work allowance through `Options::max_work_units`; its default is 200,000,000,
-including filesystem accounting. `--postprocess-work N` and `--postprocess-bytes N` set
-`Options::postprocess_budgets.work` and `.storage_bytes` for the single `prepare_triangles` call.
-The default `PostProcessBudgets` allows 100,000,000 work items and 1,073,741,824 accounted storage
+including filesystem accounting. `--postprocess-actions N` and `--postprocess-bytes N` set
+`Options::postprocess_budgets.max_work_actions` and `.storage_bytes` for the single `prepare_triangles` call.
+The default `PostProcessBudgets` allows 100,000,000 bounded work actions and 1,073,741,824 accounted storage
 bytes. These preparation budgets are separate from import limits and from application buffer
 allocations. Coordinate conversion retains its documented default operation limits; the two
 postprocess flags apply to triangle preparation, not conversion or a combined pipeline ledger.
+
+`bounded-normal-actions/v2` identifies the postprocess action vocabulary. One normally returned
+bounded normal operation, including a semantic error, consumes one action; a denied admission
+increments representable attempted actions without executing that operation. Face evaluation,
+one smoothing-candidate visit and one output element are separate operations. Concrete Copy
+initialization/order scans process at most 32 records per action. Delegated selection, core
+construction, real retained-share and protected terminal work retain their defined units on the
+same authority. Conservative control costs are separate from consumed actions and preserve the
+bounded cancellation frontier. There is no numerical conversion from the retired getter counts.
 
 The processing order is one selected triangle-preparation transaction followed by one whole-Scene
 space conversion. Lowering first lets polygons/strips/fans enter a conversion that reverses winding.
@@ -310,7 +319,8 @@ it does not reuse an imported Scene or average away individual observations. Nor
 the separately built `--allocation-metrics` variant belong in different artifact directories.
 
 Consumer summaries separate import, postprocess, provenance traversal and buffer extraction time.
-`postprocess_work` sums the coordinate-conversion and triangle-preparation reports;
+`postprocess_work_actions` sums the coordinate-conversion and triangle-preparation reports,
+with `postprocess_work_action_contract` identifying their bounded vocabulary;
 `changed_operations` counts changed reports from those two calls.
 `selected_geometry_reconstructions` comes from the preparation report's
 `geometry_reconstruction_count()` and records the actual selected transaction count. It is separate

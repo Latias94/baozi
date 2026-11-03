@@ -1028,8 +1028,8 @@ fn assert_source_order(snapshot: &SceneSnapshot) {
 fn assert_finished(resources: &PostProcessResourceEvidence) {
     assert_eq!(resources.current_live_bytes(), 0);
     assert_eq!(resources.active_reservations(), 0);
-    assert!(resources.consumed_work_items() > 0);
-    assert!(resources.attempted_work_items() >= resources.consumed_work_items());
+    assert!(resources.consumed_work_actions() > 0);
+    assert!(resources.attempted_work_actions() >= resources.consumed_work_actions());
 }
 
 #[test]

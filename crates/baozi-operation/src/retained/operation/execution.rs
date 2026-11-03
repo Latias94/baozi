@@ -301,7 +301,7 @@ where
         Ok(())
     }
 
-    pub(crate) fn before_action(&mut self) -> Result<(), ExecutionError<D>> {
+    pub(crate) fn before_action(&mut self, max_cost: u16) -> Result<(), ExecutionError<D>> {
         if self.failure.get().is_some() {
             return Err(self
                 .progress
@@ -309,16 +309,35 @@ where
                 .map_or(ExecutionError::Stopped, ExecutionError::Control));
         }
         ensure_running(self.failure)?;
-        if usize::from(self.actions_since_poll.get()) >= crate::MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS {
+        if max_cost == 0 || usize::from(max_cost) > crate::MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS {
+            return self.reject_action_cost();
+        }
+        let next = self.actions_since_poll.get().checked_add(max_cost);
+        if next.is_none_or(|next| usize::from(next) > crate::MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS) {
             self.checkpoint()?;
         }
         Ok(())
     }
 
-    /// Work completion precedes this cadence-only update; no uncommitted work lives here.
-    pub(crate) fn completed_action(&mut self) {
+    /// Advances conservative control cost after actual work completion, never ledger consumption.
+    pub(crate) fn completed_action(&mut self, max_cost: u16) -> Result<(), ExecutionError<D>> {
+        let next = self.actions_since_poll.get().checked_add(max_cost);
+        if max_cost == 0
+            || next.is_none_or(|next| usize::from(next) > crate::MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS)
+        {
+            return self.reject_action_cost();
+        }
         self.actions_since_poll
-            .set(self.actions_since_poll.get().saturating_add(1));
+            .set(next.expect("the checked control cost fits"));
+        Ok(())
+    }
+
+    fn reject_action_cost(&self) -> Result<(), ExecutionError<D>> {
+        record_terminal_cause_with_precedence(
+            self.failure,
+            PreparationFailureCode::product_graph(0x4143_4f53),
+        );
+        Err(ExecutionError::Stopped)
     }
 
     pub(crate) fn report_progress(

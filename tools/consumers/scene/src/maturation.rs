@@ -120,7 +120,7 @@ fn selected_geometry(importer: &Importer) -> Result<(), Box<dyn std::error::Erro
         TrianglePreparationOptions {
             normals: Some(NormalOptions::default()),
             budgets: PostProcessBudgets {
-                work: 1_000_000,
+                max_work_actions: 1_000_000,
                 storage_bytes: 16 * 1024 * 1024,
             },
             ..TrianglePreparationOptions::default()

@@ -60,7 +60,8 @@ pub struct Metrics {
     pub buffers_micros: u128,
     pub import_peak_live_bytes: u64,
     pub import_work: u64,
-    pub postprocess_work: u64,
+    pub postprocess_work_actions: u64,
+    pub postprocess_work_action_contract: Option<&'static str>,
     /// Maximum operation-local peak, not a sum or an aggregate physical-memory peak.
     pub max_postprocess_peak_live_bytes: u64,
     pub opened_assets: u64,
@@ -211,7 +212,8 @@ fn trace_primitive_sources(scene: &ValidatedScene, metrics: &mut Metrics) -> Res
 
 fn record(metrics: &mut Metrics, report: &PostProcessReport) {
     let resources = report.resources();
-    metrics.postprocess_work += resources.consumed_work_items();
+    metrics.postprocess_work_actions += resources.consumed_work_actions();
+    metrics.postprocess_work_action_contract = Some(resources.work_action_contract());
     metrics.max_postprocess_peak_live_bytes = metrics
         .max_postprocess_peak_live_bytes
         .max(resources.peak_live_bytes());

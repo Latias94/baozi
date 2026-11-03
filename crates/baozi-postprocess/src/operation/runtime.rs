@@ -25,7 +25,9 @@ pub(crate) const MAX_WORK: u64 = 100_000_000;
 pub(crate) const MAX_BYTES: u64 = 1024 * 1024 * 1024;
 pub(crate) const REJECTION_CODE: u32 = 0x5050_0001;
 const CATALOG: StoreSemanticCatalogId =
-    StoreSemanticCatalogId::new(*b"baozi-postproc-1", NonZeroU32::MIN);
+    StoreSemanticCatalogId::new(*b"baozi-postproc-2", NonZeroU32::MIN);
+
+pub(crate) const WORK_ACTION_CONTRACT: &str = "bounded-normal-actions/v2";
 
 #[derive(Clone, Copy)]
 pub(crate) enum RuntimeDimension {
@@ -116,8 +118,8 @@ fn plan_runtime_with_members(
         max_evidence_members,
         SceneEditBootstrap::failure_field_work(),
         SceneEditBootstrap::failure_field_work(),
-        budgets.work,
-        budgets.work,
+        budgets.max_work_actions,
+        budgets.max_work_actions,
     )
     .ok()?;
     let limits = LedgerLimits::new(
@@ -210,7 +212,7 @@ pub(crate) struct ActiveRuntime<'op> {
     >,
     // The envelope stays owned between leaves; action state is tracked separately.
     pending: Option<StoreExecutionPermit<'op, 1>>,
-    action_pending: bool,
+    action_pending: Option<u16>,
 }
 
 pub(crate) fn with_execution<R, E: From<StoreRuntimeError>>(
@@ -226,10 +228,10 @@ pub(crate) fn with_execution<R, E: From<StoreRuntimeError>>(
         storage,
         control,
         pending: None,
-        action_pending: false,
+        action_pending: None,
     };
     let result = action(&mut runtime);
-    if runtime.action_pending {
+    if runtime.action_pending.is_some() {
         // Unmatched Begin keeps abandonment even if the permit was completed behind the adapter.
         return match result {
             Ok(_) => Err(StoreRuntimeError::ObservedWorkIncomplete.into()),
@@ -267,23 +269,23 @@ impl ActiveRuntime<'_> {
         self.control.checkpoint()
     }
 
-    pub(crate) fn begin_action(&mut self) -> Result<(), StoreRuntimeError> {
-        if self.action_pending {
+    pub(crate) fn begin_action(&mut self, max_cost: u16) -> Result<(), StoreRuntimeError> {
+        if self.action_pending.is_some() {
             return Err(StoreRuntimeError::ObservedWorkOutstanding);
         }
-        self.control.before_action()?;
+        self.control.before_action(max_cost)?;
         match &mut self.pending {
             Some(work) => work.replenish_one()?,
             None => self.pending = Some(self.group.admit_observed([1])?),
         }
-        self.action_pending = true;
+        self.action_pending = Some(max_cost);
         Ok(())
     }
 
     pub(crate) fn complete_action(&mut self) -> Result<(), StoreRuntimeError> {
-        if !self.action_pending {
-            return Err(StoreRuntimeError::ObservedWorkIncomplete);
-        }
+        let max_cost = self
+            .action_pending
+            .ok_or(StoreRuntimeError::ObservedWorkIncomplete)?;
         let work = self
             .pending
             .as_mut()
@@ -292,15 +294,20 @@ impl ActiveRuntime<'_> {
             return Err(StoreRuntimeError::ObservedWorkIncomplete);
         }
         if let Err(cause) = work.complete([1]) {
-            self.action_pending = false;
+            self.action_pending = None;
             // Completion errors resolve now, so callers can immediately check region quiescence.
             if let Some(work) = self.pending.take() {
                 let _ = work.finish_partial();
             }
             return Err(cause);
         }
-        self.action_pending = false;
-        self.control.completed_action();
+        self.action_pending = None;
+        if let Err(cause) = self.control.completed_action(max_cost) {
+            if let Some(work) = self.pending.take() {
+                let _ = work.finish_partial();
+            }
+            return Err(cause);
+        }
         Ok(())
     }
 }
@@ -314,7 +321,7 @@ pub(crate) fn run_unit<R>(
     operation: &mut ActiveRuntime<'_>,
     action: impl FnOnce() -> R,
 ) -> Result<R, StoreRuntimeError> {
-    operation.begin_action()?;
+    operation.begin_action(1)?;
     let value = action();
     operation.complete_action()?;
     Ok(value)

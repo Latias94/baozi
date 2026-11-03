@@ -107,7 +107,7 @@ fn pending_callback_error_survives_cleanup_with_its_completed_prefix() {
     let mut polls_at_exit = 0;
     let result = with_execution(&mut operation, keys, |active| {
         run_unit(active, || physical[0] = 1)?;
-        active.begin_action()?;
+        active.begin_action(1)?;
         physical[1] = 2;
         polls_at_exit = polls.load(Ordering::Relaxed);
         Err::<(), _>(TestError::Callback("callback rejected the leaf"))
@@ -175,7 +175,7 @@ fn successful_return_with_pending_ownership_is_a_sticky_contract_failure() {
         let mut physical = 0;
         let mut polls_at_exit = 0;
         let result = with_execution(&mut operation, keys, |active| {
-            active.begin_action()?;
+            active.begin_action(1)?;
             if physically_complete {
                 physical = 1;
                 // Even zero remaining work still requires explicit ownership resolution.
@@ -214,7 +214,8 @@ fn failed_completion_keeps_the_actual_write_and_original_ledger_cause() {
         limit: initial,
     });
     let result = with_execution(&mut operation, keys, |active| {
-        active.begin_action()?;
+        active.begin_action(118)?;
+        assert_eq!(active.action_pending, Some(118));
         physical = 1;
         // A policy tightened after admission rejects the physical completion, not its prefix.
         let tightened = active
@@ -224,7 +225,7 @@ fn failed_completion_keeps_the_actual_write_and_original_ledger_cause() {
         let completed = active.complete_action();
         assert_eq!(completed, Err(expected.clone()));
         assert!(active.pending.is_none());
-        assert!(!active.action_pending);
+        assert!(active.action_pending.is_none());
         active.work.finish_region().unwrap();
         polls_at_exit = polls.load(Ordering::Relaxed);
         completed
@@ -256,7 +257,7 @@ fn idle_success_and_known_error_explicitly_close_without_abandonment() {
             assert!(active.pending.is_none());
             for (index, destination) in physical.iter_mut().enumerate() {
                 run_unit(active, || *destination = index + 1)?;
-                assert!(!active.action_pending);
+                assert!(active.action_pending.is_none());
                 assert_eq!(active.pending.as_ref().unwrap().remaining(), [0]);
             }
             polls_at_exit = polls.load(Ordering::Relaxed);
@@ -308,7 +309,7 @@ fn panic_between_completed_leaves_keeps_abandonment_without_polling() {
             |active| -> Result<(), StoreRuntimeError> {
                 run_unit(active, || physical = 1)?;
                 assert_eq!(active.pending.as_ref().unwrap().remaining(), [0]);
-                assert!(!active.action_pending);
+                assert!(active.action_pending.is_none());
                 polls_at_exit = polls.load(Ordering::Relaxed);
                 std::panic::panic_any("injected idle region panic");
             },
@@ -355,7 +356,7 @@ fn callback_capture_drop_unwinds_through_idle_sequence_without_polling() {
             keys,
             move |active| -> Result<(), StoreRuntimeError> {
                 run_unit(active, || *destination = 1)?;
-                assert!(!active.action_pending);
+                assert!(active.action_pending.is_none());
                 assert_eq!(active.pending.as_ref().unwrap().remaining(), [0]);
                 *observed_polls = counter.load(Ordering::Relaxed);
                 std::hint::black_box(&captured);
@@ -404,7 +405,7 @@ fn completed_leaf_value_drop_unwinds_through_idle_sequence_without_polling() {
                     physical = 1;
                     ReturnedDrop(Arc::clone(&drops))
                 })?;
-                assert!(!active.action_pending);
+                assert!(active.action_pending.is_none());
                 assert_eq!(active.pending.as_ref().unwrap().remaining(), [0]);
                 polls_at_exit = polls.load(Ordering::Relaxed);
                 std::hint::black_box(&returned);
@@ -453,12 +454,12 @@ fn runtime_refill_denial_keeps_the_literal_write_prefix_and_original_ledger_caus
                 keys.work,
                 DimensionPolicy::counter(attempted, initial + 1, 0),
             )?;
-            let denied = active.begin_action();
+            let denied = active.begin_action(1);
             if denied.is_ok() {
                 physical[1] = 1;
             }
             assert_eq!(denied, Err(expected.clone()));
-            assert!(!active.action_pending);
+            assert!(active.action_pending.is_none());
             assert_eq!(active.pending.as_ref().unwrap().remaining(), [0]);
             polls_at_exit = polls.load(Ordering::Relaxed);
             denied
@@ -578,7 +579,7 @@ fn final_cancellation_closes_idle_sequences_and_preserves_short_and_full_prefixe
                 for destination in physical.iter_mut().take(actions) {
                     run_unit(active, || *destination = 1)?;
                 }
-                assert!(!active.action_pending);
+                assert!(active.action_pending.is_none());
                 assert_eq!(active.pending.is_some(), actions != 0);
                 polls_at_exit = polls.load(Ordering::Relaxed);
                 cancel_at.store(polls_at_exit + 1, Ordering::Relaxed);
@@ -605,4 +606,74 @@ fn final_cancellation_closes_idle_sequences_and_preserves_short_and_full_prefixe
             );
         }
     }
+}
+
+#[test]
+fn weighted_begin_captures_cost_only_after_admission_and_counts_one_action() {
+    let polls = Arc::new(AtomicUsize::new(0));
+    let (mut operation, keys, initial) = start(&polls);
+    let mut physical = [0; 2];
+    let result = with_execution(&mut operation, keys, |active| {
+        active.begin_action(118)?;
+        assert_eq!(active.action_pending, Some(118));
+        physical[0] = 1;
+        active.complete_action()?;
+        assert!(active.action_pending.is_none());
+        active.work.tighten_dimension_policy(
+            keys.work,
+            DimensionPolicy::counter(initial + 1, initial + 1, 0),
+        )?;
+        let denied = active.begin_action(35);
+        if denied.is_ok() {
+            physical[1] = 1;
+        }
+        assert!(matches!(denied, Err(StoreRuntimeError::Ledger(_))));
+        assert!(active.action_pending.is_none());
+        denied
+    });
+    assert!(matches!(result, Err(StoreRuntimeError::Ledger(_))));
+    assert_eq!(physical, [1, 0]);
+    assert_failed_prefix(
+        operation,
+        keys,
+        StorePreparationFailureClass::Ledger,
+        initial + 2,
+        initial + 1,
+    );
+}
+
+#[test]
+fn weighted_next_action_polls_before_reading_and_idle_error_cleanup_adds_no_poll() {
+    let polls = Arc::new(AtomicUsize::new(0));
+    let cancel_at = Arc::new(AtomicUsize::new(usize::MAX));
+    let (mut operation, keys, initial) = start_with_cancel_at(&polls, &cancel_at);
+    let mut physical = [0; 3];
+    let mut before = 0;
+    let result = with_execution(&mut operation, keys, |active| {
+        for destination in physical.iter_mut().take(2) {
+            active.begin_action(118)?;
+            *destination = 1;
+            active.complete_action()?;
+        }
+        before = polls.load(Ordering::Relaxed);
+        cancel_at.store(before + 1, Ordering::Relaxed);
+        active.begin_action(35)?;
+        physical[2] = 1;
+        active.complete_action()
+    });
+    assert_eq!(
+        result,
+        Err(StoreRuntimeError::Control(ControlCause::Cancelled {
+            origin: CancellationOrigin::Signal
+        }))
+    );
+    assert_eq!(physical, [1, 1, 0]);
+    assert_eq!(polls.load(Ordering::Relaxed), before + 1);
+    assert_failed_prefix(
+        operation,
+        keys,
+        StorePreparationFailureClass::Control,
+        initial + 2,
+        initial + 2,
+    );
 }

@@ -647,7 +647,7 @@ fn one_and_eight_mib_images_share_payloads_without_growing_conversion_allocation
         assert_finished(resources);
         assert!(allocations.count_total > 0);
         assert!(allocations.bytes_max > 0);
-        assert!(resources.consumed_work_items() > 0);
+        assert!(resources.consumed_work_actions() > 0);
         let measured = (
             allocations.count_total,
             allocations.bytes_total,
@@ -655,8 +655,8 @@ fn one_and_eight_mib_images_share_payloads_without_growing_conversion_allocation
             resources.peak_live_bytes(),
             resources.peak_staging_bytes(),
             resources.committed_canonical_bytes(),
-            resources.attempted_work_items(),
-            resources.consumed_work_items(),
+            resources.attempted_work_actions(),
+            resources.consumed_work_actions(),
         );
         if let Some(baseline) = baseline {
             assert_eq!(

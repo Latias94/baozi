@@ -94,11 +94,11 @@ fn write_unit(
     control: &mut StoreExecutionControl<'_, TestOwner, TestProgress, TestUnit>,
     destination: &mut u8,
 ) -> Result<(), StoreRuntimeError> {
-    control.before_action()?;
+    control.before_action(1)?;
     let mut permit = group.admit_observed([1])?;
     *destination = 1;
     permit.complete([1])?;
-    control.completed_action();
+    control.completed_action(1)?;
     permit.finish()
 }
 
@@ -206,10 +206,10 @@ fn group_and_partial_permit_survive_real_storage_and_progress() {
         let region = work;
         let mut permit = group.admit_observed([3]).unwrap();
 
-        control.before_action().unwrap();
+        control.before_action(1).unwrap();
         output[0] = 1;
         permit.complete([1]).unwrap();
-        control.completed_action();
+        control.completed_action(1).unwrap();
         control
             .report_progress(TestProgress::Build, TestUnit::Items, 1, None)
             .unwrap();
@@ -257,10 +257,10 @@ fn group_and_partial_permit_survive_real_storage_and_progress() {
         let retained = reservation.bind_storage(value).unwrap();
 
         assert_eq!(permit.remaining(), [2]);
-        control.before_action().unwrap();
+        control.before_action(1).unwrap();
         output[1] = 2;
         permit.complete([1]).unwrap();
-        control.completed_action();
+        control.completed_action(1).unwrap();
         permit.finish_partial().unwrap();
         write_unit(&group, &mut control, &mut output[2]).unwrap();
         region.finish_region().unwrap();
@@ -336,11 +336,11 @@ fn idle_sequence_keeps_retained_share_work_and_storage_on_the_same_authority() {
     {
         let (work, storage, mut control) = operation.execution().unwrap();
         let group = work.bind_group([keys.dimension]).unwrap();
-        control.before_action().unwrap();
+        control.before_action(1).unwrap();
         let mut permit = group.admit_observed([1]).unwrap();
         output[0] = 1;
         permit.complete([1]).unwrap();
-        control.completed_action();
+        control.completed_action(1).unwrap();
 
         let plan = CapacityPlan::for_type::<u8>(0, 0, 5).unwrap();
         let mut reservation = storage
@@ -364,11 +364,11 @@ fn idle_sequence_keeps_retained_share_work_and_storage_on_the_same_authority() {
         assert_eq!(physical_delta(physical, account.snapshot()), (bytes, 1));
         assert_eq!(permit.remaining(), [0]);
 
-        control.before_action().unwrap();
+        control.before_action(1).unwrap();
         permit.replenish_one().unwrap();
         output[1] = retained.as_ref()[0];
         permit.complete([1]).unwrap();
-        control.completed_action();
+        control.completed_action(1).unwrap();
         permit.finish().unwrap();
         drop(retained);
         let state = work.dimension_state(keys.dimension).unwrap();
@@ -412,11 +412,11 @@ fn tightened_policy_rejects_refill_once_and_preserves_the_written_prefix() {
         let group = work.bind_group([keys.other_dimension]).unwrap();
         let mut permit = group.admit_observed([0]).unwrap();
         for destination in output.iter_mut().take(2) {
-            control.before_action().unwrap();
+            control.before_action(1).unwrap();
             permit.replenish_one().unwrap();
             *destination = 1;
             permit.complete([1]).unwrap();
-            control.completed_action();
+            control.completed_action(1).unwrap();
         }
         work.tighten_dimension_policy(keys.other_dimension, DimensionPolicy::counter(2, 2, 0))
             .unwrap();
@@ -470,11 +470,11 @@ fn exact_work_is_independent_of_entry_periodic_and_final_poll_counts() {
             let group = work.bind_group([keys.other_dimension]).unwrap();
             let mut permit = group.admit_observed([0]).unwrap();
             for destination in physical.iter_mut().take(actions) {
-                control.before_action().unwrap();
+                control.before_action(1).unwrap();
                 permit.replenish_one().unwrap();
                 *destination = 1;
                 permit.complete([1]).unwrap();
-                control.completed_action();
+                control.completed_action(1).unwrap();
             }
             permit.finish().unwrap();
             assert_eq!(signal.polls.load(Ordering::SeqCst), expected_polls - 1);
@@ -551,7 +551,7 @@ fn cancellation_is_observed_at_entry_or_within_the_explicit_action_bound() {
             let mut stopped = false;
             for (index, destination) in physical.iter_mut().enumerate() {
                 let result = control
-                    .before_action()
+                    .before_action(1)
                     .and_then(|()| permit.replenish_one());
                 if result.is_err() {
                     assert!(matches!(
@@ -566,7 +566,7 @@ fn cancellation_is_observed_at_entry_or_within_the_explicit_action_bound() {
                 }
                 *destination = 1;
                 permit.complete([1]).unwrap();
-                control.completed_action();
+                control.completed_action(1).unwrap();
                 if index + 1 == cancel_after {
                     signal.token.cancel();
                 }
@@ -593,7 +593,7 @@ fn cancellation_is_observed_at_entry_or_within_the_explicit_action_bound() {
                 }))
             ));
             assert!(matches!(
-                control.before_action(),
+                control.before_action(1),
                 Err(StoreRuntimeError::Control(ControlCause::Cancelled {
                     origin: CancellationOrigin::Signal,
                 }))
@@ -636,10 +636,10 @@ fn final_checkpoint_preserves_partial_envelope_prefixes_including_a_zero_action_
             let group = work.bind_group([keys.other_dimension]).unwrap();
             let mut permit = group.admit_observed([attempted]).unwrap();
             for destination in physical.iter_mut().take(actions) {
-                control.before_action().unwrap();
+                control.before_action(1).unwrap();
                 *destination = 1;
                 permit.complete([1]).unwrap();
-                control.completed_action();
+                control.completed_action(1).unwrap();
             }
             signal.token.cancel();
             assert_eq!(signal.polls.load(Ordering::SeqCst), expected_polls - 1);
@@ -727,13 +727,13 @@ fn every_action_checks_attempted_and_consumed_budgets_between_control_polls() {
                 let group = work.bind_group([keys.other_dimension]).unwrap();
                 let mut permit = group.admit_observed([0]).unwrap();
                 for destination in physical.iter_mut().take(allowed) {
-                    control.before_action().unwrap();
+                    control.before_action(1).unwrap();
                     permit.replenish_one().unwrap();
                     *destination = 1;
                     permit.complete([1]).unwrap();
-                    control.completed_action();
+                    control.completed_action(1).unwrap();
                 }
-                control.before_action().unwrap();
+                control.before_action(1).unwrap();
                 let rejected = permit.replenish_one();
                 if rejected.is_ok() {
                     physical[allowed] = 1;
@@ -757,7 +757,7 @@ fn every_action_checks_attempted_and_consumed_budgets_between_control_polls() {
                     Err(StoreRuntimeError::FallbackOnly)
                 ));
                 assert!(matches!(
-                    control.before_action(),
+                    control.before_action(1),
                     Err(StoreRuntimeError::FallbackOnly)
                 ));
                 work.finish_region().unwrap();
@@ -797,11 +797,11 @@ fn finish_region_rejects_forgotten_fully_completed_and_zero_amount_permits() {
             let mut permit = group.admit_observed([0]).unwrap();
             let mut physical = [0; 3];
             for destination in physical.iter_mut().take(amount as usize) {
-                control.before_action().unwrap();
+                control.before_action(1).unwrap();
                 permit.replenish_one().unwrap();
                 *destination = 1;
                 permit.complete([1]).unwrap();
-                control.completed_action();
+                control.completed_action(1).unwrap();
             }
             assert_eq!(u64::from(physical.iter().sum::<u8>()), amount);
             assert_eq!(permit.remaining(), [0]);
@@ -840,11 +840,11 @@ fn dropping_fully_completed_and_zero_amount_permits_still_prevents_success() {
             let mut permit = group.admit_observed([0]).unwrap();
             let mut physical = [0; 3];
             for destination in physical.iter_mut().take(amount as usize) {
-                control.before_action().unwrap();
+                control.before_action(1).unwrap();
                 permit.replenish_one().unwrap();
                 *destination = 1;
                 permit.complete([1]).unwrap();
-                control.completed_action();
+                control.completed_action(1).unwrap();
             }
             assert_eq!(u64::from(physical.iter().sum::<u8>()), amount);
             drop(permit);
@@ -878,10 +878,10 @@ fn ignored_incomplete_finish_keeps_the_exact_prefix_and_sticky_failure() {
         let (work, _storage, mut control) = operation.execution().unwrap();
         let group = work.bind_group([keys.other_dimension]).unwrap();
         let mut permit = group.admit_observed([3]).unwrap();
-        control.before_action().unwrap();
+        control.before_action(1).unwrap();
         physical += 1;
         permit.complete([1]).unwrap();
-        control.completed_action();
+        control.completed_action(1).unwrap();
         assert!(matches!(
             permit.finish(),
             Err(StoreRuntimeError::FallbackOnly)
@@ -1158,5 +1158,125 @@ fn storage_rejects_foreign_control_before_polling_or_admitting_bytes() {
         let _ = rejected_success_evidence(source, StorePreparationFailureClass::Ledger);
         let _ = foreign.prepare_minimal_fallback(71).unwrap().handoff();
         assert!(!account.snapshot().poisoned());
+    }
+}
+
+#[test]
+fn weighted_control_frontiers_do_not_charge_estimated_inner_work() {
+    for costs in [
+        vec![118_u16, 118, 35],
+        vec![255, 1, 1],
+        vec![32; 9],
+        vec![9; 29],
+        vec![19; 14],
+        vec![35; 8],
+    ] {
+        let factory = factory(1);
+        let account = account(&factory);
+        let signal = CountedCancellation::default();
+        let (mut operation, keys) = operation_with_work_policy(
+            &account,
+            OperationControl::default().with_cancellation(signal.clone()),
+            DimensionPolicy::counter(64, 64, 0),
+        );
+        let mut physical = vec![0; costs.len()];
+        {
+            let (work, _storage, mut control) = operation.execution().unwrap();
+            let group = work.bind_group([keys.other_dimension]).unwrap();
+            let mut permit = group.admit_observed([0]).unwrap();
+            let entry_polls = signal.polls.load(Ordering::SeqCst);
+            for (index, (&cost, destination)) in costs.iter().zip(&mut physical).enumerate() {
+                control.before_action(cost).unwrap();
+                assert_eq!(
+                    signal.polls.load(Ordering::SeqCst),
+                    entry_polls + usize::from(index + 1 == costs.len())
+                );
+                permit.replenish_one().unwrap();
+                *destination = 1;
+                permit.complete([1]).unwrap();
+                control.completed_action(cost).unwrap();
+            }
+            permit.finish().unwrap();
+            work.finish_region().unwrap();
+        }
+        assert!(physical.iter().all(|value| *value == 1));
+        let published = operation.prepare_minimal_fallback(71).unwrap().handoff();
+        assert_work(
+            &published.ledger_evidence,
+            keys.other_dimension,
+            costs.len() as u64,
+            costs.len() as u64,
+        );
+    }
+}
+
+#[test]
+fn weighted_frontier_cancellation_precedes_next_action_and_retains_cause_on_region_reentry() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let signal = CountedCancellation::default();
+    let (mut operation, keys) = operation_with_work_policy(
+        &account,
+        OperationControl::default().with_cancellation(signal.clone()),
+        DimensionPolicy::counter(8, 8, 0),
+    );
+    let mut output = [0; 3];
+    let polls;
+    {
+        let (work, _storage, mut control) = operation.execution().unwrap();
+        let group = work.bind_group([keys.other_dimension]).unwrap();
+        let mut permit = group.admit_observed([0]).unwrap();
+        for destination in output.iter_mut().take(2) {
+            control.before_action(118).unwrap();
+            permit.replenish_one().unwrap();
+            *destination = 1;
+            permit.complete([1]).unwrap();
+            control.completed_action(118).unwrap();
+        }
+        polls = signal.polls.load(Ordering::SeqCst);
+        signal.token.cancel();
+        let next = control.before_action(35);
+        if next.is_ok() {
+            output[2] = 1;
+        }
+        assert!(matches!(
+            next,
+            Err(StoreRuntimeError::Control(ControlCause::Cancelled { .. }))
+        ));
+        assert_eq!(signal.polls.load(Ordering::SeqCst), polls + 1);
+        permit.finish_partial().unwrap();
+        work.finish_region().unwrap();
+    }
+    assert_eq!(output, [1, 1, 0]);
+    // Obtaining a later region must preserve the already recorded Control cause.
+    assert!(matches!(
+        operation.execution(),
+        Err(StoreRuntimeError::Control(_))
+    ));
+    let evidence = rejected_success_evidence(operation, StorePreparationFailureClass::Control);
+    assert_work(&evidence, keys.other_dimension, 2, 2);
+}
+
+#[test]
+fn invalid_control_cost_is_sticky_without_running_or_charging_work() {
+    for invalid in [0_u16, 257, u16::MAX] {
+        let factory = factory(1);
+        let account = account(&factory);
+        let (mut operation, keys) = operation_with_work_policy(
+            &account,
+            OperationControl::default(),
+            DimensionPolicy::counter(8, 8, 0),
+        );
+        {
+            let (work, _storage, mut control) = operation.execution().unwrap();
+            assert!(matches!(
+                control.before_action(invalid),
+                Err(StoreRuntimeError::FallbackOnly)
+            ));
+            work.finish_region().unwrap();
+        }
+        let evidence =
+            rejected_success_evidence(operation, StorePreparationFailureClass::ProductGraph);
+        assert_work(&evidence, keys.other_dimension, 0, 0);
     }
 }

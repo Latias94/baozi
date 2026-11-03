@@ -46,10 +46,10 @@ fn sample<P: PositionSource>(label: &str, positions: P, indices: &[u32], groups:
         groups.len()
     ];
     let mut samples = Vec::with_capacity(20);
-    let mut work_units = 0_u64;
+    let mut work_actions = 0_u64;
     let mut checkpoints = 0_u64;
     for iteration in 0..23 {
-        work_units = 0;
+        work_actions = 0;
         checkpoints = 0;
         let start = Instant::now();
         generate_into(
@@ -67,7 +67,7 @@ fn sample<P: PositionSource>(label: &str, positions: P, indices: &[u32], groups:
             },
             |event| {
                 match event {
-                    WorkEvent::Begin => work_units += 1,
+                    WorkEvent::Begin(_) => work_actions += 1,
                     WorkEvent::Complete => {}
                     WorkEvent::Checkpoint => checkpoints += 1,
                 }
@@ -83,7 +83,7 @@ fn sample<P: PositionSource>(label: &str, positions: P, indices: &[u32], groups:
         }
     }
     println!(
-        "{{\"schema\":\"baozi-normal-kernel-diagnostic/v2\",\"position_source\":\"{label}\",\"faces\":{},\"work_units\":{work_units},\"checkpoints\":{checkpoints},\"work_unit_contract\":\"bounded-leaf-begin/v1\",\"warmups\":3,\"samples_ns\":{samples:?},\"scope\":\"kernel only, preallocated workspace, local counting observer, no operation accounting or publication\"}}",
+        "{{\"schema\":\"baozi-normal-kernel-diagnostic/v3\",\"position_source\":\"{label}\",\"faces\":{},\"work_actions\":{work_actions},\"checkpoints\":{checkpoints},\"work_action_contract\":\"bounded-normal-actions/v2\",\"warmups\":3,\"samples_ns\":{samples:?},\"scope\":\"kernel only, preallocated workspace, local counting observer, no operation accounting or publication\"}}",
         groups.len()
     );
 }
@@ -98,7 +98,7 @@ fn observed_unit_protocol_with_empty_actions_preserves_exact_work_evidence() {
 
     use crate::operation::{PostProcessOwner, runtime};
 
-    // Fixed historical pre-P3 control-site workload, not the new normal leaf-action count.
+    // Fixed historical pre-P3 control-site workload, not the new semantic normal-action count.
     const ACTIONS: u64 = 982_943;
     let (scene, source_evidence) = crate::test_fixtures::canonical_triangle_import().into_parts();
     let mut samples = Vec::with_capacity(20);
@@ -129,14 +129,16 @@ fn observed_unit_protocol_with_empty_actions_preserves_exact_work_evidence() {
                 .expect("bind one ordinary work role");
             let start = Instant::now();
             for _ in 0..ACTIONS {
-                control.before_action().expect("admit bounded control debt");
+                control
+                    .before_action(1)
+                    .expect("admit bounded control debt");
                 let mut permit = group.admit_observed([1]).expect("admit one empty action");
                 black_box(());
                 permit
                     .complete([1])
                     .expect("record the physically completed empty action");
                 permit.finish().expect("resolve the completed envelope");
-                control.completed_action();
+                control.completed_action(1).expect("checked control cost");
             }
             let elapsed = start.elapsed().as_nanos();
             control

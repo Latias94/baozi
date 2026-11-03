@@ -4,13 +4,15 @@ use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PostProcessBudgets {
-    pub work: u64,
+    /// Maximum attempted/consumed semantic actions under `bounded-normal-actions/v2`.
+    /// Compound actions have fixed bounds; control-cost credits are not work charges.
+    pub max_work_actions: u64,
     pub storage_bytes: u64,
 }
 impl Default for PostProcessBudgets {
     fn default() -> Self {
         Self {
-            work: crate::operation::runtime::MAX_WORK,
+            max_work_actions: crate::operation::runtime::MAX_WORK,
             storage_bytes: crate::operation::runtime::MAX_BYTES,
         }
     }

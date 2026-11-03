@@ -110,7 +110,7 @@ pub(crate) fn build_origins(
             })??;
         }
         let mut control = |event| match event {
-            WorkEvent::Begin => operation.begin_action(),
+            WorkEvent::Begin => operation.begin_action(1),
             WorkEvent::Complete => operation.complete_action(),
             WorkEvent::Checkpoint => operation.checkpoint(),
         };

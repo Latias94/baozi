@@ -99,7 +99,7 @@ pub fn run(data: &[u8]) -> Option<LifecycleRun> {
         let options = TrianglePreparationOptions {
             normals: Some(normal_options(policy)),
             budgets: PostProcessBudgets {
-                work: 4_000_000,
+                max_work_actions: 4_000_000,
                 storage_bytes: 16 * 1024 * 1024,
             },
             ..TrianglePreparationOptions::default()

@@ -28,6 +28,11 @@ pub struct PostProcessResourceEvidence {
 }
 
 impl PostProcessResourceEvidence {
+    /// Identifies the semantic vocabulary used by the action counters and budgets.
+    pub const fn work_action_contract(&self) -> &'static str {
+        super::runtime::WORK_ACTION_CONTRACT
+    }
+
     pub(crate) fn from_store(raw: StoreLedgerEvidence) -> Self {
         let header = raw.header();
         let dimension = |kind| {
@@ -72,13 +77,15 @@ impl PostProcessResourceEvidence {
         self.counters.reservations
     }
 
-    /// Returns cumulative admitted work, including protected terminal work.
-    pub const fn attempted_work_items(&self) -> u64 {
+    /// Returns representable attempted semantic actions, including denied admission and
+    /// protected terminal work. Delegated core/share actions retain their defined units.
+    pub const fn attempted_work_actions(&self) -> u64 {
         self.counters.attempted
     }
 
-    /// Returns cumulative completed work, including protected terminal work.
-    pub const fn consumed_work_items(&self) -> u64 {
+    /// Returns normally returned semantic actions, including semantic-error returns and
+    /// protected terminal work. It does not count successful normal tuples or control credits.
+    pub const fn consumed_work_actions(&self) -> u64 {
         self.counters.consumed
     }
 
@@ -121,6 +128,7 @@ impl fmt::Debug for PostProcessResourceEvidence {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("PostProcessResourceEvidence")
+            .field("work_action_contract", &self.work_action_contract())
             .field("counters", &self.counters)
             .finish_non_exhaustive()
     }
