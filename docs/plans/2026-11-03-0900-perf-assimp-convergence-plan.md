@@ -1,0 +1,127 @@
+---
+title: "Converge maintained import workflows with Assimp before release"
+type: perf
+status: in_progress
+date: 2026-11-03
+baseline: e0a7b387371b71c28bc40f6e2cfd4c1ff5f91726
+---
+
+# Assimp Performance Convergence
+
+The user requires comparable performance before the first usable release. The completed
+pre-release evolution does not satisfy this new release condition. Necessary interface,
+ownership, execution and representation changes may break compatibility. Publication remains
+closed while this plan is incomplete.
+
+## Evidence and Acceptance
+
+Keep the fourteen existing analytic cases, 110 admitted lanes, successful semantic tasks,
+precision, normal policies, allocator/build policy and complete-pipeline timing boundary in
+[the comparison protocol](../testing/assimp-comparison.md). Frozen B0/B1 records remain history.
+Use new immutable binaries, build manifests, source archives and artifact directories for every
+candidate. No build or profiler runs concurrently with ordinary measurement.
+
+The following are conservative **engineering targets**, adopted for development rather than
+attributed to a numerical promise from the user:
+
+- Every file/memory complete-pipeline median should be at most 3 times its same-campaign Assimp
+  control, on both Windows and Linux. Report each lane; an aggregate cannot hide a failing case.
+- Every admitted import, preparation and extraction endpoint should meet the same at-most-3x
+  release target. Removing confirmed 10-fold gaps is an intermediate checkpoint. Very short
+  endpoints require dispersion and absolute-time reporting and repeated confirmation, rather
+  than an exemption or silently changed task. Unresolved noisy lanes remain open.
+- Comparable whole-child peak memory should stay within 3 times the same-method control.
+  Separately collected heap peaks and allocation counts are diagnostics with named lifetimes;
+  they never substitute for missing RSS/working-set data. Investigate the old RSS breaches again.
+- Timing parity is necessary, not sufficient for stability. Semantic, numerical, resource,
+  cancellation, failure ownership and public consumer gates must still pass. No new producer
+  breadth or untested platform claim follows from this finite comparison.
+
+A retained experiment needs a material same-task ordinary improvement beyond dispersion,
+without an unexplained regression in affected lanes or memory. A candidate that improves one
+owner but leaves these release targets unmet is an intermediate result, not release readiness.
+After each major keep, refresh attribution before choosing the next representation change.
+
+## Current Baseline
+
+[Windows final](../reviews/2026-11-03-windows-final-comparison.md) and
+[Linux B1](../reviews/2026-11-03-linux-b1-and-heap-comparison.md) each contain 2,200 retained pairs.
+Runtime source is `52446ec8511b7dfba2e5352ce6941558d85e0ae2`. Windows memory pipelines include
+90.450/9.406 ms repeated OBJ, 194.923/24.758 ms grid OBJ, 5.168/0.333 ms shared glTF and
+4.488/0.228 ms STL (Baozi/Assimp). The normal-preparation endpoint remains 48.738/1.028 ms.
+These independently measured endpoints are not additive pipeline components.
+
+Current whole-worker Callgrind profiles are under `target/review/final-attribution/`. They
+contain setup/checking/teardown and count instructions, not native CPU percentages. They show
+repeated work binding, semantic-host validation and permit construction/completion across
+formats. Parser completion is also substantial in grid OBJ. The existing stable buckets and
+dense remaps already removed the previously demonstrated sorting waste; do not claim that gain
+again or assume text allocation is now the leading cost.
+
+## Work Sequence
+
+1. **Locate and freeze.** Reconcile current exclusive profile rows with the executed source;
+   inspect concrete call edges and record estimated opportunity bounds. Verify ordinary binary
+   hashes and run a finite current Windows checkpoint. Keep the existing harness immutable.
+2. **Bind semantic execution at its owner.** Investigate replacing per-unit producer-host
+   construction/key validation/full control polls with one session-bound work/storage/control
+   region. Admit each real action before execution, record each normally returned physical
+   prefix immediately and poll at existing bounded/semantic/allocation boundaries. Retain
+   panic containment, sticky errors, scoped receipts and rejection ownership. Delete the old
+   repeated path when its replacement qualifies.
+3. **Reduce numeric capability traffic.** Investigate carrying dense owner-bound positions
+   through parser and observed-action loops, projecting full semantic identities only on cold
+   error/evidence paths. There must remain one numeric authority. No shadow counters, precharged
+   completion, guard across user code, unmetered cache or second interpretation of work policy.
+   Measure this independently from step 2 where file scopes permit.
+4. **Re-profile and choose the next owner.** Evaluate typed geometry read views for normals and
+   extraction, borrowed conforming text, flat syntax staging and payload adoption only against
+   the refreshed measured cost. Preserve source identity, signed zero, exact accumulation order,
+   partial-channel policy, finite checks and bounded scratch. Replace a representation at its
+   owner and remove superseded paths; avoid benchmark-only or format-specific escape hatches.
+5. **Small-task lifecycle.** Locate setup/fallback/evidence cost separately from scaling work.
+   A reused-plan workload may be added as a separately named experiment for both engines; it
+   never replaces the frozen complete pipeline or moves setup outside its clock.
+6. **Integrated convergence.** Run the complete ordinary Windows/Linux matrices, matching heap
+   diagnostics for representative failures and all applicable regression gates. If a target is
+   unmet, record the precise remaining owner and continue the next measured replacement. Do not
+   classify an accepted historical semantic cost as passing this new release gate.
+
+## Coordination and Verification
+
+The main thread owns all Cargo/CMake/profiling/measurement, serialized with one build job and
+the existing target. Native Codex research lanes cover OBJ construction, normal preparation and
+small-task lifecycle. Implementation lanes receive disjoint file scopes; independent reviewers
+inspect invariants and the combined diff before any keep. Preserve unrelated user notes.
+
+Local execution state is `.git/baozi-review/performance-convergence/`. Retain hypotheses,
+commands, exact source identities, failures, ordinary samples and decisions there or under new
+`target/review/` and `target/assimp-comparison/` directories. Export reviewer-relevant conclusions
+to tracked documents. No registry publication/yank, remote push/PR or native-target promotion is
+part of this plan.
+
+Validation is proportional to each owner: meaningful physical-prefix/admission/cancellation and
+panic/failure tests first; affected nextest suites and strict Clippy/fmt; public comparison
+consumer semantics; independent review and ordinary before/after measurements. Broad integrated
+checks follow a retained runtime, not every exploratory edit. Use source-qualified local
+Conventional Commits for complete slices.
+
+Before retaining a borrowing/capability replacement, also run the affected packages' existing
+compile-fail doctests separately with `cargo test --locked --doc --all-features`. Preserve the
+negative contracts for region escape, cross-thread execution and linear publication. Add a new
+negative case only for a genuinely new boundary, not for incidental private layout.
+
+## Execution Record
+
+- Initial source/workspace inspection: tracked paths clean; pre-existing untracked engineering
+  notes preserved. No active build or prior optimization goal remains.
+- Initial independent plan review: no P1 finding; both P2 corrections adopted (all endpoint
+  release targets at most 3x, and affected compile-fail doctests before a capability keep).
+- Three source/profile investigations independently identify semantic-session binding first;
+  normal reader enum dispatch and borrowed text copying have much smaller current opportunity
+  envelopes. Repeated glTF profile accounting is a separate subsequent measured candidate.
+- Fresh Windows baseline: 23 memory-input lanes, 460 retained pairs and 69 warmup pairs;
+  all successful, unchanged ordinary worker. Local report is
+  `target/assimp-comparison/convergence-windows-baseline/report.json`, SHA-256
+  `b0a155d1531068c06e0adc0a0a4dad87297076aee0d52d7c48531b481b4ff962`.
+- Production changes, measured keeps and release-convergence qualification: pending.
