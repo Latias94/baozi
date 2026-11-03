@@ -40,6 +40,10 @@ attributed to a numerical promise from the user:
 A retained experiment needs a material same-task ordinary improvement beyond dispersion,
 without an unexplained regression in affected lanes or memory. A candidate that improves one
 owner but leaves these release targets unmet is an intermediate result, not release readiness.
+An independently reviewed candidate may remain the intermediate working source with a named
+accepted tradeoff while its confirmed per-lane regression is repaired. That disposition is
+explicitly conditional: it clears neither the regression nor any release gate and cannot be
+reported as a general no-regression result. Preserve the failed lane and its immutable control.
 After each major keep, refresh attribution before choosing the next representation change.
 
 ## Current Baseline
@@ -190,6 +194,13 @@ negative case only for a genuinely new boundary, not for incidental private layo
   memory scope and six current-source Linux instruction profiles. This is neither uniform
   improvement nor release convergence. Reader and bounded normal-vocabulary candidates remain
   separate, reviewed and unqualified until applied/tested/measured on their own source.
+- R4 [bound attribute readers](../reviews/2026-11-03-bound-attribute-readers.md) are source-qualified
+  at `1065e0469ad688bcfa1e2f7d204243be58d85d00`: 961 core/postprocess tests, compiler contracts,
+  strict library/consumer Clippy and 124 asset-consumer tests pass. Independent ordinary review
+  supports an intermediate keep with large repeated selected-extraction gains. F64-neighbor
+  extraction is a confirmed +3.55/+3.10 us regression and remains a required repair; glTF/STL
+  positive lanes also remain explicit. Six current-source Linux instruction profiles do not
+  clear Windows native regressions. Full release convergence remains open.
 - [Pinned Assimp principles and Rust ownership audit](../research/2026-11-03-assimp-principles-and-rust-ownership.md)
   distinguishes loader-specific buffering, different normal algorithms, genuinely escaping
   storage ownership and removable per-getter/lifecycle work. Independent design review requires
