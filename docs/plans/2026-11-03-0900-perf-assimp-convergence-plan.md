@@ -124,4 +124,13 @@ negative case only for a genuinely new boundary, not for incidental private layo
   all successful, unchanged ordinary worker. Local report is
   `target/assimp-comparison/convergence-windows-baseline/report.json`, SHA-256
   `b0a155d1531068c06e0adc0a0a4dad87297076aee0d52d7c48531b481b4ff962`.
-- Production changes, measured keeps and release-convergence qualification: pending.
+- R1 session-bound semantic execution is retained at
+  `a54d39dcd0862b12d292e7541cab0bf5db92986c`. The
+  [qualification receipt](../reviews/2026-11-03-bound-semantic-execution.md) records source and
+  caller failures found/fixed, 2,262 affected tests, compiler contracts, strict lint, public
+  control/asset consumers, fresh ordinary confirmation, short-endpoint cost dispositions and
+  six reconciled current-source instruction profiles. This is an intermediate keep, not release
+  convergence or a per-lane no-regression assertion.
+- R2 compact owner-bound numeric capabilities and lazy diagnostic-key projection: independently
+  source-reviewed; runtime/doctest/lint validation in progress. No R2 timing claim yet.
+- Complete release-convergence qualification: pending; all final gates remain closed.
