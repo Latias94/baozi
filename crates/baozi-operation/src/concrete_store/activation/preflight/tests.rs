@@ -378,3 +378,376 @@ fn poison_is_checked_before_qualification_poll_or_policy_changes() {
         Some((2, 5, 5))
     );
 }
+
+type SemanticOutcome =
+    CanonicalActivationOutcome<Owner, Progress, Unit, (), (), ScalarSequence<u8>, Tag>;
+
+fn release_semantic_rejection(outcome: SemanticOutcome, account: &PhysicalStorageAccount) {
+    let CanonicalActivationOutcome::NeverActivated(rejected) = outcome else {
+        panic!("semantic rejection must not activate canonical storage");
+    };
+    let (prepared, _) = rejected.prepare_minimal_fallback().unwrap().into_parts();
+    drop(prepared.handoff());
+    let snapshot = account.snapshot();
+    assert!(!snapshot.poisoned());
+    assert_eq!(snapshot.live_retained_bytes(), 0);
+    assert_eq!(snapshot.live_retained_allocations(), 0);
+}
+
+#[test]
+fn prior_ledger_failure_skips_the_transaction_and_preserves_healthy_failure_evidence() {
+    let (mut operation, keys, account) = operation(4096, 4096, OperationControl::default());
+    assert!(
+        operation
+            .producer_host()
+            .charge_attempted(keys.work, u64::MAX)
+            .is_err()
+    );
+    let transaction_ran = std::cell::Cell::new(false);
+    let outcome: SemanticOutcome = keys
+        .session(operation)
+        .plan_and_activate_scoped(|planning| {
+            transaction_ran.set(true);
+            planning.reject((), 88)
+        })
+        .unwrap();
+    assert!(!transaction_ran.get());
+    let CanonicalActivationOutcome::NeverActivated(rejected) = outcome else {
+        panic!("prior ledger rejection must retain its dormant failure owner");
+    };
+    assert!(matches!(
+        rejected.cause(),
+        StoreNeverActivatedCause::Runtime(StoreRuntimeError::SuccessOutcomeRejected)
+    ));
+    let (prepared, _) = rejected.prepare_minimal_fallback().unwrap().into_parts();
+    let published = prepared.handoff();
+    assert!(matches!(
+        published.ledger_evidence.header().terminal_cause(),
+        crate::concrete_store::StoreTerminalCause::Failure(cause)
+            if cause.class() == crate::concrete_store::StorePreparationFailureClass::Ledger
+    ));
+    drop(published);
+    assert!(!account.snapshot().poisoned());
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+}
+
+#[test]
+fn prior_failure_still_contains_a_panicking_transaction_capture_drop() {
+    let (mut operation, keys, account) = operation(4096, 4096, OperationControl::default());
+    assert!(
+        operation
+            .producer_host()
+            .charge_attempted(keys.work, u64::MAX)
+            .is_err()
+    );
+    let transaction_ran = std::cell::Cell::new(false);
+    let dropped = std::cell::Cell::new(false);
+    let capture = SemanticPanicDrop(&dropped);
+    let ran = &transaction_ran;
+    let outcome: Result<SemanticOutcome, _> =
+        keys.session(operation)
+            .plan_and_activate_scoped(move |planning| {
+                let _capture = &capture;
+                ran.set(true);
+                planning.reject((), 89)
+            });
+    assert!(!transaction_ran.get());
+    assert!(dropped.get());
+    assert!(outcome.is_err());
+    assert!(account.snapshot().poisoned());
+}
+
+#[test]
+fn prior_outstanding_zero_or_completed_permit_cannot_use_the_healthy_failure_exit() {
+    for admitted in [0_u64, 1] {
+        let (mut operation, keys, account) = operation(4096, 4096, OperationControl::default());
+        {
+            let (work, _, _) = operation.execution().unwrap();
+            let group = work.bind_group([keys.work]).unwrap();
+            let mut permit = group.admit_observed([admitted]).unwrap();
+            permit.complete([admitted]).unwrap();
+            std::mem::forget(permit);
+        }
+        let transaction_ran = std::cell::Cell::new(false);
+        let outcome: Result<SemanticOutcome, _> =
+            keys.session(operation)
+                .plan_and_activate_scoped(|planning| {
+                    transaction_ran.set(true);
+                    planning.reject((), 90)
+                });
+        assert!(!transaction_ran.get());
+        assert!(outcome.is_err());
+        assert!(account.snapshot().poisoned());
+    }
+}
+
+fn semantic_counters(
+    semantic: &CanonicalSemanticWorkSession<'_, '_, Owner, Progress, Unit>,
+    keys: Keys,
+) -> (u64, u64) {
+    let state = semantic.work.dimension_state(keys.work).unwrap();
+    (state.attempted(), state.consumed())
+}
+
+#[test]
+fn semantic_execution_polls_at_entry_256_actions_and_finish() {
+    for actions in [255_u64, 256, 257] {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let control = OperationControl::default().with_cancellation(Stop {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            polls: polls.clone(),
+        });
+        let (operation, keys, account) = operation(4096, 4096, control);
+        let outcome: SemanticOutcome = keys
+            .session(operation)
+            .plan_and_activate_scoped(|mut planning| {
+                let before_entry = polls.load(Ordering::Relaxed);
+                let mut semantic = planning.begin_semantic_work().unwrap();
+                assert_eq!(polls.load(Ordering::Relaxed), before_entry + 1);
+                let baseline = semantic_counters(&semantic, keys);
+                for completed in 1..=actions {
+                    semantic.run_unit(|| ()).unwrap();
+                    assert_eq!(
+                        semantic_counters(&semantic, keys),
+                        (baseline.0 + completed, baseline.1 + completed)
+                    );
+                    let block_polls = usize::try_from((completed - 1) / 256).unwrap();
+                    assert_eq!(
+                        polls.load(Ordering::Relaxed),
+                        before_entry + 1 + block_polls
+                    );
+                }
+                let before_finish = polls.load(Ordering::Relaxed);
+                semantic.finish_rejected().unwrap();
+                assert_eq!(polls.load(Ordering::Relaxed), before_finish + 1);
+                planning.reject((), 81)
+            })
+            .unwrap();
+        release_semantic_rejection(outcome, &account);
+    }
+}
+
+#[test]
+fn semantic_returned_error_completes_before_any_checkpoint() {
+    let (operation, keys, account) = operation(4096, 4096, OperationControl::default());
+    let outcome: SemanticOutcome = keys
+        .session(operation)
+        .plan_and_activate_scoped(|mut planning| {
+            let mut semantic = planning.begin_semantic_work().unwrap();
+            let baseline = semantic_counters(&semantic, keys);
+            assert_eq!(
+                semantic
+                    .run_unit(|| Err::<(), _>("invalid domain value"))
+                    .unwrap(),
+                Err("invalid domain value")
+            );
+            assert_eq!(
+                semantic_counters(&semantic, keys),
+                (baseline.0 + 1, baseline.1 + 1)
+            );
+            semantic.finish_rejected().unwrap();
+            planning.reject((), 82)
+        })
+        .unwrap();
+    release_semantic_rejection(outcome, &account);
+}
+
+#[test]
+fn semantic_consumed_limit_denies_the_callback_before_execution() {
+    let (operation, keys, account) = operation(4096, 4096, OperationControl::default());
+    let executed = std::cell::Cell::new(false);
+    let outcome: SemanticOutcome = keys
+        .session(operation)
+        .plan_and_activate_scoped(|mut planning| {
+            let mut semantic = planning.begin_semantic_work().unwrap();
+            let baseline = semantic_counters(&semantic, keys);
+            semantic
+                .work
+                .tighten_dimension_policy(
+                    keys.work,
+                    DimensionPolicy::counter(baseline.0 + 8, baseline.1, 0),
+                )
+                .unwrap();
+            assert!(matches!(
+                semantic.run_unit(|| executed.set(true)),
+                Err(StoreRuntimeError::Ledger(_))
+            ));
+            assert!(!executed.get());
+            assert_eq!(
+                semantic_counters(&semantic, keys),
+                (baseline.0 + 1, baseline.1)
+            );
+            assert!(matches!(
+                semantic.finish_rejected(),
+                Err(StoreRuntimeError::Ledger(_))
+            ));
+            planning.reject((), 83)
+        })
+        .unwrap();
+    release_semantic_rejection(outcome, &account);
+}
+
+#[test]
+fn semantic_scratch_boundaries_poll_before_the_action_cadence_is_due() {
+    for boundary in ["reserve", "resize", "validate"] {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let control = OperationControl::default().with_cancellation(Stop {
+            cancelled: cancelled.clone(),
+            polls: Arc::new(AtomicUsize::new(0)),
+        });
+        let (operation, keys, account) = operation(4096, 4096, control);
+        let outcome: SemanticOutcome = keys
+            .session(operation)
+            .plan_and_activate_scoped(|mut planning| {
+                let mut semantic = planning.begin_semantic_work().unwrap();
+                let mut scratch = semantic.reserve(4).unwrap();
+                semantic.run_unit(|| ()).unwrap();
+                let before = scratch.raw.covered_bytes_for_test();
+                let physical_before = account.snapshot();
+                cancelled.store(true, Ordering::Relaxed);
+                let result = match boundary {
+                    "reserve" => semantic.reserve(8).map(drop),
+                    "resize" => semantic.resize(&mut scratch, 8),
+                    "validate" => semantic.validate_live_owner(&scratch),
+                    _ => unreachable!(),
+                };
+                assert!(matches!(result, Err(StoreRuntimeError::Control(_))));
+                assert_eq!(scratch.raw.covered_bytes_for_test(), before);
+                assert_eq!(account.snapshot(), physical_before);
+                assert!(matches!(
+                    semantic.finish_rejected(),
+                    Err(StoreRuntimeError::Control(_))
+                ));
+                drop(scratch);
+                planning.reject((), 84)
+            })
+            .unwrap();
+        release_semantic_rejection(outcome, &account);
+    }
+}
+
+struct SemanticPanicDrop<'a>(&'a std::cell::Cell<bool>);
+
+impl Drop for SemanticPanicDrop<'_> {
+    fn drop(&mut self) {
+        self.0.set(true);
+        panic!("semantic capture drop panic");
+    }
+}
+
+#[test]
+fn semantic_capture_drop_failure_retains_the_returned_action_prefix() {
+    let (operation, keys, account) = operation(4096, 4096, OperationControl::default());
+    let dropped = std::cell::Cell::new(false);
+    let result: Result<SemanticOutcome, _> =
+        keys.session(operation)
+            .plan_and_activate_scoped(|mut planning| {
+                let mut semantic = planning.begin_semantic_work().unwrap();
+                let baseline = semantic_counters(&semantic, keys);
+                let capture = SemanticPanicDrop(&dropped);
+                assert!(matches!(
+                    semantic.run_unit(move || {
+                        let _capture = &capture;
+                    }),
+                    Err(StoreRuntimeError::ConstructionInvariantUnverified)
+                ));
+                assert!(dropped.get());
+                assert_eq!(
+                    semantic_counters(&semantic, keys),
+                    (baseline.0 + 1, baseline.1 + 1)
+                );
+                assert!(semantic.first_fault.as_ref().unwrap().contract_seen);
+                assert!(matches!(
+                    semantic.finish_rejected(),
+                    Err(StoreRuntimeError::ConstructionInvariantUnverified)
+                ));
+                planning.reject((), 85)
+            });
+    assert!(result.is_err());
+    assert!(account.snapshot().poisoned());
+}
+
+#[test]
+fn semantic_denied_admission_catches_capture_drop_without_replacing_ledger_cause() {
+    let (operation, keys, account) = operation(4096, 4096, OperationControl::default());
+    let dropped = std::cell::Cell::new(false);
+    let executed = std::cell::Cell::new(false);
+    let result: Result<SemanticOutcome, _> =
+        keys.session(operation)
+            .plan_and_activate_scoped(|mut planning| {
+                let mut semantic = planning.begin_semantic_work().unwrap();
+                let baseline = semantic_counters(&semantic, keys);
+                semantic
+                    .work
+                    .tighten_dimension_policy(
+                        keys.work,
+                        DimensionPolicy::counter(baseline.0 + 8, baseline.1, 0),
+                    )
+                    .unwrap();
+                let capture = SemanticPanicDrop(&dropped);
+                let executed_ref = &executed;
+                assert!(matches!(
+                    semantic.run_unit(move || {
+                        let _capture = &capture;
+                        executed_ref.set(true);
+                    }),
+                    Err(StoreRuntimeError::Ledger(_))
+                ));
+                assert!(dropped.get());
+                assert!(!executed.get());
+                assert_eq!(
+                    semantic_counters(&semantic, keys),
+                    (baseline.0 + 1, baseline.1)
+                );
+                let fault = semantic.first_fault.as_ref().unwrap();
+                assert!(matches!(&fault.cause, StoreRuntimeError::Ledger(_)));
+                assert!(fault.contract_seen);
+                assert!(matches!(
+                    semantic.finish_rejected(),
+                    Err(StoreRuntimeError::Ledger(_))
+                ));
+                planning.reject((), 86)
+            });
+    assert!(result.is_err());
+    assert!(account.snapshot().poisoned());
+}
+
+#[test]
+fn semantic_body_and_capture_drop_panics_keep_only_the_completed_prefix() {
+    for completed_prefix in [0_u64, 1] {
+        let (operation, keys, account) = operation(4096, 4096, OperationControl::default());
+        let dropped = std::cell::Cell::new(false);
+        let result: Result<SemanticOutcome, _> =
+            keys.session(operation)
+                .plan_and_activate_scoped(|mut planning| {
+                    let mut semantic = planning.begin_semantic_work().unwrap();
+                    let baseline = semantic_counters(&semantic, keys);
+                    if completed_prefix == 1 {
+                        semantic.run_unit(|| ()).unwrap();
+                    }
+                    let capture = SemanticPanicDrop(&dropped);
+                    let panicked = catch_unwind(AssertUnwindSafe(|| {
+                        let _ = semantic.run_unit(move || -> () {
+                            let _capture = &capture;
+                            panic!("semantic body panic");
+                        });
+                    }));
+                    assert!(panicked.is_err());
+                    assert!(dropped.get());
+                    assert_eq!(
+                        semantic_counters(&semantic, keys),
+                        (
+                            baseline.0 + completed_prefix + 1,
+                            baseline.1 + completed_prefix,
+                        )
+                    );
+                    assert!(matches!(
+                        semantic.finish_rejected(),
+                        Err(StoreRuntimeError::ConstructionInvariantUnverified)
+                    ));
+                    planning.reject((), 87)
+                });
+        assert!(result.is_err());
+        assert!(account.snapshot().poisoned());
+    }
+}

@@ -299,6 +299,7 @@ where
     U: ProgressUnit,
 {
     let planning_baseline = dormant.operation().raw.planning_baseline();
+    let prior_failure = dormant.operation().activation_terminal_cause();
     let containment_anchor = dormant.containment_anchor.share();
     let mut transaction = ManuallyDrop::new(Some(transaction));
     let receipt_brand = ScopedReceiptBrand { _private: 0 };
@@ -313,6 +314,19 @@ where
         semantic_state: ScopedSemanticState::NotStarted,
     };
     let result = catch_unwind(AssertUnwindSafe(|| {
+        // A selected terminal cannot lend ordinary execution. Preserve its exact code and
+        // resolve the dormant owner before any semantic callback, as activation opening does.
+        if let Some(failure_code) = prior_failure {
+            if let ScopedActivationState::Dormant(dormant) = &mut driver.state {
+                // Observe late control without replacing the already selected terminal code.
+                dormant.operation_mut().raw.poll_terminal_control();
+            }
+            driver.install_never_activated_failure(
+                StoreRuntimeError::SuccessOutcomeRejected,
+                failure_code,
+            );
+            return true;
+        }
         let transaction = transaction
             .as_mut()
             .expect("the scoped activation transaction remains owned until controlled drop");
@@ -570,6 +584,14 @@ where
             let _ = self.contain_current();
             return;
         };
+        self.install_never_activated_failure(fault.cause, failure_code);
+    }
+
+    fn install_never_activated_failure(
+        &mut self,
+        cause: StoreRuntimeError,
+        failure_code: PreparationFailureCode,
+    ) {
         let state = std::mem::replace(&mut self.state, ScopedActivationState::Transitioning);
         let ScopedActivationState::Dormant(dormant) = state else {
             self.state = state;
@@ -599,7 +621,7 @@ where
                 failure.outcome_evidence_plan,
                 self.failure_work,
                 failure.outcome_evidence_destination_dimension,
-                fault.cause,
+                cause,
                 failure_code,
                 false,
             ),
@@ -653,6 +675,10 @@ where
                 Err(StoreRuntimeError::ConstructionInvariantUnverified),
             );
         }
+        if let Some(cause) = preserved_fault(first_fault) {
+            *semantic_state = ScopedSemanticState::Rejected;
+            return Err(cause);
+        }
         let Some(roles) = roles.as_ref() else {
             return preserve_first_fault(
                 first_fault,
@@ -669,18 +695,36 @@ where
                 );
             }
         };
+        let (work, storage, control) =
+            match preserve_first_fault(first_fault, operation.execution()) {
+                Ok(execution) => execution,
+                Err(cause) => {
+                    *semantic_state = ScopedSemanticState::Rejected;
+                    return Err(cause);
+                }
+            };
+        let work_group = match preserve_first_fault(first_fault, work.bind_group([work_dimension]))
+        {
+            Ok(group) => group,
+            Err(cause) => {
+                *semantic_state = ScopedSemanticState::Rejected;
+                return Err(cause);
+            }
+        };
         *semantic_state = ScopedSemanticState::Active;
         Ok(CanonicalSemanticWorkSession {
-            operation,
+            work,
+            work_group,
+            storage,
+            control,
             first_fault,
             phase,
-            work_dimension,
             scratch_dimension,
             state: semantic_state,
             receipt_brand,
-            work_batch: work_batch::CompletionPrefixBatch::new(),
             completed_any: false,
             resolved: false,
+            lineage: PhantomData,
             scope: PhantomData,
         })
     }
@@ -1536,79 +1580,103 @@ where
     }
 
     fn poll_now(&mut self) -> Result<(), StoreRuntimeError> {
-        let mut checkpoint = CanonicalControlCheckpoint {
-            raw: self.operation.control_checkpoint(),
-            first_fault: &mut *self.first_fault,
-            activation: PhantomData,
-        };
-        checkpoint.poll()?;
-        self.work_batch.note_poll();
-        Ok(())
+        if let Some(cause) = preserved_fault(self.first_fault) {
+            return Err(cause);
+        }
+        preserve_first_fault(self.first_fault, self.control.checkpoint())
     }
 
-    /// Flushes and polls when the bounded completion checkpoint has been reached.
+    /// Polls when the invocation's bounded action checkpoint has been reached.
     pub fn poll_if_due(&mut self) -> Result<(), StoreRuntimeError> {
         if let Some(cause) = preserved_fault(self.first_fault) {
             return Err(cause);
         }
-        if self.work_batch.poll_due() {
-            self.poll_now()?;
+        preserve_first_fault(self.first_fault, self.control.before_action())
+    }
+
+    fn finish_checkpoint(&mut self) -> Result<(), StoreRuntimeError> {
+        let poll = self.poll_now();
+        if let Err(cause) = self.work.finish_region() {
+            let _ = preserve_first_fault::<()>(self.first_fault, Err(cause));
+            note_later_contract::<()>(
+                self.first_fault,
+                Err(StoreRuntimeError::ConstructionInvariantUnverified),
+            );
         }
-        Ok(())
+        poll?;
+        preserved_fault(self.first_fault).map_or(Ok(()), Err)
+    }
+
+    fn finish_action_callback<F, R>(
+        &mut self,
+        action: ManuallyDrop<Option<F>>,
+        result: Result<R, StoreRuntimeError>,
+    ) -> Result<R, StoreRuntimeError> {
+        let result = preserve_first_fault(self.first_fault, result);
+        if drop_optional_callback(action).is_err() {
+            note_later_contract::<()>(
+                self.first_fault,
+                Err(StoreRuntimeError::ConstructionInvariantUnverified),
+            );
+            if let Ok(value) = result {
+                let _ = drop_scoped_value(value);
+            }
+            return Err(preserved_fault(self.first_fault)
+                .expect("callback drop failure preserves a semantic contract fault"));
+        }
+        result
     }
 
     /// Runs one semantic action after bounded control polling and records it only on normal return.
     pub fn run_unit<R>(&mut self, action: impl FnMut() -> R) -> Result<R, StoreRuntimeError> {
-        if let Some(cause) = preserved_fault(self.first_fault) {
-            return Err(cause);
-        }
-        if self.work_batch.poll_due() {
-            // Observed-work admission performs the matching control poll immediately before the
-            // action, so it also satisfies this bounded checkpoint without a duplicate poll.
-            self.work_batch.note_poll();
-        }
-        let mut host = self.operation.producer_host();
-        let start = host.try_begin_observed_work([(self.work_dimension, 1)]);
-        let mut observed = preserve_first_fault(self.first_fault, start)?;
         let mut action = ManuallyDrop::new(Some(action));
+        let start = self
+            .poll_if_due()
+            .and_then(|()| self.work_group.admit_observed([1]));
+        let mut observed = match preserve_first_fault(self.first_fault, start) {
+            Ok(observed) => observed,
+            Err(cause) => return self.finish_action_callback(action, Err(cause)),
+        };
         let result = catch_unwind(AssertUnwindSafe(|| {
             action
                 .as_mut()
                 .expect("the semantic action remains owned until controlled drop")()
         }));
-        let action_drop_failed = drop_optional_callback(action).is_err();
-        if action_drop_failed && self.first_fault.is_none() {
-            let _ = preserve_first_fault::<()>(
-                self.first_fault,
-                Err(StoreRuntimeError::ConstructionInvariantUnverified),
-            );
-        }
         let result = match result {
             Ok(result) => result,
             Err(payload) => {
-                observed.finish_partial();
-                self.note_contract_if_untrusted();
+                note_later_contract::<()>(
+                    self.first_fault,
+                    Err(StoreRuntimeError::ConstructionInvariantUnverified),
+                );
+                let _ = observed.finish_partial();
+                if drop_optional_callback(action).is_err() {
+                    note_later_contract::<()>(
+                        self.first_fault,
+                        Err(StoreRuntimeError::ConstructionInvariantUnverified),
+                    );
+                }
                 std::panic::resume_unwind(payload);
             }
         };
         if let Err(cause) = observed.complete([1]) {
-            observed.finish_partial();
-            return preserve_runtime_fault_then_drop_result(self.first_fault, cause, result);
+            let _ = preserve_first_fault::<()>(self.first_fault, Err(cause.clone()));
+            if observed.finish_partial().is_err() {
+                note_later_contract::<()>(
+                    self.first_fault,
+                    Err(StoreRuntimeError::ConstructionInvariantUnverified),
+                );
+            }
+            let result = preserve_runtime_fault_then_drop_result(self.first_fault, cause, result);
+            return self.finish_action_callback(action, result);
         }
         if let Err(cause) = observed.finish() {
-            return preserve_runtime_fault_then_drop_result(self.first_fault, cause, result);
+            let result = preserve_runtime_fault_then_drop_result(self.first_fault, cause, result);
+            return self.finish_action_callback(action, result);
         }
         self.completed_any = true;
-        if self.work_batch.note_observed_unit().is_err() {
-            self.note_contract_if_untrusted();
-            let _ = drop_scoped_value(result);
-            return Err(StoreRuntimeError::ConstructionInvariantUnverified);
-        }
-        if action_drop_failed {
-            let _ = drop_scoped_value(result);
-            return Err(StoreRuntimeError::ConstructionInvariantUnverified);
-        }
-        Ok(result)
+        self.control.completed_action();
+        self.finish_action_callback(action, Ok(result))
     }
 
     /// Reserves metered construction scratch in the policy-owned authoring role.
@@ -1616,15 +1684,18 @@ where
         &mut self,
         bytes: u64,
     ) -> Result<CanonicalReservation<'scope, O>, StoreRuntimeError> {
-        self.poll_if_due()?;
-        let phase = self.phase;
-        let dimension = self.scratch_dimension;
-        let mut checkpoint = CanonicalControlCheckpoint {
-            raw: self.operation.control_checkpoint(),
-            first_fault: &mut *self.first_fault,
-            activation: PhantomData,
-        };
-        checkpoint.reserve(phase, dimension, bytes)
+        if let Some(cause) = preserved_fault(self.first_fault) {
+            return Err(cause);
+        }
+        preserve_first_fault(
+            self.first_fault,
+            self.storage
+                .reserve(&mut self.control, self.phase, self.scratch_dimension, bytes),
+        )
+        .map(|raw| CanonicalReservation {
+            raw,
+            scope: PhantomData,
+        })
     }
 
     /// Resizes one scoped reservation while retaining it unchanged on rejection.
@@ -1633,13 +1704,11 @@ where
         reservation: &mut CanonicalReservation<'scope, O>,
         bytes: u64,
     ) -> Result<(), StoreRuntimeError> {
-        self.poll_if_due()?;
-        let mut checkpoint = CanonicalControlCheckpoint {
-            raw: self.operation.control_checkpoint(),
-            first_fault: &mut *self.first_fault,
-            activation: PhantomData,
-        };
-        checkpoint.resize(reservation, bytes)
+        self.poll_now()?;
+        preserve_first_fault(
+            self.first_fault,
+            self.storage.resize(&mut reservation.raw, bytes),
+        )
     }
 
     /// Proves that one scoped reservation belongs to this operation.
@@ -1647,13 +1716,11 @@ where
         &mut self,
         reservation: &CanonicalReservation<'scope, O>,
     ) -> Result<(), StoreRuntimeError> {
-        self.poll_if_due()?;
-        let mut checkpoint = CanonicalControlCheckpoint {
-            raw: self.operation.control_checkpoint(),
-            first_fault: &mut *self.first_fault,
-            activation: PhantomData,
-        };
-        checkpoint.validate_live_owner(reservation)
+        self.poll_now()?;
+        preserve_first_fault(
+            self.first_fault,
+            self.storage.validate_live_owner(&reservation.raw),
+        )
     }
 
     /// Completes one nonempty action-derived semantic prefix.
@@ -1661,7 +1728,7 @@ where
         mut self,
     ) -> Result<CanonicalSemanticCompletion<'scope>, StoreRuntimeError> {
         let receipt_brand = self.receipt_brand;
-        let result = self.poll_now();
+        let result = self.finish_checkpoint();
         if let Err(cause) = result {
             *self.state = ScopedSemanticState::Rejected;
             self.resolved = true;
@@ -1684,7 +1751,7 @@ where
 
     /// Resolves a verified semantic rejection without requiring a success completion token.
     pub fn finish_rejected(mut self) -> Result<(), StoreRuntimeError> {
-        let result = self.poll_now();
+        let result = self.finish_checkpoint();
         *self.state = ScopedSemanticState::Rejected;
         self.resolved = true;
         result

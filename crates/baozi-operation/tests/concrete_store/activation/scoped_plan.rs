@@ -1964,6 +1964,7 @@ fn panic_after_pending_activated_is_fail_closed() {
 
 #[test]
 fn control_interruption_then_reject_preserves_runtime_never_activated() {
+    let baseline = scoped_semantic_baseline();
     let factory = factory(1);
     let account = account(&factory);
     let cancellation = CancellationToken::new();
@@ -1978,16 +1979,11 @@ fn control_interruption_then_reject_preserves_runtime_never_activated() {
         .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     cancellation.cancel();
-    let action_executed = Cell::new(false);
 
     let outcome: ScopedOutcome<PreflightRejection> = owner
         .plan_and_activate_scoped(|mut planning| {
-            let mut semantic = planning.begin_semantic_work().unwrap();
-            let cause = semantic.run_unit(|| action_executed.set(true)).unwrap_err();
-            assert!(matches!(cause, StoreRuntimeError::Control(_)));
-            assert!(!action_executed.get());
             assert!(matches!(
-                semantic.finish_rejected(),
+                planning.begin_semantic_work(),
                 Err(StoreRuntimeError::Control(_))
             ));
             planning.reject(PreflightRejection::Unsupported, 41)
@@ -2010,7 +2006,10 @@ fn control_interruption_then_reject_preserves_runtime_never_activated() {
         .prepare_minimal_fallback()
         .unwrap()
         .into_parts();
-    drop(prepared.handoff());
+    let published = prepared.handoff();
+    let work = published.ledger_evidence.dimension(keys.dimension).unwrap();
+    assert_eq!((work.attempted(), work.consumed()), baseline);
+    drop(published);
     assert!(!account.snapshot().poisoned());
 }
 
@@ -2132,11 +2131,10 @@ fn runtime_fault_before_semantic_completion_resolves_without_activation() {
     let owner = operation
         .into_test_session_outcome_owner(policy, failure)
         .unwrap();
-    cancellation.cancel();
-
     let outcome: ScopedOutcome<()> = owner
         .plan_and_activate_scoped(|mut planning| {
             let semantic = planning.begin_semantic_work().unwrap();
+            cancellation.cancel();
             assert!(matches!(
                 semantic.finish_rejected(),
                 Err(StoreRuntimeError::Control(_))
@@ -2595,6 +2593,7 @@ fn semantic_work_records_exact_255_256_and_cancelled_257_prefixes() {
     assert_eq!(scoped_semantic_case(255, None), (255, 255, 255, false));
     assert_eq!(scoped_semantic_case(256, None), (256, 256, 256, false));
     assert_eq!(scoped_semantic_case(257, Some(256)), (256, 256, 256, true));
+    assert_eq!(scoped_semantic_case(257, Some(1)), (256, 256, 256, true));
 }
 
 #[test]
