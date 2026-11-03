@@ -4,11 +4,13 @@ use crate::ledger::ImportOperationOwner;
 use crate::store::{ImportExecutionFailure, ImportStoreVocabulary, project_store_runtime_error};
 use baozi_operation::__retained_store_integration::activation::{
     StoreExtensionResult, StoreFailureStorage, StoreInvocation, StoreInvocationError,
-    StoreInvocationLayout, StoreInvocationParser, StoreParserWorkError,
+    StoreInvocationLayout, StoreInvocationParser, StoreOrdinaryStorage, StoreParserWorkError,
 };
 
 type Numeric<'op> =
     StoreInvocation<'op, ImportOperationOwner, ImportProgressPhase, ImportProgressUnit>;
+type OrdinaryStorage<'b> =
+    StoreOrdinaryStorage<'b, ImportOperationOwner, ImportProgressPhase, ImportProgressUnit>;
 type FailureStorage<'b, 'op> =
     StoreFailureStorage<'b, 'op, ImportOperationOwner, ImportProgressPhase, ImportProgressUnit>;
 
@@ -18,11 +20,18 @@ struct ParseViews<'borrow, 'session> {
     source: &'session AssetPath,
     bytes: &'session [u8],
     limits: &'session ResourceLimits,
+    issuer: &'session DependencyOriginIssuer,
     terminal: &'session RefCell<Option<ScopeAbortCause>>,
     callback_active: &'borrow Cell<bool>,
     failure_storage: &'session RefCell<FailureEvidenceStorage>,
 }
-impl ParseViews<'_, '_> {
+impl<'session> ParseViews<'_, 'session> {
+    fn identity(&self) -> StorageIdentity<'session> {
+        StorageIdentity {
+            issuer: self.issuer,
+            terminal: self.terminal,
+        }
+    }
     fn abort(&self, cause: ScopeAbortCause) -> ParseFailure {
         latch_abort(self.terminal, cause)
     }
@@ -217,6 +226,7 @@ impl<'session> ParseContext<'session> {
             source: self.primary_source,
             bytes: self.primary_bytes,
             limits: self.limits,
+            issuer: self.dependency_origin_issuer,
             terminal: self.terminal,
             callback_active: &self.callback_active,
             failure_storage: self.format_failure_storage,
@@ -259,6 +269,44 @@ impl<'session> ParseContext<'session> {
 }
 
 impl<'op, 'session> ParseRoot<'_, 'op, 'session> {
+    /// Borrows ordinary storage/poll services without lending numeric work.
+    pub fn storage(&mut self) -> ParseResult<ParseStorage<'_, 'session>> {
+        self.views.preflight()?;
+        Ok(ParseStorage::new(
+            crate::store::ImportOrdinaryStorage::new(
+                self.numeric.ordinary_storage(),
+                self.vocabulary,
+            ),
+            self.views.identity(),
+            self.views.callback_active,
+        ))
+    }
+    /// Preserves cold preflight and the actual allocation failure cause.
+    pub fn allocation_failure(&self, resource: &'static str) -> ParseFailure {
+        if let Err(cause) = self.views.preflight() {
+            return cause;
+        }
+        self.views.abort(ScopeAbortCause::Allocation { resource })
+    }
+    /// Materializes the real accounted failure without a dummy work action.
+    pub fn format_failure<P: FormatFailureEvidenceProducer>(
+        &mut self,
+        producer: P,
+    ) -> ParseFailure {
+        if let Err(cause) = self.views.preflight() {
+            return cause;
+        }
+        self.numeric.stop_known_error();
+        capture_format_failure(
+            FormatFailureHost::exclusive(
+                self.numeric.failure_storage(),
+                self.vocabulary,
+                self.views,
+            ),
+            producer,
+        )
+    }
+
     pub fn source(&self) -> &'session AssetPath {
         self.views.source
     }
@@ -435,6 +483,72 @@ impl<'op, 'session> ParseRoot<'_, 'op, 'session> {
 impl<'op, 'session, const N: usize, const CHILD: bool>
     ParseParser<'_, '_, '_, 'op, 'session, N, CHILD>
 {
+    /// The live storage loan prevents reentry of this parser role.
+    pub fn storage(&mut self) -> ParseResult<ParseStorage<'_, 'session>> {
+        self.views.preflight()?;
+        Ok(ParseStorage::new(
+            crate::store::ImportOrdinaryStorage::new(
+                self.numeric.ordinary_storage(),
+                self.vocabulary,
+            ),
+            self.views.identity(),
+            self.views.callback_active,
+        ))
+    }
+    /// Admits one real growing push; an unused value stays outside the denial path.
+    pub fn push_growing<T>(
+        &mut self,
+        amounts: [u64; N],
+        values: &mut MeteredVec<'session, T>,
+        value: T,
+    ) -> ParseResult<()> {
+        let mut unused = Some(value);
+        self.views.preflight()?;
+        let views = self.views;
+        let vocabulary = self.vocabulary;
+        let mut slot = Some(|mut raw: OrdinaryStorage<'_>| {
+            let mut storage = ParseStorage::new(
+                crate::store::ImportOrdinaryStorage::new(raw.reborrow(), vocabulary),
+                views.identity(),
+                views.callback_active,
+            );
+            storage.reserve_vec(values, 1)?;
+            values.try_push_reserved(unused.take().expect("a compound push moves its value once"))
+        });
+        self.numeric.run_prefix_with_storage(
+            amounts,
+            1,
+            &mut slot,
+            |cause| views.runtime(vocabulary, cause),
+            |_, cause| cause,
+        )
+    }
+    /// Appends actual text under the same parser guard and shared growth owner.
+    pub fn append_string(
+        &mut self,
+        amounts: [u64; N],
+        value: &mut MeteredString<'session>,
+        text: &str,
+    ) -> ParseResult<()> {
+        self.views.preflight()?;
+        let views = self.views;
+        let vocabulary = self.vocabulary;
+        let mut slot = Some(|mut raw: OrdinaryStorage<'_>| {
+            let mut storage = ParseStorage::new(
+                crate::store::ImportOrdinaryStorage::new(raw.reborrow(), vocabulary),
+                views.identity(),
+                views.callback_active,
+            );
+            storage.append_string(value, text)
+        });
+        self.numeric.run_prefix_with_storage(
+            amounts,
+            1,
+            &mut slot,
+            |cause| views.runtime(vocabulary, cause),
+            |_, cause| cause,
+        )
+    }
     pub fn error_view(&self) -> ParseErrorView<'session> {
         ParseErrorView {
             terminal: self.views.terminal,
@@ -446,16 +560,16 @@ impl<'op, 'session, const N: usize, const CHILD: bool>
         action: impl FnOnce() -> Result<T, E>,
     ) -> Result<T, E> {
         self.views.preflight().map_err(E::from)?;
-        self.numeric
-            .run_prefix_with_failure(amounts, 1, action, |_, cause| {
-                ImportExecutionFailure::Owned(cause)
-            })
-            .map_err(|cause| match cause {
-                ImportExecutionFailure::Owned(cause) => cause,
-                ImportExecutionFailure::Runtime(cause) => {
-                    E::from(self.views.runtime(self.vocabulary, cause))
-                }
-            })
+        let views = self.views;
+        let vocabulary = self.vocabulary;
+        let mut slot = Some(|_storage: OrdinaryStorage<'_>| action());
+        self.numeric.run_prefix_with_storage(
+            amounts,
+            1,
+            &mut slot,
+            |cause| E::from(views.runtime(vocabulary, cause)),
+            |_, cause| cause,
+        )
     }
     fn exit_poll(&mut self) -> ParseResult<()> {
         self.views.preflight()?;
@@ -486,20 +600,19 @@ impl<'op, 'session, const N: usize, const CHILD: bool>
         self.views.preflight()?;
         let views = self.views;
         let vocabulary = self.vocabulary;
-        self.numeric
-            .run_prefix_with_failure(amounts, 1, action, |numeric, producer| {
-                let storage = numeric.failure_storage();
-                ImportExecutionFailure::Owned(capture_format_failure(
-                    FormatFailureHost::exclusive(storage, vocabulary, views),
+        let mut slot = Some(|_storage: OrdinaryStorage<'_>| action());
+        self.numeric.run_prefix_with_storage(
+            amounts,
+            1,
+            &mut slot,
+            |cause| views.runtime(vocabulary, cause),
+            |numeric, producer| {
+                capture_format_failure(
+                    FormatFailureHost::exclusive(numeric.failure_storage(), vocabulary, views),
                     producer,
-                ))
-            })
-            .map_err(|cause| match cause {
-                ImportExecutionFailure::Owned(cause) => cause,
-                ImportExecutionFailure::Runtime(cause) => {
-                    self.views.runtime(self.vocabulary, cause)
-                }
-            })
+                )
+            },
+        )
     }
 }
 impl<'op, 'session, const N: usize> ParseParser<'_, '_, '_, 'op, 'session, N, false> {

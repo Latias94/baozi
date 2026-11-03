@@ -3,8 +3,8 @@
 use super::*;
 mod exclusive;
 use crate::retained::{
-    ExecutionControl, ExecutionError, ExecutionGroup, ExecutionParserScope, ExecutionPermit,
-    ExecutionStorage, ExecutionWork,
+    ExecutionControl, ExecutionError, ExecutionGroup, ExecutionOrdinaryStorage,
+    ExecutionParserScope, ExecutionPermit, ExecutionStorage, ExecutionWork,
 };
 pub use exclusive::{
     StoreExtensionResult, StoreFailureStorage, StoreImporterBoundary, StoreInvocation,
@@ -21,6 +21,12 @@ pub struct StoreExecutionWork<'op, O> {
 pub struct StoreExecutionStorage<'op, O> {
     raw: ExecutionStorage<'op, O, StorePhaseKey, StoreDimensionKey>,
     domain: &'op StoreKeyDomain,
+}
+
+/// Ordinary storage and real poll authority, borrowing no numeric work or progress state.
+pub struct StoreOrdinaryStorage<'b, O, PP, U> {
+    raw: ExecutionOrdinaryStorage<'b, O, StorePhaseKey, PP, U, StoreDimensionKey>,
+    domain: &'b StoreKeyDomain,
 }
 
 /// Exclusive callback authority and invocation-wide bounded action cadence.
@@ -441,15 +447,7 @@ impl<O: OperationOwner> StoreExecutionStorage<'_, O> {
         bytes: u64,
     ) -> Result<RetainedStoreReservation<O>, StoreRuntimeError> {
         self.validate(phase, dimension)?;
-        if !self.raw.shares_invocation(&control.raw) {
-            self.raw.reject_binding();
-            return Err(StoreRuntimeError::ConstructionInvariantUnverified);
-        }
-        control.checkpoint()?;
-        self.raw
-            .reserve(phase, dimension, bytes)
-            .map(RetainedStoreReservation::live)
-            .map_err(map_execution_error)
+        self.ordinary(control)?.reserve(phase, dimension, bytes)
     }
 
     /// Reconciles actual capacity after allocation, preserving the source on rejection.
@@ -458,23 +456,118 @@ impl<O: OperationOwner> StoreExecutionStorage<'_, O> {
         reservation: &mut RetainedStoreReservation<O>,
         bytes: u64,
     ) -> Result<(), StoreRuntimeError> {
-        if reservation
-            .physical
-            .as_ref()
-            .is_some_and(|lease| bytes > lease.admitted_bytes())
-        {
+        resize_store_reservation(
+            &self.raw.storage_view(),
+            self.raw.failure(),
+            reservation,
+            bytes,
+        )
+    }
+}
+
+impl<'op, O: OperationOwner> StoreExecutionStorage<'op, O> {
+    /// Joins only actual sibling storage/control; constructing the loan does not poll.
+    pub fn ordinary<'b, PP: ProgressPhase, U: ProgressUnit>(
+        &'b self,
+        control: &'b mut StoreExecutionControl<'_, O, PP, U>,
+    ) -> Result<StoreOrdinaryStorage<'b, O, PP, U>, StoreRuntimeError> {
+        if !self.raw.shares_invocation(&control.raw) {
             self.raw.reject_binding();
             return Err(StoreRuntimeError::ConstructionInvariantUnverified);
         }
-        self.raw
-            .resize(&mut reservation.raw, bytes)
-            .map_err(map_execution_error)?;
-        if let Some(physical) = &mut reservation.physical {
-            physical
-                .shrink_to(bytes)
-                .map_err(|cause| map_writer_error(&RetainedWriterError::Physical(cause)))?;
+        Ok(StoreOrdinaryStorage {
+            raw: self.raw.ordinary(&mut control.raw),
+            domain: self.domain,
+        })
+    }
+}
+
+fn resize_store_reservation<O: OperationOwner>(
+    storage: &crate::ledger::ExclusiveStorage<'_, O, StorePhaseKey, StoreDimensionKey>,
+    failure: &std::cell::Cell<Option<crate::retained::PreparationFailureCode>>,
+    reservation: &mut RetainedStoreReservation<O>,
+    bytes: u64,
+) -> Result<(), StoreRuntimeError> {
+    if reservation
+        .physical
+        .as_ref()
+        .is_some_and(|lease| bytes > lease.admitted_bytes())
+    {
+        crate::retained::record_terminal_cause_with_precedence(
+            failure,
+            crate::retained::PreparationFailureCode::ledger(),
+        );
+        return Err(StoreRuntimeError::ConstructionInvariantUnverified);
+    }
+    storage
+        .resize(&mut reservation.raw, bytes)
+        .map_err(|cause| {
+            crate::retained::record_terminal_cause_with_precedence(
+                failure,
+                crate::retained::PreparationFailureCode::ledger(),
+            );
+            StoreRuntimeError::Ledger(cause)
+        })?;
+    if let Some(physical) = &mut reservation.physical {
+        physical
+            .shrink_to(bytes)
+            .map_err(|cause| map_writer_error(&RetainedWriterError::Physical(cause)))?;
+    }
+    Ok(())
+}
+
+impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreOrdinaryStorage<'_, O, PP, U> {
+    /// Shortens only storage/poll fields for a local compound service.
+    pub fn reborrow(&mut self) -> StoreOrdinaryStorage<'_, O, PP, U> {
+        StoreOrdinaryStorage {
+            domain: self.domain,
+            raw: ExecutionOrdinaryStorage {
+                storage: self.raw.storage.reborrow(),
+                poll: self.raw.poll.reborrow(),
+                failure: self.raw.failure,
+                debt: self.raw.debt,
+                execution_state: self.raw.execution_state,
+            },
         }
-        Ok(())
+    }
+    /// Uses this invocation's actual ordinary checkpoint without delivering progress.
+    pub fn checkpoint(&mut self) -> Result<(), StoreRuntimeError> {
+        self.raw.checkpoint().map_err(map_execution_error)
+    }
+    /// Ordinary live capacity; no retained physical lease or Internal share work.
+    pub fn reserve(
+        &mut self,
+        phase: StorePhaseKey,
+        dimension: StoreDimensionKey,
+        bytes: u64,
+    ) -> Result<RetainedStoreReservation<O>, StoreRuntimeError> {
+        let foreign = if !self.domain.owns_phase(phase) {
+            Some(StoreRuntimeError::ForeignPhaseDomain { phase })
+        } else if !self.domain.owns_dimension(dimension) {
+            Some(StoreRuntimeError::ForeignDimensionDomain { dimension })
+        } else {
+            None
+        };
+        if let Some(cause) = foreign {
+            crate::retained::record_terminal_cause_with_precedence(
+                self.raw.failure,
+                crate::retained::PreparationFailureCode::ledger(),
+            );
+            return Err(cause);
+        }
+        self.raw
+            .reserve(phase, dimension, bytes)
+            .map(RetainedStoreReservation::live)
+            .map_err(map_execution_error)
+    }
+    /// Reconciles real capacity without adding a poll or permitting stopped body execution.
+    pub fn resize(
+        &self,
+        reservation: &mut RetainedStoreReservation<O>,
+        bytes: u64,
+    ) -> Result<(), StoreRuntimeError> {
+        self.raw.running().map_err(map_execution_error)?;
+        resize_store_reservation(&self.raw.storage, self.raw.failure, reservation, bytes)
     }
 }
 

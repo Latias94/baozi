@@ -275,7 +275,35 @@ fn face_limit_is_checked_before_binary_allocation() {
     let failure =
         import_bytes_with_limits("limited.stl", &bytes, limits).expect_err("face limit must fail");
 
-    assert!(matches!(failure.cause(), ImportCause::Scope(_)));
+    assert!(
+        matches!(failure.cause(), ImportCause::Scope(abort) if matches!(abort.cause(),
+        baozi_import::ScopeAbortCause::Ledger(baozi_import::LedgerCause::LimitExceeded {
+            class: baozi_operation::CounterClass::Attempted, dimension: ImportDimension::Faces, value: 1, limit: 0,
+        })))
+    );
+    for (dimension, attempted) in [
+        (ImportDimension::DecodeWork, 134),
+        (ImportDimension::Faces, 1),
+        (ImportDimension::Vertices, 0),
+        (ImportDimension::Meshes, 0),
+    ] {
+        let row = failure.ledger().dimension(dimension).unwrap();
+        assert_eq!(
+            (row.attempted(), row.consumed()),
+            (attempted, 0),
+            "{dimension:?}"
+        );
+    }
+    assert_eq!(
+        failure
+            .ledger()
+            .dimension(ImportDimension::CanonicalOutputBytes)
+            .unwrap()
+            .peak_live_bytes(),
+        0
+    );
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    assert_eq!(failure.ledger().active_reservations(), 0);
 }
 
 #[test]
@@ -325,4 +353,53 @@ fn materialise_facet_color_uses_materialise_channel_order() -> TestResult {
         "0x3f800000,0x00000000,0x00000000,0x3f800000"
     )));
     Ok(())
+}
+
+#[test]
+fn binary_decode_work_envelope_is_exact_and_one_short_denies_before_payload() {
+    let bytes = binary_stl(b"binary", &[BinaryFacet::unit_triangle(); 2]);
+    assert_eq!(bytes.len(), 184);
+    let mut exact = ResourceLimits::default();
+    exact.max_decode_work = 184;
+    let report = import_bytes_with_limits("binary-exact-envelope.stl", &bytes, exact)
+        .expect("exact binary envelope");
+    let row = report
+        .ledger()
+        .dimension(ImportDimension::DecodeWork)
+        .unwrap();
+    assert_eq!((row.attempted(), row.consumed()), (184, 184));
+    let mut below = ResourceLimits::default();
+    below.max_decode_work = 183;
+    let failure = import_bytes_with_limits("binary-short-envelope.stl", &bytes, below)
+        .expect_err("one-short binary envelope");
+    assert!(
+        matches!(failure.cause(), ImportCause::Scope(abort) if matches!(abort.cause(),
+        baozi_import::ScopeAbortCause::Ledger(baozi_import::LedgerCause::LimitExceeded {
+            class: baozi_operation::CounterClass::Attempted, dimension: ImportDimension::DecodeWork, value: 184, limit: 183,
+        })))
+    );
+    for (dimension, attempted) in [
+        (ImportDimension::DecodeWork, 184),
+        (ImportDimension::Faces, 0),
+        (ImportDimension::Vertices, 0),
+        (ImportDimension::Records, 0),
+        (ImportDimension::Meshes, 0),
+    ] {
+        let row = failure.ledger().dimension(dimension).unwrap();
+        assert_eq!(
+            (row.attempted(), row.consumed()),
+            (attempted, 0),
+            "{dimension:?}"
+        );
+    }
+    assert_eq!(
+        failure
+            .ledger()
+            .dimension(ImportDimension::CanonicalOutputBytes)
+            .unwrap()
+            .peak_live_bytes(),
+        0
+    );
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    assert_eq!(failure.ledger().active_reservations(), 0);
 }

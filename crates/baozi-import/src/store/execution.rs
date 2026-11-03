@@ -7,8 +7,8 @@
 
 use baozi_operation::__retained_store_integration::activation::{
     StoreBoundWorkGroup, StoreExecutionControl, StoreExecutionPermit, StoreExecutionStorage,
-    StoreExecutionWork, StoreFailureStorage, StoreInvocation, StoreParserWorkError,
-    StoreParserWorkScope,
+    StoreExecutionWork, StoreFailureStorage, StoreInvocation, StoreOrdinaryStorage,
+    StoreParserWorkError, StoreParserWorkScope,
 };
 
 use super::*;
@@ -23,6 +23,65 @@ pub(crate) struct ImportStoreExecution<'region> {
         ImportProgressUnit,
     >,
     vocabulary: &'region ImportStoreVocabulary,
+}
+
+pub(crate) struct ImportOrdinaryStorage<'b> {
+    raw: StoreOrdinaryStorage<'b, ImportOperationOwner, ImportProgressPhase, ImportProgressUnit>,
+    vocabulary: &'b ImportStoreVocabulary,
+}
+impl<'b> ImportOrdinaryStorage<'b> {
+    pub(crate) fn new(
+        raw: StoreOrdinaryStorage<
+            'b,
+            ImportOperationOwner,
+            ImportProgressPhase,
+            ImportProgressUnit,
+        >,
+        vocabulary: &'b ImportStoreVocabulary,
+    ) -> Self {
+        Self { raw, vocabulary }
+    }
+    pub(crate) fn poll(&mut self) -> Result<(), ImportStoreHostError> {
+        self.raw
+            .checkpoint()
+            .map_err(|cause| project_store_runtime_error(self.vocabulary, cause))
+    }
+    pub(crate) fn reserve(
+        &mut self,
+        phase: ImportLedgerPhase,
+        dimension: ImportDimension,
+        bytes: u64,
+    ) -> Result<ImportStoreReservation, ImportStoreHostError> {
+        let raw = self
+            .raw
+            .reserve(
+                self.vocabulary.phase(phase),
+                self.vocabulary.dimension(dimension),
+                bytes,
+            )
+            .map_err(|cause| project_store_runtime_error(self.vocabulary, cause))?;
+        Ok(ImportStoreReservation {
+            raw: Some(raw),
+            bytes,
+        })
+    }
+    pub(crate) fn resize(
+        &self,
+        reservation: &mut ImportStoreReservation,
+        bytes: u64,
+    ) -> Result<(), ImportStoreHostError> {
+        self.raw
+            .resize(
+                reservation
+                    .raw
+                    .as_mut()
+                    .expect("a live import reservation owns its backing"),
+                bytes,
+            )
+            .map_err(|cause| project_store_runtime_error(self.vocabulary, cause))?;
+        reservation.bytes = bytes;
+        Ok(())
+    }
 }
 
 pub(crate) struct ImportBoundWorkGroup<'region, const N: usize> {
@@ -165,6 +224,14 @@ impl ImportStoreSessionOwner {
 }
 
 impl<'region> ImportStoreExecution<'region> {
+    pub(crate) fn ordinary(&mut self) -> Result<ImportOrdinaryStorage<'_>, ImportStoreHostError> {
+        let raw = self
+            .storage
+            .ordinary(&mut self.control)
+            .map_err(|cause| project_store_runtime_error(self.vocabulary, cause))?;
+        Ok(ImportOrdinaryStorage::new(raw, self.vocabulary))
+    }
+
     #[cfg(test)]
     pub(crate) fn storage_observation(
         &self,

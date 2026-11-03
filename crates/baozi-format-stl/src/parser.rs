@@ -52,10 +52,14 @@ struct PrimitivePatch {
 
 pub(crate) fn read_stl(context: &mut ParseContext<'_>) -> ParseResult<()> {
     let bytes = context.primary_bytes();
-    let parsed = context.with_execution(|exec| match exact_binary_facets(bytes) {
-        Some(facets) => binary::parse(exec, bytes, facets),
-        None => ascii::parse(exec),
-    })?;
+    let parsed = match exact_binary_facets(bytes) {
+        Some(facets) => context.with_parser_execution(|root| {
+            // The old ParseExecution entry has a second real poll after concrete-owner entry.
+            root.poll()?;
+            binary::parse(root, bytes, facets)
+        })?,
+        None => context.with_execution(ascii::parse)?,
+    };
     scene_from_parsed(context, parsed)
 }
 

@@ -1,7 +1,9 @@
 //! Disjoint invocation capabilities for repeated library execution.
 
 use super::*;
-use crate::ledger::{BoundWorkGroup, Ledger, ParserWorkError, ParserWorkScope, WorkLane};
+use crate::ledger::{
+    BoundWorkGroup, ExclusiveStorage, Ledger, ParserWorkError, ParserWorkScope, WorkLane,
+};
 
 pub(crate) enum ExecutionError<D> {
     Control(ControlCause),
@@ -26,6 +28,15 @@ pub(crate) struct ExecutionControl<'op, O, P, PP, U, D> {
     progress: OperationProgressCheckpoint<'op, O, P, PP, U, D>,
     failure: &'op Cell<Option<PreparationFailureCode>>,
     actions_since_poll: &'op Cell<u16>,
+    execution_state: &'op Cell<StoreExecutionState>,
+}
+
+pub(crate) struct ExecutionOrdinaryStorage<'b, O, P, PP, U, D> {
+    pub(crate) storage: ExclusiveStorage<'b, O, P, D>,
+    pub(crate) poll: OperationPollCheckpoint<'b, PP, U>,
+    pub(crate) failure: &'b Cell<Option<PreparationFailureCode>>,
+    pub(crate) debt: &'b Cell<u16>,
+    pub(crate) execution_state: &'b Cell<StoreExecutionState>,
 }
 
 pub(crate) struct ExecutionGroup<'op, D: Copy, const N: usize> {
@@ -60,6 +71,62 @@ fn ensure_running<D>(
         Err(ExecutionError::Stopped)
     } else {
         Ok(())
+    }
+}
+
+pub(crate) fn check_execution_state<D>(
+    failure: &Cell<Option<PreparationFailureCode>>,
+    state: &Cell<StoreExecutionState>,
+    recorded: impl FnOnce() -> Option<ControlCause>,
+) -> Result<(), ExecutionError<D>> {
+    StoreExecutionState::settle_caught_unwind(state, failure);
+    if failure.get().is_some() || state.get() != StoreExecutionState::Running {
+        return Err(recorded().map_or(ExecutionError::Stopped, ExecutionError::Control));
+    }
+    Ok(())
+}
+
+pub(crate) fn poll_execution<PP, U, D>(
+    poll: &mut OperationPollCheckpoint<'_, PP, U>,
+    failure: &Cell<Option<PreparationFailureCode>>,
+    debt: &Cell<u16>,
+) -> Result<(), ExecutionError<D>> {
+    if failure.get().is_some() {
+        return Err(poll
+            .recorded_control_cause()
+            .map_or(ExecutionError::Stopped, ExecutionError::Control));
+    }
+    poll.poll().map_err(|cause| {
+        record_terminal_cause_with_precedence(
+            failure,
+            PreparationFailureCode::from_control(&cause),
+        );
+        ExecutionError::Control(cause)
+    })?;
+    debt.set(0);
+    Ok(())
+}
+
+impl<O: OperationOwner, P: Copy + Ord, PP, U, D: Copy + Ord + fmt::Debug>
+    ExecutionOrdinaryStorage<'_, O, P, PP, U, D>
+{
+    pub(crate) fn checkpoint(&mut self) -> Result<(), ExecutionError<D>> {
+        self.running()?;
+        poll_execution(&mut self.poll, self.failure, self.debt)
+    }
+    pub(crate) fn running(&self) -> Result<(), ExecutionError<D>> {
+        check_execution_state(self.failure, self.execution_state, || {
+            self.poll.recorded_control_cause()
+        })
+    }
+    pub(crate) fn reserve(
+        &mut self,
+        phase: P,
+        dimension: D,
+        bytes: u64,
+    ) -> Result<LiveReservation<O, P, D>, ExecutionError<D>> {
+        self.checkpoint()?;
+        preserve_ledger(self.failure, self.storage.reserve(phase, dimension, bytes))
     }
 }
 
@@ -283,22 +350,14 @@ where
 {
     /// Entry, allocation, IO, external callback and region completion use this full checkpoint.
     pub(crate) fn checkpoint(&mut self) -> Result<(), ExecutionError<D>> {
-        if self.failure.get().is_some() {
-            return Err(self
-                .progress
-                .recorded_control_cause()
-                .map_or(ExecutionError::Stopped, ExecutionError::Control));
-        }
-        ensure_running(self.failure)?;
-        self.progress.poll().map_err(|cause| {
-            record_terminal_cause_with_precedence(
-                self.failure,
-                PreparationFailureCode::from_control(&cause),
-            );
-            ExecutionError::Control(cause)
+        check_execution_state(self.failure, self.execution_state, || {
+            self.progress.recorded_control_cause()
         })?;
-        self.actions_since_poll.set(0);
-        Ok(())
+        poll_execution(
+            &mut self.progress.reborrow_poll(),
+            self.failure,
+            self.actions_since_poll,
+        )
     }
 
     pub(crate) fn before_action(&mut self, max_cost: u16) -> Result<(), ExecutionError<D>> {
@@ -362,6 +421,29 @@ where
     P: Copy + Ord,
     D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
 {
+    pub(crate) fn ordinary<'b, PP, U>(
+        &'b self,
+        control: &'b mut ExecutionControl<'_, O, P, PP, U, D>,
+    ) -> ExecutionOrdinaryStorage<'b, O, P, PP, U, D>
+    where
+        PP: ProgressPhase,
+        U: ProgressUnit,
+    {
+        ExecutionOrdinaryStorage {
+            storage: self.ledger.storage_view(),
+            poll: control.progress.reborrow_poll(),
+            failure: self.failure,
+            debt: control.actions_since_poll,
+            execution_state: control.execution_state,
+        }
+    }
+    pub(crate) fn storage_view(&self) -> ExclusiveStorage<'_, O, P, D> {
+        self.ledger.storage_view()
+    }
+    pub(crate) fn failure(&self) -> &Cell<Option<PreparationFailureCode>> {
+        self.failure
+    }
+
     pub(crate) fn shares_invocation<PP, U>(
         &self,
         control: &ExecutionControl<'_, O, P, PP, U, D>,
@@ -408,27 +490,6 @@ where
             record_terminal_cause_with_precedence(self.failure, code);
         }
         result
-    }
-
-    pub(crate) fn reserve(
-        &self,
-        phase: P,
-        dimension: D,
-        bytes: u64,
-    ) -> Result<LiveReservation<O, P, D>, ExecutionError<D>> {
-        ensure_running(self.failure)?;
-        preserve_ledger(self.failure, self.ledger.reserve(phase, dimension, bytes))
-    }
-
-    pub(crate) fn resize(
-        &self,
-        reservation: &mut LiveReservation<O, P, D>,
-        bytes: u64,
-    ) -> Result<(), ExecutionError<D>> {
-        preserve_ledger(
-            self.failure,
-            self.ledger.resize_reservation(reservation, bytes),
-        )
     }
 
     pub(crate) fn validate_live_owner(
@@ -482,6 +543,7 @@ where
             terminal_account_share_work,
             sticky_terminal_cause,
             control_action_debt,
+            execution_state,
             ..
         } = self;
         let (progress, ledger) = coordinator.split_progress_checkpoint_and_retained_ledger();
@@ -500,6 +562,7 @@ where
                 progress,
                 failure: sticky_terminal_cause,
                 actions_since_poll: control_action_debt,
+                execution_state,
             },
         )
     }

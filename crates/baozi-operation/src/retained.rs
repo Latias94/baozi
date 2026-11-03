@@ -220,12 +220,13 @@ use triomphe::{Arc, UniqueArc};
 pub(crate) use operation::panic_next_publication_account_open;
 pub(crate) use operation::{
     BorrowedRetainedWorkPermit, ExclusiveOperationParts, ExecutionControl, ExecutionError,
-    ExecutionGroup, ExecutionParserScope, ExecutionPermit, ExecutionStorage, ExecutionWork,
-    RetainedFailureWorkConsumeError, RetainedFailureWorkFinishError, RetainedFailureWorkPermit,
-    RetainedFailureWorkStartError, RetainedPlanningBaseline, RetainedPlanningContainmentAnchor,
-    RetainedProducerHost, RetainedProducerWorkFinishError, RetainedProducerWorkPermit,
-    RetainedProducerWorkStartError, RetainedWorkConsumeError, RetainedWorkFinishError,
-    RetainedWorkPermit, RetainedWorkStartError, StoreExecutionState, checked_action_debt,
+    ExecutionGroup, ExecutionOrdinaryStorage, ExecutionParserScope, ExecutionPermit,
+    ExecutionStorage, ExecutionWork, RetainedFailureWorkConsumeError,
+    RetainedFailureWorkFinishError, RetainedFailureWorkPermit, RetainedFailureWorkStartError,
+    RetainedPlanningBaseline, RetainedPlanningContainmentAnchor, RetainedProducerHost,
+    RetainedProducerWorkFinishError, RetainedProducerWorkPermit, RetainedProducerWorkStartError,
+    RetainedWorkConsumeError, RetainedWorkFinishError, RetainedWorkPermit, RetainedWorkStartError,
+    StoreExecutionState, check_execution_state, checked_action_debt, poll_execution,
     record_terminal_cause_with_precedence,
 };
 pub(crate) use operation::{

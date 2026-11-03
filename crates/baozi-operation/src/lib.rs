@@ -297,7 +297,8 @@ pub mod __retained_store_integration {
             StoreBoundWorkGroup, StoreExecutionControl, StoreExecutionPermit,
             StoreExecutionStorage, StoreExecutionWork, StoreExtensionResult, StoreFailureStorage,
             StoreImporterBoundary, StoreInvocation, StoreInvocationError, StoreInvocationLayout,
-            StoreInvocationParser, StoreParserWorkError, StoreParserWorkScope,
+            StoreInvocationParser, StoreOrdinaryStorage, StoreParserWorkError,
+            StoreParserWorkScope,
         };
     }
 

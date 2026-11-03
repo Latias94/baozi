@@ -388,3 +388,48 @@ fn failure_materializer_observes_active_frame_before_resolution() {
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
     assert!(!account.snapshot().poisoned());
 }
+
+#[test]
+fn parser_completion_failure_after_real_write_resolves_suffix_without_abandonment() {
+    let (mut owner, key) = actual_ledger();
+    let mut exclusive = owner.exclusive().unwrap();
+    let layout = exclusive.bind([key]).unwrap();
+    let frame = layout
+        .begin_parser(&mut exclusive.work, [2], [None], ParserChannel::Child)
+        .unwrap();
+    // Tightening uses the actual owner before borrowing its action guard. No outside alias.
+    exclusive
+        .tighten_policy(key, DimensionPolicy::counter(8, 0, 0))
+        .unwrap();
+    let failure = Cell::new(None);
+    let execution_state = Cell::new(StoreExecutionState::Running);
+    let mut frame = frame;
+    let mut host = ParserActionHost {
+        work: &mut exclusive.work,
+        frame: &mut frame,
+        layout,
+        failure: &failure,
+        execution_state: &execution_state,
+        boundary: None,
+        armed: true,
+    };
+    let mut physical = [0_u8; 2];
+    physical[0] = 37;
+    assert!(matches!(
+        host.complete([1]),
+        Err(LedgerCause::LimitExceeded {
+            class: crate::CounterClass::Consumed,
+            value: 1,
+            limit: 0,
+            ..
+        })
+    ));
+    assert!(!host.frame.active);
+    assert_eq!(host.frame.remaining, [2]);
+    drop(host);
+    assert_eq!(execution_state.get(), StoreExecutionState::Running);
+    assert_eq!(physical, [37, 0]);
+    assert_eq!(exclusive.counters(key).unwrap(), (2, 0, 0));
+    exclusive.check_quiescent().unwrap();
+    assert_eq!(failure.get(), Some(PreparationFailureCode::ledger()));
+}

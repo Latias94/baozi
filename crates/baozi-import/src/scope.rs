@@ -68,7 +68,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 mod parser_execution;
+mod storage;
 pub use parser_execution::{ParseErrorView, ParseParser, ParseRoot, ParseWorkLayout};
+pub use storage::ParseStorage;
 
 pub type ParseResult<T> = Result<T, ParseFailure>;
 type AssetSnapshotResult = Result<AccountedVec<u8>, ScopeAbortCause>;
@@ -784,6 +786,17 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
         source.authority() == self.primary_authority
             && source.path() == self.primary_source
             && std::ptr::eq(source.bytes(), self.primary_bytes)
+    }
+
+    /// Borrows ordinary capacity and poll services without numeric authority.
+    pub fn storage(&mut self) -> ParseResult<ParseStorage<'_, 'session>> {
+        self.preflight_active()?;
+        let identity = self.storage_identity();
+        let raw = self
+            .store
+            .ordinary()
+            .map_err(|cause| latch_abort(self.terminal, cause.into_scope_abort_cause()))?;
+        Ok(ParseStorage::new(raw, identity, self.callback_active))
     }
 
     pub(crate) fn session_issuer(&self) -> &'session DependencyOriginIssuer {
@@ -3552,19 +3565,7 @@ fn append_metered_string(
     output: &mut String,
     value: &str,
 ) -> ParseResult<()> {
-    let mut start = 0usize;
-    while start < value.len() {
-        exec.poll()?;
-        let mut end = start
-            .checked_add(METERED_COPY_POLL_INTERVAL)
-            .map_or(value.len(), |end| end.min(value.len()));
-        while end > start && !value.is_char_boundary(end) {
-            end -= 1;
-        }
-        output.push_str(&value[start..end]);
-        start = end;
-    }
-    Ok(())
+    storage::append_metered_string(&mut exec.storage()?, output, value)
 }
 
 impl StorageIdentity<'_> {
@@ -3644,59 +3645,7 @@ impl<'session, T> MeteredVec<'session, T> {
         exec: &mut ParseExecution<'_, 'session>,
         additional: usize,
     ) -> ParseResult<()> {
-        self.identity.check(exec)?;
-        exec.poll()?;
-        let required = self
-            .values
-            .len()
-            .checked_add(additional)
-            .ok_or_else(|| self.identity.allocation_failure(self.resource))?;
-        if required <= self.values.capacity() {
-            return Ok(());
-        }
-
-        let (plan, replacement_plan) =
-            metered_vec_replacement_plans::<T>(self.values.len(), self.values.capacity(), required)
-                .map_err(|cause| self.identity.capacity_error(self.resource, cause))?;
-        let admitted = replacement_plan
-            .envelope_delta_bytes()
-            .map_err(|cause| self.identity.capacity_error(self.resource, cause))?;
-        let mut token = self.identity.reserve(exec, self.class, admitted)?;
-        plan.verify_preflight(self.values.len(), self.values.capacity())
-            .map_err(|cause| self.identity.capacity_error(self.resource, cause))?;
-        replacement_plan
-            .verify_preflight(0, 0)
-            .map_err(|cause| self.identity.capacity_error(self.resource, cause))?;
-        let mut replacement = Vec::new();
-        if fail_next_metered_allocation() {
-            return Err(self.identity.allocation_failure(self.resource));
-        }
-        replacement
-            .try_reserve_exact(replacement_plan.allocator_additional())
-            .map_err(|_| self.identity.allocation_failure(self.resource))?;
-        let complete_bytes = replacement_plan
-            .finish(replacement.len(), replacement.capacity())
-            .map_err(|cause| self.identity.capacity_error(self.resource, cause))?;
-        plan.finish(self.values.len(), replacement.capacity())
-            .map_err(|cause| self.identity.capacity_error(self.resource, cause))?;
-        self.identity
-            .resize_exact(exec, &mut token, complete_bytes)?;
-        if fail_next_metered_qualification() {
-            return Err(self.identity.qualification_failure(self.resource));
-        }
-        self.identity.check(exec)?;
-        exec.poll()?;
-
-        assert!(
-            replacement.capacity() >= self.values.len(),
-            "a prepared metered vector must retain every live element"
-        );
-        replacement.append(&mut self.values);
-        let retired_values = std::mem::replace(&mut self.values, replacement);
-        let retired_token = std::mem::replace(&mut self.capacity, token);
-        drop(retired_values);
-        drop(retired_token);
-        Ok(())
+        exec.storage()?.reserve_vec(self, additional)
     }
 
     pub fn try_push(
@@ -3704,9 +3653,7 @@ impl<'session, T> MeteredVec<'session, T> {
         exec: &mut ParseExecution<'_, 'session>,
         value: T,
     ) -> ParseResult<()> {
-        self.try_reserve(exec, 1)?;
-        self.values.push(value);
-        Ok(())
+        exec.storage()?.push_vec(self, value)
     }
 
     /// Pushes into a slot admitted by an earlier reserve without polling or entering the allocator.
@@ -3959,56 +3906,7 @@ impl<'session> MeteredString<'session> {
         exec: &mut ParseExecution<'_, 'session>,
         additional: usize,
     ) -> ParseResult<()> {
-        self.identity.check(exec)?;
-        exec.poll()?;
-        let required = self
-            .value
-            .len()
-            .checked_add(additional)
-            .ok_or_else(|| self.identity.allocation_failure(self.resource))?;
-        if required <= self.value.capacity() {
-            return Ok(());
-        }
-
-        let (plan, replacement_plan) = metered_replacement_plans_with_element_size(
-            self.value.len(),
-            self.value.capacity(),
-            required,
-            1,
-        )
-        .map_err(|cause| self.identity.capacity_error(self.resource, cause))?;
-        let admitted = replacement_plan
-            .envelope_delta_bytes()
-            .map_err(|cause| self.identity.capacity_error(self.resource, cause))?;
-        let mut token = self.identity.reserve(exec, self.class, admitted)?;
-        plan.verify_preflight(self.value.len(), self.value.capacity())
-            .map_err(|cause| self.identity.capacity_error(self.resource, cause))?;
-        replacement_plan
-            .verify_preflight(0, 0)
-            .map_err(|cause| self.identity.capacity_error(self.resource, cause))?;
-        let mut replacement = String::new();
-        replacement
-            .try_reserve_exact(replacement_plan.allocator_additional())
-            .map_err(|_| self.identity.allocation_failure(self.resource))?;
-        let complete_bytes = replacement_plan
-            .finish(replacement.len(), replacement.capacity())
-            .map_err(|cause| self.identity.capacity_error(self.resource, cause))?;
-        plan.finish(self.value.len(), replacement.capacity())
-            .map_err(|cause| self.identity.capacity_error(self.resource, cause))?;
-        self.identity
-            .resize_exact(exec, &mut token, complete_bytes)?;
-        if fail_next_metered_qualification() {
-            return Err(self.identity.qualification_failure(self.resource));
-        }
-        append_metered_string(exec, &mut replacement, &self.value)?;
-        self.identity.check(exec)?;
-        exec.poll()?;
-
-        let retired_value = std::mem::replace(&mut self.value, replacement);
-        let retired_token = std::mem::replace(&mut self.capacity, token);
-        drop(retired_value);
-        drop(retired_token);
-        Ok(())
+        exec.storage()?.reserve_string(self, additional)
     }
 
     pub fn try_push_str(
@@ -4016,8 +3914,7 @@ impl<'session> MeteredString<'session> {
         exec: &mut ParseExecution<'_, 'session>,
         value: &str,
     ) -> ParseResult<()> {
-        self.try_reserve(exec, value.len())?;
-        append_metered_string(exec, &mut self.value, value)
+        exec.storage()?.append_string(self, value)
     }
 
     /// Appends bytes admitted by an earlier reserve without polling or entering the allocator.
@@ -5931,6 +5828,494 @@ mod tests {
             assert_eq!(drops.get(), 2);
             drop(values);
             assert_eq!(drops.get(), 4);
+        });
+        store.assert_released();
+    }
+    #[test]
+    fn exclusive_storage_crosses_regions_and_legacy_growth_uses_the_same_owner() {
+        let mut store = test_store(&ResourceLimits::default());
+        testing::with_context(&mut store.owner, |context| {
+            let (mut values, mut text) = context
+                .with_parser_execution(|root| -> ParseResult<_> {
+                    let group =
+                        root.bind_group([ImportWorkClass::Tokens, ImportWorkClass::StringBytes])?;
+                    root.child(&group, [2, 3], |child| -> ParseResult<_> {
+                        let mut values = child.storage()?.metered_vec(
+                            ImportStorageClass::FormatNormalization,
+                            "exclusive-values",
+                        );
+                        child.push_growing([1, 0], &mut values, 3_u32)?;
+                        child.push_growing([1, 0], &mut values, 5_u32)?;
+                        let mut text = child.storage()?.metered_string(
+                            ImportStorageClass::FormatNormalization,
+                            "exclusive-text",
+                        );
+                        child.append_string([0, 3], &mut text, "aé")?;
+                        assert_eq!(child.work_counters(ImportWorkClass::Tokens)?, (2, 2, 0));
+                        assert_eq!(
+                            child.work_counters(ImportWorkClass::StringBytes)?,
+                            (3, 3, 0)
+                        );
+                        Ok((values, text))
+                    })
+                })
+                .unwrap();
+            context
+                .with_execution(|exec| -> ParseResult<()> {
+                    let additional = values.capacity() + 1;
+                    values.try_reserve(exec, additional)?;
+                    values.try_extend_from_slice(exec, &[7, 11, 13])?;
+                    text.try_push_str(exec, "-legacy")?;
+                    assert_eq!(values.as_slice(), &[3, 5, 7, 11, 13]);
+                    assert_eq!(text.as_str(), "aé-legacy");
+                    let tokens = exec.store.dimension_state(ImportDimension::Tokens).unwrap();
+                    assert_eq!((tokens.attempted(), tokens.consumed()), (2, 2));
+                    Ok(())
+                })
+                .unwrap();
+        });
+        store.assert_released();
+    }
+
+    #[test]
+    fn exclusive_replacement_faults_preserve_old_payload_token_and_verified_prefix() {
+        for qualification in [false, true] {
+            let mut store = test_store(&ResourceLimits::default());
+            testing::with_context(&mut store.owner, |context| {
+                let mut values = context
+                    .with_execution(|exec| -> ParseResult<_> {
+                        let mut values = exec.metered_vec::<u32>(
+                            ImportStorageClass::FormatNormalization,
+                            "exclusive-replacement",
+                        );
+                        values.try_reserve(exec, 4)?;
+                        while values.len() < values.capacity() {
+                            values.try_push_reserved(17)?;
+                        }
+                        Ok(values)
+                    })
+                    .unwrap();
+                let old = values.as_slice().to_vec();
+                let old_capacity = values.capacity();
+                let old_bytes = values.capacity.as_ref().unwrap().bytes();
+                let terminal = context.terminal;
+                let physical = Cell::new(0_u8);
+                let result = context.with_parser_execution(|root| -> ParseResult<()> {
+                    let group = root.bind_group([ImportWorkClass::Tokens])?;
+                    root.child(&group, [2], |child| -> ParseResult<()> {
+                        child.run([1], || {
+                            physical.set(31);
+                            Ok(())
+                        })?;
+                        if qualification {
+                            FAIL_NEXT_METERED_QUALIFICATION.with(|fault| fault.set(true));
+                        } else {
+                            inject_next_metered_allocation_failure();
+                        }
+                        let result = child.storage()?.reserve_vec(&mut values, 1);
+                        assert!(result.is_err());
+                        assert_eq!(child.work_counters(ImportWorkClass::Tokens)?, (2, 1, 0));
+                        result
+                    })
+                });
+                assert!(result.is_err());
+                assert_eq!(physical.get(), 31);
+                assert_eq!(values.as_slice(), old);
+                assert_eq!(values.capacity(), old_capacity);
+                assert_eq!(values.capacity.as_ref().unwrap().bytes(), old_bytes);
+                if qualification {
+                    assert!(matches!(
+                        terminal.borrow().as_ref(),
+                        Some(ScopeAbortCause::CapacityEnvelope {
+                            resource: "exclusive-replacement",
+                            ..
+                        })
+                    ));
+                } else {
+                    assert!(matches!(
+                        terminal.borrow().as_ref(),
+                        Some(ScopeAbortCause::Allocation {
+                            resource: "exclusive-replacement"
+                        })
+                    ));
+                }
+            });
+            store.assert_released();
+        }
+    }
+
+    #[test]
+    fn exclusive_replacement_budget_keeps_old_and_new_capacity_live_together() {
+        let mut store = test_store(&ResourceLimits::default());
+        testing::with_context(&mut store.owner, |context| {
+            let (mut values, expected_value, limit) = context
+                .with_execution(|exec| -> ParseResult<_> {
+                    let mut values = exec.metered_vec::<u32>(
+                        ImportStorageClass::FormatNormalization,
+                        "exclusive-overlap",
+                    );
+                    values.try_reserve(exec, 4)?;
+                    while values.len() < values.capacity() {
+                        values.try_push_reserved(23)?;
+                    }
+                    let old = values.capacity.as_ref().unwrap().bytes();
+                    let live = exec
+                        .store
+                        .dimension_state(ImportDimension::ScratchBytes)
+                        .unwrap()
+                        .live_bytes();
+                    let (_, replacement) = metered_vec_replacement_plans::<u32>(
+                        values.len(),
+                        values.capacity(),
+                        values.len() + 1,
+                    )
+                    .unwrap();
+                    let new = replacement.envelope_delta_bytes().unwrap();
+                    let limit = live - old + new;
+                    exec.store
+                        .tighten_dimension_policy(
+                            ImportDimension::ScratchBytes,
+                            DimensionPolicy::reservable_bytes(
+                                ResourceLimits::default().max_live_bytes,
+                                ResourceLimits::default().max_live_bytes,
+                                0,
+                                limit,
+                            ),
+                        )
+                        .unwrap();
+                    Ok((values, live + new, limit))
+                })
+                .unwrap();
+            let old = values.as_slice().to_vec();
+            let old_capacity = values.capacity();
+            let terminal = context.terminal;
+            assert!(
+                context
+                    .with_parser_execution(|root| root.storage()?.reserve_vec(&mut values, 1))
+                    .is_err()
+            );
+            assert_eq!(values.as_slice(), old);
+            assert_eq!(values.capacity(), old_capacity);
+            assert!(
+                matches!(terminal.borrow().as_ref(), Some(ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                class: CounterClass::Live, dimension: ImportDimension::ScratchBytes, value, limit: actual_limit
+            })) if *value == expected_value && *actual_limit == limit)
+            );
+        });
+        store.assert_released();
+    }
+
+    #[test]
+    fn exclusive_append_cancellation_retains_real_copied_prefix_without_completing_piece() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        struct ArmedCancellation {
+            armed: Arc<AtomicBool>,
+            polls: Arc<AtomicUsize>,
+        }
+        impl baozi_operation::CancellationSignal for ArmedCancellation {
+            fn is_cancelled(&self) -> bool {
+                self.armed.load(Ordering::SeqCst) && self.polls.fetch_add(1, Ordering::SeqCst) >= 2
+            }
+        }
+        let armed = Arc::new(AtomicBool::new(false));
+        let polls = Arc::new(AtomicUsize::new(0));
+        let control = ImportOperationControl::default().with_cancellation(ArmedCancellation {
+            armed: Arc::clone(&armed),
+            polls: Arc::clone(&polls),
+        });
+        let mut store = test_store_with_control(&ResourceLimits::default(), control);
+        testing::with_context(&mut store.owner, |context| {
+            let source = "é".repeat(4097);
+            let mut text = context
+                .with_execution(|exec| -> ParseResult<_> {
+                    let mut text = exec.metered_string(
+                        ImportStorageClass::FormatNormalization,
+                        "exclusive-chunk-copy",
+                    );
+                    text.try_reserve(exec, source.len())?;
+                    Ok(text)
+                })
+                .unwrap();
+            let terminal = context.terminal;
+            let result = context.with_parser_execution(|root| -> ParseResult<()> {
+                let group = root.bind_group([ImportWorkClass::StringBytes])?;
+                root.child(&group, [8194], |child| -> ParseResult<()> {
+                    armed.store(true, Ordering::SeqCst);
+                    let result = child.append_string([8194], &mut text, &source);
+                    assert!(result.is_err());
+                    assert_eq!(
+                        child.work_counters(ImportWorkClass::StringBytes)?,
+                        (8194, 0, 0)
+                    );
+                    result
+                })
+            });
+            assert!(result.is_err());
+            assert_eq!(text.as_str(), &source[..4096]);
+            assert_eq!(polls.load(Ordering::SeqCst), 3);
+            assert!(matches!(
+                terminal.borrow().as_ref(),
+                Some(ScopeAbortCause::Control(_))
+            ));
+        });
+        store.assert_released();
+    }
+
+    #[test]
+    fn exclusive_growth_failure_latches_allocation_before_unused_value_drop_panics() {
+        struct UnusedValue<'a> {
+            terminal: &'a RefCell<Option<ScopeAbortCause>>,
+            drops: &'a Cell<usize>,
+        }
+        impl Drop for UnusedValue<'_> {
+            fn drop(&mut self) {
+                assert!(matches!(
+                    self.terminal.borrow().as_ref(),
+                    Some(ScopeAbortCause::Allocation {
+                        resource: "exclusive-unused-value"
+                    })
+                ));
+                self.drops.set(self.drops.get() + 1);
+                panic!("actual unused growing-push value destructor");
+            }
+        }
+        let mut store = test_store(&ResourceLimits::default());
+        testing::with_context(&mut store.owner, |context| {
+            let terminal = context.terminal;
+            let drops = Cell::new(0);
+            let next = Cell::new(false);
+            let physical = Cell::new(0_u8);
+            let result = context.with_parser_execution(|root| -> ParseResult<()> {
+                let group = root.bind_group([ImportWorkClass::Tokens])?;
+                root.child(&group, [2], |child| -> ParseResult<()> {
+                    child.run([1], || {
+                        physical.set(43);
+                        Ok(())
+                    })?;
+                    let mut values = child.storage()?.metered_vec(
+                        ImportStorageClass::FormatNormalization,
+                        "exclusive-unused-value",
+                    );
+                    inject_next_metered_allocation_failure();
+                    let result = catch_unwind(AssertUnwindSafe(|| {
+                        child.push_growing(
+                            [1],
+                            &mut values,
+                            UnusedValue {
+                                terminal,
+                                drops: &drops,
+                            },
+                        )
+                    }));
+                    assert!(result.is_err());
+                    assert!(values.is_empty());
+                    assert_eq!(values.capacity(), 0);
+                    assert!(values.capacity.is_none());
+                    assert_eq!(drops.get(), 1);
+                    assert_eq!(child.work_counters(ImportWorkClass::Tokens)?, (2, 1, 0));
+                    assert!(
+                        child
+                            .run([1], || {
+                                next.set(true);
+                                Ok::<_, ParseFailure>(())
+                            })
+                            .is_err()
+                    );
+                    Err(ParseFailure::scope())
+                })
+            });
+            assert!(result.is_err());
+            assert_eq!(physical.get(), 43);
+            assert!(!next.get());
+            assert_eq!(drops.get(), 1);
+            assert!(matches!(
+                terminal.borrow().as_ref(),
+                Some(ScopeAbortCause::Allocation {
+                    resource: "exclusive-unused-value"
+                })
+            ));
+        });
+        store.assert_released();
+    }
+    #[test]
+    fn exclusive_completion_projects_real_cause_before_returned_value_drop_panics() {
+        struct ReturnedValue<'a> {
+            terminal: &'a RefCell<Option<ScopeAbortCause>>,
+            observed: &'a Cell<bool>,
+            drops: &'a Cell<usize>,
+        }
+        impl Drop for ReturnedValue<'_> {
+            fn drop(&mut self) {
+                let observed = matches!(
+                    self.terminal.borrow().as_ref(),
+                    Some(ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                        class: CounterClass::Consumed,
+                        dimension: ImportDimension::Tokens,
+                        value: 2,
+                        limit: 1,
+                    }))
+                );
+                self.observed.set(observed);
+                assert!(
+                    observed,
+                    "actual import terminal must precede returned payload disposal"
+                );
+                self.drops.set(self.drops.get() + 1);
+                panic!("actual returned payload destructor after denied completion");
+            }
+        }
+        let mut store = test_store(&ResourceLimits::default());
+        testing::with_context(&mut store.owner, |context| {
+            context
+                .with_execution(|exec| -> ParseResult<()> {
+                    exec.store
+                        .tighten_dimension_policy(
+                            ImportDimension::Tokens,
+                            DimensionPolicy::counter(8, 1, 0),
+                        )
+                        .unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            let terminal = context.terminal;
+            let observed = Cell::new(false);
+            let drops = Cell::new(0);
+            let physical = Cell::new(0_u8);
+            let next = Cell::new(false);
+            let result = context.with_parser_execution(|root| -> ParseResult<()> {
+                let layout = root.bind_group([ImportWorkClass::Tokens])?;
+                root.child(&layout, [2], |child| -> ParseResult<()> {
+                    child.run([1], || {
+                        physical.set(1);
+                        Ok::<_, ParseFailure>(())
+                    })?;
+                    let caught = catch_unwind(AssertUnwindSafe(|| {
+                        let _returned = child.run([1], || {
+                            physical.set(2);
+                            Ok::<_, ParseFailure>(ReturnedValue {
+                                terminal,
+                                observed: &observed,
+                                drops: &drops,
+                            })
+                        })?;
+                        next.set(true);
+                        Ok::<_, ParseFailure>(())
+                    }));
+                    let Err(payload) = caught else {
+                        panic!("returned payload Drop must panic");
+                    };
+                    assert_eq!(
+                        payload.downcast_ref::<&'static str>().copied(),
+                        Some("actual returned payload destructor after denied completion")
+                    );
+                    assert!(observed.get());
+                    assert_eq!(drops.get(), 1);
+                    assert_eq!(physical.get(), 2);
+                    assert_eq!(child.work_counters(ImportWorkClass::Tokens)?, (2, 1, 0));
+                    assert!(
+                        child
+                            .run([1], || {
+                                next.set(true);
+                                Ok::<_, ParseFailure>(())
+                            })
+                            .is_err()
+                    );
+                    Err(ParseFailure::scope())
+                })
+            });
+            assert!(result.is_err());
+            assert!(observed.get());
+            assert_eq!(drops.get(), 1);
+            assert_eq!(physical.get(), 2);
+            assert!(!next.get());
+            assert!(
+                context
+                    .with_execution(|_| {
+                        next.set(true);
+                        Ok::<_, ParseFailure>(())
+                    })
+                    .is_err()
+            );
+            assert!(!next.get());
+            assert!(matches!(
+                terminal.borrow().as_ref(),
+                Some(ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                    class: CounterClass::Consumed,
+                    dimension: ImportDimension::Tokens,
+                    value: 2,
+                    limit: 1,
+                }))
+            ));
+        });
+        store.assert_released();
+    }
+
+    #[test]
+    fn exclusive_old_string_copy_cancel_preserves_original_payload_capacity_and_token() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        struct ArmedCancellation {
+            armed: Arc<AtomicBool>,
+            polls: Arc<AtomicUsize>,
+        }
+        impl baozi_operation::CancellationSignal for ArmedCancellation {
+            fn is_cancelled(&self) -> bool {
+                self.armed.load(Ordering::SeqCst) && self.polls.fetch_add(1, Ordering::SeqCst) >= 3
+            }
+        }
+        let armed = Arc::new(AtomicBool::new(false));
+        let polls = Arc::new(AtomicUsize::new(0));
+        let control = ImportOperationControl::default().with_cancellation(ArmedCancellation {
+            armed: Arc::clone(&armed),
+            polls: Arc::clone(&polls),
+        });
+        let mut store = test_store_with_control(&ResourceLimits::default(), control);
+        testing::with_context(&mut store.owner, |context| {
+            let old = "\u{e9}".repeat(4097);
+            let mut text = context
+                .with_execution(|exec| -> ParseResult<_> {
+                    let mut text = exec.metered_string(
+                        ImportStorageClass::FormatNormalization,
+                        "exclusive-old-copy",
+                    );
+                    text.try_push_str(exec, &old)?;
+                    Ok(text)
+                })
+                .unwrap();
+            assert_eq!(text.len(), 8194);
+            let old_pointer = text.as_str().as_ptr();
+            let old_capacity = text.capacity();
+            let old_token_bytes = text.capacity.as_ref().unwrap().bytes();
+            let terminal = context.terminal;
+            let result = context.with_parser_execution(|root| -> ParseResult<()> {
+                armed.store(true, Ordering::SeqCst);
+                root.storage()?.reserve_string(&mut text, old_capacity + 1)
+            });
+            assert!(result.is_err());
+            // Initial reserve poll, backing admission, first old-copy chunk, denied next chunk.
+            assert_eq!(polls.load(Ordering::SeqCst), 4);
+            assert_eq!(text.as_str(), old);
+            assert_eq!(text.as_str().as_ptr(), old_pointer);
+            assert_eq!(text.capacity(), old_capacity);
+            assert_eq!(text.capacity.as_ref().unwrap().bytes(), old_token_bytes);
+            assert!(matches!(
+                terminal.borrow().as_ref(),
+                Some(ScopeAbortCause::Control(
+                    baozi_operation::ControlCause::Cancelled {
+                        origin: baozi_operation::CancellationOrigin::Signal,
+                    }
+                ))
+            ));
+            let next = Cell::new(false);
+            assert!(
+                context
+                    .with_execution(|_| {
+                        next.set(true);
+                        Ok::<_, ParseFailure>(())
+                    })
+                    .is_err()
+            );
+            assert!(!next.get());
+            assert_eq!(polls.load(Ordering::SeqCst), 4);
         });
         store.assert_released();
     }

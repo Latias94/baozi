@@ -2,8 +2,8 @@ mod execution;
 mod scene_activation;
 
 pub(crate) use execution::{
-    ImportBoundWorkGroup, ImportExecutionFailure, ImportParserAdmissionError,
-    ImportParserWorkScope, ImportStoreExecution,
+    ImportBoundWorkGroup, ImportExecutionFailure, ImportOrdinaryStorage,
+    ImportParserAdmissionError, ImportParserWorkScope, ImportStoreExecution,
 };
 
 use std::fmt;

@@ -680,3 +680,42 @@ fn binary_color_row_1_cancellation_respects_geometry_bound() {
     // Keep this assertion last so the first failing run also exercises cleanup and reuse.
     assert_geometry_bound(&probe);
 }
+
+#[test]
+fn binary_two_facets_cancel_after_one_with_literal_work_prefix() {
+    let plan = import_plan();
+    let source = AssetPath::new("binary-two-facet-prefix.stl").unwrap();
+    let bytes = binary_fixture(2, false);
+    assert_eq!(bytes.len(), 184);
+    let token = CancellationToken::new();
+    let probe = ScopedProbe::install(CompletionSite::BinaryFacet, 1, token.clone());
+    let result = plan.read_bytes(
+        source.clone(),
+        &bytes,
+        ImportOperationControl::default().with_cancellation(token.clone()),
+    );
+    let probe = probe.finish();
+    let failure = result
+        .expect_err("the second facet must not run")
+        .into_operation_failure()
+        .unwrap();
+    assert_signal_failure(&failure, &source);
+    assert_before_mesh_construction(&failure);
+    let last = assert_probe(&probe, &token, 2);
+    assert_eq!((last.rows, last.positions, last.normals), (1, 3, 3));
+    for (dimension, attempted, consumed) in [
+        (ImportDimension::DecodeWork, 184, 134),
+        (ImportDimension::Faces, 2, 1),
+        (ImportDimension::Vertices, 6, 3),
+        (ImportDimension::AttributeCells, 12, 6),
+        (ImportDimension::Records, 2, 1),
+    ] {
+        let row = row(&failure, dimension);
+        assert_eq!(
+            (row.attempted(), row.consumed()),
+            (attempted, consumed),
+            "{dimension:?}"
+        );
+    }
+    assert_geometry_bound(&probe);
+}

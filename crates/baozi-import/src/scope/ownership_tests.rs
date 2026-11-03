@@ -60,6 +60,7 @@ fn paired_live_contexts_reject_foreign_capabilities_before_zero_or_nonzero_actio
         Group(u64),
         EmptyGroup,
         Vector { grow: bool },
+        ExclusiveVector { grow: bool },
         EmptyDecodedAppend,
         SourceObserveEmpty,
         SourceFinish,
@@ -73,6 +74,8 @@ fn paired_live_contexts_reject_foreign_capabilities_before_zero_or_nonzero_actio
         Case::EmptyGroup,
         Case::Vector { grow: false },
         Case::Vector { grow: true },
+        Case::ExclusiveVector { grow: false },
+        Case::ExclusiveVector { grow: true },
         Case::EmptyDecodedAppend,
         Case::SourceObserveEmpty,
         Case::SourceFinish,
@@ -175,6 +178,34 @@ fn paired_live_contexts_reject_foreign_capabilities_before_zero_or_nonzero_actio
                                 assert_eq!(values.capacity(), capacity);
                                 assert_eq!(values.as_slice(), if grow { &[7][..] } else { &[] });
                                 assert_eq!(accounting(&source_exec.store), before, "{case:?}");
+                                values.identity.check(source_exec)?;
+                                if grow {
+                                    values.try_push_reserved(9)?;
+                                    assert_eq!(values.as_slice(), &[7, 9]);
+                                }
+                                rejected
+                            })
+                        }
+                        Case::ExclusiveVector { grow } => {
+                            let mut values = sender.metered_vec::<u8>(
+                                ImportStorageClass::FormatNormalization,
+                                "foreign-exclusive-vector",
+                            );
+                            if grow {
+                                values.try_reserve(sender, 2)?;
+                                values.try_push_reserved(7)?;
+                            }
+                            let before = accounting(&sender.store);
+                            let source_exec = &*sender;
+                            receiver.with_parser_execution(move |root| {
+                                let mut values = values;
+                                let capacity = values.capacity();
+                                let additional = if grow { capacity + 1 } else { 0 };
+                                let rejected = root.storage()?.reserve_vec(&mut values, additional);
+                                assert!(rejected.is_err());
+                                assert_eq!(values.capacity(), capacity);
+                                assert_eq!(values.as_slice(), if grow { &[7][..] } else { &[] });
+                                assert_eq!(accounting(&source_exec.store), before);
                                 values.identity.check(source_exec)?;
                                 if grow {
                                     values.try_push_reserved(9)?;
@@ -310,11 +341,18 @@ fn paired_live_contexts_reject_foreign_capabilities_before_zero_or_nonzero_actio
                             })
                             .is_err()
                     );
-                    assert_eq!(
-                        accounting(&receiver.store_owner.execution().unwrap()),
-                        receiver_before,
-                        "{case:?}",
-                    );
+                    if matches!(case, Case::ExclusiveVector { .. }) {
+                        assert!(
+                            receiver.store_owner.execution().is_err(),
+                            "exclusive known-error state persists after the failed region"
+                        );
+                    } else {
+                        assert_eq!(
+                            accounting(&receiver.store_owner.execution().unwrap()),
+                            receiver_before,
+                            "{case:?}"
+                        );
+                    }
                     let physical_after = receiver_account.snapshot();
                     assert_eq!(
                         physical_after.live_retained_bytes(),

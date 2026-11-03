@@ -786,6 +786,8 @@ mod exclusive_bridge {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Case {
         Success,
+        DeniedPushDrop,
+        DeniedCaptureDrop,
         Incomplete,
         IncompleteCancel,
         Semantic,
@@ -877,6 +879,13 @@ mod exclusive_bridge {
             self.0.owned_drops.fetch_add(1, Ordering::SeqCst);
         }
     }
+    struct DeniedDrop(Arc<Observation>);
+    impl Drop for DeniedDrop {
+        fn drop(&mut self) {
+            self.0.owned_drops.fetch_add(1, Ordering::SeqCst);
+            panic!("real denied value/capture destructor");
+        }
+    }
     struct Reader {
         case: Case,
         observation: Arc<Observation>,
@@ -936,6 +945,31 @@ mod exclusive_bridge {
             self.observation.entries.fetch_add(1, Ordering::SeqCst);
             let before = self.observation.polls.load(Ordering::SeqCst);
             let result = context.with_parser_execution(|root| -> ParseResult<()> {
+                if matches!(self.case, Case::DeniedPushDrop | Case::DeniedCaptureDrop) {
+                    let group = root.bind_group([ImportWorkClass::Tokens])?;
+                    return root.child(&group, [2], |child| -> ParseResult<()> {
+                        child.run([1], || {
+                            self.observation.writes.fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        })?;
+                        let captured = DeniedDrop(Arc::clone(&self.observation));
+                        if self.case == Case::DeniedPushDrop {
+                            let mut values = child.storage()?.metered_vec(
+                                baozi_import::ImportStorageClass::FormatNormalization,
+                                "denied-value",
+                            );
+                            child.push_growing([2], &mut values, captured)?;
+                        } else {
+                            child.run([2], move || {
+                                std::hint::black_box(&captured);
+                                self.observation.writes.fetch_add(1, Ordering::SeqCst);
+                                Ok(())
+                            })?;
+                        }
+                        self.observation.next.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    });
+                }
                 if matches!(
                     self.case,
                     Case::IoReturn | Case::IoEof | Case::IoError | Case::IoPanic
@@ -1484,6 +1518,22 @@ mod exclusive_bridge {
             } else {
                 result.unwrap();
             }
+        }
+    }
+    #[test]
+    fn denied_compound_value_and_leaf_capture_latch_before_real_drop_panic() {
+        for case in [Case::DeniedPushDrop, Case::DeniedCaptureDrop] {
+            let (failure, observation) = run(case);
+            let failure = failure.unwrap_err();
+            assert_eq!(scope_code(&failure), "import-store-observed-work-overrun");
+            assert_dimension(&failure, ImportDimension::Tokens, 2, 1);
+            assert_dimension(&failure, ImportDimension::Records, 0, 0);
+            assert_eq!(observation.writes.load(Ordering::SeqCst), 1);
+            assert_eq!(observation.owned_drops.load(Ordering::SeqCst), 1);
+            assert_eq!(observation.next.load(Ordering::SeqCst), 0);
+            assert_eq!(observation.submitted.load(Ordering::SeqCst), 0);
+            assert_eq!(failure.ledger().current_live_bytes(), 0);
+            assert_eq!(failure.ledger().active_reservations(), 0);
         }
     }
 }

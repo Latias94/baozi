@@ -146,6 +146,14 @@ pub(crate) struct OperationPollCheckpoint<'a, PP, U> {
 }
 
 impl<PP, U> OperationPollCheckpoint<'_, PP, U> {
+    pub(crate) fn reborrow(&mut self) -> OperationPollCheckpoint<'_, PP, U> {
+        OperationPollCheckpoint {
+            control: self.control,
+            terminal: self.terminal,
+            allow_preexisting_terminal: self.allow_preexisting_terminal,
+        }
+    }
+
     pub(crate) fn recorded_control_cause(&self) -> Option<ControlCause> {
         self.terminal.clone()
     }
@@ -183,6 +191,14 @@ where
     U: ProgressUnit,
     D: Copy + Ord + fmt::Debug,
 {
+    pub(crate) fn reborrow_poll(&mut self) -> OperationPollCheckpoint<'_, PP, U> {
+        OperationPollCheckpoint {
+            control: self.control,
+            terminal: self.terminal,
+            allow_preexisting_terminal: false,
+        }
+    }
+
     pub(crate) fn recorded_control_cause(&self) -> Option<ControlCause> {
         self.terminal.clone()
     }

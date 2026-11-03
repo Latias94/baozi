@@ -92,6 +92,16 @@ impl<O: OperationOwner, P: Copy + Ord, D: Copy + Ord + fmt::Debug> ExclusiveLedg
 }
 
 impl<O: OperationOwner, P: Copy + Ord, D: Copy + Ord + fmt::Debug> ExclusiveStorage<'_, O, P, D> {
+    pub(crate) fn reborrow(&self) -> ExclusiveStorage<'_, O, P, D> {
+        ExclusiveStorage {
+            state: self.state,
+            phases: self.phases,
+            catalog: self.catalog,
+            operation_live_byte_limit: self.operation_live_byte_limit,
+            owner: PhantomData,
+        }
+    }
+
     pub(crate) fn reserve(
         &self,
         phase: P,

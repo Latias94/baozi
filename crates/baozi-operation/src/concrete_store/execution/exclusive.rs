@@ -364,18 +364,12 @@ impl AdmittedShareWork<StoreDimensionKey> for ActionHost<'_, '_, 2> {
 
 impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation<'op, O, PP, U> {
     fn running(&self) -> Result<(), StoreInvocationError> {
-        StoreExecutionState::settle_caught_unwind(self.parts.execution_state, self.parts.failure);
-        if self.parts.failure.get().is_some()
-            || self.parts.execution_state.get() != StoreExecutionState::Running
-        {
-            return Err(self
-                .parts
-                .poll
-                .recorded_control_cause()
-                .map_or(StoreRuntimeError::FallbackOnly, StoreRuntimeError::Control)
-                .into());
-        }
-        Ok(())
+        crate::retained::check_execution_state(
+            self.parts.failure,
+            self.parts.execution_state,
+            || self.parts.poll.recorded_control_cause(),
+        )
+        .map_err(|cause| map_execution_error(cause).into())
     }
 
     fn reject(&self, cause: StoreRuntimeError) -> StoreInvocationError {
@@ -410,25 +404,22 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation
 
     /// Trusted host-only exit poll. It never reopens body execution or clears a cause.
     pub fn prescribed_exit_checkpoint(&mut self) -> Result<(), StoreInvocationError> {
-        // Scope exits keep the existing runtime-failure short circuit. The separate outer
-        // importer/session poll still observes late control through its actual producer host.
-        if self.parts.failure.get().is_some() {
-            return Err(self
-                .parts
-                .poll
-                .recorded_control_cause()
-                .map_or(StoreRuntimeError::FallbackOnly, StoreRuntimeError::Control)
-                .into());
+        crate::retained::poll_execution(&mut self.parts.poll, self.parts.failure, self.parts.debt)
+            .map_err(|cause| map_execution_error(cause).into())
+    }
+
+    /// Borrows ordinary storage and poll fields, excluding work and progress.
+    pub fn ordinary_storage(&mut self) -> StoreOrdinaryStorage<'_, O, PP, U> {
+        StoreOrdinaryStorage {
+            domain: self.domain,
+            raw: ExecutionOrdinaryStorage {
+                storage: self.parts.ledger.storage.reborrow(),
+                poll: self.parts.poll.reborrow(),
+                failure: self.parts.failure,
+                debt: self.parts.debt,
+                execution_state: self.parts.execution_state,
+            },
         }
-        self.parts.poll.poll().map_err(|cause| {
-            record(
-                self.parts.failure,
-                PreparationFailureCode::from_control(&cause),
-            );
-            StoreInvocationError::from(StoreRuntimeError::Control(cause))
-        })?;
-        self.parts.debt.set(0);
-        Ok(())
     }
 
     fn before(&mut self, cost: u16) -> Result<(), StoreInvocationError> {
@@ -1016,27 +1007,49 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, const N: usize,
         action: impl FnOnce() -> Result<T, P>,
         materialize: impl FnOnce(&mut Self, P) -> E,
     ) -> Result<T, E> {
+        let mut slot = Some(|_storage: StoreOrdinaryStorage<'_, O, PP, U>| action());
+        self.run_prefix_with_storage(amounts, control_cost, &mut slot, E::from, materialize)
+    }
+
+    /// One guarded prefix runner; runtime projection precedes disposal of uncalled captures.
+    pub fn run_prefix_with_storage<T, P, E, F>(
+        &mut self,
+        amounts: [u64; N],
+        control_cost: u16,
+        action: &mut Option<F>,
+        project: impl FnOnce(StoreInvocationError) -> E,
+        materialize: impl FnOnce(&mut Self, P) -> E,
+    ) -> Result<T, E>
+    where
+        F: for<'s> FnOnce(StoreOrdinaryStorage<'s, O, PP, U>) -> Result<T, P>,
+    {
         let captured_cost = control_cost;
-        if self.host.context.boundary.is_none() {
-            if !CHILD {
-                self.host.context.checkpoint()?;
+        let entry = if self.host.context.boundary.is_none() {
+            let checkpoint = if !CHILD {
+                self.host.context.checkpoint()
+            } else {
+                Ok(())
+            };
+            match checkpoint {
+                Ok(()) => self.host.context.before(captured_cost),
+                Err(cause) => Err(cause),
             }
-            self.host.context.before(captured_cost)?;
         } else {
-            self.host.context.running()?;
+            self.host.context.running()
+        };
+        if let Err(cause) = entry {
+            return Err(project(cause));
         }
-        // Invalid prefixes are denied before the leaf. Completion rechecks the authoritative
-        // parser metadata and current row policies, with the same all-or-nothing prefix kernel.
         if amounts
             .iter()
             .zip(self.host.frame.remaining)
             .any(|(amount, remaining)| *amount > remaining)
         {
-            return Err(self
+            let cause = self
                 .host
                 .context
-                .reject(StoreRuntimeError::ObservedWorkExceedsAdmitted)
-                .into());
+                .reject(StoreRuntimeError::ObservedWorkExceedsAdmitted);
+            return Err(project(cause));
         }
         let failure = self.host.context.parts.failure;
         let mut prefix = ParserActionHost {
@@ -1048,7 +1061,20 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, const N: usize,
             boundary: self.host.context.boundary,
             armed: true,
         };
-        let value = match action() {
+        let storage = StoreOrdinaryStorage {
+            domain: self.host.context.domain,
+            raw: ExecutionOrdinaryStorage {
+                storage: self.host.context.parts.ledger.storage.reborrow(),
+                poll: self.host.context.parts.poll.reborrow(),
+                failure,
+                debt: self.host.context.parts.debt,
+                execution_state: self.host.context.parts.execution_state,
+            },
+        };
+        let action = action
+            .take()
+            .expect("a host-owned prefix callback runs once");
+        let value = match action(storage) {
             Ok(value) => value,
             Err(cause) => {
                 StoreExecutionState::stop(prefix.execution_state, StoreExecutionState::KnownError);
@@ -1069,12 +1095,19 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, const N: usize,
         let result = prefix.complete(amounts);
         drop(prefix);
         if let Err(cause) = result {
-            return Err(StoreInvocationError::from(StoreRuntimeError::Ledger(cause)).into());
+            return Err(project(StoreRuntimeError::Ledger(cause).into()));
         }
-        if self.host.context.boundary.is_none() {
-            self.host.context.completed(captured_cost)?;
+        if self.host.context.boundary.is_none()
+            && let Err(cause) = self.host.context.completed(captured_cost)
+        {
+            return Err(project(cause));
         }
         Ok(value)
+    }
+
+    /// A live loan excludes reentry of this parser role.
+    pub fn ordinary_storage(&mut self) -> StoreOrdinaryStorage<'_, O, PP, U> {
+        self.host.context.ordinary_storage()
     }
 
     pub fn failure_storage(&mut self) -> StoreFailureStorage<'_, 'op, O, PP, U> {

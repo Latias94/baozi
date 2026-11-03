@@ -1,197 +1,154 @@
 use crate::detect::{BINARY_PREAMBLE_BYTES, FACET_BYTES, HEADER_BYTES};
 use crate::error::{StlFailure, StlFailureCode};
 use crate::parser::{ParsedMesh, ParsedStl};
-use baozi_import::authoring::{Color, Vec3};
+use baozi_import::authoring::Color;
 use baozi_import::{
-    ImportStorageClass, ImportWorkClass, MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS, MeteredVec,
-    ParseExecution, ParseFailure, ParseResult,
+    ImportStorageClass, ImportWorkClass, MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS, ParseFailure,
+    ParseResult, ParseRoot,
 };
 
 const MATERIALISE_COLOR_TOKEN: &[u8] = b"COLOR=";
 
 pub(crate) fn parse<'session>(
-    exec: &mut ParseExecution<'_, 'session>,
+    root: &mut ParseRoot<'_, '_, 'session>,
     bytes: &[u8],
     facets: u32,
 ) -> ParseResult<ParsedStl<'session>> {
     let face_count =
-        usize::try_from(facets).map_err(|_| exec.allocation_failure("stl-binary-face-count"))?;
+        usize::try_from(facets).map_err(|_| root.allocation_failure("stl-binary-face-count"))?;
     let record_bytes = face_count
         .checked_mul(FACET_BYTES)
-        .ok_or_else(|| exec.allocation_failure("stl-binary-size"))?;
+        .ok_or_else(|| root.allocation_failure("stl-binary-size"))?;
     let expected = BINARY_PREAMBLE_BYTES
         .checked_add(record_bytes)
-        .ok_or_else(|| exec.allocation_failure("stl-binary-size"))?;
+        .ok_or_else(|| root.allocation_failure("stl-binary-size"))?;
     if expected != bytes.len() {
-        return Err(exec.format_failure(
+        let expected = usize_amount(root, expected, "stl-expected-size")?;
+        let actual = usize_amount(root, bytes.len(), "stl-actual-size")?;
+        return Err(root.format_failure(
             StlFailure::content(
                 StlFailureCode::BinarySizeMismatch,
                 "facet-count",
                 "declared-count-does-not-match-size",
             )
-            .with_counts(
-                usize_amount(exec, expected, "stl-expected-size")?,
-                usize_amount(exec, bytes.len(), "stl-actual-size")?,
-            ),
+            .with_counts(expected, actual),
         ));
     }
     if facets == 0 {
-        return Err(exec.format_failure(StlFailure::content(
+        return Err(root.format_failure(StlFailure::content(
             StlFailureCode::EmptyGeometry,
             "binary-facets",
             "zero-facets",
         )));
     }
-
     let vertex_count = face_count
         .checked_mul(3)
-        .ok_or_else(|| exec.allocation_failure("stl-binary-vertex-count"))?;
+        .ok_or_else(|| root.allocation_failure("stl-binary-vertex-count"))?;
     let Some(header) = bytes.get(..HEADER_BYTES) else {
-        return Err(exec.format_failure(StlFailure::content(
+        return Err(root.format_failure(StlFailure::content(
             StlFailureCode::InvalidStructure,
             "binary-header",
             "truncated",
         )));
     };
-    let object_color = materialise_default_color(header);
-    let materialise = object_color.is_some();
     let attribute_cell_count = vertex_count
         .checked_mul(2)
-        .ok_or_else(|| exec.allocation_failure("stl-binary-attribute-cells"))?;
-    let decode_bytes = usize_amount(exec, bytes.len(), "stl-decode-work")?;
-    let preamble_bytes = usize_amount(exec, BINARY_PREAMBLE_BYTES, "stl-binary-preamble")?;
-    let facet_bytes = usize_amount(exec, FACET_BYTES, "stl-binary-facet-bytes")?;
-    let mut has_facet_colors = false;
-    let mut has_fallback_facets = false;
-    let decode_work = exec.bind_work_group([
+        .ok_or_else(|| root.allocation_failure("stl-binary-attribute-cells"))?;
+    let decode_bytes = usize_amount(root, bytes.len(), "stl-decode-work")?;
+    let preamble_bytes = usize_amount(root, BINARY_PREAMBLE_BYTES, "stl-binary-preamble")?;
+    let facet_bytes = usize_amount(root, FACET_BYTES, "stl-binary-facet-bytes")?;
+    let faces = usize_amount(root, face_count, "stl-binary-faces")?;
+    let vertices = usize_amount(root, vertex_count, "stl-binary-vertices")?;
+    let cells = usize_amount(root, attribute_cell_count, "stl-binary-attribute-cells")?;
+    let records_count = usize_amount(root, face_count, "stl-binary-records")?;
+    let decode_work = root.bind_group([
         ImportWorkClass::DecodeWork,
         ImportWorkClass::Faces,
         ImportWorkClass::Vertices,
         ImportWorkClass::AttributeCells,
         ImportWorkClass::Records,
     ])?;
-    let (positions, normals, facet_colors) = exec.with_work(
-        &decode_work,
-        [
-            decode_bytes,
-            usize_amount(exec, face_count, "stl-binary-faces")?,
-            usize_amount(exec, vertex_count, "stl-binary-vertices")?,
-            usize_amount(exec, attribute_cell_count, "stl-binary-attribute-cells")?,
-            usize_amount(exec, face_count, "stl-binary-records")?,
-        ],
-        |exec, work| -> ParseResult<_> {
-            work.complete([preamble_bytes, 0, 0, 0, 0])?;
-            let mut positions = try_vec_capacity(
-                exec,
-                ImportStorageClass::SceneConstruction,
-                vertex_count,
-                "stl-binary-positions",
-            )?;
-            let mut normals = try_vec_capacity(
-                exec,
-                ImportStorageClass::SceneConstruction,
-                vertex_count,
-                "stl-binary-normals",
-            )?;
-            let mut facet_colors = try_vec_capacity(
-                exec,
-                ImportStorageClass::FormatNormalization,
-                face_count,
-                "stl-binary-facet-colors",
-            )?;
-            for face_index in 0..face_count {
-                exec.poll()?;
-                work.run([facet_bytes, 1, 3, 6, 1], || -> ParseResult<()> {
-                    let offset =
-                        BINARY_PREAMBLE_BYTES
-                            .checked_add(face_index.checked_mul(FACET_BYTES).ok_or_else(|| {
-                                exec.allocation_failure("stl-binary-record-offset")
-                            })?)
-                            .ok_or_else(|| exec.allocation_failure("stl-binary-record-offset"))?;
-                    let end = offset
-                        .checked_add(FACET_BYTES)
-                        .ok_or_else(|| exec.allocation_failure("stl-binary-record-end"))?;
-                    let Some(record) = bytes.get(offset..end) else {
-                        return Err(exec.format_failure(
-                            StlFailure::content(
-                                StlFailureCode::InvalidStructure,
-                                "binary-facet",
-                                "truncated-record",
-                            )
-                            .at_byte(usize_amount(
-                                exec,
-                                offset,
-                                "stl-binary-offset",
-                            )?),
-                        ));
-                    };
-                    let normal = vec3_at(record, 0, exec, offset)?;
-                    let v0 = vec3_at(record, 12, exec, offset + 12)?;
-                    let v1 = vec3_at(record, 24, exec, offset + 24)?;
-                    let v2 = vec3_at(record, 36, exec, offset + 36)?;
-                    positions.try_extend_from_slice_reserved(&[
-                        vec3_components(v0),
-                        vec3_components(v1),
-                        vec3_components(v2),
-                    ])?;
-                    normals.try_extend_from_slice_reserved(&[vec3_components(normal); 3])?;
-
-                    let Some(attribute_bytes) = record.get(48..50) else {
-                        return Err(exec.format_failure(
-                            StlFailure::content(
-                                StlFailureCode::InvalidStructure,
-                                "binary-facet-attribute",
-                                "truncated",
-                            )
-                            .at_byte(usize_amount(
-                                exec,
-                                offset + 48,
-                                "stl-binary-offset",
-                            )?),
-                        ));
-                    };
-                    let mut attribute = [0; 2];
-                    attribute.copy_from_slice(attribute_bytes);
-                    let color = facet_color(u16::from_le_bytes(attribute), materialise);
-                    has_facet_colors |= color.is_some();
-                    has_fallback_facets |= color.is_none();
-                    facet_colors.try_push_reserved(color)?;
-                    Ok(())
+    let (positions, normals, facet_colors, object_color, has_facet_colors, has_fallback_facets) =
+        root.child(
+            &decode_work,
+            [decode_bytes, faces, vertices, cells, records_count],
+            |child| -> ParseResult<_> {
+                let object_color = child.run([preamble_bytes, 0, 0, 0, 0], || {
+                    Ok(materialise_default_color(header))
                 })?;
-                #[cfg(test)]
-                crate::control_tests::facet_completed(
-                    crate::control_tests::CompletionSite::BinaryFacet,
-                    facet_colors.len(),
-                    positions.as_slice(),
-                    normals.as_slice(),
-                );
-            }
-            Ok((positions, normals, facet_colors))
-        },
-    )?;
-
+                let materialise = object_color.is_some();
+                let (mut positions, mut normals, mut facet_colors) = {
+                    let mut storage = child.storage()?;
+                    let mut positions = storage.metered_vec(
+                        ImportStorageClass::SceneConstruction,
+                        "stl-binary-positions",
+                    );
+                    storage.reserve_vec(&mut positions, vertex_count)?;
+                    let mut normals = storage
+                        .metered_vec(ImportStorageClass::SceneConstruction, "stl-binary-normals");
+                    storage.reserve_vec(&mut normals, vertex_count)?;
+                    let mut facet_colors = storage.metered_vec(
+                        ImportStorageClass::FormatNormalization,
+                        "stl-binary-facet-colors",
+                    );
+                    storage.reserve_vec(&mut facet_colors, face_count)?;
+                    (positions, normals, facet_colors)
+                };
+                let mut has_facet_colors = false;
+                let mut has_fallback_facets = false;
+                // The immutable exact-size proof above establishes exactly F complete 50-byte records.
+                for record in bytes[BINARY_PREAMBLE_BYTES..].chunks_exact(FACET_BYTES) {
+                    child.poll()?;
+                    child.run([facet_bytes, 1, 3, 6, 1], || -> ParseResult<()> {
+                        let record: &[u8; FACET_BYTES] =
+                            record.try_into().expect("exact binary STL record size");
+                        let facet = decode_facet(record, materialise);
+                        positions.try_extend_from_slice_reserved(&facet.positions)?;
+                        normals.try_extend_from_slice_reserved(&[facet.normal; 3])?;
+                        has_facet_colors |= facet.color.is_some();
+                        has_fallback_facets |= facet.color.is_none();
+                        facet_colors.try_push_reserved(facet.color)
+                    })?;
+                    #[cfg(test)]
+                    crate::control_tests::facet_completed(
+                        crate::control_tests::CompletionSite::BinaryFacet,
+                        facet_colors.len(),
+                        positions.as_slice(),
+                        normals.as_slice(),
+                    );
+                }
+                Ok((
+                    positions,
+                    normals,
+                    facet_colors,
+                    object_color,
+                    has_facet_colors,
+                    has_fallback_facets,
+                ))
+            },
+        )?;
     let colors = if has_facet_colors {
         let color_work =
-            exec.bind_work_group([ImportWorkClass::AttributeCells, ImportWorkClass::WorkUnits])?;
-        Some(exec.with_work(
+            root.bind_group([ImportWorkClass::AttributeCells, ImportWorkClass::WorkUnits])?;
+        let color_cells = usize_amount(root, vertex_count, "stl-binary-color-cells")?;
+        let color_rows = usize_amount(root, face_count, "stl-binary-color-expansion")?;
+        Some(root.child(
             &color_work,
-            [
-                usize_amount(exec, vertex_count, "stl-binary-color-cells")?,
-                usize_amount(exec, face_count, "stl-binary-color-expansion")?,
-            ],
-            |exec, work| -> ParseResult<_> {
+            [color_cells, color_rows],
+            |child| -> ParseResult<_> {
                 let fallback = object_color.unwrap_or(Color::WHITE);
-                let mut colors = try_vec_capacity(
-                    exec,
-                    ImportStorageClass::SceneConstruction,
-                    vertex_count,
-                    "stl-binary-colors",
-                )?;
+                let mut colors = {
+                    let mut storage = child.storage()?;
+                    let mut colors = storage
+                        .metered_vec(ImportStorageClass::SceneConstruction, "stl-binary-colors");
+                    storage.reserve_vec(&mut colors, vertex_count)?;
+                    colors
+                };
                 for (index, color) in facet_colors.as_slice().iter().copied().enumerate() {
                     if index % MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS == 0 {
-                        exec.poll()?;
+                        child.poll()?;
                     }
-                    work.run([3, 1], || {
+                    child.run([3, 1], || {
                         colors.try_extend_from_slice_reserved(
                             &[color_components(color.unwrap_or(fallback)); 3],
                         )
@@ -205,96 +162,74 @@ pub(crate) fn parse<'session>(
     } else {
         None
     };
-
     let name_value = "<STL_BINARY>";
-    let name_byte_count = usize_amount(exec, name_value.len(), "stl-binary-name")?;
-    let mesh_work =
-        exec.bind_work_group([ImportWorkClass::Meshes, ImportWorkClass::StringBytes])?;
-    let meshes = exec.with_work(
+    let name_byte_count = usize_amount(root, name_value.len(), "stl-binary-name")?;
+    let mesh_work = root.bind_group([ImportWorkClass::Meshes, ImportWorkClass::StringBytes])?;
+    let meshes = root.child(
         &mesh_work,
         [1, name_byte_count],
-        |exec, work| -> ParseResult<_> {
-            let name = work.run([0, name_byte_count], || -> ParseResult<_> {
-                let mut owned =
-                    exec.metered_string(ImportStorageClass::SceneConstruction, "stl-binary-name");
-                owned.try_push_str(exec, name_value)?;
-                Ok(owned)
-            })?;
-            work.run([1, 0], || -> ParseResult<_> {
-                let mut meshes = try_vec_capacity(
-                    exec,
-                    ImportStorageClass::FormatNormalization,
-                    1,
-                    "stl-binary-meshes",
-                )?;
-                meshes.try_push_reserved(ParsedMesh {
+        |child| -> ParseResult<_> {
+            let mut name = child
+                .storage()?
+                .metered_string(ImportStorageClass::SceneConstruction, "stl-binary-name");
+            child.append_string([0, name_byte_count], &mut name, name_value)?;
+            let mut meshes = child
+                .storage()?
+                .metered_vec(ImportStorageClass::FormatNormalization, "stl-binary-meshes");
+            child.push_growing(
+                [1, 0],
+                &mut meshes,
+                ParsedMesh {
                     name: Some(name),
                     positions,
                     normals,
                     colors,
-                })?;
-                Ok(meshes)
-            })
+                },
+            )?;
+            Ok(meshes)
         },
     )?;
     Ok(ParsedStl {
-        // An overridden object fallback must not tint facets or enable transparency.
         material_color: object_color.filter(|_| has_fallback_facets),
         meshes,
     })
 }
 
-fn vec3_at(
-    record: &[u8],
-    offset: usize,
-    exec: &mut ParseExecution<'_, '_>,
-    byte_offset: usize,
-) -> ParseResult<Vec3> {
-    Ok(Vec3::new(
-        f32_at(record, offset, exec, byte_offset)?,
-        f32_at(record, offset + 4, exec, byte_offset + 4)?,
-        f32_at(record, offset + 8, exec, byte_offset + 8)?,
-    ))
+struct DecodedFacet {
+    normal: [f32; 3],
+    positions: [[f32; 3]; 3],
+    color: Option<Color>,
 }
 
-fn f32_at(
-    record: &[u8],
-    offset: usize,
-    exec: &mut ParseExecution<'_, '_>,
-    byte_offset: usize,
-) -> ParseResult<f32> {
-    let Some(chunk) = record.get(offset..offset + 4) else {
-        return Err(exec.format_failure(
-            StlFailure::content(
-                StlFailureCode::InvalidStructure,
-                "binary-float",
-                "truncated",
-            )
-            .at_byte(usize_amount(exec, byte_offset, "stl-binary-offset")?),
-        ));
-    };
+fn decode_facet(record: &[u8; FACET_BYTES], materialise: bool) -> DecodedFacet {
+    DecodedFacet {
+        normal: vec3_at(record, 0),
+        positions: [
+            vec3_at(record, 12),
+            vec3_at(record, 24),
+            vec3_at(record, 36),
+        ],
+        color: facet_color(u16::from_le_bytes([record[48], record[49]]), materialise),
+    }
+}
+fn vec3_at(record: &[u8; FACET_BYTES], offset: usize) -> [f32; 3] {
+    [
+        f32_at(record, offset),
+        f32_at(record, offset + 4),
+        f32_at(record, offset + 8),
+    ]
+}
+fn f32_at(record: &[u8; FACET_BYTES], offset: usize) -> f32 {
     let mut bytes = [0; 4];
-    bytes.copy_from_slice(chunk);
-    Ok(f32::from_le_bytes(bytes))
+    bytes.copy_from_slice(&record[offset..offset + 4]);
+    f32::from_le_bytes(bytes)
 }
-
-fn try_vec_capacity<'session, T>(
-    exec: &mut ParseExecution<'_, 'session>,
-    class: ImportStorageClass,
-    capacity: usize,
-    resource: &'static str,
-) -> ParseResult<MeteredVec<'session, T>> {
-    let mut values = exec.metered_vec(class, resource);
-    values.try_reserve(exec, capacity)?;
-    Ok(values)
-}
-
 fn usize_amount(
-    exec: &ParseExecution<'_, '_>,
+    root: &ParseRoot<'_, '_, '_>,
     value: usize,
     resource: &'static str,
 ) -> Result<u64, ParseFailure> {
-    u64::try_from(value).map_err(|_| exec.allocation_failure(resource))
+    u64::try_from(value).map_err(|_| root.allocation_failure(resource))
 }
 
 fn materialise_default_color(header: &[u8]) -> Option<Color> {
@@ -328,10 +263,6 @@ fn facet_color(attribute: u16, materialise: bool) -> Option<Color> {
 
 fn byte_color(value: u8) -> f32 {
     value as f32 / 255.0
-}
-
-const fn vec3_components(value: Vec3) -> [f32; 3] {
-    [value.x, value.y, value.z]
 }
 
 const fn color_components(value: Color) -> [f32; 4] {

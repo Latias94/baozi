@@ -129,7 +129,7 @@ pub use resource_graph::{
 pub use scope::{
     ImportStorageClass, ImportWorkClass, ImportWorkGroup, ImportWorkScope, ParseContext,
     ParseErrorView, ParseExecution, ParseFailure, ParseParser, ParseResult, ParseRoot,
-    ParseWorkLayout,
+    ParseStorage, ParseWorkLayout,
 };
 pub use session::ReadHint;
 pub use source_scope::{

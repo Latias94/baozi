@@ -52,8 +52,9 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 mod execution;
 pub(crate) use execution::{
-    ExecutionControl, ExecutionError, ExecutionGroup, ExecutionParserScope, ExecutionPermit,
-    ExecutionStorage, ExecutionWork,
+    ExecutionControl, ExecutionError, ExecutionGroup, ExecutionOrdinaryStorage,
+    ExecutionParserScope, ExecutionPermit, ExecutionStorage, ExecutionWork, check_execution_state,
+    poll_execution,
 };
 
 /// Execution has stopped independently of the owner's eventual terminal classification.
@@ -392,19 +393,9 @@ where
     }
 
     pub(crate) fn check_execution_running(&self) -> Result<(), ExecutionError<D>> {
-        StoreExecutionState::settle_caught_unwind(
-            &self.execution_state,
-            &self.sticky_terminal_cause,
-        );
-        if self.execution_state.get() != StoreExecutionState::Running
-            || self.sticky_terminal_cause.get().is_some()
-        {
-            return Err(self
-                .coordinator
-                .recorded_control_cause()
-                .map_or(ExecutionError::Stopped, ExecutionError::Control));
-        }
-        Ok(())
+        check_execution_state(&self.sticky_terminal_cause, &self.execution_state, || {
+            self.coordinator.recorded_control_cause()
+        })
     }
 
     pub(crate) fn settle_importer_return(&self) {
