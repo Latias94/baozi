@@ -271,4 +271,10 @@ negative case only for a genuinely new boundary, not for incidental private layo
   revision cost as a caller-cutover investigation/repair obligation. Every raw/exclusive total reconciles. Neither
   instruction gain nor intermediate native keep clears Windows extraction costs or the
   final all-endpoint/pipeline/memory target.
+- The [bounded call-owner investigation](../research/2026-11-03-common-work-kernel-costs.md)
+  independently verifies a contributing unchanged-action route: repeated OBJ's typed runner
+  still executes 262,189 bodies with identical exclusive instructions, while its authority/
+  control child edges add 30,937,278 Ir. Preserve that shallow-cut scope and copy/inlining
+  limits. It supports investigating real-region ownership and deleting obsolete adaptation;
+  it is not a measured benefit of future exclusive adoption or Windows code-generation cause.
 - Complete release-convergence qualification: pending; all final gates remain closed.
