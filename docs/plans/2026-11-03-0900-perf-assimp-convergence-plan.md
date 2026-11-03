@@ -181,6 +181,14 @@ negative case only for a genuinely new boundary, not for incidental private layo
   only terminal construction cannot establish endpoint convergence. Fixed invocation backing,
   one shared accounting authority, indexed semantic classification and consuming retained
   attachment are being designed before production implementation.
+- R3 observed-envelope reuse is source-qualified at `ae4c77af891e3d92340535c48408a32ffbec34e9`.
+  Independent four-campaign Windows review supports an intermediate keep: repeated normal
+  preparation improves about 37% and its pipeline about 19–20%, while grid pipeline's positive
+  medians remain an accepted unresolved tradeoff. The
+  [receipt](../reviews/2026-11-03-observed-work-sequence.md) retains every positive-lane concern,
+  memory scope and six current-source Linux instruction profiles. This is neither uniform
+  improvement nor release convergence. Reader and bounded normal-vocabulary candidates remain
+  separate, reviewed and unqualified until applied/tested/measured on their own source.
 - [Pinned Assimp principles and Rust ownership audit](../research/2026-11-03-assimp-principles-and-rust-ownership.md)
   distinguishes loader-specific buffering, different normal algorithms, genuinely escaping
   storage ownership and removable per-getter/lifecycle work. Independent design review requires
