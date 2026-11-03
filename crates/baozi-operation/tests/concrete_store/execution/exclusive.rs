@@ -76,7 +76,15 @@ fn normal_parser_error_retains_only_verified_piece_and_the_original_semantic_own
     }
     assert_eq!(physical, [17, 29, 0]);
     assert_eq!(signal.polls.load(Ordering::SeqCst), 1);
-    let evidence = rejected_success_evidence(operation, StorePreparationFailureClass::Requested);
+    let evidence = operation
+        .prepare_minimal_fallback(41)
+        .unwrap()
+        .handoff()
+        .ledger_evidence;
+    assert_eq!(
+        store_failure_cause(&evidence).class(),
+        StorePreparationFailureClass::Requested
+    );
     assert_work(&evidence, keys.other_dimension, 2, 1);
 }
 
@@ -144,6 +152,27 @@ fn postallocation_control_rejection_drops_real_backing_before_the_next_child_pie
     ));
     assert_eq!(signal.polls.load(Ordering::SeqCst), 3);
     assert_eq!(next_piece.get(), 0);
+    assert!(matches!(
+        operation.execution(),
+        Err(StoreRuntimeError::Control(ControlCause::Cancelled {
+            origin: CancellationOrigin::Signal
+        }))
+    ));
+    let reentered = Cell::new(0);
+    let reentry = operation.with_exclusive_execution::<(), StoreInvocationError>(|_| {
+        reentered.set(1);
+        Ok(())
+    });
+    assert!(matches!(
+        reentry,
+        Err(StoreInvocationError::Runtime(StoreRuntimeError::Control(
+            ControlCause::Cancelled {
+                origin: CancellationOrigin::Signal
+            }
+        )))
+    ));
+    assert_eq!(reentered.get(), 0);
+    assert_eq!(signal.polls.load(Ordering::SeqCst), 3);
     assert_eq!(physical_delta(physical, account.snapshot()), (0, 0));
     let after = operation
         .producer_host()
@@ -775,6 +804,66 @@ fn forgetting_a_parser_borrow_cannot_forget_zero_or_incomplete_host_ownership() 
             let evidence =
                 rejected_success_evidence(operation, StorePreparationFailureClass::ProductGraph);
             assert_work(&evidence, keys.other_dimension, 1, 0);
+        }
+    }
+}
+
+#[test]
+fn host_caught_extension_panic_is_not_a_normally_returned_error_or_eof() {
+    use baozi_operation::__retained_store_integration::activation::StoreExtensionResult;
+    for panic in [false, true] {
+        let factory = factory(1);
+        let account = account(&factory);
+        let signal = CountedCancellation::default();
+        let (mut operation, keys) = operation_with_work_policy(
+            &account,
+            OperationControl::default().with_cancellation(signal.clone()),
+            DimensionPolicy::counter(8, 8, 0),
+        );
+        signal.polls.store(0, Ordering::SeqCst);
+        let physical = Cell::new(0);
+        let next = Cell::new(0);
+        let result = operation.with_exclusive_execution::<_, StoreInvocationError>(|context| {
+            let layout = context.bind_group([keys.other_dimension])?;
+            let value = context.run_extension(layout, [1], 3, || -> Result<usize, u8> {
+                physical.set(1);
+                if panic {
+                    panic!("host-caught extension");
+                }
+                Err(7)
+            })?;
+            assert_eq!(
+                context.work_counters(keys.other_dimension)?,
+                (1, if panic { 0 } else { 1 }, 0)
+            );
+            if panic {
+                assert!(matches!(value, StoreExtensionResult::Panicked));
+                assert!(context.run_action(layout, [1], 1, || next.set(1)).is_err());
+            } else {
+                assert!(matches!(value, StoreExtensionResult::Returned(Err(7))));
+            }
+            Ok(())
+        });
+        assert_eq!(physical.get(), 1);
+        assert_eq!(next.get(), 0);
+        assert_eq!(
+            signal.polls.load(Ordering::SeqCst),
+            if panic { 1 } else { 2 }
+        );
+        if panic {
+            assert!(result.is_err());
+            let evidence = operation
+                .prepare_minimal_fallback(74)
+                .unwrap()
+                .handoff()
+                .ledger_evidence;
+            assert_eq!(
+                store_failure_cause(&evidence).class(),
+                StorePreparationFailureClass::Requested
+            );
+            assert_work(&evidence, keys.other_dimension, 1, 0);
+        } else {
+            result.unwrap();
         }
     }
 }

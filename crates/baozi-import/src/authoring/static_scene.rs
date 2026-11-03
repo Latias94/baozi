@@ -133,6 +133,7 @@ pub(crate) fn submit(
     format: &FormatId,
     content_digest: ManifestDigest,
 ) -> ParseResult<()> {
+    scope.check_execution_running()?;
     let document = scope.with_execution(|exec| document_resource(exec, content_digest))?;
     let locator = SourceObjectLocator::indexed(SourceObjectKind::Document, 0);
     let resources = [ObservedResourceAuthoring::session_opaque(

@@ -56,6 +56,37 @@ pub(crate) use execution::{
     ExecutionStorage, ExecutionWork,
 };
 
+/// Execution has stopped independently of the owner's eventual terminal classification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StoreExecutionState {
+    Running,
+    KnownError,
+    IncompleteSuccess,
+    UnwindPending,
+}
+
+impl StoreExecutionState {
+    pub(crate) const ABANDONED: u32 = 0x4558_4142;
+
+    pub(crate) fn stop(slot: &Cell<Self>, reason: Self) {
+        if slot.get() == Self::Running {
+            slot.set(reason);
+        }
+    }
+
+    pub(crate) fn settle_caught_unwind(
+        slot: &Cell<Self>,
+        failure: &Cell<Option<PreparationFailureCode>>,
+    ) {
+        if slot.get() == Self::UnwindPending {
+            record_terminal_cause_with_precedence(
+                failure,
+                PreparationFailureCode::product_graph(Self::ABANDONED),
+            );
+        }
+    }
+}
+
 pub(crate) struct ExclusiveOperationParts<'op, O, P, PP, U, D> {
     pub(crate) ledger: crate::ledger::ExclusiveLedger<'op, O, P, D>,
     pub(crate) poll: OperationPollCheckpoint<'op, PP, U>,
@@ -63,6 +94,7 @@ pub(crate) struct ExclusiveOperationParts<'op, O, P, PP, U, D> {
     pub(crate) share_work: RetainedHandleSharePlan<D>,
     pub(crate) failure: &'op Cell<Option<PreparationFailureCode>>,
     pub(crate) debt: &'op Cell<u16>,
+    pub(crate) execution_state: &'op Cell<StoreExecutionState>,
 }
 
 /// One checked weighted-debt calculation for the exclusive runner and migration adapters.
@@ -127,6 +159,7 @@ where
     ordinary_work_permit_partially_resolved: bool,
     sticky_terminal_cause: Cell<Option<PreparationFailureCode>>,
     control_action_debt: Cell<u16>,
+    execution_state: Cell<StoreExecutionState>,
     canonical_lineage: CanonicalLineageAuthority,
 }
 
@@ -314,6 +347,7 @@ where
         P: TerminalEvidenceKey,
         D: TerminalEvidenceKey,
     {
+        self.check_execution_running()?;
         // Transitional aliases may have forgotten an envelope or RefMut. Qualify these before
         // the legacy terminal predicate can collapse a failed dynamic borrow into "sealed".
         self.coordinator
@@ -335,6 +369,7 @@ where
             terminal_account_share_work,
             sticky_terminal_cause,
             control_action_debt,
+            execution_state,
             ..
         } = self;
         let (poll, ledger) = coordinator.split_exclusive_poll_and_ledger();
@@ -352,7 +387,31 @@ where
             share_work: *terminal_account_share_work,
             failure: sticky_terminal_cause,
             debt: control_action_debt,
+            execution_state,
         })
+    }
+
+    pub(crate) fn check_execution_running(&self) -> Result<(), ExecutionError<D>> {
+        StoreExecutionState::settle_caught_unwind(
+            &self.execution_state,
+            &self.sticky_terminal_cause,
+        );
+        if self.execution_state.get() != StoreExecutionState::Running
+            || self.sticky_terminal_cause.get().is_some()
+        {
+            return Err(self
+                .coordinator
+                .recorded_control_cause()
+                .map_or(ExecutionError::Stopped, ExecutionError::Control));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn settle_importer_return(&self) {
+        StoreExecutionState::settle_caught_unwind(
+            &self.execution_state,
+            &self.sticky_terminal_cause,
+        );
     }
 
     pub(crate) fn record_terminal_cause(&mut self, cause: PreparationFailureCode) {
@@ -2221,6 +2280,7 @@ where
             ordinary_work_permit_partially_resolved: false,
             sticky_terminal_cause: Cell::new(None),
             control_action_debt: Cell::new(0),
+            execution_state: Cell::new(StoreExecutionState::Running),
             canonical_lineage,
         })
     }
@@ -2522,6 +2582,11 @@ where
         mut self,
         final_progress: FinalProgress<PP, U>,
     ) -> Result<PreparedRetainedEvidenceOnlyOutcome<F, P, D>, RetainedPublicationPrepareError> {
+        // Success cannot consume an unclassified stopped invocation. Real rejection adapters
+        // supply their owned requested cause before the terminal failure path instead.
+        if self.execution_state.get() != StoreExecutionState::Running {
+            self.record_product_graph_failure(StoreExecutionState::ABANDONED);
+        }
         self.prepare_terminal_control(final_progress);
         self.close_terminal_owners();
         let terminal_cause = self.sticky_terminal_cause();

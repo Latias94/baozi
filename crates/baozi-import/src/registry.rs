@@ -434,19 +434,26 @@ impl PreparedInvocation {
         context: &mut ParseContext<'_>,
     ) -> Result<ParseResult<()>, ParseInvocationError> {
         let Some(permit) = self.health.begin_invocation() else {
+            context.finish_importer_boundary(Some(ParseInvocationError::ExtensionPoisoned));
             return Err(ParseInvocationError::ExtensionPoisoned);
         };
+        if !context.begin_importer_boundary() {
+            return Ok(Err(context.importer_reentered()));
+        }
         let result = match catch_unwind(AssertUnwindSafe(|| self.invocation.parse(context))) {
             Ok(result) => result,
             Err(payload) => {
                 permit.poison();
+                context.finish_importer_boundary(Some(ParseInvocationError::ExtensionPanicked));
                 discard_untrusted_panic_payload(payload);
                 return Err(ParseInvocationError::ExtensionPanicked);
             }
         };
         if self.health.is_poisoned() && result.is_ok() {
+            context.finish_importer_boundary(Some(ParseInvocationError::ExtensionPoisoned));
             Err(ParseInvocationError::ExtensionPoisoned)
         } else {
+            context.finish_importer_boundary(None);
             Ok(result)
         }
     }

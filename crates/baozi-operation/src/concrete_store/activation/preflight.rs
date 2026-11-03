@@ -167,6 +167,32 @@ where
         self.dormant.operation_mut().execution()
     }
 
+    /// Lends the existing Dormant root to the one executor; activation authority never escapes.
+    pub fn with_parser_execution<R, E: From<crate::concrete_store::StoreInvocationError>>(
+        &mut self,
+        boundary: &crate::concrete_store::StoreImporterBoundary,
+        body: impl for<'op> FnOnce(
+            &mut crate::concrete_store::StoreInvocation<'op, O, PP, U>,
+        ) -> Result<R, E>,
+    ) -> Result<R, E> {
+        self.dormant
+            .operation_mut()
+            .with_parser_execution(boundary, body)
+    }
+
+    /// Shared gate for replacement execution, legacy entry and both submission paths.
+    pub fn check_execution_running(&self) -> Result<(), StoreRuntimeError> {
+        self.dormant
+            .operation()
+            .raw
+            .check_execution_running()
+            .map_err(crate::concrete_store::execution::map_execution_error)
+    }
+
+    pub fn settle_importer_return(&self) {
+        self.dormant.operation().raw.settle_importer_return();
+    }
+
     /// Borrows producer work and accounting before canonical activation begins.
     pub fn producer_host(&mut self) -> RetainedStoreProducerHost<'_, O, PP, U> {
         self.dormant.operation_mut().producer_host()

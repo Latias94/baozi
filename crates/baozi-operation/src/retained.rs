@@ -225,7 +225,7 @@ pub(crate) use operation::{
     RetainedFailureWorkStartError, RetainedPlanningBaseline, RetainedPlanningContainmentAnchor,
     RetainedProducerHost, RetainedProducerWorkFinishError, RetainedProducerWorkPermit,
     RetainedProducerWorkStartError, RetainedWorkConsumeError, RetainedWorkFinishError,
-    RetainedWorkPermit, RetainedWorkStartError, checked_action_debt,
+    RetainedWorkPermit, RetainedWorkStartError, StoreExecutionState, checked_action_debt,
     record_terminal_cause_with_precedence,
 };
 pub(crate) use operation::{

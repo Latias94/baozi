@@ -7,7 +7,8 @@ use crate::retained::{
     ExecutionStorage, ExecutionWork,
 };
 pub use exclusive::{
-    StoreInvocation, StoreInvocationError, StoreInvocationLayout, StoreInvocationParser,
+    StoreExtensionResult, StoreFailureStorage, StoreImporterBoundary, StoreInvocation,
+    StoreInvocationError, StoreInvocationLayout, StoreInvocationParser,
 };
 
 /// Work authority borrowed from one active invocation, separate from its storage and control.
@@ -82,7 +83,7 @@ impl std::error::Error for StoreParserWorkError {
     }
 }
 
-fn map_execution_error(cause: ExecutionError<StoreDimensionKey>) -> StoreRuntimeError {
+pub(super) fn map_execution_error(cause: ExecutionError<StoreDimensionKey>) -> StoreRuntimeError {
     match cause {
         ExecutionError::Control(cause) => StoreRuntimeError::Control(cause),
         ExecutionError::Ledger(cause) => StoreRuntimeError::Ledger(cause),
@@ -493,6 +494,9 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, L> RetainedStoreOper
         ),
         StoreRuntimeError,
     > {
+        self.raw
+            .check_execution_running()
+            .map_err(map_execution_error)?;
         if self.raw.is_terminal_only() {
             return Err(StoreRuntimeError::FallbackOnly);
         }

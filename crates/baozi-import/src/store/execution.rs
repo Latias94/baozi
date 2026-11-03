@@ -7,7 +7,8 @@
 
 use baozi_operation::__retained_store_integration::activation::{
     StoreBoundWorkGroup, StoreExecutionControl, StoreExecutionPermit, StoreExecutionStorage,
-    StoreExecutionWork, StoreParserWorkError, StoreParserWorkScope,
+    StoreExecutionWork, StoreFailureStorage, StoreInvocation, StoreParserWorkError,
+    StoreParserWorkScope,
 };
 
 use super::*;
@@ -48,7 +49,99 @@ pub(crate) struct ImportObservedExecution<'region, const N: usize> {
     vocabulary: &'region ImportStoreVocabulary,
 }
 
+pub(crate) enum ImportExecutionFailure<E> {
+    Runtime(StoreParserWorkError),
+    Owned(E),
+}
+impl<E> From<StoreParserWorkError> for ImportExecutionFailure<E> {
+    fn from(cause: StoreParserWorkError) -> Self {
+        Self::Runtime(cause)
+    }
+}
+
+impl ImportStoreReservation {
+    pub(crate) fn reserve_failure_storage(
+        storage: &mut StoreFailureStorage<
+            '_,
+            '_,
+            ImportOperationOwner,
+            ImportProgressPhase,
+            ImportProgressUnit,
+        >,
+        phase: StorePhaseKey,
+        dimension: StoreDimensionKey,
+        bytes: u64,
+        allocations: u64,
+    ) -> Result<Self, StoreParserWorkError> {
+        let raw = storage.reserve(phase, dimension, bytes, allocations)?;
+        Ok(Self {
+            raw: Some(raw),
+            bytes,
+        })
+    }
+
+    pub(crate) fn resize_failure_storage(
+        &mut self,
+        storage: &StoreFailureStorage<
+            '_,
+            '_,
+            ImportOperationOwner,
+            ImportProgressPhase,
+            ImportProgressUnit,
+        >,
+        bytes: u64,
+    ) -> Result<(), StoreParserWorkError> {
+        storage.resize(
+            self.raw
+                .as_mut()
+                .expect("a live import reservation owns its backing"),
+            bytes,
+        )?;
+        self.bytes = bytes;
+        Ok(())
+    }
+}
+
 impl ImportStoreSessionOwner {
+    pub(crate) fn parser_runtime_failure(
+        &self,
+        cause: StoreParserWorkError,
+        terminal: &std::cell::RefCell<Option<ScopeAbortCause>>,
+    ) -> crate::ParseFailure {
+        let cause = match cause {
+            StoreParserWorkError::Runtime(cause) => {
+                project_store_runtime_error(&self.storage[0].vocabulary, cause)
+                    .into_scope_abort_cause()
+            }
+            StoreParserWorkError::ItemLimit { .. } => ScopeAbortCause::DescriptorContract {
+                code: "parse-work-item-limit-lane-invalid",
+            },
+        };
+        crate::scope::latch_abort(terminal, cause)
+    }
+
+    pub(crate) fn with_parser_execution<R, E>(
+        &mut self,
+        action: impl for<'op> FnOnce(
+            &mut StoreInvocation<'op, ImportOperationOwner, ImportProgressPhase, ImportProgressUnit>,
+            &ImportStoreVocabulary,
+        ) -> Result<R, ImportExecutionFailure<E>>,
+    ) -> Result<R, ImportExecutionFailure<E>> {
+        let data = &mut self.storage[0];
+        let ImportStoreSessionData {
+            state,
+            vocabulary,
+            importer_boundary,
+            ..
+        } = data;
+        let ImportStoreSessionState::Dormant(owner) = state else {
+            return Err(ImportExecutionFailure::Runtime(
+                StoreParserWorkError::Runtime(baozi_operation::StoreRuntimeError::FallbackOnly),
+            ));
+        };
+        owner.with_parser_execution(importer_boundary, |numeric| action(numeric, vocabulary))
+    }
+
     pub(crate) fn execution(&mut self) -> Result<ImportStoreExecution<'_>, ImportStoreHostError> {
         let data = &mut self.storage[0];
         let vocabulary = &data.vocabulary;
@@ -56,6 +149,9 @@ impl ImportStoreSessionOwner {
         let ImportStoreSessionState::Dormant(owner) = state else {
             return Err(inactive_store_state_error(state));
         };
+        owner
+            .check_execution_running()
+            .map_err(|cause| project_store_runtime_error(vocabulary, cause))?;
         let (work, storage, control) = owner
             .execution()
             .map_err(|cause| project_store_runtime_error(vocabulary, cause))?;

@@ -2,7 +2,8 @@ mod execution;
 mod scene_activation;
 
 pub(crate) use execution::{
-    ImportBoundWorkGroup, ImportParserAdmissionError, ImportParserWorkScope, ImportStoreExecution,
+    ImportBoundWorkGroup, ImportExecutionFailure, ImportParserAdmissionError,
+    ImportParserWorkScope, ImportStoreExecution,
 };
 
 use std::fmt;
@@ -18,7 +19,7 @@ use baozi_core::{SceneValidationLimits, ValidatedScene as CanonicalValidatedScen
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalActivationSessionPolicy, CanonicalMaterializationRole, CanonicalValidationRole,
     RetainedStoreDimensionState, RetainedStoreSessionOutcomeOwner, RetainedStoreWriterRole,
-    StoreActivationContainment,
+    StoreActivationContainment, StoreImporterBoundary,
 };
 use baozi_operation::__retained_store_integration::authority::{
     RetainedStoreOperation, RetainedStoreReservation, RetainedStoreSharePlan,
@@ -1123,6 +1124,7 @@ pub(crate) struct ImportStoreSessionData {
     state: ImportStoreSessionState,
     vocabulary: ImportStoreVocabulary,
     unsubmitted_evidence: SceneEvidenceRecipe,
+    importer_boundary: StoreImporterBoundary,
 }
 
 impl std::ops::Deref for ImportStoreSessionOwner {
@@ -1211,6 +1213,7 @@ impl ImportStoreSessionOwner {
             state: ImportStoreSessionState::Dormant(owner),
             vocabulary,
             unsubmitted_evidence,
+            importer_boundary: StoreImporterBoundary::default(),
         };
         let ImportStoreSessionState::Dormant(owner) = &mut data.state else {
             unreachable!()
@@ -1247,6 +1250,45 @@ impl ImportStoreSessionOwner {
         // No state-cell reservation may reach the final ledger freeze.
         drop(self);
         (data.state, data.unsubmitted_evidence)
+    }
+
+    pub(crate) fn check_execution_running(&self) -> Result<(), ImportStoreHostError> {
+        let data = &self.storage[0];
+        match &data.state {
+            ImportStoreSessionState::Dormant(owner) => owner
+                .check_execution_running()
+                .map_err(|cause| project_store_runtime_error(&data.vocabulary, cause)),
+            other => Err(inactive_store_state_error(other)),
+        }
+    }
+
+    pub(crate) fn begin_importer_boundary(&self) -> bool {
+        self.storage[0].importer_boundary.begin()
+    }
+
+    pub(crate) fn finish_importer_boundary(
+        &self,
+        outcome: Option<crate::registry::ParseInvocationError>,
+    ) {
+        let data = &self.storage[0];
+        match outcome {
+            Some(crate::registry::ParseInvocationError::ExtensionPanicked) => {
+                data.importer_boundary.finish_panicked()
+            }
+            Some(crate::registry::ParseInvocationError::ExtensionPoisoned) => {
+                data.importer_boundary.finish_poisoned()
+            }
+            None => data.importer_boundary.finish_returned(false),
+        }
+        // Only an actual normal importer return can prove a locally caught numeric unwind.
+        // Pending owns a consumed activation and never supplies a numeric root for this record.
+        if !matches!(
+            outcome,
+            Some(crate::registry::ParseInvocationError::ExtensionPanicked)
+        ) && let ImportStoreSessionState::Dormant(owner) = &data.state
+        {
+            owner.settle_importer_return();
+        }
     }
 
     pub(crate) fn poll_parser_boundary(&mut self) -> Result<(), ImportStoreHostError> {
@@ -1420,7 +1462,7 @@ impl std::error::Error for ImportStoreHostError {
     }
 }
 
-fn project_store_runtime_error(
+pub(crate) fn project_store_runtime_error(
     vocabulary: &ImportStoreVocabulary,
     cause: StoreRuntimeError,
 ) -> ImportStoreHostError {

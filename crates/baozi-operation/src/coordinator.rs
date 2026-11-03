@@ -475,6 +475,11 @@ where
         }
     }
 
+    /// Reads the original cold control cause without polling or changing control state.
+    pub(crate) fn recorded_control_cause(&self) -> Option<ControlCause> {
+        self.terminal.clone()
+    }
+
     /// Polls cancellation and deadline state.
     pub fn poll(&mut self) -> Result<(), ControlCause> {
         poll_operation_control(&mut self.control, &mut self.terminal)

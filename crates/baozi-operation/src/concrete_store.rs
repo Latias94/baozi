@@ -171,8 +171,9 @@ mod batch;
 mod execution;
 pub use execution::{
     StoreBoundWorkGroup, StoreExecutionControl, StoreExecutionPermit, StoreExecutionStorage,
-    StoreExecutionWork, StoreInvocation, StoreInvocationError, StoreInvocationLayout,
-    StoreInvocationParser, StoreParserWorkError, StoreParserWorkScope,
+    StoreExecutionWork, StoreExtensionResult, StoreFailureStorage, StoreImporterBoundary,
+    StoreInvocation, StoreInvocationError, StoreInvocationLayout, StoreInvocationParser,
+    StoreParserWorkError, StoreParserWorkScope,
 };
 mod terminal_output;
 mod transcript;

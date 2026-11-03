@@ -67,6 +67,9 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::sync::Arc;
 
+mod parser_execution;
+pub use parser_execution::{ParseErrorView, ParseParser, ParseRoot, ParseWorkLayout};
+
 pub type ParseResult<T> = Result<T, ParseFailure>;
 type AssetSnapshotResult = Result<AccountedVec<u8>, ScopeAbortCause>;
 
@@ -303,7 +306,7 @@ impl<const N: usize> ImportWorkScope<'_, N> {
     }
 }
 
-fn latch_abort(
+pub(crate) fn latch_abort(
     terminal: &RefCell<Option<ScopeAbortCause>>,
     cause: ScopeAbortCause,
 ) -> ParseFailure {
@@ -547,6 +550,29 @@ impl<'session> ParseContext<'session> {
         DependencyOrigin::primary(self.dependency_origin_issuer, self.primary_io)
     }
 
+    pub(crate) fn begin_importer_boundary(&self) -> bool {
+        self.store_owner.begin_importer_boundary()
+    }
+    pub(crate) fn finish_importer_boundary(
+        &self,
+        outcome: Option<crate::registry::ParseInvocationError>,
+    ) {
+        self.store_owner.finish_importer_boundary(outcome);
+    }
+    pub(crate) fn importer_reentered(&self) -> ParseFailure {
+        latch_abort(
+            self.terminal,
+            ScopeAbortCause::DescriptorContract {
+                code: "parse-capability-reentered",
+            },
+        )
+    }
+    pub(crate) fn check_execution_running(&self) -> ParseResult<()> {
+        self.store_owner
+            .check_execution_running()
+            .map_err(|cause| latch_abort(self.terminal, cause.into_scope_abort_cause()))
+    }
+
     /// The result cannot borrow the execution region, while session-owned storage may leave it.
     pub fn with_execution<R, E>(
         &mut self,
@@ -556,6 +582,7 @@ impl<'session> ParseContext<'session> {
         E: From<ParseFailure>,
     {
         preflight_terminal(self.terminal).map_err(E::from)?;
+        self.check_execution_running().map_err(E::from)?;
         let terminal = self.terminal;
         let store = self
             .store_owner
@@ -604,6 +631,7 @@ impl<'session> ParseContext<'session> {
 
     pub fn submit(&mut self, input: crate::authoring::StaticSceneBuilder<'_>) -> ParseResult<()> {
         preflight_terminal(self.terminal)?;
+        self.check_execution_running()?;
         let content_digest = self
             .resource_graph
             .try_borrow()
@@ -623,6 +651,7 @@ impl<'session> ParseContext<'session> {
 
     pub fn submit_complete(&mut self, input: SceneAuthoringBatch<'_>) -> ParseResult<()> {
         preflight_terminal(self.terminal)?;
+        self.check_execution_running()?;
         self.with_execution(|exec| {
             exec.resource_graph
                 .try_borrow_mut()
@@ -643,6 +672,7 @@ impl<'session> ParseContext<'session> {
                     },
                 )
             })?;
+        self.check_execution_running()?;
         self.store_owner
             .submit_scene(construction)
             .map_err(|cause| {
@@ -1190,17 +1220,6 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
         self.store
             .resize(reservation, bytes)
             .map_err(|cause| cause.into_scope_abort_cause())
-    }
-
-    fn resize_live(
-        &self,
-        reservation: &mut ImportLiveReservation<'_>,
-        bytes: u64,
-    ) -> ParseResult<()> {
-        self.preflight_active()?;
-        self.store
-            .resize(&mut reservation.reservation, bytes)
-            .map_err(|cause| self.abort(cause.into_scope_abort_cause()))
     }
 
     fn capacity_plan_error(
@@ -2157,152 +2176,16 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
     where
         P: FormatFailureEvidenceProducer,
     {
-        let format_failure_storage = self.format_failure_storage;
-
-        let mut producer = Some(producer);
-        let captured = (|| -> ParseResult<(FormatFailureEnvelope, FormatFailureEvidence)> {
-            self.preflight_active()?;
-            let failure_storage_is_active = match format_failure_storage.try_borrow() {
-                Ok(storage) => storage.is_active(),
-                Err(_) => return Err(self.reentrant_capability_failure()),
-            };
-            if failure_storage_is_active {
-                return Err(self.abort(ScopeAbortCause::DescriptorContract {
-                    code: "format-failure-storage-already-active",
-                }));
-            }
-            let capacity_plan =
-                BoundedFormatFailureDetailSink::capacity_plan().map_err(|cause| {
-                    self.capacity_plan_error("format-failure-evidence-storage", cause)
-                })?;
-            let envelope_bytes = capacity_plan.envelope_bytes().map_err(|cause| {
-                self.capacity_plan_error("format-failure-evidence-storage", cause)
-            })?;
-            let mut storage = ImportLiveReservation {
-                reservation: self
-                    .reserve_retained_storage_cause(
-                        ImportStorageClass::FormatNormalization,
-                        envelope_bytes,
-                        3,
-                    )
-                    .map_err(|cause| self.abort(cause))?,
-                scope: PhantomData,
-            };
-            let allocation_error = |cause| match cause {
-                FormatFailureDetailCause::CapacityPlan(cause) => {
-                    self.capacity_plan_error("format-failure-evidence-storage", cause)
-                }
-                cause => self.abort(ScopeAbortCause::FormatFailureDetail(cause)),
-            };
-            let (envelope, owner_storage_bytes) =
-                FormatFailureEnvelope::try_allocate(self.entry.descriptor_handle(), capacity_plan)
-                    .map_err(allocation_error)?;
-            let (mut evidence, actual_storage_bytes) =
-                BoundedFormatFailureDetailSink::try_allocate(capacity_plan)
-                    .map_err(allocation_error)?;
-            let actual_storage_bytes = actual_storage_bytes
-                .checked_add(owner_storage_bytes)
-                .ok_or_else(|| {
-                    self.capacity_plan_error(
-                        "format-failure-evidence-storage",
-                        CapacityPlanError::CapacityOverflow,
-                    )
-                })?;
-            self.resize_live(&mut storage, actual_storage_bytes)?;
-            {
-                let mut failure_storage = match format_failure_storage.try_borrow_mut() {
-                    Ok(storage) => storage,
-                    Err(_) => return Err(self.reentrant_capability_failure()),
-                };
-                if failure_storage.is_active() {
-                    return Err(self.abort(ScopeAbortCause::DescriptorContract {
-                        code: "format-failure-storage-already-active",
-                    }));
-                }
-                failure_storage.reservation = Some(storage.into_reservation());
-                failure_storage.format_captured = true;
-            }
-
-            let Some(producer) = producer.as_ref() else {
-                return Err(self.abort(ScopeAbortCause::DescriptorContract {
-                    code: "format-failure-producer-was-lost",
-                }));
-            };
-            let code_result = {
-                let _callback = self.enter_parse_callback()?;
-                catch_unwind(AssertUnwindSafe(|| producer.code()))
-            };
-            let code = match code_result {
-                Ok(code) => code,
-                Err(payload) => {
-                    discard_untrusted_panic_payload(payload);
-                    return Err(self.abort(ScopeAbortCause::TrustedExtension {
-                        boundary: TrustedExtensionBoundary::FormatFailureDetail,
-                        code: "format-failure-code-panicked",
-                    }));
-                }
-            };
-            self.preflight_active()?;
-            if !valid_diagnostic_code(code) {
-                return Err(self.abort(ScopeAbortCause::DescriptorContract {
-                    code: "invalid-format-failure-code",
-                }));
-            }
-            evidence
-                .store_code(code)
-                .map_err(|cause| self.abort(ScopeAbortCause::FormatFailureDetail(cause)))?;
-            let details_result = {
-                let _callback = self.enter_parse_callback()?;
-                catch_unwind(AssertUnwindSafe(|| {
-                    producer.visit_details(&mut evidence);
-                }))
-            };
-            if let Err(payload) = details_result {
-                discard_untrusted_panic_payload(payload);
-                return Err(self.abort(ScopeAbortCause::TrustedExtension {
-                    boundary: TrustedExtensionBoundary::FormatFailureDetail,
-                    code: "format-failure-detail-panicked",
-                }));
-            }
-            self.preflight_active()?;
-            evidence
-                .finish()
-                .map(|evidence| (envelope, evidence))
-                .map_err(|cause| self.abort(ScopeAbortCause::FormatFailureDetail(cause)))
-        })();
-
-        let producer_drop = match self.enter_parse_callback() {
-            Ok(_callback) => catch_unwind(AssertUnwindSafe(|| drop(producer.take()))),
-            Err(failure) => {
-                if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(producer.take()))) {
-                    discard_untrusted_panic_payload(payload);
-                }
-                return failure;
-            }
-        };
-        if let Err(payload) = producer_drop {
-            discard_untrusted_panic_payload(payload);
-            return self.abort(ScopeAbortCause::TrustedExtension {
-                boundary: TrustedExtensionBoundary::FormatFailureDetail,
-                code: "format-failure-producer-drop-panicked",
-            });
-        }
-
-        match captured {
-            Ok((envelope, evidence)) => match self.preflight_active() {
-                Ok(()) => {
-                    let storage = format_failure_storage.borrow_mut().reservation.take();
-                    if storage.is_none() {
-                        return self.abort(ScopeAbortCause::DescriptorContract {
-                            code: "format-failure-without-storage-reservation",
-                        });
-                    }
-                    ParseFailure::format(envelope.seal(evidence, storage))
-                }
-                Err(failure) => failure,
-            },
-            Err(failure) => failure,
-        }
+        parser_execution::capture_format_failure(
+            parser_execution::FormatFailureHost::legacy(
+                &mut self.store,
+                &self.entry,
+                self.terminal,
+                self.callback_active,
+                self.format_failure_storage,
+            ),
+            producer,
+        )
     }
 
     fn dependency_failure(
@@ -3584,15 +3467,6 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
     fn reentrant_capability_failure(&self) -> ParseFailure {
         self.abort(ScopeAbortCause::DescriptorContract {
             code: "parse-capability-reentered",
-        })
-    }
-
-    fn enter_parse_callback(&self) -> ParseResult<ParseCallbackGuard<'region>> {
-        if self.callback_active.replace(true) {
-            return Err(self.reentrant_capability_failure());
-        }
-        Ok(ParseCallbackGuard {
-            active: self.callback_active,
         })
     }
 }
