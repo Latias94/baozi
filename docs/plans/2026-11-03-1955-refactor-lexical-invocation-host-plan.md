@@ -1,0 +1,147 @@
+---
+title: "Keep lexical invocation authority in an outer host"
+type: refactor
+status: in_progress
+date: 2026-11-03
+parent: 2026-11-03-1120-refactor-exclusive-invocation-plan.md
+---
+
+# Lexical Invocation Host and Consuming Attachment
+
+This is the connected root/attachment replacement from the
+[exclusive invocation plan](2026-11-03-1120-refactor-exclusive-invocation-plan.md).
+The [bound-services result](../reviews/2026-11-03-bound-storage-performance-hold.md)
+remains HOLD: reduced construction instructions did not establish an ordinary performance
+keep, and canonical action traffic, parser state access and small-operation startup remain
+measured owners. The unchanged 14-case/110-lane Windows/Linux release gates remain open.
+
+The user authorizes breaking interfaces, ownership changes and removal of obsolete code.
+There is no publication, remote push/PR, native promotion, benchmark task change or numerical
+algorithm change in this cut.
+
+## Reviewed Ownership Decision
+
+Fixed postprocess arrays and dynamic import Vecs live in lexical roots. An actual outer host
+owns the one coordinator/control, unique work view, storage selector, start admission, failure
+cause, progress/debt and publication lineage. It also owns the real retained baseline, tables,
+candidate output, proof and rejection/fallback stage data. Callbacks borrow short permission
+views; consuming a view changes those host-owned stages. No view owns the final recovery
+authority or exposes a raw-owner extractor, finalizer or `DerefMut` into the host.
+
+This corrects a rejected by-value-owner design: `mem::forget` of that actual owner could lose
+control and cleanup authority. A disposition bit, poison anchor, owning-view Drop or HRTB
+alone cannot recover it. Forgetting a permission leaves the actual state in the outer host.
+An unresolved exit fails or contains; forgetting an inert view after a valid disposition
+request can be harmless. Leaked genuine scratch remains charged and prevents clean finish.
+
+Keep the qualified `work + StoreExecutionServices` split and short `services.ordinary()`
+loans. Numeric mutation uses the existing `WorkView` kernel over unique row/header slices.
+Replace `LocalWork` and its real permit/parser consumers rather than introducing a permanent
+borrowed/owned compatibility backend. No full-Ledger alias accompanies exclusive work.
+True independently released storage remains synchronized and may escape or move across
+threads; invocation, recovery and candidate permission views may not escape the root.
+
+The concrete outer entry calls a retained `FnMut` callback exactly once under controlled
+unwind handling and accepts no arbitrary returned `R`. Captures remain owned outside that
+call, then are explicitly disposed while the real host is armed. Postprocess/import supply
+their existing concrete output/proof/cause specializations; operation gains no dependency
+on either crate. Owned-only final outcomes leave the entry after private driver finalization.
+Inner bounded actions can still return values under their existing private host guards.
+
+## Attachment, Storage and Finish
+
+- Acquire `PendingOperationStartAdmission` once, before execution/storage effects. Attachment
+  accepts no replacement source, account, control, limits or domain. Preserve account/source
+  checks and recheck actual lineage/poison eligibility without another operation-start action.
+- Qualify attachment against actual current work, pending competition, live scratch, tightened
+  policies and phases. Use the current-state startup predicates; zero-state qualification or
+  replay into a new Ledger/coordinator is incorrect. Preserve the real six startup reservation
+  specs, four account-share steps, manifest and protected-work eligibility.
+- Split common from existing retained/assembly/failure/freeze fields. A private attachment
+  frame stages their actual owners while common stays in its host field. Ready installs only
+  fully qualified fields in a nonallocating/non-callback transition. Record clean unattached
+  failure, eligible fallback or unresolved containment before returning a permission result.
+  Ignored errors latch the real first cause and stop ordinary work before returning `Err`.
+- At the first genuine escaping reservation, admit and allocate an unissued vacant shared shell
+  and required fixed-to-owned row capacity before moving authority. Qualify actual capacity
+  and unique ownership, install complete state, then issue tokens. Dynamic Vecs/charges move
+  once. Preserve every counter, peak, policy and phase. No token observes vacancy or a second
+  account. Zero-byte tokens are still real tokens; no no-op allocation claim follows yet.
+- Rename administrative limits/evidence to explicit payload/capacity bytes. Cover known
+  payloads, Vec capacities and overlap once, and report inline root/fact layout separately.
+  Opaque standard Arc headers, runtime and allocator overhead remain unmeasured. Existing
+  retained requested-layout/strong-owner charges remain intact. Replace forced-zero metadata
+  projections with exact allowed-coverage validation, preserving all live-scratch, pending,
+  account and publication gates.
+- Split scene-edit validation from private outer finish. Store actual success, rejection,
+  interruption or live `PendingMinimalFallback` state in the host. End transaction/postflight
+  data loans, destroy replacements/prepared/session scratch, then return from the callback and
+  dispose its captures before terminal progress/freeze/joint publication. Requesting a final
+  disposition stops ordinary execution. Remove the activation `Fallback` variant with no
+  production constructor; keep the real central fallback and its cleanup-before-finish route.
+- Containment must detach only reference-free physical owners/charges after stopping work.
+  Existing whole-operation `forget` cannot retain a borrowed common/root. Reuse value-before-
+  storage cleanup and conservative unresolved-charge semantics, with no fabricated release.
+  No client callback, destructor under our control or fallible allocation follows irreversible
+  publication. Process abort and double-panic abort have no recovery promise.
+
+Keep all six direct dimensions, three phases, four possible progress pairs and the current
+normal action weights/control debt. Attached changed-direct and import paths still request
+their actual terminal bundle in this cut. Indexed selection, the five-row follow-up, changed-
+direct terminal removal and the [owned-payload work](2026-11-03-1255-refactor-owned-geometry-payload-plan.md)
+remain separate changes.
+
+## Connected Implementation and Deletion Boundary
+
+1. **Operation root and actual hosts.** Migrate ledger/work/exclusive/storage/snapshot/startup
+   and coordinator, then retained operation/execution/startup/assembly/terminal and concrete
+   activation/payload/fallback/joint owners. Real private transitions borrow common and own
+   stage fields; they cannot call the former consuming constructor under a borrowed wrapper.
+2. **Core and postprocess.** Core alone binds the actual canonical source/account. Preparation,
+   space, scene-edit validation/finish, resource facts and normal-action instrumentation use
+   that same host and kernel. Preserve numeric expressions/order and the original source Scene,
+   remaps, typed failure ownership and distinct known-error control behavior.
+3. **Actual import entry and formats.** Construct root/account/actual canonical host outside
+   `ImportSession` in both byte and asset/resolver entry paths. The existing accounted session
+   cell holds a short host permission, vocabulary and recipe; pop/drop it before outer finish.
+   `AccountedVec<T>` and both `release_storage<T>` paths already permit borrowed T. Keep the
+   unrelated fallback `F: Send + Sync + 'static` and truly shared payload bounds unchanged.
+   Migrate real detection, dependency graph, IO/hash/text and OBJ/PLY/STL/glTF parser adapters.
+4. **Delete replaced owners.** Remove LocalWork's dynamic numeric alias route, caller-owned
+   permit/parser compatibility, fresh Ledger startup/from_started_ledger, nested common owners,
+   callback finalizers and stale eager direct terminal branches once real callers have moved.
+   Internal staging may be incomplete; completion requires this connected production path.
+
+Use an isolated compiler workspace for the large signature migration. Main exclusively owns
+Cargo, profiling and ordinary measurements. Workers have explicit file ownership and cannot
+modify benchmark clocks/tasks, unrelated user notes or high-context instructions. Apply to
+main only a source-qualified, independently reviewed connected result.
+
+## Meaningful Qualification
+
+- Compile actual changed/unchanged edits, space declaration changes and both import entries
+  through attachment, central success/rejection/fallback, caller cleanup and outer finish.
+  Owned Scene/facts/failure and independent storage leases escape successfully. Valid-method
+  negative probes reject permission/recovery/candidate escape, cross-root substitution,
+  reentry and scoped-thread movement; pair them with adjacent valid uses.
+- Forget actual permissions at each stage; ignore real semantic/resource/attach errors, then
+  attempt reuse/publication. Exercise body panic, caught leaf panic, denied-entry capture Drop,
+  post-request capture Drop and rejected inner-result Drop. Assert the actual host/state survives,
+  exact completed prefixes/first cause, drop-once storage, no generation change and honest
+  unresolved charges. Preserve importer extension and geometry/parser exit-poll distinctions.
+- Use literal fixed/dynamic accounting and current-state attachment with real prework, live
+  scratch, policy tightening and pending Internal competition. Cover zero/exact/one-short,
+  overflow/order, shell-before-move, spare/overlap capacity, zero-byte lease and one shared
+  identity through later independent/thread release. No mock-only owner proves this cut.
+- Verify scratch/cell/capture destruction precedes every final success/rejection/fallback gate.
+  Check allowed positive administrative coverage and unexplained residue rejection. Run affected
+  nextest/compiler/consumer/strict Clippy/fmt gates, then immutable ordinary Windows/Linux
+  comparisons under the unchanged acceptance protocol. Record regressions individually.
+
+The concrete v2 sidecar and independent source review are frozen under
+`.git/baozi-review/performance-convergence/`: design SHA-256
+`19b11dea41615507fe9a1438355d29fba8ad8561aae6abd3d8786f245bf9d119`, review
+`b658c285010878c462065ab5fa0f84715b66edab6f973b97f99d1c83aa10102c`.
+They support design code-go for this connected implementation, without claiming compiler
+feasibility, source qualification, an optimization keep or release readiness. No new user
+permission is needed to execute the reviewed work.
