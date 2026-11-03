@@ -285,6 +285,13 @@ negative case only for a genuinely new boundary, not for incidental private layo
   failure materialization before frame close, owned errors and stopped-state entry gates are
   qualified. This is an unmeasured structural slice; all prior performance costs remain open.
 - Complete release-convergence qualification: pending; all final gates remain closed.
+- The [binary STL exclusive caller](../reviews/2026-11-03-binary-stl-exclusive-caller.md)
+  qualifies source `48d6f17e2f0829bdd5d50c8d7c48cea72ce343a1` on Windows: affected 2355,
+  formats 855, control 9 and independent consumer 138 pass, with docs 30 + 54, strict lint,
+  formatting and actual new-test/artifact association. One ordinary storage/growth owner and
+  one guarded compound service replace duplicated bodies and binary's old adapter. No normal
+  math, benchmark task or allowance changes. Ordinary candidate/control comparison is next;
+  source qualification supplies no speedup, Linux caller result or release-gate clearance.
 - The [normal source-value follow-up](../research/2026-11-03-normal-generation-standards.md#subsequent-selected-value-audit-and-windows-reproduction)
   reproduces selected FLOAT NORMAL `(0,0,2)` acceptance on Windows with a passing bit-exact
   unit control. This P2 requires an explicit glTF admission tolerance/policy and selected-owner

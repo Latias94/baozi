@@ -217,5 +217,19 @@ proof, widen budgets, weaken mathematical results or move benchmark work outside
   authored bits and canonical NaN errors. Remove binary's old execution-taking helpers and
   duplicated growth bodies in that cut; ASCII/text, other formats and canonical authoring
   remain genuine later callers. This is a reviewed next slice, not implemented cutover.
+- The first caller's concrete 120-line storage/compound supplement, SHA-256
+  `365058f505503fd48b2608a4987a86d352fbf92b8f4a757c6036afebb6b92189`, is independently
+  accepted. Its source pin is corrected explicitly to runtime `67b5ca6`; temporary loans
+  exclude numeric authority, share the existing poll/storage representation, and keep caller
+  captures/values alive until actual cold error projection. One growth implementation and
+  one guarded prefix service serve both entry routes. The
+  [binary STL implementation receipt](../reviews/2026-11-03-binary-stl-exclusive-caller.md)
+  records removed old caller bodies, literal semantic/control/Drop oracles, observed shared
+  artifact-source mismatches and their retained failed/partial checks. Exact final candidate
+  patch `f8c8a12407eb7b463c88ff8d8ae12db7489b4cf0337bd4da4bd85ba08769e99a` qualifies at
+  `48d6f17e2f0829bdd5d50c8d7c48cea72ce343a1`: affected 2355, formats 855, control 9, independent
+  consumer 138, docs 30 + 54, strict lint and formatting pass on Windows. Eleven critical
+  new tests are independently present in actual main binaries with matching dep-info origins.
+  Linux caller qualification and ordinary native performance disposition remain pending.
 - Fixed/dynamic roots, honest administrative payload/capacity metric, consuming attachment,
   cleanup-before-finish, indexed selection and removal of transitional permits remain pending.
