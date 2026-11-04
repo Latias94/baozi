@@ -324,3 +324,24 @@ consumer migration, current-state attachment using one start admission, shared-s
 state promotion, exact accounting and superseded-owner deletion. Main Rust application and
 all unchanged Windows/Linux timing/memory gates remain open. This structural qualification
 does not establish an ordinary performance improvement.
+
+## Borrowed Geometry Action Checkpoint, 2026-11-04
+
+The [geometry-action receipt](../reviews/2026-11-04-borrowed-geometry-actions.md) migrates
+Postprocess's actual `ActiveRuntime` onto `StoreActionExecution`, which holds the existing
+exclusive `WorkView`, actual pending `WorkFrame` and captured cost outside client loans.
+The old Postprocess work/group/services/owning-permit adapter and its cleanup dispatcher
+are deleted. Begin/Complete events, singleton replenishment, physical-prefix accounting,
+scratch Internal share work and control behavior retain the existing kernel and cadence.
+
+Frozen source2 passes 3,473 whole-workspace tests (6 existing skips), 144 affected doctests,
+138 independent consumer tests (1 existing skip), strict workspace/consumer lint and both
+format checks. Independent connected-source review closes the two relocated owner-oracle
+gaps without an introduced defect. Independent final review verifies exact source/QA/log
+association, the actual new owner-test inclusion and unchanged skips without a finding.
+
+This migrates the geometry action consumer; it does not yet remove `LocalWork` from the
+real semantic, Import and startup consumers. The next semantic cut has three production
+entries and must return source-bound plans/outer-branded reservations only after the unique
+numeric loan and controlled callback captures end. Current-state attachment, shared
+promotion, exact accounting, main Rust application and ordinary performance remain open.

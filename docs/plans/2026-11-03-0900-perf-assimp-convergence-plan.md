@@ -372,3 +372,14 @@ negative case only for a genuinely new boundary, not for incidental private layo
   Borrowed numeric backing, current-state single-start attachment, shared promotion, exact accounting,
   obsolete-owner deletion, main Rust application and the unchanged complete performance
   campaign remain open. No ordinary performance keep or release readiness follows.
+- The isolated [borrowed geometry action component](../reviews/2026-11-04-borrowed-geometry-actions.md)
+  replaces Postprocess's actual dynamic work/permit adapter with an outer-owned action host
+  over the existing exclusive `WorkView` kernel. Actual normal/triangulation events, weights,
+  scratch share work, completed prefixes and cancellation cadence remain. Source2 passes
+  3,473 workspace runtime tests (6 existing skips), 144 affected doctests, 138 independent
+  consumer tests (1 existing skip), strict workspace/consumer lint and both format checks.
+  Independent connected-source review closes both private-oracle relocation gaps; independent
+  final source/evidence association also passes. The semantic/Import/startup numeric consumers,
+  complete borrowed backing, current-state attachment, shared promotion, exact accounting, main
+  application and the unchanged ordinary Windows/Linux comparison remain open. No new
+  performance measurement or release acceptance follows from this structural checkpoint.
