@@ -496,3 +496,22 @@ This is a bounded service prerequisite; the concrete
 services/children projections, returned-prefix runner, actual text/PLY and other format
 consumers, old-adapter deletion and all subsequent integration/performance gates remain
 required.
+
+## Main Integration and Full Windows Measurement, 2026-11-05
+
+The [qualified pre-attachment implementation](../reviews/2026-11-05-preparation-before-attachment.md)
+is integrated at `67e9d1c215372744d55ddc2ecd72a6a9fe6324af`, including the actual Import,
+detection and four format consumers, outer payload/cause/terminal authority, original-account
+current-state binding and direct unattached completion. The reviewed 260-input overlay
+is byte-identical to the qualified source; main-root strict lint and formatting pass.
+The runtime/consumer qualification remains associated with that identical frozen source.
+
+The [six complete Windows campaigns](../reviews/2026-11-05-outer-host-windows-comparison.md)
+have independent raw reconstruction and no integrity errors. Large repeated OBJ improves,
+but glTF, whole-child time and memory retain positive costs. No complete clean confirmation
+pair exists; 58/110 initial timing lanes and nine of 28 pipelines still exceed 3x Assimp.
+Measured whole-child memory remains within 3x, which does not erase version growth.
+Performance and release remain HOLD. Fixed/dynamic backing, shared promotion, exact
+administrative accounting, remaining `LocalWork`/owning-path deletion and indexing are
+still implementation work. Full current-source ordinary Linux and separate heap gates
+are open; completed Linux instruction attribution is a separate diagnostic step.

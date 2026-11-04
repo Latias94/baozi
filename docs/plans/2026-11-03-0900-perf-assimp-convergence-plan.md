@@ -472,3 +472,14 @@ negative case only for a genuinely new boundary, not for incidental private layo
   overlay is applied to main after standalone checks and a pinned Linux registry ASan
   smoke; main-root strict compilation and formatting pass. A fresh exact-current control
   worker is retained; integrated-candidate native performance acceptance is still open.
+- The integrated [outer-host Windows comparison](../reviews/2026-11-05-outer-host-windows-comparison.md)
+  completes six original fourteen-case/110-lane campaigns. Independent reconstruction
+  checks 30,360 native children and 60,720 output files without an integrity error or
+  reported semantic/work-signature change. Large repeated-OBJ preparation improves
+  about 31% and pipelines about 14%, but all twelve glTF import/pipeline lanes regress,
+  103 initial whole-child elapsed medians rise and 98 peak working sets grow. N0 still
+  has 58/110 timing lanes above 3x, 37 at least 10x, and nine of 28 pipelines above 3x;
+  measured whole-child memory remains within 3x. Later rounds record tool overlap,
+  so there is no complete clean confirmation. All six rounds and costs are retained;
+  performance keep and release remain HOLD. Twelve exact-source Linux instruction
+  profiles are collected for attribution, not the remaining full ordinary Linux gate.

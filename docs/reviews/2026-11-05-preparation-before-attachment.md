@@ -139,6 +139,8 @@ The exact pre-integration control is `4c22eae585ee1e151e7521333d4d5a0a4d163638`,
 the current FLOAT direction check. Its ordinary uninstrumented Windows worker and source
 archive are retained under
 `target/assimp-comparison/convergence-windows-late-attachment-control-build/`.
-Historical `314d0` workers remain historical. The next step builds and measures the
-integrated candidate before selecting further representation changes; integration itself
-does not approve a performance keep or complete the lexical-host plan.
+Historical `314d0` workers remain historical. Integration itself does not approve a
+performance keep or complete the lexical-host plan. The subsequent
+[six-campaign Windows comparison](2026-11-05-outer-host-windows-comparison.md) measures
+this exact integrated candidate and retains its material benefits, positive costs and
+remaining convergence failures. It keeps performance and release HOLD.
