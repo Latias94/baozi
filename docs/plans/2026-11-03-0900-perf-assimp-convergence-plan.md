@@ -450,3 +450,12 @@ negative case only for a genuinely new boundary, not for incidental private layo
   unattached finalization, honest unattached facts, actual pre-attachment preparation,
   backing/promotion, remaining owning-path deletion, main integration and unchanged full
   Windows/Linux time/memory and separate heap gates remain open.
+- The isolated [shared action-region checkpoint](../reviews/2026-11-05-action-region-and-bound-prework.md)
+  repairs actual ignored-error and caught-unwind reentry, using one guard/runner for
+  attached and bound prework. Source2 passes 3,557 workspace tests (six existing skips),
+  174 doctests, 138 consumer tests (one existing skip), both strict lints and both format
+  checks. Independent source/evidence review verifies the original red run, source1
+  fixture failure, exact Requested-41 correction and final frozen qualification. Actual
+  late preparation, original-account unattached finalization, backing/promotion, owning
+  path deletion, main integration and full ordinary time/memory/heap acceptance remain
+  separate advancing work, without a new performance keep.

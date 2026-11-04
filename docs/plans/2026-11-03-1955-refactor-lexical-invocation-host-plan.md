@@ -155,6 +155,15 @@ permission is needed to execute the reviewed work.
 
 ## Isolated Implementation Checkpoints
 
+The [shared action-region checkpoint](../reviews/2026-11-05-action-region-and-bound-prework.md)
+repairs reproduced ignored-error and caught-unwind reentry and lends the same runner to
+bound prework. Final source2 passes 3,557 workspace tests (six existing skips), 174
+doctests, 138 consumer tests (one existing skip), both strict lints and both format
+checks. Independent source and complete evidence reviews retain bounded direct-test
+limits without a remaining actionable finding. Later unattached-terminal and actual
+preparation construction is a separate source; main Rust integration and performance
+acceptance remain open.
+
 The [current-state bound invocation](../reviews/2026-11-05-current-state-bound-invocation.md)
 connects actual prework and consuming attachment to one original account/start admission,
 keeps common/control in the outer root, and migrates Core's exact source binding and the
