@@ -160,5 +160,16 @@ The subsequent [output/proof host receipt](../reviews/2026-11-04-canonical-outpu
 qualifies actual outer-owned canonical values and an opaque startup permission that prevents root
 extraction after a forgotten permission. Its final 1,405-file source runs all 3,426 workspace tests,
 102 doctests and 138 consumer tests successfully, with strict lint and format checks. That isolated
-checkpoint also remains unapplied to main. The actual central-fallback cause is being migrated next;
-the receipt does not qualify that successor or close the remaining recovery/outer-driver work.
+checkpoint also remains unapplied to main. That receipt does not qualify its recovery successor or
+close the remaining recovery/outer-driver work.
+
+The subsequent [recovery-host receipt](../reviews/2026-11-04-canonical-recovery-host.md) records the
+bounded central-fallback change and the actual typed activation/validation/generation cause slots.
+Independent review found and reproduced two successive admission defects: foreign recovery slots
+were checked too late, then aggregate cleanup of independently panicking callback captures could
+abort. Source4 implements early admission and separate controlled callback cleanup; all 3,436
+workspace tests, 102 doctests, 138 consumer tests, strict lint and format checks pass on its exact
+1,405-file source. Independent review closes both findings and confirms final source/QA association.
+Successful terminal cause detachment, actual outer driver/capture cleanup, borrowed numeric
+backing, current-state attachment, shared storage promotion, retired-path deletion and ordinary
+performance qualification remain open. Main Rust is still unchanged by this isolated successor.

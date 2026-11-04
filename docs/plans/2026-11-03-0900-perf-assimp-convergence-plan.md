@@ -331,3 +331,11 @@ negative case only for a genuinely new boundary, not for incidental private layo
   remaining canonical action owners and grid parser completion/active-borrow work.
   Preserve those distinct owners; a removed descriptor constructor is not a complete
   lifecycle, canonical payload or parser replacement.
+- The [lexical invocation-host successor](2026-11-03-1955-refactor-lexical-invocation-host-plan.md)
+  is being implemented in an isolated compiler workspace. Actual retained/assembly fields,
+  output/proof and typed recovery causes are source-qualified in the outer host; the
+  [recovery receipt](../reviews/2026-11-04-canonical-recovery-host.md) preserves real failing
+  admission regressions and their repairs. The final successor passes 3,436 workspace tests,
+  102 doctests, 138 consumer tests, strict lint/formatting and independent source/evidence review.
+  These structural checkpoints do not apply that Rust successor to main, establish a new
+  ordinary performance keep or clear any of the unchanged release targets.
