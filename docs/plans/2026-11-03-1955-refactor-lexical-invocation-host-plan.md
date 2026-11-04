@@ -395,3 +395,16 @@ extraction costs; all remaining implementation and complete Windows/Linux timing
 gates persist. Independent raw reconstruction verifies all 5,704 children and 3,596
 summary slots with zero validation errors and unchanged reported work/output signatures;
 the 25 actual interference observations and all costs/tails remain explicit.
+
+The [trusted scan-close prerequisite](../reviews/2026-11-04-trusted-parser-scan-close.md)
+then adds a typed Exhausted/Boundary outcome over the existing parser host. Ordinary
+parent/child results stay exact; a trusted text boundary preserves the verified prefix,
+releases unused admission and skips successful-channel debt without clearing earlier
+failure. Source1 passes four focused tests, 142 doctests, all 2,317 selected Operation/
+Import/four-format tests (zero skips), strict workspace lint and formatting. Independent
+review identifies two direct scan-branch test gaps; a production-identical source2 appends
+both and passes six focused tests, Operation strict lint and formatting. Final independent
+review closes both gaps and verifies the separate source/QA/log associations without a
+finding. Actual Import text exit polls, service/children loans, returned-prefix execution,
+PLY and remaining format/detection migration remain required;
+this mechanism is not connected Import completion or a new performance result.

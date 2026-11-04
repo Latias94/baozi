@@ -415,3 +415,12 @@ negative case only for a genuinely new boundary, not for incidental private layo
   performance keep, no-regression or complete Windows/Linux 110-lane claim follows. Full-service
   Import migration, actual backing/attachment/promotion, obsolete-owner deletion, main Rust
   application, uncontaminated confirmation and the complete final acceptance remain open.
+- The isolated [trusted parser scan-close prerequisite](../reviews/2026-11-04-trusted-parser-scan-close.md)
+  expresses a real text boundary separately from failure and exhausted success, while
+  retaining the existing single parser host/kernel. Source1 passes 2,317 selected runtime
+  tests, 142 doctests, strict workspace lint and formatting; its test-only source2 closes
+  two review-requested direct branches with six focused tests and affected lint/formatting.
+  Final independent review closes both gaps and verifies the separate terminal associations
+  without a finding. The actual text/PLY/service/detection consumers and old-adapter
+  deletion are still open; no new ordinary timing or release
+  acceptance follows from this required migration mechanism.
