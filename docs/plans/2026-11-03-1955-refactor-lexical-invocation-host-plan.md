@@ -408,3 +408,20 @@ review closes both gaps and verifies the separate source/QA/log associations wit
 finding. Actual Import text exit polls, service/children loans, returned-prefix execution,
 PLY and remaining format/detection migration remain required;
 this mechanism is not connected Import completion or a new performance result.
+
+The [borrowed progress component](../reviews/2026-11-04-borrowed-progress-storage.md)
+then removes the progress state's complete Ledger alias. Real metadata and poll fields
+bind to the same storage-only evidence authority beside exclusive numeric work; one
+existing algorithm retains its capacity/release, two-poll and first-cause behavior.
+Source1's failed new supplemental-cause assertion is preserved. Test-only source2
+corrects that assertion and passes four focused tests, 142 affected doctests, all
+3,495 workspace runtime tests (six existing skips), 138 consumer tests (one existing
+skip), both strict Clippy gates and root formatting. Independent source review finds
+no new production defect and records two non-blocking direct-coverage limits. Successful
+root event delivery and remaining active-prefix control failures remain follow-up work
+with the actual Import migration. Independent terminal evidence review verifies both
+source associations and actual results without a mismatch; those limits remain open.
+This is a bounded service prerequisite; the concrete
+services/children projections, returned-prefix runner, actual text/PLY and other format
+consumers, old-adapter deletion and all subsequent integration/performance gates remain
+required.

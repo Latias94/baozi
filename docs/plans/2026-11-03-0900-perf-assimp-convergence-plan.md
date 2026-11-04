@@ -424,3 +424,17 @@ negative case only for a genuinely new boundary, not for incidental private layo
   without a finding. The actual text/PLY/service/detection consumers and old-adapter
   deletion are still open; no new ordinary timing or release
   acceptance follows from this required migration mechanism.
+- The isolated [borrowed progress component](../reviews/2026-11-04-borrowed-progress-storage.md)
+  replaces the progress state's complete Ledger reference with a borrowed view of the
+  same progress evidence storage, then binds actual metadata beside the unique work
+  view. Operation/Import root and parser forwarding preserve the existing two polls,
+  capacity release and first-cause behavior. The original source1 focused failure is
+  retained; test-only source2 corrects a supplemental-cause assertion without changing
+  production. It passes four focused tests, 142 affected doctests, 3,495 workspace
+  runtime tests (six existing skips), 138 consumer tests (one existing skip), both strict
+  Clippy gates and root formatting. Independent source review finds no new production defect
+  and retains two non-blocking direct-coverage limits for the connected Import migration.
+  Independent terminal evidence review verifies both source associations and all actual
+  results without a mismatch; those coverage limits remain open.
+  Real text/format/detection consumers, obsolete-owner deletion, attachment/promotion,
+  main Rust integration and complete ordinary performance acceptance remain open.
