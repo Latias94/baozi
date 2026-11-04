@@ -250,3 +250,54 @@ consumer lint and both format checks. Independent final review verifies the exac
 all source/QA identities and F1 closure. Old terminal authority, unreachable canonical API
 arms, numeric backing, attachment/promotion and ordinary performance gates remain open;
 main Rust is still unapplied.
+
+The [success-only canonical joint receipt](../reviews/2026-11-04-canonical-joint-success.md)
+then removes the exact joint's unreachable rich/minimal outcomes, redundant concrete
+classification wrapper/helper, three Core dead consumer branches and the corresponding
+direct Postprocess publication/owner path. Actual ordinary failure classifications and
+storage-cleanup oracles remain at their raw owner. Source2 adds real after-Ready cancellation
+coverage through the outer body; it passes that focused regression, 2,424 affected tests
+(6 existing skips), 105 doctests, 138 independent consumer tests (1 existing skip), strict
+workspace/consumer lint and both format checks. Independent source review finds no introduced
+defect and closes its identified test gap; final evidence review verifies all frozen sources,
+QA/log associations and exact result counts with no finding. Final-only
+authority, numeric backing, attachment/promotion, main Rust application and all ordinary
+performance gates remain open.
+
+## Final Authority Removal Decision, 2026-11-04
+
+The bounded independent analysis of the qualified Import catalog source identifies three
+connected removal requirements. Deleting `split` alone is insufficient: a body can start the
+raw retained operation and prepare an ordinary terminal directly, and a body-owned rejection
+builder can internally prepare fallback. Close all three routes together:
+
+- Replace body parts with `CanonicalBodyParts`, containing only opaque `CanonicalBodyStart`,
+  output/proof slots and activation/validation slots. Generation and failure-fallback slots
+  are issued only after the retained body and captures have been disposed.
+- Start an opaque `CanonicalBodyOperation` through that nominal permission. It forwards
+  bounded execution, reservation, progress, phase and failure-work operations, activation and
+  disposition requests. It exposes no raw startup conversion, publication assembly, direct
+  terminal preparation, recovery extractor or mutable dereference to the retained owner.
+  Ordinary raw publication remains a separate existing API for its real callers.
+- Restore each actual deferred canonical stage into privately constructed `CanonicalFinal<S>`.
+  Only its concrete implementations expose freeze issuance or rejection/interruption/fallback
+  preparation. Generation-rejection descendants retain that permission. Body states retain
+  inspection, activation/validation and consuming disposition requests, with no terminal
+  escape through their failure builders.
+
+Keep the current finite host fields and same-root restoration; these views create no new
+account, ledger, domain, allocation or numeric backend. Migrate production Import/Postprocess
+and Core's same-account edit constructor, then legacy split-based fixtures to `run_body`.
+Tests may inspect inside a body or return an actual recorded finish; a test-only `split` or
+public final-wrapper constructor would retain the defect. Preserve the inner format/parser
+callbacks' metered results and borrowed authoring data. Their bounded callbacks have a
+different purpose from the fixed-unit outer body.
+
+Qualification must pair valid outside-body finalization with external compiler rejections
+for body-side terminal methods, raw startup conversion, final-wrapper construction, escaped
+body state and the deleted `split`. Exercise real candidate/failure dispositions and legal
+`mem::forget` of body/final permissions: actual host payloads, graph and original account must
+remain available for cleanup or containment. This decision is a source-grounded design cut;
+it does not claim this removal has been implemented or measured. The static report is retained
+locally as `final-authority-removal-cut-1.md` with its frozen-source and lane association.
+Its immutable SHA-256 is `f93c9514ac034bb91eed9c1ad9fda155f904176d139930556b8404bb94920124`.

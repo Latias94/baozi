@@ -346,3 +346,17 @@ negative case only for a genuinely new boundary, not for incidental private layo
   source/evidence review pass. Whole-invocation capture cleanup, import publication/cell migration,
   numeric backing, current-state attachment, promotion and deletion remain open. This source
   qualification supplies no new Windows/Linux ordinary timing or memory result.
+- The isolated [canonical success-only joint component](../reviews/2026-11-04-canonical-joint-success.md)
+  follows the connected Import body, actual payload cleanup and precommit catalog components.
+  It removes unreachable joint failure outcomes, their three Core consumer branches and
+  Postprocess's corresponding dead publication/owner path, while retaining actual ordinary
+  rich/minimal preparation. The raw success finish rejects a non-success state before freeze.
+  Independent review's after-Ready cancellation coverage request is implemented as a real
+  outer-body regression; source2 passes that focused test and 2,424 affected tests (6 existing
+  skips), 105 doctests, 138 consumer tests (1 existing skip), strict workspace/consumer lint
+  and both format checks. Independent source and final evidence reviews close the identified
+  gap and verify the exact frozen source/QA/log associations. The reviewed final-authority
+  decision requires opaque body startup/
+  operation views and private final state wrappers together with deleting `split`; that
+  connected migration remains unimplemented. Main Rust and ordinary performance remain
+  unchanged by these isolated structural checkpoints.
