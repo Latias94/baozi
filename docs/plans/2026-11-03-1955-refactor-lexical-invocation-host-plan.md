@@ -230,3 +230,12 @@ error/payload-panic and actual shared-storage refund/failure compositions need a
 regressions. Those tests are a separate moving successor. Import schema admission/projection,
 old terminal authority, numeric backing/attachment/promotion and ordinary performance gates
 remain open. Main Rust remains unapplied.
+
+The same receipt's composed source6 then closes those two regression gaps with actual
+attributed shared-storage refunds/release faults and three real prepare-failure phases across
+both unwind states and all payload-panic masks. It passes 961 Operation tests, 1,461 connected
+caller tests (6 existing skips), 105 doctests, 138 consumer tests (1 existing skip), strict
+workspace/consumer lint and both format checks. Independent final source/evidence review
+closes the earlier test-oracle findings without relabeling any historical RED. This bounded
+checkpoint does not qualify a whole-workspace runtime or ordinary performance; all remaining
+schema/authority/backing/attachment/promotion work and main Rust application are still open.

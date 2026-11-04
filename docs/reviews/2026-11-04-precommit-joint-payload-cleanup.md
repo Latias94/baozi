@@ -100,3 +100,52 @@ No whole-workspace runtime is attributed to this successor yet. The earlier 3,45
 receipt belongs to Import source2; the independent consumer receipt above belongs to joint
 source2. The composed-regression successor remains a separate moving source. Main Rust remains unapplied, and no
 new ordinary timing or memory campaign exists for this successor. Release remains HOLD.
+
+## Composed Successor, Source6
+
+The fixed classified finishing body is now a single private function called by actual joint
+preparation and its real general-classifier composition fixtures. The production body is
+extracted without changing its transitions. The actual attributed `SharedRetainedStorage`
+tests check clean refunds against the original weak ledger before failure qualification,
+and a destructor that returns normally after its physical payload fails to release. The
+latter preserves first poison, physical charges and ledger attribution, and prevents freeze.
+Both rich and minimal decisions are exercised; the minimal fixture stages actual evidence
+headroom before central validation rather than relying on its name or limit alone.
+
+The actual prepare-error test covers three distinct failure points, two unwind states and
+all four output/proof panic masks. A test-only extension of the existing primary-bind hook
+selects true canonical binding for genuine classifier failure; its original evidence-only
+false-binding behavior remains. Evidence-qualification failure correctly observes a qualified
+ledger. Account poison is a separate final-eligibility failure after detach/freeze, preserving
+the original poison and unpublished containment. Both payloads are attempted in order and the
+original outer panic survives. No test callback is added to a production transition.
+
+Earlier composed snapshots remain RED: source3's wrong typed reader and source4's test loans
+fail compilation; source5's phase/branch oracles fail runtime; an intervening run still
+mislabels account poison as early classification. The immutable logs and independent report2
+retain these findings. Source6 fixes the actual test triggers and observations; it does not
+change production semantics to match an incorrect oracle. Independent report3 closes all
+three findings and both composition gaps, and verifies the final source/QA associations.
+
+| Source6 artifact | SHA-256 |
+| --- | --- |
+| Complete 1,409-file set | `9fc2c52ebb059e90c0f32e6bf4305fa79d6146be9011be5e6390d772fadbcff2` |
+| `precommit-joint-development-source-6.json` | `c6b1c527721d821df860bf5e80ad28d4e116d34038466325d2e0b3adfc8fabf5` |
+| Operation QA11 | `9c43818b721e3b43566cb9c066845181c269805d2b18f5f0b5aaf05cead69542` |
+| Connected caller/docs/workspace/consumer QA12 | `c76eb9fa894aa9f875a4b0855ea092d50a41822749c18d9bf26d6b1ec7d0e072` |
+| Independent final `precommit-joint-source-review-3.md` | `770ca13c60fcabd5a803b596fceea692534ec60df0f396eed53d6039986f650b` |
+
+Actual source6 passes **961 Operation tests** (run `2841f816-3dfb-4642-ba10-fd85a2baac46`),
+**1,461 Core/Import/Postprocess tests** with 6 existing skips (run
+`d4969a83-bd65-4053-b8aa-6696faca119c`), **105 doctests**, and **138 independent consumer
+tests** with 1 existing skip (run `43714b44-9fa5-4067-bafe-26f1809b2272`). Workspace and consumer
+all-target/all-feature strict Clippy, root format check and exact consumer format check pass.
+All stable check maps match source6. QA11's initial formatter is recorded as a mutation with
+its after-map; it is not mislabeled as a stable format check.
+
+This closes the bounded joint composition checkpoint. It does not establish a whole-workspace
+runtime result or performance keep. The actual canonical frozen contribution still returns
+success or containment; a later simplification can remove its unreachable rich/minimal API
+arms while preserving the real general terminal rails. Import schema admission/projection,
+exclusive terminal authority, numeric backing, attachment/promotion and all unchanged ordinary
+comparison targets remain open. Main Rust is still unapplied.
