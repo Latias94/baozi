@@ -173,3 +173,14 @@ workspace tests, 102 doctests, 138 consumer tests, strict lint and format checks
 Successful terminal cause detachment, actual outer driver/capture cleanup, borrowed numeric
 backing, current-state attachment, shared storage promotion, retired-path deletion and ordinary
 performance qualification remain open. Main Rust is still unchanged by this isolated successor.
+
+The [closed Scene-edit publication component](../reviews/2026-11-04-closed-scene-edit-publication.md)
+then removes the actual caller rejection/preparation callbacks and arbitrary result R. Central
+validation retains reference-free proved handoff facts; both roots are admitted before generation,
+and private success handoff only moves the exact owners. The isolated successor passes 938
+operation tests and 58 doctests on unchanged scoped inputs, 986 complete core/postprocess tests,
+10 affected doctests, 138 consumer tests and workspace/consumer strict lint/formatting. Independent
+operation and core/caller reviews confirm the source/evidence association within that component.
+This is not a whole-workspace-runtime or performance result. Late joint-failure token cleanup,
+the actual outer FnMut/capture boundary and import's corresponding publication/cell migration
+remain connected work; the isolated Rust successor is still not applied to main.

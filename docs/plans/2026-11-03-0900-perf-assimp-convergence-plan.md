@@ -339,3 +339,10 @@ negative case only for a genuinely new boundary, not for incidental private layo
   102 doctests, 138 consumer tests, strict lint/formatting and independent source/evidence review.
   These structural checkpoints do not apply that Rust successor to main, establish a new
   ordinary performance keep or clear any of the unchanged release targets.
+- The isolated [closed Scene-edit publication component](../reviews/2026-11-04-closed-scene-edit-publication.md)
+  removes the actual caller terminal callbacks/arbitrary R and moves rejecting handoff checks
+  into the existing central proof before generation/commit. Actual operation and core/postprocess
+  tests, affected compiler examples, consumer gates, strict lint/formatting and independent
+  source/evidence review pass. Whole-invocation capture cleanup, import publication/cell migration,
+  numeric backing, current-state attachment, promotion and deletion remain open. This source
+  qualification supplies no new Windows/Linux ordinary timing or memory result.
