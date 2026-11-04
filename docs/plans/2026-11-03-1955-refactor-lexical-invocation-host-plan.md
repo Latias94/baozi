@@ -155,3 +155,10 @@ records source2's complete 3,413-test runtime and final source3's six test-only 
 applied to main. Canonical payload/recovery slots, outer terminal/capture authority, borrowed numeric
 backing, current-state attachment and ordinary performance qualification remain open; this plan is
 still in progress.
+
+The subsequent [output/proof host receipt](../reviews/2026-11-04-canonical-output-proof-host.md)
+qualifies actual outer-owned canonical values and an opaque startup permission that prevents root
+extraction after a forgotten permission. Its final 1,405-file source runs all 3,426 workspace tests,
+102 doctests and 138 consumer tests successfully, with strict lint and format checks. That isolated
+checkpoint also remains unapplied to main. The actual central-fallback cause is being migrated next;
+the receipt does not qualify that successor or close the remaining recovery/outer-driver work.
