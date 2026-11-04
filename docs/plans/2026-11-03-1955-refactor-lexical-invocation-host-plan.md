@@ -155,6 +155,16 @@ permission is needed to execute the reviewed work.
 
 ## Isolated Implementation Checkpoint, 2026-11-04
 
+The [connected Import services and format checkpoint](../reviews/2026-11-05-connected-import-services-and-formats.md)
+completes the actual Detection, dependency, text and four-format caller migration and
+deletes Import's old owning execution adapters. Its final source8 passes 3,510 workspace
+runtime tests (six existing skips), 162 doctests, 138 independent asset-consumer tests
+(one existing skip), both strict Clippy gates and both format checks. Original failing
+error-host, result-poll and JSON scan-handback regressions are retained alongside their
+repairs and bounded independent reviews. The isolated Rust remains unapplied to main.
+Temporary entry spelling, actual current-state attachment, shared promotion, remaining
+Operation owners and final ordinary Windows/Linux performance acceptance remain open.
+
 The [borrowed detection and OBJ checkpoint](../reviews/2026-11-05-borrowed-import-detection-and-obj.md)
 connects actual mutable detection and OBJ/MTL to the same invocation and deletes Import's
 retired owning execution adapters. Its explicitly glTF-excluded source passes 994 Operation
