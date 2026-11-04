@@ -153,7 +153,19 @@ They support design code-go for this connected implementation, without claiming 
 feasibility, source qualification, an optimization keep or release readiness. No new user
 permission is needed to execute the reviewed work.
 
-## Isolated Implementation Checkpoint, 2026-11-04
+## Isolated Implementation Checkpoints
+
+The [current-state bound invocation](../reviews/2026-11-05-current-state-bound-invocation.md)
+connects actual prework and consuming attachment to one original account/start admission,
+keeps common/control in the outer root, and migrates Core's exact source binding and the
+real Import/Postprocess entries. Final source6 passes 3,551 workspace tests (six existing
+skips), 172 doctests, 138 consumer tests (one existing skip), both strict lints and both
+format checks. A real ordinary-stack consumer failure is repaired by ending narrow-error
+initialization before parsing; the unchanged 1 MiB main-stack case and all eight original
+stage/IO probes pass. Independent bounded source and test reviews preserve their coverage
+limits. Unattached final facts and original-account lifetime through capture cleanup,
+actual pre-attachment preparation, backing/promotion, obsolete-owner deletion, main Rust
+integration and complete ordinary performance acceptance remain open.
 
 The [startup graph ownership prerequisite](../reviews/2026-11-05-startup-graph-keeps-outer-ledger.md)
 keeps the real ledger/coordinator in outer common through graph preparation and removes

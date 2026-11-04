@@ -438,3 +438,15 @@ negative case only for a genuinely new boundary, not for incidental private layo
   results without a mismatch; those coverage limits remain open.
   Real text/format/detection consumers, obsolete-owner deletion, attachment/promotion,
   main Rust integration and complete ordinary performance acceptance remain open.
+- The isolated [current-state bound invocation](../reviews/2026-11-05-current-state-bound-invocation.md)
+  binds the original account/source/control/start admission before prework, attaches against
+  the same current ledger and connects actual Core, Import and Postprocess entries. Final
+  source6 passes 3,551 workspace tests (six existing skips), 172 doctests, 138 consumer tests
+  (one existing skip), both strict lints and both format checks, with exact source/map/log
+  association. Independent source and repair reviews retain bounded coverage limits. The
+  real source5 default-stack failure is repaired by separating initialization from the
+  persistent parser frame; unchanged 1 MiB main-stack probes pass. This is a correctness
+  prerequisite, without a new ordinary timing keep. Original-account lifetime through
+  unattached finalization, honest unattached facts, actual pre-attachment preparation,
+  backing/promotion, remaining owning-path deletion, main integration and unchanged full
+  Windows/Linux time/memory and separate heap gates remain open.
