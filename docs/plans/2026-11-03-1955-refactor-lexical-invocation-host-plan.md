@@ -206,3 +206,15 @@ P implementation passes 295 tests (2 existing manual skips) and O/P strict lint.
 review verifies the two frozen sources and separate package evidence without a whole-source
 claim. Import migration, removing alternative terminal authority, precommit projection, late
 joint cleanup and all subsequent ownership/performance gates remain open. Main Rust is unapplied.
+
+The [connected Import outer-host checkpoint](../reviews/2026-11-04-connected-import-outer-host.md)
+then moves both physical import entries onto the same retained body. Outside session data
+preserve report/manifest/error owners; the accounted session cell and temporary loans end
+before the disposition request. Old eager session finalizers and unused terminal slots are
+deleted. Its frozen six-file Import delta passes 471 Import tests and strict C/I/P lint, and
+independent review finds no actionable introduced defect. The exact complete source also
+passes 3,457 workspace tests (6 existing skips), 104 doctests, 138 independent consumer tests
+(1 existing skip), strict workspace/consumer lint and both format checks, with complete source
+maps stable across all seven integrated commands. Precommit terminal projection, late joint
+cleanup, final-only authority, numeric backing/attachment/promotion and all performance gates remain open. This
+isolated Rust successor is still not applied to main.
