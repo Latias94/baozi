@@ -155,6 +155,16 @@ permission is needed to execute the reviewed work.
 
 ## Isolated Implementation Checkpoint, 2026-11-04
 
+The [borrowed detection and OBJ checkpoint](../reviews/2026-11-05-borrowed-import-detection-and-obj.md)
+connects actual mutable detection and OBJ/MTL to the same invocation and deletes Import's
+retired owning execution adapters. Its explicitly glTF-excluded source passes 994 Operation
+tests, 107 Operation doctests, 338 OBJ/PLY/STL tests, three corrected root-entry tests,
+17 detection/cancellation-stage tests, six Detection compiler examples and the scoped
+strict lint/format checks. Independent review covers the bounded detection/root production
+seams. Import's old private callers, glTF, later storage-transition support, final integrated
+qualification, main application and performance acceptance remain open; this is a construction
+checkpoint, not completion of the connected plan.
+
 Actual retained/assembly fields now live in the caller-owned root, and core, postprocess, both import
 entries and their format/consumer callers compile through that root. The [source-qualified receipt](../reviews/2026-11-04-lexical-root-fields-and-callers.md)
 records source2's complete 3,413-test runtime and final source3's six test-only cleanup statements,
