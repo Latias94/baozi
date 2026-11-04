@@ -218,3 +218,15 @@ passes 3,457 workspace tests (6 existing skips), 104 doctests, 138 independent c
 maps stable across all seven integrated commands. Precommit terminal projection, late joint
 cleanup, final-only authority, numeric backing/attachment/promotion and all performance gates remain open. This
 isolated Rust successor is still not applied to main.
+
+The [precommit joint-payload checkpoint](../reviews/2026-11-04-precommit-joint-payload-cleanup.md)
+then retains actual output/proof inside the scoped joint. A raw unqualified classification
+precedes discarded-payload cleanup, account recheck and failure finishing. Core constructs
+tokens only with prepared success; late token drops and the old edit joint wrapper are deleted.
+Frozen source2 passes 958 Operation tests, 1,461 Core/Import/Postprocess tests (6 existing skips),
+105 doctests, 138 consumer tests (1 existing skip), strict workspace/consumer lint and applicable
+format checks. Independent source review finds no introduced defect, while direct preparation
+error/payload-panic and actual shared-storage refund/failure compositions need additional
+regressions. Those tests are a separate moving successor. Import schema admission/projection,
+old terminal authority, numeric backing/attachment/promotion and ordinary performance gates
+remain open. Main Rust remains unapplied.
