@@ -301,3 +301,26 @@ remain available for cleanup or containment. This decision is a source-grounded 
 it does not claim this removal has been implemented or measured. The static report is retained
 locally as `final-authority-removal-cut-1.md` with its frozen-source and lane association.
 Its immutable SHA-256 is `f93c9514ac034bb91eed9c1ad9fda155f904176d139930556b8404bb94920124`.
+
+## Final Authority Implementation Checkpoint, 2026-11-04
+
+The [final-authority receipt](../reviews/2026-11-04-final-invocation-authority.md) implements
+the preceding decision across the actual Operation/Core/Import/Postprocess path and legacy
+fixtures. `split` and its parts type are deleted. Opaque body startup/operation views expose
+bounded work and disposition requests; only the six real restored `CanonicalFinal<S>` states
+expose final freeze/failure preparation. The original host retains real output/proof/cause,
+account and cleanup authority. Actual inner authoring/parser callbacks remain.
+
+Frozen source4 passes all 3,469 workspace runtime tests (6 existing skips), 142 affected
+doctests, 138 independent consumer tests (1 existing skip), workspace/consumer strict Clippy
+and both format checks. Complete live/frozen sources and all seven verification commands'
+14 maps match the 1,412-file source set; the separate preparatory formatter's maps also
+match. Independent source4 review closes the constructive/escape compiler gaps without a
+correctness finding. Independent final review verifies the exact source, all command/log
+associations, actual totals and unchanged skip declarations without a finding.
+
+The remaining implementation is borrowed numeric backing and the actual permit/parser
+consumer migration, current-state attachment using one start admission, shared-shell-before-
+state promotion, exact accounting and superseded-owner deletion. Main Rust application and
+all unchanged Windows/Linux timing/memory gates remain open. This structural qualification
+does not establish an ordinary performance improvement.

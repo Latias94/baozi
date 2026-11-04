@@ -358,5 +358,17 @@ negative case only for a genuinely new boundary, not for incidental private layo
   gap and verify the exact frozen source/QA/log associations. The reviewed final-authority
   decision requires opaque body startup/
   operation views and private final state wrappers together with deleting `split`; that
-  connected migration remains unimplemented. Main Rust and ordinary performance remain
-  unchanged by these isolated structural checkpoints.
+  connected migration belongs to the successor below. Main Rust and ordinary performance
+  remain unchanged by these isolated structural checkpoints.
+- The isolated [final invocation-authority component](../reviews/2026-11-04-final-invocation-authority.md)
+  deletes the old `split` and restricts body startup/operations, final failure builders and
+  freeze issuance across actual Core/Import/Postprocess callers and legacy fixtures. The
+  original outer host restores six actual final states after body/capture cleanup; no new
+  numeric backend, account or mathematical algorithm is introduced. Frozen source4 passes
+  3,469 whole-workspace runtime tests (6 existing skips), 142 affected doctests, 138 independent
+  consumer tests (1 existing skip), workspace/consumer strict lint and both format checks.
+  Complete source/QA/log checks match; independent source4 review closes the constructive
+  and independent escape compiler gaps. Independent final source/evidence review also passes.
+  Borrowed numeric backing, current-state single-start attachment, shared promotion, exact accounting,
+  obsolete-owner deletion, main Rust application and the unchanged complete performance
+  campaign remain open. No ordinary performance keep or release readiness follows.
