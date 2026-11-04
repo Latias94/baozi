@@ -195,3 +195,14 @@ association. Existing posthandoff import ledger projection, import's outer body/
 late joint-token cleanup and the connected owner/performance work remain open. This is not
 current-successor, whole-workspace-runtime or performance qualification; main Rust remains
 unmodified by the isolated refactor.
+
+The subsequent [actual outer-host/Postprocess checkpoint](../reviews/2026-11-04-outer-host-postprocess-checkpoint.md)
+implements finite reference-free root stages, typed concrete requests/restoration and retained
+FnMut/capture cleanup. Both production P entries use that boundary; their old borrowed
+`PendingEdit` and eager body finalizers are deleted. A real never-activated rich-failure RED is
+repaired by a terminal-only failure-opening marker without reopening ordinary work. Exact final
+Operation inputs pass 951 tests, 59 doctests and strict lint/formatting; the unchanged executable
+P implementation passes 295 tests (2 existing manual skips) and O/P strict lint. Independent
+review verifies the two frozen sources and separate package evidence without a whole-source
+claim. Import migration, removing alternative terminal authority, precommit projection, late
+joint cleanup and all subsequent ownership/performance gates remain open. Main Rust is unapplied.
