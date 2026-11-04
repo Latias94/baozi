@@ -184,3 +184,14 @@ operation and core/caller reviews confirm the source/evidence association within
 This is not a whole-workspace-runtime or performance result. Late joint-failure token cleanup,
 the actual outer FnMut/capture boundary and import's corresponding publication/cell migration
 remain connected work; the isolated Rust successor is still not applied to main.
+
+The subsequent [closed import-publication component](../reviews/2026-11-04-closed-import-publication.md)
+migrates the actual core/import generation consumer to fixed prepared success/rich/minimal
+results, admits recovery and both roots before generation, and couples the private success
+owners without a fallible pairing tail. Its complete frozen source passes 1,165 Core/Import
+tests (4 existing skips), 41 doctests and affected strict lint/format checks. Independent review
+finds no actionable introduced defect within that component and verifies exact source/QA/log
+association. Existing posthandoff import ledger projection, import's outer body/session cell,
+late joint-token cleanup and the connected owner/performance work remain open. This is not
+current-successor, whole-workspace-runtime or performance qualification; main Rust remains
+unmodified by the isolated refactor.
