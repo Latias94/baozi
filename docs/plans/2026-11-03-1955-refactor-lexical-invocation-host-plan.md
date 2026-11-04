@@ -155,6 +155,15 @@ permission is needed to execute the reviewed work.
 
 ## Isolated Implementation Checkpoint, 2026-11-04
 
+The [startup graph ownership prerequisite](../reviews/2026-11-05-startup-graph-keeps-outer-ledger.md)
+keeps the real ledger/coordinator in outer common through graph preparation and removes
+`StartedLedger` and coordinator reconstruction. Its final source2 passes 3,514 workspace
+runtime tests (six existing skips), 162 doctests, 138 consumer tests (one existing skip),
+both strict lints and both format checks. Independent source review finds no actionable
+defect in the nine-file cut. Initial outer binding/current-state attachment, baseline
+qualification separation, shared promotion, remaining numeric owners, main integration
+and the complete ordinary performance gates remain open.
+
 The [connected Import services and format checkpoint](../reviews/2026-11-05-connected-import-services-and-formats.md)
 completes the actual Detection, dependency, text and four-format caller migration and
 deletes Import's old owning execution adapters. Its final source8 passes 3,510 workspace
