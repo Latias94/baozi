@@ -383,3 +383,16 @@ negative case only for a genuinely new boundary, not for incidental private layo
   complete borrowed backing, current-state attachment, shared promotion, exact accounting, main
   application and the unchanged ordinary Windows/Linux comparison remain open. No new
   performance measurement or release acceptance follows from this structural checkpoint.
+- The isolated [host-owned semantic-work component](../reviews/2026-11-04-host-owned-semantic-work.md)
+  replaces the real Core/Import/Postprocess owning-session callers with a retained callback
+  borrowing the actual unique invocation. Client begin/finish methods and their old consumers
+  are deleted; returned plans keep external input and outer reservation lifetimes after the
+  numeric loan ends. Frozen source4 passes 3,478 workspace tests (6 existing skips), 149
+  doctests, 12 focused semantic tests, 138 consumer tests (1 existing skip), both strict lints
+  and both format checks, with exact source/map/log association. Independent source review
+  identifies two direct host test gaps; production-identical source5 adds three tests/four
+  executions and passes 15 focused tests, Operation strict lint and formatting. Final independent
+  source/evidence review verifies both associations and closes both gaps without a finding.
+  Import/detection/startup numeric consumers, attachment, promotion, deletion, main application
+  and the unchanged Windows/Linux comparison remain open. This component supplies no new
+  ordinary performance keep.

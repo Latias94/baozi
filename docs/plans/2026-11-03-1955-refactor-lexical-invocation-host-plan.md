@@ -345,3 +345,32 @@ real semantic, Import and startup consumers. The next semantic cut has three pro
 entries and must return source-bound plans/outer-branded reservations only after the unique
 numeric loan and controlled callback captures end. Current-state attachment, shared
 promotion, exact accounting, main Rust application and ordinary performance remain open.
+
+## Host-Owned Semantic Work Checkpoint, 2026-11-04
+
+The [semantic-work receipt](../reviews/2026-11-04-host-owned-semantic-work.md) connects the
+actual Import, Postprocess and Core node-transform semantic callers to retained
+`CanonicalPlanning::with_semantic_work`. The real session holds the existing unique
+`StoreInvocation`; clients borrow it. Callback captures end before final control and
+completion issuance. Public begin/client-finish methods and all their old callers are
+removed. Returned input-bound plans and outer-scoped reservations survive the shorter
+numeric loan; sealing remains outside that callback. The existing action kernel,
+physical-prefix accounting, first-cause and mathematical behavior remain.
+
+Frozen source4 passes all 3,478 workspace runtime tests (6 existing skips), 149 affected
+doctests, 12 focused semantic tests, 138 independent consumer tests (1 existing skip),
+workspace/consumer strict lint and both format checks. Both exact 1,415-file trees, all
+nine logs and sixteen qualification maps plus both preparatory formatter maps match.
+Bounded independent source reviews find no confirmed production defect and identify two
+direct host regression gaps. A test-only source5 successor adds three tests/four executions
+for returned-value cleanup and nontrivial rejection ownership. Its 15 focused semantic tests,
+Operation strict lint and format check pass. All production/docs/consumer files remain
+identical to source4; this is affected successor evidence, not another full-workspace run.
+Final independent review verifies both exact source/QA/log associations, closes the two
+testing gaps and confirms the new external completion markers without a finding.
+
+Remaining real Import/detection and startup/share numeric consumers still block removal
+of `LocalWork`/`BoundWorkGroup`. Current-state single-start attachment, shared-shell-before-
+state promotion, exact accounting/deletion, main Rust application and the unchanged
+Windows/Linux timing/memory campaign remain open. This component establishes no new
+ordinary performance improvement.
