@@ -51,6 +51,23 @@ pub(super) enum AssemblyContainmentProvenance {
     RetainedFailureAlreadyRecorded(AccountPoisonReason),
 }
 
+pub(super) enum RetainedDeferredStage<CanonicalBlock, EvidenceBlock> {
+    Operation,
+    /// The trusted outer finish restored an unopened operation after actual body cleanup.
+    TerminalOperation,
+    Assembly,
+    Failure {
+        fallback_cause: super::PreparationFailureCode,
+    },
+    Fallback {
+        cause: super::PreparationFailureCode,
+        activation_containment_required: bool,
+    },
+    Success {
+        proof: RetainedSuccessClosureProof<CanonicalBlock, EvidenceBlock>,
+    },
+}
+
 pub(super) enum RetainedTerminalRequest<CanonicalBlock, EvidenceBlock, PP, U> {
     Success {
         proof: RetainedSuccessClosureProof<CanonicalBlock, EvidenceBlock>,

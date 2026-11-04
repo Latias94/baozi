@@ -2,21 +2,25 @@
 
 use std::num::{NonZeroU32, NonZeroU64};
 
-use baozi_core::__scene_integration::integration::SceneEditBootstrap;
+use baozi_core::__scene_integration::integration::{
+    SceneCanonicalRootTag, SceneEditBootstrap, SceneEditEvidenceTag, SceneEditGenerationRejection,
+    SceneEditOutput, SceneEditRejection, SceneEditValidationProof,
+};
 use baozi_operation::__retained_store_integration::activation::{
-    CanonicalActivationSessionPolicy, CanonicalMaterializationRole, CanonicalValidationRole,
-    RetainedStoreWriterRole, StoreBoundWorkGroup, StoreExecutionPermit, StoreExecutionServices,
-    StoreExecutionWork,
+    CanonicalActivationSessionPolicy, CanonicalBodyOperation, CanonicalBoundInvocationFinish,
+    CanonicalDispositionSlot, CanonicalInvocationFinish, CanonicalInvocationHost,
+    CanonicalMaterializationRole, CanonicalValidationRole, RetainedStoreWriterRole,
+    StoreActionExecution,
 };
 use baozi_operation::__retained_store_integration::authority::{
-    CanonicalInheritanceSource, RetainedStoreOperation, RetainedStoreReservation,
-    RetainedStoreSharePlan, RetainedStoreStartPlan, RetainedStoreWriterPlan,
+    CanonicalInheritanceSource, RetainedStoreReservation, RetainedStoreSharePlan,
+    RetainedStoreStartPlan, RetainedStoreWriterPlan,
 };
 use baozi_operation::{
-    CapacityPlan, DimensionPolicy, FinalProgress, LedgerLimits, RetainedStoreBatchLimits,
-    RetainedStoreFailureTerminalWorkPlan, StoreDimensionKey, StoreDimensionSemanticId,
-    StoreFallbackEnvelope, StoreKeyDomain, StoreLedgerPlan, StorePhaseKey, StorePhaseSemanticId,
-    StoreRuntimeError, StoreSemanticCatalogId,
+    CapacityPlan, DimensionPolicy, FinalProgress, LedgerLimits, RecordBlock,
+    RetainedStoreBatchLimits, RetainedStoreFailureTerminalWorkPlan, StoreDimensionKey,
+    StoreDimensionSemanticId, StoreFallbackEnvelope, StoreKeyDomain, StoreLedgerPlan,
+    StorePhaseKey, StorePhaseSemanticId, StoreRuntimeError, StoreSemanticCatalogId,
 };
 
 use super::{PostProcessOwner, PostProcessProgressPhase, PostProcessProgressUnit};
@@ -39,12 +43,110 @@ pub(crate) enum RuntimeDimension {
     TerminalEvidenceRecords = 6,
 }
 
-pub(crate) type EditOperation = RetainedStoreOperation<
+pub(crate) type EditHost = CanonicalInvocationHost<
+    PostProcessOwner,
+    PostProcessProgressPhase,
+    PostProcessProgressUnit,
+    SceneEditOutput,
+    SceneEditValidationProof,
+    SceneEditRejection,
+    SceneEditRejection,
+    SceneEditGenerationRejection,
+    RecordBlock,
+    SceneCanonicalRootTag,
+    RecordBlock,
+    SceneEditEvidenceTag,
+>;
+
+pub(crate) type EditDisposition<'inv> = CanonicalDispositionSlot<
+    'inv,
+    RecordBlock,
+    SceneCanonicalRootTag,
+    RecordBlock,
+    SceneEditEvidenceTag,
+>;
+
+pub(crate) type EditFinish<'inv> = CanonicalInvocationFinish<
+    'inv,
+    PostProcessOwner,
+    PostProcessProgressPhase,
+    PostProcessProgressUnit,
+    SceneEditOutput,
+    SceneEditValidationProof,
+    SceneEditRejection,
+    SceneEditRejection,
+    SceneEditGenerationRejection,
+    RecordBlock,
+    SceneCanonicalRootTag,
+    RecordBlock,
+    SceneEditEvidenceTag,
+>;
+
+pub(crate) type EditBoundFinish<'inv, 'account> = CanonicalBoundInvocationFinish<
+    'inv,
+    'account,
+    PostProcessOwner,
+    PostProcessProgressPhase,
+    PostProcessProgressUnit,
+    SceneEditOutput,
+    SceneEditValidationProof,
+    SceneEditRejection,
+    SceneEditRejection,
+    SceneEditGenerationRejection,
+    RecordBlock,
+    SceneCanonicalRootTag,
+    RecordBlock,
+    SceneEditEvidenceTag,
+>;
+
+pub(crate) type EditOperation<'inv> = CanonicalBodyOperation<
+    'inv,
     PostProcessOwner,
     PostProcessProgressPhase,
     PostProcessProgressUnit,
     CanonicalInheritanceSource,
 >;
+
+#[cfg(test)]
+pub(crate) fn with_test_operation<T>(
+    scene: &baozi_core::ValidatedScene,
+    control: crate::PostProcessControl,
+    mut body: impl for<'inv> FnMut(&mut EditOperation<'inv>, RuntimeKeys) -> T,
+) -> (
+    baozi_operation::__retained_store_integration::activation::CanonicalOperationPublication,
+    T,
+) {
+    use baozi_operation::__retained_store_integration::activation::CanonicalInvocationOutcome;
+
+    let (writer, _, _) = SceneEditBootstrap::try_new().unwrap().into_parts();
+    let (keys, ledger, plan) =
+        plan_selected_runtime(writer, crate::PostProcessBudgets::default()).unwrap();
+    let mut inputs = Some((control, ledger, plan));
+    let mut result = None;
+    let result_slot = &mut result;
+    let mut host = EditHost::new();
+    let finish = host
+        .run_body(move |parts, disposition| {
+            let (control, ledger, plan) = inputs.take().expect("one test operation body");
+            let mut operation =
+                baozi_core::__scene_integration::integration::try_start_scene_edit_operation::<
+                    PostProcessOwner,
+                    _,
+                    _,
+                >(parts.startup, scene, control.into_runtime(), ledger, plan)
+                .unwrap();
+            *result_slot = Some(body(&mut operation, keys));
+            operation.request_unchanged(disposition).unwrap();
+        })
+        .unwrap();
+    let CanonicalInvocationOutcome::Operation(operation) = finish.resume().outcome else {
+        panic!("the bounded execution fixture must restore its actual operation");
+    };
+    (
+        operation.finish(final_progress()).unwrap(),
+        result.expect("the test operation body must run once"),
+    )
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct RuntimeKeys {
@@ -200,114 +302,15 @@ pub(crate) const fn final_progress()
 }
 
 /// One concrete execution region; all borrowed roles end before consuming the edit owner.
-pub(crate) struct ActiveRuntime<'op> {
-    work: StoreExecutionWork<'op, PostProcessOwner>,
-    group: StoreBoundWorkGroup<'op, 1>,
-    services: StoreExecutionServices<
-        'op,
-        PostProcessOwner,
-        PostProcessProgressPhase,
-        PostProcessProgressUnit,
-    >,
-    // The envelope stays owned between leaves; action state is tracked separately.
-    pending: Option<StoreExecutionPermit<'op, 1>>,
-    action_pending: Option<u16>,
-}
+pub(crate) type ActiveRuntime<'op> =
+    StoreActionExecution<'op, PostProcessOwner, PostProcessProgressPhase, PostProcessProgressUnit>;
 
 pub(crate) fn with_execution<R, E: From<StoreRuntimeError>>(
-    operation: &mut EditOperation,
+    operation: &mut EditOperation<'_>,
     keys: RuntimeKeys,
     action: impl FnOnce(&mut ActiveRuntime<'_>) -> Result<R, E>,
 ) -> Result<R, E> {
-    let (work, services) = operation.execution()?;
-    let group = work.bind_group([keys.work])?;
-    let mut runtime = ActiveRuntime {
-        work,
-        group,
-        services,
-        pending: None,
-        action_pending: None,
-    };
-    let result = action(&mut runtime);
-    if runtime.action_pending.is_some() {
-        // Unmatched Begin keeps abandonment even if the permit was completed behind the adapter.
-        return match result {
-            Ok(_) => Err(StoreRuntimeError::ObservedWorkIncomplete.into()),
-            Err(cause) => Err(cause),
-        };
-    }
-    let closed = match runtime.pending.take() {
-        Some(work) => match &result {
-            Ok(_) => work.finish(),
-            Err(_) => work.finish_partial(),
-        },
-        None => Ok(()),
-    };
-    let resolved = match closed {
-        Ok(()) => runtime.work.finish_region(),
-        Err(cause) => Err(cause),
-    };
-    match result {
-        Ok(value) => {
-            resolved?;
-            runtime.services.checkpoint()?;
-            Ok(value)
-        }
-        // Explicit cleanup retains its own sticky faults without replacing the original error.
-        Err(cause) => Err(cause),
-    }
-}
-
-#[allow(
-    clippy::result_large_err,
-    reason = "action failures retain exact inline accounting and control causes"
-)]
-impl ActiveRuntime<'_> {
-    pub(crate) fn checkpoint(&mut self) -> Result<(), StoreRuntimeError> {
-        self.services.checkpoint()
-    }
-
-    pub(crate) fn begin_action(&mut self, max_cost: u16) -> Result<(), StoreRuntimeError> {
-        if self.action_pending.is_some() {
-            return Err(StoreRuntimeError::ObservedWorkOutstanding);
-        }
-        self.services.before_action(max_cost)?;
-        match &mut self.pending {
-            Some(work) => work.replenish_one()?,
-            None => self.pending = Some(self.group.admit_observed([1])?),
-        }
-        self.action_pending = Some(max_cost);
-        Ok(())
-    }
-
-    pub(crate) fn complete_action(&mut self) -> Result<(), StoreRuntimeError> {
-        let max_cost = self
-            .action_pending
-            .ok_or(StoreRuntimeError::ObservedWorkIncomplete)?;
-        let work = self
-            .pending
-            .as_mut()
-            .ok_or(StoreRuntimeError::ObservedWorkIncomplete)?;
-        if work.remaining() != [1] {
-            return Err(StoreRuntimeError::ObservedWorkIncomplete);
-        }
-        if let Err(cause) = work.complete([1]) {
-            self.action_pending = None;
-            // Completion errors resolve now, so callers can immediately check region quiescence.
-            if let Some(work) = self.pending.take() {
-                let _ = work.finish_partial();
-            }
-            return Err(cause);
-        }
-        self.action_pending = None;
-        if let Err(cause) = self.services.completed_action(max_cost) {
-            if let Some(work) = self.pending.take() {
-                let _ = work.finish_partial();
-            }
-            return Err(cause);
-        }
-        Ok(())
-    }
+    operation.with_action_execution(keys.work, action)
 }
 
 /// Accounts the actual bounded leaf; control cadence is independent from numeric admission.
@@ -346,7 +349,7 @@ impl<T> ScratchVec<T> {
         let bytes = plan
             .envelope_delta_bytes()
             .map_err(|cause| StoreRuntimeError::Plan(cause.into()))?;
-        let mut reservation = operation.services.reserve_retained(
+        let mut reservation = operation.reserve_retained(
             keys.planning,
             keys.scratch,
             bytes,
@@ -367,7 +370,7 @@ impl<T> ScratchVec<T> {
                 return Err(StoreRuntimeError::Plan(cause.into()));
             }
         };
-        if let Err(cause) = operation.services.resize(&mut reservation, actual) {
+        if let Err(cause) = operation.resize(&mut reservation, actual) {
             reservation.release_storage(values);
             return Err(cause);
         }
@@ -393,7 +396,22 @@ impl<T> ScratchVec<T> {
 impl<T> Drop for ScratchVec<T> {
     fn drop(&mut self) {
         if let Some(reservation) = self.reservation.take() {
+            #[cfg(test)]
+            let released = self
+                .values
+                .as_ref()
+                .map(|values| (values.as_ptr() as usize, values.len(), values.capacity()));
             reservation.release_storage(self.values.take());
+            #[cfg(test)]
+            if let Some((address, len, capacity)) = released {
+                crate::prepare::cleanup_tests::record(
+                    crate::prepare::cleanup_tests::Event::ScratchDropped {
+                        address,
+                        len,
+                        capacity,
+                    },
+                );
+            }
         }
     }
 }

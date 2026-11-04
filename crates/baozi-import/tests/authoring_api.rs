@@ -23,7 +23,7 @@ fn custom_importers_receive_one_authority_free_authoring_surface() {
 
     fn accepts_input(_: SceneAuthoringBatch<'_>) {}
     fn submit_complete(
-        context: &mut ParseContext<'_>,
+        context: &mut ParseContext<'_, '_>,
         input: SceneAuthoringBatch<'_>,
     ) -> ParseResult<()> {
         context.submit_complete(input)

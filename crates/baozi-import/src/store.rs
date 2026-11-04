@@ -1,50 +1,60 @@
 mod execution;
+mod root_execution;
+pub(crate) use root_execution::{ImportRootExecution, ImportRootWorkLayout};
 mod scene_activation;
 
-pub(crate) use execution::{
-    ImportBoundWorkGroup, ImportExecutionFailure, ImportOrdinaryStorage,
-    ImportParserAdmissionError, ImportParserWorkScope, ImportStoreExecution,
-};
+pub(crate) use execution::{ImportExecutionFailure, ImportOrdinaryStorage, ImportStoreServices};
 
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64};
 
 use baozi_core::__scene_integration::integration::{
-    SceneEvidenceRecipe, SceneOutcomeEvidenceTag, SceneSessionActivationBootstrap,
-    maximum_scene_canonical_blocks, maximum_scene_structural_work,
+    SceneActivationOutput, SceneActivationRejection, SceneCanonicalRootTag, SceneEvidenceRecipe,
+    SceneGenerationRejection, SceneOutcomeEvidenceTag, SceneSessionActivationBootstrap,
+    SceneValidationProof, maximum_scene_canonical_blocks, maximum_scene_structural_work,
     scene_failure_evidence_field_work, scene_failure_evidence_member_count,
     scene_failure_terminal_work_requirement,
 };
 use baozi_core::{SceneValidationLimits, ValidatedScene as CanonicalValidatedScene};
+#[cfg(test)]
+use baozi_operation::__retained_store_integration::activation::CanonicalBodyParts;
 use baozi_operation::__retained_store_integration::activation::{
-    CanonicalActivationSessionPolicy, CanonicalMaterializationRole, CanonicalValidationRole,
-    RetainedStoreDimensionState, RetainedStoreSessionOutcomeOwner, RetainedStoreWriterRole,
-    StoreActivationContainment, StoreImporterBoundary,
+    CanonicalActivationSessionPolicy, CanonicalBodyOperation, CanonicalBoundBodyParts,
+    CanonicalDispositionSlot, CanonicalInvocationFinish, CanonicalInvocationHost,
+    CanonicalMaterializationRole, CanonicalValidationRole, RetainedStoreDimensionState,
+    RetainedStoreSessionOutcomeOwner, RetainedStoreWriterRole, StoreActivationContainment,
+    StoreImporterBoundary,
 };
 use baozi_operation::__retained_store_integration::authority::{
-    RetainedStoreOperation, RetainedStoreReservation, RetainedStoreSharePlan,
-    RetainedStoreStartError, RetainedStoreStartPlan, RetainedStoreWriterPlan,
+    RetainedStoreReservation, RetainedStoreSharePlan, RetainedStoreStartError,
+    RetainedStoreStartPlan, RetainedStoreWriterPlan,
 };
+#[cfg(test)]
+use baozi_operation::PhysicalStorageAccount;
 use baozi_operation::{
     ControlCause, DimensionPolicy, LedgerCause, LedgerLimits, LedgerLimitsError,
-    PhysicalStorageAccount, PublishedOutcomeEvidenceStore, PublishedRichFailureStore,
-    PublishedStoreFallbackOutput, RecordBlock, RetainedStoreBatchLimits,
-    RetainedStoreFailureTerminalWorkPlan, StoreDimensionKey, StoreDimensionSemanticId,
-    StoreDimensionSnapshot, StoreFallbackEnvelope, StoreKeyDomain, StoreKeyDomainCreateError,
-    StoreLedgerEvidence, StoreLedgerPlan, StoreLedgerPlanError, StorePhaseKey,
-    StorePhaseSemanticId, StorePhaseSnapshot, StorePlanError, StorePreparationFailureClass,
-    StorePrepareError, StoreRuntimeError, StoreSemanticCatalogId, StoreTerminalCause,
+    PublishedOutcomeEvidenceStore, PublishedRichFailureStore, PublishedStoreFallbackOutput,
+    RecordBlock, RetainedStoreBatchLimits, RetainedStoreFailureTerminalWorkPlan, StoreDimensionKey,
+    StoreDimensionSemanticId, StoreDimensionSnapshot, StoreFallbackEnvelope, StoreKeyDomain,
+    StoreKeyDomainCreateError, StoreLedgerEvidence, StoreLedgerPlan, StoreLedgerPlanError,
+    StorePhaseKey, StorePhaseSemanticId, StorePhaseSnapshot, StorePlanError,
+    StorePreparationFailureClass, StorePrepareError, StoreRuntimeError, StoreSemanticCatalogId,
+    StoreTerminalCause,
 };
 
 use crate::error::ScopeAbortCause;
+#[cfg(test)]
+use crate::ledger::ImportOperationControl;
 use crate::ledger::{
-    ImportDimension, ImportLedgerPhase, ImportOperationControl, ImportOperationOwner,
-    ImportProgressPhase, ImportProgressUnit, import_ledger_limits,
+    ImportDimension, ImportLedgerPhase, ImportOperationOwner, ImportProgressPhase,
+    ImportProgressUnit, import_ledger_limits,
 };
 use crate::limits::ResourceLimits;
 use crate::metered_storage::AccountedVec;
 
-pub(crate) use scene_activation::ImportStoreSceneBoundary;
+pub(crate) use scene_activation::{
+    ImportStoreFinishRequest, ImportStoreSceneBoundary, finish_scene,
+};
 
 const IMPORT_STORE_CATALOG: StoreSemanticCatalogId =
     StoreSemanticCatalogId::new(*b"baozi-import-led", NonZeroU32::MIN);
@@ -57,10 +67,73 @@ const IMPORT_STORE_TERMINAL_DIMENSION_COUNT: usize = 4;
 const IMPORT_STORE_EVIDENCE_DIMENSION_COUNT: usize =
     IMPORT_DIMENSION_COUNT + IMPORT_STORE_TERMINAL_DIMENSION_COUNT;
 
-type ImportStoreOperation =
-    RetainedStoreOperation<ImportOperationOwner, ImportProgressPhase, ImportProgressUnit>;
-type ImportStoreOutcomeOwner =
-    RetainedStoreSessionOutcomeOwner<ImportOperationOwner, ImportProgressPhase, ImportProgressUnit>;
+pub(crate) type ImportStoreInvocationRoot = CanonicalInvocationHost<
+    ImportOperationOwner,
+    ImportProgressPhase,
+    ImportProgressUnit,
+    SceneActivationOutput,
+    SceneValidationProof,
+    SceneActivationRejection,
+    SceneActivationRejection,
+    SceneGenerationRejection,
+    RecordBlock,
+    SceneCanonicalRootTag,
+    RecordBlock,
+    SceneOutcomeEvidenceTag,
+>;
+pub(crate) type ImportStoreBoundBodyParts<'call, 'entry, 'account> = CanonicalBoundBodyParts<
+    'call,
+    'entry,
+    'account,
+    ImportOperationOwner,
+    ImportProgressPhase,
+    ImportProgressUnit,
+    SceneActivationOutput,
+    SceneValidationProof,
+    SceneActivationRejection,
+    SceneActivationRejection,
+>;
+#[cfg(test)]
+pub(crate) type ImportStoreBodyParts<'inv> = CanonicalBodyParts<
+    'inv,
+    ImportOperationOwner,
+    ImportProgressPhase,
+    ImportProgressUnit,
+    SceneActivationOutput,
+    SceneValidationProof,
+    SceneActivationRejection,
+    SceneActivationRejection,
+>;
+pub(crate) type ImportStoreDisposition<'inv> = CanonicalDispositionSlot<
+    'inv,
+    RecordBlock,
+    SceneCanonicalRootTag,
+    RecordBlock,
+    SceneOutcomeEvidenceTag,
+>;
+pub(crate) type ImportStoreFinish<'inv> = CanonicalInvocationFinish<
+    'inv,
+    ImportOperationOwner,
+    ImportProgressPhase,
+    ImportProgressUnit,
+    SceneActivationOutput,
+    SceneValidationProof,
+    SceneActivationRejection,
+    SceneActivationRejection,
+    SceneGenerationRejection,
+    RecordBlock,
+    SceneCanonicalRootTag,
+    RecordBlock,
+    SceneOutcomeEvidenceTag,
+>;
+type ImportStoreOperation<'inv> =
+    CanonicalBodyOperation<'inv, ImportOperationOwner, ImportProgressPhase, ImportProgressUnit>;
+type ImportStoreOutcomeOwner<'inv> = RetainedStoreSessionOutcomeOwner<
+    'inv,
+    ImportOperationOwner,
+    ImportProgressPhase,
+    ImportProgressUnit,
+>;
 
 /// Import-owned terminal classification copied from the unique ledger header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -308,43 +381,20 @@ pub(crate) struct ImportStoreTerminalEvidence {
 }
 
 impl ImportStoreTerminalEvidence {
-    fn try_from_ledger(
-        evidence: StoreLedgerEvidence,
-    ) -> Result<Self, ImportStoreTerminalProjectionError> {
+    fn from_admitted_ledger(evidence: StoreLedgerEvidence) -> Self {
         let header = evidence.header();
-        if header.phase_count() != ImportLedgerPhase::ALL.len() {
-            return Err(ImportStoreTerminalProjectionError::UnexpectedPhaseCount {
-                actual: header.phase_count(),
-                expected: ImportLedgerPhase::ALL.len(),
-            });
-        }
-        if header.dimension_count() != IMPORT_STORE_EVIDENCE_DIMENSION_COUNT {
-            return Err(
-                ImportStoreTerminalProjectionError::UnexpectedDimensionCount {
-                    actual: header.dimension_count(),
-                    expected: IMPORT_STORE_EVIDENCE_DIMENSION_COUNT,
-                },
-            );
-        }
-        if header.current_live_bytes() != 0 || header.active_reservations() != 0 {
-            return Err(
-                ImportStoreTerminalProjectionError::UnreleasedTerminalState {
-                    current_live_bytes: header.current_live_bytes(),
-                    active_reservations: header.active_reservations(),
-                },
-            );
-        }
+        // The exact live root admits this complete catalog before final restoration.
+        // Typed terminal qualification proves every live cover and projects the post-commit
+        // zero state; no report validation or alternative result follows committed handoff.
+        let cause = import_terminal_cause(header.terminal_cause());
+        let last_completed_phase = header.last_completed_phase().map(|semantic| {
+            ImportLedgerPhase::ALL
+                .into_iter()
+                .find(|phase| import_phase_semantic_id(*phase) == semantic)
+                .expect("the admitted immutable Import catalog contains every completed phase")
+        });
 
-        let cause = import_terminal_cause(header.terminal_cause())?;
-        let last_completed_phase = header
-            .last_completed_phase()
-            .map(import_phase_from_semantic)
-            .transpose()?;
-        validate_import_phases(|semantic| evidence.phase_by_semantic(semantic))?;
-        validate_import_dimensions(|semantic| evidence.dimension_by_semantic(semantic))?;
-        validate_import_terminal_dimensions(|semantic| evidence.dimension_by_semantic(semantic))?;
-
-        Ok(Self {
+        Self {
             cause,
             last_completed_phase,
             current_live_bytes: header.current_live_bytes(),
@@ -353,7 +403,7 @@ impl ImportStoreTerminalEvidence {
             current_evidence_bytes: header.current_evidence_bytes(),
             peak_evidence_bytes: header.peak_evidence_bytes(),
             ledger: evidence,
-        })
+        }
     }
 
     pub(crate) const fn cause(&self) -> ImportStoreTerminalCause {
@@ -566,152 +616,44 @@ impl ImportStoreTerminalOutcome {
     }
 }
 
-fn import_terminal_cause(
-    cause: StoreTerminalCause,
-) -> Result<ImportStoreTerminalCause, ImportStoreTerminalProjectionError> {
+fn import_terminal_cause(cause: StoreTerminalCause) -> ImportStoreTerminalCause {
     match cause {
-        StoreTerminalCause::Success => Ok(ImportStoreTerminalCause::Success),
+        StoreTerminalCause::Success => ImportStoreTerminalCause::Success,
         StoreTerminalCause::Failure(cause) => {
-            let class = import_terminal_failure_class(cause.class())?;
-            Ok(ImportStoreTerminalCause::Failure {
+            let class = import_terminal_failure_class(cause.class());
+            ImportStoreTerminalCause::Failure {
                 class,
                 code: cause.code(),
-            })
+            }
         }
-        _ => Err(ImportStoreTerminalProjectionError::UnsupportedTerminalCause),
     }
 }
 
 fn import_terminal_failure_class(
     class: StorePreparationFailureClass,
-) -> Result<ImportStoreTerminalFailureClass, ImportStoreTerminalProjectionError> {
+) -> ImportStoreTerminalFailureClass {
     match class {
-        StorePreparationFailureClass::Requested => Ok(ImportStoreTerminalFailureClass::Requested),
-        StorePreparationFailureClass::Control => Ok(ImportStoreTerminalFailureClass::Control),
-        StorePreparationFailureClass::ProductGraph => {
-            Ok(ImportStoreTerminalFailureClass::ProductGraph)
+        StorePreparationFailureClass::Requested => ImportStoreTerminalFailureClass::Requested,
+        StorePreparationFailureClass::Control => ImportStoreTerminalFailureClass::Control,
+        StorePreparationFailureClass::ProductGraph => ImportStoreTerminalFailureClass::ProductGraph,
+        StorePreparationFailureClass::Ledger => ImportStoreTerminalFailureClass::Ledger,
+    }
+}
+
+fn import_terminal_phases() -> [StorePhaseSemanticId; ImportLedgerPhase::ALL.len()] {
+    ImportLedgerPhase::ALL.map(import_phase_semantic_id)
+}
+
+fn import_terminal_dimensions() -> [StoreDimensionSemanticId; IMPORT_STORE_EVIDENCE_DIMENSION_COUNT]
+{
+    std::array::from_fn(|index| {
+        if index < IMPORT_DIMENSION_COUNT {
+            import_dimension_semantic_id(ImportDimension::ALL[index])
+        } else {
+            ImportStoreTerminalDimension::ALL[index - IMPORT_DIMENSION_COUNT].semantic_id()
         }
-        StorePreparationFailureClass::Ledger => Ok(ImportStoreTerminalFailureClass::Ledger),
-        _ => Err(ImportStoreTerminalProjectionError::UnsupportedTerminalFailureClass),
-    }
+    })
 }
-
-fn import_phase_from_semantic(
-    semantic: StorePhaseSemanticId,
-) -> Result<ImportLedgerPhase, ImportStoreTerminalProjectionError> {
-    ImportLedgerPhase::ALL
-        .into_iter()
-        .find(|phase| import_phase_semantic_id(*phase) == semantic)
-        .ok_or(ImportStoreTerminalProjectionError::UnknownLastCompletedPhase)
-}
-
-fn validate_import_phases(
-    mut lookup: impl FnMut(StorePhaseSemanticId) -> Option<StorePhaseSnapshot>,
-) -> Result<(), ImportStoreTerminalProjectionError> {
-    for phase in ImportLedgerPhase::ALL {
-        lookup(import_phase_semantic_id(phase))
-            .ok_or(ImportStoreTerminalProjectionError::MissingPhase { phase })?;
-    }
-    Ok(())
-}
-
-fn validate_import_dimensions(
-    mut lookup: impl FnMut(StoreDimensionSemanticId) -> Option<StoreDimensionSnapshot>,
-) -> Result<(), ImportStoreTerminalProjectionError> {
-    for dimension in ImportDimension::ALL {
-        lookup(import_dimension_semantic_id(dimension))
-            .ok_or(ImportStoreTerminalProjectionError::MissingDimension { dimension })?;
-    }
-    Ok(())
-}
-
-fn validate_import_terminal_dimensions(
-    mut lookup: impl FnMut(StoreDimensionSemanticId) -> Option<StoreDimensionSnapshot>,
-) -> Result<(), ImportStoreTerminalProjectionError> {
-    for dimension in ImportStoreTerminalDimension::ALL {
-        lookup(dimension.semantic_id())
-            .ok_or(ImportStoreTerminalProjectionError::MissingTerminalDimension { dimension })?;
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ImportStoreTerminalProjectionError {
-    UnexpectedPhaseCount {
-        actual: usize,
-        expected: usize,
-    },
-    UnexpectedDimensionCount {
-        actual: usize,
-        expected: usize,
-    },
-    UnreleasedTerminalState {
-        current_live_bytes: u64,
-        active_reservations: u64,
-    },
-    UnsupportedTerminalCause,
-    UnsupportedTerminalFailureClass,
-    TerminalOwnerCauseMismatch,
-    UnknownLastCompletedPhase,
-    MissingPhase {
-        phase: ImportLedgerPhase,
-    },
-    MissingDimension {
-        dimension: ImportDimension,
-    },
-    MissingTerminalDimension {
-        dimension: ImportStoreTerminalDimension,
-    },
-}
-
-impl fmt::Display for ImportStoreTerminalProjectionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnexpectedPhaseCount { actual, expected } => write!(
-                formatter,
-                "terminal store evidence contains {actual} phases; expected {expected}"
-            ),
-            Self::UnexpectedDimensionCount { actual, expected } => write!(
-                formatter,
-                "terminal store evidence contains {actual} dimensions; expected {expected}"
-            ),
-            Self::UnreleasedTerminalState {
-                current_live_bytes,
-                active_reservations,
-            } => write!(
-                formatter,
-                "terminal store evidence retains {current_live_bytes} live bytes across {active_reservations} active reservations"
-            ),
-            Self::UnsupportedTerminalCause => {
-                formatter.write_str("terminal store evidence has an unsupported terminal cause")
-            }
-            Self::UnsupportedTerminalFailureClass => formatter
-                .write_str("terminal store evidence has an unsupported terminal failure class"),
-            Self::TerminalOwnerCauseMismatch => formatter.write_str(
-                "terminal store ownership does not match the unique ledger terminal cause",
-            ),
-            Self::UnknownLastCompletedPhase => {
-                formatter.write_str("terminal store evidence has an unknown last-completed phase")
-            }
-            Self::MissingPhase { phase } => {
-                write!(
-                    formatter,
-                    "terminal store evidence is missing phase {phase:?}"
-                )
-            }
-            Self::MissingDimension { dimension } => write!(
-                formatter,
-                "terminal store evidence is missing dimension {dimension:?}"
-            ),
-            Self::MissingTerminalDimension { dimension } => write!(
-                formatter,
-                "terminal store evidence is missing terminal dimension {dimension:?}"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for ImportStoreTerminalProjectionError {}
 
 /// Import-owned view of one retained-store reservation.
 ///
@@ -1108,27 +1050,52 @@ pub(crate) struct ImportStoreBootstrap {
     scene_activation: SceneSessionActivationBootstrap,
 }
 
+pub(crate) struct ImportStoreBodyBootstrap {
+    vocabulary: ImportStoreVocabulary,
+    scene_activation: SceneSessionActivationBootstrap,
+}
+
+impl ImportStoreBootstrap {
+    pub(crate) fn into_bound_parts(
+        self,
+    ) -> (
+        StoreLedgerPlan,
+        RetainedStoreStartPlan,
+        ImportStoreBodyBootstrap,
+    ) {
+        (
+            self.ledger_plan,
+            self.start_plan,
+            ImportStoreBodyBootstrap {
+                vocabulary: self.vocabulary,
+                scene_activation: self.scene_activation,
+            },
+        )
+    }
+}
+
 /// Sole retained-store owner for one import session before canonical activation begins.
 ///
-/// Producer-facing code borrows [`ImportStoreExecution`] rather than the raw operation, store
+/// Producer-facing code borrows [`ImportRootExecution`] rather than the raw operation, store
 /// keys or physical account. The private state slot retains the session-lifetime outcome owner and its
 /// dormant Scene authority across producer work, then consumes that owner exactly once when the
 /// core-sealed Scene plan reaches activation.
-pub(crate) struct ImportStoreSessionOwner {
+pub(crate) struct ImportStoreSessionOwner<'inv> {
     // One startup-admitted cell keeps the large linear state out of every import stack frame.
     // AccountedVec destroys the actual cell before releasing its physical and ledger charge.
-    storage: AccountedVec<ImportStoreSessionData>,
+    storage: AccountedVec<ImportStoreSessionData<'inv>>,
 }
 
-pub(crate) struct ImportStoreSessionData {
-    state: ImportStoreSessionState,
+pub(crate) struct ImportStoreSessionData<'inv> {
+    state: ImportStoreSessionState<'inv>,
+    canonical_slots: Option<scene_activation::ImportSceneActivationSlots<'inv>>,
     vocabulary: ImportStoreVocabulary,
     unsubmitted_evidence: SceneEvidenceRecipe,
     importer_boundary: StoreImporterBoundary,
 }
 
-impl std::ops::Deref for ImportStoreSessionOwner {
-    type Target = ImportStoreSessionData;
+impl<'inv> std::ops::Deref for ImportStoreSessionOwner<'inv> {
+    type Target = ImportStoreSessionData<'inv>;
 
     fn deref(&self) -> &Self::Target {
         &self.storage[0]
@@ -1166,14 +1133,14 @@ impl std::error::Error for ImportStoreSessionStartError {
     clippy::large_enum_variant,
     reason = "the sole operation and pending terminal owners stay inline so fail-closed transitions do not allocate"
 )]
-enum ImportStoreSessionState {
-    Dormant(ImportStoreOutcomeOwner),
+enum ImportStoreSessionState<'inv> {
+    Dormant(ImportStoreOutcomeOwner<'inv>),
     Transitioning,
-    Pending(scene_activation::ImportPendingScene),
+    Pending(scene_activation::ImportPendingScene<'inv>),
     Contained,
 }
 
-fn inactive_store_state_error(state: &ImportStoreSessionState) -> ImportStoreHostError {
+fn inactive_store_state_error(state: &ImportStoreSessionState<'_>) -> ImportStoreHostError {
     match state {
         ImportStoreSessionState::Contained => ImportStoreHostError::OperationContained,
         ImportStoreSessionState::Dormant(_)
@@ -1186,20 +1153,64 @@ fn inactive_store_state_error(state: &ImportStoreSessionState) -> ImportStoreHos
     clippy::result_large_err,
     reason = "startup failures preserve the complete linear retained-store recovery owner"
 )]
-impl ImportStoreSessionOwner {
-    pub(crate) fn try_start(
+impl<'inv> ImportStoreSessionOwner<'inv> {
+    pub(crate) fn try_attach_in_body(
+        parts: ImportStoreBoundBodyParts<'inv, '_, '_>,
+        bootstrap: ImportStoreBodyBootstrap,
+    ) -> Result<Self, ImportStoreSessionStartError> {
+        let operation = parts
+            .startup
+            .attach()
+            .map_err(ImportStoreSessionStartError::Start)?;
+        Self::try_from_operation(
+            operation,
+            scene_activation::ImportSceneActivationSlots {
+                output: parts.output,
+                proof: parts.proof,
+                activation: parts.activation,
+                validation: parts.validation,
+            },
+            bootstrap,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_start_in_body(
+        parts: ImportStoreBodyParts<'inv>,
         control: ImportOperationControl,
         account: &PhysicalStorageAccount,
         bootstrap: ImportStoreBootstrap,
     ) -> Result<Self, ImportStoreSessionStartError> {
-        let ImportStoreBootstrap {
-            vocabulary,
+        let (ledger_plan, start_plan, bootstrap) = bootstrap.into_bound_parts();
+        let operation = ImportStoreOperation::try_start(
+            parts.startup,
+            control,
             ledger_plan,
+            account,
             start_plan,
+        )
+        .map_err(ImportStoreSessionStartError::Start)?;
+        Self::try_from_operation(
+            operation,
+            scene_activation::ImportSceneActivationSlots {
+                output: parts.output,
+                proof: parts.proof,
+                activation: parts.activation,
+                validation: parts.validation,
+            },
+            bootstrap,
+        )
+    }
+
+    fn try_from_operation(
+        operation: ImportStoreOperation<'inv>,
+        canonical_slots: scene_activation::ImportSceneActivationSlots<'inv>,
+        bootstrap: ImportStoreBodyBootstrap,
+    ) -> Result<Self, ImportStoreSessionStartError> {
+        let ImportStoreBodyBootstrap {
+            vocabulary,
             scene_activation,
         } = bootstrap;
-        let operation = ImportStoreOperation::try_start(control, ledger_plan, account, start_plan)
-            .map_err(ImportStoreSessionStartError::Start)?;
         let (outcome_evidence_writer_limits, failure, unsubmitted_evidence) =
             scene_activation.into_parts();
         let owner = operation
@@ -1211,6 +1222,7 @@ impl ImportStoreSessionOwner {
             .map_err(ImportStoreSessionStartError::Containment)?;
         let mut data = ImportStoreSessionData {
             state: ImportStoreSessionState::Dormant(owner),
+            canonical_slots: Some(canonical_slots),
             vocabulary,
             unsubmitted_evidence,
             importer_boundary: StoreImporterBoundary::default(),
@@ -1242,14 +1254,18 @@ impl ImportStoreSessionOwner {
         Ok(Self { storage })
     }
 
-    fn into_terminal_state(mut self) -> (ImportStoreSessionState, SceneEvidenceRecipe) {
+    fn into_body_state(mut self) -> Result<ImportStoreSessionData<'inv>, ImportStoreHostError> {
         let data = self
             .storage
             .pop()
             .expect("the startup-admitted session has exactly one state cell");
-        // No state-cell reservation may reach the final ledger freeze.
         drop(self);
-        (data.state, data.unsubmitted_evidence)
+        match &data.state {
+            ImportStoreSessionState::Transitioning | ImportStoreSessionState::Contained => {
+                Err(ImportStoreHostError::OperationContained)
+            }
+            ImportStoreSessionState::Dormant(_) | ImportStoreSessionState::Pending(_) => Ok(data),
+        }
     }
 
     pub(crate) fn check_execution_running(&self) -> Result<(), ImportStoreHostError> {
@@ -1384,30 +1400,6 @@ impl std::error::Error for ImportStoreActivationError {
 }
 
 #[derive(Debug)]
-pub(crate) enum ImportStoreFinalizationError {
-    Activation(ImportStoreActivationError),
-    Projection(ImportStoreTerminalProjectionError),
-}
-
-impl fmt::Display for ImportStoreFinalizationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Activation(cause) => cause.fmt(formatter),
-            Self::Projection(cause) => cause.fmt(formatter),
-        }
-    }
-}
-
-impl std::error::Error for ImportStoreFinalizationError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Activation(cause) => Some(cause),
-            Self::Projection(cause) => Some(cause),
-        }
-    }
-}
-
-#[derive(Debug)]
 pub(crate) enum ImportStoreHostError {
     OperationConsumed,
     OperationContained,
@@ -1429,6 +1421,18 @@ impl ImportStoreHostError {
             },
             Self::Contract { code } => ScopeAbortCause::DescriptorContract { code },
         }
+    }
+}
+
+impl From<ImportStoreHostError> for ScopeAbortCause {
+    fn from(cause: ImportStoreHostError) -> Self {
+        cause.into_scope_abort_cause()
+    }
+}
+
+impl From<ImportStoreHostError> for crate::ImportCause {
+    fn from(cause: ImportStoreHostError) -> Self {
+        Self::Scope(crate::ScopeAbort::new(cause.into_scope_abort_cause()))
     }
 }
 
@@ -1578,12 +1582,6 @@ fn project_store_ledger_cause(
         LedgerCause::FinalSnapshotShapeMismatch => LedgerCause::FinalSnapshotShapeMismatch,
         _ => return None,
     })
-}
-
-#[derive(Debug)]
-pub(crate) enum ImportObservedWorkFailure<E> {
-    Store(ImportStoreHostError),
-    Action(E),
 }
 
 pub(crate) fn try_import_store_bootstrap(
@@ -1878,7 +1876,7 @@ mod tests {
     use super::*;
     use std::mem::size_of;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use crate::authoring::{
         AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoredTransform,
@@ -1890,6 +1888,7 @@ mod tests {
     };
     use baozi_core::__scene_integration::integration::{SceneConstruction, SceneParseOutcome};
     use baozi_core::SceneValidationLimits;
+    use baozi_operation::__retained_store_integration::activation::StoreParserWorkError;
     use baozi_operation::{
         CancellationOrigin, CancellationSignal, PhysicalStorageAccountFactory,
         PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits, StoreTerminalCause,
@@ -1902,12 +1901,12 @@ mod tests {
         const MAX_INLINE_SESSION_OWNER_BYTES: usize = 64 * 1024;
         const MAX_INLINE_SESSION_HANDLE_BYTES: usize = 512;
 
-        assert!(size_of::<ImportStoreOperation>() <= MAX_INLINE_SESSION_OWNER_BYTES);
-        assert!(size_of::<ImportStoreOutcomeOwner>() <= MAX_INLINE_SESSION_OWNER_BYTES);
-        assert!(size_of::<ImportPendingScene>() <= MAX_INLINE_SESSION_OWNER_BYTES);
+        assert!(size_of::<ImportStoreOperation<'_>>() <= MAX_INLINE_SESSION_OWNER_BYTES);
+        assert!(size_of::<ImportStoreOutcomeOwner<'_>>() <= MAX_INLINE_SESSION_OWNER_BYTES);
+        assert!(size_of::<ImportPendingScene<'_>>() <= MAX_INLINE_SESSION_OWNER_BYTES);
         assert!(size_of::<ImportStorePreparedScene>() <= MAX_INLINE_SESSION_OWNER_BYTES);
-        assert!(size_of::<ImportStoreSessionState>() <= MAX_INLINE_SESSION_OWNER_BYTES);
-        assert!(size_of::<ImportStoreSessionOwner>() <= MAX_INLINE_SESSION_HANDLE_BYTES);
+        assert!(size_of::<ImportStoreSessionState<'_>>() <= MAX_INLINE_SESSION_OWNER_BYTES);
+        assert!(size_of::<ImportStoreSessionOwner<'_>>() <= MAX_INLINE_SESSION_HANDLE_BYTES);
     }
 
     fn ordinary_work_limits(limits: &ResourceLimits) -> (u64, u64) {
@@ -1953,23 +1952,11 @@ mod tests {
         assert_eq!(scene.max_provenance_depth(), 1_024);
     }
 
-    fn start_store_owner() -> ImportStoreSessionOwner {
-        let (owner, account) = start_store_owner_with_account();
-        drop(account);
-        owner
-    }
-
-    fn start_store_owner_with_account() -> (ImportStoreSessionOwner, PhysicalStorageAccount) {
-        start_store_owner_with_account_and_control(
-            ResourceLimits::default(),
-            ImportOperationControl::default(),
-        )
-    }
-
-    fn start_store_owner_with_account_and_control(
+    fn start_store_owner_in_body<'inv>(
+        parts: ImportStoreBodyParts<'inv>,
         limits: ResourceLimits,
         control: ImportOperationControl,
-    ) -> (ImportStoreSessionOwner, PhysicalStorageAccount) {
+    ) -> (ImportStoreSessionOwner<'inv>, PhysicalStorageAccount) {
         let bootstrap = try_import_store_bootstrap(&limits, requirements_for(&limits))
             .expect("test import store bootstrap must be valid");
         let factory = PhysicalStorageAccountFactory::try_new(
@@ -1983,10 +1970,115 @@ mod tests {
                     .expect("test account limits are valid"),
             )
             .expect("test physical account must allocate");
-        let owner = ImportStoreSessionOwner::try_start(control, &account, bootstrap)
+        let owner = ImportStoreSessionOwner::try_start_in_body(parts, control, &account, bootstrap)
             .expect("the import store owner must start");
         drop(factory);
         (owner, account)
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub(super) fn run_scene_body(
+        root: &mut ImportStoreInvocationRoot,
+        limits: ResourceLimits,
+        control: ImportOperationControl,
+        outcome: SceneParseOutcome,
+        body: impl for<'call> FnMut(&mut ImportStoreSessionOwner<'call>, &PhysicalStorageAccount),
+    ) -> (
+        Result<ImportStorePreparedScene, ImportStoreActivationError>,
+        PhysicalStorageAccount,
+    ) {
+        let (request, account) = request_scene_body(root, limits, control, outcome, body);
+        let prepared =
+            request.and_then(|(finish, request)| scene_activation::prepare_scene(finish, request));
+        (prepared, account)
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn request_scene_body<'inv>(
+        root: &'inv mut ImportStoreInvocationRoot,
+        limits: ResourceLimits,
+        control: ImportOperationControl,
+        outcome: SceneParseOutcome,
+        mut body: impl for<'call> FnMut(&mut ImportStoreSessionOwner<'call>, &PhysicalStorageAccount),
+    ) -> (
+        Result<(ImportStoreFinish<'inv>, ImportStoreFinishRequest), ImportStoreActivationError>,
+        PhysicalStorageAccount,
+    ) {
+        let mut startup = Some((limits, control, outcome));
+        let mut account = None;
+        let mut request = None;
+        let finish = {
+            let account = &mut account;
+            let request = &mut request;
+            root.run_body(move |parts, disposition| {
+                let (limits, control, outcome) = startup.take().unwrap();
+                let (mut owner, started_account) =
+                    start_store_owner_in_body(parts, limits, control);
+                body(&mut owner, &started_account);
+                *request = Some(owner.request_finish(disposition, outcome));
+                *account = Some(started_account);
+            })
+        };
+        let requested = match request.expect("the body must record its exact request result") {
+            Ok(request) => Ok((
+                finish.expect("the requested stage must survive retained body cleanup"),
+                request,
+            )),
+            Err(cause) => Err(cause),
+        };
+        (
+            requested,
+            account.expect("the body must retain its physical account"),
+        )
+    }
+
+    fn inspect_store_body(
+        body: impl for<'call> FnOnce(&mut ImportStoreSessionOwner<'call>, &PhysicalStorageAccount),
+    ) {
+        let mut root = ImportStoreInvocationRoot::new();
+        let mut body = Some(body);
+        let (requested, account) = request_scene_body(
+            &mut root,
+            ResourceLimits::default(),
+            ImportOperationControl::default(),
+            SceneParseOutcome::Rejected,
+            move |owner, account| body.take().unwrap()(owner, account),
+        );
+        let (_finish, _request) =
+            requested.expect("the inspected body must record its actual disposition");
+        drop(root);
+        let released = account.snapshot();
+        assert_eq!(released.live_retained_bytes(), 0);
+        assert_eq!(released.live_retained_allocations(), 0);
+        assert!(!released.poisoned());
+    }
+
+    fn with_root<R>(
+        owner: &mut ImportStoreSessionOwner<'_>,
+        action: impl for<'loan, 'op> FnOnce(
+            &mut ImportRootExecution<'loan, 'op>,
+        ) -> Result<R, ImportStoreHostError>,
+    ) -> Result<R, ImportStoreHostError> {
+        owner.with_root_execution(action)
+    }
+
+    fn charge_observed_prefix(
+        owner: &mut ImportStoreSessionOwner<'_>,
+        dimension: ImportDimension,
+        amount: u64,
+    ) {
+        let key = owner.storage[0].vocabulary.dimension(dimension);
+        with_root(owner, |exec| {
+            let layout = exec
+                .raw
+                .bind_group([key])
+                .expect("the observed prefix must bind the real store key");
+            exec.raw
+                .charge_observed_bound(layout, [amount])
+                .expect("the observed prefix must complete on the real operation");
+            Ok(())
+        })
+        .expect("the observed prefix must finish its root loan");
     }
 
     #[derive(Clone)]
@@ -2084,7 +2176,7 @@ mod tests {
         reason = "the integration helper preserves the exact allocation-free activation error chain"
     )]
     fn submit_two_node(
-        owner: &mut ImportStoreSessionOwner,
+        owner: &mut ImportStoreSessionOwner<'_>,
     ) -> Result<(), ImportStoreActivationError> {
         with_two_node_construction(|construction| owner.submit_scene(construction))
     }
@@ -2094,7 +2186,7 @@ mod tests {
         reason = "the integration helper preserves the exact allocation-free authoring rejection chain"
     )]
     fn submit_invalid_parent(
-        owner: &mut ImportStoreSessionOwner,
+        owner: &mut ImportStoreSessionOwner<'_>,
     ) -> Result<(), ImportStoreActivationError> {
         with_two_node_construction_parent(NodeLocalId::new(2), |construction| {
             owner.submit_scene(construction)
@@ -2156,18 +2248,28 @@ mod tests {
                     .expect("test account limits are valid"),
             )
             .expect("test physical account must allocate");
-        let owner = ImportStoreSessionOwner::try_start(
-            ImportOperationControl::default(),
-            &account,
-            bootstrap,
-        )
-        .expect("the bootstrap must start one dormant session outcome owner");
-
-        let published = owner
-            .prepare_scene(SceneParseOutcome::Rejected)
+        let mut invocation_root = ImportStoreInvocationRoot::new();
+        let mut bootstrap = Some(bootstrap);
+        let mut request = None;
+        let finish = invocation_root
+            .run_body(|parts, disposition| {
+                let owner = ImportStoreSessionOwner::try_start_in_body(
+                    parts,
+                    ImportOperationControl::default(),
+                    &account,
+                    bootstrap.take().unwrap(),
+                )
+                .expect("the bootstrap must start one dormant session outcome owner");
+                request = Some(
+                    owner
+                        .request_finish(disposition, SceneParseOutcome::Rejected)
+                        .unwrap(),
+                );
+            })
+            .unwrap();
+        let published = scene_activation::prepare_scene(finish, request.unwrap())
             .expect("the session failure baseline must prepare")
             .handoff();
-        let published = published.expect("the terminal evidence must project");
         assert!(!published.is_success());
         assert!(matches!(
             published.ledger_evidence().header().terminal_cause(),
@@ -2182,30 +2284,34 @@ mod tests {
 
     #[test]
     fn session_owner_drives_node_scene_success_on_the_same_import_ledger() {
-        let (mut owner, account) = start_store_owner_with_account();
-        let mut exec = owner
-            .execution()
-            .expect("the dormant owner must lend execution");
-        exec.with_observed_work([(ImportDimension::DetectionWork, 1)], |_, work| {
-            work.complete([1])
-                .expect("the producer detection unit must complete");
-            Ok::<_, ()>(())
-        })
-        .expect("producer work must remain on the sole import ledger");
-        submit_two_node(&mut owner)
-            .expect("the import owner must activate the exact NodeScene request");
-        owner
-            .poll_parser_boundary()
-            .expect("a submitted Scene already completed the transaction's final control poll");
-        assert!(matches!(
-            owner.execution(),
-            Err(ImportStoreHostError::OperationConsumed)
-        ));
-        let terminal = owner
-            .prepare_scene(SceneParseOutcome::Accepted)
+        let mut invocation_root = ImportStoreInvocationRoot::new();
+        let (prepared, account) = run_scene_body(
+            &mut invocation_root,
+            ResourceLimits::default(),
+            ImportOperationControl::default(),
+            SceneParseOutcome::Accepted,
+            |owner, _account| {
+                with_root(owner, |exec| {
+                    let group = exec.bind_group([ImportDimension::DetectionWork])?;
+                    exec.run_fallible_action(&group, [1], || Ok::<_, ()>(()))?
+                        .expect("the producer detection unit must complete");
+                    Ok(())
+                })
+                .expect("producer work must remain on the sole import ledger");
+                submit_two_node(owner)
+                    .expect("the import owner must activate the exact NodeScene request");
+                owner.poll_parser_boundary().expect(
+                    "a submitted Scene already completed the transaction's final control poll",
+                );
+                assert!(matches!(
+                    with_root(owner, |_| Ok(())),
+                    Err(ImportStoreHostError::OperationConsumed)
+                ));
+            },
+        );
+        let terminal = prepared
             .expect("the accepted centrally validated candidate must prepare")
-            .handoff()
-            .expect("the prepared Scene terminal must project");
+            .handoff();
         let terminal_evidence = terminal.ledger_evidence();
         assert!(
             terminal.is_success(),
@@ -2262,27 +2368,31 @@ mod tests {
 
     #[test]
     fn session_owner_samples_its_activation_baseline_after_parser_reservations() {
-        let (mut owner, account) = start_store_owner_with_account();
-        let parser_scratch = owner
-            .execution()
-            .expect("the dormant owner must lend execution")
-            .reserve(
-                ImportLedgerPhase::FormatNormalization,
-                ImportDimension::ScratchBytes,
-                8,
-            )
-            .expect("parser scratch must remain live until Scene submission returns");
+        let mut invocation_root = ImportStoreInvocationRoot::new();
+        let (prepared, account) = run_scene_body(
+            &mut invocation_root,
+            ResourceLimits::default(),
+            ImportOperationControl::default(),
+            SceneParseOutcome::Accepted,
+            |owner, account| {
+                let parser_scratch = with_root(owner, |exec| {
+                    exec.reserve(
+                        ImportLedgerPhase::FormatNormalization,
+                        ImportDimension::ScratchBytes,
+                        8,
+                    )
+                })
+                .expect("parser scratch must remain live until Scene submission returns");
 
-        submit_two_node(&mut owner)
-            .expect("session-start reservations belong to the activation-entry baseline");
-        assert!(account.snapshot().live_retained_bytes() >= 8);
-        drop(parser_scratch);
-
-        let terminal = owner
-            .prepare_scene(SceneParseOutcome::Accepted)
+                submit_two_node(owner)
+                    .expect("session-start reservations belong to the activation-entry baseline");
+                assert!(account.snapshot().live_retained_bytes() >= 8);
+                drop(parser_scratch);
+            },
+        );
+        let terminal = prepared
             .expect("the quiescent validated Scene must prepare")
-            .handoff()
-            .expect("the prepared Scene terminal must project");
+            .handoff();
         assert!(terminal.is_success());
 
         drop(terminal);
@@ -2294,11 +2404,28 @@ mod tests {
 
     #[test]
     fn consuming_finalization_preserves_scene_report_and_unique_terminal_evidence() {
-        let (mut owner, account) = start_store_owner_with_account();
-        submit_two_node(&mut owner)
-            .expect("the import owner must activate the exact NodeScene request");
-        let outcome = owner
-            .finish_scene(SceneParseOutcome::Accepted)
+        let mut invocation_root = ImportStoreInvocationRoot::new();
+        let mut request = None;
+        let mut account = None;
+        let finish = invocation_root
+            .run_body(|parts, disposition| {
+                let (mut owner, started_account) = start_store_owner_in_body(
+                    parts,
+                    ResourceLimits::default(),
+                    ImportOperationControl::default(),
+                );
+                submit_two_node(&mut owner)
+                    .expect("the import owner must activate the exact NodeScene request");
+                request = Some(
+                    owner
+                        .request_finish(disposition, SceneParseOutcome::Accepted)
+                        .unwrap(),
+                );
+                account = Some(started_account);
+            })
+            .unwrap();
+        let account = account.unwrap();
+        let outcome = finish_scene(finish, request.unwrap())
             .expect("the accepted candidate must finish through one consuming terminal seam");
 
         let ImportStoreTerminalOutcome::Success {
@@ -2340,23 +2467,97 @@ mod tests {
     }
 
     #[test]
-    fn session_owner_without_scene_submission_prepares_requested_terminal_on_the_same_ledger() {
-        let (mut owner, account) = start_store_owner_with_account();
-        owner
-            .execution()
-            .expect("the dormant owner must lend execution")
-            .with_observed_work([(ImportDimension::DetectionWork, 1)], |_, work| {
-                work.complete([1])
-                    .expect("the producer detection unit must complete");
-                Ok::<_, ()>(())
-            })
-            .expect("producer work must remain on the sole import ledger");
+    fn retained_body_capture_releases_scratch_before_final_progress() {
+        struct Capture {
+            scratch: Option<ImportStoreReservation>,
+            dropped: Arc<AtomicBool>,
+        }
 
-        let terminal = owner
-            .prepare_scene(SceneParseOutcome::Accepted)
+        impl Capture {
+            fn retain(&mut self, scratch: ImportStoreReservation) {
+                self.scratch = Some(scratch);
+            }
+        }
+
+        impl Drop for Capture {
+            fn drop(&mut self) {
+                drop(self.scratch.take());
+                self.dropped.store(true, Ordering::Release);
+            }
+        }
+
+        let capture_dropped = Arc::new(AtomicBool::new(false));
+        let final_observed = Arc::new(AtomicBool::new(false));
+        let observed_capture = Arc::clone(&capture_dropped);
+        let observed_final = Arc::clone(&final_observed);
+        let control = ImportOperationControl::default().with_progress_observer(
+            move |event: baozi_operation::ProgressEvent<
+                ImportProgressPhase,
+                ImportProgressUnit,
+            >| {
+                if event.phase() == ImportProgressPhase::Finalize {
+                    assert!(observed_capture.load(Ordering::Acquire));
+                    observed_final.store(true, Ordering::Release);
+                }
+                baozi_operation::ProgressDecision::Continue
+            },
+        );
+        let mut capture = Capture {
+            scratch: None,
+            dropped: Arc::clone(&capture_dropped),
+        };
+        let mut root = ImportStoreInvocationRoot::new();
+        let (prepared, account) = run_scene_body(
+            &mut root,
+            ResourceLimits::default(),
+            control,
+            SceneParseOutcome::Accepted,
+            move |owner, _account| {
+                let scratch = with_root(owner, |exec| {
+                    exec.reserve(
+                        ImportLedgerPhase::FormatNormalization,
+                        ImportDimension::ScratchBytes,
+                        8,
+                    )
+                })
+                .unwrap();
+                capture.retain(scratch);
+                submit_two_node(owner).unwrap();
+            },
+        );
+        let terminal = prepared.unwrap().handoff();
+        assert!(terminal.is_success());
+        assert!(capture_dropped.load(Ordering::Acquire));
+        assert!(final_observed.load(Ordering::Acquire));
+        assert_eq!(terminal.evidence().current_live_bytes(), 0);
+        assert_eq!(terminal.evidence().active_reservations(), 0);
+        drop(terminal);
+        assert_eq!(account.snapshot().live_retained_bytes(), 0);
+        assert_eq!(account.snapshot().live_retained_allocations(), 0);
+        assert!(!account.snapshot().poisoned());
+    }
+
+    #[test]
+    fn session_owner_without_scene_submission_prepares_requested_terminal_on_the_same_ledger() {
+        let mut invocation_root = ImportStoreInvocationRoot::new();
+        let (prepared, account) = run_scene_body(
+            &mut invocation_root,
+            ResourceLimits::default(),
+            ImportOperationControl::default(),
+            SceneParseOutcome::Accepted,
+            |owner, _account| {
+                with_root(owner, |exec| {
+                    let group = exec.bind_group([ImportDimension::DetectionWork])?;
+                    exec.run_fallible_action(&group, [1], || Ok::<_, ()>(()))?
+                        .expect("the producer detection unit must complete");
+                    Ok(())
+                })
+                .expect("producer work must remain on the sole import ledger");
+            },
+        );
+        let terminal = prepared
             .expect("an import without a Scene must prepare the pre-admitted fallback")
-            .handoff()
-            .expect("the unsubmitted Scene terminal must project");
+            .handoff();
         assert!(!terminal.is_success());
         assert_eq!(terminal.canonical_block_count(), None);
         assert!(matches!(
@@ -2394,51 +2595,83 @@ mod tests {
     #[test]
     fn minimal_fallback_keeps_import_error_storage_live_until_the_actual_owner_drops() {
         use crate::outcome::AccountedErrorContext;
-        use baozi_operation::__retained_store_integration::activation::CanonicalActivationOutcome;
-
-        let (mut owner, account) = start_store_owner_with_account();
-        let source = baozi_io::AssetPath::new("models/fallback.asset").unwrap();
-        let (context, storage) = crate::DependencyFailureContext::try_capture(
-            &mut owner
-                .execution()
-                .expect("the dormant owner must lend execution"),
-            &baozi_io::AuthorityDomain::new(),
-            &source,
-            &crate::DependencyRoleId::new("test.fallback").unwrap(),
-            "missing.bin",
-            None,
-            None,
-        )
-        .unwrap();
-        let context_bytes = storage.bytes();
-        let context = AccountedErrorContext::new(
-            crate::ImportCause::Scope(crate::ScopeAbort::with_dependency_context(
-                ScopeAbortCause::DescriptorContract {
-                    code: "test-fallback",
-                },
-                context,
-            )),
-            Some(storage),
-        );
-        let ImportStoreSessionState::Dormant(owner) = owner.into_terminal_state().0 else {
-            panic!("the fallback fixture must begin before Scene activation");
+        use baozi_operation::__retained_store_integration::activation::{
+            CanonicalActivationOutcome, CanonicalInvocationOutcome,
         };
-        let rejected = owner
-            .reject_without_activation::<(), (), RecordBlock, SceneOutcomeEvidenceTag>(
-                (),
+
+        let mut invocation_root = ImportStoreInvocationRoot::new();
+        let mut retained_context = None;
+        let mut retained_account = None;
+        let mut context_bytes = 0;
+        let finish = invocation_root
+            .run_body(|parts, disposition| {
+                let (mut owner, account) = start_store_owner_in_body(
+                    parts,
+                    ResourceLimits::default(),
+                    ImportOperationControl::default(),
+                );
+                let source = baozi_io::AssetPath::new("models/fallback.asset").unwrap();
+                let (context, storage) = owner
+                    .with_root_execution(|exec| {
+                        crate::DependencyFailureContext::try_capture(
+                            exec,
+                            &baozi_io::AuthorityDomain::new(),
+                            &source,
+                            &crate::DependencyRoleId::new("test.fallback").unwrap(),
+                            "missing.bin",
+                            None,
+                            None,
+                        )
+                    })
+                    .unwrap();
+                context_bytes = storage.bytes();
+                let context = AccountedErrorContext::new(
+                    crate::ImportCause::Scope(crate::ScopeAbort::with_dependency_context(
+                        ScopeAbortCause::DescriptorContract {
+                            code: "test-fallback",
+                        },
+                        context,
+                    )),
+                    Some(storage),
+                );
+                retained_context = Some(context);
+                let data = owner.into_body_state().unwrap();
+                let ImportStoreSessionState::Dormant(owner) = data.state else {
+                    panic!("the fallback fixture must begin before Scene activation");
+                };
+                let rejected = owner
+            .reject_without_activation::<
+                baozi_core::__scene_integration::integration::SceneActivationOutput,
+                SceneActivationRejection,
+                RecordBlock,
+                SceneCanonicalRootTag,
+            >(
+                data.canonical_slots
+                    .expect("the dormant fixture must retain its activation slots")
+                    .activation,
+                SceneActivationRejection::construction_invariant(),
                 IMPORT_STORE_FALLBACK_CODE,
             )
             .unwrap();
-        let CanonicalActivationOutcome::NeverActivated(rejected) = rejected else {
-            panic!("the explicit rejection must not activate a Scene");
+                let CanonicalActivationOutcome::NeverActivated(rejected) = rejected else {
+                    panic!("the explicit rejection must not activate a Scene");
+                };
+                rejected.request_finish(disposition).unwrap();
+                retained_account = Some(account);
+            })
+            .unwrap();
+        let account = retained_account.unwrap();
+        let context = retained_context.unwrap();
+        let completion = finish.resume();
+        let CanonicalInvocationOutcome::NeverActivated(rejected) = completion.outcome else {
+            panic!("the host must resume the exact never-activated rejection");
         };
         let fallback = rejected
             .prepare_minimal_fallback()
             .expect("the never-activated rejection must prepare its admitted minimal fallback");
         let (fallback, _) = fallback.into_parts();
         let published = fallback.handoff();
-        let ledger =
-            ImportStoreTerminalEvidence::try_from_ledger(published.ledger_evidence).unwrap();
+        let ledger = ImportStoreTerminalEvidence::from_admitted_ledger(published.ledger_evidence);
         assert_eq!(ledger.current_live_bytes(), 0);
         assert_eq!(ledger.active_reservations(), 0);
         assert!(account.snapshot().live_retained_bytes() >= context_bytes);
@@ -2454,14 +2687,20 @@ mod tests {
 
     #[test]
     fn terminal_projection_maps_the_complete_import_vocabulary() {
-        let mut owner = start_store_owner();
-        submit_two_node(&mut owner)
-            .expect("the import owner must activate the exact NodeScene request");
-        let terminal = owner
-            .prepare_scene(SceneParseOutcome::Accepted)
+        let mut invocation_root = ImportStoreInvocationRoot::new();
+        let (prepared, _account) = run_scene_body(
+            &mut invocation_root,
+            ResourceLimits::default(),
+            ImportOperationControl::default(),
+            SceneParseOutcome::Accepted,
+            |owner, _account| {
+                submit_two_node(owner)
+                    .expect("the import owner must activate the exact NodeScene request");
+            },
+        );
+        let terminal = prepared
             .expect("the accepted centrally validated candidate must prepare")
-            .handoff()
-            .expect("the successful Scene terminal must project");
+            .handoff();
 
         let evidence = terminal.evidence();
         assert_eq!(evidence.cause(), ImportStoreTerminalCause::Success);
@@ -2501,39 +2740,97 @@ mod tests {
     }
 
     #[test]
-    fn terminal_projection_fails_closed_when_a_semantic_row_is_missing() {
-        assert_eq!(
-            validate_import_phases(|_| None).expect_err("a missing phase must fail closed"),
-            ImportStoreTerminalProjectionError::MissingPhase {
-                phase: ImportLedgerPhase::PrimarySnapshot,
+    fn terminal_catalog_rejects_missing_and_same_size_wrong_rows_before_final_progress() {
+        for submitted in [false, true] {
+            for mismatch in 0..4 {
+                let final_progress = Arc::new(AtomicUsize::new(0));
+                let observed = Arc::clone(&final_progress);
+                let control = ImportOperationControl::default().with_progress_observer(
+                    move |event: baozi_operation::ProgressEvent<
+                        ImportProgressPhase,
+                        ImportProgressUnit,
+                    >| {
+                        if event.phase() == ImportProgressPhase::Finalize {
+                            observed.fetch_add(1, Ordering::SeqCst);
+                        }
+                        baozi_operation::ProgressDecision::Continue
+                    },
+                );
+                let mut root = ImportStoreInvocationRoot::new();
+                let (account, contained) = {
+                    let (request, account) = request_scene_body(
+                        &mut root,
+                        ResourceLimits::default(),
+                        control,
+                        SceneParseOutcome::Accepted,
+                        |owner, _account| {
+                            if submitted {
+                                submit_two_node(owner).unwrap();
+                            }
+                        },
+                    );
+                    let (finish, _request) = request.unwrap();
+                    let before = final_progress.load(Ordering::SeqCst);
+                    let mut phases = import_terminal_phases();
+                    let mut dimensions = import_terminal_dimensions();
+                    let phase_count = if mismatch == 0 {
+                        phases.len() - 1
+                    } else {
+                        phases.len()
+                    };
+                    let dimension_count = if mismatch == 1 {
+                        dimensions.len() - 1
+                    } else {
+                        dimensions.len()
+                    };
+                    if mismatch == 2 {
+                        phases[0] = StorePhaseSemanticId::new(
+                            IMPORT_STORE_CATALOG,
+                            NonZeroU64::new(99).unwrap(),
+                        );
+                    }
+                    if mismatch == 3 {
+                        dimensions[0] = StoreDimensionSemanticId::new(
+                            IMPORT_STORE_CATALOG,
+                            NonZeroU64::new(99).unwrap(),
+                        );
+                    }
+                    let error = match finish.admit_terminal_catalog(
+                        &phases[..phase_count],
+                        &dimensions[..dimension_count],
+                    ) {
+                        Err(error) => error,
+                        Ok(_) => panic!("a wrong complete catalog cannot retain final authority"),
+                    };
+                    assert!(error.containment().is_some());
+                    assert_eq!(final_progress.load(Ordering::SeqCst), before);
+                    let contained = account.snapshot();
+                    assert!(contained.poisoned());
+                    assert!(contained.live_retained_allocations() > 0);
+                    (account, contained)
+                };
+                drop(root);
+                assert_eq!(account.snapshot(), contained);
             }
-        );
-        assert_eq!(
-            validate_import_dimensions(|_| None)
-                .expect_err("a missing import dimension must fail closed"),
-            ImportStoreTerminalProjectionError::MissingDimension {
-                dimension: ImportDimension::AssetOpen,
-            }
-        );
-        assert_eq!(
-            validate_import_terminal_dimensions(|_| None)
-                .expect_err("a missing terminal dimension must fail closed"),
-            ImportStoreTerminalProjectionError::MissingTerminalDimension {
-                dimension: ImportStoreTerminalDimension::StartupOutcomeEvidence,
-            }
-        );
+        }
     }
 
     #[test]
     fn terminal_projection_preserves_original_cause_authority_for_a_rejected_parser() {
-        let mut owner = start_store_owner();
-        submit_two_node(&mut owner)
-            .expect("the import owner must activate the exact NodeScene request");
-        let terminal = owner
-            .prepare_scene(SceneParseOutcome::Rejected)
+        let mut invocation_root = ImportStoreInvocationRoot::new();
+        let (prepared, _account) = run_scene_body(
+            &mut invocation_root,
+            ResourceLimits::default(),
+            ImportOperationControl::default(),
+            SceneParseOutcome::Rejected,
+            |owner, _account| {
+                submit_two_node(owner)
+                    .expect("the import owner must activate the exact NodeScene request");
+            },
+        );
+        let terminal = prepared
             .expect("a rejected parser must prepare its candidate as a failure")
-            .handoff()
-            .expect("the parser rejection terminal must project");
+            .handoff();
         let StoreTerminalCause::Failure(header_cause) =
             terminal.ledger_evidence().header().terminal_cause()
         else {
@@ -2546,12 +2843,10 @@ mod tests {
             ImportStoreTerminalClass::Requested
         );
         assert_eq!(evidence.cause().code(), Some(header_cause.code()));
+        assert_eq!(header_cause.code(), 0x5343_1001);
         assert!(matches!(
             &terminal,
             ImportStoreTerminalOutcome::RichFailure {
-                cause_authority: ImportStoreFailureCauseAuthority::OriginalImport,
-                ..
-            } | ImportStoreTerminalOutcome::MinimalFallback {
                 cause_authority: ImportStoreFailureCauseAuthority::OriginalImport,
                 ..
             }
@@ -2560,23 +2855,29 @@ mod tests {
 
     #[test]
     fn terminal_projection_reads_requested_cause_from_authoring_rejection() {
-        let mut owner = start_store_owner();
-        let result = submit_invalid_parent(&mut owner);
-        assert!(matches!(
-            result,
-            Err(ImportStoreActivationError::SceneValidation(
-                baozi_core::SceneValidationError::ParentOutOfRange {
-                    node: 1,
-                    parent: 2,
-                    node_count: 2,
-                }
-            ))
-        ));
-        let terminal = owner
-            .prepare_scene(SceneParseOutcome::Rejected)
+        let mut invocation_root = ImportStoreInvocationRoot::new();
+        let (prepared, _account) = run_scene_body(
+            &mut invocation_root,
+            ResourceLimits::default(),
+            ImportOperationControl::default(),
+            SceneParseOutcome::Rejected,
+            |owner, _account| {
+                let result = submit_invalid_parent(owner);
+                assert!(matches!(
+                    result,
+                    Err(ImportStoreActivationError::SceneValidation(
+                        baozi_core::SceneValidationError::ParentOutOfRange {
+                            node: 1,
+                            parent: 2,
+                            node_count: 2,
+                        }
+                    ))
+                ));
+            },
+        );
+        let terminal = prepared
             .expect("the authoring rejection must retain its exact terminal")
-            .handoff()
-            .expect("the authoring rejection terminal must project");
+            .handoff();
         let StoreTerminalCause::Failure(header_cause) =
             terminal.ledger_evidence().header().terminal_cause()
         else {
@@ -2617,7 +2918,7 @@ mod tests {
     fn terminal_projection_maps_product_graph_header_class() {
         assert_eq!(
             import_terminal_failure_class(StorePreparationFailureClass::ProductGraph),
-            Ok(ImportStoreTerminalFailureClass::ProductGraph)
+            ImportStoreTerminalFailureClass::ProductGraph
         );
     }
 
@@ -2626,21 +2927,26 @@ mod tests {
         let cancellation = CancelOnSignalPoll::new();
         cancellation.cancel_after_additional_polls(1);
         let control = ImportOperationControl::default().with_cancellation(cancellation);
-        let (mut owner, _account) =
-            start_store_owner_with_account_and_control(ResourceLimits::default(), control);
-        assert!(matches!(
-            submit_two_node(&mut owner),
-            Err(ImportStoreActivationError::Control(
-                ControlCause::Cancelled {
-                    origin: CancellationOrigin::Signal
-                }
-            ))
-        ));
-        let terminal = owner
-            .prepare_scene(SceneParseOutcome::Rejected)
+        let mut invocation_root = ImportStoreInvocationRoot::new();
+        let (prepared, _account) = run_scene_body(
+            &mut invocation_root,
+            ResourceLimits::default(),
+            control,
+            SceneParseOutcome::Rejected,
+            |owner, _account| {
+                assert!(matches!(
+                    submit_two_node(owner),
+                    Err(ImportStoreActivationError::Control(
+                        ControlCause::Cancelled {
+                            origin: CancellationOrigin::Signal
+                        }
+                    ))
+                ));
+            },
+        );
+        let terminal = prepared
             .expect("cancelled authoring must retain its exact terminal")
-            .handoff()
-            .expect("the cancelled authoring terminal must project");
+            .handoff();
         assert!(matches!(
             terminal.control_cause(),
             Some(ControlCause::Cancelled {
@@ -2666,17 +2972,22 @@ mod tests {
             max_work_units: 10,
             ..ResourceLimits::default()
         };
-        let (mut owner, _account) =
-            start_store_owner_with_account_and_control(limits, ImportOperationControl::default());
-        assert!(matches!(
-            submit_two_node(&mut owner),
-            Err(ImportStoreActivationError::MaterializationFailed)
-        ));
-        let terminal = owner
-            .prepare_scene(SceneParseOutcome::Rejected)
+        let mut invocation_root = ImportStoreInvocationRoot::new();
+        let (prepared, _account) = run_scene_body(
+            &mut invocation_root,
+            limits,
+            ImportOperationControl::default(),
+            SceneParseOutcome::Rejected,
+            |owner, _account| {
+                assert!(matches!(
+                    submit_two_node(owner),
+                    Err(ImportStoreActivationError::MaterializationFailed)
+                ));
+            },
+        );
+        let terminal = prepared
             .expect("work exhaustion must retain its exact terminal")
-            .handoff()
-            .expect("the work-exhaustion terminal must project");
+            .handoff();
         let StoreTerminalCause::Failure(header_cause) =
             terminal.ledger_evidence().header().terminal_cause()
         else {
@@ -2692,21 +3003,26 @@ mod tests {
 
     #[test]
     fn rejected_parser_cannot_commit_or_publish_its_validated_candidate() {
-        let (mut owner, account) = start_store_owner_with_account();
-        submit_two_node(&mut owner)
-            .expect("the import owner must activate the exact NodeScene request");
-        assert_eq!(
-            owner
-                .completed_scene_boundary()
-                .expect("the private candidate boundary must remain observable"),
-            Some(scene_activation::ImportStoreSceneBoundary::Validated)
+        let mut invocation_root = ImportStoreInvocationRoot::new();
+        let (prepared, account) = run_scene_body(
+            &mut invocation_root,
+            ResourceLimits::default(),
+            ImportOperationControl::default(),
+            SceneParseOutcome::Rejected,
+            |owner, _account| {
+                submit_two_node(owner)
+                    .expect("the import owner must activate the exact NodeScene request");
+                assert_eq!(
+                    owner
+                        .completed_scene_boundary()
+                        .expect("the private candidate boundary must remain observable"),
+                    Some(scene_activation::ImportStoreSceneBoundary::Validated)
+                );
+            },
         );
-
-        let terminal = owner
-            .prepare_scene(SceneParseOutcome::Rejected)
+        let terminal = prepared
             .expect("a rejected parser must prepare its candidate as a failure")
-            .handoff()
-            .expect("the parser rejection terminal must project");
+            .handoff();
         assert!(!terminal.is_success());
         assert_eq!(terminal.canonical_block_count(), None);
         assert!(matches!(
@@ -2731,27 +3047,34 @@ mod tests {
 
     #[test]
     fn independent_parser_outcomes_do_not_cross_pending_candidates() {
-        let (mut left, left_account) = start_store_owner_with_account();
-        let (mut right, right_account) = start_store_owner_with_account();
-        for (owner, amount) in [(&mut left, 1), (&mut right, 2)] {
-            owner
-                .execution()
-                .expect("each dormant owner must lend its own execution")
-                .charge_observed_batch(&[(ImportDimension::DetectionWork, amount)])
-                .expect("each operation must retain its own distinct producer prefix");
+        let mut left_root = ImportStoreInvocationRoot::new();
+        let mut right_root = ImportStoreInvocationRoot::new();
+        let prepare = |owner: &mut ImportStoreSessionOwner<'_>, amount| {
+            charge_observed_prefix(owner, ImportDimension::DetectionWork, amount);
             submit_two_node(owner).expect("each owner must retain its own validated candidate");
-        }
-
-        let left_terminal = left
-            .prepare_scene(SceneParseOutcome::Accepted)
+        };
+        let (left, left_account) = request_scene_body(
+            &mut left_root,
+            ResourceLimits::default(),
+            ImportOperationControl::default(),
+            SceneParseOutcome::Accepted,
+            |owner, _account| prepare(owner, 1),
+        );
+        let (right, right_account) = request_scene_body(
+            &mut right_root,
+            ResourceLimits::default(),
+            ImportOperationControl::default(),
+            SceneParseOutcome::Rejected,
+            |owner, _account| prepare(owner, 2),
+        );
+        let (left_finish, left_request) = left.unwrap();
+        let (right_finish, right_request) = right.unwrap();
+        let left_terminal = scene_activation::prepare_scene(left_finish, left_request)
             .expect("the left parser must accept only its own candidate")
-            .handoff()
-            .expect("the left accepted terminal must project");
-        let right_terminal = right
-            .prepare_scene(SceneParseOutcome::Rejected)
+            .handoff();
+        let right_terminal = scene_activation::prepare_scene(right_finish, right_request)
             .expect("the right parser must reject only its own candidate")
-            .handoff()
-            .expect("the right rejected terminal must project");
+            .handoff();
         assert!(left_terminal.is_success());
         assert!(!right_terminal.is_success());
         assert_eq!(right_terminal.canonical_block_count(), None);
@@ -2785,33 +3108,76 @@ mod tests {
     }
 
     #[test]
-    fn sibling_prepared_scene_owners_cannot_be_crossed_at_handoff() {
-        let (mut left, left_account) = start_store_owner_with_account();
-        let (mut right, right_account) = start_store_owner_with_account();
-        submit_two_node(&mut left).expect("the left owner must activate its candidate");
-        submit_two_node(&mut right).expect("the right owner must activate its candidate");
-
-        let ImportStorePreparedScene::Success {
-            token: left_token,
-            store: left_store,
-        } = left
-            .prepare_scene(SceneParseOutcome::Accepted)
-            .expect("the left Scene must prepare its exact success owners")
-        else {
-            panic!("the left Scene must prepare a success")
+    fn sibling_prepared_scenes_keep_their_success_owners_inseparable() {
+        let mut left_root = ImportStoreInvocationRoot::new();
+        let mut right_root = ImportStoreInvocationRoot::new();
+        let prepare = |owner: &mut ImportStoreSessionOwner<'_>, amount| {
+            charge_observed_prefix(owner, ImportDimension::DetectionWork, amount);
         };
-        let ImportStorePreparedScene::Success {
-            token: right_token,
-            store: right_store,
-        } = right
-            .prepare_scene(SceneParseOutcome::Accepted)
-            .expect("the right Scene must prepare its exact success owners")
-        else {
-            panic!("the right Scene must prepare a success")
-        };
+        let (left, left_account) = request_scene_body(
+            &mut left_root,
+            ResourceLimits::default(),
+            ImportOperationControl::default(),
+            SceneParseOutcome::Accepted,
+            |owner, _account| {
+                prepare(owner, 3);
+                submit_two_node(owner).expect("the left owner must activate its candidate");
+            },
+        );
+        let (right, right_account) = request_scene_body(
+            &mut right_root,
+            ResourceLimits::default(),
+            ImportOperationControl::default(),
+            SceneParseOutcome::Accepted,
+            |owner, _account| {
+                prepare(owner, 7);
+                submit_two_node(owner).expect("the right owner must activate its candidate");
+            },
+        );
+        let (left_finish, left_request) = left.unwrap();
+        let (right_finish, right_request) = right.unwrap();
+        let left = scene_activation::prepare_scene(left_finish, left_request)
+            .expect("the left Scene must prepare its exact success owners");
+        let right = scene_activation::prepare_scene(right_finish, right_request)
+            .expect("the right Scene must prepare its exact success owners");
 
-        assert!(left_token.handoff(right_store).is_err());
-        assert!(right_token.handoff(left_store).is_err());
+        let right = right.handoff();
+        let left = left.handoff();
+        let ImportStoreTerminalOutcome::Success {
+            scene: left_scene,
+            report: left_report,
+            ..
+        } = &left
+        else {
+            panic!("the left publication must retain its successful Scene")
+        };
+        let ImportStoreTerminalOutcome::Success {
+            scene: right_scene,
+            report: right_report,
+            ..
+        } = &right
+        else {
+            panic!("the right publication must retain its successful Scene")
+        };
+        assert_ne!(left_scene.generation(), right_scene.generation());
+        assert_ne!(
+            left_report._outcome_evidence.root_ref(),
+            right_report._outcome_evidence.root_ref()
+        );
+        for (terminal, amount) in [(&left, 3), (&right, 7)] {
+            let detection = terminal
+                .evidence()
+                .dimension(ImportDimension::DetectionWork)
+                .unwrap();
+            assert_eq!(detection.attempted(), amount);
+            assert_eq!(detection.consumed(), amount);
+            assert_eq!(
+                terminal.evidence().cause(),
+                ImportStoreTerminalCause::Success
+            );
+        }
+        drop((left, right));
+        drop((left_root, right_root));
 
         for account in [left_account, right_account] {
             let released = account.snapshot();
@@ -2823,31 +3189,36 @@ mod tests {
 
     #[test]
     fn raw_second_scene_submission_preserves_the_first_pending_owner() {
-        let (mut owner, account) = start_store_owner_with_account();
-        submit_two_node(&mut owner)
-            .expect("the first Scene request must install its pending owner");
-        let first_pending = account.snapshot();
-        let second = submit_invalid_parent(&mut owner);
-        assert!(matches!(
-            second,
-            Err(ImportStoreActivationError::StoreUnavailable(
-                ImportStoreHostError::OperationConsumed
-            ))
-        ));
-        assert_eq!(account.snapshot(), first_pending);
-        assert_eq!(
-            owner
-                .completed_scene_boundary()
-                .expect("the first candidate must retain its validation boundary"),
-            Some(scene_activation::ImportStoreSceneBoundary::Validated)
+        let mut invocation_root = ImportStoreInvocationRoot::new();
+        let (prepared, account) = run_scene_body(
+            &mut invocation_root,
+            ResourceLimits::default(),
+            ImportOperationControl::default(),
+            SceneParseOutcome::Accepted,
+            |owner, account| {
+                submit_two_node(owner)
+                    .expect("the first Scene request must install its pending owner");
+                let first_pending = account.snapshot();
+                let second = submit_invalid_parent(owner);
+                assert!(matches!(
+                    second,
+                    Err(ImportStoreActivationError::StoreUnavailable(
+                        ImportStoreHostError::OperationConsumed
+                    ))
+                ));
+                assert_eq!(account.snapshot(), first_pending);
+                assert_eq!(
+                    owner
+                        .completed_scene_boundary()
+                        .expect("the first candidate must retain its validation boundary"),
+                    Some(scene_activation::ImportStoreSceneBoundary::Validated)
+                );
+            },
         );
-
         // The trusted raw caller selects acceptance; ParseContext latches duplicate-submit errors.
-        let terminal = owner
-            .prepare_scene(SceneParseOutcome::Accepted)
+        let terminal = prepared
             .expect("explicit raw acceptance must prepare the retained first candidate")
-            .handoff()
-            .expect("the retained first Scene terminal must project");
+            .handoff();
         assert!(terminal.is_success());
 
         drop(terminal);
@@ -2859,39 +3230,43 @@ mod tests {
 
     #[test]
     fn authoring_rejection_defers_terminal_prepare_until_parser_storage_is_released() {
-        let (mut owner, account) = start_store_owner_with_account();
-        let parser_scratch = owner
-            .execution()
-            .expect("the dormant owner must lend execution")
-            .reserve(
-                ImportLedgerPhase::FormatNormalization,
-                ImportDimension::ScratchBytes,
-                8,
-            )
-            .expect("parser scratch must remain live across the synchronous Scene submission");
-        let result = submit_invalid_parent(&mut owner);
-        assert!(matches!(
-            result,
-            Err(ImportStoreActivationError::SceneValidation(
-                baozi_core::SceneValidationError::ParentOutOfRange {
-                    node: 1,
-                    parent: 2,
-                    node_count: 2,
-                }
-            ))
-        ));
-        let pending = account.snapshot();
-        assert!(pending.live_retained_bytes() >= 8);
-        assert!(pending.live_retained_allocations() > 0);
-        assert!(!pending.poisoned());
+        let mut invocation_root = ImportStoreInvocationRoot::new();
+        let (prepared, account) = run_scene_body(
+            &mut invocation_root,
+            ResourceLimits::default(),
+            ImportOperationControl::default(),
+            SceneParseOutcome::Rejected,
+            |owner, account| {
+                let parser_scratch = with_root(owner, |exec| {
+                    exec.reserve(
+                        ImportLedgerPhase::FormatNormalization,
+                        ImportDimension::ScratchBytes,
+                        8,
+                    )
+                })
+                .expect("parser scratch must remain live across the synchronous Scene submission");
+                let result = submit_invalid_parent(owner);
+                assert!(matches!(
+                    result,
+                    Err(ImportStoreActivationError::SceneValidation(
+                        baozi_core::SceneValidationError::ParentOutOfRange {
+                            node: 1,
+                            parent: 2,
+                            node_count: 2,
+                        }
+                    ))
+                ));
+                let pending = account.snapshot();
+                assert!(pending.live_retained_bytes() >= 8);
+                assert!(pending.live_retained_allocations() > 0);
+                assert!(!pending.poisoned());
 
-        drop(parser_scratch);
-
-        let terminal = owner
-            .prepare_scene(SceneParseOutcome::Rejected)
+                drop(parser_scratch);
+            },
+        );
+        let terminal = prepared
             .expect("the quiescent session must prepare its deferred authoring failure")
-            .handoff()
-            .expect("the deferred authoring terminal must project");
+            .handoff();
         assert!(!terminal.is_success());
         assert!(matches!(
             terminal.ledger_evidence().header().terminal_cause(),
@@ -2911,21 +3286,25 @@ mod tests {
             max_open_assets: 0,
             ..ResourceLimits::default()
         };
-        let (mut owner, account) =
-            start_store_owner_with_account_and_control(limits, ImportOperationControl::default());
-        let failure = owner
-            .execution()
-            .expect("the dormant owner must lend execution")
-            .charge_attempted(ImportDimension::AssetOpen, 1)
-            .expect_err("the zero asset-open budget must latch one ledger failure");
-        assert!(matches!(failure, ImportStoreHostError::Ledger(_)));
+        let mut invocation_root = ImportStoreInvocationRoot::new();
+        let (prepared, account) = run_scene_body(
+            &mut invocation_root,
+            limits,
+            ImportOperationControl::default(),
+            SceneParseOutcome::Rejected,
+            |owner, _account| {
+                let failure = with_root(owner, |exec| {
+                    exec.charge_attempted(ImportDimension::AssetOpen, 1)
+                })
+                .expect_err("the zero asset-open budget must latch one ledger failure");
+                assert!(matches!(failure, ImportStoreHostError::Ledger(_)));
 
-        assert!(submit_invalid_parent(&mut owner).is_err());
-        let terminal = owner
-            .prepare_scene(SceneParseOutcome::Rejected)
+                assert!(submit_invalid_parent(owner).is_err());
+            },
+        );
+        let terminal = prepared
             .expect("a quiescent ledger rejection must still prepare its terminal evidence")
-            .handoff()
-            .expect("the deferred ledger terminal must project");
+            .handoff();
         assert!(!terminal.is_success());
         let evidence = terminal.evidence();
         assert_eq!(evidence.cause().class(), ImportStoreTerminalClass::Ledger);
@@ -2939,291 +3318,367 @@ mod tests {
 
     #[test]
     fn dropping_a_pending_scene_owner_releases_unpublished_storage() {
-        let (mut owner, account) = start_store_owner_with_account();
-        submit_two_node(&mut owner)
-            .expect("the import owner must retain one unpublished Scene candidate");
-        assert!(account.snapshot().live_retained_allocations() > 0);
+        use baozi_operation::__retained_store_integration::activation::CanonicalInvocationOutcome;
 
-        drop(owner);
-        let released = account.snapshot();
+        let mut invocation_root = ImportStoreInvocationRoot::new();
+        let mut account = None;
+        let finish = invocation_root
+            .run_body(|parts, disposition| {
+                let (mut owner, started_account) = start_store_owner_in_body(
+                    parts,
+                    ResourceLimits::default(),
+                    ImportOperationControl::default(),
+                );
+                submit_two_node(&mut owner)
+                    .expect("the import owner must retain one unpublished Scene candidate");
+                assert!(started_account.snapshot().live_retained_allocations() > 0);
+                owner
+                    .request_finish(disposition, SceneParseOutcome::Accepted)
+                    .expect("the pending Scene candidate must record its actual disposition");
+                account = Some(started_account);
+            })
+            .expect("the pending Scene candidate must survive body cleanup");
+        match finish.resume().outcome {
+            CanonicalInvocationOutcome::Candidate(candidate) => drop(candidate),
+            _ => panic!("the host must restore its actual pending Scene candidate"),
+        }
+        drop(invocation_root);
+        let released = account.unwrap().snapshot();
         assert_eq!(released.live_retained_bytes(), 0);
         assert_eq!(released.live_retained_allocations(), 0);
         assert!(!released.poisoned());
     }
 
     #[test]
+    #[allow(
+        clippy::result_large_err,
+        reason = "the test keeps the actual inline parser failure and physical accounting without allocating a boxed error"
+    )]
     fn grouped_observed_work_uses_import_dimensions_on_the_same_operation() {
-        let mut owner = start_store_owner();
-        let mut exec = owner
-            .execution()
+        inspect_store_body(|owner, _account| {
+            let dimensions = [
+                ImportDimension::PrimaryBytes,
+                ImportDimension::TotalAssetBytes,
+            ];
+            let keys = dimensions.map(|dimension| owner.storage[0].vocabulary.dimension(dimension));
+            let phase = owner.storage[0]
+                .vocabulary
+                .phase(ImportLedgerPhase::PrimarySnapshot);
+            let scratch_dimension = owner.storage[0]
+                .vocabulary
+                .dimension(ImportDimension::ScratchBytes);
+            with_root(owner, |exec| {
+                exec.poll()?;
+                let layout = exec
+                    .raw
+                    .bind_group(keys)
+                    .expect("the actual import group must bind");
+                exec.raw
+                    .parser_child::<_, StoreParserWorkError, 2>(layout, [3, 3], [None; 2], |work| {
+                        assert_eq!(work.remaining(), [3, 3]);
+                        let scratch = ImportStoreReservation {
+                            raw: Some(
+                                work.ordinary_storage()
+                                    .reserve(phase, scratch_dimension, 8)
+                                    .expect("the observed-work callback must use disjoint storage admission"),
+                            ),
+                            bytes: 8,
+                        };
+                        work.run_prefix([1, 1], 1, || Ok::<_, StoreParserWorkError>(()))
+                            .expect("the first physical prefix must complete atomically");
+                        assert_eq!(work.remaining(), [2, 2]);
+                        work.run_prefix([2, 2], 1, || Ok::<_, StoreParserWorkError>(()))
+                            .expect("the admitted suffix must complete atomically");
+                        drop(scratch);
+                        Ok(())
+                    })
+                    .expect("the exact observed-work envelope must finish");
+
+                for dimension in dimensions {
+                    let state = exec.dimension_state(dimension).expect(
+                        "the import dimension must remain observable through the same execution",
+                    );
+                    assert_eq!(state.attempted(), 3);
+                    assert_eq!(state.consumed(), 3);
+                }
+                Ok(())
+            })
             .expect("the dormant owner must lend execution");
-
-        exec.with_observed_work(
-            [
-                (ImportDimension::PrimaryBytes, 3),
-                (ImportDimension::TotalAssetBytes, 3),
-            ],
-            |exec, work| {
-                assert_eq!(work.remaining(), [3, 3]);
-                let scratch = exec
-                    .reserve(
-                        ImportLedgerPhase::PrimarySnapshot,
-                        ImportDimension::ScratchBytes,
-                        8,
-                    )
-                    .expect("the observed-work callback must use disjoint storage admission");
-                work.complete([1, 1])
-                    .expect("the first physical prefix must complete atomically");
-                assert_eq!(work.remaining(), [2, 2]);
-                work.complete([2, 2])
-                    .expect("the admitted suffix must complete atomically");
-                drop(scratch);
-                Ok::<_, ()>(())
-            },
-        )
-        .expect("the exact observed-work envelope must finish");
-
-        for dimension in [
-            ImportDimension::PrimaryBytes,
-            ImportDimension::TotalAssetBytes,
-        ] {
-            let state = exec
-                .dimension_state(dimension)
-                .expect("the import dimension must remain observable through the same execution");
-            assert_eq!(state.attempted(), 3);
-            assert_eq!(state.consumed(), 3);
-        }
+        });
     }
 
     #[test]
     fn split_parser_accounting_and_storage_share_disjoint_execution_capabilities() {
-        let (mut owner, account) = start_store_owner_with_account();
-        let mut exec = owner
-            .execution()
+        inspect_store_body(|owner, _account| {
+            with_root(owner, |exec| {
+                let baseline = exec
+                    .dimension_state(ImportDimension::ScratchBytes)
+                    .expect("startup scratch storage remains observable")
+                    .live_bytes();
+
+                exec.charge_attempted(ImportDimension::DecodeWork, 2)
+                    .expect("the parser admits its exact decode envelope");
+                let reservation = exec
+                    .reserve(
+                        ImportLedgerPhase::BackendDecode,
+                        ImportDimension::ScratchBytes,
+                        8,
+                    )
+                    .expect("metered storage uses the same operation between work charges");
+                exec.charge_consumed(ImportDimension::DecodeWork, 1)
+                    .expect("the first completed decode prefix is retained");
+                exec.charge_consumed_batch(&[(ImportDimension::DecodeWork, 1)])
+                    .expect("the final completed prefix is retained");
+
+                let decode = exec
+                    .dimension_state(ImportDimension::DecodeWork)
+                    .expect("decode work remains observable");
+                assert_eq!(decode.attempted(), 2);
+                assert_eq!(decode.consumed(), 2);
+                assert_eq!(
+                    exec.dimension_state(ImportDimension::ScratchBytes)
+                        .expect("scratch storage remains on the same operation")
+                        .live_bytes(),
+                    baseline + reservation.bytes()
+                );
+
+                drop(reservation);
+                assert_eq!(
+                    exec.dimension_state(ImportDimension::ScratchBytes)
+                        .expect("dropping the reservation updates the same operation")
+                        .live_bytes(),
+                    baseline
+                );
+                Ok(())
+            })
             .expect("the dormant owner must lend execution");
-        let baseline = exec
-            .dimension_state(ImportDimension::ScratchBytes)
-            .expect("startup scratch storage remains observable")
-            .live_bytes();
-
-        exec.charge_attempted(ImportDimension::DecodeWork, 2)
-            .expect("the parser admits its exact decode envelope");
-        let reservation = exec
-            .reserve(
-                ImportLedgerPhase::BackendDecode,
-                ImportDimension::ScratchBytes,
-                8,
-            )
-            .expect("metered storage uses the same operation between work charges");
-        exec.charge_consumed(ImportDimension::DecodeWork, 1)
-            .expect("the first completed decode prefix is retained");
-        exec.charge_consumed_batch(&[(ImportDimension::DecodeWork, 1)])
-            .expect("the final completed prefix is retained");
-
-        let decode = exec
-            .dimension_state(ImportDimension::DecodeWork)
-            .expect("decode work remains observable");
-        assert_eq!(decode.attempted(), 2);
-        assert_eq!(decode.consumed(), 2);
-        assert_eq!(
-            exec.dimension_state(ImportDimension::ScratchBytes)
-                .expect("scratch storage remains on the same operation")
-                .live_bytes(),
-            baseline + reservation.bytes()
-        );
-
-        drop(reservation);
-        assert_eq!(
-            exec.dimension_state(ImportDimension::ScratchBytes)
-                .expect("dropping the reservation updates the same operation")
-                .live_bytes(),
-            baseline
-        );
-        drop(owner);
-        let released = account.snapshot();
-        assert_eq!(released.live_retained_bytes(), 0);
-        assert_eq!(released.live_retained_allocations(), 0);
-        assert!(!released.poisoned());
+        });
     }
 
     #[test]
+    #[allow(
+        clippy::result_large_err,
+        reason = "the test inspects original owned errors and exact inline admission failure evidence"
+    )]
     fn action_failure_resolves_observed_work_with_the_exact_completed_prefix() {
-        let mut owner = start_store_owner();
-        let mut exec = owner
-            .execution()
+        inspect_store_body(|owner, _account| {
+            let dimensions = [
+                ImportDimension::PrimaryBytes,
+                ImportDimension::TotalAssetBytes,
+            ];
+            let keys = dimensions.map(|dimension| owner.storage[0].vocabulary.dimension(dimension));
+            with_root(owner, |exec| {
+                exec.poll()?;
+                let layout = exec
+                    .raw
+                    .bind_group(keys)
+                    .expect("the actual import group must bind");
+                let result = exec
+                    .raw
+                    .parser_child::<(), ImportExecutionFailure<&str>, 2>(
+                        layout,
+                        [3, 3],
+                        [None; 2],
+                        |work| {
+                            work.run_prefix([1, 1], 1, || Ok::<_, StoreParserWorkError>(()))
+                                .expect("the completed physical prefix must be recorded");
+                            Err(ImportExecutionFailure::Owned("short-read"))
+                        },
+                    );
+                assert!(matches!(
+                    result,
+                    Err(ImportExecutionFailure::Owned("short-read"))
+                ));
+
+                for dimension in [
+                    ImportDimension::PrimaryBytes,
+                    ImportDimension::TotalAssetBytes,
+                ] {
+                    let state = exec
+                        .dimension_state(dimension)
+                        .expect("partial work remains observable on the sole operation");
+                    assert_eq!(state.attempted(), 3);
+                    assert_eq!(state.consumed(), 1);
+                }
+                Ok(())
+            })
             .expect("the dormant owner must lend execution");
-
-        let result = exec.with_observed_work(
-            [
-                (ImportDimension::PrimaryBytes, 3),
-                (ImportDimension::TotalAssetBytes, 3),
-            ],
-            |_, work| {
-                work.complete([1, 1])
-                    .expect("the completed physical prefix must be recorded");
-                Err::<(), _>("short-read")
-            },
-        );
-        assert!(matches!(
-            result,
-            Err(ImportObservedWorkFailure::Action("short-read"))
-        ));
-
-        for dimension in [
-            ImportDimension::PrimaryBytes,
-            ImportDimension::TotalAssetBytes,
-        ] {
-            let state = exec
-                .dimension_state(dimension)
-                .expect("partial work remains observable on the sole operation");
-            assert_eq!(state.attempted(), 3);
-            assert_eq!(state.consumed(), 1);
-        }
+        });
     }
 
     #[test]
     fn execution_reservations_remain_bound_to_the_import_operation() {
-        let mut owner = start_store_owner();
-        let mut exec = owner
-            .execution()
+        inspect_store_body(|owner, _account| {
+            with_root(owner, |exec| {
+                let mut reservation = exec
+                    .reserve(
+                        ImportLedgerPhase::Detection,
+                        ImportDimension::ScratchBytes,
+                        8,
+                    )
+                    .expect("execution must reserve import scratch through the retained operation");
+                assert_eq!(reservation.bytes(), 8);
+                exec.validate_live_owner(&reservation)
+                    .expect("the import wrapper must preserve the sole operation owner");
+
+                exec.resize(&mut reservation, 16)
+                    .expect("the same execution must resize its reservation");
+                assert_eq!(reservation.bytes(), 16);
+                exec.transition(
+                    &mut reservation,
+                    ImportLedgerPhase::DependencyAcquisition,
+                    ImportDimension::DependencyBytes,
+                    12,
+                )
+                .expect("the same execution must transition its reservation");
+                assert_eq!(reservation.bytes(), 12);
+                exec.validate_live_owner(&reservation)
+                    .expect("transition must preserve the sole operation owner");
+                assert_eq!(
+                    exec.dimension_state(ImportDimension::DependencyBytes)
+                        .expect("the transitioned dimension must be observable")
+                        .live_bytes(),
+                    12
+                );
+
+                drop(reservation);
+                assert_eq!(
+                    exec.dimension_state(ImportDimension::DependencyBytes)
+                        .expect("dropping the reservation must update the same operation")
+                        .live_bytes(),
+                    0
+                );
+                Ok(())
+            })
             .expect("the dormant owner must lend execution");
-        let mut reservation = exec
-            .reserve(
-                ImportLedgerPhase::Detection,
-                ImportDimension::ScratchBytes,
-                8,
-            )
-            .expect("execution must reserve import scratch through the retained operation");
-        assert_eq!(reservation.bytes(), 8);
-        exec.validate_live_owner(&reservation)
-            .expect("the import wrapper must preserve the sole operation owner");
-
-        exec.resize(&mut reservation, 16)
-            .expect("the same execution must resize its reservation");
-        assert_eq!(reservation.bytes(), 16);
-        exec.transition(
-            &mut reservation,
-            ImportLedgerPhase::DependencyAcquisition,
-            ImportDimension::DependencyBytes,
-            12,
-        )
-        .expect("the same execution must transition its reservation");
-        assert_eq!(reservation.bytes(), 12);
-        exec.validate_live_owner(&reservation)
-            .expect("transition must preserve the sole operation owner");
-        assert_eq!(
-            exec.dimension_state(ImportDimension::DependencyBytes)
-                .expect("the transitioned dimension must be observable")
-                .live_bytes(),
-            12
-        );
-
-        drop(reservation);
-        assert_eq!(
-            exec.dimension_state(ImportDimension::DependencyBytes)
-                .expect("dropping the reservation must update the same operation")
-                .live_bytes(),
-            0
-        );
+        });
     }
 
     #[test]
+    #[allow(
+        clippy::result_large_err,
+        reason = "the completion-denial test retains the real inline ledger cause without failure-path allocation"
+    )]
     fn execution_tightens_import_policy_without_exposing_store_keys() {
-        let mut owner = start_store_owner();
-        let mut exec = owner
-            .execution()
+        inspect_store_body(|owner, _account| {
+            let key = owner.storage[0]
+                .vocabulary
+                .dimension(ImportDimension::DetectionWork);
+            with_root(owner, |exec| {
+                exec.tighten_dimension_policy(
+                    ImportDimension::DetectionWork,
+                    DimensionPolicy::counter(3, 2, 0),
+                )
+                .expect("the import execution must tighten its own qualified dimension");
+
+                let group = exec.raw.bind_group([key]).unwrap();
+                let mut completed = false;
+                let result = exec.raw.parser_child(
+                    group,
+                    [3],
+                    [None],
+                    |child| child.run_prefix([3], 1, || {
+                        completed = true;
+                        Ok::<_, baozi_operation::__retained_store_integration::activation::StoreParserWorkError>(())
+                    }),
+                );
+                assert!(
+                    completed,
+                    "the physical action must complete before projection fails"
+                );
+                assert!(matches!(result, Err(
+                    baozi_operation::__retained_store_integration::activation::StoreParserWorkError::Runtime(
+                        StoreRuntimeError::Ledger(_)
+                    )
+                )));
+                let state = exec
+                    .dimension_state(ImportDimension::DetectionWork)
+                    .expect("the tightened dimension must remain observable");
+                assert_eq!(state.attempted(), 3);
+                assert_eq!(state.consumed(), 0);
+                Ok(())
+            })
             .expect("the dormant owner must lend execution");
-
-        exec.tighten_dimension_policy(
-            ImportDimension::DetectionWork,
-            DimensionPolicy::counter(3, 2, 0),
-        )
-        .expect("the import execution must tighten its own qualified dimension");
-
-        let result = exec.with_observed_work([(ImportDimension::DetectionWork, 3)], |_, work| {
-            work.complete([3])
-                .expect("the completed prefix must be retained before projection fails");
-            Ok::<_, ()>(())
         });
-        assert!(matches!(
-            result,
-            Err(ImportObservedWorkFailure::Store(
-                ImportStoreHostError::Ledger(_)
-            ))
-        ));
-        let state = exec
-            .dimension_state(ImportDimension::DetectionWork)
-            .expect("the tightened dimension must remain observable");
-        assert_eq!(state.attempted(), 3);
-        assert_eq!(state.consumed(), 0);
     }
 
     #[test]
     fn execution_projects_runtime_ledger_keys_back_to_import_semantics() {
-        let mut owner = start_store_owner();
-        let exec = owner
-            .execution()
-            .expect("the dormant owner must lend execution");
-        exec.tighten_dimension_policy(
-            ImportDimension::DetectionWork,
-            DimensionPolicy::counter(1, 1, 0),
-        )
-        .expect("the detection policy must tighten before work");
+        inspect_store_body(|owner, _account| {
+            with_root(owner, |exec| {
+                exec.tighten_dimension_policy(
+                    ImportDimension::DetectionWork,
+                    DimensionPolicy::counter(1, 1, 0),
+                )
+                .expect("the detection policy must tighten before work");
 
-        let cause = exec
-            .charge_attempted(ImportDimension::DetectionWork, 2)
-            .expect_err("the attempted prefix crosses the tightened limit");
-        assert!(matches!(
-            &cause,
-            ImportStoreHostError::Ledger(LedgerCause::LimitExceeded {
-                dimension,
-                value,
-                limit,
-                ..
-            }) if *dimension == ImportDimension::DetectionWork && *value == 2 && *limit == 1
-        ));
+                let cause = exec
+                    .charge_attempted(ImportDimension::DetectionWork, 2)
+                    .expect_err("the attempted prefix crosses the tightened limit");
+                assert!(matches!(
+                    &cause,
+                    ImportStoreHostError::Ledger(LedgerCause::LimitExceeded {
+                        dimension,
+                        value,
+                        limit,
+                        ..
+                    }) if *dimension == ImportDimension::DetectionWork && *value == 2 && *limit == 1
+                ));
 
-        let projected = cause.into_scope_abort_cause();
-        assert!(matches!(
-            projected,
-            ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
-                dimension: ImportDimension::DetectionWork,
-                value: 2,
-                limit: 1,
-                ..
+                let projected = cause.into_scope_abort_cause();
+                assert!(matches!(
+                    projected,
+                    ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                        dimension: ImportDimension::DetectionWork,
+                        value: 2,
+                        limit: 1,
+                        ..
+                    })
+                ));
+                Ok(())
             })
-        ));
+            .expect("the dormant owner must lend execution");
+        });
     }
 
     #[test]
     fn abandoned_scene_transition_quarantines_the_dormant_outcome_owner() {
-        let (mut owner, account) = start_store_owner_with_account();
-        let (operation, transition) =
-            ImportStoreActivationTransition::begin(&mut owner.storage[0].state)
-                .expect("the active import operation must enter one Scene transition");
+        let mut invocation_root = ImportStoreInvocationRoot::new();
+        let body = invocation_root.run_body(|parts, _disposition| {
+            let (mut owner, account) = start_store_owner_in_body(
+                parts,
+                ResourceLimits::default(),
+                ImportOperationControl::default(),
+            );
+            let (operation, transition) =
+                ImportStoreActivationTransition::begin(&mut owner.storage[0].state)
+                    .expect("the active import operation must enter one Scene transition");
 
-        drop(operation);
-        drop(transition);
+            drop(operation);
+            drop(transition);
 
-        assert!(matches!(
-            owner.execution(),
-            Err(ImportStoreHostError::OperationContained)
-        ));
-        assert!(matches!(
-            owner.prepare_scene(SceneParseOutcome::Rejected),
-            Err(ImportStoreActivationError::StoreUnavailable(
-                ImportStoreHostError::OperationContained
-            ))
-        ));
-        let contained = account.snapshot();
-        assert!(contained.poisoned());
-        assert!(contained.live_retained_bytes() > 0);
-        assert!(contained.live_retained_allocations() > 0);
-        assert_eq!(
-            contained
-                .first_poison_evidence()
-                .map(|evidence| evidence.reason()),
-            Some(baozi_operation::AccountPoisonReason::OwnershipGraphUnverified)
+            assert!(matches!(
+                with_root(&mut owner, |_| Ok(())),
+                Err(ImportStoreHostError::OperationContained)
+            ));
+            assert!(matches!(
+                owner.into_body_state(),
+                Err(ImportStoreHostError::OperationContained)
+            ));
+            let contained = account.snapshot();
+            assert!(contained.poisoned());
+            assert!(contained.live_retained_bytes() > 0);
+            assert!(contained.live_retained_allocations() > 0);
+            assert_eq!(
+                contained
+                    .first_poison_evidence()
+                    .map(|evidence| evidence.reason()),
+                Some(baozi_operation::AccountPoisonReason::OwnershipGraphUnverified)
+            );
+        });
+        assert!(
+            body.is_err(),
+            "a contained owner cannot record a final disposition"
         );
     }
 

@@ -2,7 +2,7 @@ use super::{BuiltGeometryStreams, CornerChannelSelection, dense};
 use baozi_import::{
     ImportCause, ImportConfigOverlay, ImportDimension, ImportFailure, ImportOperationControl,
     ImportReport, ImportRequest, ImportRequestLayer, ImportTerminalFailureClass,
-    OptionCompileLimits, ParseExecution, ParseResult, RegistryBuildLimits, RegistryBuilder,
+    OptionCompileLimits, ParseResult, ParseServices, RegistryBuildLimits, RegistryBuilder,
     ResourceLimits, ResourceLimitsOverlay, ScopeAbortCause,
 };
 use baozi_io::AssetPath;
@@ -88,7 +88,7 @@ impl Drop for ProbeGuard {
 }
 
 pub(super) fn before_rows(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     resource: &'static str,
 ) -> ParseResult<()> {
     let token = PROBE.with(|slot| {

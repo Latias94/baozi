@@ -16,8 +16,8 @@ use baozi_import::authoring::{
     SourceObjectKind, SourceObjectLocator, SpatialAuthoringBatch,
 };
 use baozi_import::{
-    ImportStorageClass, ImportWorkClass, ImportWorkScope, MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS,
-    MeteredString, MeteredVec, ParseContext, ParseExecution, ParseFailure, ParseResult,
+    ImportStorageClass, ImportWorkClass, MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS, MeteredString,
+    MeteredVec, ParseContext, ParseFailure, ParseParser, ParseResult, ParseRoot, ParseServices,
 };
 
 const MATERIAL_NAME: &str = "STL Default Material";
@@ -50,11 +50,11 @@ struct PrimitivePatch {
     attributes: AuthoringRange,
 }
 
-pub(crate) fn read_stl(context: &mut ParseContext<'_>) -> ParseResult<()> {
+pub(crate) fn read_stl(context: &mut ParseContext<'_, '_>) -> ParseResult<()> {
     let bytes = context.primary_bytes();
     let parsed = match exact_binary_facets(bytes) {
         Some(facets) => context.with_parser_execution(|root| {
-            // The old ParseExecution entry has a second real poll after concrete-owner entry.
+            // The ordinary entry has a second real poll after concrete-owner entry.
             root.poll()?;
             binary::parse(root, bytes, facets)
         })?,
@@ -83,9 +83,10 @@ struct SceneTables<'session, 'input> {
 }
 
 fn authoring_tables<'session, 'input>(
-    exec: &mut ParseExecution<'_, 'session>,
+    root: &mut ParseRoot<'_, '_, 'session>,
     parsed: &'input ParsedStl<'session>,
 ) -> ParseResult<SceneTables<'session, 'input>> {
+    let exec = &mut root.services()?;
     if parsed.meshes.is_empty() {
         return Err(exec.format_failure(StlFailure::content(
             StlFailureCode::EmptyGeometry,
@@ -140,17 +141,14 @@ fn authoring_tables<'session, 'input>(
     remaining_canonical_string_bytes = remaining_canonical_string_bytes
         .checked_sub(MATERIAL_NAME.len())
         .ok_or_else(|| exec.allocation_failure("stl-canonical-string-counter"))?;
-    let material_name_work = exec.bind_work_group([ImportWorkClass::CanonicalStringBytes])?;
-    exec.with_work(
-        &material_name_work,
-        [usize_amount(
-            exec,
-            MATERIAL_NAME.len(),
-            "stl-material-name",
-        )?],
-        |exec, work| work.run_all(|| materials.try_push(exec, material)),
-    )?;
+    let material_name_work = root.bind_group([ImportWorkClass::CanonicalStringBytes])?;
+    let material_name_bytes =
+        usize_amount(&root.services()?, MATERIAL_NAME.len(), "stl-material-name")?;
+    root.child(&material_name_work, [material_name_bytes], |child| {
+        child.push_growing([material_name_bytes], &mut materials, material)
+    })?;
 
+    let exec = &mut root.services()?;
     let mut indices = exec.metered_vec(
         ImportStorageClass::FormatNormalization,
         "stl-authoring-indices",
@@ -196,7 +194,7 @@ fn authoring_tables<'session, 'input>(
         "stl-authoring-mesh-instance-deformations",
     );
 
-    let mesh_work = exec.bind_work_group([
+    let mesh_work = root.bind_group([
         ImportWorkClass::TopologyCells,
         ImportWorkClass::CanonicalStringBytes,
         ImportWorkClass::Primitives,
@@ -205,6 +203,7 @@ fn authoring_tables<'session, 'input>(
         ImportWorkClass::GraphEdges,
     ])?;
     for (mesh_index, parsed_mesh) in parsed.meshes.as_slice().iter().enumerate() {
+        let exec = &mut root.services()?;
         let topology_cells = parsed_mesh.positions.len();
         remaining_topology_cells = remaining_topology_cells
             .checked_sub(topology_cells)
@@ -224,7 +223,7 @@ fn authoring_tables<'session, 'input>(
         let local_id = u32::try_from(mesh_index)
             .map_err(|_| exec.allocation_failure("stl-authoring-local-id"))?;
 
-        exec.with_work(
+        root.child(
             &mesh_work,
             [
                 topology_cells,
@@ -234,97 +233,93 @@ fn authoring_tables<'session, 'input>(
                 1,
                 1,
             ],
-            |exec, work| -> ParseResult<()> {
-                let index_range = append_sequential_indices(
-                    exec,
-                    work,
-                    &mut indices,
-                    parsed_mesh.positions.len(),
-                )?;
+            |child| -> ParseResult<()> {
+                let index_range =
+                    append_sequential_indices(child, &mut indices, parsed_mesh.positions.len())?;
 
-                work.run([0, mesh_name_bytes, 0, 0, 0, 0], || Ok(()))?;
+                child.run([0, mesh_name_bytes, 0, 0, 0, 0], || {
+                    Ok::<_, ParseFailure>(())
+                })?;
 
+                let exec = &mut child.services()?;
                 let attribute_offset = u32::try_from(attributes.len())
                     .map_err(|_| exec.allocation_failure("stl-authoring-attribute-offset"))?;
                 let attribute_count = u32::try_from(attribute_stream_count)
                     .map_err(|_| exec.allocation_failure("stl-authoring-attribute-count"))?;
                 let attribute_range = AuthoringRange::new(attribute_offset, attribute_count);
-                work.run(
-                    [0, mesh_name_bytes, 1, attribute_stream_count, 0, 0],
-                    || -> ParseResult<()> {
-                        attributes.try_push(
-                            exec,
+                let errors = child.error_view();
+                child.run_returned_with_storage::<_, StlFailure>(|mut storage| {
+                    storage.push_vec(
+                        &mut attributes,
+                        GeometryAttributeAuthoring::f32(
+                            AttributeSemantic::Position,
+                            AttributeDomain::Vertex,
+                            3,
+                            parsed_mesh.positions.as_slice().as_flattened(),
+                            Presence::Absent,
+                        ),
+                    )?;
+                    storage.push_vec(
+                        &mut attributes,
+                        GeometryAttributeAuthoring::f32(
+                            AttributeSemantic::Normal,
+                            AttributeDomain::Vertex,
+                            3,
+                            parsed_mesh.normals.as_slice().as_flattened(),
+                            Presence::Absent,
+                        ),
+                    )?;
+                    if let Some(colors) = &parsed_mesh.colors {
+                        storage.push_vec(
+                            &mut attributes,
                             GeometryAttributeAuthoring::f32(
-                                AttributeSemantic::Position,
+                                AttributeSemantic::Color(0),
                                 AttributeDomain::Vertex,
-                                3,
-                                parsed_mesh.positions.as_slice().as_flattened(),
+                                4,
+                                colors.as_slice().as_flattened(),
                                 Presence::Absent,
                             ),
                         )?;
-                        attributes.try_push(
-                            exec,
-                            GeometryAttributeAuthoring::f32(
-                                AttributeSemantic::Normal,
-                                AttributeDomain::Vertex,
-                                3,
-                                parsed_mesh.normals.as_slice().as_flattened(),
-                                Presence::Absent,
-                            ),
-                        )?;
-                        if let Some(colors) = &parsed_mesh.colors {
-                            attributes.try_push(
-                                exec,
-                                GeometryAttributeAuthoring::f32(
-                                    AttributeSemantic::Color(0),
-                                    AttributeDomain::Vertex,
-                                    4,
-                                    colors.as_slice().as_flattened(),
-                                    Presence::Absent,
-                                ),
-                            )?;
-                        }
+                    }
 
-                        let primitive_offset = u32::try_from(primitives.len()).map_err(|_| {
-                            exec.allocation_failure("stl-authoring-primitive-offset")
-                        })?;
-                        let mut logical_mesh = GeometryLogicalMeshAuthoring::new(
-                            AuthoringRange::new(primitive_offset, 1),
-                        );
-                        if let Some(name) = &parsed_mesh.name {
-                            logical_mesh = logical_mesh.with_name(name.as_str());
-                        }
-                        logical_meshes.try_push(exec, logical_mesh)?;
-                        primitives.try_push(
-                            exec,
-                            GeometryPrimitiveAuthoring::new(
-                                GeometryTopologyAuthoring::TriangleList,
-                                Presence::Absent,
-                                baozi_import::authoring::MaterialAssignment::Authored(
-                                    MaterialLocalId::new(0),
-                                ),
-                                attribute_range,
+                    let primitive_offset = u32::try_from(primitives.len())
+                        .map_err(|_| errors.allocation_failure("stl-authoring-primitive-offset"))?;
+                    let mut logical_mesh =
+                        GeometryLogicalMeshAuthoring::new(AuthoringRange::new(primitive_offset, 1));
+                    if let Some(name) = &parsed_mesh.name {
+                        logical_mesh = logical_mesh.with_name(name.as_str());
+                    }
+                    storage.push_vec(&mut logical_meshes, logical_mesh)?;
+                    storage.push_vec(
+                        &mut primitives,
+                        GeometryPrimitiveAuthoring::new(
+                            GeometryTopologyAuthoring::TriangleList,
+                            Presence::Absent,
+                            baozi_import::authoring::MaterialAssignment::Authored(
+                                MaterialLocalId::new(0),
                             ),
-                        )?;
-                        primitive_patches.try_push(
-                            exec,
-                            PrimitivePatch {
-                                indices: index_range,
-                                attributes: attribute_range,
-                            },
-                        )?;
-                        logical_morphs.try_push(
-                            exec,
-                            LogicalMorphAuthoring::new(AuthoringRange::new(0, 0), &[]),
-                        )?;
-                        primitive_deformations.try_push(
-                            exec,
-                            PrimitiveDeformationAuthoring::new(Presence::Absent, &[]),
-                        )
-                    },
-                )?;
+                            attribute_range,
+                        ),
+                    )?;
+                    storage.push_vec(
+                        &mut primitive_patches,
+                        PrimitivePatch {
+                            indices: index_range,
+                            attributes: attribute_range,
+                        },
+                    )?;
+                    storage.push_vec(
+                        &mut logical_morphs,
+                        LogicalMorphAuthoring::new(AuthoringRange::new(0, 0), &[]),
+                    )?;
+                    storage.push_vec(
+                        &mut primitive_deformations,
+                        PrimitiveDeformationAuthoring::new(Presence::Absent, &[]),
+                    )?;
+                    Ok(((), [0, mesh_name_bytes, 1, attribute_stream_count, 0, 0]))
+                })?;
 
-                work.run([0, 0, 0, 0, 1, 0], || -> ParseResult<()> {
+                child.run_returned_with_storage::<_, StlFailure>(|mut storage| {
                     let node_id = NodeLocalId::new(local_id);
                     let mut node = NodeAuthoringNode::new(
                         Presence::Absent,
@@ -335,22 +330,24 @@ fn authoring_tables<'session, 'input>(
                     if let Some(name) = &parsed_mesh.name {
                         node = node.with_name(name.as_str());
                     }
-                    roots.try_push(exec, node_id)?;
-                    nodes.try_push(exec, node)
+                    storage.push_vec(&mut roots, node_id)?;
+                    storage.push_vec(&mut nodes, node)?;
+                    Ok(((), [0, 0, 0, 0, 1, 0]))
                 })?;
 
-                work.run([0, 0, 0, 0, 0, 1], || -> ParseResult<()> {
-                    mesh_instances.try_push(
-                        exec,
+                child.run_returned_with_storage::<_, StlFailure>(|mut storage| {
+                    storage.push_vec(
+                        &mut mesh_instances,
                         GeometryMeshInstanceAuthoring::new(
                             NodeLocalId::new(local_id),
                             LogicalMeshLocalId::new(local_id),
                         ),
                     )?;
-                    mesh_instance_deformations.try_push(
-                        exec,
+                    storage.push_vec(
+                        &mut mesh_instance_deformations,
                         MeshInstanceDeformationAuthoring::new(Presence::Absent, Presence::Absent),
-                    )
+                    )?;
+                    Ok(((), [0, 0, 0, 0, 0, 1]))
                 })
             },
         )?;
@@ -359,6 +356,7 @@ fn authoring_tables<'session, 'input>(
     debug_assert_eq!(remaining_topology_cells, 0);
     debug_assert_eq!(remaining_canonical_string_bytes, 0);
 
+    let exec = &mut root.services()?;
     if primitives.len() != primitive_patches.len() {
         return Err(canonical_contract_failure(
             exec,
@@ -417,7 +415,7 @@ fn authoring_tables<'session, 'input>(
 }
 
 fn scene_from_parsed<'session>(
-    context: &mut ParseContext<'session>,
+    context: &mut ParseContext<'session, '_>,
     parsed: ParsedStl<'session>,
 ) -> ParseResult<()> {
     let SceneTables {
@@ -437,11 +435,12 @@ fn scene_from_parsed<'session>(
         resource_identity,
         resource_stability,
         format,
-    } = context.with_execution(|exec| authoring_tables(exec, &parsed))?;
+    } = context.with_execution(|root| authoring_tables(root, &parsed))?;
 
     // Move the buffers apart before descriptors borrow the sealed index storage.
     let mut primitives: MeteredVec<'_, GeometryPrimitiveAuthoring<'_>> = primitives;
-    context.with_execution(|exec| -> ParseResult<()> {
+    context.with_execution(|root| -> ParseResult<()> {
+        let exec = &mut root.services()?;
         for (index, (primitive, patch)) in primitives
             .as_mut_slice()
             .iter_mut()
@@ -523,7 +522,7 @@ fn scene_from_parsed<'session>(
 }
 
 fn validate_mesh_shape(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     mesh: &ParsedMesh<'_>,
 ) -> ParseResult<()> {
     if mesh.positions.len() != mesh.normals.len()
@@ -540,28 +539,28 @@ fn validate_mesh_shape(
     Ok(())
 }
 
-fn append_sequential_indices<'region, 'session>(
-    exec: &mut ParseExecution<'region, 'session>,
-    work: &mut ImportWorkScope<'region, 6>,
+fn append_sequential_indices<'session>(
+    child: &mut ParseParser<'_, '_, '_, '_, 'session, 6, true>,
     indices: &mut MeteredVec<'session, u32>,
     vertex_count: usize,
 ) -> ParseResult<IndexRange> {
     let offset = indices.len();
-    indices.try_reserve(exec, vertex_count)?;
+    indices.try_reserve(&mut child.services()?, vertex_count)?;
+    let errors = child.error_view();
     for index in 0..vertex_count {
         if index % MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS == 0 {
-            exec.poll()?;
+            child.poll()?;
         }
         // The mesh scope admits the full stream; consume only indices actually appended.
-        work.run([1, 0, 0, 0, 0, 0], || {
+        child.run([1, 0, 0, 0, 0, 0], || {
             indices.try_push_reserved(
-                u32::try_from(index).map_err(|_| exec.allocation_failure("stl-index-space"))?,
+                u32::try_from(index).map_err(|_| errors.allocation_failure("stl-index-space"))?,
             )
         })?;
         #[cfg(test)]
         crate::control_tests::index_completed(&indices.as_slice()[offset..]);
     }
-    exec.poll()?;
+    child.poll()?;
     Ok(IndexRange {
         offset,
         count: vertex_count,
@@ -569,7 +568,7 @@ fn append_sequential_indices<'region, 'session>(
 }
 
 fn canonical_string_bytes(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     parsed: &ParsedStl<'_>,
 ) -> ParseResult<usize> {
     let mut bytes = MATERIAL_NAME.len();
@@ -587,7 +586,7 @@ fn canonical_string_bytes(
 }
 
 fn checked_add(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     total: &mut usize,
     value: usize,
     resource: &'static str,
@@ -599,7 +598,7 @@ fn checked_add(
 }
 
 fn push_owner<'session, 'input>(
-    exec: &mut ParseExecution<'_, 'session>,
+    exec: &mut ParseServices<'_, '_, 'session>,
     owners: &mut MeteredVec<'session, OwnerProvenanceAuthoring<'input>>,
     owner: ProfileOwner,
 ) -> ParseResult<()> {
@@ -610,7 +609,7 @@ fn push_owner<'session, 'input>(
 }
 
 fn profile_resource_identity(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
 ) -> ParseResult<(ResourceIdentity, SessionOpaqueReason)> {
     match ResourceIdentity::new(exec.source().as_str()) {
         Ok(identity) => Ok((identity, SessionOpaqueReason::CallerLabel)),
@@ -620,12 +619,12 @@ fn profile_resource_identity(
     }
 }
 
-fn profile_index(exec: &ParseExecution<'_, '_>, index: usize) -> Result<u32, ParseFailure> {
+fn profile_index(exec: &ParseServices<'_, '_, '_>, index: usize) -> Result<u32, ParseFailure> {
     u32::try_from(index).map_err(|_| exec.allocation_failure("stl-profile-owner-index"))
 }
 
 fn usize_amount(
-    exec: &ParseExecution<'_, '_>,
+    exec: &ParseServices<'_, '_, '_>,
     value: usize,
     resource: &'static str,
 ) -> Result<u64, ParseFailure> {
@@ -633,7 +632,7 @@ fn usize_amount(
 }
 
 fn canonical_contract_failure(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     subject: &'static str,
 ) -> ParseFailure {
     exec.format_failure(StlFailure::content(

@@ -5,9 +5,9 @@ mod share;
 #[cfg(test)]
 pub(in crate::retained) use config::map_qualified_startup_batch_error;
 pub(crate) use config::{
-    RetainedBatchLimits, RetainedFailureTerminalWorkPlan, RetainedHandleSharePlan,
-    RetainedOperationStartError, RetainedOperationStartPlan, RetainedWriterError,
-    RetainedWriterPlan,
+    RetainedBatchLimits, RetainedFailureTerminalWorkPlan, RetainedFailureTerminalWorkRequirement,
+    RetainedHandleSharePlan, RetainedOperationStartError, RetainedOperationStartPlan,
+    RetainedWriterError, RetainedWriterPlan,
 };
 pub(in crate::retained) use config::{
     map_account_action_admission_error, map_batch_error, map_faulted_pending_rollback,

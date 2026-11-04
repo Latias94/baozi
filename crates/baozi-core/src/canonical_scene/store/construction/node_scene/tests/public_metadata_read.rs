@@ -140,8 +140,11 @@ fn build_metadata_scene(account: &PhysicalStorageAccount) -> NodeSceneSuccessPar
         LineageAuthoringBatch::new(&resources, &sources, &provenance, &fixture.owners),
         MetadataAuthoringBatch::new(&entries),
     );
-    successful_parts(
+    let mut construction_root_1 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    let parts = successful_parts(
         NodeSceneTestTransaction::with_account(
+            &mut construction_root_1,
             account,
             test_limits(),
             SceneAuthoringBatch::new(
@@ -160,7 +163,9 @@ fn build_metadata_scene(account: &PhysicalStorageAccount) -> NodeSceneSuccessPar
         .unwrap()
         .publish_for_test()
         .unwrap(),
-    )
+    );
+    drop(construction_root_1);
+    parts
 }
 
 #[test]

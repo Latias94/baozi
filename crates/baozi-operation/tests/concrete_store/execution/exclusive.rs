@@ -19,12 +19,210 @@ impl From<StoreInvocationError> for ParsePieceError {
     }
 }
 
+#[derive(Debug)]
+enum ActionBoundaryError {
+    Runtime(StoreRuntimeError),
+    Semantic { code: u32, identity: Rc<()> },
+}
+
+impl From<StoreRuntimeError> for ActionBoundaryError {
+    fn from(cause: StoreRuntimeError) -> Self {
+        Self::Runtime(cause)
+    }
+}
+
+#[test]
+fn ignored_action_region_semantic_error_keeps_its_owner_and_prevents_reuse() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let signal = CountedCancellation::default();
+    let mut root = TestInvocationRoot::new();
+    let (mut operation, keys) = operation_with_work_policy(
+        &mut root,
+        &account,
+        OperationControl::default().with_cancellation(signal.clone()),
+        DimensionPolicy::counter(8, 8, 0),
+    );
+    signal.polls.store(0, Ordering::SeqCst);
+    let identity = Rc::new(());
+    let physical = Cell::new(false);
+    let result = operation.with_action_execution::<(), ActionBoundaryError>(
+        keys.other_dimension,
+        |actions| {
+            actions.begin_action(1)?;
+            physical.set(true);
+            actions.complete_action()?;
+            Err(ActionBoundaryError::Semantic {
+                code: 41,
+                identity: Rc::clone(&identity),
+            })
+        },
+    );
+    match result {
+        Err(ActionBoundaryError::Semantic {
+            code: 41,
+            identity: returned,
+        }) => {
+            assert!(Rc::ptr_eq(&returned, &identity));
+        }
+        Err(ActionBoundaryError::Runtime(cause)) => {
+            panic!("the action error was replaced: {cause}")
+        }
+        other => panic!("unexpected action result: {other:?}"),
+    }
+    assert!(physical.get());
+    assert_eq!(signal.polls.load(Ordering::SeqCst), 1);
+    let next_called = Cell::new(false);
+    assert!(matches!(
+        operation.with_action_execution::<_, StoreRuntimeError>(keys.other_dimension, |_| {
+            next_called.set(true);
+            Ok(())
+        }),
+        Err(StoreRuntimeError::FallbackOnly)
+    ));
+    assert!(!next_called.get());
+    assert_eq!(signal.polls.load(Ordering::SeqCst), 1);
+    let evidence = rejected_success_evidence(operation, StorePreparationFailureClass::ProductGraph);
+    assert_work(&evidence, keys.other_dimension, 1, 1);
+    drop(evidence);
+    drop(root);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    assert!(!account.snapshot().poisoned());
+}
+
+#[test]
+fn caught_action_region_unwind_before_first_action_prevents_reuse_and_success() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let signal = CountedCancellation::default();
+    let mut root = TestInvocationRoot::new();
+    let (mut operation, keys) = operation_with_work_policy(
+        &mut root,
+        &account,
+        OperationControl::default().with_cancellation(signal.clone()),
+        DimensionPolicy::counter(8, 8, 0),
+    );
+    signal.polls.store(0, Ordering::SeqCst);
+    let before = account.snapshot();
+    let panic = catch_unwind(AssertUnwindSafe(|| {
+        let _: Result<(), StoreRuntimeError> = operation
+            .with_action_execution(keys.other_dimension, |_| {
+                panic!("action region before its first numeric action")
+            });
+    }));
+    assert!(panic.is_err());
+    assert_eq!(signal.polls.load(Ordering::SeqCst), 1);
+    assert_eq!(account.snapshot(), before);
+    let next_called = Cell::new(false);
+    assert!(matches!(
+        operation.with_action_execution::<_, StoreRuntimeError>(keys.other_dimension, |_| {
+            next_called.set(true);
+            Ok(())
+        }),
+        Err(StoreRuntimeError::FallbackOnly)
+    ));
+    assert!(!next_called.get());
+    assert_eq!(signal.polls.load(Ordering::SeqCst), 1);
+    let evidence = rejected_success_evidence(operation, StorePreparationFailureClass::ProductGraph);
+    assert_work(&evidence, keys.other_dimension, 0, 0);
+    drop(evidence);
+    drop(root);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    assert!(!account.snapshot().poisoned());
+}
+
+struct ReturnedActionOwner {
+    values: Option<Vec<u8>>,
+    reservation: Option<
+        baozi_operation::__retained_store_integration::authority::RetainedStoreReservation<
+            TestOwner,
+        >,
+    >,
+    drops: Rc<Cell<usize>>,
+}
+
+impl Drop for ReturnedActionOwner {
+    fn drop(&mut self) {
+        self.reservation
+            .take()
+            .unwrap()
+            .release_storage(self.values.take());
+        self.drops.set(self.drops.get() + 1);
+        panic!("rejected action result destructor");
+    }
+}
+
+#[test]
+fn rejected_action_result_drop_unwind_keeps_original_control_and_disposes_storage_once() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let signal = CountedCancellation::default();
+    let mut root = TestInvocationRoot::new();
+    let (mut operation, keys) = operation_with_work_policy(
+        &mut root,
+        &account,
+        OperationControl::default().with_cancellation(signal.clone()),
+        DimensionPolicy::counter(8, 8, 0),
+    );
+    let before = account.snapshot();
+    let drops = Rc::new(Cell::new(0));
+    let returned = Cell::new(false);
+    let panic = catch_unwind(AssertUnwindSafe(|| {
+        let result = operation.with_action_execution::<_, StoreRuntimeError>(
+            keys.other_dimension,
+            |actions| {
+                let mut reservation = actions.reserve_retained(keys.phase, keys.dimension, 5, 1)?;
+                let mut values = Vec::<u8>::new();
+                values.try_reserve_exact(5).unwrap();
+                actions.resize(&mut reservation, values.capacity() as u64)?;
+                actions.begin_action(1)?;
+                values.push(17);
+                actions.complete_action()?;
+                signal.token.cancel();
+                Ok(ReturnedActionOwner {
+                    values: Some(values),
+                    reservation: Some(reservation),
+                    drops: Rc::clone(&drops),
+                })
+            },
+        );
+        returned.set(true);
+        drop(result);
+    }));
+    assert!(panic.is_err());
+    assert!(!returned.get());
+    assert_eq!(drops.get(), 1);
+    assert_eq!(physical_delta(before, account.snapshot()), (0, 0));
+    let next_called = Cell::new(false);
+    assert!(matches!(
+        operation.with_action_execution::<_, StoreRuntimeError>(keys.other_dimension, |_| {
+            next_called.set(true);
+            Ok(())
+        },),
+        Err(StoreRuntimeError::Control(ControlCause::Cancelled {
+            origin: CancellationOrigin::Signal
+        }))
+    ));
+    assert!(!next_called.get());
+    let evidence = rejected_success_evidence(operation, StorePreparationFailureClass::Control);
+    assert_work(&evidence, keys.other_dimension, 1, 1);
+    drop(evidence);
+    drop(root);
+    assert_eq!(drops.get(), 1);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    assert!(!account.snapshot().poisoned());
+}
+
 #[test]
 fn normal_parser_error_retains_only_verified_piece_and_the_original_semantic_owner() {
     let factory = factory(1);
     let account = account(&factory);
     let signal = CountedCancellation::default();
+    let mut invocation_root = TestInvocationRoot::new();
     let (mut operation, keys) = operation_with_work_policy(
+        &mut invocation_root,
         &account,
         OperationControl::default().with_cancellation(signal.clone()),
         DimensionPolicy::counter(8, 8, 0),
@@ -116,7 +314,9 @@ fn postallocation_control_rejection_drops_real_backing_before_the_next_child_pie
     let factory = factory(1);
     let account = account(&factory);
     let signal = BoundaryCancellation::new();
+    let mut invocation_root = TestInvocationRoot::new();
     let (mut operation, keys) = operation_with_work_policy(
+        &mut invocation_root,
         &account,
         OperationControl::default().with_cancellation(signal.clone()),
         DimensionPolicy::counter(8, 8, 0),
@@ -219,7 +419,9 @@ fn final_poll_rejection_drops_returned_real_owner_and_preserves_control_through_
         let factory = factory(1);
         let account = account(&factory);
         let signal = CountedCancellation::default();
+        let mut invocation_root = TestInvocationRoot::new();
         let (mut operation, keys) = operation_with_work_policy(
+            &mut invocation_root,
             &account,
             OperationControl::default().with_cancellation(signal.clone()),
             DimensionPolicy::counter(8, 8, 0),
@@ -280,7 +482,9 @@ fn final_poll_rejection_drops_returned_real_owner_and_preserves_control_through_
 fn nested_parser_allocation_internal_share_and_escaping_storage_use_one_real_owner() {
     let factory = factory(1);
     let account = account(&factory);
+    let mut invocation_root = TestInvocationRoot::new();
     let (mut operation, keys) = operation_with_work_policy(
+        &mut invocation_root,
         &account,
         OperationControl::default(),
         DimensionPolicy::counter(32, 32, 0),
@@ -386,7 +590,9 @@ fn nested_parser_allocation_internal_share_and_escaping_storage_use_one_real_own
 fn returned_semantic_error_is_completed_before_inspection_and_has_no_false_failure() {
     let factory = factory(1);
     let account = account(&factory);
+    let mut invocation_root = TestInvocationRoot::new();
     let (mut operation, keys) = operation_with_work_policy(
+        &mut invocation_root,
         &account,
         OperationControl::default(),
         DimensionPolicy::counter(8, 8, 0),
@@ -419,7 +625,9 @@ fn weighted_actions_poll_before_crossing_the_bound_and_never_change_numeric_work
         let factory = factory(1);
         let account = account(&factory);
         let signal = CountedCancellation::default();
+        let mut invocation_root = TestInvocationRoot::new();
         let (mut operation, keys) = operation_with_work_policy(
+            &mut invocation_root,
             &account,
             OperationControl::default().with_cancellation(signal.clone()),
             DimensionPolicy::counter(8, 8, 0),
@@ -446,7 +654,9 @@ fn weighted_frontier_observes_real_cancellation_before_the_next_admission() {
     let factory = factory(1);
     let account = account(&factory);
     let signal = CountedCancellation::default();
+    let mut invocation_root = TestInvocationRoot::new();
     let (mut operation, keys) = operation_with_work_policy(
+        &mut invocation_root,
         &account,
         OperationControl::default().with_cancellation(signal.clone()),
         DimensionPolicy::counter(8, 8, 0),
@@ -481,7 +691,9 @@ fn invalid_action_weights_deny_the_leaf_without_attempting_numeric_work() {
     for cost in [0_u16, 257, u16::MAX] {
         let factory = factory(1);
         let account = account(&factory);
+        let mut invocation_root = TestInvocationRoot::new();
         let (mut operation, keys) = operation_with_work_policy(
+            &mut invocation_root,
             &account,
             OperationControl::default(),
             DimensionPolicy::counter(8, 8, 0),
@@ -508,7 +720,9 @@ fn direct_parser_denial_keeps_the_literal_item_index_and_caller_ordered_attempts
     let factory = factory(1);
     let account = account(&factory);
     let signal = CountedCancellation::default();
+    let mut invocation_root = TestInvocationRoot::new();
     let (mut operation, keys) = operation_with_work_policy(
+        &mut invocation_root,
         &account,
         OperationControl::default().with_cancellation(signal.clone()),
         DimensionPolicy::counter(8, 8, 0),
@@ -550,7 +764,9 @@ fn caught_leaf_panic_immediately_resolves_pending_and_prevents_more_physical_wor
     let factory = factory(1);
     let account = account(&factory);
     let signal = CountedCancellation::default();
+    let mut invocation_root = TestInvocationRoot::new();
     let (mut operation, keys) = operation_with_work_policy(
+        &mut invocation_root,
         &account,
         OperationControl::default().with_cancellation(signal.clone()),
         DimensionPolicy::counter(8, 8, 0),
@@ -590,7 +806,9 @@ fn parser_prefix_panic_caught_inside_the_child_closes_its_channel_immediately() 
     let factory = factory(1);
     let account = account(&factory);
     let signal = CountedCancellation::default();
+    let mut invocation_root = TestInvocationRoot::new();
     let (mut operation, keys) = operation_with_work_policy(
+        &mut invocation_root,
         &account,
         OperationControl::default().with_cancellation(signal.clone()),
         DimensionPolicy::counter(8, 8, 0),
@@ -650,7 +868,9 @@ fn denied_capture_drop_cannot_replace_the_original_ledger_cause() {
     let factory = factory(1);
     let account = account(&factory);
     let signal = CountedCancellation::default();
+    let mut invocation_root = TestInvocationRoot::new();
     let (mut operation, keys) = operation_with_work_policy(
+        &mut invocation_root,
         &account,
         OperationControl::default().with_cancellation(signal.clone()),
         DimensionPolicy::counter(0, 0, 0),
@@ -688,7 +908,9 @@ fn real_idle_capture_and_completed_result_destructors_keep_the_exact_prefix() {
         let factory = factory(1);
         let account = account(&factory);
         let signal = CountedCancellation::default();
+        let mut invocation_root = TestInvocationRoot::new();
         let (mut operation, keys) = operation_with_work_policy(
+            &mut invocation_root,
             &account,
             OperationControl::default().with_cancellation(signal.clone()),
             DimensionPolicy::counter(8, 8, 0),
@@ -734,7 +956,9 @@ fn explicit_policy_tightening_denies_the_next_capture_without_polling_again() {
     let factory = factory(1);
     let account = account(&factory);
     let signal = CountedCancellation::default();
+    let mut invocation_root = TestInvocationRoot::new();
     let (mut operation, keys) = operation_with_work_policy(
+        &mut invocation_root,
         &account,
         OperationControl::default().with_cancellation(signal.clone()),
         DimensionPolicy::counter(8, 8, 0),
@@ -774,7 +998,9 @@ fn forgetting_a_parser_borrow_cannot_forget_zero_or_incomplete_host_ownership() 
     for amount in [0, 1] {
         let factory = factory(1);
         let account = account(&factory);
+        let mut invocation_root = TestInvocationRoot::new();
         let (mut operation, keys) = operation_with_work_policy(
+            &mut invocation_root,
             &account,
             OperationControl::default(),
             DimensionPolicy::counter(8, 8, 0),
@@ -815,7 +1041,9 @@ fn host_caught_extension_panic_is_not_a_normally_returned_error_or_eof() {
         let factory = factory(1);
         let account = account(&factory);
         let signal = CountedCancellation::default();
+        let mut invocation_root = TestInvocationRoot::new();
         let (mut operation, keys) = operation_with_work_policy(
+            &mut invocation_root,
             &account,
             OperationControl::default().with_cancellation(signal.clone()),
             DimensionPolicy::counter(8, 8, 0),

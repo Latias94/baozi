@@ -81,8 +81,7 @@ pub use concrete_store::{
 /// }
 /// ```
 ///
-/// The successful joint-commit binder moves owned output into the paired handoff callback.
-/// Proof descriptors remain destructor-free; actual storage keeps its own central release owner:
+/// The joint retains owned output until preparation selects its exact terminal result:
 ///
 /// ```no_run
 /// use baozi_operation::__retained_store_integration::activation::CanonicalFreezePermit;
@@ -104,15 +103,15 @@ pub use concrete_store::{
 ///     fn stable_id(self) -> &'static str { "item" }
 /// }
 ///
-/// type Permit = CanonicalFreezePermit<Owner, Phase, Unit, String, (), (), (), (), ()>;
-/// fn bind_owned_output(permit: Permit) {
-///     permit.bind_joint_commit(|_, _, _, _| ());
+/// type Permit<'inv> = CanonicalFreezePermit<'inv, Owner, Phase, Unit, String, (), (), (), (), ()>;
+/// fn bind_owned_output(permit: Permit<'_>) {
+///     permit.bind_joint_commit(|joint, seal| { let _ = joint.prepare(seal); });
 /// }
 /// ```
 ///
-/// A proof cannot introduce an independently destructible owner:
+/// A non-Copy proof stays coupled to the same physical owner through joint preparation:
 ///
-/// ```compile_fail
+/// ```no_run
 /// use baozi_operation::__retained_store_integration::activation::CanonicalFreezePermit;
 /// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
 ///
@@ -132,9 +131,22 @@ pub use concrete_store::{
 ///     fn stable_id(self) -> &'static str { "item" }
 /// }
 ///
-/// type Permit = CanonicalFreezePermit<Owner, Phase, Unit, (), String, (), (), (), ()>;
-/// fn bind_non_copy_proof(permit: Permit) {
-///     permit.bind_joint_commit(|_, _, _, _| ());
+/// type Permit<'inv> = CanonicalFreezePermit<'inv, Owner, Phase, Unit, (), String, (), (), (), ()>;
+/// fn bind_non_copy_proof(permit: Permit<'_>) {
+///     permit.bind_joint_commit(|joint, seal| { let _ = joint.prepare(seal); });
+/// }
+/// ```
+///
+/// The joint's payload owner cannot be extracted before terminal classification:
+///
+/// ```compile_fail,E0616
+/// use baozi_operation::__retained_store_integration::activation::CanonicalJointCommit;
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+///
+/// fn cannot_detach<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     joint: CanonicalJointCommit<'_, '_, O, P, U, String, String, (), (), (), ()>,
+/// ) {
+///     let _payload_owner = joint.owner;
 /// }
 /// ```
 ///
@@ -160,10 +172,10 @@ pub use concrete_store::{
 ///     fn stable_id(self) -> &'static str { "item" }
 /// }
 ///
-/// type Permit = CanonicalFreezePermit<Owner, Phase, Unit, (), (), (), (), (), ()>;
-/// fn cross_scopes(first: Permit, second: Permit) {
-///     first.bind_joint_commit(|_, _, first_joint, _| {
-///         second.bind_joint_commit(|_, _, _, second_seal| {
+/// type Permit<'inv> = CanonicalFreezePermit<'inv, Owner, Phase, Unit, (), (), (), (), (), ()>;
+/// fn cross_scopes(first: Permit<'_>, second: Permit<'_>) {
+///     first.bind_joint_commit(|first_joint, _| {
+///         second.bind_joint_commit(|_, second_seal| {
 ///             let _ = first_joint.prepare(second_seal);
 ///         });
 ///     });
@@ -192,8 +204,8 @@ pub use concrete_store::{
 ///     fn stable_id(self) -> &'static str { "item" }
 /// }
 ///
-/// type Joint<'a> = CanonicalJointCommit<'a, Owner, Phase, Unit, (), (), (), ()>;
-/// fn cannot_copy(joint: Joint<'_>) {
+/// type Joint<'inv, 'joint> = CanonicalJointCommit<'inv, 'joint, Owner, Phase, Unit, (), (), (), (), (), ()>;
+/// fn cannot_copy(joint: Joint<'_, '_>) {
 ///     let moved = joint;
 ///     let _used_again = joint;
 ///     let _ = moved;
@@ -220,8 +232,8 @@ pub use concrete_store::{
 ///     fn stable_id(self) -> &'static str { "item" }
 /// }
 ///
-/// type Joint<'a> = CanonicalJointCommit<'a, Owner, Phase, Unit, (), (), (), ()>;
-/// fn cannot_clone(joint: Joint<'_>) {
+/// type Joint<'inv, 'joint> = CanonicalJointCommit<'inv, 'joint, Owner, Phase, Unit, (), (), (), (), (), ()>;
+/// fn cannot_clone(joint: Joint<'_, '_>) {
 ///     let _clone = joint.clone();
 /// }
 /// ```
@@ -256,14 +268,15 @@ pub mod __retained_store_integration {
     /// ```
     pub mod authority {
         pub use crate::concrete_store::{
-            CanonicalInheritanceSource, DerivedRetainedStoreOperation, FreshStoreLineage,
-            PreparedStoreEvidenceOnlyOutcome, PreparedStoreEvidenceOnlySuccess,
+            BoundStoreOperation, CanonicalInheritanceSource, DerivedRetainedStoreOperation,
+            FreshStoreLineage, PreparedStoreEvidenceOnlyOutcome, PreparedStoreEvidenceOnlySuccess,
             PreparedStoreFailure, PreparedStoreFailureOutcome, PreparedStoreFallback,
             PreparedStoreSuccess, PreparedStoreSuccessOutcome,
             PublishedStoreEvidenceOnlySuccessParts, RetainedStoreOperation,
             RetainedStorePublicationPlan, RetainedStoreReservation, RetainedStoreSharePlan,
             RetainedStoreStartError, RetainedStoreStartPlan, RetainedStoreWriterPlan,
-            StoreStorageObservation,
+            StoreInvocationRoot, StoreInvocationStart, StoreStorageObservation,
+            TerminalStoreLineage,
         };
         pub use crate::retained::{RetainedStorage, SharedRetainedStorage};
     }
@@ -273,31 +286,41 @@ pub mod __retained_store_integration {
         pub use crate::concrete_store::activation::{
             ActivatedCanonicalStoreSession, CanonicalActivationOutcome, CanonicalActivationPermit,
             CanonicalActivationSeal, CanonicalActivationSealFailure,
-            CanonicalActivationSessionPolicy, CanonicalBuildControl,
-            CanonicalCandidateStoreSession, CanonicalCentralValidationOutcome,
-            CanonicalFailureRequirements, CanonicalFailureTerminalWorkPlan,
-            CanonicalFreezeInterruptionClass, CanonicalFreezePermit, CanonicalFreezePermitIssue,
-            CanonicalJointCommit, CanonicalJointSeal, CanonicalLane, CanonicalMaterialization,
-            CanonicalMaterializationRole, CanonicalOutcomeEvidenceLane, CanonicalRecordBuildRow,
-            CanonicalReservation, CanonicalRetainedStorageBuildControl, CanonicalScopedDisposition,
-            CanonicalSemanticCompletion, CanonicalSemanticWorkSession,
+            CanonicalActivationSessionPolicy, CanonicalActivationSlots, CanonicalBodyOperation,
+            CanonicalBodyParts, CanonicalBodyStart, CanonicalBoundBodyError,
+            CanonicalBoundBodyParts, CanonicalBoundBodyStart, CanonicalBoundInvocationFinish,
+            CanonicalBuildControl, CanonicalCandidateStoreSession, CanonicalCauseSlot,
+            CanonicalCentralValidationOutcome, CanonicalDispositionSlot,
+            CanonicalFailureRequirements, CanonicalFailureTerminalWorkPlan, CanonicalFinal,
+            CanonicalFreezeInterruption, CanonicalFreezeInterruptionClass, CanonicalFreezePermit,
+            CanonicalFreezePermitIssue, CanonicalGenerationSlots, CanonicalInvocationBodyError,
+            CanonicalInvocationCompletion, CanonicalInvocationFinish, CanonicalInvocationHost,
+            CanonicalInvocationOutcome, CanonicalJointCommit, CanonicalJointSeal,
+            CanonicalJointSuccess, CanonicalLane, CanonicalMaterialization,
+            CanonicalMaterializationRole, CanonicalOperationCompletion,
+            CanonicalOperationPublication, CanonicalOutcomeEvidenceLane, CanonicalOutputSlot,
+            CanonicalProofSlot, CanonicalRecordBuildRow, CanonicalReservation,
+            CanonicalRetainedStorageBuildControl, CanonicalScopedDisposition,
+            CanonicalSemanticCompletion, CanonicalSemanticWorkError, CanonicalSemanticWorkSession,
             CanonicalValidationCheckpoint, CanonicalValidationDecision, CanonicalValidationMember,
             CanonicalValidationPlanning, CanonicalValidationPreparationError,
             CanonicalValidationProgress, CanonicalValidationRole, CanonicalValidationSession,
-            CentrallyRejectedCanonicalStoreSession, FailureEvidenceDecision, FailureEvidenceMember,
-            FailureEvidenceOutcome, FailureEvidenceValidationSession, FrozenFailureState,
-            InterruptedCanonicalStoreSession, NeverActivatedStoreSession, OutcomeEvidenceDecision,
-            OutcomeEvidenceValidationMember, PendingMinimalFallback, PreparedFailureEvidence,
-            RejectedCanonicalStoreSession, RetainedStoreSessionOutcomeOwner,
-            RootedFailureValidation, StoreActivationContainment, StoreActivationContainmentAnchor,
-            StoreCanonicalRejection, StoreNeverActivatedCause, VerifiedMinimalFallback,
+            CanonicalValidationSlots, CentrallyRejectedCanonicalStoreSession,
+            FailureEvidenceDecision, FailureEvidenceMember, FailureEvidenceOutcome,
+            FailureEvidenceValidationSession, FrozenFailureState, InterruptedCanonicalStoreSession,
+            NeverActivatedStoreSession, OutcomeEvidenceDecision, OutcomeEvidenceValidationMember,
+            PendingMinimalFallback, PreparedFailureEvidence, RejectedCanonicalStoreSession,
+            RetainedStoreSessionOutcomeOwner, RootedFailureValidation, StoreActivationContainment,
+            StoreActivationContainmentAnchor, StoreCanonicalRejection, StoreNeverActivatedCause,
+            VerifiedMinimalFallback,
         };
         pub use crate::concrete_store::{
             RetainedStoreDimensionState, RetainedStoreObservedWork, RetainedStoreWriterRole,
-            StoreBoundWorkGroup, StoreExecutionPermit, StoreExecutionServices, StoreExecutionWork,
-            StoreExtensionResult, StoreFailureStorage, StoreImporterBoundary, StoreInvocation,
-            StoreInvocationError, StoreInvocationLayout, StoreInvocationParser,
-            StoreOrdinaryStorage, StoreParserWorkError, StoreParserWorkScope,
+            StoreActionExecution, StoreBoundWorkGroup, StoreChildAdmission, StoreExecutionPermit,
+            StoreExecutionServices, StoreExecutionWork, StoreExtensionResult, StoreFailureStorage,
+            StoreImporterBoundary, StoreInvocation, StoreInvocationError, StoreInvocationLayout,
+            StoreInvocationParser, StoreInvocationServices, StoreOrdinaryStorage,
+            StoreParserWorkError, StoreParserWorkScope, StoreScanReturn,
         };
     }
 

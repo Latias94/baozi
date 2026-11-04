@@ -99,8 +99,11 @@ fn source_scene(account: &PhysicalStorageAccount, polygon: bool) -> NodeSceneSuc
         ),
         MetadataAuthoringBatch::new(&metadata),
     );
-    successful_parts(
+    let mut construction_root_1 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    let parts = successful_parts(
         NodeSceneTestTransaction::with_account(
+            &mut construction_root_1,
             account,
             test_limits(),
             SceneAuthoringBatch::new(
@@ -119,7 +122,9 @@ fn source_scene(account: &PhysicalStorageAccount, polygon: bool) -> NodeSceneSuc
         .unwrap()
         .publish_for_test()
         .unwrap(),
-    )
+    );
+    drop(construction_root_1);
+    parts
 }
 
 fn assert_source_payload(profile: &ProfileStorage, expected_entries: usize) {
@@ -188,7 +193,9 @@ fn normal_deletion_keeps_same_index_source_metadata_and_exact_json_after_source_
     )
     .unwrap();
     let plan = pending.counts.profile;
-    let output = retain_edit(pending);
+    let mut invocation_root_1 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    let output = retain_edit(&mut invocation_root_1, pending);
     let output_geometry = output.output().geometry.as_ref();
     assert!(output_geometry.names.is_empty());
     assert_eq!(output_geometry.attributes.len(), 2);
@@ -214,6 +221,7 @@ fn normal_deletion_keeps_same_index_source_metadata_and_exact_json_after_source_
     drop(source);
     assert_source_payload(&output.output().profile, 1);
     drop(output);
+    drop(invocation_root_1);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
 }
 
@@ -241,7 +249,9 @@ fn triangulation_shares_source_json_and_keeps_direct_lookup_past_empty_tail_segm
     )
     .unwrap();
     let plan = pending.counts.profile;
-    let output = retain_edit(pending);
+    let mut invocation_root_2 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    let output = retain_edit(&mut invocation_root_2, pending);
     assert_valid_profile(&output.output().profile, plan);
     assert!(std::ptr::eq(
         source.scene.tables.profile.metadata.as_ref(),
@@ -250,6 +260,7 @@ fn triangulation_shares_source_json_and_keeps_direct_lookup_past_empty_tail_segm
     drop(source);
     assert_source_payload(&output.output().profile, 2);
     drop(output);
+    drop(invocation_root_2);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
 }
 
@@ -277,7 +288,9 @@ fn space_conversion_shares_exact_source_json_and_keeps_source_rows_independent_o
     )
     .unwrap();
     let plan = pending.counts.profile;
-    let output = retain_edit(pending);
+    let mut invocation_root_3 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    let output = retain_edit(&mut invocation_root_3, pending);
     assert_valid_profile(&output.output().profile, plan);
     assert!(std::ptr::eq(
         source.scene.tables.profile.metadata.as_ref(),
@@ -286,5 +299,6 @@ fn space_conversion_shares_exact_source_json_and_keeps_source_rows_independent_o
     drop(source);
     assert_source_payload(&output.output().profile, 2);
     drop(output);
+    drop(invocation_root_3);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
 }

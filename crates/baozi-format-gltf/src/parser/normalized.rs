@@ -5,13 +5,13 @@ use super::{
     model::*,
     morph, poll_parser_loop,
     source_profile::{self, SelectedSourceProfile},
-    to_u64, uri,
+    to_u64, uri, with_content,
 };
 use crate::FORMAT_ID;
 use baozi_import::ImportWorkClass;
 use baozi_import::authoring::*;
 use baozi_import::{
-    ImportStorageClass, MeteredVec, ParseContext, ParseExecution, SourceScopeSelectionRequest,
+    ImportStorageClass, MeteredVec, ParseContext, ParseRoot, SourceScopeSelectionRequest,
 };
 use sha2::{Digest, Sha256};
 
@@ -19,10 +19,10 @@ use sha2::{Digest, Sha256};
 mod tests;
 
 pub(super) fn submit<'session>(
-    context: &mut ParseContext<'session>,
+    context: &mut ParseContext<'session, '_>,
     model: &NormalizedGltf<'session>,
 ) -> Result<()> {
-    context.with_execution(|ctx| {
+    with_content(context, |ctx| {
         model
             .sources
             .required(ctx, source_profile::DOCUMENT)
@@ -54,7 +54,7 @@ struct OwnerSource {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn submit_parts<'session>(
-    context: &mut ParseContext<'session>,
+    context: &mut ParseContext<'session, '_>,
     appearance_storage: &AppearanceStorage<'session>,
     geometry_storage: &GeometryStorage<'session>,
     cameras: &CameraStorage<'session>,
@@ -82,12 +82,12 @@ pub(super) fn submit_parts<'session>(
         skin_authoring,
         logical_morphs,
         morph_deltas,
-    ) = context.with_execution(|ctx| -> Result<_> {
-        let mut images = ctx.metered_vec(
+    ) = with_content(context, |ctx| -> Result<_> {
+        let mut images = ctx.services()?.metered_vec(
             ImportStorageClass::SceneConstruction,
             "gltf-complete-batch-images",
         );
-        images.try_reserve(ctx, appearance_storage.images.len())?;
+        images.try_reserve(&mut ctx.services()?, appearance_storage.images.len())?;
         for image in appearance_storage.images.as_slice() {
             let media_type = image
                 .media_type
@@ -111,11 +111,11 @@ pub(super) fn submit_parts<'session>(
             images.try_push_reserved(authored)?;
         }
 
-        let mut bindings = ctx.metered_vec(
+        let mut bindings = ctx.services()?.metered_vec(
             ImportStorageClass::SceneConstruction,
             "gltf-complete-batch-material-bindings",
         );
-        bindings.try_reserve(ctx, appearance_storage.bindings.len())?;
+        bindings.try_reserve(&mut ctx.services()?, appearance_storage.bindings.len())?;
         for binding in appearance_storage.bindings.as_slice() {
             let authored = MaterialBindingAuthoring::try_from_parts(
                 binding.texture,
@@ -132,11 +132,11 @@ pub(super) fn submit_parts<'session>(
             bindings.try_push_reserved(authored)?;
         }
 
-        let mut materials = ctx.metered_vec(
+        let mut materials = ctx.services()?.metered_vec(
             ImportStorageClass::SceneConstruction,
             "gltf-complete-batch-materials",
         );
-        materials.try_reserve(ctx, appearance_storage.materials.len())?;
+        materials.try_reserve(&mut ctx.services()?, appearance_storage.materials.len())?;
         for material in appearance_storage.materials.as_slice() {
             let mut authored = MaterialAuthoring::try_from_parts(
                 material.bindings,
@@ -152,15 +152,15 @@ pub(super) fn submit_parts<'session>(
             materials.try_push_reserved(authored)?;
         }
 
-        let mut logical_meshes = ctx.metered_vec(
+        let mut logical_meshes = ctx.services()?.metered_vec(
             ImportStorageClass::SceneConstruction,
             "gltf-complete-batch-logical-meshes",
         );
-        let mut primitives = ctx.metered_vec(
+        let mut primitives = ctx.services()?.metered_vec(
             ImportStorageClass::SceneConstruction,
             "gltf-complete-batch-primitives",
         );
-        let mut attributes = ctx.metered_vec(
+        let mut attributes = ctx.services()?.metered_vec(
             ImportStorageClass::SceneConstruction,
             "gltf-complete-batch-attributes",
         );
@@ -181,18 +181,18 @@ pub(super) fn submit_parts<'session>(
                 count.checked_add(primitive.attributes.len())
             })
             .ok_or_else(|| ctx.allocation_failure("gltf-complete-batch-attribute-count"))?;
-        logical_meshes.try_reserve(ctx, geometry_storage.logical_meshes.len())?;
-        primitives.try_reserve(ctx, primitive_count)?;
-        attributes.try_reserve(ctx, attribute_count)?;
+        logical_meshes.try_reserve(&mut ctx.services()?, geometry_storage.logical_meshes.len())?;
+        primitives.try_reserve(&mut ctx.services()?, primitive_count)?;
+        attributes.try_reserve(&mut ctx.services()?, attribute_count)?;
         for mesh in geometry_storage.logical_meshes.as_slice() {
             let primitive_offset = authoring_u32(
-                ctx,
+                &mut ctx.services()?,
                 primitives.len(),
                 "gltf-complete-batch-primitive-offset",
             )?;
             for primitive in mesh.primitives.as_slice() {
                 let attribute_offset = authoring_u32(
-                    ctx,
+                    &mut ctx.services()?,
                     attributes.len(),
                     "gltf-complete-batch-attribute-offset",
                 )?;
@@ -226,7 +226,7 @@ pub(super) fn submit_parts<'session>(
                     AuthoringRange::new(
                         attribute_offset,
                         authoring_u32(
-                            ctx,
+                            &mut ctx.services()?,
                             primitive.attributes.len(),
                             "gltf-complete-batch-attribute-count",
                         )?,
@@ -236,7 +236,7 @@ pub(super) fn submit_parts<'session>(
             let mut authored = GeometryLogicalMeshAuthoring::new(AuthoringRange::new(
                 primitive_offset,
                 authoring_u32(
-                    ctx,
+                    &mut ctx.services()?,
                     mesh.primitives.len(),
                     "gltf-complete-batch-logical-mesh-primitive-count",
                 )?,
@@ -247,20 +247,20 @@ pub(super) fn submit_parts<'session>(
             logical_meshes.try_push_reserved(authored)?;
         }
 
-        let mut mesh_instances = ctx.metered_vec(
+        let mut mesh_instances = ctx.services()?.metered_vec(
             ImportStorageClass::SceneConstruction,
             "gltf-complete-batch-mesh-instances",
         );
-        mesh_instances.try_reserve(ctx, nodes.mesh_instances.len())?;
+        mesh_instances.try_reserve(&mut ctx.services()?, nodes.mesh_instances.len())?;
         for instance in nodes.mesh_instances.as_slice() {
             mesh_instances.try_push_reserved(instance.authored)?;
         }
 
-        let mut skin_authoring = ctx.metered_vec(
+        let mut skin_authoring = ctx.services()?.metered_vec(
             ImportStorageClass::SceneConstruction,
             "gltf-complete-batch-skins",
         );
-        skin_authoring.try_reserve(ctx, skins.skins.len())?;
+        skin_authoring.try_reserve(&mut ctx.services()?, skins.skins.len())?;
         for skin in skins.skins.as_slice() {
             let name = skin
                 .name
@@ -278,40 +278,40 @@ pub(super) fn submit_parts<'session>(
             ))?;
         }
 
-        let mut logical_morphs = ctx.metered_vec(
+        let mut logical_morphs = ctx.services()?.metered_vec(
             ImportStorageClass::SceneConstruction,
             "gltf-complete-batch-logical-morphs",
         );
-        logical_morphs.try_reserve(ctx, logical_meshes.len())?;
+        logical_morphs.try_reserve(&mut ctx.services()?, logical_meshes.len())?;
         if morph_storage.logical_meshes.len() != logical_meshes.len()
             || morph_storage.primitives.len() != primitives.len()
         {
             return Err(gltf_parse_error("glTF morph tables disagree with geometry"));
         }
-        let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
+        let work_group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
         for mesh in morph_storage.logical_meshes.as_slice() {
-            ctx.with_work(
-                &work_group,
-                [1],
-                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-            )?;
-            logical_morphs.try_push_reserved(LogicalMorphAuthoring::new(
-                mesh.definitions,
-                mesh.weights.as_slice(),
-            ))?;
+            let authored = ctx.child(&work_group, [1], |child| {
+                child.run([1], || {
+                    Ok::<_, baozi_import::ParseFailure>(LogicalMorphAuthoring::new(
+                        mesh.definitions,
+                        mesh.weights.as_slice(),
+                    ))
+                })
+            })?;
+            logical_morphs.try_push_reserved(authored)?;
         }
-        let mut morph_deltas = ctx.metered_vec(
+        let mut morph_deltas = ctx.services()?.metered_vec(
             ImportStorageClass::SceneConstruction,
             "gltf-complete-batch-morph-deltas",
         );
-        morph_deltas.try_reserve(ctx, morph_storage.deltas.len())?;
+        morph_deltas.try_reserve(&mut ctx.services()?, morph_storage.deltas.len())?;
         for delta in morph_storage.deltas.as_slice() {
-            ctx.with_work(
-                &work_group,
-                [1],
-                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-            )?;
-            morph_deltas.try_push_reserved(morph::delta_authoring(delta))?;
+            let authored = ctx.child(&work_group, [1], |child| {
+                child.run([1], || {
+                    Ok::<_, baozi_import::ParseFailure>(morph::delta_authoring(delta))
+                })
+            })?;
+            morph_deltas.try_push_reserved(authored)?;
         }
         Ok((
             images,
@@ -327,32 +327,34 @@ pub(super) fn submit_parts<'session>(
         ))
     })?;
 
-    let morph_targets = context.with_execution(|ctx| -> Result<_> {
-        let mut morph_targets = ctx.metered_vec(
+    let morph_targets = with_content(context, |ctx| -> Result<_> {
+        let mut morph_targets = ctx.services()?.metered_vec(
             ImportStorageClass::SceneConstruction,
             "gltf-complete-batch-morph-targets",
         );
-        morph_targets.try_reserve(ctx, morph_storage.targets.len())?;
-        let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
+        morph_targets.try_reserve(&mut ctx.services()?, morph_storage.targets.len())?;
+        let work_group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
         for target in morph_storage.targets.as_slice() {
-            ctx.with_work(
-                &work_group,
-                [1],
-                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-            )?;
-            morph_targets
-                .try_push_reserved(morph::target_authoring(target, morph_deltas.as_slice()))?;
+            let authored = ctx.child(&work_group, [1], |child| {
+                child.run([1], || {
+                    Ok::<_, baozi_import::ParseFailure>(morph::target_authoring(
+                        target,
+                        morph_deltas.as_slice(),
+                    ))
+                })
+            })?;
+            morph_targets.try_push_reserved(authored)?;
         }
         Ok(morph_targets)
     })?;
 
-    let primitive_deformations = context.with_execution(|ctx| -> Result<_> {
-        let mut primitive_deformations = ctx.metered_vec(
+    let primitive_deformations = with_content(context, |ctx| -> Result<_> {
+        let mut primitive_deformations = ctx.services()?.metered_vec(
             ImportStorageClass::SceneConstruction,
             "gltf-complete-batch-primitive-deformations",
         );
-        primitive_deformations.try_reserve(ctx, primitives.len())?;
-        let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
+        primitive_deformations.try_reserve(&mut ctx.services()?, primitives.len())?;
+        let work_group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
         for mesh in geometry_storage.logical_meshes.as_slice() {
             for primitive in mesh.primitives.as_slice() {
                 let influences = if primitive.influences.is_empty() {
@@ -363,15 +365,17 @@ pub(super) fn submit_parts<'session>(
                         primitive.influences.as_slice(),
                     ))
                 };
-                ctx.with_work(
-                    &work_group,
-                    [1],
-                    |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-                )?;
-                let range = morph_storage
-                    .primitives
-                    .as_slice()
-                    .get(primitive_deformations.len())
+                let range = ctx
+                    .child(&work_group, [1], |child| {
+                        child.run([1], || {
+                            Ok::<_, baozi_import::ParseFailure>(
+                                morph_storage
+                                    .primitives
+                                    .as_slice()
+                                    .get(primitive_deformations.len()),
+                            )
+                        })
+                    })?
                     .ok_or_else(|| {
                         gltf_parse_error("glTF primitive morph target range is missing")
                     })?;
@@ -399,28 +403,29 @@ pub(super) fn submit_parts<'session>(
         attributes.as_slice(),
         mesh_instances.as_slice(),
     );
-    let mesh_instance_deformations = context.with_execution(|ctx| -> Result<_> {
-        let mut mesh_instance_deformations = ctx.metered_vec(
+    let mesh_instance_deformations = with_content(context, |ctx| -> Result<_> {
+        let mut mesh_instance_deformations = ctx.services()?.metered_vec(
             ImportStorageClass::SceneConstruction,
             "gltf-complete-batch-instance-deformations",
         );
-        mesh_instance_deformations.try_reserve(ctx, instance_deformations.len())?;
-        let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
+        mesh_instance_deformations
+            .try_reserve(&mut ctx.services()?, instance_deformations.len())?;
+        let work_group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
         for instance in instance_deformations.as_slice() {
-            ctx.with_work(
-                &work_group,
-                [1],
-                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-            )?;
-            mesh_instance_deformations.try_push_reserved(MeshInstanceDeformationAuthoring::new(
-                instance.skin,
-                instance
-                    .weights
-                    .as_ref()
-                    .map_or(Presence::Absent, |weights| {
-                        Presence::Present(weights.as_slice())
-                    }),
-            ))?;
+            let authored = ctx.child(&work_group, [1], |child| {
+                child.run([1], || {
+                    Ok::<_, baozi_import::ParseFailure>(MeshInstanceDeformationAuthoring::new(
+                        instance.skin,
+                        instance
+                            .weights
+                            .as_ref()
+                            .map_or(Presence::Absent, |weights| {
+                                Presence::Present(weights.as_slice())
+                            }),
+                    ))
+                })
+            })?;
+            mesh_instance_deformations.try_push_reserved(authored)?;
         }
         Ok(mesh_instance_deformations)
     })?;
@@ -446,27 +451,27 @@ pub(super) fn submit_parts<'session>(
         cameras.authored.as_slice(),
         lights.authored.as_slice(),
     );
-    let authored_nodes = context.with_execution(|ctx| -> Result<_> {
-        let mut authored_nodes = ctx.metered_vec(
+    let authored_nodes = with_content(context, |ctx| -> Result<_> {
+        let mut authored_nodes = ctx.services()?.metered_vec(
             ImportStorageClass::SceneConstruction,
             "gltf-complete-batch-nodes",
         );
-        authored_nodes.try_reserve(ctx, nodes.nodes.len())?;
+        authored_nodes.try_reserve(&mut ctx.services()?, nodes.nodes.len())?;
         if nodes.names.len() != nodes.nodes.len() {
             return Err(gltf_parse_error(
                 "glTF normalized node names are incomplete",
             ));
         }
-        let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
+        let work_group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
         for (node, name) in nodes.nodes.as_slice().iter().zip(nodes.names.as_slice()) {
-            ctx.with_work(
-                &work_group,
-                [1],
-                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-            )?;
-            let node = name
-                .as_ref()
-                .map_or(*node, |name| node.with_name(name.as_str()));
+            let node = ctx.child(&work_group, [1], |child| {
+                child.run([1], || {
+                    Ok::<_, baozi_import::ParseFailure>(
+                        name.as_ref()
+                            .map_or(*node, |name| node.with_name(name.as_str())),
+                    )
+                })
+            })?;
             authored_nodes.try_push_reserved(node)?;
         }
         Ok(authored_nodes)
@@ -476,32 +481,32 @@ pub(super) fn submit_parts<'session>(
         Presence::Present(nodes.roots.as_slice()),
         authored_nodes.as_slice(),
     );
-    let primary_identity = context.with_execution(|ctx| {
-        let argument_0 = ctx.source().as_str();
+    let primary_identity = with_content(context, |ctx| {
+        let argument_0 = ctx.services()?.source().as_str();
         uri::profile_identity(ctx, argument_0)
     })?;
     let (resource_count, resources, snapshots, locators) =
-        context.with_execution(|ctx| -> Result<_> {
+        with_content(context, |ctx| -> Result<_> {
             let resource_count = buffers
                 .external_resource_count()
                 .checked_add(external_images.values.len())
                 .and_then(|count| count.checked_add(1))
                 .ok_or_else(|| ctx.allocation_failure("gltf-profile-resource-count"))?;
-            let mut resources = ctx.metered_vec(
+            let mut resources = ctx.services()?.metered_vec(
                 ImportStorageClass::SceneConstruction,
                 "gltf-complete-batch-resources",
             );
-            let mut snapshots = ctx.metered_vec(
+            let mut snapshots = ctx.services()?.metered_vec(
                 ImportStorageClass::SceneConstruction,
                 "gltf-complete-batch-resource-snapshots",
             );
-            let mut locators = ctx.metered_vec(
+            let mut locators = ctx.services()?.metered_vec(
                 ImportStorageClass::SceneConstruction,
                 "gltf-complete-batch-source-locators",
             );
-            resources.try_reserve(ctx, resource_count)?;
-            snapshots.try_reserve(ctx, resource_count)?;
-            locators.try_reserve(ctx, resource_count - 1)?;
+            resources.try_reserve(&mut ctx.services()?, resource_count)?;
+            snapshots.try_reserve(&mut ctx.services()?, resource_count)?;
+            locators.try_reserve(&mut ctx.services()?, resource_count - 1)?;
             resources.try_push_reserved(ObservedResourceAuthoring::session_opaque(
                 primary_identity.value(),
                 SessionOpaqueReason::CallerLabel,
@@ -537,24 +542,24 @@ pub(super) fn submit_parts<'session>(
             Ok((resource_count, resources, snapshots, locators))
         })?;
 
-    let format = context.with_execution(|_ctx| -> Result<_> {
+    let format = with_content(context, |_ctx| -> Result<_> {
         FormatId::new(FORMAT_ID)
             .map_err(|_| gltf_parse_error("static glTF format identity is invalid"))
     })?;
-    let (source_identities, mut provenance_nodes, owner_sources, owner_source_values) = context
-        .with_execution(|ctx| -> Result<_> {
-            let mut source_identities = ctx.metered_vec(
+    let (source_identities, mut provenance_nodes, owner_sources, owner_source_values) =
+        with_content(context, |ctx| -> Result<_> {
+            let mut source_identities = ctx.services()?.metered_vec(
                 ImportStorageClass::SceneConstruction,
                 "gltf-complete-batch-source-identities",
             );
-            let mut provenance_nodes = ctx.metered_vec(
+            let mut provenance_nodes = ctx.services()?.metered_vec(
                 ImportStorageClass::SceneConstruction,
                 "gltf-complete-batch-provenance-nodes",
             );
             let source_count = resource_count
                 .checked_add(selected_sources.entries().len() - 1)
                 .ok_or_else(|| ctx.allocation_failure("gltf-profile-source-count"))?;
-            source_identities.try_reserve(ctx, source_count)?;
+            source_identities.try_reserve(&mut ctx.services()?, source_count)?;
             let operation_count = 1
                 + usize::from(appearance_storage.default_sampler.is_some())
                 + usize::from(appearance_storage.default_material.is_some());
@@ -562,35 +567,42 @@ pub(super) fn submit_parts<'session>(
                 let value = source_count
                     .checked_add(operation_count)
                     .ok_or_else(|| ctx.allocation_failure("gltf-profile-provenance-count"))?;
-                provenance_nodes.try_reserve(ctx, value)
+                provenance_nodes.try_reserve(&mut ctx.services()?, value)
             }?;
             let document_locator = &selected_sources
                 .required(ctx, source_profile::DOCUMENT)?
                 .locator;
-            let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
-            ctx.with_work(
+            let work_group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+            ctx.child(
                 &work_group,
                 [to_u64(resource_count)],
-                |ctx, work| -> Result<()> {
+                |child| -> Result<()> {
                     for index in 0..resource_count {
-                        poll_parser_loop(ctx, index)?;
-                        let local = authoring_u32(ctx, index, "gltf-profile-source-identity")?;
-                        let locator = if index == 0 {
-                            document_locator
-                        } else {
-                            locators.as_slice().get(index - 1).ok_or_else(|| {
-                                gltf_parse_error("glTF profile source locator table is incomplete")
-                            })?
-                        };
-                        source_identities.try_push_reserved(SourceIdentityAuthoring::new(
-                            ResourceIdentityLocalId::new(local),
-                            &format,
-                            locator,
-                        ))?;
-                        provenance_nodes.try_push_reserved(ProvenanceNodeAuthoring::source(
-                            SourceIdentityLocalId::new(local),
-                        ))?;
-                        work.complete([1])?;
+                        poll_parser_loop(&mut child.services()?, index)?;
+                        let errors = child.error_view();
+                        child.run([1], || -> Result<()> {
+                            let local = u32::try_from(index).map_err(|_| {
+                                errors.allocation_failure("gltf-profile-source-identity")
+                            })?;
+                            let locator = if index == 0 {
+                                document_locator
+                            } else {
+                                locators.as_slice().get(index - 1).ok_or_else(|| {
+                                    gltf_parse_error(
+                                        "glTF profile source locator table is incomplete",
+                                    )
+                                })?
+                            };
+                            source_identities.try_push_reserved(SourceIdentityAuthoring::new(
+                                ResourceIdentityLocalId::new(local),
+                                &format,
+                                locator,
+                            ))?;
+                            provenance_nodes.try_push_reserved(ProvenanceNodeAuthoring::source(
+                                SourceIdentityLocalId::new(local),
+                            ))?;
+                            Ok(())
+                        })?;
                         #[cfg(test)]
                         crate::control_tests::resource_source_completed(index + 1);
                     }
@@ -598,22 +610,22 @@ pub(super) fn submit_parts<'session>(
                 },
             )?;
             for source in selected_sources.entries().iter().skip(1) {
-                ctx.with_work(&work_group, [1], |ctx, work| -> Result<()> {
-                    let local = authoring_u32(
-                        ctx,
-                        source_identities.len(),
-                        "gltf-profile-source-identity",
-                    )?;
-                    source_identities.try_push_reserved(SourceIdentityAuthoring::new(
-                        ResourceIdentityLocalId::new(0),
-                        &format,
-                        &source.locator,
-                    ))?;
-                    provenance_nodes.try_push_reserved(ProvenanceNodeAuthoring::source(
-                        SourceIdentityLocalId::new(local),
-                    ))?;
-                    work.complete_all()?;
-                    Ok(())
+                ctx.child(&work_group, [1], |child| -> Result<()> {
+                    let errors = child.error_view();
+                    child.run([1], || -> Result<()> {
+                        let local = u32::try_from(source_identities.len()).map_err(|_| {
+                            errors.allocation_failure("gltf-profile-source-identity")
+                        })?;
+                        source_identities.try_push_reserved(SourceIdentityAuthoring::new(
+                            ResourceIdentityLocalId::new(0),
+                            &format,
+                            &source.locator,
+                        ))?;
+                        provenance_nodes.try_push_reserved(ProvenanceNodeAuthoring::source(
+                            SourceIdentityLocalId::new(local),
+                        ))?;
+                        Ok(())
+                    })
                 })?;
             }
 
@@ -704,16 +716,16 @@ pub(super) fn submit_parts<'session>(
                 .checked_add(additional_owner_source_count)
                 .and_then(|count| count.checked_add(selected_sources.link_count()))
                 .ok_or_else(|| ctx.allocation_failure("gltf-profile-owner-source-count"))?;
-            let mut owner_sources = ctx.metered_vec(
+            let mut owner_sources = ctx.services()?.metered_vec(
                 ImportStorageClass::SceneConstruction,
                 "gltf-complete-batch-owner-sources",
             );
-            let mut owner_source_values = ctx.metered_vec(
+            let mut owner_source_values = ctx.services()?.metered_vec(
                 ImportStorageClass::SceneConstruction,
                 "gltf-complete-batch-owner-source-values",
             );
-            owner_sources.try_reserve(ctx, owner_count)?;
-            owner_source_values.try_reserve(ctx, owner_source_count)?;
+            owner_sources.try_reserve(&mut ctx.services()?, owner_count)?;
+            owner_source_values.try_reserve(&mut ctx.services()?, owner_source_count)?;
             push_owner_source(
                 ctx,
                 &mut owner_sources,
@@ -735,7 +747,7 @@ pub(super) fn submit_parts<'session>(
             for index in 0..nodes.nodes.len() {
                 {
                     let argument_0 = ProfileOwner::Node(NodeLocalId::new(authoring_u32(
-                        ctx,
+                        &mut ctx.services()?,
                         index,
                         "gltf-profile-node-owner",
                     )?));
@@ -753,7 +765,7 @@ pub(super) fn submit_parts<'session>(
             for index in 0..cameras.authored.len() {
                 {
                     let argument_0 = ProfileOwner::Camera(authoring_u32(
-                        ctx,
+                        &mut ctx.services()?,
                         index,
                         "gltf-profile-camera-owner",
                     )?);
@@ -770,8 +782,11 @@ pub(super) fn submit_parts<'session>(
             }
             for index in 0..lights.authored.len() {
                 {
-                    let argument_0 =
-                        ProfileOwner::Light(authoring_u32(ctx, index, "gltf-profile-light-owner")?);
+                    let argument_0 = ProfileOwner::Light(authoring_u32(
+                        &mut ctx.services()?,
+                        index,
+                        "gltf-profile-light-owner",
+                    )?);
                     push_owner_source(
                         ctx,
                         &mut owner_sources,
@@ -785,7 +800,7 @@ pub(super) fn submit_parts<'session>(
             }
             for (index, image) in appearance_storage.images.as_slice().iter().enumerate() {
                 let provenance = image.provenance;
-                let index = authoring_u32(ctx, index, "gltf-profile-image-owner")?;
+                let index = authoring_u32(&mut ctx.services()?, index, "gltf-profile-image-owner")?;
                 push_owner_source(
                     ctx,
                     &mut owner_sources,
@@ -802,7 +817,8 @@ pub(super) fn submit_parts<'session>(
                 .iter()
                 .enumerate()
             {
-                let index = authoring_u32(ctx, index, "gltf-profile-sampler-owner")?;
+                let index =
+                    authoring_u32(&mut ctx.services()?, index, "gltf-profile-sampler-owner")?;
                 push_owner_source(
                     ctx,
                     &mut owner_sources,
@@ -819,7 +835,8 @@ pub(super) fn submit_parts<'session>(
                 .iter()
                 .enumerate()
             {
-                let index = authoring_u32(ctx, index, "gltf-profile-texture-owner")?;
+                let index =
+                    authoring_u32(&mut ctx.services()?, index, "gltf-profile-texture-owner")?;
                 push_owner_source(
                     ctx,
                     &mut owner_sources,
@@ -831,7 +848,11 @@ pub(super) fn submit_parts<'session>(
                 )?;
             }
             for (index, binding) in appearance_storage.bindings.as_slice().iter().enumerate() {
-                let index = authoring_u32(ctx, index, "gltf-profile-texture-binding-owner")?;
+                let index = authoring_u32(
+                    &mut ctx.services()?,
+                    index,
+                    "gltf-profile-texture-binding-owner",
+                )?;
                 push_owner_source(
                     ctx,
                     &mut owner_sources,
@@ -879,7 +900,7 @@ pub(super) fn submit_parts<'session>(
                         })?;
                     {
                         let argument_0 = ProfileOwner::Primitive(authoring_u32(
-                            ctx,
+                            &mut ctx.services()?,
                             primitive_owner_index,
                             "gltf-profile-primitive-owner",
                         )?);
@@ -899,7 +920,7 @@ pub(super) fn submit_parts<'session>(
                     for attribute in primitive.attributes.as_slice() {
                         {
                             let argument_0 = ProfileOwner::Attribute(authoring_u32(
-                                ctx,
+                                &mut ctx.services()?,
                                 attribute_owner_index,
                                 "gltf-profile-attribute-owner",
                             )?);
@@ -931,8 +952,11 @@ pub(super) fn submit_parts<'session>(
             )?;
             for (index, skin) in skins.skins.as_slice().iter().enumerate() {
                 {
-                    let argument_0 =
-                        ProfileOwner::Skin(authoring_u32(ctx, index, "gltf-profile-skin-owner")?);
+                    let argument_0 = ProfileOwner::Skin(authoring_u32(
+                        &mut ctx.services()?,
+                        index,
+                        "gltf-profile-skin-owner",
+                    )?);
                     push_owner_sources(
                         ctx,
                         &mut owner_sources,
@@ -954,14 +978,14 @@ pub(super) fn submit_parts<'session>(
                 ProfileOwner::MorphDefinition,
             )?;
             for (index, delta) in morph_storage.deltas.as_slice().iter().enumerate() {
-                ctx.with_work(
-                    &work_group,
-                    [1],
-                    |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-                )?;
+                let provenance = ctx.child(&work_group, [1], |child| {
+                    child.run([1], || {
+                        Ok::<_, baozi_import::ParseFailure>(delta.provenance.as_slice())
+                    })
+                })?;
                 {
                     let argument_0 = ProfileOwner::MorphDelta(authoring_u32(
-                        ctx,
+                        &mut ctx.services()?,
                         index,
                         "gltf-profile-morph-delta-owner",
                     )?);
@@ -972,7 +996,7 @@ pub(super) fn submit_parts<'session>(
                         selected_sources,
                         resource_count,
                         argument_0,
-                        delta.provenance.as_slice().iter().copied(),
+                        provenance.iter().copied(),
                     )
                 }?;
             }
@@ -982,7 +1006,7 @@ pub(super) fn submit_parts<'session>(
                 })?;
                 {
                     let argument_0 = ProfileOwner::AnimationClip(authoring_u32(
-                        ctx,
+                        &mut ctx.services()?,
                         index,
                         "gltf-profile-animation-clip-owner",
                     )?);
@@ -1003,7 +1027,7 @@ pub(super) fn submit_parts<'session>(
                 })?;
                 {
                     let argument_0 = ProfileOwner::AnimationChannel(authoring_u32(
-                        ctx,
+                        &mut ctx.services()?,
                         index,
                         "gltf-profile-animation-channel-owner",
                     )?);
@@ -1028,7 +1052,7 @@ pub(super) fn submit_parts<'session>(
         })?;
 
     let (root_options, root_evidence, root_attachment) =
-        context.with_execution(|ctx| -> Result<_> {
+        with_content(context, |ctx| -> Result<_> {
             let projection_sources =
                 selected_sources.for_owner(ctx, ProfileOwner::SyntheticRoot)?;
             let [projection] = projection_sources else {
@@ -1059,7 +1083,7 @@ pub(super) fn submit_parts<'session>(
             let (root_options, root_evidence) =
                 generated_evidence(ctx, "org.baozi.gltf:projection-root-v1", &instruction)?;
             let root_attachment = [ProvenanceLocalId::new(authoring_u32(
-                ctx,
+                &mut ctx.services()?,
                 provenance_nodes.len(),
                 "gltf-profile-generated-root",
             )?)];
@@ -1067,7 +1091,7 @@ pub(super) fn submit_parts<'session>(
         })?;
 
     let root_kind = OperationKind::Generated;
-    context.with_execution(|ctx| -> Result<()> {
+    with_content(context, |ctx| -> Result<()> {
         provenance_nodes.try_push_reserved(ProvenanceNodeAuthoring::operation(
             ProvenanceOperationAuthoring::new(
                 &root_kind,
@@ -1089,11 +1113,11 @@ pub(super) fn submit_parts<'session>(
         .default_sampler
         .map(|sampler| ProfileOwner::Sampler(sampler.index()));
     let (default_options, default_evidence, default_sampler_attachment) =
-        context.with_execution(|ctx| -> Result<_> {
+        with_content(context, |ctx| -> Result<_> {
             let (default_options, default_evidence) =
                 generated_evidence(ctx, "org.baozi.gltf:implicit-sampler-v1", &[0; 9])?;
             let default_sampler_attachment = [ProvenanceLocalId::new(authoring_u32(
-                ctx,
+                &mut ctx.services()?,
                 provenance_nodes.len(),
                 "gltf-profile-default-sampler",
             )?)];
@@ -1105,7 +1129,7 @@ pub(super) fn submit_parts<'session>(
         })?;
 
     let default_kind = OperationKind::Default;
-    context.with_execution(|ctx| -> Result<()> {
+    with_content(context, |ctx| -> Result<()> {
         if let Some(owner) = default_sampler_owner {
             provenance_nodes.try_push_reserved(ProvenanceNodeAuthoring::operation(
                 ProvenanceOperationAuthoring::new(
@@ -1124,12 +1148,12 @@ pub(super) fn submit_parts<'session>(
         .default_material
         .map(|material| ProfileOwner::Material(material.index()));
     let (material_generated, default_material_attachment) =
-        context.with_execution(|ctx| -> Result<_> {
+        with_content(context, |ctx| -> Result<_> {
             let material_generated = default_material_owner
                 .map(|_| generated_evidence(ctx, "org.baozi.gltf:implicit-material-v1", &[]))
                 .transpose()?;
             let default_material_attachment = [ProvenanceLocalId::new(authoring_u32(
-                ctx,
+                &mut ctx.services()?,
                 provenance_nodes.len(),
                 "gltf-profile-default-material",
             )?)];
@@ -1137,7 +1161,7 @@ pub(super) fn submit_parts<'session>(
         })?;
 
     let material_kind = OperationKind::Generated;
-    context.with_execution(|ctx| -> Result<()> {
+    with_content(context, |ctx| -> Result<()> {
         if let (Some(owner), Some((material_options, material_evidence))) =
             (default_material_owner, material_generated.as_ref())
         {
@@ -1154,12 +1178,12 @@ pub(super) fn submit_parts<'session>(
         Ok(())
     })?;
 
-    let owner_provenance = context.with_execution(|ctx| -> Result<_> {
-        let mut owner_provenance = ctx.metered_vec(
+    let owner_provenance = with_content(context, |ctx| -> Result<_> {
+        let mut owner_provenance = ctx.services()?.metered_vec(
             ImportStorageClass::SceneConstruction,
             "gltf-complete-batch-owner-provenance",
         );
-        owner_provenance.try_reserve(ctx, owner_sources.len())?;
+        owner_provenance.try_reserve(&mut ctx.services()?, owner_sources.len())?;
         for owner in owner_sources.as_slice() {
             let end = owner
                 .provenance_offset
@@ -1185,49 +1209,51 @@ pub(super) fn submit_parts<'session>(
         Ok(owner_provenance)
     })?;
 
-    let (source_name_key, extras_media_type) = context.with_execution(|_ctx| -> Result<_> {
+    let (source_name_key, extras_media_type) = with_content(context, |_ctx| -> Result<_> {
         let source_name_key = NamespacedName::new("org.baozi.gltf:source-name")
             .map_err(|_| gltf_parse_error("static glTF metadata key is invalid"))?;
         let extras_media_type = ExtensionMediaType::new(super::extras::MEDIA_TYPE)
             .map_err(|_| gltf_parse_error("static glTF extras media type is invalid"))?;
         Ok((source_name_key, extras_media_type))
     })?;
-    let metadata = context.with_execution(|ctx| -> Result<_> {
-        let mut metadata = ctx.metered_vec(
+    let metadata = with_content(context, |ctx| -> Result<_> {
+        let mut metadata = ctx.services()?.metered_vec(
             ImportStorageClass::SceneConstruction,
             "gltf-complete-batch-metadata",
         );
-        let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
+        let work_group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
         for extras in selected_sources.extras() {
-            ctx.with_work(
-                &work_group,
-                [1],
-                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-            )?;
+            let source_id = ctx.child(&work_group, [1], |child| {
+                child.run([1], || Ok::<_, baozi_import::ParseFailure>(extras.source))
+            })?;
             // Source leaves and source identities share the authoring index order. The metadata
             // references the source identity, never a canonical entity or a provenance attachment.
-            let source = selected_sources.source_index(ctx, resource_count, extras.source)?;
+            let source = selected_sources.source_index(ctx, resource_count, source_id)?;
             {
                 let value = MetadataAuthoringEntry::for_source(
                     SourceIdentityLocalId::new(source),
                     &extras.key,
                     ExtensionValueRef::Bytes {
                         media_type: &extras_media_type,
-                        payload: extras.bytes(ctx)?,
+                        payload: extras.bytes(&mut ctx.services()?)?,
                     },
                 );
-                metadata.try_push(ctx, value)
+                metadata.try_push(&mut ctx.services()?, value)
             }?;
         }
         for (index, name) in cameras.names.as_slice().iter().enumerate() {
             if let Some(name) = name {
                 {
                     let value = MetadataAuthoringEntry::new(
-                        ProfileOwner::Camera(authoring_u32(ctx, index, "gltf-metadata-camera")?),
+                        ProfileOwner::Camera(authoring_u32(
+                            &mut ctx.services()?,
+                            index,
+                            "gltf-metadata-camera",
+                        )?),
                         &source_name_key,
                         ExtensionValueRef::String(name.as_str()),
                     );
-                    metadata.try_push(ctx, value)
+                    metadata.try_push(&mut ctx.services()?, value)
                 }?;
             }
         }
@@ -1250,19 +1276,21 @@ pub(super) fn submit_parts<'session>(
             ),
         ] {
             for (index, name) in names.iter().enumerate() {
-                ctx.with_work(
-                    &work_group,
-                    [1],
-                    |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-                )?;
-                if let Some(name) = name.as_ref() {
+                let name = ctx.child(&work_group, [1], |child| {
+                    child.run([1], || Ok::<_, baozi_import::ParseFailure>(name.as_ref()))
+                })?;
+                if let Some(name) = name {
                     {
                         let value = MetadataAuthoringEntry::new(
-                            owner(authoring_u32(ctx, index, "gltf-metadata-source-name")?),
+                            owner(authoring_u32(
+                                &mut ctx.services()?,
+                                index,
+                                "gltf-metadata-source-name",
+                            )?),
                             &source_name_key,
                             ExtensionValueRef::String(name.as_str()),
                         );
-                        metadata.try_push(ctx, value)
+                        metadata.try_push(&mut ctx.services()?, value)
                     }?;
                 }
             }
@@ -1281,7 +1309,9 @@ pub(super) fn submit_parts<'session>(
         MetadataAuthoringBatch::new(metadata.as_slice()),
     )
     .with_resource_snapshots(snapshots.as_slice());
-    let animations = context.with_execution(|ctx| animation_storage.authoring_tables(ctx))?;
+    let animations = with_content(context, |ctx| {
+        animation_storage.authoring_tables(&mut ctx.services()?)
+    })?;
     context.submit_complete(SceneAuthoringBatch::new(
         spatial,
         node_batch,
@@ -1295,19 +1325,19 @@ pub(super) fn submit_parts<'session>(
 }
 
 fn owner_sources_for<'a>(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseRoot<'_, '_, '_>,
     owners: &MeteredVec<'_, OwnerSource>,
     values: &'a MeteredVec<'_, ProvenanceLocalId>,
     target: ProfileOwner,
 ) -> Result<&'a [ProvenanceLocalId]> {
-    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
+    let work_group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
     for owner in owners.as_slice() {
-        ctx.with_work(
-            &work_group,
-            [1],
-            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-        )?;
-        if owner.owner == target {
+        let matches = ctx.child(&work_group, [1], |child| {
+            child.run([1], || {
+                Ok::<_, baozi_import::ParseFailure>(owner.owner == target)
+            })
+        })?;
+        if matches {
             let end = owner
                 .provenance_offset
                 .checked_add(owner.provenance_count)
@@ -1328,15 +1358,20 @@ fn owner_sources_for<'a>(
 // Each versioned instruction identifies the normalization rule and its immutable inputs.
 // Its source parents bind the generated owner to actual declarations without inventing a locator.
 fn generated_evidence(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseRoot<'_, '_, '_>,
     code: &'static str,
     instruction: &[u8],
 ) -> Result<(OptionsDigest, [OperationEvidenceSummary; 1])> {
-    ctx.charge_work(to_u64(code.len()) + to_u64(instruction.len()))?;
-    let mut digest = Sha256::new();
-    digest.update(code.as_bytes());
-    digest.update(instruction);
-    let bytes: [u8; 32] = digest.finalize().into();
+    let amount = to_u64(code.len()) + to_u64(instruction.len());
+    let layout = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+    let bytes: [u8; 32] = ctx.child(&layout, [amount], |child| {
+        child.run([amount], || {
+            let mut digest = Sha256::new();
+            digest.update(code.as_bytes());
+            digest.update(instruction);
+            Ok::<_, baozi_import::ParseFailure>(digest.finalize().into())
+        })
+    })?;
     let code = NamespacedName::new(code)
         .map_err(|_| gltf_parse_error("static glTF generated evidence code is invalid"))?;
     let evidence = OperationEvidenceSummary::new(code, 1, Some(EvidenceDigest::sha256(bytes)))
@@ -1345,34 +1380,35 @@ fn generated_evidence(
 }
 
 fn non_primary_provenance_count<'a>(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseRoot<'_, '_, '_>,
     provenance: impl IntoIterator<Item = &'a [u32]>,
 ) -> Result<usize> {
     provenance
         .into_iter()
         .try_fold(0usize, |mut count, sources| {
-            ctx.charge_work(1)?;
-            let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
-            ctx.with_work(
-                &work_group,
-                [to_u64(sources.len())],
-                |ctx, work| -> Result<()> {
-                    for (index, &source) in sources.iter().enumerate() {
-                        poll_parser_loop(ctx, index)?;
+            let work_group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+            let length = ctx.child(&work_group, [1], |child| {
+                child.run([1], || Ok::<_, baozi_import::ParseFailure>(sources.len()))
+            })?;
+            ctx.child(&work_group, [to_u64(length)], |child| -> Result<()> {
+                let errors = child.error_view();
+                for (index, &source) in sources.iter().enumerate() {
+                    poll_parser_loop(&mut child.services()?, index)?;
+                    child.run([1], || -> Result<()> {
                         count = count.checked_add(usize::from(source != 0)).ok_or_else(|| {
-                            ctx.allocation_failure("gltf-profile-owner-source-count")
+                            errors.allocation_failure("gltf-profile-owner-source-count")
                         })?;
-                        work.complete([1])?;
-                    }
-                    Ok(())
-                },
-            )?;
+                        Ok(())
+                    })?;
+                }
+                Ok(())
+            })?;
             Ok(count)
         })
 }
 
 fn push_owner_source<'session>(
-    ctx: &mut ParseExecution<'_, 'session>,
+    ctx: &mut ParseRoot<'_, '_, 'session>,
     owners: &mut MeteredVec<'session, OwnerSource>,
     values: &mut MeteredVec<'session, ProvenanceLocalId>,
     selected_sources: &SelectedSourceProfile<'_>,
@@ -1392,7 +1428,7 @@ fn push_owner_source<'session>(
 }
 
 fn push_owner_sources<'session>(
-    ctx: &mut ParseExecution<'_, 'session>,
+    ctx: &mut ParseRoot<'_, '_, 'session>,
     owners: &mut MeteredVec<'session, OwnerSource>,
     values: &mut MeteredVec<'session, ProvenanceLocalId>,
     selected_sources: &SelectedSourceProfile<'_>,
@@ -1401,15 +1437,13 @@ fn push_owner_sources<'session>(
     provenance: impl IntoIterator<Item = u32>,
 ) -> Result<()> {
     let offset = values.len();
-    values.try_push(ctx, ProvenanceLocalId::new(0))?;
+    values.try_push(&mut ctx.services()?, ProvenanceLocalId::new(0))?;
     let mut previous = 0;
-    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
+    let work_group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
     for source in provenance {
-        ctx.with_work(
-            &work_group,
-            [1],
-            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-        )?;
+        let source = ctx.child(&work_group, [1], |child| {
+            child.run([1], || Ok::<_, baozi_import::ParseFailure>(source))
+        })?;
         if source == 0 {
             continue;
         }
@@ -1418,16 +1452,14 @@ fn push_owner_sources<'session>(
                 "owner provenance sources are not strictly ordered",
             )));
         }
-        values.try_push(ctx, ProvenanceLocalId::new(source))?;
+        values.try_push(&mut ctx.services()?, ProvenanceLocalId::new(source))?;
         previous = source;
     }
     for link in selected_sources.for_owner(ctx, owner)? {
-        ctx.with_work(
-            &work_group,
-            [1],
-            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-        )?;
-        let source = selected_sources.source_index(ctx, resource_count, link.source)?;
+        let source_id = ctx.child(&work_group, [1], |child| {
+            child.run([1], || Ok::<_, baozi_import::ParseFailure>(link.source))
+        })?;
+        let source = selected_sources.source_index(ctx, resource_count, source_id)?;
         if source == 0 {
             continue;
         }
@@ -1437,11 +1469,11 @@ fn push_owner_sources<'session>(
             )
             .into());
         }
-        values.try_push(ctx, ProvenanceLocalId::new(source))?;
+        values.try_push(&mut ctx.services()?, ProvenanceLocalId::new(source))?;
         previous = source;
     }
     owners.try_push(
-        ctx,
+        &mut ctx.services()?,
         OwnerSource {
             owner,
             provenance_offset: offset,
@@ -1452,7 +1484,7 @@ fn push_owner_sources<'session>(
 }
 
 fn push_indexed_owner_sources<'session>(
-    ctx: &mut ParseExecution<'_, 'session>,
+    ctx: &mut ParseRoot<'_, '_, 'session>,
     owners: &mut MeteredVec<'session, OwnerSource>,
     values: &mut MeteredVec<'session, ProvenanceLocalId>,
     selected_sources: &SelectedSourceProfile<'_>,
@@ -1462,7 +1494,11 @@ fn push_indexed_owner_sources<'session>(
 ) -> Result<()> {
     for index in 0..count {
         {
-            let argument_0 = owner(authoring_u32(ctx, index, "gltf-profile-owner-index")?);
+            let argument_0 = owner(authoring_u32(
+                &mut ctx.services()?,
+                index,
+                "gltf-profile-owner-index",
+            )?);
             push_owner_source(
                 ctx,
                 owners,

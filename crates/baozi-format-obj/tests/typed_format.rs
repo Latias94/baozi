@@ -49,12 +49,16 @@ impl Format for TypedObj {
         &self,
         probe: &Probe<'_>,
         hint: &ReadHint,
-        scope: &DetectionScope<'_>,
+        scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         ObjImporter.detect(probe, hint, scope)
     }
 
-    fn parse(&self, options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         assert_eq!(
             options.text_decoding_mode(),
             ObjTextDecodingMode::ReplaceInvalidUtf8

@@ -6,8 +6,9 @@ use baozi_import::{
     DetectionScope, Format, FormatCapability, FormatDescriptor, FormatEncoding, ImportCause,
     ImportDimension, ImportFailure, ImportOperationControl, ImportPlan, ImportRequest,
     ImportResult, ImportWorkClass, NoFormatOptions, OptionCompileError, OptionCompileLimits,
-    ParseContext, ParseFailure, ParseResult, ReadConfidence, ReadHint, RegistryBuildLimits,
-    RegistryBuildScope, RegistryBuilder, ScopeAbortCause, TrustedExtensionBoundary,
+    ParseContext, ParseFailure, ParseResult, ParseScanReturn, ReadConfidence, ReadHint,
+    RegistryBuildLimits, RegistryBuildScope, RegistryBuilder, ScopeAbortCause,
+    TrustedExtensionBoundary,
 };
 use baozi_io::AssetPath;
 use baozi_operation::CancellationToken;
@@ -37,8 +38,11 @@ enum WorkCase {
     ZeroGroup,
     DynamicChunks,
     CallbackError,
+    ReturnedOwnedError,
+    ScanBoundary,
+    ScanIncomplete,
+    ScanBoundaryCancel,
     Incomplete,
-    Nested,
     ParentNestedSuccess,
     ParentChildFailure,
     ParentGroupNestedSuccess,
@@ -67,8 +71,11 @@ impl WorkImporter {
             WorkCase::ZeroGroup => "dev.baozi.test.work-callback-zero",
             WorkCase::DynamicChunks => "dev.baozi.test.work-callback-dynamic",
             WorkCase::CallbackError => "dev.baozi.test.work-callback-error",
+            WorkCase::ReturnedOwnedError => "dev.baozi.test.work-returned-owned-error",
+            WorkCase::ScanBoundary => "dev.baozi.test.scan-boundary",
+            WorkCase::ScanIncomplete => "dev.baozi.test.scan-incomplete",
+            WorkCase::ScanBoundaryCancel => "dev.baozi.test.scan-boundary-cancel",
             WorkCase::Incomplete => "dev.baozi.test.work-callback-incomplete",
-            WorkCase::Nested => "dev.baozi.test.work-callback-nested",
             WorkCase::ParentNestedSuccess => "dev.baozi.test.work-parent-success",
             WorkCase::ParentChildFailure => "dev.baozi.test.work-parent-child-failure",
             WorkCase::ParentGroupNestedSuccess => "dev.baozi.test.work-parent-group-success",
@@ -92,8 +99,11 @@ impl WorkImporter {
             WorkCase::ZeroGroup => "work-zero",
             WorkCase::DynamicChunks => "work-dynamic",
             WorkCase::CallbackError => "work-error",
+            WorkCase::ReturnedOwnedError => "work-returned-owned-error",
+            WorkCase::ScanBoundary => "scan-boundary",
+            WorkCase::ScanIncomplete => "scan-incomplete",
+            WorkCase::ScanBoundaryCancel => "scan-boundary-cancel",
             WorkCase::Incomplete => "work-incomplete",
-            WorkCase::Nested => "work-nested",
             WorkCase::ParentNestedSuccess => "work-parent-success",
             WorkCase::ParentChildFailure => "work-parent-failure",
             WorkCase::ParentGroupNestedSuccess => "work-parent-group-success",
@@ -137,100 +147,199 @@ impl Format for WorkImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
-        context.with_execution(|exec| -> ParseResult<()> {
-            let work_units = exec.bind_work_group([ImportWorkClass::WorkUnits])?;
-            let tokens = exec.bind_work_group([ImportWorkClass::Tokens])?;
-            let records = exec.bind_work_group([ImportWorkClass::Records])?;
-            let string_bytes = exec.bind_work_group([ImportWorkClass::StringBytes])?;
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
+        context.with_execution(|root| -> ParseResult<()> {
+            let work_units = root.bind_group([ImportWorkClass::WorkUnits])?;
+            let tokens = root.bind_group([ImportWorkClass::Tokens])?;
+            let records = root.bind_group([ImportWorkClass::Records])?;
+            let string_bytes = root.bind_group([ImportWorkClass::StringBytes])?;
             let tokens_work =
-                exec.bind_work_group([ImportWorkClass::Tokens, ImportWorkClass::WorkUnits])?;
+                root.bind_group([ImportWorkClass::Tokens, ImportWorkClass::WorkUnits])?;
             let work_tokens =
-                exec.bind_work_group([ImportWorkClass::WorkUnits, ImportWorkClass::Tokens])?;
+                root.bind_group([ImportWorkClass::WorkUnits, ImportWorkClass::Tokens])?;
             let record_attributes =
-                exec.bind_work_group([ImportWorkClass::Records, ImportWorkClass::AttributeCells])?;
+                root.bind_group([ImportWorkClass::Records, ImportWorkClass::AttributeCells])?;
             let line_tokens =
-                exec.bind_work_group([ImportWorkClass::LineBytes, ImportWorkClass::Tokens])?;
+                root.bind_group([ImportWorkClass::LineBytes, ImportWorkClass::Tokens])?;
             let duplicate_work =
-                exec.bind_work_group([ImportWorkClass::WorkUnits, ImportWorkClass::WorkUnits])?;
+                root.bind_group([ImportWorkClass::WorkUnits, ImportWorkClass::WorkUnits])?;
+            let source = root.services()?.primary_bytes();
             match self.case {
                 WorkCase::EntryFailure => {
-                    return Err(exec.resource_limit_exceeded("work-callback-entry", 0));
+                    return Err(root
+                        .services()?
+                        .resource_limit_exceeded("work-callback-entry", 0));
                 }
                 WorkCase::ExactGroup => {
-                    exec.with_work(&tokens_work, [3, 2], |_exec, work| {
+                    let mut decoded = [0; 3];
+                    root.child(&tokens_work, [3, 2], |work| {
                         assert_eq!(work.remaining(), [3, 2]);
-                        work.complete([1, 1])?;
-                        work.run([2, 1], || Ok(()))?;
+                        work.run_returned(|| {
+                            decoded[0] = source[0];
+                            Ok(((), [1, 1]))
+                        })?;
+                        work.run([2, 1], || {
+                            decoded[1..].copy_from_slice(&source[1..3]);
+                            Ok::<_, ParseFailure>(())
+                        })?;
                         assert_eq!(work.remaining(), [0, 0]);
-                        Ok(())
+                        Ok::<_, ParseFailure>(())
                     })?;
+                    assert_eq!(&decoded, b"fix");
                 }
                 WorkCase::ZeroGroup => {
-                    exec.with_work(&work_tokens, [0, 0], |_exec, work| {
+                    root.child(&work_tokens, [0, 0], |work| {
                         assert_eq!(work.remaining(), [0, 0]);
-                        work.complete_all()
+                        Ok::<_, ParseFailure>(())
                     })?;
                 }
                 WorkCase::DynamicChunks => {
-                    exec.with_work(&work_units, [0], |_exec, work| {
-                        work.replenish(4)?;
-                        work.complete_all()?;
-                        work.replenish(4)?;
-                        work.complete_all()
+                    let mut decoded = [[0; 4]; 2];
+                    root.child(&work_units, [0], |work| {
+                        for chunk in &mut decoded {
+                            work.replenish(4)?;
+                            work.run([4], || {
+                                chunk.copy_from_slice(&source[..4]);
+                                Ok::<_, ParseFailure>(())
+                            })?;
+                        }
+                        Ok::<_, ParseFailure>(())
                     })?;
+                    assert_eq!(decoded, [*b"fixt"; 2]);
+                }
+                WorkCase::ScanBoundary
+                | WorkCase::ScanIncomplete
+                | WorkCase::ScanBoundaryCancel => {
+                    let mut decoded = [0; 3];
+                    let result = root.scan(&tokens, [3], |scan| {
+                        scan.run([2], || {
+                            decoded[..2].copy_from_slice(&source[..2]);
+                            Ok::<_, ParseFailure>(())
+                        })?;
+                        if matches!(self.case, WorkCase::ScanBoundaryCancel) {
+                            self.cancellation
+                                .as_ref()
+                                .expect("the boundary cancellation case owns a token")
+                                .cancel();
+                        }
+                        Ok::<_, ParseFailure>(if matches!(self.case, WorkCase::ScanIncomplete) {
+                            ParseScanReturn::Exhausted(2)
+                        } else {
+                            ParseScanReturn::Boundary(2)
+                        })
+                    });
+                    assert_eq!(decoded, [b'f', b'i', 0]);
+                    match result {
+                        Ok(offset) => {
+                            assert_eq!(offset, 2);
+                            root.child(&tokens, [1], |work| {
+                                work.run([1], || {
+                                    decoded[2] = source[offset];
+                                    Ok::<_, ParseFailure>(())
+                                })
+                            })?;
+                            assert_eq!(&decoded, b"fix");
+                        }
+                        Err(cause) => {
+                            let mut following = false;
+                            assert!(
+                                root.child(&tokens, [1], |_| {
+                                    following = true;
+                                    Ok::<_, ParseFailure>(())
+                                })
+                                .is_err()
+                            );
+                            assert!(!following);
+                            return Err(cause);
+                        }
+                    }
                 }
                 WorkCase::CallbackError => {
-                    exec.with_work(&work_tokens, [2, 2], |exec, work| {
-                        work.complete([1, 1])?;
-                        exec.enforce_resource_limit("work-callback-error", 2, 1)?;
-                        Ok(())
+                    let mut decoded = [0; 2];
+                    root.child(&work_tokens, [2, 2], |work| {
+                        work.run([1, 1], || {
+                            decoded[0] = source[0];
+                            Ok::<_, ParseFailure>(())
+                        })?;
+                        assert_eq!(decoded, [b'f', 0]);
+                        work.services()?
+                            .enforce_resource_limit("work-callback-error", 2, 1)?;
+                        Ok::<_, ParseFailure>(())
                     })?;
                 }
                 WorkCase::Incomplete => {
-                    exec.with_work(&work_tokens, [2, 2], |_exec, work| {
-                        work.complete([1, 1])?;
-                        Ok(())
-                    })?;
-                }
-                WorkCase::Nested => {
-                    exec.with_work(&work_units, [0], |exec, work| {
-                        work.replenish(4)?;
-                        assert!(
-                            exec.with_work(&tokens, [1], |_exec, nested| { nested.complete_all() })
-                                .is_err()
-                        );
-                        work.complete_all()
+                    let mut decoded = [0; 2];
+                    root.child(&work_tokens, [2, 2], |work| {
+                        work.run([1, 1], || {
+                            decoded[0] = source[0];
+                            Ok::<_, ParseFailure>(())
+                        })?;
+                        assert_eq!(decoded, [b'f', 0]);
+                        Ok::<_, ParseFailure>(())
                     })?;
                 }
                 WorkCase::ParentNestedSuccess => {
-                    exec.with_parent_work(&records, [1], |exec, _parent| {
-                        exec.with_work(&tokens, [2], |_exec, child| child.complete_all())
+                    let mut decoded = [0; 2];
+                    root.parent(&records, [1], |parent| {
+                        parent.children()?.child(&tokens, [2], |child| {
+                            child.run([2], || {
+                                decoded.copy_from_slice(&source[..2]);
+                                Ok::<_, ParseFailure>(())
+                            })
+                        })
                     })?;
+                    assert_eq!(&decoded, b"fi");
                 }
                 WorkCase::ParentChildFailure => {
-                    exec.with_parent_work(&records, [1], |exec, _parent| {
-                        exec.with_work(&work_units, [2], |exec, child| {
-                            child.complete([1])?;
-                            exec.enforce_resource_limit("parent-child-failure", 2, 1)
+                    let mut decoded = [0; 2];
+                    root.parent(&records, [1], |parent| {
+                        parent.children()?.child(&work_units, [2], |child| {
+                            child.run([1], || {
+                                decoded[0] = source[0];
+                                Ok::<_, ParseFailure>(())
+                            })?;
+                            assert_eq!(decoded, [b'f', 0]);
+                            child
+                                .services()?
+                                .enforce_resource_limit("parent-child-failure", 2, 1)
                         })
                     })?;
                 }
                 WorkCase::ParentGroupNestedSuccess => {
-                    exec.with_parent_work(&record_attributes, [1, 2], |exec, _parent| {
-                        exec.with_work(&tokens, [3], |_exec, child| child.complete_all())
+                    let mut decoded = [0; 3];
+                    root.parent(&record_attributes, [1, 2], |parent| {
+                        parent.children()?.child(&tokens, [3], |child| {
+                            child.run([3], || {
+                                decoded.copy_from_slice(&source[..3]);
+                                Ok::<_, ParseFailure>(())
+                            })
+                        })
                     })?;
+                    assert_eq!(&decoded, b"fix");
                 }
                 WorkCase::ParentGroupChildFailure => {
-                    exec.with_parent_work(&record_attributes, [1, 2], |exec, _parent| {
-                        exec.with_work(&work_units, [2], |exec, child| {
-                            child.complete([1])?;
-                            exec.enforce_resource_limit("parent-group-child-failure", 2, 1)
+                    let mut decoded = [0; 2];
+                    root.parent(&record_attributes, [1, 2], |parent| {
+                        parent.children()?.child(&work_units, [2], |child| {
+                            child.run([1], || {
+                                decoded[0] = source[0];
+                                Ok::<_, ParseFailure>(())
+                            })?;
+                            assert_eq!(decoded, [b'f', 0]);
+                            child.services()?.enforce_resource_limit(
+                                "parent-group-child-failure",
+                                2,
+                                1,
+                            )
                         })
                     })?;
                 }
@@ -239,43 +348,56 @@ impl Format for WorkImporter {
                         .cancellation
                         .as_ref()
                         .expect("parent cancellation case owns a token");
-                    exec.with_parent_work(&records, [1], |_exec, _parent| {
+                    root.parent(&records, [1], |_parent| {
                         cancellation.cancel();
-                        Ok(())
+                        Ok::<_, ParseFailure>(())
                     })?;
                 }
                 WorkCase::PrematureReplenish => {
-                    exec.with_work(&work_units, [2], |_exec, work| {
+                    root.child(&work_units, [2], |work| {
                         work.replenish(1)?;
-                        Ok(())
+                        Ok::<_, ParseFailure>(())
                     })?;
                 }
                 WorkCase::ItemLimitedReplenish => {
-                    exec.with_work(&string_bytes, [0], |_exec, work| {
+                    root.child(&string_bytes, [0], |work| {
                         work.replenish(1)?;
-                        Ok(())
+                        Ok::<_, ParseFailure>(())
                     })?;
                 }
                 WorkCase::GroupItemLimit => {
-                    let line_bytes = u64::try_from(exec.limits().max_line_bytes)
+                    let line_bytes = u64::try_from(root.services()?.limits().max_line_bytes)
                         .expect("line-byte limit fits the import counter")
                         .checked_add(1)
                         .expect("test line-byte excess fits the import counter");
-                    exec.with_work(&line_tokens, [line_bytes, 1], |_exec, work| {
-                        work.complete_all()
+                    root.child(&line_tokens, [line_bytes, 1], |_work| -> ParseResult<()> {
+                        panic!("an item-limit failure cannot enter the physical callback")
                     })?;
                 }
                 WorkCase::CallbackPanic => {
-                    exec.with_work(&work_tokens, [2, 2], |_exec, work| -> ParseResult<()> {
-                        work.complete([1, 1])?;
+                    let mut decoded = [0; 2];
+                    root.child(&work_tokens, [2, 2], |work| -> ParseResult<()> {
+                        work.run([1, 1], || {
+                            decoded[0] = source[0];
+                            Ok::<_, ParseFailure>(())
+                        })?;
+                        assert_eq!(decoded, [b'f', 0]);
                         panic!("work callback panic")
                     })?;
                 }
                 WorkCase::DuplicateDimension => {
-                    exec.with_work(&duplicate_work, [2, 3], |_exec, work| {
-                        work.complete([1, 2])?;
-                        work.complete_all()
+                    let mut decoded = [0; 5];
+                    root.child(&duplicate_work, [2, 3], |work| {
+                        work.run_returned(|| {
+                            decoded[..3].copy_from_slice(&source[..3]);
+                            Ok(((), [1, 2]))
+                        })?;
+                        work.run([1, 1], || {
+                            decoded[3..].copy_from_slice(&source[3..5]);
+                            Ok::<_, ParseFailure>(())
+                        })
                     })?;
+                    assert_eq!(&decoded, b"fixtu");
                 }
                 WorkCase::CallbackErrorCancel => {
                     enum CallbackError {
@@ -293,27 +415,75 @@ impl Format for WorkImporter {
                         .cancellation
                         .as_ref()
                         .expect("callback error cancellation case owns a token");
-                    let result = exec.with_work(
-                        &work_units,
-                        [2],
-                        |_exec, work| -> Result<(), CallbackError> {
-                            work.complete([1])?;
+                    let mut decoded = [0; 2];
+                    let result =
+                        root.child(&work_units, [2], |work| -> Result<(), CallbackError> {
+                            work.run([1], || {
+                                decoded[0] = source[0];
+                                Ok::<_, ParseFailure>(())
+                            })?;
                             cancellation.cancel();
                             Err(CallbackError::Requested)
-                        },
-                    );
+                        });
+                    assert_eq!(decoded, [b'f', 0]);
                     assert!(matches!(result, Err(CallbackError::Requested)));
-                    exec.poll()?;
+                    root.poll()?;
+                }
+                WorkCase::ReturnedOwnedError => {
+                    enum PieceError {
+                        Parse,
+                        Owned(std::rc::Rc<()>),
+                    }
+                    impl From<ParseFailure> for PieceError {
+                        fn from(_: ParseFailure) -> Self {
+                            Self::Parse
+                        }
+                    }
+                    let marker = std::rc::Rc::new(());
+                    let mut decoded = [0; 2];
+                    let result = root.child(&work_units, [2], |work| {
+                        work.run([1], || {
+                            decoded[0] = source[0];
+                            Ok::<_, PieceError>(())
+                        })?;
+                        work.run_returned(|| {
+                            Err::<((), [u64; 1]), _>(PieceError::Owned(std::rc::Rc::clone(&marker)))
+                        })
+                    });
+                    let result = root.poll_result(result);
+                    let Err(PieceError::Owned(returned)) = result else {
+                        panic!("the physical callback's owned error must escape unchanged")
+                    };
+                    assert!(std::rc::Rc::ptr_eq(&marker, &returned));
+                    assert_eq!(decoded, [b'f', 0]);
+                    let mut following = false;
+                    let failure = root
+                        .child(&work_units, [1], |work| {
+                            work.run([1], || {
+                                following = true;
+                                Ok::<_, ParseFailure>(())
+                            })
+                        })
+                        .expect_err(
+                            "the owned piece error must stop numeric work before any abort",
+                        );
+                    assert!(!following);
+                    return Err(failure);
                 }
                 WorkCase::IncompleteCancel => {
                     let cancellation = self
                         .cancellation
                         .as_ref()
                         .expect("incomplete cancellation case owns a token");
-                    exec.with_work(&work_units, [2], |_exec, work| {
-                        work.complete([1])?;
+                    let mut decoded = [0; 2];
+                    root.child(&work_units, [2], |work| {
+                        work.run([1], || {
+                            decoded[0] = source[0];
+                            Ok::<_, ParseFailure>(())
+                        })?;
+                        assert_eq!(decoded, [b'f', 0]);
                         cancellation.cancel();
-                        Ok(())
+                        Ok::<_, ParseFailure>(())
                     })?;
                 }
                 WorkCase::CancelAfterCompletion => {
@@ -321,10 +491,15 @@ impl Format for WorkImporter {
                         .cancellation
                         .as_ref()
                         .expect("cancellation case owns a token");
-                    exec.with_work(&work_units, [2], |_exec, work| {
-                        work.complete_all()?;
+                    let mut decoded = [0; 2];
+                    root.child(&work_units, [2], |work| {
+                        work.run([2], || {
+                            decoded.copy_from_slice(&source[..2]);
+                            Ok::<_, ParseFailure>(())
+                        })?;
+                        assert_eq!(&decoded, b"fi");
                         cancellation.cancel();
-                        Ok(())
+                        Ok::<_, ParseFailure>(())
                     })?;
                 }
             }
@@ -494,20 +669,67 @@ fn callback_error_and_incomplete_success_preserve_exact_prefixes() {
 }
 
 #[test]
-fn nested_work_is_rejected_before_inner_admission() {
-    let failure = run_case(WorkCase::Nested, None).expect_err("nested work cannot start");
-    assert!(matches!(
-        failure.cause(),
-        ImportCause::Scope(abort)
-            if matches!(
-                abort.cause(),
-                ScopeAbortCause::Ledger(LedgerCause::InactiveLinearWorkPermit)
-            )
-    ));
-    assert_dimension(&failure, ImportDimension::WorkUnits, 4, 0);
-    assert_dimension(&failure, ImportDimension::Tokens, 0, 0);
+fn returned_piece_preserves_non_send_owned_errors_and_the_actual_completed_prefix() {
+    let failure = run_case(WorkCase::ReturnedOwnedError, None)
+        .expect_err("an owned piece error must stop subsequent physical work");
+    assert!(matches!(failure.cause(), ImportCause::Scope(abort)
+    if matches!(abort.cause(), ScopeAbortCause::DescriptorContract {
+        code: "import-store-runtime-contract",
+    })));
+    assert_dimension(&failure, ImportDimension::WorkUnits, 2, 1);
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    assert_eq!(failure.ledger().active_reservations(), 0);
 }
 
+#[test]
+fn scan_boundary_releases_only_the_unused_suffix_and_allows_the_following_child() {
+    let report =
+        run_case(WorkCase::ScanBoundary, None).expect("a classified scan boundary is valid");
+    let tokens = report
+        .ledger()
+        .dimension(ImportDimension::Tokens)
+        .expect("the actual scan token evidence");
+    assert_eq!((tokens.attempted(), tokens.consumed()), (4, 3));
+    assert_eq!(report.ledger().current_live_bytes(), 0);
+    assert_eq!(report.ledger().active_reservations(), 0);
+}
+
+#[test]
+fn scan_exhaustion_requires_its_exact_physical_prefix() {
+    let failure = run_case(WorkCase::ScanIncomplete, None)
+        .expect_err("exhaustion cannot discard an unfinished suffix");
+    assert!(matches!(failure.cause(), ImportCause::Scope(abort)
+    if matches!(abort.cause(), ScopeAbortCause::DescriptorContract {
+        code: "parse-work-callback-incomplete",
+    })));
+    assert_dimension(&failure, ImportDimension::Tokens, 3, 2);
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    assert_eq!(failure.ledger().active_reservations(), 0);
+}
+
+#[test]
+fn scan_boundary_exit_preserves_control_priority_and_the_physical_prefix() {
+    let cancellation = CancellationToken::new();
+    let request = request_for(WorkImporter {
+        case: WorkCase::ScanBoundaryCancel,
+        cancellation: Some(cancellation.clone()),
+    });
+    let failure = operation_result(request.read_bytes(
+        AssetPath::new("asset.scan-boundary-cancel").expect("valid scan source"),
+        b"fixture",
+        ImportOperationControl::default().with_cancellation(cancellation),
+    ))
+    .expect_err("a normal scan boundary must still observe cancellation");
+    assert!(matches!(failure.cause(), ImportCause::Scope(abort)
+    if matches!(abort.cause(), ScopeAbortCause::Control(_))));
+    assert_dimension(&failure, ImportDimension::Tokens, 3, 2);
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    assert_eq!(failure.ledger().active_reservations(), 0);
+}
+
+/// The paired valid and compile-fail examples on `ParseRoot` in
+/// `src/scope/parser_execution.rs` cover same-root nested child reentry statically.
+/// This runtime case retains the valid explicit parent-to-child completion contract.
 #[test]
 fn parent_work_can_span_child_work_and_completes_only_after_the_child() {
     let report = run_case(WorkCase::ParentNestedSuccess, None)
@@ -773,19 +995,28 @@ mod exclusive_bridge {
     use super::*;
     use baozi_import::{
         DetectionFailure, DetectionFaultCode, FormatFailureDetailSink, FormatFailureDetailValue,
-        FormatFailureEvidenceProducer, ImportConfigOverlay, ImportPhase, ImportRequestLayer,
-        ImportTerminalCause, ImportTerminalFailureClass, ResourceLimits, ResourceLimitsOverlay,
+        FormatFailureEvidenceProducer, ImportConfigOverlay, ImportPhase, ImportProgressPhase,
+        ImportProgressUnit, ImportRequestLayer, ImportTerminalCause, ImportTerminalFailureClass,
+        ResourceLimits, ResourceLimitsOverlay,
     };
     use baozi_io::{AssetReadError, AssetReadErrorKind, AssetReader, AuthorityDomain, OpenedAsset};
-    use baozi_operation::CancellationSignal;
+    use baozi_operation::{
+        CancellationOrigin, CancellationSignal, ControlCause, ProgressDecision, ProgressEvent,
+    };
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Case {
         Success,
+        ReplenishedComparisons,
+        Progress,
+        ProgressObserverCancel,
+        ProgressFirstPollCancel,
+        ProgressSecondPollCancel,
+        ProgressObserverPanic,
         DeniedPushDrop,
         DeniedCaptureDrop,
         Incomplete,
@@ -822,7 +1053,13 @@ mod exclusive_bridge {
         reader_calls: AtomicUsize,
         reader_drops: AtomicUsize,
         polls: AtomicUsize,
+        cancel_at_poll: AtomicUsize,
         region_polls: AtomicUsize,
+        progress_checks: AtomicUsize,
+        progress_rejections: AtomicUsize,
+        progress_cancels: AtomicUsize,
+        progress_panics: AtomicUsize,
+        progress_events: Mutex<Vec<ProgressEvent<ImportProgressPhase, ImportProgressUnit>>>,
         owned_drops: AtomicUsize,
         entries: AtomicUsize,
         submitted: AtomicUsize,
@@ -834,7 +1071,13 @@ mod exclusive_bridge {
     }
     impl CancellationSignal for Signal {
         fn is_cancelled(&self) -> bool {
-            self.observation.polls.fetch_add(1, Ordering::SeqCst);
+            let poll = self.observation.polls.fetch_add(1, Ordering::SeqCst) + 1;
+            if poll == self.observation.cancel_at_poll.load(Ordering::SeqCst) {
+                self.observation
+                    .progress_cancels
+                    .fetch_add(1, Ordering::SeqCst);
+                self.token.cancel();
+            }
             self.token.is_cancelled()
         }
     }
@@ -937,14 +1180,212 @@ mod exclusive_bridge {
             &self,
             _: &baozi_import::Probe<'_>,
             _: &ReadHint,
-            _: &DetectionScope<'_>,
+            _: &mut DetectionScope<'_, '_>,
         ) -> DetectionResult<DetectionOutcome> {
             Ok(DetectionOutcome::Match(ReadConfidence::Certain))
         }
-        fn parse(&self, _: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+        fn parse(&self, _: &Self::Options, context: &mut ParseContext<'_, '_>) -> ParseResult<()> {
             self.observation.entries.fetch_add(1, Ordering::SeqCst);
             let before = self.observation.polls.load(Ordering::SeqCst);
             let result = context.with_parser_execution(|root| -> ParseResult<()> {
+                if matches!(
+                    self.case,
+                    Case::Progress
+                        | Case::ProgressObserverCancel
+                        | Case::ProgressFirstPollCancel
+                        | Case::ProgressSecondPollCancel
+                        | Case::ProgressObserverPanic
+                ) {
+                    let group =
+                        root.bind_group([ImportWorkClass::Tokens, ImportWorkClass::WorkUnits])?;
+                    let baseline = root.work_counters(ImportWorkClass::WorkUnits)?;
+                    let before = self.observation.polls.load(Ordering::SeqCst);
+                    root.report_progress(
+                        ImportProgressPhase::Decode,
+                        ImportProgressUnit::WorkUnits,
+                        0,
+                        Some(2),
+                    )?;
+                    assert_eq!(self.observation.polls.load(Ordering::SeqCst) - before, 2);
+                    self.observation
+                        .progress_checks
+                        .fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(root.work_counters(ImportWorkClass::WorkUnits)?, baseline);
+                    let result = root.child(&group, [2, 2], |child| -> ParseResult<()> {
+                        child.run([1, 1], || {
+                            self.observation.writes.fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        })?;
+                        let before = self.observation.polls.load(Ordering::SeqCst);
+                        let cancel_poll = match self.case {
+                            Case::ProgressFirstPollCancel => Some(1),
+                            Case::ProgressSecondPollCancel => Some(2),
+                            _ => None,
+                        };
+                        if let Some(cancel_poll) = cancel_poll {
+                            self.observation
+                                .cancel_at_poll
+                                .store(before + cancel_poll, Ordering::SeqCst);
+                        }
+                        let progress = child.report_progress(
+                            ImportProgressPhase::Decode,
+                            ImportProgressUnit::WorkUnits,
+                            1,
+                            Some(2),
+                        );
+                        assert_eq!(
+                            self.observation.polls.load(Ordering::SeqCst) - before,
+                            if self.case == Case::ProgressFirstPollCancel {
+                                1
+                            } else {
+                                2
+                            }
+                        );
+                        self.observation
+                            .progress_checks
+                            .fetch_add(1, Ordering::SeqCst);
+                        let actual = child.work_counters(ImportWorkClass::WorkUnits)?;
+                        assert_eq!((actual.0 - baseline.0, actual.1 - baseline.1), (2, 1));
+                        let tokens = child.work_counters(ImportWorkClass::Tokens)?;
+                        assert_eq!((tokens.0, tokens.1), (2, 1));
+                        if matches!(
+                            self.case,
+                            Case::ProgressObserverCancel
+                                | Case::ProgressFirstPollCancel
+                                | Case::ProgressSecondPollCancel
+                                | Case::ProgressObserverPanic
+                        ) {
+                            let first_failure =
+                                progress.expect_err("the actual progress boundary stops");
+                            self.token.cancel();
+                            assert!(
+                                child
+                                    .run([1, 1], || -> ParseResult<()> {
+                                        self.observation.next.fetch_add(1, Ordering::SeqCst);
+                                        Ok(())
+                                    })
+                                    .is_err()
+                            );
+                            self.observation
+                                .progress_rejections
+                                .fetch_add(1, Ordering::SeqCst);
+                            assert!(
+                                child
+                                    .report_progress(
+                                        ImportProgressPhase::Decode,
+                                        ImportProgressUnit::WorkUnits,
+                                        2,
+                                        Some(2),
+                                    )
+                                    .is_err()
+                            );
+                            self.observation
+                                .progress_rejections
+                                .fetch_add(1, Ordering::SeqCst);
+                            return Err(first_failure);
+                        }
+                        progress?;
+                        child.run([1, 1], || {
+                            self.observation.writes.fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        })
+                    });
+                    let completed = if matches!(
+                        self.case,
+                        Case::ProgressObserverCancel
+                            | Case::ProgressFirstPollCancel
+                            | Case::ProgressSecondPollCancel
+                            | Case::ProgressObserverPanic
+                    ) {
+                        1
+                    } else {
+                        2
+                    };
+                    let actual = root.work_counters(ImportWorkClass::WorkUnits)?;
+                    assert_eq!(
+                        (actual.0 - baseline.0, actual.1 - baseline.1, actual.2),
+                        (2, completed, 0)
+                    );
+                    assert_eq!(
+                        root.work_counters(ImportWorkClass::Tokens)?,
+                        (2, completed, 0)
+                    );
+                    if matches!(
+                        self.case,
+                        Case::ProgressObserverCancel
+                            | Case::ProgressFirstPollCancel
+                            | Case::ProgressSecondPollCancel
+                            | Case::ProgressObserverPanic
+                    ) {
+                        assert!(result.is_err());
+                        assert!(
+                            root.report_progress(
+                                ImportProgressPhase::Decode,
+                                ImportProgressUnit::WorkUnits,
+                                2,
+                                Some(2),
+                            )
+                            .is_err()
+                        );
+                        self.observation
+                            .progress_rejections
+                            .fetch_add(1, Ordering::SeqCst);
+                        assert!(
+                            root.child(&group, [1, 1], |_| -> ParseResult<()> {
+                                self.observation.next.fetch_add(1, Ordering::SeqCst);
+                                Ok(())
+                            })
+                            .is_err()
+                        );
+                        self.observation
+                            .progress_rejections
+                            .fetch_add(1, Ordering::SeqCst);
+                        return result;
+                    }
+                    result?;
+                    let before = self.observation.polls.load(Ordering::SeqCst);
+                    root.report_progress(
+                        ImportProgressPhase::Decode,
+                        ImportProgressUnit::WorkUnits,
+                        2,
+                        Some(2),
+                    )?;
+                    assert_eq!(self.observation.polls.load(Ordering::SeqCst) - before, 2);
+                    self.observation
+                        .progress_checks
+                        .fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(root.work_counters(ImportWorkClass::WorkUnits)?, actual);
+                    return Ok(());
+                }
+                if self.case == Case::ReplenishedComparisons {
+                    let comparisons = root.bind_group([ImportWorkClass::WorkUnits])?;
+                    let baseline = root.work_counters(ImportWorkClass::WorkUnits)?;
+                    let found = root.child(&comparisons, [0], |child| -> ParseResult<_> {
+                        let mut found = [None; 2];
+                        for (slot, needle) in found.iter_mut().zip([5_u32, 14]) {
+                            for (index, value) in [2_u32, 5, 9, 14].into_iter().enumerate() {
+                                child.replenish(1)?;
+                                let equal = child.run([1], || {
+                                    self.observation.writes.fetch_add(1, Ordering::SeqCst);
+                                    Ok::<_, ParseFailure>(value == needle)
+                                })?;
+                                if equal {
+                                    *slot = Some(index);
+                                    break;
+                                }
+                            }
+                        }
+                        Ok(found)
+                    })?;
+                    assert_eq!(found, [Some(1), Some(3)]);
+                    let actual = root.work_counters(ImportWorkClass::WorkUnits)?;
+                    assert_eq!(
+                        (actual.0 - baseline.0, actual.1 - baseline.1, actual.2),
+                        (6, 6, 0)
+                    );
+                    assert_eq!(root.work_counters(ImportWorkClass::Tokens)?, (0, 0, 0));
+                    return Ok(());
+                }
                 if matches!(self.case, Case::DeniedPushDrop | Case::DeniedCaptureDrop) {
                     let group = root.bind_group([ImportWorkClass::Tokens])?;
                     return root.child(&group, [2], |child| -> ParseResult<()> {
@@ -1126,6 +1567,31 @@ mod exclusive_bridge {
             );
             if matches!(
                 self.case,
+                Case::ProgressObserverCancel
+                    | Case::ProgressFirstPollCancel
+                    | Case::ProgressSecondPollCancel
+                    | Case::ProgressObserverPanic
+            ) {
+                assert!(result.is_err());
+                assert!(
+                    context
+                        .with_parser_execution(|_| -> ParseResult<()> {
+                            self.observation.next.fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        })
+                        .is_err()
+                );
+                self.observation
+                    .progress_rejections
+                    .fetch_add(1, Ordering::SeqCst);
+                assert!(support::submit_minimal_scene(context).is_err());
+                self.observation
+                    .progress_rejections
+                    .fetch_add(1, Ordering::SeqCst);
+                return Ok(());
+            }
+            if matches!(
+                self.case,
                 Case::CaughtReturn
                     | Case::CaughtNew
                     | Case::CaughtLegacy
@@ -1217,14 +1683,71 @@ mod exclusive_bridge {
             token,
             observation: Arc::clone(&observation),
         };
+        let mut control = ImportOperationControl::default().with_cancellation(signal);
+        if matches!(
+            case,
+            Case::Progress
+                | Case::ProgressObserverCancel
+                | Case::ProgressFirstPollCancel
+                | Case::ProgressSecondPollCancel
+                | Case::ProgressObserverPanic
+        ) {
+            let observation = Arc::clone(&observation);
+            control = control.with_progress_observer(
+                move |event: ProgressEvent<ImportProgressPhase, ImportProgressUnit>| {
+                    observation.progress_events.lock().unwrap().push(event);
+                    if event.phase() == ImportProgressPhase::Decode
+                        && event.unit() == ImportProgressUnit::WorkUnits
+                        && event.completed() == 1
+                    {
+                        match case {
+                            Case::ProgressObserverCancel => {
+                                observation.progress_cancels.fetch_add(1, Ordering::SeqCst);
+                                ProgressDecision::Cancel
+                            }
+                            Case::ProgressObserverPanic => {
+                                observation.progress_panics.fetch_add(1, Ordering::SeqCst);
+                                panic!("actual Decode work progress observer");
+                            }
+                            _ => ProgressDecision::Continue,
+                        }
+                    } else {
+                        ProgressDecision::Continue
+                    }
+                },
+            );
+        }
         (
             operation_result(plan.read_bytes(
                 AssetPath::new("asset.exclusive-work").unwrap(),
                 b"fixture",
-                ImportOperationControl::default().with_cancellation(signal),
+                control,
             )),
             observation,
         )
+    }
+    fn assert_progress_events(observation: &Observation, completed: &[u64]) {
+        let events = observation.progress_events.lock().unwrap();
+        let decode: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.phase() == ImportProgressPhase::Decode
+                    && event.unit() == ImportProgressUnit::WorkUnits
+            })
+            .collect();
+        assert_eq!(
+            decode
+                .iter()
+                .map(|event| event.completed())
+                .collect::<Vec<_>>(),
+            completed
+        );
+        assert!(decode.iter().all(|event| event.total() == Some(2)));
+        assert!(
+            events
+                .windows(2)
+                .all(|pair| pair[0].sequence() < pair[1].sequence())
+        );
     }
     fn scope_code(failure: &ImportFailure) -> &'static str {
         match failure.cause() {
@@ -1248,6 +1771,149 @@ mod exclusive_bridge {
         let tokens = report.ledger().dimension(ImportDimension::Tokens).unwrap();
         assert_eq!((tokens.attempted(), tokens.consumed()), (2, 2));
     }
+
+    #[test]
+    fn exclusive_replenished_comparisons_keep_literal_work_before_actual_submit() {
+        let (report, observation) = run(Case::ReplenishedComparisons);
+        let report = report.unwrap();
+        assert_eq!(observation.entries.load(Ordering::SeqCst), 1);
+        assert_eq!(observation.writes.load(Ordering::SeqCst), 6);
+        assert_eq!(observation.submitted.load(Ordering::SeqCst), 1);
+        assert_eq!(observation.region_polls.load(Ordering::SeqCst), 3);
+        drop(report);
+    }
+
+    #[test]
+    fn exclusive_root_and_active_child_progress_keep_work_prefix_and_actual_submit() {
+        let (report, observation) = run(Case::Progress);
+        let report = report.expect("root and child progress permit actual Scene submission");
+        assert_eq!(observation.entries.load(Ordering::SeqCst), 1);
+        assert_eq!(observation.writes.load(Ordering::SeqCst), 2);
+        assert_eq!(observation.progress_checks.load(Ordering::SeqCst), 3);
+        assert_eq!(observation.region_polls.load(Ordering::SeqCst), 9);
+        assert_eq!(observation.submitted.load(Ordering::SeqCst), 1);
+        assert_progress_events(&observation, &[0, 1, 2]);
+        assert_eq!(report.last_completed().phase(), ImportPhase::Validated);
+        assert_eq!(
+            report.ledger().terminal_cause(),
+            ImportTerminalCause::Success
+        );
+        let tokens = report.ledger().dimension(ImportDimension::Tokens).unwrap();
+        assert_eq!((tokens.attempted(), tokens.consumed()), (2, 2));
+    }
+
+    #[test]
+    fn exclusive_progress_observer_cancellation_latches_first_cause_and_rejects_reuse() {
+        let (failure, observation) = run(Case::ProgressObserverCancel);
+        let failure = failure.expect_err("the actual progress observer stops publication");
+        assert_eq!(observation.entries.load(Ordering::SeqCst), 1);
+        assert_eq!(observation.writes.load(Ordering::SeqCst), 1);
+        assert_eq!(observation.progress_checks.load(Ordering::SeqCst), 2);
+        assert_eq!(observation.progress_cancels.load(Ordering::SeqCst), 1);
+        assert_eq!(observation.progress_rejections.load(Ordering::SeqCst), 6);
+        assert_eq!(observation.region_polls.load(Ordering::SeqCst), 5);
+        assert_eq!(observation.next.load(Ordering::SeqCst), 0);
+        assert_eq!(observation.submitted.load(Ordering::SeqCst), 0);
+        assert_progress_events(&observation, &[0, 1]);
+        assert!(matches!(
+            failure.cause(),
+            ImportCause::Scope(abort)
+                if matches!(
+                    abort.cause(),
+                    ScopeAbortCause::Control(ControlCause::Cancelled {
+                        origin: CancellationOrigin::Observer,
+                    })
+                )
+        ));
+        assert_eq!(failure.cause().owner(), CauseOwner::Operation);
+        // Observer cancellation is the primary cause above, not an additional interruption.
+        assert!(failure.terminal_control_cause().is_none());
+        assert_dimension(&failure, ImportDimension::Tokens, 2, 1);
+        assert_dimension(&failure, ImportDimension::WorkUnits, 2, 1);
+        assert_eq!(
+            failure.last_completed().phase(),
+            ImportPhase::SelectionCompleted
+        );
+        assert_eq!(failure.ledger().current_live_bytes(), 0);
+        assert_eq!(failure.ledger().active_reservations(), 0);
+    }
+
+    #[test]
+    fn exclusive_progress_poll_cancellation_and_observer_panic_preserve_actual_prefix() {
+        for case in [
+            Case::ProgressFirstPollCancel,
+            Case::ProgressSecondPollCancel,
+            Case::ProgressObserverPanic,
+        ] {
+            let (failure, observation) = run(case);
+            let failure = failure.expect_err("the actual active-child progress boundary stops");
+            assert_eq!(observation.entries.load(Ordering::SeqCst), 1);
+            assert_eq!(observation.writes.load(Ordering::SeqCst), 1);
+            assert_eq!(observation.progress_checks.load(Ordering::SeqCst), 2);
+            assert_eq!(observation.progress_rejections.load(Ordering::SeqCst), 6);
+            assert_eq!(observation.next.load(Ordering::SeqCst), 0);
+            assert_eq!(observation.submitted.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                observation.region_polls.load(Ordering::SeqCst),
+                if case == Case::ProgressFirstPollCancel {
+                    4
+                } else {
+                    5
+                }
+            );
+            let expected_cause = if case == Case::ProgressObserverPanic {
+                assert_eq!(observation.progress_panics.load(Ordering::SeqCst), 1);
+                assert_eq!(observation.progress_cancels.load(Ordering::SeqCst), 0);
+                assert_progress_events(&observation, &[0, 1]);
+                ControlCause::ObserverPanicked
+            } else {
+                assert_eq!(observation.progress_panics.load(Ordering::SeqCst), 0);
+                assert_eq!(observation.progress_cancels.load(Ordering::SeqCst), 1);
+                assert_eq!(
+                    observation.polls.load(Ordering::SeqCst),
+                    observation.cancel_at_poll.load(Ordering::SeqCst)
+                );
+                assert_progress_events(&observation, &[0]);
+                ControlCause::Cancelled {
+                    origin: CancellationOrigin::Signal,
+                }
+            };
+            let events = observation.progress_events.lock().unwrap();
+            assert_eq!(
+                events.last().map(|event| (
+                    event.phase(),
+                    event.unit(),
+                    event.completed(),
+                    event.total()
+                )),
+                Some((
+                    ImportProgressPhase::Decode,
+                    ImportProgressUnit::WorkUnits,
+                    u64::from(case == Case::ProgressObserverPanic),
+                    Some(2)
+                ))
+            );
+            assert!(matches!(
+                failure.cause(),
+                ImportCause::Scope(abort)
+                    if matches!(
+                        abort.cause(),
+                        ScopeAbortCause::Control(cause) if cause == &expected_cause
+                    )
+            ));
+            assert_eq!(failure.cause().owner(), CauseOwner::Operation);
+            assert!(failure.terminal_control_cause().is_none());
+            assert_dimension(&failure, ImportDimension::Tokens, 2, 1);
+            assert_dimension(&failure, ImportDimension::WorkUnits, 2, 1);
+            assert_eq!(
+                failure.last_completed().phase(),
+                ImportPhase::SelectionCompleted
+            );
+            assert_eq!(failure.ledger().current_live_bytes(), 0);
+            assert_eq!(failure.ledger().active_reservations(), 0);
+        }
+    }
+
     #[test]
     fn exclusive_incomplete_and_semantic_error_use_real_exit_classification() {
         for case in [

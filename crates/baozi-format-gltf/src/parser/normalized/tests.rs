@@ -2,6 +2,7 @@ use super::*;
 use crate::parser::model::{AttributeStorage, LogicalMeshStorage, PrimitiveStorage};
 use crate::parser::{ContentError, owned_name};
 use crate::source_map::{GltfSourceMap, SourceEntityKind};
+use baozi_import::ParseServices;
 use baozi_import::{
     DetectionOutcome, DetectionResult, DetectionScope, Format, FormatDescriptor, FormatSelection,
     ImportConfigOverlay, ImportOperationControl, ImportRequest, ImportRequestLayer,
@@ -47,12 +48,12 @@ impl Format for HandBuiltModel {
         &self,
         _: &Probe<'_>,
         _: &ReadHint,
-        _: &DetectionScope<'_>,
+        _: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(&self, _: &Self::Options, context: &mut ParseContext<'_, '_>) -> ParseResult<()> {
         let result = context
             .with_execution(|scope| build_fixture(scope, self.0))
             .and_then(|model| submit(context, &model));
@@ -66,7 +67,7 @@ impl Format for HandBuiltModel {
 }
 
 fn values<'scope, T: Copy>(
-    scope: &mut ParseExecution<'_, 'scope>,
+    scope: &mut ParseServices<'_, '_, 'scope>,
     values: &[T],
 ) -> Result<MeteredVec<'scope, T>> {
     let mut output = scope.metered_vec(
@@ -78,7 +79,7 @@ fn values<'scope, T: Copy>(
 }
 
 fn one<'scope, T>(
-    scope: &mut ParseExecution<'_, 'scope>,
+    scope: &mut ParseServices<'_, '_, 'scope>,
     value: T,
 ) -> Result<MeteredVec<'scope, T>> {
     let mut output = scope.metered_vec(
@@ -90,7 +91,7 @@ fn one<'scope, T>(
 }
 
 fn build_fixture<'scope>(
-    scope: &mut ParseExecution<'_, 'scope>,
+    scope: &mut ParseRoot<'_, '_, 'scope>,
     fault: FixtureFault,
 ) -> Result<NormalizedGltf<'scope>> {
     use source_profile::{DOCUMENT, SelectedSourceProfile, entity};
@@ -145,63 +146,77 @@ fn build_fixture<'scope>(
     let positions = AttributeStorage {
         semantic: AttributeSemantic::Position,
         lanes: 3,
-        values: values(scope, &[0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0, 0.0])?,
+        values: values(
+            &mut scope.services()?,
+            &[0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0, 0.0],
+        )?,
         provenance: AccessorSources::ROOT,
     };
     let primitive = PrimitiveStorage {
         topology: GeometryTopologyAuthoring::TriangleList,
         has_indices: true,
-        indices: values(scope, &[2, 0, 1])?,
+        indices: values(&mut scope.services()?, &[2, 0, 1])?,
         material_assignment: MaterialAssignment::Unspecified,
-        attributes: one(scope, positions)?,
-        influence_offsets: values(scope, &[])?,
-        influences: values(scope, &[])?,
+        attributes: one(&mut scope.services()?, positions)?,
+        influence_offsets: values(&mut scope.services()?, &[])?,
+        influences: values(&mut scope.services()?, &[])?,
         provenance_offset: 0,
         provenance_count: 1,
     };
     let appearance = AppearanceStorage {
-        images: scope.metered_vec(ImportStorageClass::FormatNormalization, "fixture-images"),
-        image_names: scope.metered_vec(
+        images: scope
+            .services()?
+            .metered_vec(ImportStorageClass::FormatNormalization, "fixture-images"),
+        image_names: scope.services()?.metered_vec(
             ImportStorageClass::FormatNormalization,
             "fixture-image-names",
         ),
         encoded_image_payloads: scope
+            .services()?
             .metered_vec(ImportStorageClass::FormatNormalization, "fixture-images"),
-        samplers: scope.metered_vec(ImportStorageClass::FormatNormalization, "fixture-samplers"),
-        sampler_names: scope.metered_vec(
+        samplers: scope
+            .services()?
+            .metered_vec(ImportStorageClass::FormatNormalization, "fixture-samplers"),
+        sampler_names: scope.services()?.metered_vec(
             ImportStorageClass::FormatNormalization,
             "fixture-sampler-names",
         ),
-        sampler_provenance: values(scope, &[])?,
-        textures: scope.metered_vec(ImportStorageClass::FormatNormalization, "fixture-textures"),
-        texture_provenance: values(scope, &[])?,
-        texture_names: scope.metered_vec(
+        sampler_provenance: values(&mut scope.services()?, &[])?,
+        textures: scope
+            .services()?
+            .metered_vec(ImportStorageClass::FormatNormalization, "fixture-textures"),
+        texture_provenance: values(&mut scope.services()?, &[])?,
+        texture_names: scope.services()?.metered_vec(
             ImportStorageClass::FormatNormalization,
             "fixture-texture-names",
         ),
-        bindings: scope.metered_vec(ImportStorageClass::FormatNormalization, "fixture-bindings"),
-        materials: scope.metered_vec(ImportStorageClass::FormatNormalization, "fixture-materials"),
-        image_ids: values(scope, &[])?,
-        sampler_ids: values(scope, &[])?,
-        texture_ids: values(scope, &[])?,
+        bindings: scope
+            .services()?
+            .metered_vec(ImportStorageClass::FormatNormalization, "fixture-bindings"),
+        materials: scope
+            .services()?
+            .metered_vec(ImportStorageClass::FormatNormalization, "fixture-materials"),
+        image_ids: values(&mut scope.services()?, &[])?,
+        sampler_ids: values(&mut scope.services()?, &[])?,
+        texture_ids: values(&mut scope.services()?, &[])?,
         default_sampler: None,
         default_material: None,
-        material_ids: values(scope, &[])?,
+        material_ids: values(&mut scope.services()?, &[])?,
     };
     let mesh = LogicalMeshStorage {
         name: owned_name(scope, Some("hand-built mesh"), "fixture-mesh-name")?,
-        primitives: one(scope, primitive)?,
+        primitives: one(&mut scope.services()?, primitive)?,
     };
     let node_id = NodeLocalId::new(0);
     let geometry = GeometryStorage {
-        logical_meshes: one(scope, mesh)?,
-        logical_mesh_ids: values(scope, &[Some(LogicalMeshLocalId::new(0))])?,
-        primitive_provenance: values(scope, &[0])?,
+        logical_meshes: one(&mut scope.services()?, mesh)?,
+        logical_mesh_ids: values(&mut scope.services()?, &[Some(LogicalMeshLocalId::new(0))])?,
+        primitive_provenance: values(&mut scope.services()?, &[0])?,
     };
     let nodes = NodeStorage {
-        roots: values(scope, &[node_id])?,
+        roots: values(&mut scope.services()?, &[node_id])?,
         nodes: values(
-            scope,
+            &mut scope.services()?,
             &[NodeAuthoringNode::new(
                 Presence::Absent,
                 AuthoredTransform::identity_trs(),
@@ -215,11 +230,11 @@ fn build_fixture<'scope>(
         )?,
         names: {
             let argument_0 = owned_name(scope, Some("手工节点"), "fixture-node-name")?;
-            one(scope, argument_0)
+            one(&mut scope.services()?, argument_0)
         }?,
-        node_ids: values(scope, &[Some(node_id)])?,
+        node_ids: values(&mut scope.services()?, &[Some(node_id)])?,
         mesh_instances: one(
-            scope,
+            &mut scope.services()?,
             MeshInstanceStorage {
                 authored: GeometryMeshInstanceAuthoring::new(node_id, LogicalMeshLocalId::new(0)),
                 skin_index: None,
@@ -229,7 +244,7 @@ fn build_fixture<'scope>(
     };
     let morphs = morph::MorphStorage {
         definitions: values(
-            scope,
+            &mut scope.services()?,
             &[MorphTargetDefinitionAuthoring::new(
                 MorphTargetIdentity::new(0),
                 Presence::Absent,
@@ -238,19 +253,25 @@ fn build_fixture<'scope>(
         logical_meshes: {
             let argument_0 = morph::LogicalMorphStorage {
                 definitions: AuthoringRange::new(0, 1),
-                weights: values(scope, &[0.5])?,
+                weights: values(&mut scope.services()?, &[0.5])?,
             };
-            one(scope, argument_0)
+            one(&mut scope.services()?, argument_0)
         }?,
-        primitives: one(scope, 0..1)?,
-        targets: one(scope, morph::MorphTargetStorage { deltas: 0..1 })?,
+        primitives: one(&mut scope.services()?, 0..1)?,
+        targets: one(
+            &mut scope.services()?,
+            morph::MorphTargetStorage { deltas: 0..1 },
+        )?,
         deltas: {
             let argument_0 = morph::MorphDeltaStorage {
                 semantic: MorphDeltaSemantic::Position,
-                values: values(scope, &[0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0, 3.0])?,
+                values: values(
+                    &mut scope.services()?,
+                    &[0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0, 3.0],
+                )?,
                 provenance: AccessorSources::ROOT,
             };
-            one(scope, argument_0)
+            one(&mut scope.services()?, argument_0)
         }?,
     };
     Ok(NormalizedGltf {
@@ -259,17 +280,19 @@ fn build_fixture<'scope>(
         appearance,
         geometry,
         cameras: CameraStorage {
-            authored: scope.metered_vec(ImportStorageClass::FormatNormalization, "fixture-cameras"),
-            names: scope.metered_vec(
+            authored: scope
+                .services()?
+                .metered_vec(ImportStorageClass::FormatNormalization, "fixture-cameras"),
+            names: scope.services()?.metered_vec(
                 ImportStorageClass::FormatNormalization,
                 "fixture-camera-names",
             ),
-            camera_ids: values(scope, &[])?,
+            camera_ids: values(&mut scope.services()?, &[])?,
         },
         lights: if matches!(fault, FixtureFault::Light) {
             super::super::lights::LightStorage {
                 authored: one(
-                    scope,
+                    &mut scope.services()?,
                     LightDefinition::try_from_scaled_linear_srgb(
                         LightKind::point(Some(8.0)).unwrap(),
                         LocalAxes::STANDARD,
@@ -281,40 +304,46 @@ fn build_fixture<'scope>(
                 names: {
                     let argument_0 =
                         owned_name(scope, Some("Hand-built light"), "fixture-light-name")?;
-                    one(scope, argument_0)
+                    one(&mut scope.services()?, argument_0)
                 }?,
-                light_ids: values(scope, &[Some(LightLocalId::new(0))])?,
+                light_ids: values(&mut scope.services()?, &[Some(LightLocalId::new(0))])?,
             }
         } else {
             super::super::lights::LightStorage {
-                authored: values(scope, &[])?,
-                names: scope.metered_vec(
+                authored: values(&mut scope.services()?, &[])?,
+                names: scope.services()?.metered_vec(
                     ImportStorageClass::FormatNormalization,
                     "fixture-light-names",
                 ),
-                light_ids: values(scope, &[])?,
+                light_ids: values(&mut scope.services()?, &[])?,
             }
         },
         nodes,
         skins: SkinStorage {
-            skins: scope.metered_vec(ImportStorageClass::FormatNormalization, "fixture-skins"),
-            skin_ids: values(scope, &[])?,
+            skins: scope
+                .services()?
+                .metered_vec(ImportStorageClass::FormatNormalization, "fixture-skins"),
+            skin_ids: values(&mut scope.services()?, &[])?,
         },
         instance_deformations: {
             let argument_0 = InstanceDeformationStorage {
                 skin: Presence::Absent,
-                weights: Some(values(scope, &[0.75])?),
+                weights: Some(values(&mut scope.services()?, &[0.75])?),
             };
-            one(scope, argument_0)
+            one(&mut scope.services()?, argument_0)
         }?,
         buffers: BufferResources {
-            values: scope.metered_vec(ImportStorageClass::FormatNormalization, "fixture-buffers"),
+            values: scope
+                .services()?
+                .metered_vec(ImportStorageClass::FormatNormalization, "fixture-buffers"),
         },
         external_images: ExternalImageResources {
-            values: scope.metered_vec(ImportStorageClass::FormatNormalization, "fixture-images"),
+            values: scope
+                .services()?
+                .metered_vec(ImportStorageClass::FormatNormalization, "fixture-images"),
             resource_offset: 1,
         },
-        animations: animation::AnimationStorage::empty(scope),
+        animations: animation::AnimationStorage::empty(&mut scope.services()?),
         morphs,
     })
 }
@@ -458,7 +487,7 @@ fn normalized_authoring_rejects_missing_required_source_ranges_and_owner_links()
 }
 
 fn inspect_source_inventory(
-    scope: &mut ParseExecution<'_, '_>,
+    scope: &mut ParseRoot<'_, '_, '_>,
     map: &GltfSourceMap<'_>,
 ) -> Result<()> {
     use source_profile::{DOCUMENT, SelectedSourceProfile, entity};

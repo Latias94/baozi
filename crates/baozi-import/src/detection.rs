@@ -3,11 +3,9 @@ use crate::descriptor::{TextDecodingMode, TextProfile};
 use crate::error::{ScopeAbort, ScopeAbortCause};
 use crate::format::DetectionOutcome;
 use crate::ledger::ImportDimension;
-use crate::store::{
-    ImportBoundWorkGroup, ImportObservedWorkFailure, ImportStoreExecution, ImportStoreHostError,
-};
+use crate::store::{ImportRootExecution, ImportRootWorkLayout, ImportStoreHostError};
 use crate::text_input::TextConformanceResult;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::fmt;
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -55,22 +53,50 @@ impl std::error::Error for DetectionAbort {}
 ///
 /// Detector work is callback-scoped; the former escaping permit API is intentionally absent.
 ///
+/// Sequential work and explicit polls borrow the same scope:
+///
+/// ```
+/// use baozi_import::{DetectionResult, DetectionScope};
+/// fn sequential(scope: &mut DetectionScope<'_, '_>) -> DetectionResult<()> {
+///     scope.with_work(1, || Ok(()))?;
+///     scope.poll()?;
+///     scope.with_work(1, || Ok(()))
+/// }
+/// ```
+///
+/// A callback cannot poll its scope while its work is admitted:
+///
+/// ```compile_fail
+/// use baozi_import::{DetectionResult, DetectionScope};
+/// fn reenter_poll(scope: &mut DetectionScope<'_, '_>) -> DetectionResult<()> {
+///     scope.with_work(1, || scope.poll())
+/// }
+/// ```
+///
+/// Nor can it admit nested work on that scope:
+///
+/// ```compile_fail
+/// use baozi_import::{DetectionResult, DetectionScope};
+/// fn reenter_work(scope: &mut DetectionScope<'_, '_>) -> DetectionResult<()> {
+///     scope.with_work(1, || scope.with_work(1, || Ok(())))
+/// }
+/// ```
+///
 /// ```compile_fail
 /// use baozi_import::DetectionScope;
 ///
-/// fn escaping_work_is_not_available(scope: &DetectionScope<'_>) {
+/// fn escaping_work_is_not_available(scope: &mut DetectionScope<'_, '_>) {
 ///     let _permit = scope.begin_work(1);
 /// }
 /// ```
-pub struct DetectionScope<'session> {
-    exec: RefCell<ImportStoreExecution<'session>>,
-    work_group: ImportBoundWorkGroup<'session, 1>,
-    terminal: &'session RefCell<Option<ScopeAbortCause>>,
-    callback_active: Cell<bool>,
+pub struct DetectionScope<'loan, 'op> {
+    exec: ImportRootExecution<'loan, 'op>,
+    work_group: ImportRootWorkLayout<'op, 1>,
+    terminal: &'loan RefCell<Option<ScopeAbortCause>>,
     not_send_or_sync: PhantomData<Rc<()>>,
 }
 
-impl fmt::Debug for DetectionScope<'_> {
+impl fmt::Debug for DetectionScope<'_, '_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("DetectionScope")
@@ -78,28 +104,22 @@ impl fmt::Debug for DetectionScope<'_> {
     }
 }
 
-impl<'session> DetectionScope<'session> {
+impl<'loan, 'op> DetectionScope<'loan, 'op> {
     pub(crate) fn new(
-        exec: ImportStoreExecution<'session>,
-        terminal: &'session RefCell<Option<ScopeAbortCause>>,
+        exec: &'loan mut ImportRootExecution<'_, 'op>,
+        terminal: &'loan RefCell<Option<ScopeAbortCause>>,
     ) -> Result<Self, ImportStoreHostError> {
         let work_group = exec.bind_group([ImportDimension::DetectionWork])?;
         Ok(Self {
-            exec: RefCell::new(exec),
+            exec: exec.reborrow(),
             work_group,
             terminal,
-            callback_active: Cell::new(false),
             not_send_or_sync: PhantomData,
         })
     }
 
     /// Polls cancellation and deadline state, latching the first terminal cause.
-    pub fn poll(&self) -> DetectionResult<()> {
-        if self.callback_active.get() {
-            return Err(self.abort(ScopeAbortCause::DescriptorContract {
-                code: "detection-poll-during-work",
-            }));
-        }
+    pub fn poll(&mut self) -> DetectionResult<()> {
         self.poll_active()
     }
 
@@ -107,19 +127,14 @@ impl<'session> DetectionScope<'session> {
     ///
     /// The work capability is confined to this call: success records the complete chunk and polls
     /// control once more, while an error preserves attempted work without fabricating completion.
-    /// A panic clears the callback-active marker before it continues into the registry's existing
-    /// containment boundary.
+    /// The mutable loan prevents a callback from polling or admitting more work on this scope.
+    /// A panic resolves the host-owned numeric frame before reaching registry containment.
     pub fn with_work<T>(
-        &self,
+        &mut self,
         amount: u64,
         action: impl FnOnce() -> DetectionResult<T>,
     ) -> DetectionResult<T> {
         self.preflight_active()?;
-        if self.callback_active.get() {
-            return Err(self.abort(ScopeAbortCause::DescriptorContract {
-                code: "detection-work-already-in-progress",
-            }));
-        }
         if amount == 0 {
             self.poll_active()?;
             return Err(self.abort(ScopeAbortCause::DescriptorContract {
@@ -133,50 +148,29 @@ impl<'session> DetectionScope<'session> {
             }));
         }
 
-        self.poll_active()?;
-        let mut work = self
-            .work_group
-            .admit_observed([amount])
+        let result = self
+            .exec
+            .run_fallible_action(&self.work_group, [amount], action)
             .map_err(|cause| self.abort_store(cause))?;
-        // Only the real permit owns numeric work; this flag enforces callback reentry rules.
-        let callback = DetectionCallbackGuard::begin(&self.callback_active);
-        let result = match action() {
-            Ok(value) => match work.complete([amount]) {
-                Ok(()) => work
-                    .finish()
-                    .map(|()| value)
-                    .map_err(ImportObservedWorkFailure::Store),
-                Err(cause) => {
-                    let _ = work.finish_partial();
-                    Err(ImportObservedWorkFailure::Action(self.abort_store(cause)))
-                }
-            },
-            Err(cause) => {
-                let _ = work.finish_partial();
-                Err(ImportObservedWorkFailure::Action(cause))
-            }
-        };
-        callback.finish();
 
         match result {
             Ok(value) => {
                 self.poll_active()?;
                 Ok(value)
             }
-            Err(ImportObservedWorkFailure::Action(cause)) => {
+            Err(cause) => {
                 let _ = self.poll_active();
                 Err(cause)
             }
-            Err(ImportObservedWorkFailure::Store(cause)) => Err(self.abort_store(cause)),
         }
     }
 
     /// Checks a bounded probe against a text profile without allocating decoded text or line state.
     ///
-    /// Formal parsing must still use `ParseExecution::with_conformed_text_input`; this method exists so
+    /// Formal parsing must still use `ParseRoot::with_conformed_text_input`; this method exists so
     /// detectors can share the same BOM, UTF-8, newline, lexical, and control classification.
     pub fn check_text_input_conformance(
-        &self,
+        &mut self,
         profile: &TextProfile,
         bytes: &[u8],
         decoding_mode: TextDecodingMode,
@@ -200,23 +194,14 @@ impl<'session> DetectionScope<'session> {
     }
 
     pub(crate) fn into_terminal_abort(self) -> Option<ScopeAbort> {
-        if self.callback_active.replace(false) {
-            let _ = self.abort(ScopeAbortCause::DescriptorContract {
-                code: "detection-work-callback-unresolved",
-            });
-        }
-        if let Err(cause) = self.exec.borrow().finish_region() {
-            let _ = self.abort_store(cause);
-        }
+        // Every work callback is closed by its real action host; the enclosing root checks
+        // quiescence while retaining the sole numeric and cleanup authority.
         self.terminal.borrow_mut().take().map(ScopeAbort::new)
     }
 
-    fn poll_active(&self) -> DetectionResult<()> {
+    fn poll_active(&mut self) -> DetectionResult<()> {
         self.preflight_active()?;
-        self.exec
-            .borrow_mut()
-            .poll()
-            .map_err(|cause| self.abort_store(cause))
+        self.exec.poll().map_err(|cause| self.abort_store(cause))
     }
 
     fn abort(&self, cause: ScopeAbortCause) -> DetectionAbort {
@@ -240,38 +225,6 @@ impl<'session> DetectionScope<'session> {
     }
 }
 
-struct DetectionCallbackGuard<'scope> {
-    active: &'scope Cell<bool>,
-    finished: bool,
-}
-
-impl<'scope> DetectionCallbackGuard<'scope> {
-    fn begin(active: &'scope Cell<bool>) -> Self {
-        let already_active = active.replace(true);
-        debug_assert!(!already_active);
-        Self {
-            active,
-            finished: false,
-        }
-    }
-
-    fn finish(mut self) {
-        self.active.set(false);
-        self.finished = true;
-    }
-}
-
-impl Drop for DetectionCallbackGuard<'_> {
-    fn drop(&mut self) {
-        if !self.finished && self.active.replace(false) {
-            debug_assert!(
-                std::thread::panicking(),
-                "the private detector callback guard may only be abandoned by unwinding"
-            );
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,15 +232,21 @@ mod tests {
     use crate::limits::ResourceLimits;
     use crate::metered_storage::AccountedVec;
     use crate::store::{
-        ImportStoreBootstrapRequirements, ImportStoreSessionOwner, try_import_store_bootstrap,
+        ImportStoreBodyParts, ImportStoreBootstrapRequirements, ImportStoreInvocationRoot,
+        ImportStoreSessionOwner, try_import_store_bootstrap,
     };
+    use baozi_core::__scene_integration::integration::SceneParseOutcome;
     use baozi_operation::{
         CancellationToken, ControlCause, PhysicalStorageAccountFactory,
         PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits,
     };
+    use std::cell::Cell;
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
-    fn store(control: ImportOperationControl) -> ImportStoreSessionOwner {
+    fn store<'inv>(
+        parts: ImportStoreBodyParts<'inv>,
+        control: ImportOperationControl,
+    ) -> ImportStoreSessionOwner<'inv> {
         let limits = ResourceLimits::default();
         let factory = PhysicalStorageAccountFactory::try_new(
             PhysicalStorageAccountFactoryLimits::new(u64::MAX, 1).unwrap(),
@@ -298,112 +257,75 @@ mod tests {
             .unwrap();
         let requirements = ImportStoreBootstrapRequirements::for_node_scene(&limits).unwrap();
         let bootstrap = try_import_store_bootstrap(&limits, requirements).unwrap();
-        ImportStoreSessionOwner::try_start(control, &account, bootstrap).unwrap()
+        ImportStoreSessionOwner::try_start_in_body(parts, control, &account, bootstrap).unwrap()
     }
 
     #[test]
-    fn detector_callback_can_allocate_and_error_preserves_only_completed_chunks() {
-        let mut owner = store(ImportOperationControl::default());
-        let terminal = RefCell::new(None);
-        let scope = DetectionScope::new(owner.execution().unwrap(), &terminal).unwrap();
-        let bytes = scope
-            .with_work(3, || {
-                let mut exec = scope
-                    .exec
-                    .try_borrow_mut()
-                    .expect("the detector action must not retain an execution borrow");
-                let state = exec
-                    .dimension_state(ImportDimension::DetectionWork)
-                    .unwrap();
-                assert_eq!(state.attempted(), 3);
-                assert_eq!(state.consumed(), 0);
-                let mut bytes = AccountedVec::new();
-                bytes
-                    .try_reserve(8, "detector-callback-bytes", |capacity| {
-                        exec.reserve(
-                            ImportLedgerPhase::Detection,
-                            ImportDimension::ScratchBytes,
-                            capacity,
-                        )
-                        .map_err(ImportStoreHostError::into_scope_abort_cause)
-                    })
-                    .unwrap();
-                bytes.try_extend_from_slice_reserved(b"detected").unwrap();
-                Ok(bytes)
-            })
-            .unwrap();
-        assert_eq!(&*bytes, b"detected");
-        scope.with_work(2, || Ok(())).unwrap();
-        assert!(
-            scope
-                .with_work(5, || Err::<(), _>(scope.abort(
-                    ScopeAbortCause::ResourceLimit {
-                        resource: "detector-action",
-                        limit: 5
-                    },
-                )))
-                .is_err()
-        );
-        assert!(matches!(
-            scope.into_terminal_abort().unwrap().cause(),
-            ScopeAbortCause::ResourceLimit {
-                resource: "detector-action",
-                limit: 5
-            }
-        ));
-        drop(bytes);
-        let exec = owner.execution().unwrap();
-        let state = exec
-            .dimension_state(ImportDimension::DetectionWork)
-            .unwrap();
-        assert_eq!(state.attempted(), 10);
-        assert_eq!(state.consumed(), 5);
-        exec.finish_region().unwrap();
-    }
-
-    #[test]
-    fn detector_reentry_is_rejected_before_nested_work_or_control() {
-        for nested_work in [false, true] {
-            let mut owner = store(ImportOperationControl::default());
-            let terminal = RefCell::new(None);
-            let scope = DetectionScope::new(owner.execution().unwrap(), &terminal).unwrap();
-            let nested_called = Cell::new(false);
-            assert!(
-                scope
-                    .with_work(1, || {
-                        let result = if nested_work {
-                            scope.with_work(1, || {
-                                nested_called.set(true);
-                                Ok(())
+    fn detector_callback_fills_admitted_storage_and_error_preserves_only_completed_chunks() {
+        let mut invocation_root = ImportStoreInvocationRoot::new();
+        let finish = invocation_root
+            .run_body(|parts, disposition| {
+                let mut owner = store(parts, ImportOperationControl::default());
+                let terminal = RefCell::new(None);
+                owner
+                    .with_root_execution(|exec| -> Result<(), ImportStoreHostError> {
+                        let mut bytes = AccountedVec::new();
+                        bytes
+                            .try_reserve(8, "detector-callback-bytes", |capacity| {
+                                exec.reserve(
+                                    ImportLedgerPhase::Detection,
+                                    ImportDimension::ScratchBytes,
+                                    capacity,
+                                )
+                                .map_err(ImportStoreHostError::into_scope_abort_cause)
                             })
-                        } else {
-                            scope.poll()
-                        };
-                        assert!(result.is_err());
+                            .unwrap();
+                        let mut scope = DetectionScope::new(exec, &terminal)?;
+                        let bytes = scope
+                            .with_work(3, || {
+                                bytes.try_extend_from_slice_reserved(b"detected").unwrap();
+                                Ok(bytes)
+                            })
+                            .unwrap();
+                        assert_eq!(&*bytes, b"detected");
+                        let state = scope.exec.dimension_state(ImportDimension::DetectionWork)?;
+                        assert_eq!(state.attempted(), 3);
+                        assert_eq!(state.consumed(), 3);
+                        scope.with_work(2, || Ok(())).unwrap();
+                        assert!(
+                            scope
+                                .with_work(5, || {
+                                    *terminal.borrow_mut() = Some(ScopeAbortCause::ResourceLimit {
+                                        resource: "detector-action",
+                                        limit: 5,
+                                    });
+                                    Err::<(), _>(DetectionAbort::new())
+                                })
+                                .is_err()
+                        );
+                        assert!(matches!(
+                            scope.into_terminal_abort().unwrap().cause(),
+                            ScopeAbortCause::ResourceLimit {
+                                resource: "detector-action",
+                                limit: 5
+                            }
+                        ));
+                        drop(bytes);
+                        let state = exec.dimension_state(ImportDimension::DetectionWork)?;
+                        assert_eq!(state.attempted(), 10);
+                        assert_eq!(state.consumed(), 5);
                         Ok(())
                     })
-                    .is_err()
-            );
-            assert!(!nested_called.get());
-            let abort = scope.into_terminal_abort().unwrap();
-            let expected = if nested_work {
-                "detection-work-already-in-progress"
-            } else {
-                "detection-poll-during-work"
-            };
-            assert!(
-                matches!(abort.cause(), ScopeAbortCause::DescriptorContract { code }
-                if *code == expected)
-            );
-            let exec = owner.execution().unwrap();
-            let state = exec
-                .dimension_state(ImportDimension::DetectionWork)
-                .unwrap();
-            assert_eq!(state.attempted(), 1);
-            assert_eq!(state.consumed(), 1);
-            exec.finish_region().unwrap();
-        }
+                    .unwrap();
+                owner
+                    .request_finish(disposition, SceneParseOutcome::Rejected)
+                    .unwrap();
+            })
+            .unwrap();
+        let _finish = finish;
     }
+
+    // Reentry through the same scope is statically rejected by the paired public examples.
 
     #[test]
     fn detector_quantum_rejection_precedes_the_callback_and_attempted_work() {
@@ -414,83 +336,113 @@ mod tests {
                 "detector-work-quantum-exceeded",
             ),
         ] {
-            let mut owner = store(ImportOperationControl::default());
-            let terminal = RefCell::new(None);
-            let scope = DetectionScope::new(owner.execution().unwrap(), &terminal).unwrap();
-            let called = Cell::new(false);
-            assert!(
-                scope
-                    .with_work(amount, || {
-                        called.set(true);
-                        Ok(())
-                    })
-                    .is_err()
-            );
-            assert!(!called.get());
-            let abort = scope.into_terminal_abort().unwrap();
-            assert!(
-                matches!(abort.cause(), ScopeAbortCause::DescriptorContract { code }
-                if *code == expected)
-            );
-            let exec = owner.execution().unwrap();
-            let state = exec
-                .dimension_state(ImportDimension::DetectionWork)
+            let mut invocation_root = ImportStoreInvocationRoot::new();
+            let finish = invocation_root
+                .run_body(|parts, disposition| {
+                    let mut owner = store(parts, ImportOperationControl::default());
+                    let terminal = RefCell::new(None);
+                    owner
+                        .with_root_execution(|exec| -> Result<(), ImportStoreHostError> {
+                            let mut scope = DetectionScope::new(exec, &terminal)?;
+                            let called = Cell::new(false);
+                            assert!(
+                                scope
+                                    .with_work(amount, || {
+                                        called.set(true);
+                                        Ok(())
+                                    })
+                                    .is_err()
+                            );
+                            assert!(!called.get());
+                            let abort = scope.into_terminal_abort().unwrap();
+                            assert!(
+                                matches!(abort.cause(), ScopeAbortCause::DescriptorContract { code }
+                                    if *code == expected)
+                            );
+                            let state = exec.dimension_state(ImportDimension::DetectionWork)?;
+                            assert_eq!(state.attempted(), 0);
+                            assert_eq!(state.consumed(), 0);
+                            Ok(())
+                        })
+                        .unwrap();
+                    owner
+                        .request_finish(disposition, SceneParseOutcome::Rejected)
+                        .unwrap();
+                })
                 .unwrap();
-            assert_eq!(state.attempted(), 0);
-            assert_eq!(state.consumed(), 0);
-            exec.finish_region().unwrap();
+            let _finish = finish;
         }
     }
 
     #[test]
     fn detector_final_poll_observes_cancellation_after_the_completed_action() {
         let token = CancellationToken::new();
-        let mut owner = store(ImportOperationControl::default().with_cancellation(token.clone()));
-        let terminal = RefCell::new(None);
-        let scope = DetectionScope::new(owner.execution().unwrap(), &terminal).unwrap();
-        assert!(
-            scope
-                .with_work(2, || {
-                    token.cancel();
-                    Ok(())
-                })
-                .is_err()
-        );
-        let state = scope
-            .exec
-            .borrow()
-            .dimension_state(ImportDimension::DetectionWork)
+        let mut invocation_root = ImportStoreInvocationRoot::new();
+        let finish = invocation_root
+            .run_body(|parts, disposition| {
+                let mut owner = store(
+                    parts,
+                    ImportOperationControl::default().with_cancellation(token.clone()),
+                );
+                let terminal = RefCell::new(None);
+                owner
+                    .with_root_execution(|exec| -> Result<(), ImportStoreHostError> {
+                        let mut scope = DetectionScope::new(exec, &terminal)?;
+                        assert!(
+                            scope
+                                .with_work(2, || {
+                                    token.cancel();
+                                    Ok(())
+                                })
+                                .is_err()
+                        );
+                        let state = scope.exec.dimension_state(ImportDimension::DetectionWork)?;
+                        assert_eq!(state.attempted(), 2);
+                        assert_eq!(state.consumed(), 2);
+                        assert!(matches!(
+                            scope.into_terminal_abort().unwrap().cause(),
+                            ScopeAbortCause::Control(ControlCause::Cancelled { .. })
+                        ));
+                        Ok(())
+                    })
+                    .unwrap();
+                owner
+                    .request_finish(disposition, SceneParseOutcome::Rejected)
+                    .unwrap();
+            })
             .unwrap();
-        assert_eq!(state.attempted(), 2);
-        assert_eq!(state.consumed(), 2);
-        assert!(matches!(
-            scope.into_terminal_abort().unwrap().cause(),
-            ScopeAbortCause::Control(ControlCause::Cancelled { .. })
-        ));
+        let _finish = finish;
     }
 
     #[test]
     fn detector_panic_releases_the_callback_and_actual_work_owner() {
-        let mut owner = store(ImportOperationControl::default());
-        let terminal = RefCell::new(None);
-        let scope = DetectionScope::new(owner.execution().unwrap(), &terminal).unwrap();
-        assert!(
-            catch_unwind(AssertUnwindSafe(|| {
-                scope.with_work::<()>(2, || panic!("detector action panic"))
-            }))
-            .is_err()
-        );
-        assert!(!scope.callback_active.get());
-        assert!(scope.exec.try_borrow_mut().is_ok());
-        assert!(scope.poll().is_err());
-        let state = scope
-            .exec
-            .borrow()
-            .dimension_state(ImportDimension::DetectionWork)
+        let mut invocation_root = ImportStoreInvocationRoot::new();
+        let finish = invocation_root
+            .run_body(|parts, disposition| {
+                let mut owner = store(parts, ImportOperationControl::default());
+                let terminal = RefCell::new(None);
+                owner
+                    .with_root_execution(|exec| -> Result<(), ImportStoreHostError> {
+                        let mut scope = DetectionScope::new(exec, &terminal)?;
+                        assert!(
+                            catch_unwind(AssertUnwindSafe(|| {
+                                scope.with_work::<()>(2, || panic!("detector action panic"))
+                            }))
+                            .is_err()
+                        );
+                        assert!(scope.poll().is_err());
+                        let state = scope.exec.dimension_state(ImportDimension::DetectionWork)?;
+                        assert_eq!(state.attempted(), 2);
+                        assert_eq!(state.consumed(), 0);
+                        assert!(scope.into_terminal_abort().is_some());
+                        Ok(())
+                    })
+                    .unwrap();
+                owner
+                    .request_finish(disposition, SceneParseOutcome::Rejected)
+                    .unwrap();
+            })
             .unwrap();
-        assert_eq!(state.attempted(), 2);
-        assert_eq!(state.consumed(), 0);
-        scope.exec.borrow().finish_region().unwrap();
-        assert!(scope.into_terminal_abort().is_some());
+        let _finish = finish;
     }
 }

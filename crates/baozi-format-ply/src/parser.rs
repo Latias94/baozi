@@ -15,11 +15,11 @@ use baozi_import::authoring::{
 };
 use baozi_import::{
     DiagnosticByteRange, DiagnosticCode, DiagnosticSeverity, ImportProgressPhase,
-    ImportStorageClass, ImportWorkClass, ImportWorkGroup, ImportWorkScope,
-    MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS, MeteredString, MeteredVec, ParseContext, ParseExecution,
-    ParseFailure, ParseResult, SourceScopeEntityKind, TextConformanceViolation,
-    TextConformanceViolationKind, TextDecodingMode, TextDiagnosticLocation, TextInputOptions,
-    TextInputRecordCursor,
+    ImportStorageClass, ImportWorkClass, MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS, MeteredString,
+    MeteredVec, ParseChildren, ParseContext, ParseErrorView, ParseFailure, ParseParser,
+    ParsePieceError, ParseResult, ParseRoot, ParseServices, ParseStorage, ParseWorkLayout,
+    SourceScopeEntityKind, TextConformanceViolation, TextConformanceViolationKind,
+    TextDecodingMode, TextDiagnosticLocation, TextInputOptions, TextInputRecordCursor,
 };
 use std::cell::RefCell;
 use std::fmt;
@@ -56,30 +56,41 @@ fn body_completion(index: usize, amount: u64) -> [u64; BODY_WORK_ENTRIES] {
     completed
 }
 
-pub(crate) fn read_ply(context: &mut ParseContext<'_>) -> ParseResult<()> {
-    let (header, parsed) = context.with_execution(|ctx| -> ParseResult<_> {
-        let limits = ctx.limits();
-        let bytes = ctx.primary_bytes();
+pub(crate) fn read_ply(context: &mut ParseContext<'_, '_>) -> ParseResult<()> {
+    let (header, parsed) = context.with_execution(|root| -> ParseResult<_> {
+        let limits = root.services()?.limits();
+        let bytes = root.primary_bytes();
+        let source = root.services()?.diagnostic_source();
         let options = TextInputOptions::new(TextDecodingMode::RejectInvalid, "ply-text-input")
             .with_decoded_resource("ply-decoded-text-record")
             .with_line_resource("max_line_bytes")
             .with_line_index_resource("ply-line-index-bytes");
-        let mut text = ctx
-            .text_input_record_cursor(ctx.diagnostic_source(), options)?
-            .map_err(|violation| {
-                text_conformance_failure(ctx, AsciiTextSurface::Header, violation)
-            })?;
-        let header = parse_header(ctx, bytes, &mut text)?;
+        let mut text = match root.text_input_record_cursor(source, options)? {
+            Ok(text) => text,
+            Err(violation) => {
+                return Err(text_conformance_failure(
+                    &mut root.services()?,
+                    AsciiTextSurface::Header,
+                    violation,
+                ));
+            }
+        };
+        let header = parse_header(&mut root.children()?, bytes, &mut text)?;
         let decoded_utf8_bytes = match header.format {
             PlyFormat::Ascii => bytes.len(),
             PlyFormat::BinaryLittleEndian | PlyFormat::BinaryBigEndian => header.data_start,
         };
-        ctx.enforce_resource_limit(
+        let decoded_utf8_bytes = usize_amount(
+            root.error_view(),
+            decoded_utf8_bytes,
             "ply-decoded-utf8-bytes",
-            usize_amount(ctx, decoded_utf8_bytes, "ply-decoded-utf8-bytes")?,
+        )?;
+        root.services()?.enforce_resource_limit(
+            "ply-decoded-utf8-bytes",
+            decoded_utf8_bytes,
             limits.max_decoded_utf8_bytes,
         )?;
-        let parsed = parse_body(ctx, bytes, &header, &mut text)?;
+        let parsed = parse_body(root, bytes, &header, &mut text)?;
         Ok((header, parsed))
     })?;
     scene_from_parsed(context, header, parsed)
@@ -173,7 +184,7 @@ enum GeometryStream<'session, const LANES: usize> {
 
 impl<'session, const LANES: usize> GeometryStream<'session, LANES> {
     fn new(
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseServices<'_, '_, 'session>,
         width: GeometryScalarWidth,
         capacity: usize,
         label: &'static str,
@@ -205,8 +216,9 @@ impl<'session, const LANES: usize> GeometryStream<'session, LANES> {
 
     fn try_push_reserved(
         &mut self,
-        ctx: &mut ParseExecution<'_, '_>,
+        row: &mut ParseParser<'_, '_, '_, '_, 'session, BODY_WORK_ENTRIES, true>,
         tuple: [f64; LANES],
+        completed: [u64; BODY_WORK_ENTRIES],
     ) -> ParseResult<()> {
         match self {
             Self::F32(values) => {
@@ -218,16 +230,16 @@ impl<'session, const LANES: usize> GeometryStream<'session, LANES> {
                     .any(|(source, output)| source.to_bits() != f64::from(output).to_bits())
                 {
                     return Err(format_failure(
-                        ctx,
+                        &mut row.services()?,
                         PlyFailureCode::InternalInvariant,
                         "PLY geometry component does not fit its declared storage width exactly",
                         None,
                         Some("geometry-scalar-width"),
                     ));
                 }
-                values.try_push_reserved(output)
+                row.run(completed, || values.try_push_reserved(output))
             }
-            Self::F64(values) => values.try_push_reserved(tuple),
+            Self::F64(values) => row.run(completed, || values.try_push_reserved(tuple)),
         }
     }
 
@@ -343,58 +355,58 @@ struct VertexPropertyProfile {
     stream_count: usize,
 }
 
-fn parse_header<'region, 'session: 'region, 'source>(
-    ctx: &mut ParseExecution<'region, 'session>,
+fn parse_header<'op, 'session, 'source>(
+    ctx: &mut ParseChildren<'_, 'op, 'session>,
     bytes: &[u8],
     text: &mut TextInputRecordCursor<'session, 'source>,
 ) -> ParseResult<Header<'session>> {
-    let limits = ctx.limits();
-    with_next_ascii_record(ctx, text, AsciiTextSurface::Header, |ctx, line, _, _| {
+    let limits = ctx.services()?.limits();
+    let first = with_next_ascii_record(ctx, text, AsciiTextSurface::Header, |ctx, line, _, _| {
         if line != "ply" {
             return Err(ply_parse_error(
-                ctx,
+                &mut ctx.services()?,
                 PlyFailureCode::InvalidHeader,
                 Some(0),
                 "PLY header must start with 'ply'",
             ));
         }
         Ok(())
-    })?
-    .ok_or_else(|| {
-        ply_parse_error(
-            ctx,
+    })?;
+    if first.is_none() {
+        return Err(ply_parse_error(
+            &mut ctx.services()?,
             PlyFailureCode::InvalidHeader,
             None,
             "PLY input is empty",
-        )
-    })?;
+        ));
+    }
 
     let mut format = None;
-    let mut elements = ctx.metered_vec(
+    let mut elements = ctx.services()?.metered_vec(
         ImportStorageClass::FormatNormalization,
         "ply-header-elements",
     );
     let mut current_element: Option<Element<'session>> = None;
-    let mut comments = ctx.metered_vec(
+    let mut comments = ctx.services()?.metered_vec(
         ImportStorageClass::FormatNormalization,
         "ply-header-comments",
     );
-    let mut obj_infos = ctx.metered_vec(
+    let mut obj_infos = ctx.services()?.metered_vec(
         ImportStorageClass::FormatNormalization,
         "ply-header-obj-infos",
     );
     let mut saw_vertex_element = false;
     let mut saw_face_element = false;
-    let token_group =
-        ctx.bind_work_group([ImportWorkClass::Tokens, ImportWorkClass::TokenBytes])?;
-    let string_group = ctx.bind_work_group([ImportWorkClass::StringBytes])?;
+    let token_group = ctx.bind_group([ImportWorkClass::Tokens, ImportWorkClass::TokenBytes])?;
+    let string_group = ctx.bind_group([ImportWorkClass::StringBytes])?;
 
     let mut header_line_index = 0usize;
     loop {
-        poll_collection(ctx, header_line_index)?;
-        header_line_index = header_line_index
-            .checked_add(1)
-            .ok_or_else(|| ctx.resource_limit_exceeded("ply-header-lines", u64::MAX))?;
+        poll_collection(&mut ctx.services()?, header_line_index)?;
+        header_line_index = header_line_index.checked_add(1).ok_or_else(|| {
+            ctx.error_view()
+                .resource_limit_exceeded("ply-header-lines", u64::MAX)
+        })?;
         let ended = with_next_ascii_record(
             ctx,
             text,
@@ -405,18 +417,18 @@ fn parse_header<'region, 'session: 'region, 'source>(
                 }
                 if line == "end_header" {
                     if let Some(element) = current_element.take() {
-                        elements.try_push(ctx, element)?;
+                        elements.try_push(&mut ctx.services()?, element)?;
                     }
                     return Ok(true);
                 }
                 if let Some(comment) = line.strip_prefix("comment ") {
                     let comment = bounded_string(ctx, &string_group, comment, "comment")?;
-                    comments.try_push(ctx, comment)?;
+                    comments.try_push(&mut ctx.services()?, comment)?;
                     return Ok(false);
                 }
                 if let Some(info) = line.strip_prefix("obj_info ") {
                     let info = bounded_string(ctx, &string_group, info, "obj_info")?;
-                    obj_infos.try_push(ctx, info)?;
+                    obj_infos.try_push(&mut ctx.services()?, info)?;
                     return Ok(false);
                 }
                 let tokens = checked_tokens(ctx, &token_group, line)?;
@@ -424,7 +436,7 @@ fn parse_header<'region, 'session: 'region, 'source>(
                     ["format", value, version] => {
                         if format.is_some() {
                             return Err(ply_parse_error(
-                                ctx,
+                                &mut ctx.services()?,
                                 PlyFailureCode::InvalidHeader,
                                 Some(line_offset),
                                 "PLY header has multiple format lines",
@@ -432,7 +444,7 @@ fn parse_header<'region, 'session: 'region, 'source>(
                         }
                         if *version != "1.0" {
                             return Err(format_failure(
-                                ctx,
+                                &mut ctx.services()?,
                                 PlyFailureCode::UnsupportedEncoding,
                                 "unsupported PLY version",
                                 Some(line_offset),
@@ -446,7 +458,7 @@ fn parse_header<'region, 'session: 'region, 'source>(
                             other => {
                                 let _ = other;
                                 return Err(format_failure(
-                                    ctx,
+                                    &mut ctx.services()?,
                                     PlyFailureCode::UnsupportedEncoding,
                                     "unsupported PLY encoding",
                                     Some(line_offset),
@@ -457,14 +469,14 @@ fn parse_header<'region, 'session: 'region, 'source>(
                     }
                     ["element", name, count] => {
                         if let Some(element) = current_element.take() {
-                            elements.try_push(ctx, element)?;
+                            elements.try_push(&mut ctx.services()?, element)?;
                         }
-                        let count = parse_count(ctx, count, line_offset)?;
+                        let count = parse_count(&mut ctx.services()?, count, line_offset)?;
                         match *name {
                             "vertex" => {
                                 if saw_vertex_element {
                                     return Err(ply_parse_error(
-                                        ctx,
+                                        &mut ctx.services()?,
                                         PlyFailureCode::InvalidSchema,
                                         Some(line_offset),
                                         "multiple PLY vertex elements are not supported",
@@ -481,7 +493,7 @@ fn parse_header<'region, 'session: 'region, 'source>(
                             "face" => {
                                 if saw_face_element {
                                     return Err(ply_parse_error(
-                                        ctx,
+                                        &mut ctx.services()?,
                                         PlyFailureCode::InvalidSchema,
                                         Some(line_offset),
                                         "multiple PLY face elements are not supported",
@@ -500,7 +512,7 @@ fn parse_header<'region, 'session: 'region, 'source>(
                         current_element = Some(Element {
                             name: bounded_string(ctx, &string_group, name, "element name")?,
                             count,
-                            properties: ctx.metered_vec(
+                            properties: ctx.services()?.metered_vec(
                                 ImportStorageClass::FormatNormalization,
                                 "ply-header-properties",
                             ),
@@ -511,7 +523,7 @@ fn parse_header<'region, 'session: 'region, 'source>(
                     ["property", "list", count_ty, item_ty, name] => {
                         let Some(element) = current_element.as_mut() else {
                             return Err(ply_parse_error(
-                                ctx,
+                                &mut ctx.services()?,
                                 PlyFailureCode::InvalidSchema,
                                 Some(line_offset),
                                 "PLY property appeared before an element",
@@ -519,16 +531,22 @@ fn parse_header<'region, 'session: 'region, 'source>(
                         };
                         let property = Property::List {
                             name: bounded_string(ctx, &string_group, name, "property name")?,
-                            count_ty: parse_scalar_type(ctx, count_ty, line_offset)?,
-                            item_ty: parse_scalar_type(ctx, item_ty, line_offset)?,
+                            count_ty: parse_scalar_type(
+                                &mut ctx.services()?,
+                                count_ty,
+                                line_offset,
+                            )?,
+                            item_ty: parse_scalar_type(&mut ctx.services()?, item_ty, line_offset)?,
                             source_location: line_location,
                         };
-                        element.properties.try_push(ctx, property)?;
+                        element
+                            .properties
+                            .try_push(&mut ctx.services()?, property)?;
                     }
                     ["property", ty, name] => {
                         let Some(element) = current_element.as_mut() else {
                             return Err(ply_parse_error(
-                                ctx,
+                                &mut ctx.services()?,
                                 PlyFailureCode::InvalidSchema,
                                 Some(line_offset),
                                 "PLY property appeared before an element",
@@ -539,29 +557,33 @@ fn parse_header<'region, 'session: 'region, 'source>(
                             && !is_builtin_vertex_property(name.as_str())
                         {
                             let slot = element.next_custom_attribute;
-                            element.next_custom_attribute =
+                            element.next_custom_attribute = {
+                                let ctx = &mut ctx.services()?;
                                 slot.checked_add(1).ok_or_else(|| {
                                     resource_limit_failure(
                                         ctx,
                                         "max_vertex_attribute_streams_per_mesh",
                                         limits.max_vertex_attribute_streams_per_mesh,
                                     )
-                                })?;
+                                })?
+                            };
                             Some(slot)
                         } else {
                             None
                         };
                         let property = Property::Scalar {
                             name,
-                            ty: parse_scalar_type(ctx, ty, line_offset)?,
+                            ty: parse_scalar_type(&mut ctx.services()?, ty, line_offset)?,
                             custom_attribute,
                             source_location: line_location,
                         };
-                        element.properties.try_push(ctx, property)?;
+                        element
+                            .properties
+                            .try_push(&mut ctx.services()?, property)?;
                     }
                     _ => {
                         return Err(format_failure(
-                            ctx,
+                            &mut ctx.services()?,
                             PlyFailureCode::InvalidHeader,
                             "unsupported PLY header line",
                             Some(line_offset),
@@ -571,21 +593,27 @@ fn parse_header<'region, 'session: 'region, 'source>(
                 }
                 Ok(false)
             },
-        )?
-        .ok_or_else(|| {
-            ply_parse_error(
-                ctx,
+        )?;
+        let Some(ended) = ended else {
+            return Err(ply_parse_error(
+                &mut ctx.services()?,
                 PlyFailureCode::InvalidHeader,
                 None,
                 "PLY header has no end_header",
-            )
-        })?;
+            ));
+        };
         if ended {
             break;
         }
     }
 
-    let offset = raw_offset_usize(ctx, text.raw_offset(), "ply-header-data-offset")?;
+    let offset = raw_offset_usize(
+        ctx.error_view(),
+        text.raw_offset(),
+        "ply-header-data-offset",
+    )?;
+
+    let ctx = &mut ctx.services()?;
 
     validate_face_topology_schemas(ctx, elements.as_slice())?;
 
@@ -615,7 +643,7 @@ fn parse_header<'region, 'session: 'region, 'source>(
 }
 
 fn validate_face_topology_schemas(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseServices<'_, '_, '_>,
     elements: &[Element],
 ) -> ParseResult<()> {
     for (element_index, element) in elements.iter().enumerate() {
@@ -679,7 +707,7 @@ fn is_integer_scalar(ty: ScalarType) -> bool {
 }
 
 fn validate_binary_record_schema(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseServices<'_, '_, '_>,
     elements: &[Element],
 ) -> ParseResult<()> {
     for (element_index, element) in elements.iter().enumerate() {
@@ -698,15 +726,15 @@ fn validate_binary_record_schema(
 }
 
 fn validate_record_budget(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseServices<'_, '_, '_>,
     elements: &[Element],
 ) -> ParseResult<()> {
     let limits = ctx.limits();
-    let limit = usize_amount(ctx, limits.max_records, "ply-record-limit")?;
+    let limit = usize_amount(ctx.error_view(), limits.max_records, "ply-record-limit")?;
     let mut declared_records = 0_u64;
     for (element_index, element) in elements.iter().enumerate() {
         poll_collection(ctx, element_index)?;
-        let count = usize_amount(ctx, element.count, "ply-record-count")?;
+        let count = usize_amount(ctx.error_view(), element.count, "ply-record-count")?;
         let Some(next) = declared_records.checked_add(count) else {
             return Err(ctx.resource_limit_exceeded("max_records", limit));
         };
@@ -716,7 +744,7 @@ fn validate_record_budget(
 }
 
 fn validate_binary_minimum_payload(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseServices<'_, '_, '_>,
     bytes: &[u8],
     data_start: usize,
     elements: &[Element],
@@ -775,130 +803,151 @@ fn scalar_width(ty: ScalarType) -> usize {
 }
 
 fn parse_body<'session, 'source>(
-    ctx: &mut ParseExecution<'_, 'session>,
+    root: &mut ParseRoot<'_, '_, 'session>,
     bytes: &[u8],
     header: &Header<'session>,
     text: &mut TextInputRecordCursor<'session, 'source>,
 ) -> ParseResult<ParsedPly<'session>> {
-    let limits = ctx.limits();
-    let mut vertex_element = None;
-    let mut face_count = 0usize;
-    for (element_index, element) in header.elements.as_slice().iter().enumerate() {
-        poll_collection(ctx, element_index)?;
-        match element.name.as_str() {
-            "vertex" => vertex_element = Some(element),
-            "face" => face_count = element.count,
-            _ => {}
+    let mut parsed = {
+        let mut children = root.children()?;
+        let ctx = &mut children.services()?;
+        let limits = ctx.limits();
+        let mut vertex_element = None;
+        let mut face_count = 0usize;
+        for (element_index, element) in header.elements.as_slice().iter().enumerate() {
+            poll_collection(ctx, element_index)?;
+            match element.name.as_str() {
+                "vertex" => vertex_element = Some(element),
+                "face" => face_count = element.count,
+                _ => {}
+            }
         }
-    }
-    let Some(vertex_element) = vertex_element else {
-        return Err(ply_parse_error(
-            ctx,
-            PlyFailureCode::InvalidSchema,
-            None,
-            "PLY has no vertex element",
-        ));
-    };
-    if vertex_element.count == 0 {
-        return Err(ply_parse_error(
-            ctx,
-            PlyFailureCode::InvalidSchema,
-            None,
-            "PLY vertex element is empty",
-        ));
-    }
-    preflight_limit(ctx, 1, limits.max_meshes, ImportWorkClass::Meshes)?;
-    preflight_limit(ctx, 1, limits.max_primitives, ImportWorkClass::Primitives)?;
+        let Some(vertex_element) = vertex_element else {
+            return Err(ply_parse_error(
+                ctx,
+                PlyFailureCode::InvalidSchema,
+                None,
+                "PLY has no vertex element",
+            ));
+        };
+        if vertex_element.count == 0 {
+            return Err(ply_parse_error(
+                ctx,
+                PlyFailureCode::InvalidSchema,
+                None,
+                "PLY vertex element is empty",
+            ));
+        }
+        preflight_limit(&mut children, 1, limits.max_meshes, ImportWorkClass::Meshes)?;
+        preflight_limit(
+            &mut children,
+            1,
+            limits.max_primitives,
+            ImportWorkClass::Primitives,
+        )?;
 
-    let vertex_count = vertex_element.count;
-    let vertex_profile = vertex_property_profile(ctx, vertex_element)?;
-    validate_vertex_attribute_budget(ctx, vertex_count, vertex_profile.stream_count)?;
-    let channels = vertex_profile.channels;
-    let positions = GeometryStream::new(
-        ctx,
-        vertex_profile.position_width,
-        vertex_count,
-        "ply-positions",
-    )?;
-    let normals = GeometryStream::new(
-        ctx,
-        vertex_profile.normal_width,
-        if channels.normals { vertex_count } else { 0 },
-        "ply-normals",
-    )?;
-    let texcoords = GeometryStream::new(
-        ctx,
-        vertex_profile.texcoord_width,
-        if channels.texcoords { vertex_count } else { 0 },
-        "ply-texcoords",
-    )?;
-    let mut colors = ctx.metered_vec(ImportStorageClass::FormatNormalization, "ply-colors");
-    if channels.colors {
-        colors.try_reserve(ctx, vertex_count)?;
-    }
-    let mut face_vertex_counts =
-        ctx.metered_vec(ImportStorageClass::FormatNormalization, "ply-face-counts");
-    face_vertex_counts.try_reserve(ctx, face_count)?;
-    let custom_attributes =
-        custom_accumulators(ctx, vertex_element, vertex_profile.custom_scalar_count)?;
-    let mut parsed = ParsedPly {
-        channels,
-        positions,
-        normals,
-        texcoords,
-        colors,
-        indices: ctx.metered_vec(ImportStorageClass::FormatNormalization, "ply-indices"),
-        face_vertex_counts,
-        has_polygon: false,
-        custom_attributes,
+        let vertex_count = vertex_element.count;
+        let vertex_profile = vertex_property_profile(&mut children.services()?, vertex_element)?;
+        validate_vertex_attribute_budget(&mut children, vertex_count, vertex_profile.stream_count)?;
+        let ctx = &mut children.services()?;
+        let channels = vertex_profile.channels;
+        let positions = GeometryStream::new(
+            ctx,
+            vertex_profile.position_width,
+            vertex_count,
+            "ply-positions",
+        )?;
+        let normals = GeometryStream::new(
+            ctx,
+            vertex_profile.normal_width,
+            if channels.normals { vertex_count } else { 0 },
+            "ply-normals",
+        )?;
+        let texcoords = GeometryStream::new(
+            ctx,
+            vertex_profile.texcoord_width,
+            if channels.texcoords { vertex_count } else { 0 },
+            "ply-texcoords",
+        )?;
+        let mut colors = ctx.metered_vec(ImportStorageClass::FormatNormalization, "ply-colors");
+        if channels.colors {
+            colors.try_reserve(ctx, vertex_count)?;
+        }
+        let mut face_vertex_counts =
+            ctx.metered_vec(ImportStorageClass::FormatNormalization, "ply-face-counts");
+        face_vertex_counts.try_reserve(ctx, face_count)?;
+        let custom_attributes = custom_accumulators(
+            &mut children,
+            vertex_element,
+            vertex_profile.custom_scalar_count,
+        )?;
+        ParsedPly {
+            channels,
+            positions,
+            normals,
+            texcoords,
+            colors,
+            indices: children
+                .services()?
+                .metered_vec(ImportStorageClass::FormatNormalization, "ply-indices"),
+            face_vertex_counts,
+            has_polygon: false,
+            custom_attributes,
+        }
     };
 
     match header.format {
-        PlyFormat::Ascii => parse_ascii_body(ctx, header, &mut parsed, text)?,
-        PlyFormat::BinaryLittleEndian => parse_binary_body(ctx, bytes, header, false, &mut parsed)?,
-        PlyFormat::BinaryBigEndian => parse_binary_body(ctx, bytes, header, true, &mut parsed)?,
+        PlyFormat::Ascii => parse_ascii_body(root, header, &mut parsed, text)?,
+        PlyFormat::BinaryLittleEndian => {
+            parse_binary_body(root, bytes, header, false, &mut parsed)?
+        }
+        PlyFormat::BinaryBigEndian => parse_binary_body(root, bytes, header, true, &mut parsed)?,
     }
 
     Ok(parsed)
 }
 
 fn parse_ascii_body<'session, 'source>(
-    ctx: &mut ParseExecution<'_, 'session>,
+    root: &mut ParseRoot<'_, '_, 'session>,
     header: &Header<'_>,
     parsed: &mut ParsedPly<'session>,
     text: &mut TextInputRecordCursor<'session, 'source>,
 ) -> ParseResult<()> {
-    let record_group = ctx.bind_work_group([ImportWorkClass::Records])?;
-    let body_group = ctx.bind_work_group(BODY_WORK_CLASSES)?;
+    let record_group = root.bind_group([ImportWorkClass::Records])?;
+    let body_group = root.bind_group(BODY_WORK_CLASSES)?;
     for (element_index, element) in header.elements.as_slice().iter().enumerate() {
-        poll_collection(ctx, element_index)?;
-        warn_for_element_schema(ctx, element)?;
+        poll_collection(&mut root.services()?, element_index)?;
+        warn_for_element_schema(&mut root.services()?, element)?;
         for record_index in 0..element.count {
-            poll_collection(ctx, record_index)?;
-            let line_offset = raw_offset_usize(ctx, text.raw_offset(), "ply-text-byte-offset")?;
-            ctx.with_parent_work(&record_group, [1], |ctx, _parent| {
-                with_next_ascii_record(
-                    ctx,
+            poll_collection(&mut root.services()?, record_index)?;
+            let line_offset =
+                raw_offset_usize(root.error_view(), text.raw_offset(), "ply-text-byte-offset")?;
+            root.parent(&record_group, [1], |parent| -> ParseResult<()> {
+                let mut children = parent.children()?;
+                let record = with_next_ascii_record(
+                    &mut children,
                     text,
                     AsciiTextSurface::Body,
-                    |ctx, line, line_offset, _line_location| {
-                        let plan = plan_ascii_row(ctx, line, element, parsed)?;
-                        ctx.with_work(&body_group, plan.amounts, |ctx, work| -> ParseResult<()> {
+                    |children, line, line_offset, _line_location| {
+                        let plan =
+                            plan_ascii_row(&mut children.services()?, line, element, parsed)?;
+                        children.child(&body_group, plan.amounts, |row| -> ParseResult<()> {
                             let mut cursor = AsciiRow::new(line, line_offset);
-                            parse_row(ctx, element, &mut cursor, parsed, plan, work)?;
-                            cursor.finish(ctx, element.name.as_str(), work)
+                            parse_row(row, element, &mut cursor, parsed, plan)?;
+                            cursor.finish(row, element.name.as_str())
                         })
                     },
-                )?
-                .ok_or_else(|| {
-                    format_failure(
-                        ctx,
+                )?;
+                match record {
+                    Some(()) => Ok(()),
+                    None => Err(format_failure(
+                        &mut children.services()?,
                         PlyFailureCode::TruncatedPayload,
                         "PLY ended inside an element",
                         Some(line_offset),
                         Some("ascii-element-row"),
-                    )
-                })
+                    )),
+                }
             })?;
             #[cfg(test)]
             if element.name.as_str() == "face" {
@@ -910,22 +959,22 @@ fn parse_ascii_body<'session, 'source>(
 }
 
 fn parse_binary_body<'session>(
-    ctx: &mut ParseExecution<'_, 'session>,
+    root: &mut ParseRoot<'_, '_, 'session>,
     bytes: &[u8],
     header: &Header<'_>,
     big_endian: bool,
     parsed: &mut ParsedPly<'session>,
 ) -> ParseResult<()> {
     let mut cursor = BinaryCursor::new(bytes, header.data_start, big_endian);
-    let body_group = ctx.bind_work_group(BODY_WORK_CLASSES)?;
+    let body_group = root.bind_group(BODY_WORK_CLASSES)?;
     for (element_index, element) in header.elements.as_slice().iter().enumerate() {
-        poll_collection(ctx, element_index)?;
-        warn_for_element_schema(ctx, element)?;
+        poll_collection(&mut root.services()?, element_index)?;
+        warn_for_element_schema(&mut root.services()?, element)?;
         for record_index in 0..element.count {
-            poll_collection(ctx, record_index)?;
-            let plan = plan_binary_row(ctx, &cursor, element, parsed)?;
-            ctx.with_work(&body_group, plan.amounts, |ctx, work| -> ParseResult<()> {
-                parse_row(ctx, element, &mut cursor, parsed, plan, work)
+            poll_collection(&mut root.services()?, record_index)?;
+            let plan = plan_binary_row(&mut root.services()?, &cursor, element, parsed)?;
+            root.child(&body_group, plan.amounts, |row| -> ParseResult<()> {
+                parse_row(row, element, &mut cursor, parsed, plan)
             })?;
             #[cfg(test)]
             if element.name.as_str() == "face" {
@@ -937,7 +986,7 @@ fn parse_binary_body<'session>(
 }
 
 fn plan_ascii_row(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseServices<'_, '_, '_>,
     line: &str,
     element: &Element<'_>,
     parsed: &ParsedPly<'_>,
@@ -1002,7 +1051,7 @@ fn planned_ascii_list_count(token: &str, ty: ScalarType) -> Option<usize> {
 }
 
 fn plan_binary_row(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseServices<'_, '_, '_>,
     cursor: &BinaryCursor<'_>,
     element: &Element<'_>,
     parsed: &ParsedPly<'_>,
@@ -1104,7 +1153,7 @@ fn planned_binary_list_count(
 }
 
 fn plan_list_work(
-    ctx: &ParseExecution<'_, '_>,
+    ctx: &ParseServices<'_, '_, '_>,
     plan: &mut BodyWorkPlan,
     element: &Element<'_>,
     property_name: &str,
@@ -1164,24 +1213,25 @@ fn plan_list_work(
 }
 
 fn parse_row<'session>(
-    ctx: &mut ParseExecution<'_, 'session>,
+    row: &mut ParseParser<'_, '_, '_, '_, 'session, BODY_WORK_ENTRIES, true>,
     element: &Element,
     reader: &mut dyn RowReader,
     parsed: &mut ParsedPly<'session>,
     plan: BodyWorkPlan,
-    work: &mut ImportWorkScope<'_, BODY_WORK_ENTRIES>,
 ) -> ParseResult<()> {
     if element.name.as_str() == "vertex" {
-        parse_vertex_row(ctx, element, reader, parsed, work)?;
+        parse_vertex_row(row, element, reader, parsed, plan.complete_row())
     } else if element.name.as_str() == "face" {
-        parse_face_row(ctx, element, reader, parsed, work)?;
+        parse_face_row(row, element, reader, parsed, plan.complete_row())
     } else {
-        skip_unknown_row(ctx, element, reader, work)?;
+        skip_unknown_row(row, element, reader, plan.complete_row())
     }
-    work.complete(plan.complete_row())
 }
 
-fn warn_for_element_schema(ctx: &mut ParseExecution<'_, '_>, element: &Element) -> ParseResult<()> {
+fn warn_for_element_schema(
+    ctx: &mut ParseServices<'_, '_, '_>,
+    element: &Element,
+) -> ParseResult<()> {
     if element.count == 0 {
         return Ok(());
     }
@@ -1198,7 +1248,10 @@ fn warn_for_element_schema(ctx: &mut ParseExecution<'_, '_>, element: &Element) 
     }
 }
 
-fn warn_for_vertex_schema(ctx: &mut ParseExecution<'_, '_>, element: &Element) -> ParseResult<()> {
+fn warn_for_vertex_schema(
+    ctx: &mut ParseServices<'_, '_, '_>,
+    element: &Element,
+) -> ParseResult<()> {
     let mut has_nx = false;
     let mut has_ny = false;
     let mut has_nz = false;
@@ -1265,7 +1318,7 @@ fn warn_for_vertex_schema(ctx: &mut ParseExecution<'_, '_>, element: &Element) -
 }
 
 fn record_partial_channel_loss(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseServices<'_, '_, '_>,
     location: TextDiagnosticLocation<'_>,
     code: &'static str,
     channel: &'static str,
@@ -1293,7 +1346,7 @@ fn record_partial_channel_loss(
 }
 
 fn vertex_property_profile(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseServices<'_, '_, '_>,
     element: &Element,
 ) -> ParseResult<VertexPropertyProfile> {
     let limits = ctx.limits();
@@ -1386,7 +1439,7 @@ fn vertex_property_profile(
     })
 }
 
-fn warn_for_face_schema(ctx: &mut ParseExecution<'_, '_>, element: &Element) -> ParseResult<()> {
+fn warn_for_face_schema(ctx: &mut ParseServices<'_, '_, '_>, element: &Element) -> ParseResult<()> {
     for (property_index, property) in element.properties.as_slice().iter().enumerate() {
         poll_collection(ctx, property_index)?;
         match property {
@@ -1418,11 +1471,11 @@ fn warn_for_face_schema(ctx: &mut ParseExecution<'_, '_>, element: &Element) -> 
 }
 
 fn parse_vertex_row<'session>(
-    ctx: &mut ParseExecution<'_, 'session>,
+    row: &mut ParseParser<'_, '_, '_, '_, 'session, BODY_WORK_ENTRIES, true>,
     element: &Element,
     reader: &mut dyn RowReader,
     parsed: &mut ParsedPly<'session>,
-    work: &mut ImportWorkScope<'_, BODY_WORK_ENTRIES>,
+    completed: [u64; BODY_WORK_ENTRIES],
 ) -> ParseResult<()> {
     let vertex_index = parsed.positions.len();
     let retain_colors = parsed.channels.colors;
@@ -1440,7 +1493,7 @@ fn parse_vertex_row<'session>(
     let mut alpha = None;
 
     for (property_index, property) in element.properties.as_slice().iter().enumerate() {
-        poll_collection(ctx, property_index)?;
+        poll_collection(&mut row.services()?, property_index)?;
         match property {
             Property::Scalar {
                 name,
@@ -1448,7 +1501,8 @@ fn parse_vertex_row<'session>(
                 custom_attribute,
                 ..
             } => {
-                let value = reader.read_scalar(ctx, *ty, work)?;
+                let value = reader.read_scalar(row, *ty, [0; BODY_WORK_ENTRIES])?;
+                let ctx = &mut row.services()?;
                 match name.as_str() {
                     "x" => x = Some(value.to_f64(ctx, "x")?),
                     "y" => y = Some(value.to_f64(ctx, "y")?),
@@ -1511,11 +1565,12 @@ fn parse_vertex_row<'session>(
             Property::List {
                 count_ty, item_ty, ..
             } => {
-                skip_list(ctx, reader, *count_ty, *item_ty, work)?;
+                skip_list(row, reader, *count_ty, *item_ty, [0; BODY_WORK_ENTRIES])?;
             }
         }
     }
 
+    let ctx = &mut row.services()?;
     let position = [
         x.ok_or_else(|| parse_error(ctx, None, "PLY vertex is missing x"))?,
         y.ok_or_else(|| parse_error(ctx, None, "PLY vertex is missing y"))?,
@@ -1529,24 +1584,51 @@ fn parse_vertex_row<'session>(
             "PLY vertex position contains a non-finite value",
         ));
     }
-    parsed.positions.try_push_reserved(ctx, position)?;
+    let has_normals = nx.is_some() && ny.is_some() && nz.is_some();
+    let has_texcoords = s.is_some() && t.is_some();
+    let has_colors = red.is_some() && green.is_some() && blue.is_some();
+    parsed.positions.try_push_reserved(
+        row,
+        position,
+        if !has_normals && !has_texcoords && !has_colors {
+            completed
+        } else {
+            [0; BODY_WORK_ENTRIES]
+        },
+    )?;
 
     match (nx, ny, nz) {
-        (Some(nx), Some(ny), Some(nz)) => parsed.normals.try_push_reserved(ctx, [nx, ny, nz])?,
+        (Some(nx), Some(ny), Some(nz)) => parsed.normals.try_push_reserved(
+            row,
+            [nx, ny, nz],
+            if !has_texcoords && !has_colors {
+                completed
+            } else {
+                [0; BODY_WORK_ENTRIES]
+            },
+        )?,
         (None, None, None) => {}
         _ => {}
     }
     match (s, t) {
-        (Some(s), Some(t)) => parsed.texcoords.try_push_reserved(ctx, [s, t])?,
+        (Some(s), Some(t)) => parsed.texcoords.try_push_reserved(
+            row,
+            [s, t],
+            if !has_colors {
+                completed
+            } else {
+                [0; BODY_WORK_ENTRIES]
+            },
+        )?,
         (None, None) => {}
         _ => {}
     }
     match (red, green, blue) {
-        (Some(red), Some(green), Some(blue)) => {
+        (Some(red), Some(green), Some(blue)) => row.run(completed, || {
             parsed
                 .colors
-                .try_push_reserved([red, green, blue, alpha.unwrap_or(1.0)])?
-        }
+                .try_push_reserved([red, green, blue, alpha.unwrap_or(1.0)])
+        })?,
         (None, None, None) => {}
         _ => {}
     }
@@ -1554,16 +1636,16 @@ fn parse_vertex_row<'session>(
 }
 
 fn parse_face_row<'session>(
-    ctx: &mut ParseExecution<'_, 'session>,
+    row: &mut ParseParser<'_, '_, '_, '_, 'session, BODY_WORK_ENTRIES, true>,
     element: &Element,
     reader: &mut dyn RowReader,
     parsed: &mut ParsedPly<'session>,
-    work: &mut ImportWorkScope<'_, BODY_WORK_ENTRIES>,
+    completed: [u64; BODY_WORK_ENTRIES],
 ) -> ParseResult<()> {
-    let limits = ctx.limits();
+    let limits = row.services()?.limits();
     let mut found_vertices = false;
     for (property_index, property) in element.properties.as_slice().iter().enumerate() {
-        poll_collection(ctx, property_index)?;
+        poll_collection(&mut row.services()?, property_index)?;
         match property {
             Property::List {
                 name,
@@ -1572,7 +1654,8 @@ fn parse_face_row<'session>(
                 ..
             } if name.as_str() == "vertex_indices" || name.as_str() == "vertex_index" => {
                 found_vertices = true;
-                let count = read_list_count(ctx, reader, *count_ty, work)?;
+                let count = read_list_count(row, reader, *count_ty, [0; BODY_WORK_ENTRIES])?;
+                let ctx = &mut row.services()?;
                 if count < 3 {
                     return Err(ply_parse_error(
                         ctx,
@@ -1630,64 +1713,73 @@ fn parse_face_row<'session>(
                 })?;
                 parsed.face_vertex_counts.try_push_reserved(count as u32)?;
                 for position in 0..count {
-                    poll_collection(ctx, position)?;
+                    poll_collection(&mut row.services()?, position)?;
                     let index = reader
-                        .read_scalar(ctx, *item_ty, work)?
-                        .to_u32(ctx, name.as_str())?;
-                    parsed.indices.try_push_reserved(index)?;
-                    work.complete(body_completion(BODY_TOPOLOGY_CELLS, 1))?;
+                        .read_scalar(row, *item_ty, [0; BODY_WORK_ENTRIES])?
+                        .to_u32(&mut row.services()?, name.as_str())?;
+                    row.run(body_completion(BODY_TOPOLOGY_CELLS, 1), || {
+                        parsed.indices.try_push_reserved(index)
+                    })?;
                     #[cfg(test)]
                     crate::control_tests::face_index_completed(parsed.indices.len(), index);
                 }
-                parsed.has_polygon = has_polygon;
-                work.complete(body_completion(
-                    BODY_TOPOLOGY_CELLS,
-                    usize_amount(ctx, face_count_cells, "ply-face-count-cells")?,
-                ))?;
+                let errors = row.error_view();
+                row.run_returned(|| {
+                    parsed.has_polygon = has_polygon;
+                    let face_count_cells =
+                        usize_amount(errors, face_count_cells, "ply-face-count-cells")?;
+                    Ok(((), body_completion(BODY_TOPOLOGY_CELLS, face_count_cells)))
+                })?;
             }
             Property::List {
                 count_ty, item_ty, ..
             } => {
-                skip_list(ctx, reader, *count_ty, *item_ty, work)?;
+                skip_list(row, reader, *count_ty, *item_ty, [0; BODY_WORK_ENTRIES])?;
             }
             Property::Scalar { ty, .. } => {
-                let _ = reader.read_scalar(ctx, *ty, work)?;
+                let _ = reader.read_scalar(row, *ty, [0; BODY_WORK_ENTRIES])?;
             }
         }
     }
-    if !found_vertices {
-        return Err(ply_parse_error(
-            ctx,
-            PlyFailureCode::InvalidSchema,
-            None,
-            "PLY face element has no vertex_indices list property",
-        ));
-    }
-    Ok(())
+    row.run_format(completed, || {
+        if found_vertices {
+            Ok(())
+        } else {
+            Err(PlyFailure::new(
+                PlyFailureCode::InvalidSchema,
+                "PLY face element has no vertex_indices list property",
+            ))
+        }
+    })
 }
 
 fn skip_unknown_row(
-    ctx: &mut ParseExecution<'_, '_>,
+    row: &mut ParseParser<'_, '_, '_, '_, '_, BODY_WORK_ENTRIES, true>,
     element: &Element,
     reader: &mut dyn RowReader,
-    work: &mut ImportWorkScope<'_, BODY_WORK_ENTRIES>,
+    completed: [u64; BODY_WORK_ENTRIES],
 ) -> ParseResult<()> {
     for (property_index, property) in element.properties.as_slice().iter().enumerate() {
-        poll_collection(ctx, property_index)?;
+        poll_collection(&mut row.services()?, property_index)?;
+        let completed = if property_index + 1 == element.properties.len() {
+            completed
+        } else {
+            [0; BODY_WORK_ENTRIES]
+        };
         match property {
             Property::Scalar { ty, .. } => {
-                let _ = reader.read_scalar(ctx, *ty, work)?;
+                let _ = reader.read_scalar(row, *ty, completed)?;
             }
             Property::List {
                 count_ty, item_ty, ..
-            } => skip_list(ctx, reader, *count_ty, *item_ty, work)?,
+            } => skip_list(row, reader, *count_ty, *item_ty, completed)?,
         }
     }
     Ok(())
 }
 
 fn scene_from_parsed<'session>(
-    context: &mut ParseContext<'session>,
+    context: &mut ParseContext<'session, '_>,
     header: Header<'session>,
     parsed: ParsedPly<'session>,
 ) -> ParseResult<()> {
@@ -1704,52 +1796,72 @@ fn scene_from_parsed<'session>(
     } = parsed;
     // Batches borrow outer payloads only after all authoring storage has left its region.
     let (pending_metadata, mesh_name, node_name, custom_attributes) =
-        context.with_execution(|ctx| -> ParseResult<_> {
-            let limits = ctx.limits();
-            preflight_limit(ctx, 2, limits.max_graph_nodes, ImportWorkClass::GraphNodes)?;
-            preflight_limit(ctx, 1, limits.max_graph_edges, ImportWorkClass::GraphEdges)?;
-            preflight_limit(ctx, 2, limits.max_graph_depth, ImportWorkClass::GraphDepth)?;
+        context.with_execution(|root| -> ParseResult<_> {
+            let mut children = root.children()?;
+            let limits = children.services()?.limits();
+            preflight_limit(
+                &mut children,
+                2,
+                limits.max_graph_nodes,
+                ImportWorkClass::GraphNodes,
+            )?;
+            preflight_limit(
+                &mut children,
+                1,
+                limits.max_graph_edges,
+                ImportWorkClass::GraphEdges,
+            )?;
+            preflight_limit(
+                &mut children,
+                2,
+                limits.max_graph_depth,
+                ImportWorkClass::GraphDepth,
+            )?;
             if positions.is_empty() {
                 return Err(ply_parse_error(
-                    ctx,
+                    &mut children.services()?,
                     PlyFailureCode::InvalidTopology,
                     None,
                     "PLY produced no vertices",
                 ));
             }
             preflight_limit(
-                ctx,
+                &mut children,
                 positions.len(),
                 limits.max_vertices,
                 ImportWorkClass::Vertices,
             )?;
             let face_count = face_vertex_counts.len();
-            preflight_limit(ctx, face_count, limits.max_faces, ImportWorkClass::Faces)?;
-            let index_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
-            ctx.with_work(
-                &index_group,
-                [usize_amount(
-                    ctx,
-                    indices.len(),
-                    "ply-index-validation-work",
-                )?],
-                |ctx, work| -> ParseResult<()> {
-                    for (position, index) in indices.as_slice().iter().enumerate() {
-                        poll_collection(ctx, position)?;
-                        if *index as usize >= positions.len() {
-                            return Err(ply_parse_error(
-                                ctx,
-                                PlyFailureCode::InvalidTopology,
-                                None,
-                                "PLY face index references a missing vertex",
-                            ));
-                        }
-                        work.complete([1])?;
-                    }
-                    Ok(())
-                },
+            preflight_limit(
+                &mut children,
+                face_count,
+                limits.max_faces,
+                ImportWorkClass::Faces,
             )?;
+            let index_group = children.bind_group([ImportWorkClass::WorkUnits])?;
+            let index_work = usize_amount(
+                children.error_view(),
+                indices.len(),
+                "ply-index-validation-work",
+            )?;
+            children.child(&index_group, [index_work], |parser| -> ParseResult<()> {
+                for (position, index) in indices.as_slice().iter().enumerate() {
+                    poll_collection(&mut parser.services()?, position)?;
+                    parser.run_format([1], || {
+                        if *index as usize >= positions.len() {
+                            Err(PlyFailure::new(
+                                PlyFailureCode::InvalidTopology,
+                                "PLY face index references a missing vertex",
+                            ))
+                        } else {
+                            Ok(())
+                        }
+                    })?;
+                }
+                Ok(())
+            })?;
 
+            let ctx = &mut children.services()?;
             let topology_cells = indices
                 .len()
                 .checked_add(if keep_face_counts {
@@ -1765,24 +1877,29 @@ fn scene_from_parsed<'session>(
                     )
                 })?;
             preflight_limit(
-                ctx,
+                &mut children,
                 topology_cells,
                 limits.max_total_topology_cells,
                 ImportWorkClass::TopologyCells,
             )?;
+            let ctx = &mut children.services()?;
             let canonical_string_bytes = canonical_string_bytes(ctx, &header)?;
             let metadata_count = metadata_entry_count(ctx, &header)?;
-            let metadata_group = ctx.bind_work_group([
+            let amounts = [
+                usize_amount(
+                    ctx.error_view(),
+                    canonical_string_bytes,
+                    "ply-canonical-string-bytes",
+                )?,
+                usize_amount(ctx.error_view(), metadata_count, "ply-metadata-append-work")?,
+            ];
+            let metadata_group = children.bind_group([
                 ImportWorkClass::CanonicalStringBytes,
                 ImportWorkClass::WorkUnits,
             ])?;
-            let (mut pending_metadata, mesh_name, node_name) = ctx.with_work(
-                &metadata_group,
-                [
-                    usize_amount(ctx, canonical_string_bytes, "ply-canonical-string-bytes")?,
-                    usize_amount(ctx, metadata_count, "ply-metadata-append-work")?,
-                ],
-                |ctx, work| -> ParseResult<_> {
+            let (mut pending_metadata, mesh_name, node_name) =
+                children.child(&metadata_group, amounts, |parser| -> ParseResult<_> {
+                    let ctx = &mut parser.services()?;
                     let mut metadata = ctx.metered_vec(
                         ImportStorageClass::FormatNormalization,
                         "ply-complete-batch-pending-metadata",
@@ -1790,7 +1907,7 @@ fn scene_from_parsed<'session>(
                     metadata.try_reserve(ctx, metadata_count)?;
                     // Fixed keys and disjoint indexed prefixes make every generated key unique.
                     append_string_metadata(
-                        ctx,
+                        parser,
                         &mut metadata,
                         "ply:format",
                         match header.format {
@@ -1798,62 +1915,51 @@ fn scene_from_parsed<'session>(
                             PlyFormat::BinaryLittleEndian => "binary_little_endian",
                             PlyFormat::BinaryBigEndian => "binary_big_endian",
                         },
-                        work,
                     )?;
-                    let source = ctx.source();
-                    append_string_metadata(
-                        ctx,
-                        &mut metadata,
-                        "ply:source",
-                        source.as_str(),
-                        work,
-                    )?;
+                    let source = parser.services()?.source();
+                    append_string_metadata(parser, &mut metadata, "ply:source", source.as_str())?;
                     for (index, comment) in header.comments.as_slice().iter().enumerate() {
-                        poll_collection(ctx, index)?;
+                        poll_collection(&mut parser.services()?, index)?;
                         append_indexed_string_metadata(
-                            ctx,
+                            parser,
                             &mut metadata,
                             "ply:comment_",
                             index,
                             comment.as_str(),
-                            work,
                         )?;
                     }
                     for (index, info) in header.obj_infos.as_slice().iter().enumerate() {
-                        poll_collection(ctx, index)?;
+                        poll_collection(&mut parser.services()?, index)?;
                         append_indexed_string_metadata(
-                            ctx,
+                            parser,
                             &mut metadata,
                             "ply:obj_info_",
                             index,
                             info.as_str(),
-                            work,
                         )?;
                     }
+                    let ctx = &mut parser.services()?;
                     let mut mesh_name = ctx
                         .metered_string(ImportStorageClass::FormatNormalization, "ply-mesh-name");
                     mesh_name.try_push_str(ctx, MESH_NAME)?;
                     let mut node_name = ctx
                         .metered_string(ImportStorageClass::FormatNormalization, "ply-node-name");
-                    node_name.try_push_str(ctx, NODE_NAME)?;
-                    work.complete([
-                        usize_amount(ctx, canonical_string_bytes, "ply-canonical-string-bytes")?,
-                        0,
-                    ])?;
+                    parser.append_string([amounts[0], 0], &mut node_name, NODE_NAME)?;
                     Ok((metadata, mesh_name, node_name))
-                },
-            )?;
+                })?;
             drop(header);
-            order_metadata(ctx, &mut pending_metadata)?;
+            order_metadata(&mut children, &mut pending_metadata)?;
 
-            let mut custom_attributes = finish_custom_attributes(ctx, custom_attributes)?;
-            order_custom_attributes(ctx, &mut custom_attributes)?;
+            let mut custom_attributes =
+                finish_custom_attributes(&mut children.services()?, custom_attributes)?;
+            order_custom_attributes(&mut children, &mut custom_attributes)?;
 
             Ok((pending_metadata, mesh_name, node_name, custom_attributes))
         })?;
 
     let (attributes, attribute_count, metadata_keys) =
-        context.with_execution(|ctx| -> ParseResult<_> {
+        context.with_execution(|root| -> ParseResult<_> {
+            let ctx = &mut root.services()?;
             let mut attributes = ctx.metered_vec(
                 ImportStorageClass::FormatNormalization,
                 "ply-complete-batch-attributes",
@@ -1933,12 +2039,6 @@ fn scene_from_parsed<'session>(
     let logical_meshes = [logical_mesh];
     let primitives = [primitive];
     let mesh_instances = [mesh_instance];
-    let geometry = GeometryAuthoringBatch::new(
-        &logical_meshes,
-        &primitives,
-        attributes.as_slice(),
-        &mesh_instances,
-    );
 
     let roots = [NodeLocalId::new(0)];
     let nodes = [NodeAuthoringNode::new(
@@ -1948,7 +2048,6 @@ fn scene_from_parsed<'session>(
         Presence::Absent,
     )
     .with_name(node_name.as_str())];
-    let node_batch = NodeAuthoringBatch::new(Presence::Present(&roots), &nodes);
 
     let logical_morphs = [LogicalMorphAuthoring::new(AuthoringRange::new(0, 0), &[])];
     let primitive_deformations = [PrimitiveDeformationAuthoring::new(Presence::Absent, &[])];
@@ -1956,134 +2055,141 @@ fn scene_from_parsed<'session>(
         Presence::Absent,
         Presence::Absent,
     )];
-    let deformation = DeformationAuthoringBatch::new(
-        &[],
-        &[],
-        &logical_morphs,
-        &primitive_deformations,
-        &mesh_instance_deformations,
-    );
 
-    let (metadata_entries, resource_identity, resource_stability, format, owner_provenance) =
-        context.with_execution(|ctx| -> ParseResult<_> {
-            let mut metadata_entries = ctx.metered_vec(
-                ImportStorageClass::FormatNormalization,
-                "ply-complete-batch-metadata-authoring",
-            );
-            metadata_entries.try_reserve(ctx, pending_metadata.len())?;
-            for (index, (metadata, key)) in pending_metadata
-                .as_slice()
-                .iter()
-                .zip(metadata_keys.as_slice())
-                .enumerate()
-            {
-                poll_collection(ctx, index)?;
-                metadata_entries.try_push_reserved(MetadataAuthoringEntry::new(
-                    ProfileOwner::LogicalMesh(0),
-                    key,
-                    ExtensionValueRef::String(metadata.value.as_str()),
-                ))?;
-            }
+    let (
+        metadata_entries,
+        resource_identity,
+        resource_stability,
+        format,
+        owner_provenance,
+        geometry,
+        node_batch,
+        deformation,
+    ) = context.with_execution(|root| -> ParseResult<_> {
+        let ctx = &mut root.services()?;
+        let mut metadata_entries = ctx.metered_vec(
+            ImportStorageClass::FormatNormalization,
+            "ply-complete-batch-metadata-authoring",
+        );
+        metadata_entries.try_reserve(ctx, pending_metadata.len())?;
+        for (index, (metadata, key)) in pending_metadata
+            .as_slice()
+            .iter()
+            .zip(metadata_keys.as_slice())
+            .enumerate()
+        {
+            poll_collection(ctx, index)?;
+            metadata_entries.try_push_reserved(MetadataAuthoringEntry::new(
+                ProfileOwner::LogicalMesh(0),
+                key,
+                ExtensionValueRef::String(metadata.value.as_str()),
+            ))?;
+        }
 
-            let (resource_identity, resource_stability) = profile_resource_identity(ctx)?;
-            let format = FormatId::new(FORMAT_ID)
-                .map_err(|_| ctx.allocation_failure("ply-profile-format-id"))?;
-            let owner_count = 2usize
-                .checked_add(nodes.len())
-                .and_then(|count| count.checked_add(logical_meshes.len()))
-                .and_then(|count| count.checked_add(primitives.len()))
-                .and_then(|count| count.checked_add(attributes.len()))
-                .and_then(|count| count.checked_add(mesh_instances.len()))
-                .ok_or_else(|| ctx.allocation_failure("ply-profile-owner-count"))?;
-            let mut owner_provenance = ctx.metered_vec(
-                ImportStorageClass::FormatNormalization,
-                "ply-complete-batch-owner-provenance",
-            );
-            owner_provenance.try_reserve(ctx, owner_count)?;
+        let (resource_identity, resource_stability) = profile_resource_identity(ctx)?;
+        let format = FormatId::new(FORMAT_ID)
+            .map_err(|_| ctx.allocation_failure("ply-profile-format-id"))?;
+        let owner_count = 2usize
+            .checked_add(nodes.len())
+            .and_then(|count| count.checked_add(logical_meshes.len()))
+            .and_then(|count| count.checked_add(primitives.len()))
+            .and_then(|count| count.checked_add(attributes.len()))
+            .and_then(|count| count.checked_add(mesh_instances.len()))
+            .ok_or_else(|| ctx.allocation_failure("ply-profile-owner-count"))?;
+        let mut owner_provenance = ctx.metered_vec(
+            ImportStorageClass::FormatNormalization,
+            "ply-complete-batch-owner-provenance",
+        );
+        owner_provenance.try_reserve(ctx, owner_count)?;
+        owner_provenance.try_push_reserved(OwnerProvenanceAuthoring::new(
+            ProfileOwner::Scene,
+            &SOURCE_PROVENANCE,
+        ))?;
+        owner_provenance.try_push_reserved(OwnerProvenanceAuthoring::new(
+            ProfileOwner::SyntheticRoot,
+            &SOURCE_PROVENANCE,
+        ))?;
+        for index in 0..nodes.len() {
             owner_provenance.try_push_reserved(OwnerProvenanceAuthoring::new(
-                ProfileOwner::Scene,
+                ProfileOwner::Node(NodeLocalId::new(canonical_u32(
+                    ctx,
+                    index,
+                    "ply-profile-node-owner",
+                )?)),
                 &SOURCE_PROVENANCE,
             ))?;
+        }
+        for index in 0..logical_meshes.len() {
             owner_provenance.try_push_reserved(OwnerProvenanceAuthoring::new(
-                ProfileOwner::SyntheticRoot,
+                ProfileOwner::LogicalMesh(canonical_u32(
+                    ctx,
+                    index,
+                    "ply-profile-logical-mesh-owner",
+                )?),
                 &SOURCE_PROVENANCE,
             ))?;
-            for index in 0..nodes.len() {
-                owner_provenance.try_push_reserved(OwnerProvenanceAuthoring::new(
-                    ProfileOwner::Node(NodeLocalId::new(canonical_u32(
-                        ctx,
-                        index,
-                        "ply-profile-node-owner",
-                    )?)),
-                    &SOURCE_PROVENANCE,
-                ))?;
-            }
-            for index in 0..logical_meshes.len() {
-                owner_provenance.try_push_reserved(OwnerProvenanceAuthoring::new(
-                    ProfileOwner::LogicalMesh(canonical_u32(
-                        ctx,
-                        index,
-                        "ply-profile-logical-mesh-owner",
-                    )?),
-                    &SOURCE_PROVENANCE,
-                ))?;
-            }
-            for index in 0..primitives.len() {
-                owner_provenance.try_push_reserved(OwnerProvenanceAuthoring::new(
-                    ProfileOwner::Primitive(canonical_u32(
-                        ctx,
-                        index,
-                        "ply-profile-primitive-owner",
-                    )?),
-                    &SOURCE_PROVENANCE,
-                ))?;
-            }
-            for index in 0..attributes.len() {
-                poll_collection(ctx, index)?;
-                owner_provenance.try_push_reserved(OwnerProvenanceAuthoring::new(
-                    ProfileOwner::Attribute(canonical_u32(
-                        ctx,
-                        index,
-                        "ply-profile-attribute-owner",
-                    )?),
-                    &SOURCE_PROVENANCE,
-                ))?;
-            }
-            for index in 0..mesh_instances.len() {
-                owner_provenance.try_push_reserved(OwnerProvenanceAuthoring::new(
-                    ProfileOwner::MeshInstance(canonical_u32(
-                        ctx,
-                        index,
-                        "ply-profile-mesh-instance-owner",
-                    )?),
-                    &SOURCE_PROVENANCE,
-                ))?;
-            }
-            let scene_group = ctx.bind_work_group([
-                ImportWorkClass::Meshes,
-                ImportWorkClass::Primitives,
-                ImportWorkClass::GraphNodes,
-                ImportWorkClass::GraphEdges,
-                ImportWorkClass::GraphDepth,
-            ])?;
-            ctx.with_work(
-                &scene_group,
-                [1, 1, 2, 1, 2],
-                |_ctx, work| -> ParseResult<()> {
-                    work.run([1, 1, 0, 0, 0], || Ok(()))?;
-                    work.run([0, 0, 2, 0, 2], || Ok(()))?;
-                    work.run([0, 0, 0, 1, 0], || Ok(()))?;
-                    Ok(())
-                },
-            )?;
-            Ok((
-                metadata_entries,
-                resource_identity,
-                resource_stability,
-                format,
-                owner_provenance,
-            ))
-        })?;
+        }
+        for index in 0..primitives.len() {
+            owner_provenance.try_push_reserved(OwnerProvenanceAuthoring::new(
+                ProfileOwner::Primitive(canonical_u32(ctx, index, "ply-profile-primitive-owner")?),
+                &SOURCE_PROVENANCE,
+            ))?;
+        }
+        for index in 0..attributes.len() {
+            poll_collection(ctx, index)?;
+            owner_provenance.try_push_reserved(OwnerProvenanceAuthoring::new(
+                ProfileOwner::Attribute(canonical_u32(ctx, index, "ply-profile-attribute-owner")?),
+                &SOURCE_PROVENANCE,
+            ))?;
+        }
+        for index in 0..mesh_instances.len() {
+            owner_provenance.try_push_reserved(OwnerProvenanceAuthoring::new(
+                ProfileOwner::MeshInstance(canonical_u32(
+                    ctx,
+                    index,
+                    "ply-profile-mesh-instance-owner",
+                )?),
+                &SOURCE_PROVENANCE,
+            ))?;
+        }
+        let scene_group = root.bind_group([
+            ImportWorkClass::Meshes,
+            ImportWorkClass::Primitives,
+            ImportWorkClass::GraphNodes,
+            ImportWorkClass::GraphEdges,
+            ImportWorkClass::GraphDepth,
+        ])?;
+        let (geometry, node_batch, deformation) =
+            root.child(&scene_group, [1, 1, 2, 1, 2], |parser| -> ParseResult<_> {
+                parser.run([1, 1, 2, 1, 2], || {
+                    let geometry = GeometryAuthoringBatch::new(
+                        &logical_meshes,
+                        &primitives,
+                        attributes.as_slice(),
+                        &mesh_instances,
+                    );
+                    let node_batch = NodeAuthoringBatch::new(Presence::Present(&roots), &nodes);
+                    let deformation = DeformationAuthoringBatch::new(
+                        &[],
+                        &[],
+                        &logical_morphs,
+                        &primitive_deformations,
+                        &mesh_instance_deformations,
+                    );
+                    Ok::<_, ParseFailure>((geometry, node_batch, deformation))
+                })
+            })?;
+        Ok((
+            metadata_entries,
+            resource_identity,
+            resource_stability,
+            format,
+            owner_provenance,
+            geometry,
+            node_batch,
+            deformation,
+        ))
+    })?;
 
     let locator = SourceObjectLocator::indexed(SourceObjectKind::Document, 0);
     let resources = [ObservedResourceAuthoring::session_opaque(
@@ -2124,10 +2230,17 @@ fn scene_from_parsed<'session>(
 trait RowReader {
     fn read_scalar(
         &mut self,
-        ctx: &mut ParseExecution<'_, '_>,
+        row: &mut ParseParser<'_, '_, '_, '_, '_, BODY_WORK_ENTRIES, true>,
         ty: ScalarType,
-        work: &mut ImportWorkScope<'_, BODY_WORK_ENTRIES>,
+        completed: [u64; BODY_WORK_ENTRIES],
     ) -> ParseResult<ScalarValue>;
+
+    fn read_list_count(
+        &mut self,
+        row: &mut ParseParser<'_, '_, '_, '_, '_, BODY_WORK_ENTRIES, true>,
+        ty: ScalarType,
+        empty_completion: [u64; BODY_WORK_ENTRIES],
+    ) -> ParseResult<usize>;
 }
 
 struct AsciiRow<'line> {
@@ -2147,14 +2260,13 @@ impl<'line> AsciiRow<'line> {
 
     fn finish(
         &mut self,
-        ctx: &mut ParseExecution<'_, '_>,
+        row: &mut ParseParser<'_, '_, '_, '_, '_, BODY_WORK_ENTRIES, true>,
         element_name: &str,
-        work: &mut ImportWorkScope<'_, BODY_WORK_ENTRIES>,
     ) -> ParseResult<()> {
-        if next_body_token(ctx, self.line, &mut self.byte_index, work)?.is_some() {
+        if next_body_token(row, self.line, &mut self.byte_index)?.is_some() {
             let _ = element_name;
             return Err(format_failure(
-                ctx,
+                &mut row.services()?,
                 PlyFailureCode::InvalidRecord,
                 "PLY row has trailing tokens",
                 Some(self.line_offset),
@@ -2163,25 +2275,59 @@ impl<'line> AsciiRow<'line> {
         }
         Ok(())
     }
+
+    fn scalar_token(
+        &mut self,
+        row: &mut ParseParser<'_, '_, '_, '_, '_, BODY_WORK_ENTRIES, true>,
+    ) -> ParseResult<&'line str> {
+        let Some(token) = next_body_token(row, self.line, &mut self.byte_index)? else {
+            return Err(ply_parse_error(
+                &mut row.services()?,
+                PlyFailureCode::TruncatedPayload,
+                Some(self.line_offset),
+                "PLY ASCII row ended before all properties were read",
+            ));
+        };
+        if token.len() <= MAX_NUMERIC_LITERAL_BYTES {
+            row.poll()?;
+        }
+        Ok(token)
+    }
 }
 
 impl RowReader for AsciiRow<'_> {
     fn read_scalar(
         &mut self,
-        ctx: &mut ParseExecution<'_, '_>,
+        row: &mut ParseParser<'_, '_, '_, '_, '_, BODY_WORK_ENTRIES, true>,
         ty: ScalarType,
-        work: &mut ImportWorkScope<'_, BODY_WORK_ENTRIES>,
+        completed: [u64; BODY_WORK_ENTRIES],
     ) -> ParseResult<ScalarValue> {
-        let token =
-            next_body_token(ctx, self.line, &mut self.byte_index, work)?.ok_or_else(|| {
-                ply_parse_error(
-                    ctx,
-                    PlyFailureCode::TruncatedPayload,
-                    Some(self.line_offset),
-                    "PLY ASCII row ended before all properties were read",
-                )
-            })?;
-        parse_ascii_scalar(ctx, token, ty, self.line_offset)
+        let token = self.scalar_token(row)?;
+        row.run_format(completed, || {
+            parse_ascii_scalar(token, ty, self.line_offset)
+        })
+    }
+
+    fn read_list_count(
+        &mut self,
+        row: &mut ParseParser<'_, '_, '_, '_, '_, BODY_WORK_ENTRIES, true>,
+        ty: ScalarType,
+        empty_completion: [u64; BODY_WORK_ENTRIES],
+    ) -> ParseResult<usize> {
+        let token = self.scalar_token(row)?;
+        row.run_returned_with_storage(|_storage| {
+            let value =
+                parse_ascii_scalar(token, ty, self.line_offset).map_err(ParsePieceError::Format)?;
+            let count = value.unsigned_index().map_err(ParsePieceError::Format)? as usize;
+            Ok((
+                count,
+                if count == 0 {
+                    empty_completion
+                } else {
+                    [0; BODY_WORK_ENTRIES]
+                },
+            ))
+        })
     }
 }
 
@@ -2200,41 +2346,31 @@ impl<'a> BinaryCursor<'a> {
         }
     }
 
-    fn take(&mut self, ctx: &mut ParseExecution<'_, '_>, len: usize) -> ParseResult<&'a [u8]> {
+    fn take(&mut self, len: usize) -> Result<&'a [u8], PlyFailure> {
         let end = self.offset.checked_add(len).ok_or_else(|| {
-            format_failure(
-                ctx,
+            PlyFailure::new(
                 PlyFailureCode::TruncatedPayload,
                 "PLY binary payload offset overflowed",
-                Some(self.offset),
-                Some("binary-offset"),
             )
+            .at_byte(u64::try_from(self.offset).unwrap_or(u64::MAX))
+            .with_context("binary-offset")
         })?;
         let slice = self.bytes.get(self.offset..end).ok_or_else(|| {
-            ply_parse_error(
-                ctx,
+            PlyFailure::new(
                 PlyFailureCode::TruncatedPayload,
-                Some(self.offset),
                 "PLY binary payload ended inside a property",
             )
+            .at_byte(u64::try_from(self.offset).unwrap_or(u64::MAX))
         })?;
         self.offset = end;
         Ok(slice)
     }
-}
-
-impl RowReader for BinaryCursor<'_> {
-    fn read_scalar(
-        &mut self,
-        ctx: &mut ParseExecution<'_, '_>,
-        ty: ScalarType,
-        _work: &mut ImportWorkScope<'_, BODY_WORK_ENTRIES>,
-    ) -> ParseResult<ScalarValue> {
+    fn scalar(&mut self, ty: ScalarType) -> Result<ScalarValue, PlyFailure> {
         let value = match ty {
-            ScalarType::I8 => ScalarValue::I32(i8::from_ne_bytes([self.take(ctx, 1)?[0]]) as i32),
-            ScalarType::U8 => ScalarValue::U32(self.take(ctx, 1)?[0] as u32),
+            ScalarType::I8 => ScalarValue::I32(i8::from_ne_bytes([self.take(1)?[0]]) as i32),
+            ScalarType::U8 => ScalarValue::U32(self.take(1)?[0] as u32),
             ScalarType::I16 => {
-                let bytes = array2(self.take(ctx, 2)?);
+                let bytes = array2(self.take(2)?);
                 ScalarValue::I32(if self.big_endian {
                     i16::from_be_bytes(bytes)
                 } else {
@@ -2242,7 +2378,7 @@ impl RowReader for BinaryCursor<'_> {
                 } as i32)
             }
             ScalarType::U16 => {
-                let bytes = array2(self.take(ctx, 2)?);
+                let bytes = array2(self.take(2)?);
                 ScalarValue::U32(if self.big_endian {
                     u16::from_be_bytes(bytes)
                 } else {
@@ -2250,7 +2386,7 @@ impl RowReader for BinaryCursor<'_> {
                 } as u32)
             }
             ScalarType::I32 => {
-                let bytes = array4(self.take(ctx, 4)?);
+                let bytes = array4(self.take(4)?);
                 ScalarValue::I32(if self.big_endian {
                     i32::from_be_bytes(bytes)
                 } else {
@@ -2258,7 +2394,7 @@ impl RowReader for BinaryCursor<'_> {
                 })
             }
             ScalarType::U32 => {
-                let bytes = array4(self.take(ctx, 4)?);
+                let bytes = array4(self.take(4)?);
                 ScalarValue::U32(if self.big_endian {
                     u32::from_be_bytes(bytes)
                 } else {
@@ -2266,7 +2402,7 @@ impl RowReader for BinaryCursor<'_> {
                 })
             }
             ScalarType::F32 => {
-                let bytes = array4(self.take(ctx, 4)?);
+                let bytes = array4(self.take(4)?);
                 ScalarValue::F64(if self.big_endian {
                     f32::from_be_bytes(bytes)
                 } else {
@@ -2274,7 +2410,7 @@ impl RowReader for BinaryCursor<'_> {
                 } as f64)
             }
             ScalarType::F64 => {
-                let bytes = array8(self.take(ctx, 8)?);
+                let bytes = array8(self.take(8)?);
                 ScalarValue::F64(if self.big_endian {
                     f64::from_be_bytes(bytes)
                 } else {
@@ -2286,6 +2422,37 @@ impl RowReader for BinaryCursor<'_> {
     }
 }
 
+impl RowReader for BinaryCursor<'_> {
+    fn read_scalar(
+        &mut self,
+        row: &mut ParseParser<'_, '_, '_, '_, '_, BODY_WORK_ENTRIES, true>,
+        ty: ScalarType,
+        completed: [u64; BODY_WORK_ENTRIES],
+    ) -> ParseResult<ScalarValue> {
+        row.run_format(completed, || self.scalar(ty))
+    }
+
+    fn read_list_count(
+        &mut self,
+        row: &mut ParseParser<'_, '_, '_, '_, '_, BODY_WORK_ENTRIES, true>,
+        ty: ScalarType,
+        empty_completion: [u64; BODY_WORK_ENTRIES],
+    ) -> ParseResult<usize> {
+        row.run_returned_with_storage(|_storage| {
+            let value = self.scalar(ty).map_err(ParsePieceError::Format)?;
+            let count = value.unsigned_index().map_err(ParsePieceError::Format)? as usize;
+            Ok((
+                count,
+                if count == 0 {
+                    empty_completion
+                } else {
+                    [0; BODY_WORK_ENTRIES]
+                },
+            ))
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum ScalarValue {
     I32(i32),
@@ -2294,7 +2461,7 @@ enum ScalarValue {
 }
 
 impl ScalarValue {
-    fn to_f64(self, ctx: &mut ParseExecution<'_, '_>, name: &str) -> ParseResult<f64> {
+    fn to_f64(self, ctx: &mut ParseServices<'_, '_, '_>, name: &str) -> ParseResult<f64> {
         let value = match self {
             Self::I32(value) => f64::from(value),
             Self::U32(value) => f64::from(value),
@@ -2314,7 +2481,7 @@ impl ScalarValue {
         }
     }
 
-    fn to_f32(self, ctx: &mut ParseExecution<'_, '_>, name: &str) -> ParseResult<f32> {
+    fn to_f32(self, ctx: &mut ParseServices<'_, '_, '_>, name: &str) -> ParseResult<f32> {
         let value = match self {
             Self::I32(value) => value as f32,
             Self::U32(value) => value as f32,
@@ -2334,26 +2501,27 @@ impl ScalarValue {
         }
     }
 
-    fn to_u32(self, ctx: &mut ParseExecution<'_, '_>, name: &str) -> ParseResult<u32> {
+    fn to_u32(self, ctx: &mut ParseServices<'_, '_, '_>, name: &str) -> ParseResult<u32> {
+        let _ = name;
+        self.unsigned_index()
+            .map_err(|failure| ctx.format_failure(failure))
+    }
+
+    fn unsigned_index(self) -> Result<u32, PlyFailure> {
         match self {
             Self::U32(value) => Ok(value),
             Self::I32(value) if value >= 0 => Ok(value as u32),
-            Self::I32(_) | Self::F64(_) => {
-                let _ = name;
-                Err(format_failure(
-                    ctx,
-                    PlyFailureCode::InvalidScalar,
-                    "PLY property is not a valid unsigned index",
-                    None,
-                    Some("unsigned-index"),
-                ))
-            }
+            Self::I32(_) | Self::F64(_) => Err(PlyFailure::new(
+                PlyFailureCode::InvalidScalar,
+                "PLY property is not a valid unsigned index",
+            )
+            .with_context("unsigned-index")),
         }
     }
 
     fn to_color_component(
         self,
-        ctx: &mut ParseExecution<'_, '_>,
+        ctx: &mut ParseServices<'_, '_, '_>,
         ty: ScalarType,
         name: &str,
         vertex_index: usize,
@@ -2415,18 +2583,16 @@ impl ScalarValue {
 }
 
 fn read_list_count(
-    ctx: &mut ParseExecution<'_, '_>,
+    row: &mut ParseParser<'_, '_, '_, '_, '_, BODY_WORK_ENTRIES, true>,
     reader: &mut dyn RowReader,
     count_ty: ScalarType,
-    work: &mut ImportWorkScope<'_, BODY_WORK_ENTRIES>,
+    empty_completion: [u64; BODY_WORK_ENTRIES],
 ) -> ParseResult<usize> {
-    let limits = ctx.limits();
-    let count = reader
-        .read_scalar(ctx, count_ty, work)?
-        .to_u32(ctx, "list count")? as usize;
+    let limits = row.services()?.limits();
+    let count = reader.read_list_count(row, count_ty, empty_completion)?;
     if count > limits.max_vertices {
         return Err(resource_limit_failure(
-            ctx,
+            &row.services()?,
             "max_vertices",
             limits.max_vertices,
         ));
@@ -2435,34 +2601,41 @@ fn read_list_count(
 }
 
 fn skip_list(
-    ctx: &mut ParseExecution<'_, '_>,
+    row: &mut ParseParser<'_, '_, '_, '_, '_, BODY_WORK_ENTRIES, true>,
     reader: &mut dyn RowReader,
     count_ty: ScalarType,
     item_ty: ScalarType,
-    work: &mut ImportWorkScope<'_, BODY_WORK_ENTRIES>,
+    completed: [u64; BODY_WORK_ENTRIES],
 ) -> ParseResult<()> {
-    let count = read_list_count(ctx, reader, count_ty, work)?;
+    let count = read_list_count(row, reader, count_ty, completed)?;
     for index in 0..count {
-        poll_collection(ctx, index)?;
-        let _ = reader.read_scalar(ctx, item_ty, work)?;
-        work.complete(body_completion(BODY_WORK_UNITS, 1))?;
+        poll_collection(&mut row.services()?, index)?;
+        let mut item_completion = if index + 1 == count {
+            completed
+        } else {
+            [0; BODY_WORK_ENTRIES]
+        };
+        item_completion[BODY_WORK_UNITS] = 1;
+        let _ = reader.read_scalar(row, item_ty, item_completion)?;
     }
     Ok(())
 }
 
 fn custom_accumulators<'session>(
-    ctx: &mut ParseExecution<'_, 'session>,
+    children: &mut ParseChildren<'_, '_, 'session>,
     element: &Element<'session>,
     custom_scalar_count: usize,
 ) -> ParseResult<MeteredVec<'session, CustomAttributeAccumulator<'session>>> {
+    let ctx = &mut children.services()?;
     let limits = ctx.limits();
     let mut attributes = ctx.metered_vec(
         ImportStorageClass::FormatNormalization,
         "ply-custom-attributes",
     );
     attributes.try_reserve(ctx, custom_scalar_count)?;
-    let name_group = ctx.bind_work_group([ImportWorkClass::CanonicalStringBytes])?;
+    let name_group = children.bind_group([ImportWorkClass::CanonicalStringBytes])?;
     for (property_index, property) in element.properties.as_slice().iter().enumerate() {
+        let ctx = &mut children.services()?;
         poll_collection(ctx, property_index)?;
         let Property::Scalar {
             name,
@@ -2533,40 +2706,38 @@ fn custom_accumulators<'session>(
                 limits.max_canonical_string_bytes,
             )
         })?;
-        ctx.with_work(
-            &name_group,
-            [usize_amount(
-                ctx,
-                canonical_bytes,
+        let amounts = [usize_amount(
+            ctx.error_view(),
+            canonical_bytes,
+            "ply-custom-attribute-name",
+        )?];
+        children.child(&name_group, amounts, |child| -> ParseResult<()> {
+            let ctx = &mut child.services()?;
+            let mut attr_name = ctx.metered_string(
+                ImportStorageClass::FormatNormalization,
                 "ply-custom-attribute-name",
-            )?],
-            |ctx, work| -> ParseResult<()> {
-                let mut attr_name = ctx.metered_string(
-                    ImportStorageClass::FormatNormalization,
-                    "ply-custom-attribute-name",
-                );
-                attr_name.try_push_str(ctx, "ply:")?;
-                attr_name.try_push_str(ctx, name.as_str())?;
-                let mut semantic_name = ctx.metered_string(
-                    ImportStorageClass::FormatNormalization,
-                    "ply-custom-attribute-semantic",
-                );
-                semantic_name.try_push_str(ctx, "ply:")?;
-                semantic_name.try_push_str(ctx, name.as_str())?;
-                attributes.try_push_reserved(CustomAttributeAccumulator {
-                    name: attr_name,
-                    semantic: semantic_name,
-                    data: RefCell::new(data),
-                })?;
-                work.complete_all()
-            },
-        )?;
+            );
+            attr_name.try_push_str(ctx, "ply:")?;
+            attr_name.try_push_str(ctx, name.as_str())?;
+            let mut semantic_name = ctx.metered_string(
+                ImportStorageClass::FormatNormalization,
+                "ply-custom-attribute-semantic",
+            );
+            semantic_name.try_push_str(ctx, "ply:")?;
+            semantic_name.try_push_str(ctx, name.as_str())?;
+            let attribute = CustomAttributeAccumulator {
+                name: attr_name,
+                semantic: semantic_name,
+                data: RefCell::new(data),
+            };
+            child.run(amounts, || attributes.try_push_reserved(attribute))
+        })?;
     }
     Ok(attributes)
 }
 
 fn finish_custom_attributes<'session>(
-    ctx: &mut ParseExecution<'_, 'session>,
+    ctx: &mut ParseServices<'_, '_, 'session>,
     attributes: MeteredVec<'session, CustomAttributeAccumulator<'session>>,
 ) -> ParseResult<MeteredVec<'session, CustomAttributeStorage<'session>>> {
     let mut canonical = ctx.metered_vec(
@@ -2630,16 +2801,17 @@ impl CustomAttributeStorage<'_> {
 }
 
 fn validate_vertex_attribute_budget(
-    ctx: &mut ParseExecution<'_, '_>,
+    children: &mut ParseChildren<'_, '_, '_>,
     vertex_count: usize,
     stream_count: usize,
 ) -> ParseResult<()> {
+    let ctx = &mut children.services()?;
     let limits = ctx.limits();
     ctx.enforce_resource_limit(
         "max_vertex_attribute_streams_per_mesh",
-        usize_amount(ctx, stream_count, "ply-attribute-stream-count")?,
+        usize_amount(ctx.error_view(), stream_count, "ply-attribute-stream-count")?,
         usize_amount(
-            ctx,
+            ctx.error_view(),
             limits.max_vertex_attribute_streams_per_mesh,
             "ply-attribute-stream-limit",
         )?,
@@ -2651,21 +2823,30 @@ fn validate_vertex_attribute_budget(
             limits.max_total_vertex_attribute_cells,
         )
     })?;
-    let stream_count = usize_amount(ctx, stream_count, "ply-attribute-stream-count")?;
-    let cells = usize_amount(ctx, cells, "ply-attribute-cell-count")?;
-    let group = ctx.bind_work_group([
+    let amounts = [
+        usize_amount(ctx.error_view(), stream_count, "ply-attribute-stream-count")?,
+        usize_amount(ctx.error_view(), cells, "ply-attribute-cell-count")?,
+    ];
+    let errors = ctx.error_view();
+    let cell_limit = u64::try_from(limits.max_total_vertex_attribute_cells).unwrap_or(u64::MAX);
+    let group = children.bind_group([
         ImportWorkClass::AttributeStreams,
         ImportWorkClass::AttributeCells,
     ])?;
-    ctx.with_work(
-        &group,
-        [stream_count, cells],
-        |_ctx, work| -> ParseResult<()> { work.complete([stream_count, cells]) },
-    )
+    children.child(&group, amounts, |child| {
+        child.run(amounts, || {
+            stream_count
+                .checked_mul(vertex_count)
+                .ok_or_else(|| {
+                    errors.resource_limit_exceeded("max_total_vertex_attribute_cells", cell_limit)
+                })
+                .map(|_| ())
+        })
+    })
 }
 
 fn push_custom_scalar<'session>(
-    ctx: &mut ParseExecution<'_, 'session>,
+    ctx: &mut ParseServices<'_, '_, 'session>,
     parsed: &mut ParsedPly<'session>,
     attribute_index: usize,
     name: &str,
@@ -2746,64 +2927,57 @@ fn is_builtin_vertex_property(name: &str) -> bool {
 }
 
 fn parse_ascii_scalar(
-    ctx: &mut ParseExecution<'_, '_>,
     token: &str,
     ty: ScalarType,
     line_offset: usize,
-) -> ParseResult<ScalarValue> {
+) -> Result<ScalarValue, PlyFailure> {
     match ty {
-        ScalarType::I8 => parse_ascii_number::<i8>(ctx, token, line_offset, "signed-integer")
+        ScalarType::I8 => parse_ascii_number::<i8>(token, line_offset, "signed-integer")
             .map(|value| ScalarValue::I32(value as i32)),
-        ScalarType::I16 => parse_ascii_number::<i16>(ctx, token, line_offset, "signed-integer")
+        ScalarType::I16 => parse_ascii_number::<i16>(token, line_offset, "signed-integer")
             .map(|value| ScalarValue::I32(value as i32)),
-        ScalarType::I32 => parse_ascii_number::<i32>(ctx, token, line_offset, "signed-integer")
-            .map(ScalarValue::I32),
-        ScalarType::U8 => parse_ascii_number::<u8>(ctx, token, line_offset, "unsigned-integer")
+        ScalarType::I32 => {
+            parse_ascii_number::<i32>(token, line_offset, "signed-integer").map(ScalarValue::I32)
+        }
+        ScalarType::U8 => parse_ascii_number::<u8>(token, line_offset, "unsigned-integer")
             .map(|value| ScalarValue::U32(value as u32)),
-        ScalarType::U16 => parse_ascii_number::<u16>(ctx, token, line_offset, "unsigned-integer")
+        ScalarType::U16 => parse_ascii_number::<u16>(token, line_offset, "unsigned-integer")
             .map(|value| ScalarValue::U32(value as u32)),
-        ScalarType::U32 => parse_ascii_number::<u32>(ctx, token, line_offset, "unsigned-integer")
-            .map(ScalarValue::U32),
-        ScalarType::F32 => parse_ascii_number::<f32>(ctx, token, line_offset, "float")
+        ScalarType::U32 => {
+            parse_ascii_number::<u32>(token, line_offset, "unsigned-integer").map(ScalarValue::U32)
+        }
+        ScalarType::F32 => parse_ascii_number::<f32>(token, line_offset, "float")
             .map(|value| ScalarValue::F64(value as f64)),
         ScalarType::F64 => {
-            parse_ascii_number::<f64>(ctx, token, line_offset, "float").map(ScalarValue::F64)
+            parse_ascii_number::<f64>(token, line_offset, "float").map(ScalarValue::F64)
         }
     }
 }
 
 fn parse_ascii_number<T>(
-    ctx: &mut ParseExecution<'_, '_>,
     token: &str,
     line_offset: usize,
     context: &'static str,
-) -> ParseResult<T>
+) -> Result<T, PlyFailure>
 where
     T: std::str::FromStr,
 {
     if token.len() > MAX_NUMERIC_LITERAL_BYTES {
-        return Err(format_failure(
-            ctx,
-            PlyFailureCode::InvalidScalar,
-            "invalid PLY scalar value",
-            Some(line_offset),
-            Some(context),
-        ));
+        return Err(
+            PlyFailure::new(PlyFailureCode::InvalidScalar, "invalid PLY scalar value")
+                .at_byte(u64::try_from(line_offset).unwrap_or(u64::MAX))
+                .with_context(context),
+        );
     }
-    ctx.poll()?;
     token.parse::<T>().map_err(|_| {
-        format_failure(
-            ctx,
-            PlyFailureCode::InvalidScalar,
-            "invalid PLY scalar value",
-            Some(line_offset),
-            Some(context),
-        )
+        PlyFailure::new(PlyFailureCode::InvalidScalar, "invalid PLY scalar value")
+            .at_byte(u64::try_from(line_offset).unwrap_or(u64::MAX))
+            .with_context(context)
     })
 }
 
 fn parse_scalar_type(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseServices<'_, '_, '_>,
     token: &str,
     line_offset: usize,
 ) -> ParseResult<ScalarType> {
@@ -2830,7 +3004,7 @@ fn parse_scalar_type(
 }
 
 fn parse_count(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseServices<'_, '_, '_>,
     token: &str,
     line_offset: usize,
 ) -> ParseResult<usize> {
@@ -2863,63 +3037,85 @@ impl<'line> CheckedTokens<'line, '_> {
     }
 }
 
-fn checked_tokens<'line, 'region, 'session: 'region>(
-    ctx: &mut ParseExecution<'region, 'session>,
-    group: &ImportWorkGroup<'region, 2>,
+fn checked_tokens<'line, 'op, 'session>(
+    ctx: &mut ParseChildren<'_, 'op, 'session>,
+    group: &ParseWorkLayout<'op, 2>,
     line: &'line str,
 ) -> ParseResult<CheckedTokens<'line, 'session>> {
-    let mut values = ctx.metered_vec(ImportStorageClass::BackendDecode, "ply-tokens");
+    let mut values = ctx
+        .services()?
+        .metered_vec(ImportStorageClass::BackendDecode, "ply-tokens");
     let mut byte_index = 0usize;
     while let Some(token) = next_checked_token(ctx, group, line, &mut byte_index)? {
-        values.try_push(ctx, token)?;
+        values.try_push(&mut ctx.services()?, token)?;
     }
     Ok(CheckedTokens { values })
 }
 
-fn next_checked_token<'line, 'region, 'session: 'region>(
-    ctx: &mut ParseExecution<'region, 'session>,
-    group: &ImportWorkGroup<'region, 2>,
+fn next_checked_token<'line, 'op, 'session>(
+    ctx: &mut ParseChildren<'_, 'op, 'session>,
+    group: &ParseWorkLayout<'op, 2>,
     line: &'line str,
     byte_index: &mut usize,
 ) -> ParseResult<Option<&'line str>> {
-    let Some(token) = next_ascii_token(ctx, line, byte_index)? else {
+    let range = {
+        let mut services = ctx.services()?;
+        let mut storage = services.storage()?;
+        scan_ascii_token_range(&mut storage, line, byte_index)?
+    };
+    let Some(range) = range else {
         return Ok(None);
     };
-    ctx.with_work(
-        group,
-        [1, usize_amount(ctx, token.len(), "ply-token-bytes")?],
-        |ctx, work| -> ParseResult<_> {
-            work.complete([1, usize_amount(ctx, token.len(), "ply-token-bytes")?])?;
-            Ok(Some(token))
-        },
-    )
+    let amounts = [
+        1,
+        usize_amount(ctx.error_view(), range.len(), "ply-token-bytes")?,
+    ];
+    ctx.child(group, amounts, |token| {
+        token.run_format(amounts, || ascii_token(line, range).map(Some))
+    })
 }
 
 fn next_body_token<'line>(
-    ctx: &mut ParseExecution<'_, '_>,
+    row: &mut ParseParser<'_, '_, '_, '_, '_, BODY_WORK_ENTRIES, true>,
     line: &'line str,
     byte_index: &mut usize,
-    work: &mut ImportWorkScope<'_, BODY_WORK_ENTRIES>,
 ) -> ParseResult<Option<&'line str>> {
-    let Some(token) = next_ascii_token(ctx, line, byte_index)? else {
-        return Ok(None);
-    };
-    let mut completed = [0; BODY_WORK_ENTRIES];
-    completed[BODY_TOKENS] = 1;
-    completed[BODY_TOKEN_BYTES] = usize_amount(ctx, token.len(), "ply-token-bytes")?;
-    work.complete(completed)?;
-    Ok(Some(token))
+    let errors = row.error_view();
+    row.run_returned_with_storage(|mut storage| {
+        let range = scan_ascii_token_range(&mut storage, line, byte_index)
+            .map_err(ParsePieceError::Parse)?;
+        let Some(range) = range else {
+            return Ok((None, [0; BODY_WORK_ENTRIES]));
+        };
+        let token = ascii_token(line, range).map_err(ParsePieceError::Format)?;
+        let mut completed = [0; BODY_WORK_ENTRIES];
+        completed[BODY_TOKENS] = 1;
+        completed[BODY_TOKEN_BYTES] =
+            usize_amount(errors, token.len(), "ply-token-bytes").map_err(ParsePieceError::Parse)?;
+        Ok((Some(token), completed))
+    })
 }
 
 fn next_ascii_token<'line>(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseServices<'_, '_, '_>,
     line: &'line str,
     byte_index: &mut usize,
 ) -> ParseResult<Option<&'line str>> {
-    // Planning shares the decode byte frontier without admitting or completing token work.
+    let range = scan_ascii_token_range(&mut ctx.storage()?, line, byte_index)?;
+    range
+        .map(|range| ascii_token(line, range).map_err(|failure| ctx.format_failure(failure)))
+        .transpose()
+}
+
+fn scan_ascii_token_range(
+    storage: &mut ParseStorage<'_, '_, '_>,
+    line: &str,
+    byte_index: &mut usize,
+) -> ParseResult<Option<std::ops::Range<usize>>> {
+    // Planning and body decoding poll at the same byte frontiers.
     let bytes = line.as_bytes();
     if *byte_index == 0 {
-        ctx.poll()?;
+        storage.poll()?;
     }
     while bytes
         .get(*byte_index)
@@ -2927,7 +3123,7 @@ fn next_ascii_token<'line>(
     {
         *byte_index += 1;
         if (*byte_index).is_multiple_of(TEXT_SCAN_QUANTUM) {
-            ctx.poll()?;
+            storage.poll()?;
         }
     }
     if *byte_index == bytes.len() {
@@ -2941,47 +3137,49 @@ fn next_ascii_token<'line>(
     {
         *byte_index += 1;
         if (*byte_index).is_multiple_of(TEXT_SCAN_QUANTUM) {
-            ctx.poll()?;
+            storage.poll()?;
         }
     }
-    let token = line.get(token_start..*byte_index).ok_or_else(|| {
-        format_failure(
-            ctx,
-            PlyFailureCode::InternalInvariant,
-            "PLY token range is not a valid ASCII boundary",
-            None,
-            Some("ascii-token-range"),
-        )
-    })?;
-    Ok(Some(token))
+    Ok(Some(token_start..*byte_index))
 }
 
-fn bounded_string<'region, 'session: 'region>(
-    ctx: &mut ParseExecution<'region, 'session>,
-    group: &ImportWorkGroup<'region, 1>,
+fn ascii_token(line: &str, range: std::ops::Range<usize>) -> Result<&str, PlyFailure> {
+    line.get(range).ok_or_else(|| {
+        PlyFailure::new(
+            PlyFailureCode::InternalInvariant,
+            "PLY token range is not a valid ASCII boundary",
+        )
+        .with_context("ascii-token-range")
+    })
+}
+
+fn bounded_string<'op, 'session>(
+    ctx: &mut ParseChildren<'_, 'op, 'session>,
+    group: &ParseWorkLayout<'op, 1>,
     value: &str,
     label: &'static str,
 ) -> ParseResult<MeteredString<'session>> {
-    ctx.with_work(
-        group,
-        [usize_amount(ctx, value.len(), "ply-string-bytes")?],
-        |ctx, work| -> ParseResult<_> {
-            if value.is_empty() {
-                return Err(format_failure(
-                    ctx,
-                    PlyFailureCode::InvalidSchema,
-                    "PLY named header value must not be empty",
-                    None,
-                    Some(label),
-                ));
-            }
-            let mut output =
-                ctx.metered_string(ImportStorageClass::FormatNormalization, "ply-header-string");
-            output.try_push_str(ctx, value)?;
-            work.complete_all()?;
-            Ok(output)
-        },
-    )
+    let amounts = [usize_amount(
+        ctx.error_view(),
+        value.len(),
+        "ply-string-bytes",
+    )?];
+    ctx.child(group, amounts, |child| -> ParseResult<_> {
+        if value.is_empty() {
+            return Err(format_failure(
+                &mut child.services()?,
+                PlyFailureCode::InvalidSchema,
+                "PLY named header value must not be empty",
+                None,
+                Some(label),
+            ));
+        }
+        let mut output = child
+            .services()?
+            .metered_string(ImportStorageClass::FormatNormalization, "ply-header-string");
+        child.append_string(amounts, &mut output, value)?;
+        Ok(output)
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3020,12 +3218,12 @@ impl AsciiTextSurface {
     }
 }
 
-fn with_next_ascii_record<'region, 'session: 'region, 'source, T>(
-    ctx: &mut ParseExecution<'region, 'session>,
+fn with_next_ascii_record<'region, 'op, 'session, 'source, T>(
+    ctx: &mut ParseChildren<'region, 'op, 'session>,
     text: &mut TextInputRecordCursor<'session, 'source>,
     surface: AsciiTextSurface,
     action: impl for<'line> FnOnce(
-        &mut ParseExecution<'region, 'session>,
+        &mut ParseChildren<'region, 'op, 'session>,
         &'line str,
         usize,
         TextDiagnosticLocation<'session>,
@@ -3033,20 +3231,20 @@ fn with_next_ascii_record<'region, 'session: 'region, 'source, T>(
 ) -> ParseResult<Option<T>> {
     match text.with_next_record(ctx, |ctx, input, _recoveries| {
         let mut lines = input.lines();
-        let line = lines.next().ok_or_else(|| {
-            ctx.format_failure(PlyFailure::new(
+        let Some(line) = lines.next() else {
+            return Err(ctx.services()?.format_failure(PlyFailure::new(
                 PlyFailureCode::InternalInvariant,
                 "PLY text record produced no shared line view",
-            ))
-        })?;
+            )));
+        };
         if lines.next().is_some() {
-            return Err(ctx.format_failure(PlyFailure::new(
+            return Err(ctx.services()?.format_failure(PlyFailure::new(
                 PlyFailureCode::InternalInvariant,
                 "PLY text record produced multiple shared line views",
             )));
         }
         let line_offset = raw_offset_usize(
-            ctx,
+            ctx.error_view(),
             line.raw_content_range().start(),
             "ply-text-byte-offset",
         )?;
@@ -3058,12 +3256,16 @@ fn with_next_ascii_record<'region, 'session: 'region, 'source, T>(
         )
     })? {
         Ok(value) => Ok(value),
-        Err(violation) => Err(text_conformance_failure(ctx, surface, violation)),
+        Err(violation) => Err(text_conformance_failure(
+            &mut ctx.services()?,
+            surface,
+            violation,
+        )),
     }
 }
 
 fn text_conformance_failure(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseServices<'_, '_, '_>,
     surface: AsciiTextSurface,
     violation: TextConformanceViolation,
 ) -> ParseFailure {
@@ -3103,7 +3305,7 @@ fn text_conformance_failure(
 }
 
 fn byte_text_conformance_failure(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseServices<'_, '_, '_>,
     surface: AsciiTextSurface,
     raw_offset: Option<u64>,
     context: &'static str,
@@ -3122,7 +3324,7 @@ fn byte_text_conformance_failure(
 }
 
 fn internal_text_conformance_failure(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseServices<'_, '_, '_>,
     context: &'static str,
 ) -> ParseFailure {
     ctx.format_failure(
@@ -3135,7 +3337,7 @@ fn internal_text_conformance_failure(
 }
 
 fn warn(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseServices<'_, '_, '_>,
     code: &'static str,
     location: Option<TextDiagnosticLocation<'_>>,
     message: fmt::Arguments<'_>,
@@ -3170,7 +3372,7 @@ fn warn(
 }
 
 fn ply_parse_error(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseServices<'_, '_, '_>,
     code: PlyFailureCode,
     byte_offset: Option<usize>,
     message: &'static str,
@@ -3183,7 +3385,7 @@ fn ply_parse_error(
 }
 
 fn format_failure(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseServices<'_, '_, '_>,
     code: PlyFailureCode,
     message: &'static str,
     byte_offset: Option<usize>,
@@ -3200,7 +3402,7 @@ fn format_failure(
 }
 
 fn parse_error(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseServices<'_, '_, '_>,
     byte_offset: Option<usize>,
     message: &'static str,
 ) -> ParseFailure {
@@ -3208,23 +3410,23 @@ fn parse_error(
 }
 
 fn usize_amount(
-    ctx: &ParseExecution<'_, '_>,
+    errors: ParseErrorView<'_>,
     value: usize,
     resource: &'static str,
 ) -> ParseResult<u64> {
-    u64::try_from(value).map_err(|_| ctx.resource_limit_exceeded(resource, u64::MAX))
+    u64::try_from(value).map_err(|_| errors.resource_limit_exceeded(resource, u64::MAX))
 }
 
 fn raw_offset_usize(
-    ctx: &ParseExecution<'_, '_>,
+    errors: ParseErrorView<'_>,
     value: u64,
     resource: &'static str,
 ) -> ParseResult<usize> {
-    usize::try_from(value).map_err(|_| ctx.resource_limit_exceeded(resource, u64::MAX))
+    usize::try_from(value).map_err(|_| errors.resource_limit_exceeded(resource, u64::MAX))
 }
 
 fn canonical_u32(
-    ctx: &ParseExecution<'_, '_>,
+    ctx: &ParseServices<'_, '_, '_>,
     value: usize,
     resource: &'static str,
 ) -> ParseResult<u32> {
@@ -3232,7 +3434,7 @@ fn canonical_u32(
 }
 
 fn canonical_contract_failure(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseServices<'_, '_, '_>,
     subject: &'static str,
 ) -> ParseFailure {
     format_failure(
@@ -3245,7 +3447,7 @@ fn canonical_contract_failure(
 }
 
 fn profile_resource_identity(
-    ctx: &ParseExecution<'_, '_>,
+    ctx: &ParseServices<'_, '_, '_>,
 ) -> ParseResult<(ResourceIdentity, SessionOpaqueReason)> {
     match ResourceIdentity::new(ctx.source().as_str()) {
         Ok(identity) => Ok((identity, SessionOpaqueReason::CallerLabel)),
@@ -3262,7 +3464,7 @@ fn decimal_digits(value: usize) -> usize {
 }
 
 fn resource_limit_failure(
-    ctx: &ParseExecution<'_, '_>,
+    ctx: &ParseServices<'_, '_, '_>,
     resource: &'static str,
     limit: usize,
 ) -> ParseFailure {
@@ -3271,23 +3473,28 @@ fn resource_limit_failure(
 }
 
 fn preflight_limit(
-    ctx: &mut ParseExecution<'_, '_>,
+    children: &mut ParseChildren<'_, '_, '_>,
     amount: usize,
     maximum: usize,
     class: ImportWorkClass,
 ) -> ParseResult<()> {
     if amount > maximum {
-        let group = ctx.bind_work_group([class])?;
-        return ctx.with_work(
-            &group,
-            [usize_amount(ctx, amount, "ply-limit-amount")?],
-            |_ctx, work| work.complete_all(),
-        );
+        let group = children.bind_group([class])?;
+        let amount = usize_amount(children.error_view(), amount, "ply-limit-amount")?;
+        let maximum = u64::try_from(maximum).unwrap_or(u64::MAX);
+        return children.child(&group, [amount], |child| -> ParseResult<()> {
+            Err(child
+                .error_view()
+                .resource_limit_exceeded("ply-limit-amount", maximum))
+        });
     }
     Ok(())
 }
 
-fn metadata_entry_count(ctx: &ParseExecution<'_, '_>, header: &Header<'_>) -> ParseResult<usize> {
+fn metadata_entry_count(
+    ctx: &ParseServices<'_, '_, '_>,
+    header: &Header<'_>,
+) -> ParseResult<usize> {
     let limits = ctx.limits();
     2usize
         .checked_add(header.comments.len())
@@ -3296,12 +3503,12 @@ fn metadata_entry_count(ctx: &ParseExecution<'_, '_>, header: &Header<'_>) -> Pa
 }
 
 fn append_string_metadata<'session>(
-    ctx: &mut ParseExecution<'_, 'session>,
+    parser: &mut ParseParser<'_, '_, '_, '_, 'session, 2, true>,
     metadata: &mut MeteredVec<'session, PendingMetadata<'session>>,
     key: &str,
     value: &str,
-    work: &mut ImportWorkScope<'_, 2>,
 ) -> ParseResult<()> {
+    let ctx = &mut parser.services()?;
     let mut key_storage =
         ctx.metered_string(ImportStorageClass::FormatNormalization, "ply-metadata-key");
     key_storage.try_push_str(ctx, key)?;
@@ -3310,17 +3517,17 @@ fn append_string_metadata<'session>(
         "ply-metadata-value",
     );
     value_storage.try_push_str(ctx, value)?;
-    append_metadata_parts(metadata, key_storage, value_storage, work)
+    append_metadata_parts(parser, metadata, key_storage, value_storage)
 }
 
 fn append_indexed_string_metadata<'session>(
-    ctx: &mut ParseExecution<'_, 'session>,
+    parser: &mut ParseParser<'_, '_, '_, '_, 'session, 2, true>,
     metadata: &mut MeteredVec<'session, PendingMetadata<'session>>,
     prefix: &str,
     index: usize,
     value: &str,
-    work: &mut ImportWorkScope<'_, 2>,
 ) -> ParseResult<()> {
+    let ctx = &mut parser.services()?;
     // Canonical NamespacedName local names do not admit dots; preserve the indexed
     // source value while normalizing only this structural separator.
     let mut key = ctx.metered_string(ImportStorageClass::FormatNormalization, "ply-metadata-key");
@@ -3331,32 +3538,34 @@ fn append_indexed_string_metadata<'session>(
         "ply-metadata-value",
     );
     value_storage.try_push_str(ctx, value)?;
-    append_metadata_parts(metadata, key, value_storage, work)
+    append_metadata_parts(parser, metadata, key, value_storage)
 }
 
 fn append_metadata_parts<'session>(
+    parser: &mut ParseParser<'_, '_, '_, '_, 'session, 2, true>,
     metadata: &mut MeteredVec<'session, PendingMetadata<'session>>,
     key: MeteredString<'session>,
     value: MeteredString<'session>,
-    work: &mut ImportWorkScope<'_, 2>,
 ) -> ParseResult<()> {
-    metadata.try_push_reserved(PendingMetadata { key, value })?;
-    work.complete([0, 1])
+    parser.run([0, 1], || {
+        metadata.try_push_reserved(PendingMetadata { key, value })
+    })
 }
 
 fn order_metadata(
-    ctx: &mut ParseExecution<'_, '_>,
+    children: &mut ParseChildren<'_, '_, '_>,
     metadata: &mut MeteredVec<'_, PendingMetadata<'_>>,
 ) -> ParseResult<()> {
-    let group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
-    ctx.with_work(&group, [0], |ctx, work| {
+    let group = children.bind_group([ImportWorkClass::WorkUnits])?;
+    children.child(&group, [0], |parser| {
         let mut comparison_index = 0;
         metadata.try_sort_unstable_by(|left, right| -> ParseResult<_> {
-            poll_collection(ctx, comparison_index)?;
-            work.replenish(1)?;
+            poll_collection(&mut parser.services()?, comparison_index)?;
+            parser.replenish(1)?;
             // Generated keys have fixed prefixes and at most usize::MAX's decimal digits.
-            let ordering = left.key.as_str().cmp(right.key.as_str());
-            work.complete([1])?;
+            let ordering = parser.run([1], || {
+                Ok::<_, ParseFailure>(left.key.as_str().cmp(right.key.as_str()))
+            })?;
             comparison_index = (comparison_index + 1) % MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS;
             Ok(ordering)
         })
@@ -3364,18 +3573,19 @@ fn order_metadata(
 }
 
 fn order_custom_attributes(
-    ctx: &mut ParseExecution<'_, '_>,
+    children: &mut ParseChildren<'_, '_, '_>,
     attributes: &mut MeteredVec<'_, CustomAttributeStorage<'_>>,
 ) -> ParseResult<()> {
-    let group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
-    ctx.with_work(&group, [0], |ctx, work| {
+    let group = children.bind_group([ImportWorkClass::WorkUnits])?;
+    children.child(&group, [0], |parser| {
         let mut comparison_index = 0;
         attributes.try_sort_unstable_by(|left, right| -> ParseResult<_> {
-            poll_collection(ctx, comparison_index)?;
-            work.replenish(1)?;
+            poll_collection(&mut parser.services()?, comparison_index)?;
+            parser.replenish(1)?;
             // Validated custom semantics contain at most 64 ASCII bytes.
-            let ordering = left.semantic.cmp(&right.semantic);
-            work.complete([1])?;
+            let ordering = parser.run([1], || {
+                Ok::<_, ParseFailure>(left.semantic.cmp(&right.semantic))
+            })?;
             comparison_index = (comparison_index + 1) % MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS;
             Ok(ordering)
         })
@@ -3383,7 +3593,7 @@ fn order_custom_attributes(
 }
 
 fn canonical_string_bytes(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseServices<'_, '_, '_>,
     header: &Header<'_>,
 ) -> ParseResult<usize> {
     let limits = ctx.limits();
@@ -3455,7 +3665,7 @@ fn canonical_string_bytes(
     Ok(total)
 }
 
-fn poll_collection(ctx: &mut ParseExecution<'_, '_>, index: usize) -> ParseResult<()> {
+fn poll_collection(ctx: &mut ParseServices<'_, '_, '_>, index: usize) -> ParseResult<()> {
     if index.is_multiple_of(MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS) {
         ctx.poll()?;
     }

@@ -13,8 +13,8 @@ use baozi_import::authoring::{
     AttributeSemantic, ExtensionSchemaId, ProfileOwner, SourceLocatorValue, SourceObjectLocator,
 };
 use baozi_import::{
-    CapacityPlan, ImportStorageClass, ImportWorkScope, MeteredOpaqueAllowance, MeteredVec,
-    ParseExecution, ParseResult,
+    CapacityPlan, ImportStorageClass, MeteredOpaqueAllowance, MeteredVec, ParseParser, ParseResult,
+    ParseRoot, ParseServices,
 };
 
 const SOURCE_SCHEMA: &str = "org.baozi.gltf:source-object";
@@ -25,33 +25,32 @@ mod tests;
 
 // Each original composite comparison remains one WorkUnit. Production callers compare only
 // fixed owner/source ordinals and validated NamespacedName keys of at most 64 ASCII bytes.
-struct ProfileComparisonWork<'meter, 'region> {
-    work: &'meter mut ImportWorkScope<'region, 1>,
+struct ProfileComparisonWork<'meter, 'borrow, 'frame, 'ctx, 'op, 'session> {
+    work: &'meter mut ParseParser<'borrow, 'frame, 'ctx, 'op, 'session, 1, true>,
     comparisons_until_poll: u64,
 }
 
-impl<'meter, 'region> ProfileComparisonWork<'meter, 'region> {
-    fn new(work: &'meter mut ImportWorkScope<'region, 1>) -> Self {
+impl<'meter, 'borrow, 'frame, 'ctx, 'op, 'session>
+    ProfileComparisonWork<'meter, 'borrow, 'frame, 'ctx, 'op, 'session>
+{
+    fn new(work: &'meter mut ParseParser<'borrow, 'frame, 'ctx, 'op, 'session, 1, true>) -> Self {
         Self {
             work,
             comparisons_until_poll: COMPARISONS_BETWEEN_POLLS,
         }
     }
 
-    fn run<T>(
-        &mut self,
-        ctx: &mut ParseExecution<'region, '_>,
-        compare: impl FnOnce() -> T,
-    ) -> ParseResult<T> {
+    fn run<T>(&mut self, compare: impl FnOnce() -> T) -> ParseResult<T> {
         // Admit only this comparison; no later work precedes its physical completion.
         self.work.replenish(1)?;
-        let value = compare();
-        self.work.complete([1])?;
+        let value = self
+            .work
+            .run([1], || Ok::<_, baozi_import::ParseFailure>(compare()))?;
         #[cfg(test)]
         tests::comparison_completed();
         self.comparisons_until_poll -= 1;
         if self.comparisons_until_poll == 0 {
-            ctx.poll()?;
+            self.work.poll()?;
             self.comparisons_until_poll = COMPARISONS_BETWEEN_POLLS;
         }
         Ok(value)
@@ -99,44 +98,42 @@ pub(super) const DOCUMENT: SourceEntityId = entity(SourceEntityKind::Document, N
 
 impl<'scope> SelectedSourceProfile<'scope> {
     pub(super) fn from_source_map(
-        ctx: &mut ParseExecution<'_, 'scope>,
+        ctx: &mut ParseRoot<'_, '_, 'scope>,
         map: &GltfSourceMap<'_>,
         selected: impl Fn(SourceEntityId) -> bool,
     ) -> Result<Self> {
-        let mut entries = ctx.metered_vec(
+        let mut entries = ctx.services()?.metered_vec(
             ImportStorageClass::FormatNormalization,
             "gltf-selected-source-identities",
         );
-        let mut extras = ctx.metered_vec(
+        let mut extras = ctx.services()?.metered_vec(
             ImportStorageClass::FormatNormalization,
             "gltf-selected-source-extras",
         );
-        let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
+        let work_group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
         for &source in map.entities() {
-            ctx.with_work(
-                &work_group,
-                [1],
-                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-            )?;
-            if selected(source.id) {
+            let selected_source = ctx.child(&work_group, [1], |child| {
+                child.run([1], || {
+                    Ok::<_, baozi_import::ParseFailure>(selected(source.id))
+                })
+            })?;
+            if selected_source {
                 {
-                    let value = source_locator(ctx, source)?;
-                    entries.try_push(ctx, value)
+                    let value = source_locator(&mut ctx.services()?, source)?;
+                    entries.try_push(&mut ctx.services()?, value)
                 }?;
-                {
-                    let argument_0 = ctx.primary_bytes().len();
-                    charge_lookup(ctx, argument_0, 2)
+                let payloads = {
+                    let argument_0 = ctx.services()?.primary_bytes().len();
+                    lookup(ctx, argument_0, 2, || map.payloads_for(source.id))
                 }?;
-                for payload in map.payloads_for(source.id) {
-                    ctx.with_work(
-                        &work_group,
-                        [1],
-                        |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-                    )?;
-                    if payload.kind == SourcePayloadKind::Extras {
+                for payload in payloads {
+                    let kind = ctx.child(&work_group, [1], |child| {
+                        child.run([1], || Ok::<_, baozi_import::ParseFailure>(payload.kind))
+                    })?;
+                    if kind == SourcePayloadKind::Extras {
                         {
-                            let value = SourceExtras::new(ctx, payload)?;
-                            extras.try_push(ctx, value)
+                            let value = SourceExtras::new(payload)?;
+                            extras.try_push(&mut ctx.services()?, value)
                         }?;
                     }
                 }
@@ -144,12 +141,12 @@ impl<'scope> SelectedSourceProfile<'scope> {
         }
         ctx.poll()?;
         if extras.len() > 1 {
-            ctx.with_work(&work_group, [0], |ctx, ledger_work| {
+            ctx.child(&work_group, [0], |ledger_work| {
                 let mut work = ProfileComparisonWork::new(ledger_work);
                 #[cfg(test)]
                 tests::comparison_scope(tests::ComparisonSite::ExtrasSort);
                 extras.try_sort_unstable_by(|left, right| {
-                    work.run(ctx, || {
+                    work.run(|| {
                         left.source
                             .cmp(&right.source)
                             .then_with(|| left.key.cmp(&right.key))
@@ -160,7 +157,7 @@ impl<'scope> SelectedSourceProfile<'scope> {
         ctx.poll()?;
         let profile = Self {
             entries,
-            links: ctx.metered_vec(
+            links: ctx.services()?.metered_vec(
                 ImportStorageClass::FormatNormalization,
                 "gltf-selected-source-owner-links",
             ),
@@ -184,52 +181,57 @@ impl<'scope> SelectedSourceProfile<'scope> {
 
     pub(super) fn required(
         &self,
-        ctx: &mut ParseExecution<'_, '_>,
+        ctx: &mut ParseRoot<'_, '_, '_>,
         id: SourceEntityId,
     ) -> Result<&SelectedSource<'scope>> {
-        charge_lookup(ctx, self.entries.len(), 1)?;
-        self.entries
-            .as_slice()
-            .binary_search_by_key(&id, |source| source.entity.id)
-            .ok()
-            .and_then(|index| self.entries.as_slice().get(index))
-            .ok_or_else(|| {
-                ContentError::from(GltfFailure::internal(
-                    "selected glTF owner has no admitted source identity",
-                ))
-            })
+        lookup(ctx, self.entries.len(), 1, || {
+            self.entries
+                .as_slice()
+                .binary_search_by_key(&id, |source| source.entity.id)
+                .ok()
+                .and_then(|index| self.entries.as_slice().get(index))
+        })?
+        .ok_or_else(|| {
+            ContentError::from(GltfFailure::internal(
+                "selected glTF owner has no admitted source identity",
+            ))
+        })
     }
 
     pub(super) fn link(
         &mut self,
-        ctx: &mut ParseExecution<'_, 'scope>,
+        ctx: &mut ParseRoot<'_, '_, 'scope>,
         owner: ProfileOwner,
         source: SourceEntityId,
     ) -> Result<()> {
-        ctx.charge_work(1)?;
+        let layout = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+        let link = ctx.child(&layout, [1], |child| {
+            child.run([1], || {
+                Ok::<_, baozi_import::ParseFailure>(OwnerSourceLink { owner, source })
+            })
+        })?;
         self.required(ctx, source)?;
-        self.links
-            .try_push(ctx, OwnerSourceLink { owner, source })?;
+        self.links.try_push(&mut ctx.services()?, link)?;
         Ok(())
     }
 
-    pub(super) fn finish(&mut self, ctx: &mut ParseExecution<'_, '_>) -> Result<()> {
+    pub(super) fn finish(&mut self, ctx: &mut ParseRoot<'_, '_, '_>) -> Result<()> {
         ctx.poll()?;
         if self.links.len() > 1 {
-            let group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
-            ctx.with_work(&group, [0], |ctx, ledger_work| {
+            let group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+            ctx.child(&group, [0], |ledger_work| {
                 let mut work = ProfileComparisonWork::new(ledger_work);
                 #[cfg(test)]
                 tests::comparison_scope(tests::ComparisonSite::LinkSort);
                 self.links
-                    .try_sort_unstable_by(|left, right| work.run(ctx, || left.cmp(right)))
+                    .try_sort_unstable_by(|left, right| work.run(|| left.cmp(right)))
             })?;
-            let retained = ctx.with_work(&group, [0], |ctx, ledger_work| {
+            let retained = ctx.child(&group, [0], |ledger_work| {
                 let mut work = ProfileComparisonWork::new(ledger_work);
                 #[cfg(test)]
                 tests::comparison_scope(tests::ComparisonSite::LinkDedup);
                 self.links
-                    .try_partition_dedup_by(|left, right| work.run(ctx, || left == right))
+                    .try_partition_dedup_by(|left, right| work.run(|| left == right))
             })?;
             self.links.truncate(retained);
         }
@@ -239,13 +241,16 @@ impl<'scope> SelectedSourceProfile<'scope> {
 
     pub(super) fn for_owner(
         &self,
-        ctx: &mut ParseExecution<'_, '_>,
+        ctx: &mut ParseRoot<'_, '_, '_>,
         owner: ProfileOwner,
     ) -> Result<&[OwnerSourceLink]> {
         let links = self.links.as_slice();
-        charge_lookup(ctx, links.len(), 2)?;
-        let start = links.partition_point(|link| link.owner < owner);
-        let end = links.partition_point(|link| link.owner <= owner);
+        let (start, end) = lookup(ctx, links.len(), 2, || {
+            (
+                links.partition_point(|link| link.owner < owner),
+                links.partition_point(|link| link.owner <= owner),
+            )
+        })?;
         if start == end {
             return Err(GltfFailure::internal("glTF canonical owner has no source mapping").into());
         }
@@ -257,18 +262,16 @@ impl<'scope> SelectedSourceProfile<'scope> {
     /// same order, while metadata explicitly references a SourceIdentityLocalId.
     pub(super) fn source_index(
         &self,
-        ctx: &mut ParseExecution<'_, '_>,
+        ctx: &mut ParseRoot<'_, '_, '_>,
         resource_count: usize,
         id: SourceEntityId,
     ) -> Result<u32> {
-        charge_lookup(ctx, self.entries.len(), 1)?;
-        let index = self
-            .entries
-            .as_slice()
-            .binary_search_by_key(&id, |source| source.entity.id)
-            .map_err(|_| {
-                GltfFailure::internal("glTF source mapping references a missing identity")
-            })?;
+        let index = lookup(ctx, self.entries.len(), 1, || {
+            self.entries
+                .as_slice()
+                .binary_search_by_key(&id, |source| source.entity.id)
+        })?
+        .map_err(|_| GltfFailure::internal("glTF source mapping references a missing identity"))?;
         if id == DOCUMENT {
             return Ok(0);
         }
@@ -282,14 +285,21 @@ impl<'scope> SelectedSourceProfile<'scope> {
 
 /// Binary search and partition_point perform at most bit_length(len) + 1 comparisons.
 /// Charge that bound before entering the bounded, allocation-free standard-library search.
-fn charge_lookup(ctx: &mut ParseExecution<'_, '_>, length: usize, searches: u64) -> Result<()> {
+fn lookup<T>(
+    ctx: &mut ParseRoot<'_, '_, '_>,
+    length: usize,
+    searches: u64,
+    search: impl FnOnce() -> T,
+) -> Result<T> {
     let comparisons = u64::from(usize::BITS - length.leading_zeros()) + 1;
-    ctx.charge_work(comparisons * searches)?;
-    Ok(())
+    let layout = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+    ctx.child(&layout, [comparisons * searches], |child| {
+        child.run([comparisons * searches], || Ok::<_, ContentError>(search()))
+    })
 }
 
 fn source_locator<'scope>(
-    ctx: &mut ParseExecution<'_, 'scope>,
+    ctx: &mut ParseServices<'_, '_, 'scope>,
     source: SourceEntity,
 ) -> Result<SelectedSource<'scope>> {
     let end = source
@@ -367,7 +377,7 @@ fn source_locator<'scope>(
 /// Called before decoder teardown. Only source ordinals, raw ranges, and canonical local owner
 /// IDs cross this boundary; no JSON or backend object is retained by the normalized model.
 pub(super) fn associate<'session>(
-    ctx: &mut ParseExecution<'_, 'session>,
+    ctx: &mut ParseRoot<'_, '_, 'session>,
     document: &crate::document::Document<'_>,
     prepared: &PreparedDocument<'_, '_>,
     model: &mut NormalizedGltf<'session>,
@@ -384,13 +394,11 @@ pub(super) fn associate<'session>(
     profile.link(ctx, ProfileOwner::Scene, scene_source)?;
     profile.link(ctx, ProfileOwner::SyntheticRoot, scene_source)?;
 
-    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
+    let work_group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
     for (index, id) in model.nodes.node_ids.as_slice().iter().enumerate() {
-        ctx.with_work(
-            &work_group,
-            [1],
-            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-        )?;
+        let id = ctx.child(&work_group, [1], |child| {
+            child.run([1], || Ok::<_, baozi_import::ParseFailure>(id.as_ref()))
+        })?;
         if let Some(id) = id {
             profile.link(
                 ctx,
@@ -400,11 +408,9 @@ pub(super) fn associate<'session>(
         }
     }
     for (index, id) in model.cameras.camera_ids.as_slice().iter().enumerate() {
-        ctx.with_work(
-            &work_group,
-            [1],
-            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-        )?;
+        let id = ctx.child(&work_group, [1], |child| {
+            child.run([1], || Ok::<_, baozi_import::ParseFailure>(id.as_ref()))
+        })?;
         if let Some(id) = id {
             profile.link(
                 ctx,
@@ -414,11 +420,9 @@ pub(super) fn associate<'session>(
         }
     }
     for (index, id) in model.lights.light_ids.as_slice().iter().enumerate() {
-        ctx.with_work(
-            &work_group,
-            [1],
-            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-        )?;
+        let id = ctx.child(&work_group, [1], |child| {
+            child.run([1], || Ok::<_, baozi_import::ParseFailure>(id.as_ref()))
+        })?;
         if let Some(id) = id {
             profile.link(
                 ctx,
@@ -428,8 +432,11 @@ pub(super) fn associate<'session>(
         }
     }
     for (index, instance) in model.nodes.mesh_instances.as_slice().iter().enumerate() {
-        let owner =
-            ProfileOwner::MeshInstance(authoring_u32(ctx, index, "gltf-source-mesh-instance")?);
+        let owner = ProfileOwner::MeshInstance(authoring_u32(
+            &mut ctx.services()?,
+            index,
+            "gltf-source-mesh-instance",
+        )?);
         profile.link(
             ctx,
             owner,
@@ -448,11 +455,9 @@ pub(super) fn associate<'session>(
     }
 
     for (index, id) in model.appearance.image_ids.as_slice().iter().enumerate() {
-        ctx.with_work(
-            &work_group,
-            [1],
-            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-        )?;
+        let id = ctx.child(&work_group, [1], |child| {
+            child.run([1], || Ok::<_, baozi_import::ParseFailure>(id.as_ref()))
+        })?;
         let Some(id) = id else { continue };
         let owner = ProfileOwner::Image(id.index());
         profile.link(ctx, owner, entity(SourceEntityKind::Image, None, index))?;
@@ -461,11 +466,9 @@ pub(super) fn associate<'session>(
         }
     }
     for (index, id) in model.appearance.sampler_ids.as_slice().iter().enumerate() {
-        ctx.with_work(
-            &work_group,
-            [1],
-            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-        )?;
+        let id = ctx.child(&work_group, [1], |child| {
+            child.run([1], || Ok::<_, baozi_import::ParseFailure>(id.as_ref()))
+        })?;
         if let Some(id) = id {
             profile.link(
                 ctx,
@@ -475,11 +478,9 @@ pub(super) fn associate<'session>(
         }
     }
     for (index, id) in model.appearance.texture_ids.as_slice().iter().enumerate() {
-        ctx.with_work(
-            &work_group,
-            [1],
-            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-        )?;
+        let id = ctx.child(&work_group, [1], |child| {
+            child.run([1], || Ok::<_, baozi_import::ParseFailure>(id.as_ref()))
+        })?;
         let Some(id) = id else { continue };
         let source = entity(SourceEntityKind::Texture, None, index);
         profile.link(ctx, ProfileOwner::Texture(id.index()), source)?;
@@ -500,23 +501,23 @@ pub(super) fn associate<'session>(
     }
     let mut binding_index = 0;
     for (index, id) in model.appearance.material_ids.as_slice().iter().enumerate() {
-        ctx.with_work(
-            &work_group,
-            [1],
-            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-        )?;
+        let id = ctx.child(&work_group, [1], |child| {
+            child.run([1], || Ok::<_, baozi_import::ParseFailure>(id.as_ref()))
+        })?;
         let Some(id) = id else { continue };
         let source = entity(SourceEntityKind::Material, None, index);
         profile.link(ctx, ProfileOwner::Material(id.index()), source)?;
-        for binding in prepared.material_contracts.bindings(ctx, index)? {
-            ctx.with_work(
-                &work_group,
-                [1],
-                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-            )?;
-            let texture = binding.source_texture;
+        for binding in prepared
+            .material_contracts
+            .bindings(&mut ctx.services()?, index)?
+        {
+            let texture = ctx.child(&work_group, [1], |child| {
+                child.run([1], || {
+                    Ok::<_, baozi_import::ParseFailure>(binding.source_texture)
+                })
+            })?;
             let owner = ProfileOwner::TextureBinding(authoring_u32(
-                ctx,
+                &mut ctx.services()?,
                 binding_index,
                 "gltf-source-binding",
             )?);
@@ -541,12 +542,12 @@ pub(super) fn associate<'session>(
         .iter()
         .enumerate()
     {
-        ctx.with_work(
-            &work_group,
-            [1],
-            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-        )?;
-        if selected.is_none() {
+        let selected = ctx.child(&work_group, [1], |child| {
+            child.run([1], || {
+                Ok::<_, baozi_import::ParseFailure>(selected.is_some())
+            })
+        })?;
+        if !selected {
             continue;
         }
         let mesh = root
@@ -561,26 +562,29 @@ pub(super) fn associate<'session>(
             .ok_or_else(|| gltf_parse_error("glTF normalized mesh is missing"))?;
         let source = entity(SourceEntityKind::Mesh, None, source_index);
         {
-            let argument_0 =
-                ProfileOwner::LogicalMesh(authoring_u32(ctx, mesh_index, "gltf-source-mesh")?);
+            let argument_0 = ProfileOwner::LogicalMesh(authoring_u32(
+                &mut ctx.services()?,
+                mesh_index,
+                "gltf-source-mesh",
+            )?);
             profile.link(ctx, argument_0, source)
         }?;
         mesh_index += 1;
         let mut width = 0;
         for primitive in &mesh.primitives {
-            ctx.with_work(
-                &work_group,
-                [1],
-                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-            )?;
-            if let Some(targets) = &primitive.targets {
+            let targets = ctx.child(&work_group, [1], |child| {
+                child.run([1], || {
+                    Ok::<_, baozi_import::ParseFailure>(primitive.targets.as_ref())
+                })
+            })?;
+            if let Some(targets) = targets {
                 width = targets.len();
                 break;
             }
         }
         for _ in 0..width {
             let owner = ProfileOwner::MorphDefinition(authoring_u32(
-                ctx,
+                &mut ctx.services()?,
                 definition_index,
                 "gltf-source-morph-definition",
             )?);
@@ -598,7 +602,7 @@ pub(super) fn associate<'session>(
         {
             let source = entity(SourceEntityKind::Primitive, Some(source_index), index);
             let owner = ProfileOwner::Primitive(authoring_u32(
-                ctx,
+                &mut ctx.services()?,
                 primitive_index,
                 "gltf-source-primitive",
             )?);
@@ -626,13 +630,12 @@ pub(super) fn associate<'session>(
                         ));
                     }
                 };
-                charge_lookup(ctx, primitive.attributes.len(), 1)?;
-                let accessor = primitive
-                    .attributes
-                    .get(&semantic)
-                    .ok_or_else(|| gltf_parse_error("glTF attribute source accessor is missing"))?;
+                let accessor = lookup(ctx, primitive.attributes.len(), 1, || {
+                    primitive.attributes.get(&semantic)
+                })?
+                .ok_or_else(|| gltf_parse_error("glTF attribute source accessor is missing"))?;
                 let owner = ProfileOwner::Attribute(authoring_u32(
-                    ctx,
+                    &mut ctx.services()?,
                     attribute_index,
                     "gltf-source-attribute",
                 )?);
@@ -641,17 +644,18 @@ pub(super) fn associate<'session>(
                 attribute_index += 1;
             }
             for target in primitive.targets.iter().flatten() {
-                ctx.with_work(
-                    &work_group,
-                    [1],
-                    |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-                )?;
-                for accessor in [target.positions, target.normals, target.tangents]
-                    .into_iter()
-                    .flatten()
-                {
+                let accessors = ctx.child(&work_group, [1], |child| {
+                    child.run([1], || {
+                        Ok::<_, baozi_import::ParseFailure>([
+                            target.positions,
+                            target.normals,
+                            target.tangents,
+                        ])
+                    })
+                })?;
+                for accessor in accessors.into_iter().flatten() {
                     let owner = ProfileOwner::MorphDelta(authoring_u32(
-                        ctx,
+                        &mut ctx.services()?,
                         delta_index,
                         "gltf-source-morph-delta",
                     )?);
@@ -671,15 +675,19 @@ pub(super) fn associate<'session>(
 
     let mut skin_index = 0;
     for (index, selected) in model.skins.skin_ids.as_slice().iter().enumerate() {
-        ctx.with_work(
-            &work_group,
-            [1],
-            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-        )?;
-        if selected.is_none() {
+        let selected = ctx.child(&work_group, [1], |child| {
+            child.run([1], || {
+                Ok::<_, baozi_import::ParseFailure>(selected.is_some())
+            })
+        })?;
+        if !selected {
             continue;
         }
-        let owner = ProfileOwner::Skin(authoring_u32(ctx, skin_index, "gltf-source-skin")?);
+        let owner = ProfileOwner::Skin(authoring_u32(
+            &mut ctx.services()?,
+            skin_index,
+            "gltf-source-skin",
+        )?);
         skin_index += 1;
         profile.link(ctx, owner, entity(SourceEntityKind::Skin, None, index))?;
         let skin = root
@@ -702,30 +710,35 @@ pub(super) fn associate<'session>(
     let mut channel_index = 0;
     let mut source_channel_index = 0;
     for (index, animation) in root.animations.iter().enumerate() {
-        ctx.with_work(
-            &work_group,
-            [1],
-            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-        )?;
-        let selected = prepared
-            .animation_contracts
-            .selected_animations
-            .as_slice()
-            .get(index)
-            .copied()
+        let selected = ctx.child(&work_group, [1], |child| {
+            child.run([1], || {
+                Ok::<_, baozi_import::ParseFailure>(
+                    prepared
+                        .animation_contracts
+                        .selected_animations
+                        .as_slice()
+                        .get(index)
+                        .copied(),
+                )
+            })
+        })?;
+        let selected = selected
             .ok_or_else(|| gltf_parse_error("glTF animation source selection is missing"))?;
-        let owner =
-            ProfileOwner::AnimationClip(authoring_u32(ctx, clip_index, "gltf-source-animation")?);
+        let owner = ProfileOwner::AnimationClip(authoring_u32(
+            &mut ctx.services()?,
+            clip_index,
+            "gltf-source-animation",
+        )?);
         if selected {
             profile.link(ctx, owner, entity(SourceEntityKind::Animation, None, index))?;
             clip_index += 1;
         }
         for (local_channel, channel) in animation.channels.iter().enumerate() {
-            ctx.with_work(
-                &work_group,
-                [1],
-                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-            )?;
+            let has_target = ctx.child(&work_group, [1], |child| {
+                child.run([1], || {
+                    Ok::<_, baozi_import::ParseFailure>(channel.target.node.is_some())
+                })
+            })?;
             let retained = prepared
                 .animation_contracts
                 .source_channels
@@ -733,7 +746,7 @@ pub(super) fn associate<'session>(
                 .get(source_channel_index)
                 .is_some_and(|disposition| disposition.is_retained());
             source_channel_index += 1;
-            if !selected || channel.target.node.is_none() {
+            if !selected || !has_target {
                 continue;
             }
             let sampler_id = entity(
@@ -750,7 +763,7 @@ pub(super) fn associate<'session>(
             link_accessor(ctx, profile, root, owner, sampler.input.value())?;
             if retained {
                 let owner = ProfileOwner::AnimationChannel(authoring_u32(
-                    ctx,
+                    &mut ctx.services()?,
                     channel_index,
                     "gltf-source-animation-channel",
                 )?);
@@ -780,7 +793,7 @@ pub(super) fn associate<'session>(
 }
 
 fn link_accessor<'session>(
-    ctx: &mut ParseExecution<'_, 'session>,
+    ctx: &mut ParseRoot<'_, '_, 'session>,
     profile: &mut SelectedSourceProfile<'session>,
     root: &json::Tables<'_>,
     owner: ProfileOwner,
@@ -808,7 +821,7 @@ fn link_accessor<'session>(
 }
 
 fn link_view<'session>(
-    ctx: &mut ParseExecution<'_, 'session>,
+    ctx: &mut ParseRoot<'_, '_, 'session>,
     profile: &mut SelectedSourceProfile<'session>,
     root: &json::Tables<'_>,
     owner: ProfileOwner,

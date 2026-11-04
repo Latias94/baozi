@@ -115,12 +115,16 @@ impl Format for PlyImporter {
         &self,
         probe: &Probe<'_>,
         hint: &ReadHint,
-        scope: &DetectionScope<'_>,
+        scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         detect::detect(probe, hint, scope)
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         parser::read_ply(context)
     }
 }

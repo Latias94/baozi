@@ -1,17 +1,16 @@
 //! Generation admission and rooted handoff for a validated Scene edit.
 //!
-//! The operation-owned freeze permit and the core-owned generation reservation meet only in the
-//! scoped callback below.  The callback cannot retain either branded joint capability after it
-//! returns, and the published evidence owner keeps the remap leaves alive with the new Scene.
+//! Core admits the actual proven roots before reserving a generation and owns every terminal
+//! branch. Published evidence keeps the remap leaves alive independently of the new Scene.
 
 use baozi_operation::__retained_store_integration::activation::{
-    CanonicalFreezePermit, CanonicalJointCommit, CanonicalJointSeal,
-    CentrallyRejectedCanonicalStoreSession, FrozenFailureState, StoreActivationContainment,
+    CanonicalCauseSlot, CanonicalFreezePermit, CanonicalJointSuccess, StoreActivationContainment,
+    StoreCanonicalRejection,
 };
 use baozi_operation::__retained_store_integration::authority::PreparedStoreSuccess;
 use baozi_operation::{
-    OperationOwner, ProgressPhase, ProgressUnit, PublishedOutcomeEvidenceStore, RecordBlock,
-    StoreLedgerEvidence,
+    OperationOwner, ProgressPhase, ProgressUnit, PublishedOutcomeEvidenceStore,
+    PublishedStoreFallbackParts, RecordBlock, StoreLedgerEvidence, StorePrepareError,
 };
 use thiserror::Error;
 
@@ -23,14 +22,14 @@ use crate::canonical_scene::store::schema::SceneDirectorySchema;
 use crate::identity::{
     PrimitiveId, ReservedSceneGeneration, SceneGenerationError, SceneGenerationId,
 };
-use crate::scene_space::{Axis, FrontFaceWinding, Handedness, SceneSpace, SceneSpaceField};
-use crate::space_conversion::{SpaceConversion, TargetSpace};
+use crate::scene_space::SceneSpaceField;
+use crate::space_conversion::TargetSpace;
 
 use super::SceneEditOutput;
 use super::schema::{
     SceneEditEvidenceTag, SceneGeometryCornerOriginsTag, SceneGeometryFaceOffsetsTag,
 };
-use super::validation::SceneEditValidationProof;
+use super::validation::{SceneEditHandoffFacts, SceneEditValidationProof};
 
 const SCENE_EDIT_GENERATION_REJECTION_CODE: u32 = GENERATION_EXHAUSTED_CODE;
 
@@ -46,7 +45,8 @@ impl SceneEditGenerationRejection {
 }
 
 /// The operation/core paired freeze permit for one validated Scene edit.
-pub type SceneEditFreezePermit<O, PP, U> = CanonicalFreezePermit<
+pub type SceneEditFreezePermit<'inv, O, PP, U> = CanonicalFreezePermit<
+    'inv,
     O,
     PP,
     U,
@@ -58,32 +58,9 @@ pub type SceneEditFreezePermit<O, PP, U> = CanonicalFreezePermit<
     SceneEditEvidenceTag,
 >;
 
-/// The scoped operation contribution paired with a Scene edit generation token.
-pub type SceneEditJointCommit<'joint, O, PP, U> = CanonicalJointCommit<
-    'joint,
-    O,
-    PP,
-    U,
-    RecordBlock,
-    SceneDirectorySchema,
-    RecordBlock,
-    SceneEditEvidenceTag,
->;
-
-/// Rich failure typestate produced when the edit cannot consume its final generation permit.
-pub type SceneEditFrozenGenerationRejection<O, PP, U> = CentrallyRejectedCanonicalStoreSession<
-    O,
-    PP,
-    U,
-    SceneEditGenerationRejection,
-    RecordBlock,
-    SceneEditEvidenceTag,
-    FrozenFailureState,
->;
-
 /// Core-owned generation/proof half of a successful Scene edit publication.
 #[must_use = "the Scene edit handoff token must consume the matching prepared owner"]
-pub struct SceneEditHandoffToken {
+struct SceneEditHandoffToken {
     generation: ReservedSceneGeneration,
     proof: SceneEditValidationProof,
     tables: crate::canonical_scene::store::typed_storage::SceneTables,
@@ -112,9 +89,13 @@ struct GeometryEvidenceOwner {
 /// Centrally proved whole-scene effects with the actual published evidence root owner.
 /// Primitive-local remaps are deliberately absent; triangle reversal uses `[0, 2, 1]`.
 pub struct SceneSpaceConversionEvidence {
-    store: PublishedOutcomeEvidenceStore<RecordBlock, SceneEditEvidenceTag>,
+    _store: PublishedOutcomeEvidenceStore<RecordBlock, SceneEditEvidenceTag>,
     input_generation: SceneGenerationId,
     output_generation: SceneGenerationId,
+    source: TargetSpace,
+    target: TargetSpace,
+    assumed_mask: u32,
+    reverse_winding: bool,
 }
 
 impl SceneSpaceConversionEvidence {
@@ -124,40 +105,14 @@ impl SceneSpaceConversionEvidence {
     pub const fn output_generation(&self) -> SceneGenerationId {
         self.output_generation
     }
-    pub fn source(&self) -> TargetSpace {
-        let root = self.store.root();
-        decode_space(
-            |field| root.scalar::<u32>(0, field),
-            root.scalar::<u64>(0, super::schema::field::SOURCE_UNIT_BITS),
-            [
-                super::schema::space_field::SOURCE_HANDEDNESS,
-                super::schema::space_field::SOURCE_UP,
-                super::schema::space_field::SOURCE_FRONT,
-                super::schema::space_field::SOURCE_WINDING,
-            ],
-        )
-        .expect("published Scene conversion source facts were validated before handoff")
+    pub const fn source(&self) -> TargetSpace {
+        self.source
     }
-    pub fn target(&self) -> TargetSpace {
-        let root = self.store.root();
-        decode_space(
-            |field| root.scalar::<u32>(0, field),
-            root.scalar::<u64>(0, super::schema::field::TARGET_UNIT_BITS),
-            [
-                super::schema::space_field::TARGET_HANDEDNESS,
-                super::schema::space_field::TARGET_UP,
-                super::schema::space_field::TARGET_FRONT,
-                super::schema::space_field::TARGET_WINDING,
-            ],
-        )
-        .expect("published Scene conversion target facts were validated before handoff")
+    pub const fn target(&self) -> TargetSpace {
+        self.target
     }
-    pub fn reverses_triangle_winding(&self) -> bool {
-        self.store
-            .root()
-            .scalar::<u32>(0, super::schema::space_field::REVERSE_WINDING)
-            .expect("published Scene conversion winding effect was validated before handoff")
-            != 0
+    pub const fn reverses_triangle_winding(&self) -> bool {
+        self.reverse_winding
     }
     pub fn triangle_corner_order(&self) -> [u32; 3] {
         if self.reverses_triangle_winding() {
@@ -175,12 +130,7 @@ impl SceneSpaceConversionEvidence {
             SceneSpaceField::FrontFaceWinding => 16,
             _ => 0,
         };
-        self.store
-            .root()
-            .scalar::<u32>(0, super::schema::space_field::ASSUMED_MASK)
-            .expect("published Scene conversion assumption mask was validated before handoff")
-            & bit
-            != 0
+        self.assumed_mask & bit != 0
     }
 }
 
@@ -352,8 +302,7 @@ impl SceneEditPublishedSuccess {
 }
 
 impl SceneEditHandoffToken {
-    /// Verifies the canonical root and publishes the matching Scene/evidence owners.
-    pub fn handoff(
+    fn handoff(
         self,
         store: PreparedStoreSuccess<
             RecordBlock,
@@ -361,286 +310,102 @@ impl SceneEditHandoffToken {
             RecordBlock,
             SceneEditEvidenceTag,
         >,
-    ) -> Result<SceneEditPublishedSuccess, SceneEditHandoffPairingError> {
-        let target_generation = match self.proof.input_target {
-            super::SceneEditTarget::Primitive(target) => target.generation(),
-            super::SceneEditTarget::WholeScene(generation) => generation,
-        };
-        if target_generation != self.proof.source_generation {
-            drop(self);
-            return Err(SceneEditHandoffPairingError);
-        }
-        let expected_root = self.proof.scene.directory().into_store();
+    ) -> SceneEditPublishedSuccess {
         let published = store.handoff();
-        if published.canonical.root_ref() != expected_root {
-            drop(published);
-            drop(self);
-            return Err(SceneEditHandoffPairingError);
-        }
-
-        let evidence = {
-            let root = published.outcome_evidence.root();
-            if root.rows() != 1 || root.fields() != super::schema::ROOT_FIELDS {
-                return Err(SceneEditHandoffPairingError);
-            }
-            let invalid = SceneEditHandoffPairingError;
-            if root.scalar::<u32>(0, super::schema::field::REVISION)
-                != Some(super::schema::REVISION)
-                || root.scalar::<u32>(0, super::schema::field::OUTCOME)
-                    != Some(super::schema::OUTCOME_CHANGED)
-                || root.scalar::<u32>(0, super::schema::field::SEMANTIC_VERSION)
-                    != Some(super::schema::OPERATION_SEMANTIC_VERSION)
-            {
-                return Err(invalid);
-            }
-            match root.scalar::<u32>(0, super::schema::field::OPERATION_KIND) {
-                Some(super::schema::OPERATION_SELECTION) => {
-                    let super::SceneEditTarget::WholeScene(input_generation) =
-                        self.proof.input_target
-                    else {
-                        return Err(invalid);
-                    };
-                    let targets = root.scalar::<u32>(0, 4).ok_or(invalid)?;
-                    let corners = root
-                        .sequence_ref::<u32, SceneGeometryCornerOriginsTag>(
-                            0,
-                            super::schema::field::CORNER_ORIGINS,
-                        )
-                        .ok_or(invalid)?;
-                    let faces = root
-                        .sequence_ref::<u32, SceneGeometryFaceOffsetsTag>(
-                            0,
-                            super::schema::field::FACE_OFFSETS,
-                        )
-                        .ok_or(invalid)?;
-                    SceneEditEvidence::Selection(SceneGeometrySelectionEvidence {
-                        store: published.outcome_evidence,
-                        input_generation,
-                        output_generation: self.generation.id(),
-                        targets,
-                        corners,
-                        faces,
-                    })
-                }
-                #[cfg(test)]
-                Some(super::schema::OPERATION_NORMALS) => {
-                    let super::SceneEditTarget::Primitive(input_target) = self.proof.input_target
-                    else {
-                        return Err(invalid);
-                    };
-                    let output_target = input_target.rebind(self.generation.id());
-                    if root.scalar::<u64>(0, super::schema::field::SOURCE_UNIT_BITS) != Some(0)
-                        || root.scalar::<u64>(0, super::schema::field::TARGET_UNIT_BITS) != Some(0)
-                    {
-                        return Err(invalid);
-                    }
-                    if root.scalar::<u8>(0, super::schema::field::CORNER_ORIGINS) != Some(0)
-                        || root.scalar::<u8>(0, super::schema::field::FACE_OFFSETS) != Some(0)
-                    {
-                        return Err(SceneEditHandoffPairingError);
-                    }
-                    let effects = root
-                        .scalar::<u32>(0, super::schema::normal_field::EFFECTS)
-                        .ok_or(invalid)?;
-                    let removed_metadata = root
-                        .scalar::<u32>(0, super::schema::normal_field::REMOVED_METADATA)
-                        .ok_or(invalid)?;
-                    let normal_attribute = root
-                        .scalar::<u32>(0, super::schema::normal_field::OUTPUT_NORMAL_ATTRIBUTE)
-                        .ok_or(invalid)?;
-                    let attributes = root
-                        .scalar::<u32>(0, super::schema::normal_field::OUTPUT_ATTRIBUTE_COUNT)
-                        .ok_or(invalid)?;
-                    if normal_attribute >= attributes {
-                        return Err(invalid);
-                    }
-                    SceneEditEvidence::Normals(SceneNormalGenerationEvidence {
-                        owner: GeometryEvidenceOwner {
-                            input_target,
-                            output_target,
-                            store: published.outcome_evidence,
-                        },
-                        effects,
-                        removed_metadata,
-                        normal_attribute,
-                    })
-                }
-                #[cfg(test)]
-                Some(super::schema::OPERATION_TANGENTS) => {
-                    let super::SceneEditTarget::Primitive(input_target) = self.proof.input_target
-                    else {
-                        return Err(invalid);
-                    };
-                    if root.scalar::<u64>(0, super::schema::field::SOURCE_UNIT_BITS) != Some(0)
-                        || root.scalar::<u64>(0, super::schema::field::TARGET_UNIT_BITS) != Some(0)
-                        || root.scalar::<u8>(0, super::schema::field::CORNER_ORIGINS) != Some(0)
-                        || root.scalar::<u8>(0, super::schema::field::FACE_OFFSETS) != Some(0)
-                    {
-                        return Err(invalid);
-                    }
-                    let normal_domain = decode_tangent_domain(
-                        root.scalar::<u32>(0, super::schema::tangent_field::NORMAL_DOMAIN)
-                            .ok_or(invalid)?,
-                    )
-                    .ok_or(invalid)?;
-                    let uv_domain = decode_tangent_domain(
-                        root.scalar::<u32>(0, super::schema::tangent_field::UV_DOMAIN)
-                            .ok_or(invalid)?,
-                    )
-                    .ok_or(invalid)?;
-                    let uv_set = root
-                        .scalar::<u32>(0, super::schema::tangent_field::UV_SET)
-                        .ok_or(invalid)?;
-                    let replaced = root
-                        .scalar::<u32>(0, super::schema::tangent_field::REPLACED_TANGENT)
-                        .filter(|value| *value <= 1)
-                        .ok_or(invalid)?
-                        != 0;
-                    let tangent_attribute = root
-                        .scalar::<u32>(0, super::schema::tangent_field::OUTPUT_TANGENT_ATTRIBUTE)
-                        .ok_or(invalid)?;
-                    let attributes = root
-                        .scalar::<u32>(0, super::schema::tangent_field::OUTPUT_ATTRIBUTE_COUNT)
-                        .ok_or(invalid)?;
-                    let corners = root
-                        .scalar::<u32>(0, super::schema::tangent_field::CORNER_COUNT)
-                        .filter(|count| *count != 0 && count.is_multiple_of(3))
-                        .ok_or(invalid)?;
-                    if tangent_attribute >= attributes
-                        || root.scalar::<u32>(0, super::schema::tangent_field::FACE_COUNT)
-                            != Some(corners / 3)
-                    {
-                        return Err(invalid);
-                    }
-                    SceneEditEvidence::Tangents(SceneTangentGenerationEvidence {
-                        owner: GeometryEvidenceOwner {
-                            input_target,
-                            output_target: input_target.rebind(self.generation.id()),
-                            store: published.outcome_evidence,
-                        },
-                        replaced,
-                        tangent_attribute,
-                        corners,
-                        normal_domain,
-                        uv_set,
-                        uv_domain,
-                    })
-                }
-                #[cfg(test)]
-                Some(super::schema::OPERATION_TRIANGULATE) => {
-                    let super::SceneEditTarget::Primitive(input_target) = self.proof.input_target
-                    else {
-                        return Err(invalid);
-                    };
-                    let output_target = input_target.rebind(self.generation.id());
-                    if root.scalar::<u64>(0, super::schema::field::SOURCE_UNIT_BITS) != Some(0)
-                        || root.scalar::<u64>(0, super::schema::field::TARGET_UNIT_BITS) != Some(0)
-                    {
-                        return Err(invalid);
-                    }
-                    let corner_origins = root
-                        .sequence_ref::<u32, SceneGeometryCornerOriginsTag>(
-                            0,
-                            super::schema::field::CORNER_ORIGINS,
-                        )
-                        .ok_or(invalid)?;
-                    let face_offsets = root
-                        .sequence_ref::<u32, SceneGeometryFaceOffsetsTag>(
-                            0,
-                            super::schema::field::FACE_OFFSETS,
-                        )
-                        .ok_or(invalid)?;
-                    let source_corners = root
-                        .scalar::<u32>(0, super::schema::field::SOURCE_CORNER_COUNT)
-                        .ok_or(invalid)?;
-                    let vertices = root
-                        .scalar::<u32>(0, super::schema::field::VERTEX_COUNT)
-                        .ok_or(invalid)?;
-                    SceneEditEvidence::Triangulation(SceneTriangulationEvidence {
-                        owner: GeometryEvidenceOwner {
-                            input_target,
-                            output_target,
-                            store: published.outcome_evidence,
-                        },
-                        corner_origins,
-                        face_offsets,
-                        source_corners,
-                        vertices,
-                    })
-                }
-                Some(super::schema::OPERATION_SPACE_CONVERSION) => {
-                    let super::SceneEditTarget::WholeScene(input_generation) =
-                        self.proof.input_target
-                    else {
-                        return Err(invalid);
-                    };
-                    if root.scalar::<u8>(0, super::schema::field::CORNER_ORIGINS) != Some(0)
-                        || root.scalar::<u8>(0, super::schema::field::FACE_OFFSETS) != Some(0)
-                        || root.scalar::<u32>(0, super::schema::field::OPTIONS_ALGORITHM) != Some(0)
-                    {
-                        return Err(invalid);
-                    }
-                    let source = decode_space(
-                        |field| root.scalar::<u32>(0, field),
-                        root.scalar::<u64>(0, super::schema::field::SOURCE_UNIT_BITS),
-                        [
-                            super::schema::space_field::SOURCE_HANDEDNESS,
-                            super::schema::space_field::SOURCE_UP,
-                            super::schema::space_field::SOURCE_FRONT,
-                            super::schema::space_field::SOURCE_WINDING,
-                        ],
-                    )
-                    .ok_or(invalid)?;
-                    let target = decode_space(
-                        |field| root.scalar::<u32>(0, field),
-                        root.scalar::<u64>(0, super::schema::field::TARGET_UNIT_BITS),
-                        [
-                            super::schema::space_field::TARGET_HANDEDNESS,
-                            super::schema::space_field::TARGET_UP,
-                            super::schema::space_field::TARGET_FRONT,
-                            super::schema::space_field::TARGET_WINDING,
-                        ],
-                    )
-                    .ok_or(invalid)?;
-                    root.scalar::<u32>(0, super::schema::space_field::ASSUMED_MASK)
-                        .filter(|mask| *mask <= 31)
-                        .ok_or(invalid)?;
-                    let reverse = root
-                        .scalar::<u32>(0, super::schema::space_field::REVERSE_WINDING)
-                        .filter(|value| *value <= 1)
-                        .ok_or(invalid)?
-                        != 0;
-                    let changes = root
-                        .scalar::<u32>(0, super::schema::space_field::CHANGES_COORDINATES)
-                        .filter(|value| *value <= 1)
-                        .ok_or(invalid)?
-                        != 0;
-                    let source_space = SceneSpace {
-                        handedness: source.handedness(),
-                        up_axis: source.up_axis(),
-                        front_axis: source.front_axis(),
-                        unit_scale_to_meters: Some(source.unit_scale_to_meters()),
-                        front_face_winding: source.front_face_winding(),
-                        ..SceneSpace::UNKNOWN
-                    };
-                    let conversion = SpaceConversion::try_new(&source_space, target, None)
-                        .map_err(|_| invalid)?;
-                    if conversion.reverse_winding() != reverse
-                        || conversion.changes_coordinates() != changes
-                    {
-                        return Err(invalid);
-                    }
-                    SceneEditEvidence::SpaceConversion(SceneSpaceConversionEvidence {
-                        store: published.outcome_evidence,
-                        input_generation,
-                        output_generation: self.generation.id(),
-                    })
-                }
-                _ => return Err(invalid),
-            }
+        let evidence = match self.proof.handoff {
+            SceneEditHandoffFacts::Selection {
+                input_generation,
+                targets,
+                reconstruction_work_items,
+                geometry_reconstruction_count,
+                reconstructed_primitive_count,
+                removed_metadata,
+                origins,
+            } => SceneEditEvidence::Selection(SceneGeometrySelectionEvidence {
+                store: published.outcome_evidence,
+                input_generation,
+                output_generation: self.generation.id(),
+                targets,
+                reconstruction_work_items,
+                geometry_reconstruction_count,
+                reconstructed_primitive_count,
+                removed_metadata,
+                corners: origins.corners,
+                faces: origins.faces,
+            }),
+            SceneEditHandoffFacts::SpaceConversion {
+                input_generation,
+                source,
+                target,
+                assumed_mask,
+                reverse_winding,
+            } => SceneEditEvidence::SpaceConversion(SceneSpaceConversionEvidence {
+                _store: published.outcome_evidence,
+                input_generation,
+                output_generation: self.generation.id(),
+                source,
+                target,
+                assumed_mask,
+                reverse_winding,
+            }),
+            #[cfg(test)]
+            SceneEditHandoffFacts::Triangulation {
+                input_target,
+                origins,
+                source_corners,
+                vertices,
+            } => SceneEditEvidence::Triangulation(SceneTriangulationEvidence {
+                owner: GeometryEvidenceOwner {
+                    input_target,
+                    output_target: input_target.rebind(self.generation.id()),
+                    store: published.outcome_evidence,
+                },
+                corner_origins: origins.corners,
+                face_offsets: origins.faces,
+                source_corners,
+                vertices,
+            }),
+            #[cfg(test)]
+            SceneEditHandoffFacts::Normals {
+                input_target,
+                effects,
+                removed_metadata,
+                normal_attribute,
+            } => SceneEditEvidence::Normals(SceneNormalGenerationEvidence {
+                owner: GeometryEvidenceOwner {
+                    input_target,
+                    output_target: input_target.rebind(self.generation.id()),
+                    store: published.outcome_evidence,
+                },
+                effects,
+                removed_metadata,
+                normal_attribute,
+            }),
+            #[cfg(test)]
+            SceneEditHandoffFacts::Tangents {
+                input_target,
+                replaced,
+                tangent_attribute,
+                corners,
+                normal_domain,
+                uv_set,
+                uv_domain,
+            } => SceneEditEvidence::Tangents(SceneTangentGenerationEvidence {
+                owner: GeometryEvidenceOwner {
+                    input_target,
+                    output_target: input_target.rebind(self.generation.id()),
+                    store: published.outcome_evidence,
+                },
+                replaced,
+                tangent_attribute,
+                corners,
+                normal_domain,
+                uv_set,
+                uv_domain,
+            }),
         };
 
-        Ok(SceneEditPublishedSuccess {
+        SceneEditPublishedSuccess {
             scene: SceneStorage {
                 generation: self.generation.into_id(),
                 tables: self.tables,
@@ -651,95 +416,105 @@ impl SceneEditHandoffToken {
             },
             evidence,
             ledger_evidence: published.ledger_evidence,
-        })
+        }
     }
 }
 
-#[cfg(test)]
-fn decode_tangent_domain(value: u32) -> Option<AttributeDomain> {
-    match value {
-        0 => Some(AttributeDomain::Vertex),
-        1 => Some(AttributeDomain::Corner),
-        _ => None,
-    }
+/// The exact owned terminal publication from a centrally validated Scene edit.
+#[must_use = "the Scene edit publication owns its terminal storage and ledger evidence"]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "publication transfers the exact Scene and physical owners without a new allocation after commit"
+)]
+pub enum SceneEditPublication {
+    Success(SceneEditPublishedSuccess),
+    MinimalFallback {
+        published: PublishedStoreFallbackParts,
+    },
 }
 
-fn decode_space(
-    mut read: impl FnMut(usize) -> Option<u32>,
-    unit: Option<u64>,
-    fields: [usize; 4],
-) -> Option<TargetSpace> {
-    let handedness = match read(fields[0])? {
-        1 => Handedness::Right,
-        2 => Handedness::Left,
-        _ => return None,
-    };
-    let axis = |value| match value {
-        1 => Some(Axis::PositiveX),
-        2 => Some(Axis::NegativeX),
-        3 => Some(Axis::PositiveY),
-        4 => Some(Axis::NegativeY),
-        5 => Some(Axis::PositiveZ),
-        6 => Some(Axis::NegativeZ),
-        _ => None,
-    };
-    let up = axis(read(fields[1])?)?;
-    let front = axis(read(fields[2])?)?;
-    let winding = match read(fields[3])? {
-        1 => FrontFaceWinding::Clockwise,
-        2 => FrontFaceWinding::CounterClockwise,
-        _ => return None,
-    };
-    TargetSpace::try_new(handedness, up, front, f64::from_bits(unit?), winding).ok()
+/// A precommit failure to admit or prepare the Scene edit's terminal owners.
+#[derive(Debug, Error)]
+pub enum SceneEditPublicationError {
+    #[error(transparent)]
+    Containment(StoreActivationContainment),
+    #[error(transparent)]
+    Preparation(StorePrepareError),
 }
 
-/// A prepared canonical owner did not match the core proof root or evidence shape.
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-#[error("prepared Scene edit owner does not match the core validation proof")]
-pub struct SceneEditHandoffPairingError;
-
-/// Consumes the final Scene edit freeze permit and reserves its destination generation.
+/// Admits recovery and both proven roots before reserving the destination generation.
 ///
-/// The paired joint and seal are scoped to the callback, so the operation owner can prepare the
-/// exact store while core retains the only generation/proof token.
-#[allow(clippy::type_complexity)]
-pub fn consume_scene_edit_freeze_permit<O, PP, U, R>(
-    permit: SceneEditFreezePermit<O, PP, U>,
-    reject: impl FnOnce(SceneEditFrozenGenerationRejection<O, PP, U>) -> R,
-    prepare: impl for<'joint> FnOnce(
-        SceneEditHandoffToken,
-        SceneEditJointCommit<'joint, O, PP, U>,
-        CanonicalJointSeal<'joint>,
-    ) -> R,
-) -> Result<R, StoreActivationContainment>
+/// Core prepares the exact joint outcome and transfers its owners without a caller finalizer.
+/// Every evidence predicate is proved by central validation before this permit is issued.
+pub fn consume_scene_edit_freeze_permit<'inv, O, PP, U>(
+    permit: SceneEditFreezePermit<'inv, O, PP, U>,
+    rejection_slot: CanonicalCauseSlot<'inv, StoreCanonicalRejection<SceneEditGenerationRejection>>,
+) -> Result<SceneEditPublication, SceneEditPublicationError>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    let generation = match crate::identity::SceneGenerationId::reserve() {
+    consume_scene_edit_freeze_permit_with_generation_source(
+        permit,
+        rejection_slot,
+        SceneGenerationId::reserve,
+    )
+}
+
+fn consume_scene_edit_freeze_permit_with_generation_source<'inv, O, PP, U>(
+    permit: SceneEditFreezePermit<'inv, O, PP, U>,
+    rejection_slot: CanonicalCauseSlot<'inv, StoreCanonicalRejection<SceneEditGenerationRejection>>,
+    reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
+) -> Result<SceneEditPublication, SceneEditPublicationError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let (permit, (reserve_generation, (), ())) = permit
+        .admit_generation_rejection(&rejection_slot, (reserve_generation, (), ()))
+        .map_err(SceneEditPublicationError::Containment)?;
+    let canonical_root = permit.proof().scene.directory().into_store();
+    let evidence_root = permit.proof().evidence_root;
+    let (permit, reserve_generation) = permit
+        .admit_generation_pairing(canonical_root, evidence_root, reserve_generation)
+        .map_err(SceneEditPublicationError::Containment)?;
+    let generation = match reserve_generation() {
         Ok(generation) => generation,
         Err(SceneGenerationError::Exhausted) => {
-            return permit
+            let rejected = permit
                 .reject_generation(
+                    rejection_slot,
                     SceneEditGenerationRejection,
                     SCENE_EDIT_GENERATION_REJECTION_CODE,
                 )
-                .map(reject);
+                .map_err(SceneEditPublicationError::Containment)?;
+            let (prepared, _) = rejected
+                .prepare_minimal_fallback()
+                .map_err(SceneEditPublicationError::Preparation)?
+                .into_parts();
+            return Ok(SceneEditPublication::MinimalFallback {
+                published: prepared.handoff(),
+            });
         }
     };
 
-    Ok(permit.bind_joint_commit(|output, proof, joint, seal| {
-        prepare(
-            SceneEditHandoffToken {
-                generation,
-                proof,
-                tables: output.scene.into_tables(),
-            },
-            joint,
-            seal,
-        )
-    }))
+    permit.bind_joint_commit(|joint, seal| {
+        let CanonicalJointSuccess {
+            output,
+            proof,
+            store,
+        } = joint
+            .prepare(seal)
+            .map_err(SceneEditPublicationError::Containment)?;
+        let token = SceneEditHandoffToken {
+            generation,
+            proof,
+            tables: output.scene.into_tables(),
+        };
+        Ok(SceneEditPublication::Success(token.handoff(store)))
+    })
 }
 
 /// The rooted selected-target descriptors and origins from one atomic publication.
@@ -748,6 +523,10 @@ pub struct SceneGeometrySelectionEvidence {
     input_generation: SceneGenerationId,
     output_generation: SceneGenerationId,
     targets: u32,
+    reconstruction_work_items: u64,
+    geometry_reconstruction_count: u32,
+    reconstructed_primitive_count: u32,
+    removed_metadata: u32,
     corners: baozi_operation::OutcomeEvidenceSequenceRef<u32, SceneGeometryCornerOriginsTag>,
     faces: baozi_operation::OutcomeEvidenceSequenceRef<u32, SceneGeometryFaceOffsetsTag>,
 }
@@ -759,29 +538,17 @@ impl SceneGeometrySelectionEvidence {
     pub const fn output_generation(&self) -> SceneGenerationId {
         self.output_generation
     }
-    pub fn reconstruction_work_items(&self) -> u64 {
-        self.store
-            .root()
-            .scalar::<u64>(0, super::schema::field::SOURCE_UNIT_BITS)
-            .expect("validated reconstruction work")
+    pub const fn reconstruction_work_items(&self) -> u64 {
+        self.reconstruction_work_items
     }
-    pub fn geometry_reconstruction_count(&self) -> u32 {
-        self.store
-            .root()
-            .scalar::<u32>(0, 5)
-            .expect("validated reconstruction count")
+    pub const fn geometry_reconstruction_count(&self) -> u32 {
+        self.geometry_reconstruction_count
     }
-    pub fn reconstructed_primitive_count(&self) -> u32 {
-        self.store
-            .root()
-            .scalar::<u32>(0, 6)
-            .expect("validated reconstructed primitive count")
+    pub const fn reconstructed_primitive_count(&self) -> u32 {
+        self.reconstructed_primitive_count
     }
-    pub fn removed_metadata_entries(&self) -> u32 {
-        self.store
-            .root()
-            .scalar::<u32>(0, 7)
-            .expect("validated metadata count")
+    pub const fn removed_metadata_entries(&self) -> u32 {
+        self.removed_metadata
     }
     pub const fn len(&self) -> usize {
         self.targets as usize
@@ -874,5 +641,384 @@ impl<'a> SceneGeometryTargetEvidence<'a> {
             .sequence(self.owner.faces)?
             .as_slice()
             .get(self.words[12] as usize..self.words[12] as usize + self.words[13] as usize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use baozi_operation::__retained_store_integration::activation::{
+        CanonicalActivationOutcome, CanonicalActivationSeal, CanonicalCentralValidationOutcome,
+        CanonicalFreezePermitIssue, CanonicalValidationDecision, CanonicalValidationProgress,
+    };
+    use baozi_operation::{
+        AccountPoisonReason, OperationControl, StorePreparationFailureClass, StoreTerminalCause,
+    };
+
+    use crate::SceneValidationLimits;
+    use crate::canonical_scene::store::construction::node_scene::edit::tests::try_build_single_trs_scene;
+    use crate::canonical_scene::store::construction::node_scene::materialization::node_scene_activation_roles;
+    use crate::canonical_scene::store::construction::node_scene::scratch::ScopedNodeSceneValidationScratchOwner;
+    use crate::canonical_scene::store::construction::node_scene::tests::{
+        test_account, test_factory, test_limits,
+    };
+    use crate::canonical_scene::store::construction::{
+        STORE_DIMENSION, SceneCanonicalInvocationHost, SceneConstructionPhase,
+        SceneConstructionUnit, SceneFailureEvidenceWork, SceneStoreOperation, final_progress,
+        try_plan_scene_operation,
+    };
+
+    use super::super::{SceneEditBootstrap, SceneEditRejection, resolve_scene_space_conversion};
+    use super::*;
+
+    struct GenerationCapture<'a> {
+        drops: &'a Cell<usize>,
+        account: &'a baozi_operation::PhysicalStorageAccount,
+        retained_before: u64,
+    }
+
+    impl Drop for GenerationCapture<'_> {
+        fn drop(&mut self) {
+            let snapshot = self.account.snapshot();
+            assert!(!snapshot.poisoned());
+            assert!(snapshot.live_retained_bytes() > self.retained_before);
+            self.drops.set(self.drops.get() + 1);
+        }
+    }
+
+    #[test]
+    fn scene_edit_publication_admits_recovery_and_proof_roots_before_source() {
+        let _: fn(
+            SceneEditHandoffToken,
+            PreparedStoreSuccess<
+                RecordBlock,
+                SceneDirectorySchema,
+                RecordBlock,
+                SceneEditEvidenceTag,
+            >,
+        ) -> SceneEditPublishedSuccess = SceneEditHandoffToken::handoff;
+        for (foreign_slot, foreign_canonical) in [(false, false), (true, false), (false, true)] {
+            for exhausted in [false, true] {
+                let factory = test_factory();
+                let account = test_account(&factory, 1_024);
+                let generation_source = AtomicU64::new(0);
+                let source = try_build_single_trs_scene(&account, || {
+                    SceneGenerationId::reserve_from(&generation_source)
+                })
+                .expect("single-node edit fixture must publish success");
+                let scene = crate::ValidatedScene::from_node_scene(source.scene);
+                let input_generation = scene.generation();
+                let retained = account.snapshot();
+                if exhausted {
+                    generation_source.store(u64::MAX, Ordering::Relaxed);
+                }
+                let generation_before = generation_source.load(Ordering::Relaxed);
+                let generation_calls = Cell::new(0_usize);
+                let generation_drops = Cell::new(0_usize);
+                let (writer, failure, admission) =
+                    SceneEditBootstrap::try_new().unwrap().into_parts();
+                let start = try_plan_scene_operation(
+                    test_limits(),
+                    OperationControl::default(),
+                    256,
+                    SceneFailureEvidenceWork {
+                        max_evidence_members: SceneEditBootstrap::success_evidence_members(),
+                        construction_work_limit: SceneEditBootstrap::failure_field_work(),
+                        validation_work_limit: SceneEditBootstrap::failure_field_work(),
+                    },
+                )
+                .unwrap();
+                let mut invocation_host = SceneCanonicalInvocationHost::<
+                    SceneEditOutput,
+                    SceneEditValidationProof,
+                    SceneEditRejection,
+                    SceneEditRejection,
+                    SceneEditGenerationRejection,
+                    SceneEditEvidenceTag,
+                >::new();
+                let mut foreign_host = SceneCanonicalInvocationHost::<
+                    (),
+                    (),
+                    (),
+                    (),
+                    SceneEditGenerationRejection,
+                    SceneEditEvidenceTag,
+                >::new();
+                {
+                    let source_fields = [
+                        SceneSpaceField::Handedness,
+                        SceneSpaceField::UpAxis,
+                        SceneSpaceField::FrontAxis,
+                        SceneSpaceField::UnitScaleToMeters,
+                        SceneSpaceField::FrontFaceWinding,
+                    ];
+                    let mut assumed_source_fields = None;
+                    let mut inputs = Some((start, writer, failure, admission));
+                    let finish = invocation_host
+                        .run_body(|parts, disposition| {
+                            let (start, writer, failure, admission) = inputs.take().unwrap();
+                            let operation = SceneStoreOperation::try_start_derived(
+                                parts.startup,
+                                start.control,
+                                start.ledger_plan,
+                                &scene.as_node_scene().canonical,
+                                start.start_plan,
+                            )
+                            .unwrap();
+                            let owner = operation
+                                .into_session_outcome_owner(
+                                    node_scene_activation_roles(start.keys).session_policy(),
+                                    writer,
+                                    failure,
+                                )
+                                .unwrap();
+                            let resolved = resolve_scene_space_conversion(
+                                &scene,
+                                TargetSpace::STANDARD,
+                                Some(TargetSpace::STANDARD),
+                            )
+                            .unwrap();
+                            assert!(!resolved.is_unchanged());
+                            let mut transaction = admission
+                                .into_space_transaction(resolved, SceneValidationLimits::default());
+                            let activated = owner
+                                .plan_and_activate_scoped(
+                                    parts.output,
+                                    parts.activation,
+                                    |mut planning| {
+                                        let (sealed, completion) = planning
+                                            .with_semantic_work(|semantic| {
+                                                transaction.preflight(semantic)
+                                            })
+                                            .unwrap();
+                                        match planning.seal_activation(sealed, completion) {
+                                            CanonicalActivationSeal::Sealed(permit) => {
+                                                permit.activate(|lane, plan| plan.materialize(lane))
+                                            }
+                                            CanonicalActivationSeal::Unsealed(failure) => {
+                                                failure.finish()
+                                            }
+                                        }
+                                    },
+                                )
+                                .unwrap();
+                            let postflight = transaction.finish();
+                            let CanonicalActivationOutcome::Activated(activated) = activated else {
+                                panic!("valid space edit must materialize")
+                            };
+                            let central = activated
+                                .validate_centrally(
+                                    parts.proof,
+                                    parts.validation,
+                                    CanonicalValidationProgress::new(
+                                        SceneConstructionPhase::Validation,
+                                        SceneConstructionUnit::WorkUnits,
+                                    ),
+                                    |lane, output| postflight.build_evidence(lane, output),
+                                    |planning, output| {
+                                        if !foreign_canonical {
+                                            return postflight.validate_candidate(planning, output);
+                                        }
+                                        let scratch_plan =
+                                            output.scene.inner().central_validation.scratch_plan();
+                                        planning.validate_with(
+                                            |checkpoint| {
+                                                ScopedNodeSceneValidationScratchOwner::try_allocate(
+                                                    checkpoint,
+                                                    scratch_plan,
+                                                )
+                                            },
+                                            |session, directory, evidence, scratch| {
+                                                let mut proof = postflight
+                                            .prove_candidate(
+                                                session, directory, evidence, scratch, output,
+                                            )?
+                                            .expect("the actual metered candidate must be valid");
+                                                proof.scene = scene.as_node_scene().proof;
+                                                Ok(CanonicalValidationDecision::accept(proof))
+                                            },
+                                        )
+                                    },
+                                )
+                                .unwrap();
+                            let CanonicalCentralValidationOutcome::Candidate(candidate) = central
+                            else {
+                                panic!("valid space edit must pass central validation")
+                            };
+                            let SceneEditHandoffFacts::SpaceConversion {
+                                input_generation: proved_generation,
+                                source: proved_source,
+                                target: proved_target,
+                                assumed_mask,
+                                reverse_winding,
+                            } = candidate.proof().handoff
+                            else {
+                                panic!("space facts must already be projected before freeze")
+                            };
+                            assert_eq!(proved_generation, input_generation);
+                            assert_eq!(proved_source, resolved.source());
+                            assert_eq!(proved_target, resolved.target());
+                            assert_eq!(assumed_mask, u32::from(resolved.assumed_fields_mask()));
+                            assert_eq!(reverse_winding, resolved.reverses_winding());
+                            assumed_source_fields = Some(
+                                source_fields.map(|field| resolved.assumed_source_field(field)),
+                            );
+                            candidate.request_finish(disposition).unwrap();
+                        })
+                        .unwrap();
+                    let completion = finish.resume();
+                    let baozi_operation::__retained_store_integration::activation::CanonicalInvocationOutcome::Candidate(candidate) = completion.outcome else {
+                        panic!("valid space edit must restore its actual candidate")
+                    };
+                    let CanonicalFreezePermitIssue::Ready(permit) = candidate
+                        .try_issue_freeze_permit(
+                            completion.generation.interruption,
+                            final_progress(),
+                        )
+                        .unwrap()
+                    else {
+                        panic!("valid space edit must reach generation admission")
+                    };
+                    assert!(permit.destination_counters_are_zero());
+                    let expected_root = permit.proof().scene.directory().into_store();
+                    let expected_evidence_root = permit.proof().evidence_root;
+                    let rejection_slot = if foreign_slot {
+                        crate::canonical_scene::store::construction::finish_test_scene_operation(
+                            &mut foreign_host,
+                            &account,
+                        )
+                        .generation
+                        .rejection
+                    } else {
+                        completion.generation.rejection
+                    };
+                    let generation_capture = GenerationCapture {
+                        drops: &generation_drops,
+                        account: &account,
+                        retained_before: retained.live_retained_bytes(),
+                    };
+                    let result = consume_scene_edit_freeze_permit_with_generation_source(
+                        permit,
+                        rejection_slot,
+                        || {
+                            let _capture = generation_capture;
+                            generation_calls.set(generation_calls.get() + 1);
+                            SceneGenerationId::reserve_from(&generation_source)
+                        },
+                    );
+                    let denied = foreign_slot || foreign_canonical;
+                    if denied {
+                        assert_eq!(
+                            generation_calls.get(),
+                            0,
+                            "recovery/root mismatch must reject before source; exhausted={exhausted}"
+                        );
+                        assert!(matches!(
+                            result,
+                            Err(SceneEditPublicationError::Containment(_))
+                        ));
+                        let snapshot = account.snapshot();
+                        assert!(snapshot.poisoned());
+                        assert_eq!(
+                            snapshot.first_poison_evidence().unwrap().reason(),
+                            AccountPoisonReason::OwnershipGraphUnverified
+                        );
+                        assert_eq!(generation_source.load(Ordering::Relaxed), generation_before);
+                    } else {
+                        match (exhausted, result.unwrap()) {
+                            (true, SceneEditPublication::MinimalFallback { published }) => {
+                                let StoreTerminalCause::Failure(cause) =
+                                    published.ledger_evidence.header().terminal_cause()
+                                else {
+                                    panic!("generation exhaustion must publish a failure")
+                                };
+                                assert_eq!(cause.class(), StorePreparationFailureClass::Requested);
+                                assert_eq!(cause.code(), SCENE_EDIT_GENERATION_REJECTION_CODE);
+                                assert_eq!(
+                                    published
+                                        .ledger_evidence
+                                        .dimension_by_semantic(STORE_DIMENSION)
+                                        .unwrap()
+                                        .committed_canonical_output(),
+                                    0
+                                );
+                                drop(published);
+                            }
+                            (false, SceneEditPublication::Success(published)) => {
+                                let (published, evidence, ledger) = published.into_parts();
+                                assert_ne!(published.generation(), input_generation);
+                                assert_eq!(
+                                    published.as_node_scene().canonical.root_ref(),
+                                    expected_root
+                                );
+                                let SceneEditEvidence::SpaceConversion(evidence) = evidence else {
+                                    panic!("space edit must retain its conversion evidence")
+                                };
+                                assert_eq!(evidence._store.root_ref(), expected_evidence_root);
+                                assert_eq!(evidence.input_generation(), input_generation);
+                                assert_eq!(evidence.output_generation(), published.generation());
+                                assert_eq!(evidence.source(), TargetSpace::STANDARD);
+                                assert_eq!(evidence.target(), TargetSpace::STANDARD);
+                                assert!(!evidence.reverses_triangle_winding());
+                                assert_eq!(evidence.triangle_corner_order(), [0, 1, 2]);
+                                for (field, assumed) in source_fields
+                                    .into_iter()
+                                    .zip(assumed_source_fields.unwrap())
+                                {
+                                    assert_eq!(evidence.assumed_source_field(field), assumed);
+                                }
+                                assert_eq!(
+                                    ledger.header().terminal_cause(),
+                                    StoreTerminalCause::Success
+                                );
+                                assert!(
+                                    ledger
+                                        .dimension_by_semantic(STORE_DIMENSION)
+                                        .unwrap()
+                                        .committed_canonical_output()
+                                        > 0
+                                );
+                                drop((published, evidence, ledger));
+                            }
+                            _ => {
+                                panic!("generation admission must select its fixed terminal owner")
+                            }
+                        }
+                        assert_eq!(generation_calls.get(), 1);
+                        assert_eq!(
+                            generation_source.load(Ordering::Relaxed),
+                            if exhausted {
+                                u64::MAX
+                            } else {
+                                generation_before + 1
+                            }
+                        );
+                        assert!(!account.snapshot().poisoned());
+                    }
+                    assert_eq!(generation_drops.get(), 1);
+                }
+                drop(foreign_host);
+                drop(invocation_host);
+                assert_eq!(scene.generation(), input_generation);
+                if !foreign_slot && !foreign_canonical {
+                    assert_eq!(
+                        account.snapshot().live_retained_bytes(),
+                        retained.live_retained_bytes()
+                    );
+                    assert_eq!(
+                        account.snapshot().live_retained_allocations(),
+                        retained.live_retained_allocations()
+                    );
+                }
+                drop(scene);
+                drop(source.report);
+                if !foreign_slot && !foreign_canonical {
+                    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+                    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+                }
+            }
+        }
     }
 }

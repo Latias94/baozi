@@ -3,10 +3,12 @@ use super::*;
 use crate::ledger::{Ledger, LedgerLimits};
 use crate::retained::RetainedHandleSharePlan;
 use crate::{
-    OperationControl, OperationCoordinator, PhysicalStorageAccountFactory,
+    CancellationSignal, OperationControl, OperationCoordinator, PhysicalStorageAccountFactory,
     PhysicalStorageAccountLimits,
 };
 use std::num::{NonZeroU32, NonZeroU64};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct Owner;
 impl OperationOwner for Owner {}
@@ -22,6 +24,482 @@ fn actual_ledger() -> (Ledger<Owner, u8, StoreDimensionKey>, StoreDimensionKey) 
         .unwrap();
     let limits = LedgerLimits::new(u64::MAX, [(key, DimensionPolicy::counter(8, 8, 0))]).unwrap();
     (Ledger::try_new(limits, &[1]).unwrap(), key)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ParserProgress;
+
+impl ProgressPhase for ParserProgress {
+    fn order(self) -> u32 {
+        0
+    }
+
+    fn stable_id(self) -> &'static str {
+        "parser"
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ParserUnit;
+
+impl ProgressUnit for ParserUnit {
+    fn stable_id(self) -> &'static str {
+        "comparisons"
+    }
+}
+
+struct ParserPolls(Arc<AtomicUsize>);
+
+impl CancellationSignal for ParserPolls {
+    fn is_cancelled(&self) -> bool {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        false
+    }
+}
+
+fn with_parser_operation(
+    body: impl FnOnce(
+        &mut RetainedStoreOperation<'_, Owner, ParserProgress, ParserUnit>,
+        StoreDimensionKey,
+        &AtomicUsize,
+    ),
+) {
+    let catalog = StoreSemanticCatalogId::new(*b"parser-host-test", NonZeroU32::MIN);
+    let domain = StoreKeyDomain::try_new(catalog).unwrap();
+    let phase = domain
+        .try_admit_phase(crate::StorePhaseSemanticId::new(catalog, NonZeroU64::MIN))
+        .unwrap();
+    let [storage_key, work_key, failure_key] = [1, 2, 3].map(|local| {
+        domain
+            .try_admit_dimension(StoreDimensionSemanticId::new(
+                catalog,
+                NonZeroU64::new(local).unwrap(),
+            ))
+            .unwrap()
+    });
+    let failure_work =
+        RetainedStoreFailureTerminalWorkPlan::new(failure_key, 1, u64::MAX, u64::MAX).unwrap();
+    let storage_policy = DimensionPolicy::reservable_bytes(
+        failure_work.ordinary_attempted_work_limit() - 512,
+        failure_work.ordinary_consumed_work_limit() - 512,
+        u64::MAX,
+        u64::MAX,
+    )
+    .with_published_outcome_evidence_limit(u64::MAX);
+    let limits = LedgerLimits::new(
+        u64::MAX,
+        [
+            (storage_key, storage_policy),
+            (work_key, DimensionPolicy::counter(512, 512, 0)),
+            (failure_key, failure_work.requirement().dimension_policy()),
+        ],
+    )
+    .unwrap();
+    let ledger_plan = StoreLedgerPlan::try_new(domain, limits, &[phase]).unwrap();
+    let start = RetainedStoreStartPlan::new(
+        RetainedStoreWriterPlan::new(
+            phase,
+            storage_key,
+            storage_key,
+            RetainedStoreBatchLimits::new(32, 8).unwrap(),
+        ),
+        RetainedStoreSharePlan::new(storage_key, storage_key),
+        StoreFallbackEnvelope::new(91),
+        storage_key,
+        1,
+        storage_key,
+        1,
+        failure_work,
+    );
+    let factory =
+        PhysicalStorageAccountFactory::try_new_for_live_accounts(NonZeroU64::MIN).unwrap();
+    let account = factory
+        .try_create_account(PhysicalStorageAccountLimits::new(1 << 20, 32).unwrap())
+        .unwrap();
+    let polls = Arc::new(AtomicUsize::new(0));
+    let control = OperationControl::default().with_cancellation(ParserPolls(Arc::clone(&polls)));
+    let mut root = StoreInvocationRoot::<Owner, ParserProgress, ParserUnit>::new();
+    let mut operation =
+        RetainedStoreOperation::try_start(&mut root, control, ledger_plan, &account, start)
+            .unwrap();
+    polls.store(0, Ordering::SeqCst);
+    body(&mut operation, work_key, &polls);
+    drop(operation);
+    drop(root);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    assert!(!account.snapshot().poisoned());
+}
+
+#[test]
+fn borrowed_parser_replenishes_twice_from_zero_without_resetting_comparison_cadence() {
+    with_parser_operation(|operation, key, polls| {
+        let values: [u16; 258] = std::array::from_fn(|index| u16::try_from(index).unwrap());
+        let mut comparisons = 0;
+        operation
+            .with_exclusive_execution::<_, StoreInvocationError>(|context| {
+                let layout = context.bind_group([key])?;
+                context.parser_child::<_, StoreInvocationError, 1>(
+                    layout,
+                    [0],
+                    [None],
+                    |child| {
+                        assert_eq!(child.work_counters(key)?, (0, 0, 0));
+                        assert_eq!(polls.load(Ordering::SeqCst), 1);
+                        child.replenish(256)?;
+                        assert_eq!(child.work_counters(key)?, (256, 0, 0));
+                        assert_eq!(polls.load(Ordering::SeqCst), 1);
+                        for pair in values[..257].windows(2) {
+                            let ordering = child.run_prefix([1], 1, || {
+                                comparisons += 1;
+                                Ok::<_, StoreInvocationError>(pair[0].cmp(&pair[1]))
+                            })?;
+                            assert_eq!(ordering, std::cmp::Ordering::Less);
+                        }
+                        assert_eq!(comparisons, 256);
+                        assert_eq!(child.work_counters(key)?, (256, 256, 0));
+                        assert_eq!(polls.load(Ordering::SeqCst), 1);
+                        child.replenish(1)?;
+                        assert_eq!(child.work_counters(key)?, (257, 256, 0));
+                        assert_eq!(polls.load(Ordering::SeqCst), 1);
+                        let ordering = child.run_prefix([1], 1, || {
+                            assert_eq!(polls.load(Ordering::SeqCst), 2);
+                            comparisons += 1;
+                            Ok::<_, StoreInvocationError>(values[256].cmp(&values[257]))
+                        })?;
+                        assert_eq!(ordering, std::cmp::Ordering::Less);
+                        assert_eq!(child.work_counters(key)?, (257, 257, 0));
+                        assert_eq!(polls.load(Ordering::SeqCst), 2);
+                        Ok(())
+                    },
+                )?;
+                context.parts.work.check_quiescent().unwrap();
+                assert_eq!(context.work_counters(key)?, (257, 257, 0));
+                assert_eq!(context.parts.ordinary.failure.get(), None);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(comparisons, 257);
+        assert_eq!(polls.load(Ordering::SeqCst), 3);
+    });
+}
+
+#[test]
+fn borrowed_parser_replenishment_rejects_a_remaining_suffix_without_new_work_or_poll() {
+    with_parser_operation(|operation, key, polls| {
+        let mut comparisons = 0;
+        let result = operation.with_exclusive_execution::<_, StoreInvocationError>(|context| {
+            let layout = context.bind_group([key])?;
+            let result =
+                context.parser_child::<_, StoreInvocationError, 1>(layout, [2], [None], |child| {
+                    let ordering = child.run_prefix([1], 1, || {
+                        comparisons += 1;
+                        Ok::<_, StoreInvocationError>(3_u16.cmp(&5))
+                    })?;
+                    assert_eq!(ordering, std::cmp::Ordering::Less);
+                    assert_eq!(child.work_counters(key)?, (2, 1, 0));
+                    let result = child.replenish(2);
+                    assert!(matches!(
+                        &result,
+                        Err(StoreInvocationError::Runtime(StoreRuntimeError::Ledger(
+                            LedgerCause::InactiveLinearWorkPermit
+                        )))
+                    ));
+                    assert!(matches!(
+                        child.replenish(1),
+                        Err(StoreInvocationError::Runtime(
+                            StoreRuntimeError::FallbackOnly
+                        ))
+                    ));
+                    assert_eq!(child.work_counters(key)?, (2, 1, 0));
+                    assert_eq!(polls.load(Ordering::SeqCst), 1);
+                    result
+                });
+            context.parts.work.check_quiescent().unwrap();
+            assert_eq!(context.work_counters(key)?, (2, 1, 0));
+            assert_eq!(
+                context.parts.ordinary.failure.get(),
+                Some(PreparationFailureCode::ledger())
+            );
+            result
+        });
+        assert!(matches!(
+            result,
+            Err(StoreInvocationError::Runtime(StoreRuntimeError::Ledger(
+                LedgerCause::InactiveLinearWorkPermit
+            )))
+        ));
+        assert_eq!(comparisons, 1);
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+    });
+}
+
+#[test]
+fn borrowed_parser_replenishment_cannot_split_an_item_limited_comparison() {
+    with_parser_operation(|operation, key, polls| {
+        let mut comparisons = 0;
+        let result = operation.with_exclusive_execution::<_, StoreInvocationError>(|context| {
+            let layout = context.bind_group([key])?;
+            let result = context.parser_child::<_, StoreInvocationError, 1>(
+                layout,
+                [1],
+                [Some(1)],
+                |child| {
+                    let ordering = child.run_prefix([1], 1, || {
+                        comparisons += 1;
+                        Ok::<_, StoreInvocationError>(5_u16.cmp(&3))
+                    })?;
+                    assert_eq!(ordering, std::cmp::Ordering::Greater);
+                    assert_eq!(child.work_counters(key)?, (1, 1, 0));
+                    let result = child.replenish(1);
+                    assert!(matches!(
+                        &result,
+                        Err(StoreInvocationError::Runtime(StoreRuntimeError::Ledger(
+                            LedgerCause::InactiveLinearWorkPermit
+                        )))
+                    ));
+                    assert_eq!(child.work_counters(key)?, (1, 1, 0));
+                    assert_eq!(polls.load(Ordering::SeqCst), 1);
+                    result
+                },
+            );
+            context.parts.work.check_quiescent().unwrap();
+            assert_eq!(context.work_counters(key)?, (1, 1, 0));
+            assert_eq!(
+                context.parts.ordinary.failure.get(),
+                Some(PreparationFailureCode::ledger())
+            );
+            result
+        });
+        assert!(matches!(
+            result,
+            Err(StoreInvocationError::Runtime(StoreRuntimeError::Ledger(
+                LedgerCause::InactiveLinearWorkPermit
+            )))
+        ));
+        assert_eq!(comparisons, 1);
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+    });
+}
+
+#[test]
+fn scan_boundary_keeps_the_parent_available_for_the_real_row_and_next_child() {
+    with_parser_operation(|operation, key, polls| {
+        let input = b"a\nrest";
+        let mut classified = 0;
+        let mut row_writes = 0;
+        operation
+            .with_exclusive_execution::<_, StoreInvocationError>(|context| {
+                let layout = context.bind_group([key])?;
+                context.parser_parent::<_, StoreInvocationError, 1>(
+                    layout,
+                    [1],
+                    [None],
+                    |parent| {
+                        let end = parent.scan_child::<_, StoreInvocationError, 1>(
+                            layout,
+                            [u64::try_from(input.len()).unwrap()],
+                            [None],
+                            |scan| {
+                                for (index, byte) in input.iter().copied().enumerate() {
+                                    let newline = scan.run_prefix([1], 1, || {
+                                        classified += 1;
+                                        Ok::<_, StoreInvocationError>(byte == b'\n')
+                                    })?;
+                                    if newline {
+                                        return Ok(StoreScanReturn::Boundary(index + 1));
+                                    }
+                                }
+                                Ok(StoreScanReturn::Exhausted(input.len()))
+                            },
+                        )?;
+                        assert_eq!(end, 2);
+                        assert_eq!(parent.work_counters(key)?, (7, 2, 0));
+                        parent.child::<_, StoreInvocationError, 1>(layout, [2], [None], |row| {
+                            row.run_prefix([2], 1, || {
+                                row_writes += 2;
+                                Ok::<_, StoreInvocationError>(())
+                            })
+                        })?;
+                        assert_eq!(parent.work_counters(key)?, (9, 4, 0));
+                        parent.prescribed_exit_checkpoint()?;
+                        parent.complete_parent()
+                    },
+                )?;
+                assert_eq!(context.work_counters(key)?, (9, 5, 0));
+                context.parser_child::<_, StoreInvocationError, 1>(
+                    layout,
+                    [1],
+                    [None],
+                    |next| {
+                        next.run_prefix([1], 1, || {
+                            row_writes += 1;
+                            Ok::<_, StoreInvocationError>(())
+                        })
+                    },
+                )?;
+                assert_eq!(context.work_counters(key)?, (10, 6, 0));
+                assert_eq!(context.parts.ordinary.failure.get(), None);
+                context.parts.work.check_quiescent().unwrap();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(classified, 2);
+        assert_eq!(row_writes, 3);
+        assert_eq!(polls.load(Ordering::SeqCst), 3);
+    });
+}
+
+#[test]
+fn scan_boundary_does_not_add_successful_import_channel_debt() {
+    with_parser_operation(|operation, key, polls| {
+        let boundary = StoreImporterBoundary::default();
+        assert!(boundary.begin());
+        let mut classified = 0;
+        operation
+            .with_parser_execution::<_, StoreInvocationError>(&boundary, |context| {
+                let layout = context.bind_group([key])?;
+                for byte in [b'\n'; 257] {
+                    let newline = context.parser_scan_child::<_, StoreInvocationError, 1>(
+                        layout,
+                        [1],
+                        [None],
+                        |scan| {
+                            let newline = scan.run_prefix([1], 1, || {
+                                classified += 1;
+                                Ok::<_, StoreInvocationError>(byte == b'\n')
+                            })?;
+                            Ok(StoreScanReturn::Boundary(newline))
+                        },
+                    )?;
+                    assert!(newline);
+                    assert_eq!(polls.load(Ordering::SeqCst), 1);
+                }
+                assert_eq!(context.work_counters(key)?, (257, 257, 0));
+                context.parser_child::<_, StoreInvocationError, 1>(layout, [1], [None], |row| {
+                    row.run_prefix([1], 1, || {
+                        assert_eq!(polls.load(Ordering::SeqCst), 1);
+                        Ok::<_, StoreInvocationError>(())
+                    })
+                })?;
+                assert_eq!(context.work_counters(key)?, (258, 258, 0));
+                assert_eq!(context.parts.ordinary.debt.get(), 1);
+                assert_eq!(context.parts.ordinary.failure.get(), None);
+                context.prescribed_exit_checkpoint()
+            })
+            .unwrap();
+        boundary.finish_returned(false);
+        assert_eq!(classified, 257);
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+    });
+}
+
+#[test]
+fn scan_exhausted_and_ordinary_success_still_reject_an_unfinished_suffix() {
+    for scan in [false, true] {
+        with_parser_operation(|operation, key, polls| {
+            let mut completed = 0;
+            let mut reused = false;
+            let result = operation.with_exclusive_execution::<_, StoreInvocationError>(|context| {
+                let layout = context.bind_group([key])?;
+                let result = if scan {
+                    context.parser_scan_child::<_, StoreInvocationError, 1>(
+                        layout,
+                        [2],
+                        [None],
+                        |child| {
+                            child.run_prefix([1], 1, || {
+                                completed += 1;
+                                Ok::<_, StoreInvocationError>(())
+                            })?;
+                            Ok(StoreScanReturn::Exhausted(()))
+                        },
+                    )
+                } else {
+                    context.parser_child::<_, StoreInvocationError, 1>(
+                        layout,
+                        [2],
+                        [None],
+                        |child| {
+                            child.run_prefix([1], 1, || {
+                                completed += 1;
+                                Ok::<_, StoreInvocationError>(())
+                            })
+                        },
+                    )
+                };
+                assert!(matches!(
+                    &result,
+                    Err(StoreInvocationError::Runtime(
+                        StoreRuntimeError::ObservedWorkIncomplete
+                    ))
+                ));
+                assert_eq!(context.work_counters(key)?, (2, 1, 0));
+                context.parts.work.check_quiescent().unwrap();
+                assert!(
+                    context
+                        .parser_child::<_, StoreInvocationError, 1>(layout, [1], [None], |_child| {
+                            reused = true;
+                            Ok(())
+                        })
+                        .is_err()
+                );
+                assert_eq!(context.work_counters(key)?, (2, 1, 0));
+                result
+            });
+            assert!(matches!(
+                result,
+                Err(StoreInvocationError::Runtime(
+                    StoreRuntimeError::ObservedWorkIncomplete
+                ))
+            ));
+            assert_eq!(completed, 1);
+            assert!(!reused);
+            assert_eq!(polls.load(Ordering::SeqCst), 1);
+        });
+    }
+}
+
+#[test]
+fn a_scan_boundary_cannot_heal_a_caught_physical_prefix_panic() {
+    with_parser_operation(|operation, key, polls| {
+        let mut caught = false;
+        let result = operation.with_exclusive_execution::<_, StoreInvocationError>(|context| {
+            let layout = context.bind_group([key])?;
+            let result = context.parser_scan_child::<_, StoreInvocationError, 1>(
+                layout,
+                [2],
+                [None],
+                |child| {
+                    child.run_prefix([1], 1, || Ok::<_, StoreInvocationError>(()))?;
+                    let panic = catch_unwind(AssertUnwindSafe(|| {
+                        child.run_prefix([1], 1, || -> Result<(), StoreInvocationError> {
+                            panic!("physical text classification panic");
+                        })
+                    }));
+                    assert!(panic.is_err());
+                    caught = true;
+                    Ok(StoreScanReturn::Boundary(()))
+                },
+            );
+            assert!(matches!(
+                &result,
+                Err(StoreInvocationError::Runtime(
+                    StoreRuntimeError::FallbackOnly
+                ))
+            ));
+            assert_eq!(context.work_counters(key)?, (2, 1, 0));
+            context.parts.work.check_quiescent().unwrap();
+            assert_eq!(
+                context.parts.ordinary.failure.get(),
+                Some(PreparationFailureCode::product_graph(ABANDONED))
+            );
+            result
+        });
+        assert!(result.is_err());
+        assert!(caught);
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+    });
 }
 
 #[test]
@@ -297,12 +775,14 @@ fn failure_materializer_observes_active_frame_before_resolution() {
     let debt = Cell::new(0);
     let execution_state = Cell::new(StoreExecutionState::Running);
     let share_work = RetainedHandleSharePlan::new(internal_key, internal_key);
-    let (poll, ledger) = coordinator.split_exclusive_poll_and_ledger();
+    let (poll, progress, ledger) = coordinator.split_exclusive_progress_and_ledger();
     let (work, storage) = ledger.exclusive().unwrap();
+    let progress = progress.bind(storage.progress_evidence());
     let share_layout = work.bind(share_work.charges().map(|(key, _)| key)).unwrap();
     let mut context = StoreInvocation {
         parts: ExclusiveOperationParts {
             work,
+            progress,
             ordinary: crate::retained::ExecutionOrdinaryStorage {
                 storage,
                 poll,
@@ -433,4 +913,596 @@ fn parser_completion_failure_after_real_write_resolves_suffix_without_abandonmen
     assert_eq!(exclusive.counters(key).unwrap(), (2, 0, 0));
     exclusive.check_quiescent().unwrap();
     assert_eq!(failure.get(), Some(PreparationFailureCode::ledger()));
+}
+
+#[test]
+fn scan_exhausted_consumes_the_actual_chunk_and_one_import_channel_after_due_poll() {
+    with_parser_operation(|operation, key, polls| {
+        let boundary = StoreImporterBoundary::default();
+        assert!(boundary.begin());
+        let mut before_scan = 0;
+        let mut classified = 0;
+        let mut following = 0;
+        operation
+            .with_parser_execution::<_, StoreInvocationError>(&boundary, |context| {
+                let layout = context.bind_group([key])?;
+                for _ in 0..256 {
+                    context.parser_child::<_, StoreInvocationError, 1>(
+                        layout,
+                        [1],
+                        [None],
+                        |child| {
+                            child.run_prefix([1], 1, || {
+                                before_scan += 1;
+                                Ok::<_, StoreInvocationError>(())
+                            })
+                        },
+                    )?;
+                }
+                assert_eq!(context.work_counters(key)?, (256, 256, 0));
+                assert_eq!(context.parts.ordinary.debt.get(), 256);
+                assert_eq!(polls.load(Ordering::SeqCst), 1);
+                let input = b"ab";
+                let end = context.parser_scan_child::<_, StoreInvocationError, 1>(
+                    layout,
+                    [2],
+                    [None],
+                    |scan| {
+                        assert_eq!(polls.load(Ordering::SeqCst), 2);
+                        for (index, byte) in input.iter().copied().enumerate() {
+                            let newline = scan.run_prefix([1], 1, || {
+                                classified += 1;
+                                Ok::<_, StoreInvocationError>(byte == b'\n')
+                            })?;
+                            if newline {
+                                return Ok(StoreScanReturn::Boundary(index + 1));
+                            }
+                        }
+                        Ok(StoreScanReturn::Exhausted(input.len()))
+                    },
+                )?;
+                assert_eq!(end, input.len());
+                assert_eq!(context.work_counters(key)?, (258, 258, 0));
+                assert_eq!(context.parts.ordinary.debt.get(), 1);
+                context.parts.work.check_quiescent().unwrap();
+                context.parser_child::<_, StoreInvocationError, 1>(
+                    layout,
+                    [1],
+                    [None],
+                    |child| {
+                        child.run_prefix([1], 1, || {
+                            following += 1;
+                            Ok::<_, StoreInvocationError>(())
+                        })
+                    },
+                )?;
+                assert_eq!(context.work_counters(key)?, (259, 259, 0));
+                assert_eq!(context.parts.ordinary.debt.get(), 2);
+                assert_eq!(context.parts.ordinary.failure.get(), None);
+                assert_eq!(polls.load(Ordering::SeqCst), 2);
+                context.prescribed_exit_checkpoint()
+            })
+            .unwrap();
+        boundary.finish_returned(false);
+        assert_eq!(before_scan, 256);
+        assert_eq!(classified, 2);
+        assert_eq!(following, 1);
+        assert_eq!(polls.load(Ordering::SeqCst), 3);
+    });
+}
+
+#[test]
+fn a_scan_boundary_settles_caught_import_unwind_before_denying_the_next_child() {
+    with_parser_operation(|operation, key, polls| {
+        let boundary = StoreImporterBoundary::default();
+        assert!(boundary.begin());
+        let mut caught = false;
+        let mut following = false;
+        let result =
+            operation.with_parser_execution::<_, StoreInvocationError>(&boundary, |context| {
+                let layout = context.bind_group([key])?;
+                let result = context.parser_scan_child::<_, StoreInvocationError, 1>(
+                    layout,
+                    [2],
+                    [None],
+                    |scan| {
+                        scan.run_prefix([1], 1, || Ok::<_, StoreInvocationError>(()))?;
+                        let panic = catch_unwind(AssertUnwindSafe(|| {
+                            scan.run_prefix([1], 1, || -> Result<(), StoreInvocationError> {
+                                panic!("physical import text classification panic");
+                            })
+                        }));
+                        assert!(panic.is_err());
+                        assert_eq!(
+                            scan.host.context.parts.ordinary.execution_state.get(),
+                            StoreExecutionState::UnwindPending
+                        );
+                        assert_eq!(scan.host.context.parts.ordinary.failure.get(), None);
+                        assert_eq!(scan.work_counters(key)?, (2, 1, 0));
+                        caught = true;
+                        Ok(StoreScanReturn::Boundary(()))
+                    },
+                );
+                assert!(matches!(
+                    &result,
+                    Err(StoreInvocationError::Runtime(
+                        StoreRuntimeError::FallbackOnly
+                    ))
+                ));
+                assert_eq!(context.work_counters(key)?, (2, 1, 0));
+                context.parts.work.check_quiescent().unwrap();
+                assert_eq!(
+                    context.parts.ordinary.execution_state.get(),
+                    StoreExecutionState::UnwindPending
+                );
+                assert_eq!(
+                    context.parts.ordinary.failure.get(),
+                    Some(PreparationFailureCode::product_graph(ABANDONED))
+                );
+                assert!(
+                    context
+                        .parser_child::<_, StoreInvocationError, 1>(layout, [1], [None], |_child| {
+                            following = true;
+                            Ok(())
+                        })
+                        .is_err()
+                );
+                assert_eq!(context.work_counters(key)?, (2, 1, 0));
+                result
+            });
+        boundary.finish_returned(false);
+        assert!(matches!(
+            result,
+            Err(StoreInvocationError::Runtime(
+                StoreRuntimeError::FallbackOnly
+            ))
+        ));
+        assert!(caught);
+        assert!(!following);
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+    });
+}
+
+#[test]
+fn borrowed_services_and_child_admission_share_the_real_parent_scan_and_retained_owners() {
+    with_parser_operation(|operation, key, polls| {
+        let mut physical_calls = 0;
+        let mut scanned = 0;
+        operation
+            .with_exclusive_execution::<_, StoreInvocationError>(|context| {
+                let catalog = StoreSemanticCatalogId::new(*b"parser-host-test", NonZeroU32::MIN);
+                let phase = context
+                    .domain
+                    .try_admit_phase(crate::StorePhaseSemanticId::new(catalog, NonZeroU64::MIN))
+                    .unwrap();
+                let storage_key = context
+                    .domain
+                    .try_admit_dimension(StoreDimensionSemanticId::new(catalog, NonZeroU64::MIN))
+                    .unwrap();
+                let layout = context.child_admission().bind_group([key])?;
+                context.parser_parent(
+                    layout,
+                    [1],
+                    [None],
+                    |parent| -> Result<(), StoreInvocationError> {
+                        parent.child_admission().scan_child(
+                            layout,
+                            [7],
+                            [None],
+                            |scan| -> Result<StoreScanReturn<()>, StoreInvocationError> {
+                                let mut action = Some(
+                                    |_storage: StoreOrdinaryStorage<
+                                        '_,
+                                        '_,
+                                        Owner,
+                                        ParserProgress,
+                                        ParserUnit,
+                                    >| {
+                                        physical_calls += 1;
+                                        let completed = b"ab\nrest"
+                                            .iter()
+                                            .take_while(|byte| {
+                                                scanned += 1;
+                                                **byte != b'\n'
+                                            })
+                                            .count()
+                                            + 1;
+                                        Ok::<_, StoreInvocationError>((
+                                            completed,
+                                            [completed as u64],
+                                        ))
+                                    },
+                                );
+                                let completed = scan.run_returned_prefix_with_storage(
+                                    1,
+                                    &mut action,
+                                    |cause| cause,
+                                    |_, cause| cause,
+                                )?;
+                                assert_eq!(completed, 3);
+                                assert_eq!(scan.work_counters(key)?, (8, 3, 0));
+                                let before = polls.load(Ordering::SeqCst);
+                                {
+                                    let mut services = scan.services();
+                                    services.report_progress(
+                                        ParserProgress,
+                                        ParserUnit,
+                                        3,
+                                        Some(7),
+                                    )?;
+                                    let mut retained =
+                                        services.reserve_retained(phase, storage_key, 8, 1)?;
+                                    assert_eq!(retained.raw.bytes(), 8);
+                                    assert!(retained.physical.is_some());
+                                    services.resize(&mut retained, 4)?;
+                                    assert_eq!(retained.raw.bytes(), 4);
+                                    retained.release_storage([17_u8; 4]);
+                                    services.charge_attempted([key], [1])?;
+                                    services.complete_observed([key], [1])?;
+                                }
+                                assert_eq!(polls.load(Ordering::SeqCst) - before, 3);
+                                assert_eq!(scan.work_counters(key)?, (9, 4, 0));
+                                Ok(StoreScanReturn::Boundary(()))
+                            },
+                        )?;
+                        parent.complete_parent()
+                    },
+                )?;
+                assert_eq!(context.work_counters(key)?, (9, 5, 0));
+                context
+                    .child_admission()
+                    .child(layout, [1], [None], |child| {
+                        child.run_prefix([1], 1, || Ok::<_, StoreInvocationError>(()))
+                    })?;
+                assert_eq!(context.work_counters(key)?, (10, 6, 0));
+                context.check_work_quiescent()?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!((physical_calls, scanned), (1, 3));
+    });
+}
+
+#[test]
+fn returned_parser_prefix_excess_stops_the_actual_frame_without_fabricating_completion() {
+    with_parser_operation(|operation, key, _polls| {
+        let mut physical_calls = 0;
+        let mut following = false;
+        let result = operation.with_exclusive_execution::<_, StoreInvocationError>(|context| {
+            let layout = context.bind_group([key])?;
+            let result = context.parser_child(layout, [2], [None], |child| {
+                child.run_prefix([1], 1, || Ok::<_, StoreInvocationError>(()))?;
+                let mut action = Some(
+                    |_storage: StoreOrdinaryStorage<'_, '_, Owner, ParserProgress, ParserUnit>| {
+                        physical_calls += 1;
+                        Ok::<_, StoreInvocationError>(((), [2]))
+                    },
+                );
+                child.run_returned_prefix_with_storage(
+                    1,
+                    &mut action,
+                    |cause| cause,
+                    |_, cause| cause,
+                )
+            });
+            assert!(result.is_err());
+            assert_eq!(context.work_counters(key)?, (2, 1, 0));
+            context.parts.work.check_quiescent().unwrap();
+            assert_eq!(
+                context.parts.ordinary.failure.get(),
+                Some(PreparationFailureCode::ledger())
+            );
+            assert!(
+                context
+                    .child_admission()
+                    .child(
+                        layout,
+                        [1],
+                        [None],
+                        |_| -> Result<(), StoreInvocationError> {
+                            following = true;
+                            Ok(())
+                        }
+                    )
+                    .is_err()
+            );
+            result
+        });
+        assert!(result.is_err());
+        assert_eq!(physical_calls, 1);
+        assert!(!following);
+    });
+}
+
+#[test]
+fn fallible_chunks_and_normally_returned_io_errors_keep_distinct_real_completion_policies() {
+    with_parser_operation(|operation, key, _polls| {
+        let cause = Rc::new(17_u8);
+        let mut calls = 0;
+        operation
+            .with_exclusive_execution::<_, StoreInvocationError>(|context| {
+                let layout = context.bind_group([key])?;
+                let failure = context
+                    .run_fallible_action(layout, [1], 1, || {
+                        calls += 1;
+                        Err::<(), _>(Rc::clone(&cause))
+                    })?
+                    .unwrap_err();
+                assert!(Rc::ptr_eq(&failure, &cause));
+                assert_eq!(context.work_counters(key)?, (1, 0, 0));
+                assert_eq!(context.parts.ordinary.failure.get(), None);
+                let returned_io_error = context
+                    .run_action(layout, [1], 1, || {
+                        calls += 1;
+                        Err::<(), _>(Rc::clone(&cause))
+                    })?
+                    .unwrap_err();
+                assert!(Rc::ptr_eq(&returned_io_error, &cause));
+                assert_eq!(context.work_counters(key)?, (2, 1, 0));
+                let value = context
+                    .run_fallible_action(layout, [1], 1, || {
+                        calls += 1;
+                        Ok::<_, Rc<u8>>(29_u8)
+                    })?
+                    .unwrap();
+                assert_eq!(value, 29);
+                assert_eq!(context.work_counters(key)?, (3, 2, 0));
+                context.parts.work.check_quiescent().unwrap();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(calls, 3);
+    });
+}
+
+#[test]
+fn a_fallible_chunk_panic_reaches_the_actual_caller_catch_and_blocks_reuse() {
+    with_parser_operation(|operation, key, _polls| {
+        let mut calls = 0;
+        let mut following = false;
+        let result = operation.with_exclusive_execution::<_, StoreInvocationError>(|context| {
+            let layout = context.bind_group([key])?;
+            context
+                .run_fallible_action(layout, [1], 1, || Ok::<_, ()>(()))?
+                .unwrap();
+            let panic = catch_unwind(AssertUnwindSafe(|| {
+                context.run_fallible_action(layout, [1], 1, || -> Result<(), ()> {
+                    calls += 1;
+                    panic!("the actual detector callback panicked");
+                })
+            }));
+            assert!(panic.is_err());
+            assert_eq!(context.work_counters(key)?, (2, 1, 0));
+            context.parts.work.check_quiescent().unwrap();
+            assert_eq!(
+                context.parts.ordinary.failure.get(),
+                Some(PreparationFailureCode::product_graph(ABANDONED))
+            );
+            let result = context.run_fallible_action(layout, [1], 1, || {
+                following = true;
+                Ok::<_, ()>(())
+            });
+            assert!(result.is_err());
+            assert_eq!(context.work_counters(key)?, (2, 1, 0));
+            result.map(|_| ())
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, 1);
+        assert!(!following);
+    });
+}
+
+#[test]
+fn observed_root_calls_preserve_their_explicit_poll_policy_and_bound_numeric_prefixes() {
+    with_parser_operation(|operation, key, polls| {
+        let mut calls = 0;
+        operation
+            .with_exclusive_execution::<_, StoreInvocationError>(|context| {
+                let layout = context.bind_group([key])?;
+                context.run_action(layout, [1], 7, || ())?;
+                let debt = context.parts.ordinary.debt.get();
+                let before = polls.load(Ordering::SeqCst);
+                assert_eq!(debt, 7);
+                let value = context.run_observed_action(layout, [1], || {
+                    calls += 1;
+                    Err::<(), _>("returned-io-error")
+                })?;
+                assert_eq!(value, Err("returned-io-error"));
+                let value = context.run_observed_fallible_action(layout, [1], || {
+                    calls += 1;
+                    Err::<(), _>("detector-error")
+                })?;
+                assert_eq!(value, Err("detector-error"));
+                assert_eq!(context.parts.ordinary.debt.get(), debt);
+                assert_eq!(polls.load(Ordering::SeqCst), before);
+                context.charge_attempted_bound(layout, [2])?;
+                context.complete_observed_bound(layout, [1])?;
+                context.complete_direct_bound(layout, [1])?;
+                context.charge_observed_bound(layout, [1])?;
+                let snapshot = context.dimension_state(key)?;
+                assert_eq!((snapshot.attempted(), snapshot.consumed()), (6, 5));
+                assert_eq!(context.work_counters(key)?, (6, 5, 0));
+                context.parts.work.check_quiescent().unwrap();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(calls, 2);
+    });
+}
+
+#[test]
+fn ordinary_root_loans_preserve_entry_and_explicit_control_frontiers() {
+    with_parser_operation(|operation, key, polls| {
+        let boundary = StoreImporterBoundary::default();
+        operation
+            .with_root_execution::<_, StoreInvocationError>(&boundary, |context| {
+                let layout = context.bind_group([key])?;
+                context.run_action(layout, [1], 7, || ())?;
+                assert_eq!(context.parts.ordinary.debt.get(), 7);
+                assert_eq!(polls.load(Ordering::SeqCst), 1);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+        operation
+            .with_root_execution::<_, StoreInvocationError>(&boundary, |context| {
+                assert_eq!(context.parts.ordinary.debt.get(), 0);
+                context.checkpoint()?;
+                assert_eq!(context.parts.ordinary.debt.get(), 0);
+                assert_eq!(context.work_counters(key)?, (1, 1, 0));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(polls.load(Ordering::SeqCst), 3);
+        operation
+            .with_parser_execution::<_, StoreInvocationError>(&boundary, |_context| Ok(()))
+            .unwrap();
+        assert_eq!(polls.load(Ordering::SeqCst), 4);
+    });
+}
+
+#[test]
+fn ordinary_root_denial_returns_the_original_ledger_error_without_an_exit_poll() {
+    with_parser_operation(|operation, key, polls| {
+        let boundary = StoreImporterBoundary::default();
+        let denied =
+            operation.with_root_execution::<_, StoreInvocationError>(&boundary, |context| {
+                let layout = context.bind_group([key])?;
+                context.charge_attempted_bound(layout, [513])
+            });
+        assert!(matches!(
+            denied,
+            Err(StoreInvocationError::Runtime(StoreRuntimeError::Ledger(
+                LedgerCause::LimitExceeded {
+                    dimension,
+                    value: 513,
+                    limit: 512,
+                    ..
+                }
+            ))) if dimension == key
+        ));
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+        let mut following = false;
+        assert!(
+            operation
+                .with_root_execution::<_, StoreInvocationError>(&boundary, |_context| {
+                    following = true;
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(!following);
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+    });
+}
+
+#[test]
+fn ordinary_root_preserves_a_caught_extension_result_until_the_next_real_frontier() {
+    with_parser_operation(|operation, key, polls| {
+        let boundary = StoreImporterBoundary::default();
+        let result = operation
+            .with_root_execution::<_, StoreInvocationError>(&boundary, |context| {
+                let layout = context.bind_group([key])?;
+                let panic = catch_unwind(AssertUnwindSafe(|| {
+                    context.run_observed_fallible_action(layout, [2], || -> Result<(), ()> {
+                        panic!("actual detector callback panic")
+                    })
+                }));
+                assert!(panic.is_err());
+                assert_eq!(context.work_counters(key)?, (2, 0, 0));
+                context.parts.work.check_quiescent().unwrap();
+                Ok("extension-fault")
+            })
+            .unwrap();
+        assert_eq!(result, "extension-fault");
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+        let mut following = false;
+        assert!(
+            operation
+                .with_root_execution::<_, StoreInvocationError>(&boundary, |_| {
+                    following = true;
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(!following);
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+    });
+}
+
+#[test]
+fn borrowed_storage_observations_follow_atomic_transitions_and_actual_token_release() {
+    with_parser_operation(|operation, _key, _polls| {
+        operation
+            .with_exclusive_execution::<_, StoreInvocationError>(|context| {
+                let catalog = StoreSemanticCatalogId::new(*b"parser-host-test", NonZeroU32::MIN);
+                let phase = context
+                    .domain
+                    .try_admit_phase(crate::StorePhaseSemanticId::new(catalog, NonZeroU64::MIN))
+                    .unwrap();
+                let storage_key = context
+                    .domain
+                    .try_admit_dimension(StoreDimensionSemanticId::new(catalog, NonZeroU64::MIN))
+                    .unwrap();
+                let observation = context.storage_observation(storage_key)?;
+                let baseline = observation.live_bytes();
+                let mut reservation = context.ordinary_storage().reserve(phase, storage_key, 8)?;
+                assert_eq!(observation.live_bytes(), baseline + 8);
+                {
+                    let services = context.services();
+                    services.validate_live_owner(&reservation)?;
+                    services.transition(&mut reservation, phase, storage_key, 4)?;
+                }
+                assert_eq!(reservation.raw.bytes(), 4);
+                assert_eq!(observation.live_bytes(), baseline + 4);
+                reservation.release_storage([0_u8; 4]);
+                assert_eq!(observation.live_bytes(), baseline);
+                Ok(())
+            })
+            .unwrap();
+    });
+}
+
+#[test]
+fn borrowed_storage_transition_keeps_the_original_retained_output_rejection() {
+    with_parser_operation(|operation, _key, _polls| {
+        let result = operation.with_exclusive_execution::<_, StoreInvocationError>(|context| {
+            let catalog = StoreSemanticCatalogId::new(*b"parser-host-test", NonZeroU32::MIN);
+            let phase = context
+                .domain
+                .try_admit_phase(crate::StorePhaseSemanticId::new(catalog, NonZeroU64::MIN))
+                .unwrap();
+            let storage_key = context
+                .domain
+                .try_admit_dimension(StoreDimensionSemanticId::new(catalog, NonZeroU64::MIN))
+                .unwrap();
+            let observation = context.storage_observation(storage_key)?;
+            let baseline = observation.live_bytes();
+            let mut retained = context
+                .services()
+                .reserve_retained(phase, storage_key, 8, 1)?;
+            let before = observation.live_bytes();
+            let result = context
+                .services()
+                .transition(&mut retained, phase, storage_key, 4);
+            assert!(matches!(
+                &result,
+                Err(StoreInvocationError::Runtime(StoreRuntimeError::Ledger(
+                    LedgerCause::OwnerMismatch
+                )))
+            ));
+            assert_eq!(retained.raw.bytes(), 8);
+            assert_eq!(retained.physical.as_ref().unwrap().admitted_bytes(), 8);
+            assert_eq!(observation.live_bytes(), before);
+            retained.release_storage([0_u8; 8]);
+            assert_eq!(observation.live_bytes(), baseline);
+            result
+        });
+        assert!(matches!(
+            result,
+            Err(StoreInvocationError::Runtime(StoreRuntimeError::Ledger(
+                LedgerCause::OwnerMismatch
+            )))
+        ));
+    });
 }

@@ -783,8 +783,16 @@ where
 /// This terminal owner retains the runtime domain anchor and the metered key-bearing mapping, so
 /// semantic and ordinal queries remain valid after the producer or plugin-facing owner is gone.
 pub struct StoreLedgerEvidence {
-    raw: PublishedLedgerEvidence<StorePhaseKey, StoreDimensionKey>,
+    storage: StoreLedgerEvidenceStorage,
     domain: StoreKeyDomain,
+}
+
+enum StoreLedgerEvidenceStorage {
+    Retained(PublishedLedgerEvidence<StorePhaseKey, StoreDimensionKey>),
+    Unattached {
+        snapshot: crate::LedgerSnapshot<StorePhaseKey, StoreDimensionKey>,
+        terminal_cause: StoreTerminalCause,
+    },
 }
 
 impl StoreLedgerEvidence {
@@ -792,31 +800,70 @@ impl StoreLedgerEvidence {
         raw: PublishedLedgerEvidence<StorePhaseKey, StoreDimensionKey>,
         domain: StoreKeyDomain,
     ) -> Self {
-        Self { raw, domain }
+        Self {
+            storage: StoreLedgerEvidenceStorage::Retained(raw),
+            domain,
+        }
+    }
+
+    pub(super) fn from_unattached_snapshot(
+        snapshot: crate::LedgerSnapshot<StorePhaseKey, StoreDimensionKey>,
+        terminal_cause: StoreTerminalCause,
+        domain: StoreKeyDomain,
+    ) -> Self {
+        Self {
+            storage: StoreLedgerEvidenceStorage::Unattached {
+                snapshot,
+                terminal_cause,
+            },
+            domain,
+        }
     }
 
     /// Returns the complete frozen terminal header.
     pub fn header(&self) -> StoreLedgerEvidenceHeader {
-        let raw = self
-            .raw
-            .header()
-            .unwrap_or_else(|| published_root_invariant("terminal evidence header"));
-        StoreLedgerEvidenceHeader {
-            schema_revision: raw.schema_revision(),
-            terminal_cause: match raw.terminal_cause() {
-                TerminalEvidenceCause::Success => StoreTerminalCause::Success,
-                TerminalEvidenceCause::Failure(cause) => {
-                    StoreTerminalCause::Failure(StorePreparationFailure::from_raw(cause))
+        match &self.storage {
+            StoreLedgerEvidenceStorage::Retained(raw) => {
+                let raw = raw
+                    .header()
+                    .unwrap_or_else(|| published_root_invariant("terminal evidence header"));
+                StoreLedgerEvidenceHeader {
+                    schema_revision: raw.schema_revision(),
+                    terminal_cause: match raw.terminal_cause() {
+                        TerminalEvidenceCause::Success => StoreTerminalCause::Success,
+                        TerminalEvidenceCause::Failure(cause) => {
+                            StoreTerminalCause::Failure(StorePreparationFailure::from_raw(cause))
+                        }
+                    },
+                    last_completed_phase: raw
+                        .last_completed_phase()
+                        .map(StorePhaseKey::semantic_id),
+                    dimension_count: raw.dimension_count(),
+                    phase_count: raw.phase_count(),
+                    current_live_bytes: raw.current_live_bytes(),
+                    peak_live_bytes: raw.peak_live_bytes(),
+                    active_reservations: raw.active_reservations(),
+                    current_evidence_bytes: raw.current_evidence_bytes(),
+                    peak_evidence_bytes: raw.peak_evidence_bytes(),
                 }
+            }
+            StoreLedgerEvidenceStorage::Unattached {
+                snapshot,
+                terminal_cause,
+            } => StoreLedgerEvidenceHeader {
+                schema_revision: crate::retained::TERMINAL_LEDGER_EVIDENCE_SCHEMA_REVISION,
+                terminal_cause: *terminal_cause,
+                last_completed_phase: snapshot
+                    .last_completed_phase()
+                    .map(StorePhaseKey::semantic_id),
+                dimension_count: snapshot.dimensions().len(),
+                phase_count: snapshot.phases().len(),
+                current_live_bytes: snapshot.current_live_bytes(),
+                peak_live_bytes: snapshot.peak_live_bytes(),
+                active_reservations: snapshot.active_reservations(),
+                current_evidence_bytes: snapshot.current_evidence_bytes(),
+                peak_evidence_bytes: snapshot.peak_evidence_bytes(),
             },
-            last_completed_phase: raw.last_completed_phase().map(StorePhaseKey::semantic_id),
-            dimension_count: raw.dimension_count(),
-            phase_count: raw.phase_count(),
-            current_live_bytes: raw.current_live_bytes(),
-            peak_live_bytes: raw.peak_live_bytes(),
-            active_reservations: raw.active_reservations(),
-            current_evidence_bytes: raw.current_evidence_bytes(),
-            peak_evidence_bytes: raw.peak_evidence_bytes(),
         }
     }
 
@@ -828,23 +875,16 @@ impl StoreLedgerEvidence {
         if !self.domain.owns_dimension(dimension) {
             return Err(StoreRuntimeError::ForeignDimensionDomain { dimension });
         }
-        let raw = self
-            .raw
-            .dimension(dimension)
-            .ok_or(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension {
-                dimension,
-            }))?;
-        Ok(StoreDimensionSnapshot {
-            dimension: dimension.semantic_id(),
-            attempted: raw.attempted(),
-            consumed: raw.consumed(),
-            current_live_bytes: raw.current_live_bytes(),
-            peak_live_bytes: raw.peak_live_bytes(),
-            pending_publication: raw.pending_publication(),
-            committed: raw.committed(),
-            committed_canonical_output: raw.committed_canonical_output(),
-            published_outcome_evidence: raw.published_outcome_evidence(),
-        })
+        let raw = match &self.storage {
+            StoreLedgerEvidenceStorage::Retained(raw) => raw.dimension(dimension),
+            StoreLedgerEvidenceStorage::Unattached { snapshot, .. } => {
+                snapshot.dimension(dimension).copied()
+            }
+        }
+        .ok_or(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension {
+            dimension,
+        }))?;
+        Ok(StoreDimensionSnapshot::from_raw(dimension, raw))
     }
 
     /// Returns one frozen dimension snapshot by stable semantic identity.
@@ -858,8 +898,18 @@ impl StoreLedgerEvidence {
 
     /// Enumerates one frozen dimension and its stable semantic identity by canonical ordinal.
     pub fn dimension_at(&self, index: usize) -> Option<StoreDimensionSnapshot> {
-        let dimension = self.raw.dimension_key_at(index)?;
-        self.dimension(dimension).ok()
+        match &self.storage {
+            StoreLedgerEvidenceStorage::Retained(raw) => {
+                let dimension = raw.dimension_key_at(index)?;
+                self.dimension(dimension).ok()
+            }
+            StoreLedgerEvidenceStorage::Unattached { snapshot, .. } => {
+                let (dimension, raw) = snapshot.dimensions().nth(index)?;
+                self.domain
+                    .owns_dimension(dimension)
+                    .then(|| StoreDimensionSnapshot::from_raw(dimension, *raw))
+            }
+        }
     }
 
     /// Returns one frozen phase snapshot after exact key-domain validation.
@@ -867,15 +917,14 @@ impl StoreLedgerEvidence {
         if !self.domain.owns_phase(phase) {
             return Err(StoreRuntimeError::ForeignPhaseDomain { phase });
         }
-        let raw = self
-            .raw
-            .phase(phase)
-            .ok_or(StoreRuntimeError::Ledger(LedgerCause::UnknownPhase))?;
-        Ok(StorePhaseSnapshot {
-            phase: phase.semantic_id(),
-            current_live_bytes: raw.current_live_bytes(),
-            peak_live_bytes: raw.peak_live_bytes(),
-        })
+        let raw = match &self.storage {
+            StoreLedgerEvidenceStorage::Retained(raw) => raw.phase(phase),
+            StoreLedgerEvidenceStorage::Unattached { snapshot, .. } => {
+                snapshot.phase(phase).copied()
+            }
+        }
+        .ok_or(StoreRuntimeError::Ledger(LedgerCause::UnknownPhase))?;
+        Ok(StorePhaseSnapshot::from_raw(phase, raw))
     }
 
     /// Returns one frozen phase snapshot by stable semantic identity.
@@ -886,8 +935,18 @@ impl StoreLedgerEvidence {
 
     /// Enumerates one frozen phase and its stable semantic identity by canonical ordinal.
     pub fn phase_at(&self, index: usize) -> Option<StorePhaseSnapshot> {
-        let phase = self.raw.phase_key_at(index)?;
-        self.phase(phase).ok()
+        match &self.storage {
+            StoreLedgerEvidenceStorage::Retained(raw) => {
+                let phase = raw.phase_key_at(index)?;
+                self.phase(phase).ok()
+            }
+            StoreLedgerEvidenceStorage::Unattached { snapshot, .. } => {
+                let (phase, raw) = snapshot.phases().nth(index)?;
+                self.domain
+                    .owns_phase(phase)
+                    .then(|| StorePhaseSnapshot::from_raw(phase, *raw))
+            }
+        }
     }
 }
 
@@ -960,7 +1019,6 @@ impl StoreLedgerEvidenceHeader {
 
 /// Unique terminal classification stored in the ledger evidence header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum StoreTerminalCause {
     /// The validated canonical and outcome-evidence graph published successfully.
     Success,
@@ -983,6 +1041,20 @@ pub struct StoreDimensionSnapshot {
 }
 
 impl StoreDimensionSnapshot {
+    fn from_raw(dimension: StoreDimensionKey, raw: crate::DimensionSnapshot) -> Self {
+        Self {
+            dimension: dimension.semantic_id(),
+            attempted: raw.attempted(),
+            consumed: raw.consumed(),
+            current_live_bytes: raw.current_live_bytes(),
+            peak_live_bytes: raw.peak_live_bytes(),
+            pending_publication: raw.pending_publication(),
+            committed: raw.committed(),
+            committed_canonical_output: raw.committed_canonical_output(),
+            published_outcome_evidence: raw.published_outcome_evidence(),
+        }
+    }
+
     /// Returns the stable owner-defined dimension semantic identity.
     pub const fn dimension(self) -> StoreDimensionSemanticId {
         self.dimension
@@ -1038,6 +1110,14 @@ pub struct StorePhaseSnapshot {
 }
 
 impl StorePhaseSnapshot {
+    fn from_raw(phase: StorePhaseKey, raw: crate::PhaseSnapshot) -> Self {
+        Self {
+            phase: phase.semantic_id(),
+            current_live_bytes: raw.current_live_bytes(),
+            peak_live_bytes: raw.peak_live_bytes(),
+        }
+    }
+
     /// Returns the stable owner-defined phase semantic identity.
     pub const fn phase(self) -> StorePhaseSemanticId {
         self.phase
@@ -1073,7 +1153,6 @@ impl PublishedStoreFallbackOutput {
 
 /// Public classification of the frozen terminal preparation cause.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum StorePreparationFailureClass {
     Requested,
     Control,
@@ -1089,7 +1168,7 @@ pub struct StorePreparationFailure {
 }
 
 impl StorePreparationFailure {
-    const fn from_raw(raw: PreparationFailureCode) -> Self {
+    pub(super) const fn from_raw(raw: PreparationFailureCode) -> Self {
         let class = match raw.class() {
             PreparationFailureClass::Requested => StorePreparationFailureClass::Requested,
             PreparationFailureClass::Control => StorePreparationFailureClass::Control,

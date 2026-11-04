@@ -11,7 +11,7 @@ pub(crate) const FACET_BYTES: usize = 50;
 pub(crate) fn detect(
     probe: &Probe<'_>,
     hint: &ReadHint,
-    scope: &DetectionScope<'_>,
+    scope: &mut DetectionScope<'_, '_>,
 ) -> DetectionResult<DetectionOutcome> {
     let binary = account_detection_work(scope, binary_probe_work_bytes(probe), || {
         binary_facets(probe.bytes(), probe.source_len())
@@ -56,7 +56,7 @@ fn binary_probe_work_bytes(probe: &Probe<'_>) -> usize {
 }
 
 fn account_detection_work<T>(
-    scope: &DetectionScope<'_>,
+    scope: &mut DetectionScope<'_, '_>,
     byte_count: usize,
     work: impl FnOnce() -> T,
 ) -> DetectionResult<T> {

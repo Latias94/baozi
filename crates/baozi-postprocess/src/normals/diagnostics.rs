@@ -91,72 +91,64 @@ fn sample<P: PositionSource>(label: &str, positions: P, indices: &[u32], groups:
 #[test]
 #[ignore = "manual optimized operation attribution; empty actions are not normal generation"]
 fn observed_unit_protocol_with_empty_actions_preserves_exact_work_evidence() {
-    use baozi_core::__scene_integration::integration::{
-        SceneEditBootstrap, try_start_scene_edit_operation,
-    };
+    use baozi_operation::__retained_store_integration::activation::CanonicalOperationPublication;
     use baozi_operation::__retained_store_integration::authority::PreparedStoreEvidenceOnlyOutcome;
 
-    use crate::operation::{PostProcessOwner, runtime};
+    use crate::operation::runtime;
 
     // Fixed historical pre-P3 control-site workload, not the new semantic normal-action count.
     const ACTIONS: u64 = 982_943;
     let (scene, source_evidence) = crate::test_fixtures::canonical_triangle_import().into_parts();
     let mut samples = Vec::with_capacity(20);
     for iteration in 0..23 {
-        let (writer_limits, _, _) = SceneEditBootstrap::try_new()
-            .expect("original scene edit bootstrap")
-            .into_parts();
-        let (keys, ledger, start) =
-            runtime::plan_selected_runtime(writer_limits, crate::PostProcessBudgets::default())
-                .expect("original scene edit policy");
-        let mut operation = try_start_scene_edit_operation::<PostProcessOwner, _, _>(
+        let (publication, (keys, state, elapsed)) = runtime::with_test_operation(
             &scene,
-            crate::PostProcessControl::default().into_runtime(),
-            ledger,
-            start,
-        )
-        .expect("original scene edit operation");
-        let initial = operation
-            .producer_host()
-            .dimension_state(keys.work)
-            .expect("initial work state");
-        let elapsed = {
-            let (work, mut services) = operation
-                .execution()
-                .expect("borrow the scene edit execution region");
-            let group = work
-                .bind_group([keys.work])
-                .expect("bind one ordinary work role");
-            let start = Instant::now();
-            for _ in 0..ACTIONS {
-                services
-                    .before_action(1)
-                    .expect("admit bounded control debt");
-                let mut permit = group.admit_observed([1]).expect("admit one empty action");
-                black_box(());
-                permit
-                    .complete([1])
-                    .expect("record the physically completed empty action");
-                permit.finish().expect("resolve the completed envelope");
-                services.completed_action(1).expect("checked control cost");
-            }
-            let elapsed = start.elapsed().as_nanos();
-            services
-                .checkpoint()
-                .expect("final empty-action control checkpoint");
-            work.finish_region()
-                .expect("every borrowed action resolved");
-            elapsed
+            crate::PostProcessControl::default(),
+            |operation, keys| {
+                let initial = operation
+                    .producer_host()
+                    .dimension_state(keys.work)
+                    .expect("initial work state");
+                let elapsed = {
+                    let (work, mut services) = operation
+                        .execution()
+                        .expect("borrow the scene edit execution region");
+                    let group = work
+                        .bind_group([keys.work])
+                        .expect("bind one ordinary work role");
+                    let start = Instant::now();
+                    for _ in 0..ACTIONS {
+                        services
+                            .before_action(1)
+                            .expect("admit bounded control debt");
+                        let mut permit = group.admit_observed([1]).expect("admit one empty action");
+                        black_box(());
+                        permit
+                            .complete([1])
+                            .expect("record the physically completed empty action");
+                        permit.finish().expect("resolve the completed envelope");
+                        services.completed_action(1).expect("checked control cost");
+                    }
+                    let elapsed = start.elapsed().as_nanos();
+                    services
+                        .checkpoint()
+                        .expect("final empty-action control checkpoint");
+                    work.finish_region()
+                        .expect("every borrowed action resolved");
+                    elapsed
+                };
+                let state = operation
+                    .producer_host()
+                    .dimension_state(keys.work)
+                    .expect("completed work state");
+                assert_eq!(state.attempted(), initial.attempted() + ACTIONS);
+                assert_eq!(state.consumed(), initial.consumed() + ACTIONS);
+                (keys, state, elapsed)
+            },
+        );
+        let CanonicalOperationPublication::Unchanged(prepared) = publication else {
+            panic!("every observed unit resolved before its unchanged publication");
         };
-        let state = operation
-            .producer_host()
-            .dimension_state(keys.work)
-            .expect("completed work state");
-        assert_eq!(state.attempted(), initial.attempted() + ACTIONS);
-        assert_eq!(state.consumed(), initial.consumed() + ACTIONS);
-        let prepared = operation
-            .prepare_evidence_only_success(runtime::final_progress())
-            .expect("every observed unit resolved before publication");
         let PreparedStoreEvidenceOnlyOutcome::Success(prepared) = prepared else {
             panic!("the unchanged empty-action operation must publish success");
         };

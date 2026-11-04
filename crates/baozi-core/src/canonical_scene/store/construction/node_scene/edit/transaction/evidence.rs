@@ -302,7 +302,7 @@ impl SceneEditPostflight<'_> {
     /// graph. Any member failure aborts the whole success graph.
     pub fn build_evidence<O, PP, U>(
         &self,
-        lane: &mut CanonicalOutcomeEvidenceLane<'_, O, PP, U, CanonicalInheritanceSource>,
+        lane: &mut CanonicalOutcomeEvidenceLane<'_, '_, O, PP, U, CanonicalInheritanceSource>,
         output: &SceneEditOutput,
     ) -> OutcomeEvidenceDecision<RecordBlock, SceneEditEvidenceTag>
     where

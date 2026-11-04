@@ -1,6 +1,8 @@
 use baozi_operation::__retained_store_integration::activation::{
-    CanonicalActivationOutcome, CanonicalActivationSeal, CanonicalCentralValidationOutcome,
-    CanonicalMaterialization, CanonicalValidationProgress, RetainedStoreSessionOutcomeOwner,
+    CanonicalActivationOutcome, CanonicalActivationSeal, CanonicalActivationSlots,
+    CanonicalDispositionSlot, CanonicalInvocationOutcome, CanonicalMaterialization,
+    CanonicalOutputSlot, CanonicalProofSlot, CanonicalSemanticWorkError,
+    CanonicalValidationProgress, CanonicalValidationSlots, RetainedStoreSessionOutcomeOwner,
 };
 use baozi_operation::__retained_store_integration::authority::CanonicalInheritanceSource;
 use baozi_operation::__retained_store_integration::producer::{
@@ -8,7 +10,7 @@ use baozi_operation::__retained_store_integration::producer::{
     CanonicalSealedActivationPlan, CanonicalSuccessRequirements, CanonicalTableShape,
 };
 use baozi_operation::{
-    FinalProgress, OperationControl, OperationOwner, ProgressPhase, ProgressUnit, RecordBlock,
+    OperationControl, OperationOwner, ProgressPhase, ProgressUnit, RecordBlock,
     RetainedStoreBatchLimits, StorePlanError, StoreRuntimeError,
 };
 use thiserror::Error;
@@ -17,20 +19,30 @@ use crate::canonical_scene::store::schema::{NodeSceneOutcomeEvidenceSchema, Scen
 use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenerationId};
 
 use super::super::super::{
-    SceneConstructionError, SceneConstructionLimits, SceneConstructionPhase,
-    SceneConstructionStartError, SceneConstructionUnit, SceneFailureEvidenceWork,
-    SceneStoreOperation, final_progress, try_plan_scene_operation,
+    SceneCanonicalInvocationHost, SceneConstructionError, SceneConstructionLimits,
+    SceneConstructionPhase, SceneConstructionStartError, SceneConstructionUnit,
+    SceneFailureEvidenceWork, SceneStoreOperation, final_progress, try_plan_scene_operation,
 };
 use super::super::materialization::{
-    NodeSceneActivationOutput, NodeSceneActivationPostflight, NodeSceneFailureEvidencePlan,
-    NodeSceneLaneOutput, NodeSceneLaneRejection, node_scene_activation_roles,
+    NodeSceneActivationOutput, NodeSceneActivationPostflight, NodeSceneEvidenceRecipe,
+    NodeSceneFailureEvidencePlan, NodeSceneLaneOutput, NodeSceneLaneRejection,
+    NodeSceneLaneValidationProof, node_scene_activation_roles,
 };
 use super::super::{NodeSceneConstructionRejection, PendingNodeSceneFailure};
 use super::graph::try_rewrite_node_scene;
 use super::plan::{BoundPendingNodeSceneEdit, NodeSceneEditPlanError, PendingNodeSceneEdit};
 use super::publication::{
-    PreparedNodeSceneEdit, prepare_edit_candidate, prepare_pending_edit_failure,
+    NodeSceneEditGenerationRejection, PreparedNodeSceneEdit, prepare_edit_candidate,
+    prepare_pending_edit_failure,
 };
+
+type NodeSceneEditInvocationHost = SceneCanonicalInvocationHost<
+    NodeSceneLaneOutput,
+    NodeSceneLaneValidationProof,
+    NodeSceneLaneRejection,
+    NodeSceneLaneRejection,
+    NodeSceneEditGenerationRejection,
+>;
 
 #[derive(Debug, Error)]
 pub(in crate::canonical_scene::store) enum NodeSceneEditPrepareError {
@@ -62,11 +74,13 @@ impl<'scene> CanonicalActivationDescription for NodeSceneEditActivationDescripti
 impl PendingNodeSceneEdit {
     pub(in crate::canonical_scene::store) fn prepare(
         self,
+        host: &mut NodeSceneEditInvocationHost,
         input: &super::super::SceneStorage,
         limits: SceneConstructionLimits,
         control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
     ) -> Result<PreparedNodeSceneEdit, NodeSceneEditPrepareError> {
         self.prepare_with_control_and_generation_source(
+            host,
             input,
             limits,
             control,
@@ -77,11 +91,13 @@ impl PendingNodeSceneEdit {
     #[cfg(test)]
     pub(in crate::canonical_scene::store) fn prepare_with_generation_source(
         self,
+        host: &mut NodeSceneEditInvocationHost,
         input: &super::super::SceneStorage,
         limits: SceneConstructionLimits,
         reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
     ) -> Result<PreparedNodeSceneEdit, NodeSceneEditPrepareError> {
         self.prepare_with_control_and_generation_source(
+            host,
             input,
             limits,
             OperationControl::default(),
@@ -91,6 +107,7 @@ impl PendingNodeSceneEdit {
 
     fn prepare_with_control_and_generation_source(
         self,
+        host: &mut NodeSceneEditInvocationHost,
         input: &super::super::SceneStorage,
         limits: SceneConstructionLimits,
         control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
@@ -123,46 +140,127 @@ impl PendingNodeSceneEdit {
                 crate::canonical_scene::store::schema::NODE_SCENE_EVIDENCE_FIELD_COUNT,
             ),
         )?;
-        let raw = SceneStoreOperation::try_start_derived(
-            start.control,
-            start.ledger_plan,
-            &pending.input.canonical,
-            start.start_plan,
-        )
-        .map_err(SceneConstructionStartError::from)?;
-        let owner = raw
-            .into_session_outcome_owner(
-                node_scene_activation_roles(start.keys).session_policy(),
-                outcome_evidence_writer_limits,
-                failure_requirements,
-            )
-            .map_err(SceneConstructionError::from)?;
-
-        prepare_scoped_edit(
-            owner,
-            pending,
-            failure_evidence,
-            brand,
-            activation_request,
-            CanonicalValidationProgress::new(
-                SceneConstructionPhase::Validation,
-                SceneConstructionUnit::WorkUnits,
-            ),
-            final_progress(),
-            reserve_generation,
-        )
-        .map_err(Into::into)
+        let input_generation = pending.input.generation();
+        let invalidations = pending.invalidations;
+        let mut inputs = Some((start, pending, activation_request, failure_requirements));
+        let mut evidence = None;
+        let mut body_error = None;
+        let finish = host.run_body(|parts, disposition| {
+            let (start, pending, activation_request, failure_requirements) =
+                inputs.take().expect("one edit body");
+            let result = (|| {
+                let operation = SceneStoreOperation::try_start_derived(
+                    parts.startup,
+                    start.control,
+                    start.ledger_plan,
+                    &pending.input.canonical,
+                    start.start_plan,
+                )
+                .map_err(SceneConstructionStartError::from)?;
+                let owner = operation.into_session_outcome_owner(
+                    node_scene_activation_roles(start.keys).session_policy(),
+                    outcome_evidence_writer_limits,
+                    failure_requirements,
+                )?;
+                request_scoped_edit(
+                    owner,
+                    parts.output,
+                    parts.proof,
+                    parts.activation,
+                    parts.validation,
+                    disposition,
+                    pending,
+                    failure_evidence,
+                    brand,
+                    activation_request,
+                    CanonicalValidationProgress::new(
+                        SceneConstructionPhase::Validation,
+                        SceneConstructionUnit::WorkUnits,
+                    ),
+                )
+            })();
+            match result {
+                Ok(recipe) => evidence = Some(recipe),
+                Err(cause) => body_error = Some(cause),
+            }
+        });
+        let finish = match finish {
+            Ok(finish) => finish,
+            Err(cause) => {
+                return Err(body_error.unwrap_or_else(|| cause.into()).into());
+            }
+        };
+        let completion = finish.resume();
+        let evidence = evidence.expect("an edit disposition retains its evidence recipe");
+        let pending = match completion.outcome {
+            CanonicalInvocationOutcome::Candidate(candidate) => {
+                return prepare_edit_candidate(
+                    candidate,
+                    completion.generation,
+                    completion.failure_fallback,
+                    input_generation,
+                    invalidations,
+                    final_progress(),
+                    reserve_generation,
+                )
+                .map_err(Into::into);
+            }
+            CanonicalInvocationOutcome::Rejected(owner) => {
+                PendingNodeSceneFailure::ActivationRejected {
+                    owner,
+                    evidence_plan: evidence.record_plan(),
+                    evidence_counts: evidence.counts(),
+                    final_progress: final_progress(),
+                }
+            }
+            CanonicalInvocationOutcome::NeverActivated(owner) => {
+                PendingNodeSceneFailure::NeverActivated {
+                    owner,
+                    evidence_plan: evidence.record_plan(),
+                    evidence_counts: evidence.counts(),
+                    final_progress: final_progress(),
+                }
+            }
+            CanonicalInvocationOutcome::CentralRejected(owner) => {
+                PendingNodeSceneFailure::CentralRejected {
+                    owner,
+                    evidence_counts: evidence.counts(),
+                    final_progress: final_progress(),
+                }
+            }
+            CanonicalInvocationOutcome::Interrupted(owner) => {
+                PendingNodeSceneFailure::CentralInterrupted {
+                    owner,
+                    evidence_counts: evidence.counts(),
+                    final_progress: final_progress(),
+                }
+            }
+            CanonicalInvocationOutcome::Fallback(owner) => {
+                PendingNodeSceneFailure::DeferredFallback(owner)
+            }
+            CanonicalInvocationOutcome::Operation(_) => {
+                unreachable!("an edit records a canonical disposition")
+            }
+        };
+        prepare_pending_edit_failure(pending, completion.failure_fallback).map_err(Into::into)
     }
 
     #[cfg(test)]
     pub(super) fn prepare_with_control_and_generation_source_for_test(
         self,
+        host: &mut NodeSceneEditInvocationHost,
         input: &super::super::SceneStorage,
         limits: SceneConstructionLimits,
         control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
         reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
     ) -> Result<PreparedNodeSceneEdit, NodeSceneEditPrepareError> {
-        self.prepare_with_control_and_generation_source(input, limits, control, reserve_generation)
+        self.prepare_with_control_and_generation_source(
+            host,
+            input,
+            limits,
+            control,
+            reserve_generation,
+        )
     }
 }
 
@@ -170,46 +268,53 @@ impl PendingNodeSceneEdit {
     clippy::too_many_arguments,
     reason = "the scoped stage borrows the pending edit and moves each independent publication capability once"
 )]
-fn prepare_scoped_edit<O, PP, U>(
-    owner: RetainedStoreSessionOutcomeOwner<O, PP, U, CanonicalInheritanceSource>,
+fn request_scoped_edit<'inv, O, PP, U>(
+    owner: RetainedStoreSessionOutcomeOwner<'inv, O, PP, U, CanonicalInheritanceSource>,
+    output_slot: CanonicalOutputSlot<'inv, NodeSceneLaneOutput>,
+    proof_slot: CanonicalProofSlot<'inv, NodeSceneLaneValidationProof>,
+    activation_slots: CanonicalActivationSlots<'inv, NodeSceneLaneRejection>,
+    validation_slots: CanonicalValidationSlots<'inv, NodeSceneLaneRejection>,
+    disposition: CanonicalDispositionSlot<
+        'inv,
+        RecordBlock,
+        SceneDirectorySchema,
+        RecordBlock,
+        NodeSceneOutcomeEvidenceSchema,
+    >,
     pending: BoundPendingNodeSceneEdit<'_>,
     failure_evidence: NodeSceneFailureEvidencePlan,
     brand: super::super::super::ConstructionBrand,
     activation_request: CanonicalActivationRequest,
     validation_progress: CanonicalValidationProgress<PP, U>,
-    final_progress: FinalProgress<PP, U>,
-    reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
-) -> Result<PreparedNodeSceneEdit, SceneConstructionError>
+) -> Result<NodeSceneEvidenceRecipe, SceneConstructionError>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    let evidence_plan = failure_evidence.records;
     let evidence_counts = pending.counts.evidence;
     let postflight =
         NodeSceneActivationPostflight::from_parts(brand, failure_evidence, evidence_counts);
-    let input_generation = pending.input.generation();
-    let invalidations = pending.invalidations;
     let mut success_requirements = Some(edit_success_requirements(&pending, brand)?);
     let mut pending = Some(pending);
     let mut activation_request = Some(activation_request);
 
-    let outcome = owner.plan_and_activate_scoped(move |mut planning| {
-        let pending = match pending.take() {
-            Some(pending) => pending,
-            None => {
-                let rejection =
-                    NodeSceneLaneRejection::from(NodeSceneConstructionRejection::Materialization(
-                        StoreRuntimeError::ConstructionInvariantUnverified,
-                    ));
-                let stable_code = rejection.stable_code();
-                return planning.reject(rejection, stable_code);
-            }
-        };
-        let completion = match planning.begin_semantic_work() {
-            Ok(mut semantic) => {
-                let checked = semantic
+    let outcome =
+        owner.plan_and_activate_scoped(output_slot, activation_slots, move |mut planning| {
+            let pending = match pending.take() {
+                Some(pending) => pending,
+                None => {
+                    let rejection = NodeSceneLaneRejection::from(
+                        NodeSceneConstructionRejection::Materialization(
+                            StoreRuntimeError::ConstructionInvariantUnverified,
+                        ),
+                    );
+                    let stable_code = rejection.stable_code();
+                    return planning.reject(rejection, stable_code);
+                }
+            };
+            let completion = planning.with_semantic_work(|semantic| {
+                semantic
                     .run_unit(|| {
                         let super::plan::NodeSceneEditProgram::NodeTransform(rewrite) =
                             &pending.program
@@ -231,71 +336,53 @@ where
                         }
                         Ok(())
                     })
-                    .and_then(|result| result);
-                match checked {
-                    Ok(()) => semantic.finish_exact(),
-                    Err(cause) => {
-                        let _ = semantic.finish_rejected();
-                        Err(cause)
-                    }
+                    .and_then(|result| result)
+            });
+            let completion = match completion {
+                Ok(((), completion)) => completion,
+                Err(
+                    CanonicalSemanticWorkError::Runtime(cause)
+                    | CanonicalSemanticWorkError::Rejected(cause),
+                ) => {
+                    let rejection = NodeSceneLaneRejection::from(
+                        NodeSceneConstructionRejection::Materialization(cause),
+                    );
+                    let stable_code = rejection.stable_code();
+                    return planning.reject(rejection, stable_code);
                 }
-            }
-            Err(cause) => Err(cause),
-        };
-        let completion = match completion {
-            Ok(completion) => completion,
-            Err(cause) => {
-                let rejection = NodeSceneLaneRejection::from(
-                    NodeSceneConstructionRejection::Materialization(cause),
-                );
-                let stable_code = rejection.stable_code();
-                return planning.reject(rejection, stable_code);
-            }
-        };
-        let description = NodeSceneEditActivationDescription {
-            activation_request: activation_request
-                .take()
-                .expect("the edit activation request is consumed exactly once"),
-            requirements: success_requirements
-                .take()
-                .expect("the edit success requirements are consumed exactly once"),
-            execution: pending,
-        };
-        let permit = match planning.seal_activation(description, completion) {
-            CanonicalActivationSeal::Sealed(permit) => permit,
-            CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
-        };
-        permit.activate(move |lane, execution| materialize_edit(lane, execution, brand))
-    })?;
+            };
+            let description = NodeSceneEditActivationDescription {
+                activation_request: activation_request
+                    .take()
+                    .expect("the edit activation request is consumed exactly once"),
+                requirements: success_requirements
+                    .take()
+                    .expect("the edit success requirements are consumed exactly once"),
+                execution: pending,
+            };
+            let permit = match planning.seal_activation(description, completion) {
+                CanonicalActivationSeal::Sealed(permit) => permit,
+                CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
+            };
+            permit.activate(move |lane, execution| materialize_edit(lane, execution, brand))
+        })?;
 
     let activated = match outcome {
         CanonicalActivationOutcome::Activated(activated) => activated,
         CanonicalActivationOutcome::Rejected(rejected) => {
-            return prepare_pending_edit_failure(PendingNodeSceneFailure::ActivationRejected {
-                owner: rejected,
-                evidence_plan,
-                evidence_counts,
-                final_progress,
-            });
+            rejected.request_finish(disposition)?;
+            return Ok(postflight.failure_evidence());
         }
         CanonicalActivationOutcome::NeverActivated(never_activated) => {
-            return prepare_pending_edit_failure(PendingNodeSceneFailure::NeverActivated {
-                owner: never_activated,
-                evidence_plan,
-                evidence_counts,
-                final_progress,
-            });
-        }
-        CanonicalActivationOutcome::Fallback(fallback) => {
-            return prepare_pending_edit_failure::<O, PP, U>(
-                PendingNodeSceneFailure::PreparedFallback(fallback),
-            );
+            never_activated.request_finish(disposition)?;
+            return Ok(postflight.failure_evidence());
         }
     };
 
     let candidate_evidence = postflight.candidate_evidence(activated.output());
-    let central_counts = candidate_evidence.counts();
     let outcome = activated.validate_centrally(
+        proof_slot,
+        validation_slots,
         validation_progress,
         |lane, _output| match lane.try_retain_records(
             candidate_evidence.record_plan(),
@@ -307,34 +394,8 @@ where
         },
         |planning, output| postflight.validate_candidate(planning, output),
     )?;
-    match outcome {
-        CanonicalCentralValidationOutcome::Candidate(candidate) => prepare_edit_candidate(
-            candidate,
-            input_generation,
-            invalidations,
-            final_progress,
-            reserve_generation,
-        ),
-        CanonicalCentralValidationOutcome::Rejected(rejected) => {
-            prepare_pending_edit_failure(PendingNodeSceneFailure::CentralRejected {
-                owner: rejected,
-                evidence_counts: central_counts,
-                final_progress,
-            })
-        }
-        CanonicalCentralValidationOutcome::Interrupted(interrupted) => {
-            prepare_pending_edit_failure(PendingNodeSceneFailure::CentralInterrupted {
-                owner: interrupted,
-                evidence_counts: central_counts,
-                final_progress,
-            })
-        }
-        CanonicalCentralValidationOutcome::Fallback(fallback) => {
-            prepare_pending_edit_failure::<O, PP, U>(PendingNodeSceneFailure::DeferredFallback(
-                fallback,
-            ))
-        }
-    }
+    outcome.request_finish(disposition)?;
+    Ok(candidate_evidence)
 }
 
 fn edit_success_requirements(
@@ -357,6 +418,7 @@ fn edit_success_requirements(
 
 fn materialize_edit<'lane, O, PP, U>(
     mut lane: baozi_operation::__retained_store_integration::activation::CanonicalLane<
+        '_,
         'lane,
         O,
         PP,

@@ -47,9 +47,15 @@ fn minimal_fallback_keeps_two_by_two_terminal_evidence_after_producer_unload() {
         1,
         failure_terminal_work,
     );
-    let operation =
-        TestOperation::try_start(OperationControl::default(), ledger_plan, &account, start)
-            .unwrap();
+    let mut invocation_root = TestInvocationRoot::new();
+    let operation = TestOperation::try_start(
+        &mut invocation_root,
+        OperationControl::default(),
+        ledger_plan,
+        &account,
+        start,
+    )
+    .unwrap();
     operation.try_complete_phase(keys.phase).unwrap();
     operation.try_complete_phase(keys.other_phase).unwrap();
     let prepared = operation.prepare_minimal_fallback(75).unwrap();

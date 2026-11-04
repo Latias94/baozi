@@ -56,7 +56,7 @@ impl Format for WorldBoundsFixture {
         &self,
         probe: &Probe<'_>,
         _: &ReadHint,
-        _: &DetectionScope<'_>,
+        _: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(if probe.is_complete() && probe.bytes() == b"bounds" {
             DetectionOutcome::Match(ReadConfidence::Certain)
@@ -65,7 +65,7 @@ impl Format for WorldBoundsFixture {
         })
     }
 
-    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_, '_>) -> ParseResult<()> {
         // A canonical affine fixture deliberately exercises shear. glTF node matrices
         // cannot author it; the public custom-producer seam can retain this meaning.
         let positions = [

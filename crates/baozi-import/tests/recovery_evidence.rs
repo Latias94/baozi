@@ -64,16 +64,18 @@ impl Format for RecoveryImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_, '_>) -> ParseResult<()> {
         scope.with_execution(|exec| -> ParseResult<()> {
-            exec.record_format_recovery(
+            let mut services = exec.services()?;
+            let source = services.diagnostic_source();
+            services.record_format_recovery(
                 DiagnosticCode::new(RECOVERY_CODE).unwrap(),
-                exec.diagnostic_source(),
+                source,
                 DiagnosticByteRange::new(1, 4).unwrap(),
                 format_args!("recovered malformed token"),
             )?;

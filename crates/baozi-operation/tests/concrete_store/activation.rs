@@ -7,16 +7,23 @@ use std::cell::Cell;
 
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalActivationOutcome, CanonicalActivationPermit, CanonicalActivationSeal,
-    CanonicalActivationSealFailure, CanonicalActivationSessionPolicy,
-    CanonicalCentralValidationOutcome, CanonicalFailureRequirements, CanonicalFreezePermit,
-    CanonicalJointCommit, CanonicalJointSeal, CanonicalLane, CanonicalMaterialization,
-    CanonicalMaterializationRole, CanonicalReservation, CanonicalScopedDisposition,
-    CanonicalSemanticCompletion, CanonicalValidationDecision, CanonicalValidationMember,
-    CanonicalValidationProgress, CanonicalValidationRole, CanonicalValidationSession,
-    FailureEvidenceDecision, FailureEvidenceMember, FailureEvidenceOutcome,
-    OutcomeEvidenceDecision, OutcomeEvidenceValidationMember, RetainedStoreSessionOutcomeOwner,
-    RetainedStoreWriterRole, RootedFailureValidation, StoreActivationContainment,
-    StoreCanonicalRejection, StoreNeverActivatedCause,
+    CanonicalActivationSealFailure, CanonicalActivationSessionPolicy, CanonicalActivationSlots,
+    CanonicalBodyParts, CanonicalCauseSlot, CanonicalCentralValidationOutcome,
+    CanonicalFailureRequirements, CanonicalFinal, CanonicalFreezeInterruption,
+    CanonicalFreezePermit, CanonicalGenerationSlots, CanonicalInvocationHost,
+    CanonicalInvocationOutcome, CanonicalJointCommit, CanonicalJointSeal, CanonicalJointSuccess,
+    CanonicalLane, CanonicalMaterialization, CanonicalMaterializationRole, CanonicalOutputSlot,
+    CanonicalProofSlot, CanonicalReservation, CanonicalScopedDisposition,
+    CanonicalSemanticCompletion, CanonicalSemanticWorkError, CanonicalValidationDecision,
+    CanonicalValidationMember, CanonicalValidationProgress, CanonicalValidationRole,
+    CanonicalValidationSession, CanonicalValidationSlots, FailureEvidenceDecision,
+    FailureEvidenceMember, FailureEvidenceOutcome, OutcomeEvidenceDecision,
+    OutcomeEvidenceValidationMember, RetainedStoreSessionOutcomeOwner, RetainedStoreWriterRole,
+    RootedFailureValidation, StoreActivationContainment, StoreCanonicalRejection,
+    StoreNeverActivatedCause,
+};
+use baozi_operation::__retained_store_integration::authority::{
+    FreshStoreLineage, TerminalStoreLineage,
 };
 use baozi_operation::__retained_store_integration::producer::{
     CanonicalActivationDescription, CanonicalActivationPlanSealer, CanonicalActivationRequest,
@@ -81,7 +88,7 @@ impl TestActivationPolicy {
     }
 }
 
-trait IntoTestSessionOutcomeOwner<O, PP, U, L>
+trait IntoTestSessionOutcomeOwner<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -91,10 +98,11 @@ where
         self,
         policy: TestActivationPolicy,
         failure: CanonicalFailureRequirements,
-    ) -> Result<RetainedStoreSessionOutcomeOwner<O, PP, U, L>, StoreActivationContainment>;
+    ) -> Result<RetainedStoreSessionOutcomeOwner<'inv, O, PP, U, L>, StoreActivationContainment>;
 }
 
-impl<O, PP, U, L> IntoTestSessionOutcomeOwner<O, PP, U, L> for RetainedStoreOperation<O, PP, U, L>
+impl<'inv, O, PP, U, L> IntoTestSessionOutcomeOwner<'inv, O, PP, U, L>
+    for RetainedStoreOperation<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -104,7 +112,29 @@ where
         self,
         policy: TestActivationPolicy,
         failure: CanonicalFailureRequirements,
-    ) -> Result<RetainedStoreSessionOutcomeOwner<O, PP, U, L>, StoreActivationContainment> {
+    ) -> Result<RetainedStoreSessionOutcomeOwner<'inv, O, PP, U, L>, StoreActivationContainment>
+    {
+        let TestActivationPolicy {
+            session,
+            outcome_evidence_writer_limits,
+        } = policy;
+        self.into_session_outcome_owner(session, outcome_evidence_writer_limits, failure)
+    }
+}
+
+impl<'inv, O, PP, U, L> IntoTestSessionOutcomeOwner<'inv, O, PP, U, L>
+    for CanonicalBodyOperation<'inv, O, PP, U, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn into_test_session_outcome_owner(
+        self,
+        policy: TestActivationPolicy,
+        failure: CanonicalFailureRequirements,
+    ) -> Result<RetainedStoreSessionOutcomeOwner<'inv, O, PP, U, L>, StoreActivationContainment>
+    {
         let TestActivationPolicy {
             session,
             outcome_evidence_writer_limits,
@@ -154,7 +184,8 @@ impl<P> CanonicalActivationDescription for TestActivationDescription<P> {
     }
 }
 
-type TestActivationOutcome<T, E, CanonicalKind, CanonicalTag> = CanonicalActivationOutcome<
+type TestActivationOutcome<'inv, T, E, CanonicalKind, CanonicalTag> = CanonicalActivationOutcome<
+    'inv,
     TestOwner,
     TestProgress,
     TestUnit,
@@ -164,8 +195,45 @@ type TestActivationOutcome<T, E, CanonicalKind, CanonicalTag> = CanonicalActivat
     CanonicalTag,
 >;
 
-fn activate_scoped<'scope, T, E, CanonicalKind, CanonicalTag>(
+type TestInvocationHost<
+    T,
+    Proof = (),
+    EA = (),
+    EV = ValidationRejection,
+    EG = GenerationRejection,
+    CK = ScalarSequence<u8>,
+    CT = SequenceTag,
+    EK = ScalarSequence<u8>,
+    ET = EvidenceLeafTag,
+> = CanonicalInvocationHost<
+    TestOwner,
+    TestProgress,
+    TestUnit,
+    T,
+    Proof,
+    EA,
+    EV,
+    EG,
+    CK,
+    CT,
+    EK,
+    ET,
+>;
+
+type TestFinalNeverActivated<'inv, E> = CanonicalFinal<
+    baozi_operation::__retained_store_integration::activation::NeverActivatedStoreSession<
+        'inv,
+        TestOwner,
+        TestProgress,
+        TestUnit,
+        E,
+        TerminalStoreLineage,
+    >,
+>;
+
+fn activate_scoped<'inv, 'scope, T, E, CanonicalKind, CanonicalTag>(
     permit: CanonicalActivationPermit<
+        'inv,
         'scope,
         TestOwner,
         TestProgress,
@@ -176,7 +244,7 @@ fn activate_scoped<'scope, T, E, CanonicalKind, CanonicalTag>(
         CanonicalTag,
     >,
     mut materialize: impl for<'lane> FnMut(
-        CanonicalLane<'lane, TestOwner, TestProgress, TestUnit>,
+        CanonicalLane<'inv, 'lane, TestOwner, TestProgress, TestUnit>,
     ) -> CanonicalMaterialization<
         'lane,
         T,
@@ -188,11 +256,19 @@ fn activate_scoped<'scope, T, E, CanonicalKind, CanonicalTag>(
     permit.activate(|lane, _plan| materialize(lane))
 }
 
-fn run_scoped_activation<T, E, CanonicalKind, CanonicalTag>(
-    operation: TestOperation,
+fn run_scoped_activation<'inv, T, E, CanonicalKind, CanonicalTag>(
+    operation: impl IntoTestSessionOutcomeOwner<
+        'inv,
+        TestOwner,
+        TestProgress,
+        TestUnit,
+        FreshStoreLineage,
+    >,
+    output_slot: CanonicalOutputSlot<'inv, T>,
+    activation_slots: CanonicalActivationSlots<'inv, E>,
     activation: TestScopedActivation,
     materialize: impl for<'lane> FnMut(
-        CanonicalLane<'lane, TestOwner, TestProgress, TestUnit>,
+        CanonicalLane<'inv, 'lane, TestOwner, TestProgress, TestUnit>,
     ) -> CanonicalMaterialization<
         'lane,
         T,
@@ -200,7 +276,10 @@ fn run_scoped_activation<T, E, CanonicalKind, CanonicalTag>(
         CanonicalKind,
         CanonicalTag,
     >,
-) -> Result<TestActivationOutcome<T, E, CanonicalKind, CanonicalTag>, StoreActivationContainment> {
+) -> Result<
+    TestActivationOutcome<'inv, T, E, CanonicalKind, CanonicalTag>,
+    StoreActivationContainment,
+> {
     let TestScopedActivation {
         policy,
         failure,
@@ -211,10 +290,13 @@ fn run_scoped_activation<T, E, CanonicalKind, CanonicalTag>(
         .unwrap();
     let mut activation_plan = Some(TestActivationDescription::new(success, ()));
     let mut materialize = Some(materialize);
-    owner.plan_and_activate_scoped(move |mut planning| {
-        let mut semantic = planning.begin_semantic_work().unwrap();
-        semantic.run_unit(|| ()).unwrap();
-        let completion = semantic.finish_exact().unwrap();
+    owner.plan_and_activate_scoped(output_slot, activation_slots, move |mut planning| {
+        let ((), completion) = planning
+            .with_semantic_work(|semantic| {
+                semantic.run_unit(|| ()).unwrap();
+                Ok::<(), StoreRuntimeError>(())
+            })
+            .unwrap();
         let activation_plan = activation_plan
             .take()
             .expect("the scoped activation plan is consumed exactly once");
@@ -231,7 +313,28 @@ fn run_scoped_activation<T, E, CanonicalKind, CanonicalTag>(
 }
 
 macro_rules! plan_scoped_activation {
-    ($operation:expr, $activation:expr, $materialize:expr $(,)?) => {{ run_scoped_activation($operation, $activation, $materialize) }};
+    ($operation:expr, $output_slot:expr, $activation_slots:expr, $activation:expr, $materialize:expr $(,)?) => {{
+        run_scoped_activation(
+            $operation,
+            $output_slot,
+            $activation_slots,
+            $activation,
+            $materialize,
+        )
+    }};
+}
+
+macro_rules! request_rejected_activation_finish {
+    ($outcome:expr, $disposition:expr) => {
+        match $outcome {
+            CanonicalActivationOutcome::Rejected(state) => state.request_finish($disposition),
+            CanonicalActivationOutcome::NeverActivated(state) => state.request_finish($disposition),
+            CanonicalActivationOutcome::Activated(_) => {
+                panic!("the rejection fixture must not retain an activated success")
+            }
+        }
+        .unwrap()
+    };
 }
 
 #[path = "activation/central_validation.rs"]
@@ -240,6 +343,8 @@ mod central_validation;
 mod controlled_writers;
 #[path = "activation/failure_evidence.rs"]
 mod failure_evidence;
+#[path = "activation/host_states.rs"]
+mod host_states;
 #[path = "activation/joint_commit.rs"]
 mod joint_commit;
 #[path = "activation/scoped_plan.rs"]
@@ -285,8 +390,10 @@ fn canonical_activation_authorities_remain_linear() {
 
     type Completion = CanonicalSemanticCompletion<'static>;
     type SuccessRequest = CanonicalSuccessRequirements;
-    type SessionOwner = RetainedStoreSessionOutcomeOwner<TestOwner, TestProgress, TestUnit>;
-    type ActivationPermit = CanonicalActivationPermit<
+    type SessionOwner<'inv> =
+        RetainedStoreSessionOutcomeOwner<'inv, TestOwner, TestProgress, TestUnit>;
+    type ActivationPermit<'inv> = CanonicalActivationPermit<
+        'inv,
         'static,
         TestOwner,
         TestProgress,
@@ -296,7 +403,8 @@ fn canonical_activation_authorities_remain_linear() {
         ScalarSequence<u8>,
         SequenceTag,
     >;
-    type ActivationFailure = CanonicalActivationSealFailure<
+    type ActivationFailure<'inv> = CanonicalActivationSealFailure<
+        'inv,
         'static,
         TestOwner,
         TestProgress,
@@ -310,14 +418,15 @@ fn canonical_activation_authorities_remain_linear() {
     let _ = <Completion as AmbiguousIfClone<_>>::assert_not_clone;
     let _ = <SuccessRequest as AmbiguousIfCopy<_>>::assert_not_copy;
     let _ = <SuccessRequest as AmbiguousIfClone<_>>::assert_not_clone;
-    let _ = <SessionOwner as AmbiguousIfCopy<_>>::assert_not_copy;
-    let _ = <SessionOwner as AmbiguousIfClone<_>>::assert_not_clone;
-    let _ = <ActivationPermit as AmbiguousIfCopy<_>>::assert_not_copy;
-    let _ = <ActivationPermit as AmbiguousIfClone<_>>::assert_not_clone;
-    let _ = <ActivationFailure as AmbiguousIfCopy<_>>::assert_not_copy;
-    let _ = <ActivationFailure as AmbiguousIfClone<_>>::assert_not_clone;
+    let _ = <SessionOwner<'_> as AmbiguousIfCopy<_>>::assert_not_copy;
+    let _ = <SessionOwner<'_> as AmbiguousIfClone<_>>::assert_not_clone;
+    let _ = <ActivationPermit<'_> as AmbiguousIfCopy<_>>::assert_not_copy;
+    let _ = <ActivationPermit<'_> as AmbiguousIfClone<_>>::assert_not_clone;
+    let _ = <ActivationFailure<'_> as AmbiguousIfCopy<_>>::assert_not_copy;
+    let _ = <ActivationFailure<'_> as AmbiguousIfClone<_>>::assert_not_clone;
 
-    type Permit = CanonicalFreezePermit<
+    type Permit<'inv> = CanonicalFreezePermit<
+        'inv,
         TestOwner,
         TestProgress,
         TestUnit,
@@ -328,21 +437,24 @@ fn canonical_activation_authorities_remain_linear() {
         ScalarSequence<u8>,
         EvidenceLeafTag,
     >;
-    type Joint = CanonicalJointCommit<
+    type Joint<'inv> = CanonicalJointCommit<
+        'inv,
         'static,
         TestOwner,
         TestProgress,
         TestUnit,
+        (),
+        (),
         ScalarSequence<u8>,
         SequenceTag,
         ScalarSequence<u8>,
         EvidenceLeafTag,
     >;
     type Seal = CanonicalJointSeal<'static>;
-    let _ = <Permit as AmbiguousIfCopy<_>>::assert_not_copy;
-    let _ = <Permit as AmbiguousIfClone<_>>::assert_not_clone;
-    let _ = <Joint as AmbiguousIfCopy<_>>::assert_not_copy;
-    let _ = <Joint as AmbiguousIfClone<_>>::assert_not_clone;
+    let _ = <Permit<'_> as AmbiguousIfCopy<_>>::assert_not_copy;
+    let _ = <Permit<'_> as AmbiguousIfClone<_>>::assert_not_clone;
+    let _ = <Joint<'_> as AmbiguousIfCopy<_>>::assert_not_copy;
+    let _ = <Joint<'_> as AmbiguousIfClone<_>>::assert_not_clone;
     let _ = <Seal as AmbiguousIfCopy<_>>::assert_not_copy;
     let _ = <Seal as AmbiguousIfClone<_>>::assert_not_clone;
 }
@@ -494,7 +606,8 @@ fn activation_requirements_reject_impossible_exact_shapes() {
 fn structural_work_requirement_counts_operation_owned_share_actions() {
     let factory = factory(1);
     let account = account(&factory);
-    let (operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation(&mut invocation_root, &account);
     let scoped = scoped_activation_shape(keys, 4, 1);
     let expanded_canonical = scoped_activation_shape(keys, 5, 1);
     let expanded_evidence = scoped_activation_shape(keys, 4, 2);
@@ -520,6 +633,7 @@ fn structural_work_requirement_counts_operation_owned_share_actions() {
     assert_eq!(expanded_evidence_work, 26);
     assert_eq!(scoped_pre_activation_work, 8);
     drop(operation);
+    drop(invocation_root);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
 
@@ -553,6 +667,11 @@ enum ValidationRejection {
     Semantic,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum GenerationRejection {
+    Semantic,
+}
+
 struct DropProbe<'a>(&'a Cell<bool>);
 
 impl Drop for DropProbe<'_> {
@@ -580,70 +699,94 @@ enum ControlledWriterKind {
 fn assert_ignored_controlled_writer_fault_is_contained(kind: ControlledWriterKind) {
     let factory = factory(1);
     let account = account(&factory);
-    let (operation, keys) = operation(&account);
+    let mut invocation_host = TestInvocationHost::<_, ()>::new();
+    let body = invocation_host.run_body(
+        |CanonicalBodyParts {
+             startup: invocation_root,
+             output: output_slot,
+             activation: activation_slots,
+             ..
+         },
+         _disposition| {
+            let (operation, keys) = operation(invocation_root, &account);
 
-    let result = plan_scoped_activation!(
-        operation,
-        scoped_activation_shape(keys, 1, 1),
-        |mut lane| {
-            let root = lane
-                .try_retain_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
-                    writer.push(1)?;
-                    Ok(())
-                })
-                .unwrap();
-            match kind {
-                ControlledWriterKind::Sequence => {
-                    let ignored = lane.try_retain_sequence(
-                        SequencePlan::<u8>::new(1).unwrap(),
-                        SequenceTag,
-                        |writer| {
-                            writer.push(2)?;
-                            Ok(())
-                        },
-                    );
-                    assert_slot_limit(ignored.map(|_| ()), StoreDestination::Canonical);
-                }
-                ControlledWriterKind::Bytes => {
-                    let ignored =
-                        lane.try_retain_bytes(BytesPlan::new(1).unwrap(), BytesTag, |writer| {
-                            writer.write_bytes(&[2])?;
-                            Ok(())
-                        });
-                    assert_slot_limit(ignored.map(|_| ()), StoreDestination::Canonical);
-                }
-                ControlledWriterKind::Utf8 => {
-                    let ignored =
-                        lane.try_retain_utf8(Utf8Plan::new(1).unwrap(), TextTag, |writer| {
-                            writer.write_str("b")?;
-                            Ok(())
-                        });
-                    assert_slot_limit(ignored.map(|_| ()), StoreDestination::Canonical);
-                }
-                ControlledWriterKind::Records => {
-                    let ignored = lane.try_retain_records(
-                        RecordPlan::new(1, 1).unwrap(),
-                        CanonicalRootTag,
-                        |writer| {
-                            writer.write_row(|row| row.write_scalar(2_u8))?;
-                            Ok(())
-                        },
-                    );
-                    assert_slot_limit(ignored.map(|_| ()), StoreDestination::Canonical);
-                }
-            }
-            lane.complete::<_, (), _, _>(root, root)
+            let result = plan_scoped_activation!(
+                operation,
+                output_slot,
+                activation_slots,
+                scoped_activation_shape(keys, 1, 1),
+                |mut lane| {
+                    let root = lane
+                        .try_retain_sequence(
+                            SequencePlan::<u8>::new(1).unwrap(),
+                            SequenceTag,
+                            |writer| {
+                                writer.push(1)?;
+                                Ok(())
+                            },
+                        )
+                        .unwrap();
+                    match kind {
+                        ControlledWriterKind::Sequence => {
+                            let ignored = lane.try_retain_sequence(
+                                SequencePlan::<u8>::new(1).unwrap(),
+                                SequenceTag,
+                                |writer| {
+                                    writer.push(2)?;
+                                    Ok(())
+                                },
+                            );
+                            assert_slot_limit(ignored.map(|_| ()), StoreDestination::Canonical);
+                        }
+                        ControlledWriterKind::Bytes => {
+                            let ignored = lane.try_retain_bytes(
+                                BytesPlan::new(1).unwrap(),
+                                BytesTag,
+                                |writer| {
+                                    writer.write_bytes(&[2])?;
+                                    Ok(())
+                                },
+                            );
+                            assert_slot_limit(ignored.map(|_| ()), StoreDestination::Canonical);
+                        }
+                        ControlledWriterKind::Utf8 => {
+                            let ignored = lane.try_retain_utf8(
+                                Utf8Plan::new(1).unwrap(),
+                                TextTag,
+                                |writer| {
+                                    writer.write_str("b")?;
+                                    Ok(())
+                                },
+                            );
+                            assert_slot_limit(ignored.map(|_| ()), StoreDestination::Canonical);
+                        }
+                        ControlledWriterKind::Records => {
+                            let ignored = lane.try_retain_records(
+                                RecordPlan::new(1, 1).unwrap(),
+                                CanonicalRootTag,
+                                |writer| {
+                                    writer.write_row(|row| row.write_scalar(2_u8))?;
+                                    Ok(())
+                                },
+                            );
+                            assert_slot_limit(ignored.map(|_| ()), StoreDestination::Canonical);
+                        }
+                    }
+                    lane.complete::<_, (), _, _>(root, root)
+                },
+            );
+            let containment = match result {
+                Err(containment) => containment,
+                Ok(_) => panic!("ignored first fault must be contained"),
+            };
+            assert_eq!(
+                containment.cause().reason(),
+                AccountPoisonReason::OwnershipGraphUnverified
+            );
+            assert!(account.snapshot().poisoned());
         },
     );
-    let containment = match result {
-        Err(containment) => containment,
-        Ok(_) => panic!("ignored first fault must be contained"),
-    };
-    assert_eq!(
-        containment.cause().reason(),
-        AccountPoisonReason::OwnershipGraphUnverified
-    );
-    assert!(account.snapshot().poisoned());
+    assert!(body.is_err());
 }
 
 fn assert_slot_limit(result: Result<(), StoreRuntimeError>, destination: StoreDestination) {
@@ -658,121 +801,170 @@ fn assert_slot_limit(result: Result<(), StoreRuntimeError>, destination: StoreDe
 fn assert_controlled_writer_body_and_drop_panics_are_isolated(kind: ControlledWriterKind) {
     let factory = factory(1);
     let account = account(&factory);
-    let (operation, keys) = operation(&account);
+    let mut invocation_host = TestInvocationHost::<_, ()>::new();
+    let body = invocation_host.run_body(
+        |CanonicalBodyParts {
+             startup: invocation_root,
+             output: output_slot,
+             activation: activation_slots,
+             ..
+         },
+         _disposition| {
+            let (operation, keys) = operation(invocation_root, &account);
 
-    let result = plan_scoped_activation!(
-        operation,
-        scoped_activation_shape(keys, 1, 1),
-        |mut lane| {
-            match kind {
-                ControlledWriterKind::Sequence => {
-                    let capture = PanicOnDrop;
-                    let result = lane.try_retain_sequence(
-                        SequencePlan::<u8>::new(1).unwrap(),
-                        SequenceTag,
-                        move |_writer| {
-                            let _capture = &capture;
-                            panic!("contained canonical sequence builder panic")
-                        },
-                    );
-                    assert!(matches!(result, Err(StoreRuntimeError::BuilderPanicked)));
-                }
-                ControlledWriterKind::Bytes => {
-                    let capture = PanicOnDrop;
-                    let result = lane.try_retain_bytes(
-                        BytesPlan::new(1).unwrap(),
-                        BytesTag,
-                        move |_writer| {
-                            let _capture = &capture;
-                            panic!("contained canonical bytes builder panic")
-                        },
-                    );
-                    assert!(matches!(result, Err(StoreRuntimeError::BuilderPanicked)));
-                }
-                ControlledWriterKind::Utf8 => {
-                    let capture = PanicOnDrop;
-                    let result =
-                        lane.try_retain_utf8(Utf8Plan::new(1).unwrap(), TextTag, move |_writer| {
-                            let _capture = &capture;
-                            panic!("contained canonical UTF-8 builder panic")
-                        });
-                    assert!(matches!(result, Err(StoreRuntimeError::BuilderPanicked)));
-                }
-                ControlledWriterKind::Records => {
-                    let capture = PanicOnDrop;
-                    let result = lane.try_retain_records(
-                        RecordPlan::new(1, 1).unwrap(),
-                        CanonicalRootTag,
-                        move |_writer| {
-                            let _capture = &capture;
-                            panic!("contained canonical record builder panic")
-                        },
-                    );
-                    assert!(matches!(result, Err(StoreRuntimeError::BuilderPanicked)));
-                }
-            }
-            lane.reject::<(), (), ScalarSequence<u8>, SequenceTag>((), 1)
+            let result = plan_scoped_activation!(
+                operation,
+                output_slot,
+                activation_slots,
+                scoped_activation_shape(keys, 1, 1),
+                |mut lane| {
+                    match kind {
+                        ControlledWriterKind::Sequence => {
+                            let capture = PanicOnDrop;
+                            let result = lane.try_retain_sequence(
+                                SequencePlan::<u8>::new(1).unwrap(),
+                                SequenceTag,
+                                move |_writer| {
+                                    let _capture = &capture;
+                                    panic!("contained canonical sequence builder panic")
+                                },
+                            );
+                            assert!(matches!(result, Err(StoreRuntimeError::BuilderPanicked)));
+                        }
+                        ControlledWriterKind::Bytes => {
+                            let capture = PanicOnDrop;
+                            let result = lane.try_retain_bytes(
+                                BytesPlan::new(1).unwrap(),
+                                BytesTag,
+                                move |_writer| {
+                                    let _capture = &capture;
+                                    panic!("contained canonical bytes builder panic")
+                                },
+                            );
+                            assert!(matches!(result, Err(StoreRuntimeError::BuilderPanicked)));
+                        }
+                        ControlledWriterKind::Utf8 => {
+                            let capture = PanicOnDrop;
+                            let result = lane.try_retain_utf8(
+                                Utf8Plan::new(1).unwrap(),
+                                TextTag,
+                                move |_writer| {
+                                    let _capture = &capture;
+                                    panic!("contained canonical UTF-8 builder panic")
+                                },
+                            );
+                            assert!(matches!(result, Err(StoreRuntimeError::BuilderPanicked)));
+                        }
+                        ControlledWriterKind::Records => {
+                            let capture = PanicOnDrop;
+                            let result = lane.try_retain_records(
+                                RecordPlan::new(1, 1).unwrap(),
+                                CanonicalRootTag,
+                                move |_writer| {
+                                    let _capture = &capture;
+                                    panic!("contained canonical record builder panic")
+                                },
+                            );
+                            assert!(matches!(result, Err(StoreRuntimeError::BuilderPanicked)));
+                        }
+                    }
+                    lane.reject::<(), (), ScalarSequence<u8>, SequenceTag>((), 1)
+                },
+            );
+
+            assert!(result.is_err());
+            assert!(account.snapshot().poisoned());
         },
     );
-
-    assert!(result.is_err());
-    assert!(account.snapshot().poisoned());
+    assert!(body.is_err());
 }
 
-fn rejected_session_with_one_evidence_slot(
+fn rejected_session_with_one_evidence_slot<'inv>(
+    host: &'inv mut TestInvocationHost<(), (), PreflightRejection>,
     account: &PhysicalStorageAccount,
 ) -> (
-    baozi_operation::__retained_store_integration::activation::NeverActivatedStoreSession<
-        TestOwner,
-        TestProgress,
-        TestUnit,
-        PreflightRejection,
-    >,
+    TestFinalNeverActivated<'inv, PreflightRejection>,
     TestKeys,
+    CanonicalCauseSlot<'inv, StoreRuntimeError>,
 ) {
-    rejected_session_with_control(account, OperationControl::default())
+    rejected_session_with_control(host, account, OperationControl::default())
 }
 
-fn rejected_session_with_control(
+fn rejected_session_with_control<'inv>(
+    host: &'inv mut TestInvocationHost<(), (), PreflightRejection>,
     account: &PhysicalStorageAccount,
     control: OperationControl<TestProgress, TestUnit>,
 ) -> (
-    baozi_operation::__retained_store_integration::activation::NeverActivatedStoreSession<
-        TestOwner,
-        TestProgress,
-        TestUnit,
-        PreflightRejection,
-    >,
+    TestFinalNeverActivated<'inv, PreflightRejection>,
     TestKeys,
+    CanonicalCauseSlot<'inv, StoreRuntimeError>,
 ) {
-    let (operation, keys) = operation_with_control(account, control);
-    rejected_session_from_operation(operation, keys, 1)
+    let mut control = Some(control);
+    let mut saved_keys = None;
+    let finish = host
+        .run_body(|parts, disposition| {
+            let (operation, keys) =
+                operation_with_control(parts.startup, account, control.take().unwrap());
+            let (state, keys) =
+                rejected_session_from_operation(operation, parts.output, parts.activation, keys, 1);
+            saved_keys = Some(keys);
+            state.request_finish(disposition).unwrap();
+        })
+        .unwrap();
+    let completion = finish.resume();
+    let CanonicalInvocationOutcome::NeverActivated(state) = completion.outcome else {
+        panic!("preflight rejection must resume as NeverActivated")
+    };
+    (state, saved_keys.unwrap(), completion.failure_fallback)
 }
 
-fn rejected_session_with_failure_work_limits(
+fn rejected_session_with_failure_work_limits<'inv>(
+    host: &'inv mut TestInvocationHost<(), (), PreflightRejection>,
     account: &PhysicalStorageAccount,
     construction_work_limit: u64,
     validation_work_limit: u64,
 ) -> (
-    baozi_operation::__retained_store_integration::activation::NeverActivatedStoreSession<
+    TestFinalNeverActivated<'inv, PreflightRejection>,
+    TestKeys,
+    CanonicalCauseSlot<'inv, StoreRuntimeError>,
+) {
+    let mut saved_keys = None;
+    let finish = host
+        .run_body(|parts, disposition| {
+            let (operation, keys) = operation_with_failure_work_limits(
+                parts.startup,
+                account,
+                construction_work_limit,
+                validation_work_limit,
+            );
+            let (state, keys) =
+                rejected_session_from_operation(operation, parts.output, parts.activation, keys, 1);
+            saved_keys = Some(keys);
+            state.request_finish(disposition).unwrap();
+        })
+        .unwrap();
+    let completion = finish.resume();
+    let CanonicalInvocationOutcome::NeverActivated(state) = completion.outcome else {
+        panic!("preflight rejection must resume as NeverActivated")
+    };
+    (state, saved_keys.unwrap(), completion.failure_fallback)
+}
+
+fn rejected_session_from_operation<'inv>(
+    operation: impl IntoTestSessionOutcomeOwner<
+        'inv,
         TestOwner,
         TestProgress,
         TestUnit,
-        PreflightRejection,
+        FreshStoreLineage,
     >,
-    TestKeys,
-) {
-    let (operation, keys) =
-        operation_with_failure_work_limits(account, construction_work_limit, validation_work_limit);
-    rejected_session_from_operation(operation, keys, 1)
-}
-
-fn rejected_session_from_operation(
-    operation: TestOperation,
+    output_slot: CanonicalOutputSlot<'inv, ()>,
+    activation_slots: CanonicalActivationSlots<'inv, PreflightRejection>,
     keys: TestKeys,
     evidence_blocks: usize,
 ) -> (
     baozi_operation::__retained_store_integration::activation::NeverActivatedStoreSession<
+        'inv,
         TestOwner,
         TestProgress,
         TestUnit,
@@ -789,6 +981,7 @@ fn rejected_session_from_operation(
         .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     let outcome: CanonicalActivationOutcome<
+        '_,
         TestOwner,
         TestProgress,
         TestUnit,
@@ -797,13 +990,13 @@ fn rejected_session_from_operation(
         ScalarSequence<u8>,
         SequenceTag,
     > = owner
-        .plan_and_activate_scoped(|planning| planning.reject(PreflightRejection::Unsupported, 11))
+        .plan_and_activate_scoped(output_slot, activation_slots, |planning| {
+            planning.reject(PreflightRejection::Unsupported, 11)
+        })
         .unwrap();
     let state = match outcome {
         CanonicalActivationOutcome::NeverActivated(state) => state,
-        CanonicalActivationOutcome::Activated(_)
-        | CanonicalActivationOutcome::Rejected(_)
-        | CanonicalActivationOutcome::Fallback(_) => {
+        CanonicalActivationOutcome::Activated(_) | CanonicalActivationOutcome::Rejected(_) => {
             panic!("preflight rejection must remain NeverActivated")
         }
     };

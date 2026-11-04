@@ -3,14 +3,14 @@
 use baozi_import::{DiagnosticCode, SourceScopeEntityKind};
 
 use super::{
-    ImportStorageClass, ObjFailure, ObjParser, ParseExecution, ParseResult, ParsedTexcoord, Token,
-    Vec3, parse_f32, resolve_index,
+    ImportStorageClass, ObjFailure, ObjParser, ParseChildren, ParsePieceError, ParseResult,
+    ParseServices, ParsedTexcoord, Token, Vec3, parse_f32, resolve_index,
 };
 
-impl<'region, 'session> ObjParser<'region, 'session> {
+impl<'op, 'session> ObjParser<'op, 'session> {
     pub(super) fn parse_omitted_geometry(
         &mut self,
-        exec: &mut ParseExecution<'region, 'session>,
+        exec: &mut ParseServices<'_, 'op, 'session>,
         tokens: &[Token<'_>],
         line_number: u32,
     ) -> ParseResult<()> {
@@ -97,23 +97,30 @@ impl<'region, 'session> ObjParser<'region, 'session> {
 
     pub(super) fn parse_position(
         &mut self,
-        exec: &mut ParseExecution<'region, 'session>,
+        children: &mut ParseChildren<'_, 'op, 'session>,
         tokens: &[Token<'_>],
         line_number: u32,
     ) -> ParseResult<()> {
-        require_record_components(exec, tokens, &[3, 4, 6, 7], "position", line_number)?;
+        require_record_components(
+            &mut children.services()?,
+            tokens,
+            &[3, 4, 6, 7],
+            "position",
+            line_number,
+        )?;
         let components = tokens.len() - 1;
-        let position = exec.with_work(&self.vertex_work, [1], |exec, work| -> ParseResult<_> {
-            work.run_all(|| {
+        let errors = children.error_view();
+        let position = children.child(&self.vertex_work, [1], |work| {
+            work.run_returned_with_storage(|_storage| {
                 let mut position = Vec3::new(
-                    parse_f32(exec, "position", tokens[1], line_number)?,
-                    parse_f32(exec, "position", tokens[2], line_number)?,
-                    parse_f32(exec, "position", tokens[3], line_number)?,
+                    parse_f32(errors, "position", tokens[1], line_number)?,
+                    parse_f32(errors, "position", tokens[2], line_number)?,
+                    parse_f32(errors, "position", tokens[3], line_number)?,
                 );
                 if components == 4 {
-                    let weight = parse_f32(exec, "position-weight", tokens[4], line_number)?;
+                    let weight = parse_f32(errors, "position-weight", tokens[4], line_number)?;
                     if weight == 0.0 {
-                        return Err(exec.format_failure(ObjFailure::statement(
+                        return Err(ParsePieceError::Format(ObjFailure::statement(
                             "position-weight",
                             "zero-homogeneous-weight",
                             line_number,
@@ -126,7 +133,7 @@ impl<'region, 'session> ObjParser<'region, 'session> {
                         position.z / weight,
                     );
                     if !position.is_finite() {
-                        return Err(exec.format_failure(ObjFailure::non_finite(
+                        return Err(ParsePieceError::Format(ObjFailure::non_finite(
                             "homogeneous-position",
                             line_number,
                             tokens[4].column,
@@ -136,70 +143,88 @@ impl<'region, 'session> ObjParser<'region, 'session> {
                     // Six/seven-component extensions are not homogeneous positions. Validate
                     // the entire suffix before asking for authority to omit its semantics.
                     for token in &tokens[4..] {
-                        parse_f32(exec, "vertex-color", *token, line_number)?;
+                        parse_f32(errors, "vertex-color", *token, line_number)?;
                     }
                 }
-                Ok(position)
+                Ok((position, [1]))
             })
         })?;
         if matches!(components, 6 | 7) {
-            record_vertex_color_loss(exec, tokens, line_number)?;
+            record_vertex_color_loss(&mut children.services()?, tokens, line_number)?;
         }
-        self.parsed.positions.try_push(exec, position)
+        self.parsed
+            .positions
+            .try_push(&mut children.services()?, position)
     }
 
     pub(super) fn parse_texcoord(
         &mut self,
-        exec: &mut ParseExecution<'region, 'session>,
+        children: &mut ParseChildren<'_, 'op, 'session>,
         tokens: &[Token<'_>],
         line_number: u32,
     ) -> ParseResult<()> {
-        require_record_components(exec, tokens, &[2, 3], "texcoord", line_number)?;
+        require_record_components(
+            &mut children.services()?,
+            tokens,
+            &[2, 3],
+            "texcoord",
+            line_number,
+        )?;
         let lanes = if tokens.len() == 4 { 3 } else { 2 };
-        exec.with_work(&self.attribute_work, [1], |exec, work| -> ParseResult<()> {
-            work.run_all(|| {
+        let errors = children.error_view();
+        children.child(&self.attribute_work, [1], |work| {
+            work.run_returned_with_storage(|mut storage| {
                 let value = [
-                    parse_f32(exec, "texcoord", tokens[1], line_number)?,
-                    parse_f32(exec, "texcoord", tokens[2], line_number)?,
+                    parse_f32(errors, "texcoord", tokens[1], line_number)?,
+                    parse_f32(errors, "texcoord", tokens[2], line_number)?,
                     if lanes == 3 {
-                        parse_f32(exec, "texcoord", tokens[3], line_number)?
+                        parse_f32(errors, "texcoord", tokens[3], line_number)?
                     } else {
                         0.0
                     },
                 ];
-                self.parsed.texcoords.try_push(
-                    exec,
+                storage.push_vec(
+                    &mut self.parsed.texcoords,
                     ParsedTexcoord {
                         values: value,
                         lanes,
                     },
-                )
+                )?;
+                Ok(((), [1]))
             })
         })
     }
 
     pub(super) fn parse_normal(
         &mut self,
-        exec: &mut ParseExecution<'region, 'session>,
+        children: &mut ParseChildren<'_, 'op, 'session>,
         tokens: &[Token<'_>],
         line_number: u32,
     ) -> ParseResult<()> {
-        require_record_components(exec, tokens, &[3], "normal", line_number)?;
-        exec.with_work(&self.attribute_work, [1], |exec, work| -> ParseResult<()> {
-            work.run_all(|| {
+        require_record_components(
+            &mut children.services()?,
+            tokens,
+            &[3],
+            "normal",
+            line_number,
+        )?;
+        let errors = children.error_view();
+        children.child(&self.attribute_work, [1], |work| {
+            work.run_returned_with_storage(|mut storage| {
                 let normal = [
-                    parse_f32(exec, "normal", tokens[1], line_number)?,
-                    parse_f32(exec, "normal", tokens[2], line_number)?,
-                    parse_f32(exec, "normal", tokens[3], line_number)?,
+                    parse_f32(errors, "normal", tokens[1], line_number)?,
+                    parse_f32(errors, "normal", tokens[2], line_number)?,
+                    parse_f32(errors, "normal", tokens[3], line_number)?,
                 ];
-                self.parsed.normals.try_push(exec, normal)
+                storage.push_vec(&mut self.parsed.normals, normal)?;
+                Ok(((), [1]))
             })
         })
     }
 }
 
 fn require_record_components(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     tokens: &[Token<'_>],
     allowed: &[usize],
     subject: &'static str,
@@ -222,7 +247,7 @@ fn require_record_components(
 }
 
 fn record_vertex_color_loss(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     tokens: &[Token<'_>],
     line_number: u32,
 ) -> ParseResult<()> {

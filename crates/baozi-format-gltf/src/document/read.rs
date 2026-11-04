@@ -5,7 +5,7 @@ use super::{
     schema::accessor::{ComponentType as C, Type},
 };
 use crate::GltfFailure;
-use baozi_import::{ParseExecution, ParseResult};
+use baozi_import::{ParseResult, ParseServices};
 
 #[derive(Clone, Copy)]
 struct Stream<'bytes> {
@@ -32,11 +32,11 @@ pub(crate) struct Bound<'bytes> {
 }
 
 pub(crate) fn bind<'bytes>(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseServices<'_, '_, '_>,
     accessor: Accessor<'_>,
     mut buffer: impl FnMut(usize) -> Option<&'bytes [u8]>,
 ) -> ParseResult<Bound<'bytes>> {
-    let fail = |reason, ctx: &mut ParseExecution<'_, '_>| {
+    let fail = |reason, ctx: &mut ParseServices<'_, '_, '_>| {
         ctx.format_failure(GltfFailure::invalid_accessor(
             Some(accessor.index()),
             reason,
@@ -65,7 +65,7 @@ pub(crate) fn bind<'bytes>(
     }
     let view_bytes = |id: super::schema::Index,
                       buffer: &mut dyn FnMut(usize) -> Option<&'bytes [u8]>,
-                      ctx: &mut ParseExecution<'_, '_>|
+                      ctx: &mut ParseServices<'_, '_, '_>|
      -> ParseResult<&'bytes [u8]> {
         let view = accessor
             .doc
@@ -128,7 +128,7 @@ pub(crate) fn bind<'bytes>(
             let slice = |bytes: &'bytes [u8],
                          offset: u64,
                          width: usize,
-                         ctx: &mut ParseExecution<'_, '_>|
+                         ctx: &mut ParseServices<'_, '_, '_>|
              -> ParseResult<_> {
                 let start = usize::try_from(offset)
                     .map_err(|_| fail("sparse offset exceeds host domain", ctx))?;

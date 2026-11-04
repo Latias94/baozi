@@ -2,7 +2,7 @@ use super::{ContentError, Result, enforce_usize_limit, to_u64};
 use crate::GltfFailure;
 use baozi_import::{
     FormatFailureDetailSink, FormatFailureEvidenceProducer, ImportStorageClass, ImportWorkClass,
-    MeteredVec, ParseExecution,
+    MeteredVec, ParsePieceError, ParseRoot, ParseServices,
 };
 use std::fmt;
 
@@ -21,51 +21,60 @@ impl ProfileIdentity<'_> {
 /// Resource identities are logical labels, not URIs. Escape literal delimiters reversibly so
 /// a decoded filename containing '#' or '?' does not acquire URI fragment/query semantics.
 pub(super) fn profile_identity<'scope>(
-    ctx: &mut ParseExecution<'_, 'scope>,
+    ctx: &mut ParseRoot<'_, '_, 'scope>,
     path: &str,
 ) -> Result<ProfileIdentity<'scope>> {
     use baozi_import::CapacityPlan;
     use baozi_import::authoring::ResourceIdentity;
 
-    let mut label = ctx.metered_string(
+    let mut label = ctx.services()?.metered_string(
         ImportStorageClass::FormatNormalization,
         "gltf-profile-identity-label",
     );
-    ctx.with_work_group(
-        [(ImportWorkClass::WorkUnits, to_u64(path.len()))],
-        |ctx, work| -> Result<()> {
+    {
+        let layout = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+        ctx.child(&layout, [to_u64(path.len())], |child| -> Result<()> {
             let mut start = 0;
             let mut next_poll = 0;
             for (offset, character) in path.char_indices() {
                 if offset >= next_poll {
-                    ctx.poll()?;
+                    child.poll()?;
                     next_poll = offset.saturating_add(super::BYTE_POLL_INTERVAL);
                 }
-                let escape = match character {
-                    '%' => "%25",
-                    '#' => "%23",
-                    '?' => "%3F",
-                    _ => {
-                        work.complete([character.len_utf8() as u64])?;
-                        continue;
-                    }
-                };
-                label.try_push_str(ctx, &path[start..offset])?;
-                label.try_push_str(ctx, escape)?;
-                work.complete([character.len_utf8() as u64])?;
-                start = offset + character.len_utf8();
+                let next_start = child.run_returned_with_storage(
+                    |mut storage| -> std::result::Result<_, ParsePieceError<GltfFailure>> {
+                        let escape = match character {
+                            '%' => "%25",
+                            '#' => "%23",
+                            '?' => "%3F",
+                            _ => {
+                                return Ok((None, [character.len_utf8() as u64]));
+                            }
+                        };
+                        storage.append_string(&mut label, &path[start..offset])?;
+                        storage.append_string(&mut label, escape)?;
+                        Ok((
+                            Some(offset + character.len_utf8()),
+                            [character.len_utf8() as u64],
+                        ))
+                    },
+                )?;
+                if let Some(next_start) = next_start {
+                    start = next_start;
+                }
             }
-            label.try_push_str(ctx, &path[start..])?;
+            label.try_push_str(&mut child.services()?, &path[start..])?;
             Ok(())
-        },
-    )?;
+        })
+    }?;
     let plan = CapacityPlan::for_type::<u8>(0, 0, label.len())
         .map_err(|_| ctx.allocation_failure("gltf-profile-identity"))?;
     let envelope = plan
         .envelope_delta_bytes()
         .map_err(|_| ctx.allocation_failure("gltf-profile-identity"))?;
-    let storage =
-        ctx.metered_opaque_allowance(ImportStorageClass::FormatNormalization, envelope)?;
+    let storage = ctx
+        .services()?
+        .metered_opaque_allowance(ImportStorageClass::FormatNormalization, envelope)?;
     let value = ResourceIdentity::new(label.as_str()).map_err(|cause| match cause {
         baozi_import::authoring::ResourceIdentityError::AllocationFailed => {
             ContentError::from(ctx.allocation_failure("gltf-profile-identity"))
@@ -118,7 +127,7 @@ impl Resource {
 
     pub(super) fn unsupported(
         self,
-        ctx: &mut ParseExecution<'_, '_>,
+        ctx: &mut ParseServices<'_, '_, '_>,
         reason: &'static str,
     ) -> ContentError {
         let failure = GltfFailure::unsupported(self.subject(), format_args!("{self}: {reason}"));
@@ -178,43 +187,57 @@ impl RelativePath<'_, '_> {
 /// Encoded separators and encoded dot segments are outside this bounded profile;
 /// they must never acquire path structure as a side effect of decoding.
 pub(super) fn relative_path<'scope, 'uri>(
-    ctx: &mut ParseExecution<'_, 'scope>,
+    ctx: &mut ParseRoot<'_, '_, 'scope>,
     value: &'uri str,
     resource: Resource,
 ) -> Result<RelativePath<'scope, 'uri>> {
     {
-        let argument_0 = ctx.limits().max_string_bytes;
-        enforce_usize_limit(ctx, "max_string_bytes", value.len(), argument_0)
+        let argument_0 = ctx.services()?.limits().max_string_bytes;
+        enforce_usize_limit(
+            &mut ctx.services()?,
+            "max_string_bytes",
+            value.len(),
+            argument_0,
+        )
     }?;
     {
-        let argument_0 = ctx.limits().max_path_length;
-        enforce_usize_limit(ctx, "max_path_length", value.len(), argument_0)
+        let argument_0 = ctx.services()?.limits().max_path_length;
+        enforce_usize_limit(
+            &mut ctx.services()?,
+            "max_path_length",
+            value.len(),
+            argument_0,
+        )
     }?;
-    ctx.with_work_group(
-        [(ImportWorkClass::WorkUnits, to_u64(value.len()))],
-        |ctx, work| -> Result<_> {
+    {
+        let layout = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+        ctx.child(&layout, [to_u64(value.len())], |child| -> Result<_> {
             if value.is_empty() {
                 return Err(resource.invalid("external URI path is empty"));
             }
             if value.starts_with('/') {
-                return Err(
-                    resource.unsupported(ctx, "absolute paths and authorities are unsupported")
-                );
+                return Err(resource.unsupported(
+                    &mut child.services()?,
+                    "absolute paths and authorities are unsupported",
+                ));
             }
             if value
                 .split('/')
                 .next()
                 .is_some_and(|segment| segment.contains(':'))
             {
-                return Err(resource.unsupported(ctx, "URI schemes are unsupported"));
+                return Err(
+                    resource.unsupported(&mut child.services()?, "URI schemes are unsupported")
+                );
             }
 
-            let mut decoded =
-                ctx.metered_vec(ImportStorageClass::FormatNormalization, "gltf-uri-path");
+            let mut decoded = child
+                .services()?
+                .metered_vec(ImportStorageClass::FormatNormalization, "gltf-uri-path");
             let encoded = value.as_bytes();
             let has_escape = encoded.contains(&b'%');
             if has_escape {
-                decoded.try_reserve(ctx, encoded.len())?;
+                decoded.try_reserve(&mut child.services()?, encoded.len())?;
             }
             let mut cursor = 0;
             let mut next_poll = 0;
@@ -223,14 +246,15 @@ pub(super) fn relative_path<'scope, 'uri>(
             while cursor < encoded.len() {
                 let before = cursor;
                 if cursor >= next_poll {
-                    ctx.poll()?;
+                    child.poll()?;
                     next_poll = cursor.saturating_add(super::BYTE_POLL_INTERVAL);
                 }
                 let byte = encoded[cursor];
                 if matches!(byte, b'?' | b'#' | b'\\') {
-                    return Err(
-                        resource.unsupported(ctx, "query, fragment or backslash is unsupported")
-                    );
+                    return Err(resource.unsupported(
+                        &mut child.services()?,
+                        "query, fragment or backslash is unsupported",
+                    ));
                 }
                 if byte.is_ascii_control() || byte == b' ' {
                     return Err(resource.invalid("URI contains unescaped whitespace or controls"));
@@ -243,43 +267,54 @@ pub(super) fn relative_path<'scope, 'uri>(
                             resource.invalid("URI contains an invalid percent escape")
                         })?;
                     if matches!(escaped, b'/' | b'\\') {
-                        return Err(
-                            resource.unsupported(ctx, "percent-encoded separators are unsupported")
-                        );
+                        return Err(resource.unsupported(
+                            &mut child.services()?,
+                            "percent-encoded separators are unsupported",
+                        ));
                     }
                     if escaped == b':' {
-                        return Err(
-                            resource.unsupported(ctx, "percent-encoded colons are unsupported")
-                        );
+                        return Err(resource.unsupported(
+                            &mut child.services()?,
+                            "percent-encoded colons are unsupported",
+                        ));
                     }
                     if escaped.is_ascii_control() {
                         return Err(resource.invalid("URI decodes to a control character"));
                     }
-                    decoded.try_push_reserved(escaped)?;
-                    component_escaped = true;
-                    cursor += 3;
+                    child.run_returned(|| -> baozi_import::ParseResult<_> {
+                        decoded.try_push_reserved(escaped)?;
+                        component_escaped = true;
+                        cursor += 3;
+                        Ok(((), [(cursor - before) as u64]))
+                    })?;
                 } else {
-                    if byte == b'/' {
-                        if component_escaped
-                            && is_dot_segment(&decoded.as_slice()[component_start..])
-                        {
-                            return Err(resource
-                                .unsupported(ctx, "percent-encoded dot segments are unsupported"));
+                    if byte == b'/'
+                        && component_escaped
+                        && is_dot_segment(&decoded.as_slice()[component_start..])
+                    {
+                        return Err(resource.unsupported(
+                            &mut child.services()?,
+                            "percent-encoded dot segments are unsupported",
+                        ));
+                    }
+                    child.run_returned(|| -> baozi_import::ParseResult<_> {
+                        if byte == b'/' {
+                            component_start = decoded.len() + 1;
+                            component_escaped = false;
                         }
-                        component_start = decoded.len() + 1;
-                        component_escaped = false;
-                    }
-                    if has_escape {
-                        decoded.try_push_reserved(byte)?;
-                    }
-                    cursor += 1;
+                        if has_escape {
+                            decoded.try_push_reserved(byte)?;
+                        }
+                        cursor += 1;
+                        Ok(((), [(cursor - before) as u64]))
+                    })?;
                 }
-                work.complete([(cursor - before) as u64])?;
             }
             if component_escaped && is_dot_segment(&decoded.as_slice()[component_start..]) {
-                return Err(
-                    resource.unsupported(ctx, "percent-encoded dot segments are unsupported")
-                );
+                return Err(resource.unsupported(
+                    &mut child.services()?,
+                    "percent-encoded dot segments are unsupported",
+                ));
             }
             if has_escape {
                 let path = std::str::from_utf8(decoded.as_slice())
@@ -293,8 +328,8 @@ pub(super) fn relative_path<'scope, 'uri>(
             } else {
                 Ok(RelativePath::Literal(value))
             }
-        },
-    )
+        })
+    }
 }
 
 fn reject_controls(value: &str, resource: Resource) -> Result<()> {

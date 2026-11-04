@@ -360,14 +360,18 @@ mod required_dependency_fixture {
             &self,
             _probe: &Probe<'_>,
             _hint: &ReadHint,
-            _scope: &DetectionScope<'_>,
+            _scope: &mut DetectionScope<'_, '_>,
         ) -> DetectionResult<DetectionOutcome> {
             Ok(DetectionOutcome::Match(ReadConfidence::Certain))
         }
 
-        fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
+        fn parse(
+            &self,
+            _options: &Self::Options,
+            scope: &mut ParseContext<'_, '_>,
+        ) -> ParseResult<()> {
             scope.with_execution(|exec| -> ParseResult<()> {
-                let root = exec.root_origin();
+                let root = exec.services()?.root_origin();
                 let role =
                     DependencyRoleId::new("material-library").expect("valid dependency role");
                 let outcome = exec.dependency(&root, &role, "./materials/triangle.mtl")?;

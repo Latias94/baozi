@@ -11,7 +11,8 @@ use std::convert::Infallible;
 use std::sync::atomic::AtomicU64;
 
 use baozi_operation::__retained_store_integration::activation::{
-    ActivatedCanonicalStoreSession, CanonicalActivationOutcome, CanonicalActivationSeal,
+    CanonicalActivationOutcome, CanonicalActivationSeal, CanonicalCandidateStoreSession,
+    CanonicalFinal, CanonicalInvocationOutcome, CanonicalValidationProgress,
 };
 use baozi_operation::__retained_store_integration::authority::CanonicalInheritanceSource;
 use baozi_operation::__retained_store_integration::producer::{
@@ -24,7 +25,9 @@ use crate::attribute::{AttributeDomain, AttributeSemantic, CustomAttributeSemant
 use crate::canonical_scene::store::construction::node_scene::edit::graph::try_rewrite_node_scene;
 use crate::canonical_scene::store::construction::node_scene::edit::plan::BoundPendingNodeSceneEdit;
 use crate::canonical_scene::store::construction::node_scene::materialization::{
-    NodeSceneSessionActivationBootstrap, node_scene_activation_roles,
+    NodeSceneActivationOutput, NodeSceneActivationPostflight, NodeSceneFailureEvidencePlan,
+    NodeSceneLaneOutput, NodeSceneLaneValidationProof, NodeSceneSessionActivationBootstrap,
+    node_scene_activation_roles,
 };
 use crate::canonical_scene::store::construction::node_scene::tests::{
     single_trs_batch, successful_parts, test_account, test_factory, test_limits,
@@ -49,7 +52,7 @@ use crate::canonical_scene::store::production::{
 };
 use crate::canonical_scene::store::profile_provenance::ProfileProvenanceRef;
 use crate::canonical_scene::store::schema::{
-    NODE_SCENE_EVIDENCE_FIELD_COUNT, SceneDirectorySchema,
+    NODE_SCENE_EVIDENCE_FIELD_COUNT, NodeSceneOutcomeEvidenceSchema, SceneDirectorySchema,
 };
 use crate::canonical_scene::store::typed_storage::SceneTables;
 use crate::canonical_scene::store::typed_storage::build::TypedStorageBuildControl;
@@ -323,7 +326,10 @@ fn source_scene(
         AnimationAuthoringBatch::empty(),
         profile,
     );
+    let mut invocation_root_1 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let draft = NodeSceneTestTransaction::with_account(
+        &mut invocation_root_1,
         account,
         test_limits(),
         input,
@@ -339,15 +345,32 @@ fn source_scene(
     )
 }
 
-type RetainedEdit = ActivatedCanonicalStoreSession<
-    SceneConstructionOwner,
-    SceneConstructionPhase,
-    SceneConstructionUnit,
-    SceneTables,
-    RecordBlock,
-    SceneDirectorySchema,
-    CanonicalInheritanceSource,
->;
+#[allow(
+    clippy::type_complexity,
+    reason = "the fixture retains the exact candidate and both canonical/evidence root brands"
+)]
+struct RetainedEdit<'inv>(
+    CanonicalFinal<
+        CanonicalCandidateStoreSession<
+            'inv,
+            SceneConstructionOwner,
+            SceneConstructionPhase,
+            SceneConstructionUnit,
+            NodeSceneLaneOutput,
+            NodeSceneLaneValidationProof,
+            RecordBlock,
+            SceneDirectorySchema,
+            RecordBlock,
+            NodeSceneOutcomeEvidenceSchema,
+        >,
+    >,
+);
+
+impl RetainedEdit<'_> {
+    fn output(&self) -> &SceneTables {
+        &self.0.output().inner().tables
+    }
+}
 
 struct EditActivation<'scene> {
     request: CanonicalActivationRequest,
@@ -368,16 +391,28 @@ impl<'scene> CanonicalActivationDescription for EditActivation<'scene> {
 
 /// Uses the production graph/profile retention adapters and the existing same-account lane.
 /// Publication and postprocess orchestration are covered by their own transaction tests.
-fn retain_edit(pending: BoundPendingNodeSceneEdit<'_>) -> RetainedEdit {
-    retain_controlled_edit(pending, OperationControl::default(), || {})
+fn retain_edit<'inv>(
+    host: &'inv mut crate::canonical_scene::store::construction::SceneCanonicalInvocationHost<
+        NodeSceneLaneOutput,
+        NodeSceneLaneValidationProof,
+        StoreRuntimeError,
+    >,
+    pending: BoundPendingNodeSceneEdit<'_>,
+) -> RetainedEdit<'inv> {
+    retain_controlled_edit(host, pending, OperationControl::default(), || {})
         .expect("valid profile must reach a retained candidate")
 }
 
-fn retain_controlled_edit(
+fn retain_controlled_edit<'inv>(
+    host: &'inv mut crate::canonical_scene::store::construction::SceneCanonicalInvocationHost<
+        NodeSceneLaneOutput,
+        NodeSceneLaneValidationProof,
+        StoreRuntimeError,
+    >,
     pending: BoundPendingNodeSceneEdit<'_>,
     control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
     before_retention: impl Fn(),
-) -> Option<RetainedEdit> {
+) -> Option<RetainedEdit<'inv>> {
     let counts = pending.counts;
     let start = try_plan_scene_operation(
         test_limits(),
@@ -386,80 +421,135 @@ fn retain_controlled_edit(
         SceneFailureEvidenceWork::exact_single_record(NODE_SCENE_EVIDENCE_FIELD_COUNT),
     )
     .expect("normals derived start plan");
-    let raw = SceneStoreOperation::try_start_derived(
-        start.control,
-        start.ledger_plan,
-        &pending.input.canonical,
-        start.start_plan,
-    )
-    .expect("normals same-account start");
-    let (evidence_limits, failure, _) = NodeSceneSessionActivationBootstrap::try_new()
-        .expect("normals failure envelope")
-        .into_parts();
-    let owner = raw
-        .into_session_outcome_owner(
-            node_scene_activation_roles(start.keys).session_policy(),
-            evidence_limits,
-            failure,
-        )
-        .expect("normals session owner");
-    let (brand, request) =
-        ConstructionBrand::reserve_with_activation_request().expect("normals activation identity");
-    let name_bytes = match &pending.program {
-        super::super::plan::NodeSceneEditProgram::ConvertSpace(plan) => plan.name_bytes(),
-        _ => pending.input.read_geometry().names.len(),
-    };
-    let total = counts.canonical_blocks.as_usize();
-    let requirements = CanonicalSuccessRequirements::new(
-        CanonicalTableShape::new(total, total).expect("normals canonical shape"),
-        4,
-        total,
-        counts.central_validation_plan.work(),
-    )
-    .expect("normals success envelope")
-    .with_request_identity(brand.activation_request_identity())
-    .with_semantic_bytes(name_bytes as u64);
-    let mut description = Some(EditActivation {
-        request,
-        requirements,
-        pending,
-    });
-    let outcome: CanonicalActivationOutcome<
-        _,
-        _,
-        _,
-        SceneTables,
-        StoreRuntimeError,
-        RecordBlock,
-        SceneDirectorySchema,
-        CanonicalInheritanceSource,
-    > = owner
-        .plan_and_activate_scoped(|mut planning| {
-            let mut semantic = planning
-                .begin_semantic_work()
-                .expect("normals semantic lane");
-            semantic.run_unit(|| ()).expect("normals semantic action");
-            let completion = semantic
-                .finish_exact()
-                .expect("normals semantic completion");
-            let permit = match planning.seal_activation(
-                description.take().expect("one normals activation"),
-                completion,
-            ) {
-                CanonicalActivationSeal::Sealed(permit) => permit,
-                CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
+    let mut inputs = Some((start, pending));
+    let finish = host
+        .run_body(move |parts, disposition| {
+            let (start, pending) = inputs.take().unwrap();
+            let raw = SceneStoreOperation::try_start_derived(
+                parts.startup,
+                start.control,
+                start.ledger_plan,
+                &pending.input.canonical,
+                start.start_plan,
+            )
+            .expect("normals same-account start");
+            let (evidence_limits, failure, _) = NodeSceneSessionActivationBootstrap::try_new()
+                .expect("normals failure envelope")
+                .into_parts();
+            let owner = raw
+                .into_session_outcome_owner(
+                    node_scene_activation_roles(start.keys).session_policy(),
+                    evidence_limits,
+                    failure,
+                )
+                .expect("normals session owner");
+            let (brand, request) = ConstructionBrand::reserve_with_activation_request()
+                .expect("normals activation identity");
+            let postflight = NodeSceneActivationPostflight::from_parts(
+                brand,
+                NodeSceneFailureEvidencePlan::try_new().unwrap(),
+                counts.evidence,
+            );
+            let name_bytes = match &pending.program {
+                super::super::plan::NodeSceneEditProgram::ConvertSpace(plan) => plan.name_bytes(),
+                _ => pending.input.read_geometry().names.len(),
             };
-            permit.activate(|mut lane, pending| {
-                before_retention();
-                match try_rewrite_node_scene(&mut lane, pending) {
-                    Ok(graph) => lane.complete(graph.directory.into_store(), graph.tables),
-                    Err(cause) => lane.reject(cause, 0x4e4f_5201),
+            let total = counts.canonical_blocks.as_usize();
+            let requirements = CanonicalSuccessRequirements::new(
+                CanonicalTableShape::new(total, total).expect("normals canonical shape"),
+                4,
+                total,
+                counts.central_validation_plan.work(),
+            )
+            .expect("normals success envelope")
+            .with_request_identity(brand.activation_request_identity())
+            .with_semantic_bytes(name_bytes as u64);
+            let mut description = Some(EditActivation {
+                request,
+                requirements,
+                pending,
+            });
+            let outcome: Result<
+                CanonicalActivationOutcome<
+                    '_,
+                    _,
+                    _,
+                    _,
+                    NodeSceneLaneOutput,
+                    StoreRuntimeError,
+                    RecordBlock,
+                    SceneDirectorySchema,
+                    CanonicalInheritanceSource,
+                >,
+                _,
+            > = owner.plan_and_activate_scoped(parts.output, parts.activation, |mut planning| {
+                let ((), completion) = planning
+                    .with_semantic_work(|semantic| semantic.run_unit(|| ()))
+                    .expect("normals semantic completion");
+                let permit = match planning.seal_activation(
+                    description.take().expect("one normals activation"),
+                    completion,
+                ) {
+                    CanonicalActivationSeal::Sealed(permit) => permit,
+                    CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
+                };
+                permit.activate(|mut lane, pending| {
+                    before_retention();
+                    match try_rewrite_node_scene(&mut lane, pending) {
+                        Ok(graph) => lane.complete(
+                            graph.directory.into_store(),
+                            NodeSceneLaneOutput::from_inner(NodeSceneActivationOutput {
+                                tables: graph.tables,
+                                brand,
+                                refs: graph.refs,
+                                evidence_counts: pending.counts.evidence,
+                                central_validation: pending.counts.central_validation_plan,
+                            }),
+                        ),
+                        Err(cause) => lane.reject(cause, 0x4e4f_5201),
+                    }
+                })
+            });
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(_) => return,
+            };
+            match outcome {
+                CanonicalActivationOutcome::Activated(activated) => {
+                    let recipe = postflight.candidate_evidence(activated.output());
+                    activated
+                        .validate_centrally(
+                            parts.proof,
+                            parts.validation,
+                            CanonicalValidationProgress::new(
+                                SceneConstructionPhase::Validation,
+                                SceneConstructionUnit::WorkUnits,
+                            ),
+                            |lane, _| match lane.try_retain_records(
+                                recipe.record_plan(),
+                                NodeSceneOutcomeEvidenceSchema,
+                                |writer| writer.write_row(|row| recipe.write_row(row)),
+                            ) {
+                                Ok(evidence) => lane.complete(evidence),
+                                Err(_) => lane.abort(),
+                            },
+                            |planning, output| postflight.validate_candidate(planning, output),
+                        )
+                        .unwrap()
+                        .request_finish(disposition)
+                        .unwrap();
                 }
-            })
+                CanonicalActivationOutcome::Rejected(rejected) => {
+                    rejected.request_finish(disposition).unwrap()
+                }
+                CanonicalActivationOutcome::NeverActivated(rejected) => {
+                    rejected.request_finish(disposition).unwrap()
+                }
+            }
         })
         .ok()?;
-    match outcome {
-        CanonicalActivationOutcome::Activated(activated) => Some(activated),
+    match finish.resume().outcome {
+        CanonicalInvocationOutcome::Candidate(candidate) => Some(RetainedEdit(candidate)),
         _ => None,
     }
 }
@@ -719,7 +809,9 @@ fn smooth_replacement_retains_distinct_parent_sets_and_compacts_removed_tangent_
         SECOND_PAYLOAD.len() as u32
     );
     assert!(plan.metadata.rewrites_payloads());
-    let output = retain_edit(pending);
+    let mut invocation_root_2 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    let output = retain_edit(&mut invocation_root_2, pending);
     let profile = &output.output().profile;
     assert_generated_lineage(&source.scene, profile, &parents, 4, options);
     assert_valid_profile(profile, plan);
@@ -754,6 +846,7 @@ fn smooth_replacement_retains_distinct_parent_sets_and_compacts_removed_tangent_
     assert_valid_profile(&output.output().profile, validation_facts);
     assert_metadata(&output.output().profile, true, 2, 6);
     drop(output);
+    drop(invocation_root_2);
     assert!(!account.snapshot().poisoned());
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
@@ -803,7 +896,9 @@ fn adding_smooth_normals_reindexes_following_owners_without_copying_metadata_pay
     );
     assert_eq!(plan.output_counts.metadata_entry_count, 2);
     assert!(!plan.metadata.rewrites_payloads());
-    let output = retain_edit(pending);
+    let mut invocation_root_3 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    let output = retain_edit(&mut invocation_root_3, pending);
     let profile = &output.output().profile;
     assert_generated_lineage(&source.scene, profile, &parents, 4, options);
     assert_valid_profile(profile, plan);
@@ -843,6 +938,7 @@ fn adding_smooth_normals_reindexes_following_owners_without_copying_metadata_pay
     assert_valid_profile(&output.output().profile, validation_facts);
     assert_metadata(&output.output().profile, false, 2, 6);
     drop(output);
+    drop(invocation_root_3);
     assert!(!account.snapshot().poisoned());
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
@@ -896,7 +992,9 @@ fn flat_replacement_excludes_smoothing_group_and_unrelated_attribute_provenance(
         plan.output_counts.owner_count,
         source.scene.proof.profile_counts().owner_count
     );
-    let output = retain_edit(pending);
+    let mut invocation_root_4 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    let output = retain_edit(&mut invocation_root_4, pending);
     let profile = &output.output().profile;
     assert_generated_lineage(&source.scene, profile, &parents, 3, options);
     assert_valid_profile(profile, plan);
@@ -927,6 +1025,7 @@ fn flat_replacement_excludes_smoothing_group_and_unrelated_attribute_provenance(
     assert_valid_profile(&output.output().profile, validation_facts);
     assert_metadata(&output.output().profile, true, 2, 6);
     drop(output);
+    drop(invocation_root_4);
     assert!(!account.snapshot().poisoned());
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
@@ -968,7 +1067,9 @@ fn winding_conversion_keeps_owner_indices_and_unions_each_owners_scene_parents()
         CanonicalProfileOwner::Attribute(1),
     ];
     assert_eq!(plan.target_count.as_usize(), selected.len());
-    let output = retain_edit(pending);
+    let mut invocation_root_5 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    let output = retain_edit(&mut invocation_root_5, pending);
     let profile = &output.output().profile;
     assert!(std::ptr::eq(
         output.output().nodes.as_ref(),
@@ -1014,6 +1115,7 @@ fn winding_conversion_keeps_owner_indices_and_unions_each_owners_scene_parents()
             .unwrap()
     );
     drop(output);
+    drop(invocation_root_5);
     drop(source);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
@@ -1043,7 +1145,9 @@ fn declaration_only_conversion_shares_node_geometry_and_metadata_owners() {
     .unwrap();
     let plan = pending.counts.profile;
     assert_eq!(plan.target_count.as_u32(), 1);
-    let output = retain_edit(pending);
+    let mut invocation_root_6 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    let output = retain_edit(&mut invocation_root_6, pending);
     let tables = output.output();
     assert!(std::ptr::eq(
         tables.nodes.as_ref(),
@@ -1068,6 +1172,7 @@ fn declaration_only_conversion_shares_node_geometry_and_metadata_owners() {
         SceneSpace::UNKNOWN
     );
     drop(output);
+    drop(invocation_root_6);
     drop(source);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
@@ -1110,7 +1215,9 @@ fn space_conversion_rebinds_changed_deformation_and_curve_owners_with_exact_sele
     // 1 skin + 2 bind matrices + 4 deltas + 8 xyz tuples;
     // 3 channels + 18 values + 4 in derivatives + 4 out derivatives.
     assert_eq!(plan.selection_work, 44);
-    let output = retain_edit(pending);
+    let mut invocation_root_7 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    let output = retain_edit(&mut invocation_root_7, pending);
     let tables = output.output();
     assert!(!std::ptr::eq(
         tables.deformation.as_ref(),
@@ -1169,6 +1276,7 @@ fn space_conversion_rebinds_changed_deformation_and_curve_owners_with_exact_sele
     drop(source);
     assert_valid_profile(&output.output().profile, validation_facts);
     drop(output);
+    drop(invocation_root_7);
     assert!(!account.snapshot().poisoned());
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
@@ -1215,7 +1323,9 @@ fn winding_and_declaration_edits_share_populated_deformation_and_animation_witho
         .unwrap();
         let plan = pending.counts.profile;
         assert_eq!(plan.selection_work, 0);
-        let output = retain_edit(pending);
+        let mut invocation_root_8 =
+            crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+        let output = retain_edit(&mut invocation_root_8, pending);
         let tables = output.output();
         assert!(std::ptr::eq(
             tables.deformation.as_ref(),
@@ -1234,6 +1344,7 @@ fn winding_and_declaration_edits_share_populated_deformation_and_animation_witho
         assert!(space.validate_correspondence(tables, &mut control).unwrap());
         assert_eq!(control.0, space.correspondence_work());
         drop(output);
+        drop(invocation_root_8);
         drop(source);
         assert!(!account.snapshot().poisoned());
         assert_eq!(account.snapshot().live_retained_allocations(), 0);
@@ -1329,7 +1440,10 @@ fn interrupted_space_graph_releases_rebuilt_owners_and_preserves_the_source_acco
         )
         .unwrap();
         let polls = Arc::new(AtomicUsize::new(0));
+        let mut invocation_root_9 =
+            crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
         let result = retain_controlled_edit(
+            &mut invocation_root_9,
             pending,
             OperationControl::default().with_cancellation(Stop {
                 polls: polls.clone(),
@@ -1350,7 +1464,9 @@ fn interrupted_space_graph_releases_rebuilt_owners_and_preserves_the_source_acco
             drop(output);
         } else {
             assert!(result.is_none(), "the selected poll {at} must interrupt");
+            drop(result);
         }
+        drop(invocation_root_9);
         assert!(!account.snapshot().poisoned());
         assert_eq!(
             account.snapshot().live_retained_allocations(),
@@ -1419,7 +1535,9 @@ fn spatial_conversion_rebinds_camera_and_light_provenance_without_changing_node_
         4,
         "Scene, camera, light, and the node's reflected signed-zero components"
     );
-    let output = retain_edit(pending);
+    let mut invocation_root_10 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    let output = retain_edit(&mut invocation_root_10, pending);
     let tables = output.output();
     assert_eq!(
         tables.nodes.as_ref().nodes.len(),
@@ -1496,6 +1614,7 @@ fn spatial_conversion_rebinds_camera_and_light_provenance_without_changing_node_
     drop(source);
     assert_valid_profile(&output.output().profile, validation_facts);
     drop(output);
+    drop(invocation_root_10);
     assert!(!account.snapshot().poisoned());
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);

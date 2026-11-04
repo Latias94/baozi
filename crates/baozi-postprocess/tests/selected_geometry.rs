@@ -72,11 +72,15 @@ impl Format for Importer {
         &self,
         _: &baozi_import::Probe<'_>,
         _: &ReadHint,
-        _: &DetectionScope<'_>,
+        _: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         let f = self.0;
         let ids = if f.topology == TopologyKind::TriangleList {
             vec![0, 1, 2]
@@ -217,6 +221,85 @@ fn recipe() -> TrianglePreparationOptions {
         ..Default::default()
     }
 }
+
+#[test]
+fn empty_and_unchanged_preparation_finish_without_retained_terminal_publication() {
+    for empty in [true, false] {
+        let (scene, evidence) = import(Fixture::lists(1)).into_parts();
+        let generation = scene.generation();
+        let original = field_bits(&scene);
+        let ids = if empty { Vec::new() } else { targets(&scene) };
+        let (scene, report) = prepare_triangles(
+            scene,
+            &ids,
+            TrianglePreparationOptions::default(),
+            PostProcessControl::default(),
+        )
+        .expect("the original triangle list needs no canonical write")
+        .into_parts();
+        assert_eq!(scene.generation(), generation);
+        assert!(evidence.matches_scene(&scene));
+        assert_eq!(field_bits(&scene), original);
+        assert_eq!(
+            report.disposition(),
+            baozi_postprocess::PostProcessRunDisposition::Unchanged
+        );
+        let resources = report.resources();
+        assert_eq!(resources.current_live_bytes(), 0);
+        assert_eq!(resources.active_reservations(), 0);
+        assert_eq!(resources.committed_canonical_bytes(), 0);
+        assert_eq!(resources.published_outcome_evidence_bytes(), 0);
+        assert_eq!(resources.published_terminal_evidence_records(), 0);
+        assert_eq!(
+            resources.attempted_work_actions(),
+            resources.consumed_work_actions()
+        );
+        if !empty {
+            assert!(resources.peak_staging_bytes() > 0);
+            assert!(resources.consumed_work_actions() > 0);
+        }
+    }
+}
+
+#[test]
+fn preparation_error_releases_prework_and_keeps_original_cause_without_retained_terminal() {
+    let (scene, evidence) = import(Fixture::lists(1)).into_parts();
+    let generation = scene.generation();
+    let original = field_bits(&scene);
+    let target = targets(&scene)[0];
+    let failure = prepare_triangles(
+        scene,
+        &[target, target],
+        recipe(),
+        PostProcessControl::default(),
+    )
+    .expect_err("duplicate selection fails before canonical attachment");
+    assert_eq!(failure.input().generation(), generation);
+    assert!(evidence.matches_scene(failure.input()));
+    assert_eq!(field_bits(failure.input()), original);
+    let baozi_postprocess::PostProcessRunError::Preparation { failure } = failure.error() else {
+        panic!("the original preparation error must survive direct finalization")
+    };
+    assert!(matches!(
+        failure.cause(),
+        baozi_postprocess::PreparationCause::DuplicateTarget
+    ));
+    let resources = failure
+        .resources()
+        .expect("real prework facts remain owned");
+    assert!(resources.peak_staging_bytes() > 0);
+    assert!(resources.consumed_work_actions() > 0);
+    assert_eq!(resources.current_live_bytes(), 0);
+    assert_eq!(resources.active_reservations(), 0);
+    assert_eq!(resources.committed_canonical_bytes(), 0);
+    assert_eq!(resources.published_outcome_evidence_bytes(), 0);
+    assert_eq!(resources.published_terminal_evidence_records(), 0);
+    assert_eq!(
+        resources.attempted_work_actions(),
+        resources.consumed_work_actions()
+    );
+}
+
 fn field_bits(scene: &baozi_core::ValidatedScene) -> Vec<Vec<Vec<u64>>> {
     scene
         .meshes()

@@ -13,7 +13,7 @@ use crate::{
     json_syntax::{JsonIndex, ValueId},
     source_map::GltfSourceMap,
 };
-use baozi_import::{ParseExecution, ParseResult};
+use baozi_import::{ParseResult, ParseRoot};
 use schema::Text;
 pub(crate) use schema::{
     AlphaMode, MagFilter, MinFilter, WrappingMode,
@@ -52,7 +52,7 @@ pub(crate) struct Document<'scope> {
 
 impl<'scope> Document<'scope> {
     pub(crate) fn decode<'session: 'scope>(
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
         surfaces: AdmittedSurfaces<'scope>,
     ) -> ParseResult<Self> {
         let (json, bin, source_map, index) = surfaces.into_parts();
@@ -86,7 +86,7 @@ impl<'scope> Document<'scope> {
     }
     pub(crate) fn texture_transform<'session: 'scope>(
         &self,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
         id: ValueId,
     ) -> ParseResult<schema::extensions::texture::TextureTransform> {
         decode::Decoder {
@@ -97,7 +97,7 @@ impl<'scope> Document<'scope> {
     }
     pub(crate) fn emissive_strength<'session: 'scope>(
         &self,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
         id: ValueId,
     ) -> ParseResult<f32> {
         decode::Decoder {
@@ -108,7 +108,7 @@ impl<'scope> Document<'scope> {
     }
     pub(crate) fn clearcoat<'session: 'scope>(
         &self,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
         id: ValueId,
     ) -> ParseResult<schema::Clearcoat> {
         decode::Decoder {
@@ -119,7 +119,7 @@ impl<'scope> Document<'scope> {
     }
     pub(crate) fn sheen<'session: 'scope>(
         &self,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
         id: ValueId,
     ) -> ParseResult<schema::Sheen> {
         decode::Decoder {
@@ -136,7 +136,7 @@ impl<'scope> Document<'scope> {
     }
     pub(crate) fn punctual_light_reference<'session: 'scope>(
         &self,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
         id: ValueId,
     ) -> ParseResult<schema::Index> {
         decode::Decoder {
@@ -148,7 +148,7 @@ impl<'scope> Document<'scope> {
 
     pub(crate) fn light<'session: 'scope>(
         &self,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
         id: ValueId,
     ) -> ParseResult<schema::Light<'scope>> {
         decode::Decoder {

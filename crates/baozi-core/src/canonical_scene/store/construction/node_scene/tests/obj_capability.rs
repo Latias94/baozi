@@ -409,7 +409,10 @@ fn build_obj_scene_with_generation_source(
     reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
 ) -> NodeSceneSuccessParts {
     projection.with_scene_input(|input| {
+        let mut invocation_root_1 =
+            crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
         let build = NodeSceneTestTransaction::with_account(
+            &mut invocation_root_1,
             account,
             test_limits(),
             input,
@@ -1082,7 +1085,10 @@ fn incomplete_obj_corner_projection_is_rejected_by_central_validation() {
     assert_eq!(projection.texcoord_indices.pop(), Some(1));
 
     projection.with_scene_input(|input| {
+        let mut invocation_root_2 =
+            crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
         let build = NodeSceneTestTransaction::with_account(
+            &mut invocation_root_2,
             &account,
             test_limits(),
             input,
@@ -1160,7 +1166,10 @@ fn obj_construction_one_short_work_limit_publishes_only_rich_failure() {
         .checked_sub(1)
         .expect("OBJ construction must consume work");
     projection.with_scene_input(|input| {
+        let mut invocation_root_3 =
+            crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
         let build = NodeSceneTestTransaction::with_account(
+            &mut invocation_root_3,
             &account,
             test_limits_with_work(work_limit),
             input,
@@ -1188,6 +1197,7 @@ fn obj_construction_one_short_work_limit_publishes_only_rich_failure() {
             terminal_failure_class(failure.ledger_evidence()),
             StorePreparationFailureClass::Ledger,
         );
+        drop(invocation_root_3);
         assert_released(failure, &account);
     });
 }
@@ -1200,34 +1210,41 @@ fn obj_cancellation_after_validation_publishes_only_rich_failure() {
     let cancellation = CancellationToken::new();
 
     projection.with_scene_input(|input| {
-        let build = NodeSceneTestTransaction::with_account_and_cancellation(
-            &account,
-            test_limits(),
-            input,
-            SceneValidationLimits::default(),
-            cancellation.clone(),
-        )
-        .expect("cancellable OBJ Scene input admission")
-        .finish_draft()
-        .expect("OBJ input must materialize and validate before cancellation");
-        let NodeSceneDraftBuild::Draft { owner } = build else {
-            panic!("valid OBJ input must retain its draft before cancellation");
-        };
+        let mut invocation_root_4 =
+            crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+        let failure = {
+            let build = NodeSceneTestTransaction::with_account_and_cancellation(
+                &mut invocation_root_4,
+                &account,
+                test_limits(),
+                input,
+                SceneValidationLimits::default(),
+                cancellation.clone(),
+            )
+            .expect("cancellable OBJ Scene input admission")
+            .finish_draft()
+            .expect("OBJ input must materialize and validate before cancellation");
+            let NodeSceneDraftBuild::Draft { owner } = build else {
+                panic!("valid OBJ input must retain its draft before cancellation");
+            };
 
-        cancellation.cancel();
-        let failure = rich_failure(
-            owner
-                .prepare_with_generation_source(
-                    SceneParseOutcome::Accepted,
-                    SceneGenerationId::reserve,
-                )
-                .expect("cancelled OBJ construction must prepare rich failure")
-                .handoff(),
-        );
-        assert_eq!(
-            terminal_failure_class(failure.ledger_evidence()),
-            StorePreparationFailureClass::Control,
-        );
+            cancellation.cancel();
+            let failure = rich_failure(
+                owner
+                    .prepare_with_generation_source(
+                        SceneParseOutcome::Accepted,
+                        SceneGenerationId::reserve,
+                    )
+                    .expect("cancelled OBJ construction must prepare rich failure")
+                    .handoff(),
+            );
+            assert_eq!(
+                terminal_failure_class(failure.ledger_evidence()),
+                StorePreparationFailureClass::Control,
+            );
+            failure
+        };
+        drop(invocation_root_4);
         assert_released(failure, &account);
     });
 }

@@ -95,10 +95,8 @@ pub enum ImportRunError {
 }
 
 impl ImportRunError {
-    pub(crate) const fn initialization(source: LedgerLimitsError<ImportDimension>) -> Self {
-        Self::Initialization {
-            source: ImportInitializationError::ledger_limits(source),
-        }
+    pub(crate) const fn initialization(source: ImportInitializationError) -> Self {
+        Self::Initialization { source }
     }
 
     pub(crate) const fn retained_store_initialization(code: &'static str) -> Self {

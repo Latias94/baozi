@@ -22,7 +22,7 @@ struct DepthFrame<'graph> {
 impl ResourceGraph {
     pub(super) fn plan_existing_target(
         &mut self,
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
         target: usize,
         source: usize,
         target_depth: u64,
@@ -32,7 +32,7 @@ impl ResourceGraph {
         let group = exec
             .bind_group([ImportDimension::ResourceGraphWork])
             .map_err(|cause| ResourceGraphError::Scope(cause.into_scope_abort_cause()))?;
-        charge_bound_work(&group, 1)?;
+        charge_bound_work(exec, &group, 1)?;
         if target == source {
             return Err(ResourceGraphError::Cycle);
         }
@@ -200,9 +200,9 @@ fn outgoing<'graph>(
     }
 }
 
-fn push_scratch<T>(
-    exec: &mut ImportStoreExecution<'_>,
-    group: &ImportBoundWorkGroup<'_, 1>,
+fn push_scratch<'op, T>(
+    exec: &mut ImportRootExecution<'_, 'op>,
+    group: &ImportRootWorkLayout<'op, 1>,
     values: &mut AccountedVec<T>,
     value: T,
     resource: &'static str,

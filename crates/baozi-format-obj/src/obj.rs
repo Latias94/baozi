@@ -2,7 +2,8 @@ use crate::{ObjFailure, mtl, parser};
 use baozi_import::authoring::Vec3;
 use baozi_import::{
     ConformedTextInput, ImportStorageClass, ImportWorkClass, MeteredString, MeteredVec,
-    ParseExecution, ParseResult, TextInputLine, TextInputRecoveryTracker,
+    ParseChildren, ParseErrorView, ParseFailure, ParsePieceError, ParseResult, ParseServices,
+    ParseWorkLayout, TextInputLine, TextInputRecoveryTracker,
 };
 use std::num::NonZeroU32;
 
@@ -79,16 +80,20 @@ impl ParsedObj<'_> {
     }
 }
 
-pub(crate) fn parse<'region, 'session>(
-    exec: &mut ParseExecution<'region, 'session>,
+pub(crate) fn parse<'region, 'op, 'session>(
+    children: &mut ParseChildren<'region, 'op, 'session>,
     text: &ConformedTextInput<'_>,
     recoveries: &mut TextInputRecoveryTracker<'_, 'session>,
 ) -> ParseResult<ParsedObj<'session>> {
+    let face_work =
+        children.bind_group([ImportWorkClass::Faces, ImportWorkClass::TopologyCells])?;
+    let vertex_work = children.bind_group([ImportWorkClass::Vertices])?;
+    let attribute_work = children.bind_group([ImportWorkClass::AttributeCells])?;
+    let exec = &mut children.services()?;
     let mut parser = ObjParser {
-        face_work: exec
-            .bind_work_group([ImportWorkClass::Faces, ImportWorkClass::TopologyCells])?,
-        vertex_work: exec.bind_work_group([ImportWorkClass::Vertices])?,
-        attribute_work: exec.bind_work_group([ImportWorkClass::AttributeCells])?,
+        face_work,
+        vertex_work,
+        attribute_work,
         parsed: ParsedObj {
             positions: exec.metered_vec(ImportStorageClass::FormatNormalization, "obj-positions"),
             texcoords: exec.metered_vec(ImportStorageClass::FormatNormalization, "obj-texcoords"),
@@ -108,15 +113,17 @@ pub(crate) fn parse<'region, 'session>(
     };
     let mut scan_scratch = parser::TokenScanScratch::new();
 
-    let record_work = exec.bind_work_group([ImportWorkClass::Records])?;
+    let record_work = children.bind_group([ImportWorkClass::Records])?;
     for line in text.lines() {
-        let line_number = u32::try_from(line.number())
-            .map_err(|_| exec.resource_limit_exceeded("line-count", u64::from(u32::MAX)))?;
-        let line = exec.with_work(&record_work, [1], |_exec, work| -> ParseResult<_> {
-            work.complete_all()?;
-            Ok(line)
+        let line_number = u32::try_from(line.number()).map_err(|_| {
+            children
+                .error_view()
+                .resource_limit_exceeded("line-count", u64::from(u32::MAX))
         })?;
-        parser.parse_line(exec, &mut scan_scratch, recoveries, &line, line_number)?;
+        let line = children.child(&record_work, [1], |work| {
+            work.run([1], || Ok::<_, ParseFailure>(line))
+        })?;
+        parser.parse_line(children, &mut scan_scratch, recoveries, &line, line_number)?;
         #[cfg(test)]
         crate::control_tests::face_completed(parser.parsed.faces.len());
     }
@@ -124,10 +131,10 @@ pub(crate) fn parse<'region, 'session>(
     Ok(parser.parsed)
 }
 
-struct ObjParser<'region, 'session> {
-    face_work: baozi_import::ImportWorkGroup<'region, 2>,
-    vertex_work: baozi_import::ImportWorkGroup<'region, 1>,
-    attribute_work: baozi_import::ImportWorkGroup<'region, 1>,
+struct ObjParser<'op, 'session> {
+    face_work: ParseWorkLayout<'op, 2>,
+    vertex_work: ParseWorkLayout<'op, 1>,
+    attribute_work: ParseWorkLayout<'op, 1>,
     parsed: ParsedObj<'session>,
     object: Option<StateNameId>,
     group: Option<StateNameId>,
@@ -148,24 +155,24 @@ struct TokenBuffer<'session, 'line> {
     comment_start: Option<usize>,
 }
 
-impl<'region, 'session> ObjParser<'region, 'session> {
+impl<'op, 'session> ObjParser<'op, 'session> {
     fn parse_line(
         &mut self,
-        exec: &mut ParseExecution<'region, 'session>,
+        children: &mut ParseChildren<'_, 'op, 'session>,
         scan_scratch: &mut parser::TokenScanScratch,
         recoveries: &mut TextInputRecoveryTracker<'_, 'session>,
         decoded_line: &TextInputLine<'_, '_>,
         line_number: u32,
     ) -> ParseResult<()> {
         let raw_line = decoded_line.text();
-        let tokens = tokenize(exec, scan_scratch, decoded_line, line_number)?;
+        let tokens = tokenize(children, scan_scratch, decoded_line, line_number)?;
         let token_values = tokens.values.as_slice();
         let allowed_value = token_values.first().and_then(|first| match first.text {
             "o" | "g" | "usemtl" | "mtllib" => trailing_token_range(token_values),
             _ => None,
         });
         parser::authorize_line_recoveries(
-            exec,
+            &mut children.services()?,
             recoveries,
             decoded_line,
             allowed_value,
@@ -176,14 +183,16 @@ impl<'region, 'session> ObjParser<'region, 'session> {
         };
 
         match first.text {
-            "v" => self.parse_position(exec, token_values, line_number),
-            "vt" => self.parse_texcoord(exec, token_values, line_number),
-            "vn" => self.parse_normal(exec, token_values, line_number),
-            "f" => self.parse_face(exec, token_values, line_number),
-            "p" | "l" => self.parse_omitted_geometry(exec, token_values, line_number),
+            "v" => self.parse_position(children, token_values, line_number),
+            "vt" => self.parse_texcoord(children, token_values, line_number),
+            "vn" => self.parse_normal(children, token_values, line_number),
+            "f" => self.parse_face(children, token_values, line_number),
+            "p" | "l" => {
+                self.parse_omitted_geometry(&mut children.services()?, token_values, line_number)
+            }
             "o" => {
                 self.object = parse_state_name(
-                    exec,
+                    children,
                     &mut self.parsed.state_names,
                     self.object,
                     trailing_text_after_first_token(raw_line, token_values),
@@ -192,7 +201,7 @@ impl<'region, 'session> ObjParser<'region, 'session> {
             }
             "g" => {
                 self.group = parse_state_name(
-                    exec,
+                    children,
                     &mut self.parsed.state_names,
                     self.group,
                     trailing_text_after_first_token(raw_line, token_values),
@@ -201,7 +210,7 @@ impl<'region, 'session> ObjParser<'region, 'session> {
             }
             "usemtl" => {
                 self.material = parse_state_name(
-                    exec,
+                    children,
                     &mut self.parsed.state_names,
                     self.material,
                     trailing_text_after_first_token(raw_line, token_values),
@@ -209,18 +218,19 @@ impl<'region, 'session> ObjParser<'region, 'session> {
                 Ok(())
             }
             "s" => {
-                self.smoothing = parse_smoothing_group(exec, token_values, line_number)?;
+                self.smoothing =
+                    parse_smoothing_group(&mut children.services()?, token_values, line_number)?;
                 Ok(())
             }
-            "mtllib" => self.parse_material_library_references(exec, &token_values[1..]),
+            "mtllib" => self.parse_material_library_references(children, &token_values[1..]),
             keyword if is_unsupported_statement(keyword) => mtl::push_warning(
-                exec,
+                &mut children.services()?,
                 Some((line_number, first.column)),
                 "obj.unsupported_statement",
                 format_args!("OBJ statement '{keyword}' is not supported yet"),
             ),
             keyword => mtl::push_warning(
-                exec,
+                &mut children.services()?,
                 Some((line_number, first.column)),
                 "obj.unknown_statement",
                 format_args!("OBJ statement '{keyword}' is not recognized"),
@@ -230,13 +240,13 @@ impl<'region, 'session> ObjParser<'region, 'session> {
 
     fn parse_face(
         &mut self,
-        exec: &mut ParseExecution<'region, 'session>,
+        children: &mut ParseChildren<'_, 'op, 'session>,
         tokens: &[Token<'_>],
         line_number: u32,
     ) -> ParseResult<()> {
         if tokens.len() < 4 {
             let column = tokens.first().map_or(1, |token| token.column);
-            return Err(exec.format_failure(ObjFailure::face(
+            return Err(children.services()?.format_failure(ObjFailure::face(
                 "too-few-vertices",
                 line_number,
                 column,
@@ -244,54 +254,59 @@ impl<'region, 'session> ObjParser<'region, 'session> {
         }
 
         let face_vertex_count = tokens.len() - 1;
-        exec.with_work(
-            &self.face_work,
-            [
-                1,
-                usize_amount(exec, face_vertex_count, "obj-face-topology-cells")?,
-            ],
-            |exec, work| -> ParseResult<()> {
-                let mut vertices =
-                    exec.metered_vec(ImportStorageClass::FormatNormalization, "obj-face-vertices");
-                vertices.try_reserve(exec, face_vertex_count)?;
-                for chunk in tokens[1..].chunks(64) {
-                    exec.poll()?;
-                    for token in chunk {
-                        let vertex = parse_face_vertex(exec, *token, &self.parsed, line_number)?;
-                        work.run([0, 1], || vertices.try_push_reserved(vertex))?;
-                    }
+        let amount = usize_amount(
+            &children.services()?,
+            face_vertex_count,
+            "obj-face-topology-cells",
+        )?;
+        children.child(&self.face_work, [1, amount], |work| -> ParseResult<()> {
+            let exec = &mut work.services()?;
+            let mut vertices =
+                exec.metered_vec(ImportStorageClass::FormatNormalization, "obj-face-vertices");
+            vertices.try_reserve(exec, face_vertex_count)?;
+            for chunk in tokens[1..].chunks(64) {
+                work.poll()?;
+                for token in chunk {
+                    let vertex = parse_face_vertex(
+                        &mut work.services()?,
+                        *token,
+                        &self.parsed,
+                        line_number,
+                    )?;
+                    work.run([0, 1], || vertices.try_push_reserved(vertex))?;
                 }
-                work.run([1, 0], || {
-                    self.parsed.faces.try_push(
-                        exec,
-                        Face {
-                            vertices,
-                            object: self.object,
-                            group: self.group,
-                            material: self.material,
-                            smoothing: self.smoothing,
-                        },
-                    )
-                })
-            },
-        )
+            }
+            work.push_growing(
+                [1, 0],
+                &mut self.parsed.faces,
+                Face {
+                    vertices,
+                    object: self.object,
+                    group: self.group,
+                    material: self.material,
+                    smoothing: self.smoothing,
+                },
+            )
+        })
     }
 
     fn parse_material_library_references(
         &mut self,
-        exec: &mut ParseExecution<'region, 'session>,
+        children: &mut ParseChildren<'_, 'op, 'session>,
         tokens: &[Token<'_>],
     ) -> ParseResult<()> {
         for token in tokens {
-            let mtllib = checked_string(exec, token.text)?;
-            self.parsed.mtllibs.try_push(exec, mtllib)?;
+            let mtllib = checked_string(children, token.text)?;
+            self.parsed
+                .mtllibs
+                .try_push(&mut children.services()?, mtllib)?;
         }
         Ok(())
     }
 }
 
 fn parse_state_name<'session>(
-    exec: &mut ParseExecution<'_, 'session>,
+    children: &mut ParseChildren<'_, '_, 'session>,
     state_names: &mut MeteredVec<'session, MeteredString<'session>>,
     current: Option<StateNameId>,
     text: Option<&str>,
@@ -299,7 +314,8 @@ fn parse_state_name<'session>(
     let Some(text) = text.map(str::trim) else {
         return Ok(None);
     };
-    let string_work = exec.bind_work_group([ImportWorkClass::StringBytes])?;
+    let string_work = children.bind_group([ImportWorkClass::StringBytes])?;
+    let exec = &mut children.services()?;
     parser::enforce_text_value_limit(exec, text.len(), "obj-state-name-bytes")?;
     let string_bytes = usize_amount(exec, text.len(), "obj-state-name-bytes")?;
     if let Some(current) = current {
@@ -307,44 +323,35 @@ fn parse_state_name<'session>(
             exec.format_failure(ObjFailure::internal("state-name-id-out-of-range"))
         })?;
         let matches_current = mtl::interruptible_str_eq(
-            exec,
+            children,
             current_name.as_str(),
             text,
             "obj-state-name-comparison",
         )?;
         if matches_current {
-            return exec.with_work(
-                &string_work,
-                [string_bytes],
-                |_exec, work| -> ParseResult<_> {
-                    work.complete_all()?;
-                    Ok(Some(current))
-                },
-            );
+            return children.child(&string_work, [string_bytes], |work| {
+                work.run([string_bytes], || Ok::<_, ParseFailure>(Some(current)))
+            });
         }
     }
 
-    let mut name = exec.metered_string(ImportStorageClass::FormatNormalization, "obj-state-name");
-    exec.with_work(
-        &string_work,
-        [string_bytes],
-        |exec, work| -> ParseResult<_> {
-            name.try_reserve(exec, text.len())?;
-            for_string_chunks(text, |chunk| {
-                work.run(
-                    [usize_amount(exec, chunk.len(), "obj-state-name-bytes")?],
-                    || name.try_push_str_reserved(chunk),
-                )
-            })?;
-            let id = StateNameId(state_names.len());
-            state_names.try_push(exec, name)?;
-            Ok(Some(id))
-        },
-    )
+    let mut name = children
+        .services()?
+        .metered_string(ImportStorageClass::FormatNormalization, "obj-state-name");
+    children.child(&string_work, [string_bytes], |work| -> ParseResult<_> {
+        name.try_reserve(&mut work.services()?, text.len())?;
+        for_string_chunks(text, |chunk| {
+            let amount = usize_amount(&work.services()?, chunk.len(), "obj-state-name-bytes")?;
+            work.run([amount], || name.try_push_str_reserved(chunk))
+        })?;
+        let id = StateNameId(state_names.len());
+        state_names.try_push(&mut work.services()?, name)?;
+        Ok(Some(id))
+    })
 }
 
 fn parse_smoothing_group(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     tokens: &[Token<'_>],
     line_number: u32,
 ) -> ParseResult<ObjSmoothing> {
@@ -401,21 +408,22 @@ fn parse_smoothing_group(
 }
 
 fn tokenize<'session, 'line>(
-    exec: &mut ParseExecution<'_, 'session>,
+    children: &mut ParseChildren<'_, '_, 'session>,
     scan_scratch: &mut parser::TokenScanScratch,
     decoded_line: &'line TextInputLine<'_, '_>,
     line_number: u32,
 ) -> ParseResult<TokenBuffer<'session, 'line>> {
     let line = decoded_line.text();
-    let token_work =
-        exec.bind_work_group([ImportWorkClass::Tokens, ImportWorkClass::TokenBytes])?;
+    let token_work = children.bind_group([ImportWorkClass::Tokens, ImportWorkClass::TokenBytes])?;
     let mut tokens = TokenBuffer {
-        values: exec.metered_vec(ImportStorageClass::FormatNormalization, "obj-tokens"),
+        values: children
+            .services()?
+            .metered_vec(ImportStorageClass::FormatNormalization, "obj-tokens"),
         comment_start: None,
     };
 
     tokens.comment_start = parser::scan_token_ranges(
-        exec,
+        children,
         scan_scratch,
         line,
         "obj-token-scan-work",
@@ -441,40 +449,42 @@ fn tokenize<'session, 'line>(
     Ok(tokens)
 }
 
-fn push_token<'region, 'session, 'line>(
-    exec: &mut ParseExecution<'region, 'session>,
-    token_work: &baozi_import::ImportWorkGroup<'region, 2>,
+fn push_token<'op, 'session, 'line>(
+    children: &mut ParseChildren<'_, 'op, 'session>,
+    token_work: &ParseWorkLayout<'op, 2>,
     tokens: &mut TokenBuffer<'session, 'line>,
     line: &'line str,
     start: usize,
     end: usize,
 ) -> ParseResult<()> {
     let text = &line[start..end];
-    exec.with_work(
-        token_work,
-        [1, usize_amount(exec, text.len(), "obj-token-bytes")?],
-        |exec, work| -> ParseResult<()> {
-            work.run_all(|| {
-                let column = start
-                    .checked_add(1)
-                    .and_then(|column| u32::try_from(column).ok())
-                    .ok_or_else(|| exec.resource_limit_exceeded("line-columns", u64::MAX))?;
-                tokens.values.try_push(
-                    exec,
-                    Token {
-                        text,
-                        column,
-                        start,
-                        end,
-                    },
-                )
-            })
-        },
-    )
+    let amounts = [
+        1,
+        usize_amount(&children.services()?, text.len(), "obj-token-bytes")?,
+    ];
+    let errors = children.error_view();
+    children.child(token_work, amounts, |work| {
+        work.run_returned_with_storage::<_, ObjFailure>(|mut storage| {
+            let column = start
+                .checked_add(1)
+                .and_then(|column| u32::try_from(column).ok())
+                .ok_or_else(|| errors.resource_limit_exceeded("line-columns", u64::MAX))?;
+            storage.push_vec(
+                &mut tokens.values,
+                Token {
+                    text,
+                    column,
+                    start,
+                    end,
+                },
+            )?;
+            Ok(((), amounts))
+        })
+    })
 }
 
 fn parse_face_vertex(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     token: Token<'_>,
     parsed: &ParsedObj<'_>,
     line_number: u32,
@@ -531,7 +541,7 @@ fn parse_face_vertex(
 }
 
 fn resolve_index(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     text: &str,
     len: usize,
     kind: &'static str,
@@ -573,21 +583,25 @@ fn resolve_index(
 }
 
 fn parse_f32(
-    exec: &mut ParseExecution<'_, '_>,
+    errors: ParseErrorView<'_>,
     subject: &'static str,
     token: Token<'_>,
     line_number: u32,
-) -> ParseResult<f32> {
-    enforce_numeric_literal(exec, token.text)?;
+) -> Result<f32, ParsePieceError<ObjFailure>> {
+    if token.text.len() > MAX_NUMERIC_LITERAL_BYTES {
+        return Err(errors
+            .resource_limit_exceeded("obj-number-bytes", MAX_NUMERIC_LITERAL_BYTES as u64)
+            .into());
+    }
     let value = token.text.parse::<f32>().map_err(|_| {
-        exec.format_failure(ObjFailure::invalid_float(
+        ParsePieceError::Format(ObjFailure::invalid_float(
             subject,
             line_number,
             token.column,
         ))
     })?;
     if !value.is_finite() {
-        return Err(exec.format_failure(ObjFailure::non_finite(
+        return Err(ParsePieceError::Format(ObjFailure::non_finite(
             subject,
             line_number,
             token.column,
@@ -596,30 +610,26 @@ fn parse_f32(
     Ok(value)
 }
 
-fn checked_string<'region, 'session>(
-    exec: &mut ParseExecution<'region, 'session>,
+fn checked_string<'session>(
+    children: &mut ParseChildren<'_, '_, 'session>,
     text: &str,
 ) -> ParseResult<MeteredString<'session>> {
+    let exec = &mut children.services()?;
     parser::enforce_text_value_limit(exec, text.len(), "obj-material-library-reference")?;
     let mut owned = exec.metered_string(
         ImportStorageClass::FormatNormalization,
         "obj-material-library-reference",
     );
-    let string_work = exec.bind_work_group([ImportWorkClass::StringBytes])?;
-    exec.with_work(
-        &string_work,
-        [usize_amount(exec, text.len(), "obj-string-bytes")?],
-        |exec, work| -> ParseResult<_> {
-            owned.try_reserve(exec, text.len())?;
-            for_string_chunks(text, |chunk| {
-                work.run(
-                    [usize_amount(exec, chunk.len(), "obj-string-bytes")?],
-                    || owned.try_push_str_reserved(chunk),
-                )
-            })?;
-            Ok(owned)
-        },
-    )
+    let amount = usize_amount(exec, text.len(), "obj-string-bytes")?;
+    let string_work = children.bind_group([ImportWorkClass::StringBytes])?;
+    children.child(&string_work, [amount], |work| -> ParseResult<_> {
+        owned.try_reserve(&mut work.services()?, text.len())?;
+        for_string_chunks(text, |chunk| {
+            let amount = usize_amount(&work.services()?, chunk.len(), "obj-string-bytes")?;
+            work.run([amount], || owned.try_push_str_reserved(chunk))
+        })?;
+        Ok(owned)
+    })
 }
 
 fn for_string_chunks(
@@ -640,7 +650,7 @@ fn for_string_chunks(
     Ok(())
 }
 
-fn enforce_numeric_literal(exec: &mut ParseExecution<'_, '_>, text: &str) -> ParseResult<()> {
+fn enforce_numeric_literal(exec: &mut ParseServices<'_, '_, '_>, text: &str) -> ParseResult<()> {
     exec.enforce_resource_limit(
         "obj-number-bytes",
         usize_amount(exec, text.len(), "obj-number-bytes")?,

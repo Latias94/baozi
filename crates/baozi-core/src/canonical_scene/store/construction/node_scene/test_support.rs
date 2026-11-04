@@ -1,6 +1,4 @@
-use baozi_operation::__retained_store_integration::activation::{
-    CanonicalValidationProgress, RetainedStoreSessionOutcomeOwner,
-};
+use baozi_operation::__retained_store_integration::activation::CanonicalValidationProgress;
 use baozi_operation::{OperationControl, PhysicalStorageAccount};
 
 use crate::SceneValidationLimits;
@@ -11,12 +9,12 @@ use super::super::super::production::{
 use super::super::super::schema::NODE_SCENE_EVIDENCE_FIELD_COUNT;
 use super::super::{
     SceneConstructionLimits, SceneConstructionPhase, SceneConstructionStartError,
-    SceneConstructionUnit, SceneFailureEvidenceWork, SceneStoreOperation, final_progress,
+    SceneConstructionUnit, SceneFailureEvidenceWork, SceneOperationStart, SceneStoreOperation,
     try_plan_scene_operation,
 };
 use super::materialization::{
     NodeSceneActivationRequest, NodeScenePlanningFault, NodeSceneSessionActivationBootstrap,
-    activate_node_scene_with_faults_for_test, node_scene_activation_roles,
+    NodeSceneTestSlots, activate_node_scene_with_faults_for_test, node_scene_activation_roles,
 };
 use super::{NodeSceneBuildFaults, NodeSceneDraftBuild};
 
@@ -286,23 +284,24 @@ impl SpatialBuildFault {
 }
 
 #[must_use = "the admitted Scene input must be validated or deliberately dropped"]
-pub(in crate::canonical_scene::store) struct NodeSceneTestTransaction<'input> {
-    owner: RetainedStoreSessionOutcomeOwner<
-        super::super::SceneConstructionOwner,
-        SceneConstructionPhase,
-        SceneConstructionUnit,
-    >,
+pub(in crate::canonical_scene::store) struct NodeSceneTestTransaction<'input, 'inv, 'account> {
+    host: &'inv mut super::super::SceneCanonicalInvocationHost,
+    account: &'account PhysicalStorageAccount,
+    start: SceneOperationStart,
+    bootstrap: NodeSceneSessionActivationBootstrap,
     request: NodeSceneActivationRequest<'input>,
 }
 
-impl<'input> NodeSceneTestTransaction<'input> {
+impl<'input, 'inv, 'account> NodeSceneTestTransaction<'input, 'inv, 'account> {
     pub(in crate::canonical_scene::store) fn with_account(
-        account: &PhysicalStorageAccount,
+        host: &'inv mut super::super::SceneCanonicalInvocationHost,
+        account: &'account PhysicalStorageAccount,
         limits: SceneConstructionLimits,
         input: SceneAuthoringBatch<'input>,
         validation_limits: SceneValidationLimits,
     ) -> Result<Self, SceneConstructionStartError> {
         Self::with_account_and_control(
+            host,
             account,
             limits,
             OperationControl::default(),
@@ -312,7 +311,8 @@ impl<'input> NodeSceneTestTransaction<'input> {
     }
 
     fn with_account_and_control(
-        account: &PhysicalStorageAccount,
+        host: &'inv mut super::super::SceneCanonicalInvocationHost,
+        account: &'account PhysicalStorageAccount,
         limits: SceneConstructionLimits,
         control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
         input: SceneAuthoringBatch<'input>,
@@ -328,30 +328,25 @@ impl<'input> NodeSceneTestTransaction<'input> {
             terminal_attribution_slots,
             SceneFailureEvidenceWork::exact_single_record(NODE_SCENE_EVIDENCE_FIELD_COUNT),
         )?;
-        let raw = SceneStoreOperation::try_start(
-            start.control,
-            start.ledger_plan,
+        Ok(Self {
+            host,
             account,
-            start.start_plan,
-        )?;
-        let roles = node_scene_activation_roles(start.keys);
-        let (outcome_evidence_writer_limits, failure, _evidence) = bootstrap.into_parts();
-        let owner = raw.into_session_outcome_owner(
-            roles.session_policy(),
-            outcome_evidence_writer_limits,
-            failure,
-        )?;
-        Ok(Self { owner, request })
+            start,
+            bootstrap,
+            request,
+        })
     }
 
     pub(in crate::canonical_scene::store) fn with_account_and_cancellation(
-        account: &PhysicalStorageAccount,
+        host: &'inv mut super::super::SceneCanonicalInvocationHost,
+        account: &'account PhysicalStorageAccount,
         limits: SceneConstructionLimits,
         input: SceneAuthoringBatch<'input>,
         validation_limits: SceneValidationLimits,
         cancellation: impl baozi_operation::CancellationSignal,
     ) -> Result<Self, SceneConstructionStartError> {
         Self::with_account_and_control(
+            host,
             account,
             limits,
             OperationControl::default().with_cancellation(cancellation),
@@ -363,39 +358,96 @@ impl<'input> NodeSceneTestTransaction<'input> {
     /// Runs the complete fresh Scene authoring transaction through the sole scoped activation rail.
     pub(in crate::canonical_scene::store) fn finish_draft(
         self,
-    ) -> Result<NodeSceneDraftBuild, super::super::SceneConstructionError> {
-        let Self { owner, request } = self;
-        request.activate(
-            owner,
-            CanonicalValidationProgress::new(
-                SceneConstructionPhase::Validation,
-                SceneConstructionUnit::WorkUnits,
-            ),
-            final_progress(),
-        )
+    ) -> Result<NodeSceneDraftBuild<'inv>, super::super::SceneConstructionError> {
+        self.finish_draft_with_faults(NodeSceneBuildFaults::none())
+    }
+
+    pub(super) fn finish_draft_with_observer(
+        self,
+        before_preflight: impl FnOnce(),
+    ) -> Result<NodeSceneDraftBuild<'inv>, super::super::SceneConstructionError> {
+        self.finish_draft_with_faults_and_observer(NodeSceneBuildFaults::none(), before_preflight)
     }
 
     pub(super) fn finish_draft_with_faults(
         self,
         faults: NodeSceneBuildFaults,
-    ) -> Result<NodeSceneDraftBuild, super::super::SceneConstructionError> {
-        let Self { owner, request } = self;
-        activate_node_scene_with_faults_for_test(
+    ) -> Result<NodeSceneDraftBuild<'inv>, super::super::SceneConstructionError> {
+        self.finish_draft_with_faults_and_observer(faults, || {})
+    }
+
+    fn finish_draft_with_faults_and_observer(
+        self,
+        faults: NodeSceneBuildFaults,
+        before_preflight: impl FnOnce(),
+    ) -> Result<NodeSceneDraftBuild<'inv>, super::super::SceneConstructionError> {
+        let Self {
+            host,
+            account,
+            start,
+            bootstrap,
             request,
-            owner,
-            CanonicalValidationProgress::new(
-                SceneConstructionPhase::Validation,
-                SceneConstructionUnit::WorkUnits,
-            ),
-            final_progress(),
-            faults,
+        } = self;
+        let mut inputs = Some((start, bootstrap, request));
+        let mut before_preflight = Some(before_preflight);
+        let mut evidence = None;
+        let mut body_error = None;
+        let finish = host.run_body(|parts, disposition| {
+            let (start, bootstrap, request) = inputs.take().expect("one Scene body");
+            let result = (|| {
+                let operation = SceneStoreOperation::try_start(
+                    parts.startup,
+                    start.control,
+                    start.ledger_plan,
+                    account,
+                    start.start_plan,
+                )
+                .map_err(SceneConstructionStartError::from)?;
+                let (writer, failure, _) = bootstrap.into_parts();
+                let owner = operation
+                    .into_session_outcome_owner(
+                        node_scene_activation_roles(start.keys).session_policy(),
+                        writer,
+                        failure,
+                    )
+                    .map_err(SceneConstructionStartError::from)?;
+                before_preflight.take().unwrap()();
+                activate_node_scene_with_faults_for_test(
+                    request,
+                    owner,
+                    NodeSceneTestSlots {
+                        output_slot: parts.output,
+                        proof_slot: parts.proof,
+                        activation_slots: parts.activation,
+                        validation_slots: parts.validation,
+                    },
+                    CanonicalValidationProgress::new(
+                        SceneConstructionPhase::Validation,
+                        SceneConstructionUnit::WorkUnits,
+                    ),
+                    disposition,
+                    faults,
+                )
+            })();
+            match result {
+                Ok(recipe) => evidence = Some(recipe),
+                Err(cause) => body_error = Some(cause),
+            }
+        });
+        let finish = match finish {
+            Ok(finish) => finish,
+            Err(cause) => return Err(body_error.unwrap_or_else(|| cause.into())),
+        };
+        NodeSceneDraftBuild::from_completion(
+            finish.resume(),
+            evidence.expect("a recorded Scene disposition retains its evidence recipe"),
         )
     }
 
     pub(super) fn finish_draft_with_planning_fault(
         self,
         planning: NodeScenePlanningFault,
-    ) -> Result<NodeSceneDraftBuild, super::super::SceneConstructionError> {
+    ) -> Result<NodeSceneDraftBuild<'inv>, super::super::SceneConstructionError> {
         self.finish_draft_with_faults(NodeSceneBuildFaults {
             planning: Some(planning),
             ..NodeSceneBuildFaults::none()

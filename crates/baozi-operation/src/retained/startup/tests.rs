@@ -689,43 +689,100 @@ fn startup_uses_two_sequential_account_locks() {
 }
 
 #[test]
-fn startup_cross_plane_rail_has_one_qualified_ledger_path_and_no_legacy_authority() {
-    let source = include_str!("../startup.rs");
-    assert!(source.contains("plan: StartupCrossPlanePlan<O, P, D>"));
-    assert_eq!(
-        source
-            .matches(".into_admitted_startup_attribution_graph(parts)")
-            .count(),
-        1
-    );
-    assert!(source.contains("struct StartupGraphPreholdAuthority<"));
-    for forbidden in [
-        "allocator",
-        "try_reserve",
-        "AdmissionLease",
-        "PendingRetainedAdmission",
-        "ManuallyDrop",
-        "unsafe",
+fn startup_physical_ready_retains_all_four_preheld_owner_roles() {
+    let factory = factory(1);
+    let account = account(&factory, 28, 5);
+    let admission = account
+        .try_admit_operation_start()
+        .unwrap_or_else(|_| panic!("start must be admitted"));
+    let ready = account
+        .try_admit_startup_physical(
+            admission,
+            manifest(charge(11, 2), charge(17, 3)),
+            preheld_owners(&account),
+        )
+        .unwrap_or_else(|_| panic!("the complete physical pair must commit"));
+    let owners = ready
+        .owners
+        .as_ref()
+        .unwrap_or_else(|| panic!("Ready retains every preheld owner"));
+
+    for owner in [
+        &owners.fallback_account,
+        &owners.evidence_account,
+        &owners.fallback_lease_owner,
+        &owners.evidence_lease_owner,
     ] {
-        assert!(
-            !source.contains(forbidden),
-            "physical startup rail regained forbidden authority `{forbidden}`"
-        );
+        assert!(owner.is_same_account(&account));
     }
+    assert_eq!(account.share_call_count(), 4);
+    let before = linear_state(&account);
+    assert_eq!(before.admitted_account_actions, 1);
+    assert_eq!(before.admitted_retained_owners, 2);
+    drop(ready);
+
+    let after = linear_state(&account);
+    assert_eq!(after.counters, before.counters);
+    assert_eq!(after.admitted_account_actions, 1);
+    assert_eq!(after.admitted_retained_owners, 2);
+    assert_eq!(account.snapshot().poison_event_count(), 1);
+    assert_eq!(account.share_call_count(), 4);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 1);
 }
 
 #[test]
-fn only_ready_cross_plane_result_has_a_production_split() {
-    let source = include_str!("../startup.rs");
-    assert!(!source.contains("impl ReadyStartupPhysicalAdmission<'_> {"));
-    assert!(!source.contains("impl UncertainStartupPhysicalAdmission {"));
-    assert_eq!(source.matches("pub(super) fn split(").count(), 1);
-    for forbidden in ["fn accept(", "fn into_parts("] {
+fn ready_physical_runtime_conversion_moves_owners_without_new_admission() {
+    let factory = factory(1);
+    let account = account(&factory, 28, 5);
+    let admission = account
+        .try_admit_operation_start()
+        .unwrap_or_else(|_| panic!("start must be admitted"));
+    let ready = account
+        .try_admit_startup_physical(
+            admission,
+            manifest(charge(11, 2), charge(17, 3)),
+            preheld_owners(&account),
+        )
+        .unwrap_or_else(|_| panic!("the complete physical pair must commit"));
+    let before = linear_state(&account);
+    reset_startup_lock_probe();
+
+    let guard = ready.into_runtime_guard(ReadyStartupPhysicalSplitAuthority { private: () });
+
+    assert_eq!(linear_state(&account), before);
+    assert_eq!(account.share_call_count(), 4);
+    assert_eq!(
+        startup_lock_probe_snapshot(),
+        StartupLockProbeSnapshot::default()
+    );
+    assert!(guard.account.is_same_account(&account));
+    let admissions = guard
+        .admissions
+        .as_ref()
+        .unwrap_or_else(|| panic!("the runtime guard owns the complete pair"));
+    assert_eq!(admissions.plan.first, charge(11, 2));
+    assert_eq!(admissions.plan.second, charge(17, 3));
+    assert_eq!(admissions.plan.aggregate, charge(28, 5));
+    for owner in [
+        guard.evidence_account.as_ref(),
+        guard.fallback_lease_owner.as_ref(),
+        guard.evidence_lease_owner.as_ref(),
+    ] {
         assert!(
-            !source.contains(forbidden),
-            "startup result regained extraction seam `{forbidden}`"
+            owner
+                .unwrap_or_else(|| panic!("each runtime owner must be present"))
+                .is_same_account(&account)
         );
     }
+    drop(guard);
+
+    let after = linear_state(&account);
+    assert_eq!(after.counters, before.counters);
+    assert_eq!(after.admitted_account_actions, 1);
+    assert_eq!(after.admitted_retained_owners, 2);
+    assert_eq!(account.snapshot().poison_event_count(), 1);
+    assert_eq!(account.share_call_count(), 4);
 }
 
 #[test]

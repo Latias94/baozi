@@ -6,7 +6,8 @@ fn final_cancellation_downgrades_validated_success_before_pure_handoff() {
     let account = account(&factory);
     let cancellation = CancellationToken::new();
     let control = OperationControl::default().with_cancellation(cancellation.clone());
-    let (operation, keys) = operation_with_control(&account, control);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation_with_control(&mut invocation_root, &account, control);
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 1, 1))
         .unwrap();
@@ -70,7 +71,8 @@ fn final_cancellation_downgrades_validated_success_before_pure_handoff() {
 fn validated_success_downgrade_preserves_evidence_and_publishes_exact_rich_failure() {
     let factory = factory(1);
     let account = account(&factory);
-    let (operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation(&mut invocation_root, &account);
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 1, 3))
         .unwrap();

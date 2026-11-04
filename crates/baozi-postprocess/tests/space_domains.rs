@@ -56,11 +56,15 @@ impl Format for DomainImporter {
         &self,
         _: &baozi_import::Probe<'_>,
         _: &ReadHint,
-        _: &DetectionScope<'_>,
+        _: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         let positions = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
         let normals = [1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0];
         let tangents = [1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, -1.0, 0.0, 0.0, 1.0, 1.0];

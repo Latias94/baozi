@@ -180,7 +180,7 @@ impl Format for RecordingImporter {
         &self,
         probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         self.primary_addresses
             .lock()
@@ -202,7 +202,11 @@ impl Format for RecordingImporter {
         Ok(self.detection.clone())
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         context.with_execution(|exec| -> ParseResult<()> {
             self.primary_addresses
                 .lock()
@@ -218,7 +222,7 @@ impl Format for RecordingImporter {
                         let _ignored = support::required_root_dependency(exec, role, "missing.bin");
                     }
                     DependencyBehavior::RequiredAvailableWithDiagnostic => {
-                        let diagnostic_source = exec.diagnostic_source();
+                        let diagnostic_source = exec.services()?.diagnostic_source();
                         assert_eq!(diagnostic_source.path(), exec.source());
                         assert_eq!(diagnostic_source.bytes(), exec.primary_bytes());
                         let dependency =
@@ -393,12 +397,16 @@ impl Format for PanickingImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, _scope: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        _scope: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         self.calls.fetch_add(1, Ordering::AcqRel);
         panic!("shared registration panic")
     }
@@ -430,12 +438,16 @@ impl Format for OpaquePanickingImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, _scope: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        _scope: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         std::panic::panic_any(PanickingDropPayload {
             drops: Arc::clone(&self.payload_drops),
         })
@@ -468,12 +480,12 @@ impl Format for RacingParsePoisonImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_, '_>) -> ParseResult<()> {
         if self.calls.fetch_add(1, Ordering::AcqRel) == 0 {
             self.first_entered
                 .send(())
@@ -516,12 +528,16 @@ impl Format for FormatFailingImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         context.with_execution(|exec| -> ParseResult<()> {
             Err(exec.format_failure(TestFormatCause::new(Arc::clone(&self.observation))))
         })
@@ -554,12 +570,16 @@ impl Format for OversizedFormatFailingImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         context.with_execution(|exec| -> ParseResult<()> {
             Err(exec.format_failure(OversizedFormatCause {
                 _payload: [0; 4 * 1024 + 1],
@@ -773,20 +793,25 @@ impl Format for EvidenceStorageImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         context.with_execution(|exec| -> ParseResult<()> {
-            let mut storage =
-                exec.metered_vec(ImportStorageClass::FormatNormalization, "evidence-storage");
+            let mut storage = exec
+                .services()?
+                .metered_vec(ImportStorageClass::FormatNormalization, "evidence-storage");
             if self.reserve_capacity {
-                storage.try_reserve(exec, 1)?;
+                storage.try_reserve(&mut exec.services()?, 1)?;
             }
             let decoded = if matches!(self.phase, EvidenceStoragePhase::DecodedStorage) {
-                Some(RefCell::new(exec.metered_decoded_text(
+                Some(RefCell::new(exec.services()?.metered_decoded_text(
                     usize::from(self.reserve_capacity),
                     "evidence-decoded-text",
                 )?))
@@ -922,20 +947,25 @@ impl Format for DiagnosticPanickingImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         context.with_execution(|exec| -> ParseResult<()> {
             let code = baozi_import::DiagnosticCode::new("test.diagnostic_panic").unwrap();
+            let mut services = exec.services()?;
             match self.mode {
-                DiagnosticPanicMode::Details => exec.emit_diagnostic_with(
+                DiagnosticPanicMode::Details => services.emit_diagnostic_with(
                     baozi_import::DiagnosticSeverity::Warning,
                     code,
                     ImportProgressPhase::Decode,
-                    exec.diagnostic_source(),
+                    services.diagnostic_source(),
                     None,
                     None,
                     |_| panic!("diagnostic details panic"),
@@ -943,11 +973,11 @@ impl Format for DiagnosticPanickingImporter {
                 )?,
                 DiagnosticPanicMode::Message => {
                     let message = PanickingDiagnosticMessage;
-                    exec.emit_diagnostic_with(
+                    services.emit_diagnostic_with(
                         baozi_import::DiagnosticSeverity::Warning,
                         code,
                         ImportProgressPhase::Decode,
-                        exec.diagnostic_source(),
+                        services.diagnostic_source(),
                         None,
                         None,
                         |_| {},
@@ -988,12 +1018,16 @@ impl Format for NormalizationAdmissionImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         context.with_execution(|exec| -> ParseResult<()> {
             let _dependency =
                 support::required_root_dependency(exec, &self.role, &self.raw_reference)?;
@@ -1033,20 +1067,24 @@ impl Format for TerminalLatchImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         let result = context.with_execution(|exec| -> ParseResult<()> {
-            let mut resize_storage = exec.metered_vec::<u8>(
+            let mut resize_storage = exec.services()?.metered_vec::<u8>(
                 ImportStorageClass::BackendDecode,
                 "terminal-latch-resize-storage",
             );
-            resize_storage.try_push(exec, 0)?;
+            resize_storage.try_push(&mut exec.services()?, 0)?;
             let resize_capacity = resize_storage.capacity();
-            let work = exec.bind_work_group([ImportWorkClass::WorkUnits])?;
+            let work = exec.bind_group([ImportWorkClass::WorkUnits])?;
             let first_failure = match self.trigger {
                 TerminalLatchTrigger::MissingRequiredDependency => {
                     match support::required_root_dependency(
@@ -1059,6 +1097,7 @@ impl Format for TerminalLatchImporter {
                     }
                 }
                 TerminalLatchTrigger::ResourceLimit => exec
+                    .services()?
                     .enforce_resource_limit("terminal-latch-trigger", 2, 1)
                     .expect_err("the injected resource limit must fail"),
                 TerminalLatchTrigger::Cancellation => {
@@ -1085,40 +1124,61 @@ impl Format for TerminalLatchImporter {
                     .is_ok(),
             );
             record_late_success(
-                exec.with_work(&work, [1], |_exec, work| work.complete_all())
-                    .is_ok(),
-            );
-            record_late_success(
-                exec.metered_opaque_allowance(ImportStorageClass::BackendDecode, 1)
-                    .is_ok(),
-            );
-            record_late_success(resize_storage.try_reserve(exec, resize_capacity).is_ok());
-            record_late_success(
-                exec.report_progress(
-                    ImportProgressPhase::Decode,
-                    ImportProgressUnit::Records,
-                    0,
-                    None,
-                )
+                exec.child(&work, [1], |child| -> ParseResult<()> {
+                    child.run([1], || Ok(()))
+                })
                 .is_ok(),
             );
-            record_late_success(exec.enforce_resource_limit("late-noop-limit", 0, 1).is_ok());
+            record_late_success(
+                exec.services()
+                    .and_then(|mut services| {
+                        services.metered_opaque_allowance(ImportStorageClass::BackendDecode, 1)
+                    })
+                    .is_ok(),
+            );
+            record_late_success(
+                exec.services()
+                    .and_then(|mut services| {
+                        resize_storage.try_reserve(&mut services, resize_capacity)
+                    })
+                    .is_ok(),
+            );
+            record_late_success(
+                exec.services()
+                    .and_then(|mut services| {
+                        services.report_progress(
+                            ImportProgressPhase::Decode,
+                            ImportProgressUnit::Records,
+                            0,
+                            None,
+                        )
+                    })
+                    .is_ok(),
+            );
+            record_late_success(
+                exec.services()
+                    .and_then(|services| services.enforce_resource_limit("late-noop-limit", 0, 1))
+                    .is_ok(),
+            );
 
             let diagnostic_callbacks = Arc::clone(&self.diagnostic_callbacks);
             record_late_success(
-                exec.emit_diagnostic_with(
-                    baozi_import::DiagnosticSeverity::Warning,
-                    baozi_import::DiagnosticCode::new("test.late_diagnostic").unwrap(),
-                    ImportProgressPhase::Decode,
-                    exec.diagnostic_source(),
-                    None,
-                    None,
-                    move |_| {
-                        diagnostic_callbacks.fetch_add(1, Ordering::AcqRel);
-                    },
-                    format_args!("late diagnostic"),
-                )
-                .is_ok(),
+                exec.services()
+                    .and_then(|mut services| {
+                        services.emit_diagnostic_with(
+                            baozi_import::DiagnosticSeverity::Warning,
+                            baozi_import::DiagnosticCode::new("test.late_diagnostic").unwrap(),
+                            ImportProgressPhase::Decode,
+                            services.diagnostic_source(),
+                            None,
+                            None,
+                            move |_| {
+                                diagnostic_callbacks.fetch_add(1, Ordering::AcqRel);
+                            },
+                            format_args!("late diagnostic"),
+                        )
+                    })
+                    .is_ok(),
             );
 
             let terminal_failure = exec.format_failure(LifecycleFormatCause {
@@ -1171,12 +1231,16 @@ impl Format for LifecycleFailureImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         context.with_execution(|exec| -> ParseResult<()> {
             let failure = exec.format_failure(LifecycleFormatCause {
                 mode: self.evidence,
@@ -3635,18 +3699,23 @@ impl Format for StructuredDiagnosticImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         context.with_execution(|exec| -> ParseResult<()> {
+            let source = exec.services()?.diagnostic_source();
             exec.with_conformed_text_input(
-                exec.diagnostic_source(),
+                source,
                 TextInputOptions::new(TextDecodingMode::RejectInvalid, "structured-diagnostic")
                     .with_line_index_resource("structured-diagnostic-line-index"),
-                |exec, input, _recoveries| {
+                |children, input, _recoveries| {
                     let line = input
                         .lines()
                         .nth(1)
@@ -3655,7 +3724,7 @@ impl Format for StructuredDiagnosticImporter {
                         .diagnostic_location(baozi_import::DiagnosticByteRange::new(2, 4).unwrap())
                         .expect("fixture range must belong to the second line");
                     for record in 0..self.diagnostic_count {
-                        exec.emit_text_diagnostic_with(
+                        children.services()?.emit_text_diagnostic_with(
                             baozi_import::DiagnosticSeverity::Warning,
                             baozi_import::DiagnosticCode::new("test.structured_warning").unwrap(),
                             ImportProgressPhase::Decode,

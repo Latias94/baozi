@@ -408,11 +408,18 @@ fn poison_first_start_rejects_without_builder_or_account_side_effects() {
         OutputCommitment::new(TestDimension::Bytes, 1),
         OutputCommitment::new(TestDimension::Bytes, 1),
     );
-    let result =
-        TestOperation::try_start(OperationControl::default(), limits, &account, plan, || {
+    let mut invocation_root: TestInvocationRoot = InvocationRoot::new();
+    let result = RetainedOperation::try_start(
+        &mut invocation_root,
+        OperationControl::default(),
+        limits,
+        &account,
+        plan,
+        || {
             builder_ran.store(true, Ordering::SeqCst);
             Ok(7)
-        });
+        },
+    );
 
     assert!(matches!(
         result,
@@ -455,7 +462,9 @@ fn admission_first_start_panic_after_external_poison_records_distinct_builder_fa
     let worker_entered = StdArc::clone(&builder_entered);
     let worker_continue = StdArc::clone(&builder_continue);
     let worker = thread::spawn(move || {
-        TestOperation::try_start(
+        let mut invocation_root: TestInvocationRoot = InvocationRoot::new();
+        RetainedOperation::try_start(
+            &mut invocation_root,
             OperationControl::default(),
             limits,
             &worker_account,
@@ -466,6 +475,7 @@ fn admission_first_start_panic_after_external_poison_records_distinct_builder_fa
                 std::panic::panic_any(vec![0_u8; 8]);
             },
         )
+        .map(drop)
     });
 
     builder_entered.wait();
@@ -612,7 +622,9 @@ fn admission_first_direct_fallback_ends_in_finalization_containment() {
     DROP_COUNT.store(0, Ordering::SeqCst);
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     let operation = test_operation_on_account_with_control(
+        &mut invocation_root,
         &account,
         64,
         RetainedBatchLimits::new(2, 2),
@@ -639,13 +651,13 @@ fn admission_first_direct_fallback_ends_in_finalization_containment() {
         .unwrap_or_else(|_| panic!("poison thread must be contained"));
     let before_prepare = account.snapshot();
     let first_evidence = before_prepare.first_poison_evidence();
-    let ledger = operation.coordinator.retained_ledger().test_probe();
+    let ledger = operation.common.coordinator.retained_ledger().test_probe();
     let active_before = ledger.active_reservations();
     let live_before = ledger.current_live_bytes();
     assert!(active_before > 0);
     assert!(live_before > 0);
 
-    let result = operation.prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(91));
+    let result = operation.prepare_minimal_fallback(PreparationFailureCode::domain(91));
     let after_prepare = account.snapshot();
     assert!(matches!(
         result,
@@ -682,14 +694,16 @@ fn poisoned_inherited_share_has_no_lookup_work_clone_or_target_side_effect() {
     let account = account(&factory, u64::MAX, 128);
     let (source, source_slot, source_evidence, _source_evidence_slot) =
         publish_scalar_source(&account);
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     let operation = test_derived_operation_on_account_with_control(
+        &mut invocation_root,
         &account,
         &source,
         64,
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("target publication must open"));
     let source_allocation = source
@@ -779,14 +793,16 @@ fn admission_first_inherited_share_completes_then_later_share_is_rejected() {
     let account = account(&factory, u64::MAX, 128);
     let (source, source_slot, source_evidence, _source_evidence_slot) =
         publish_scalar_source(&account);
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     let operation = test_derived_operation_on_account_with_control(
+        &mut invocation_root,
         &account,
         &source,
         64,
         RetainedBatchLimits::new(3, 2),
         OperationControl::default(),
     );
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan_with_canonical_source_mapping(2, 1, 1))
         .unwrap_or_else(|_| panic!("admission-first share target must open"));
     assembly
@@ -798,6 +814,7 @@ fn admission_first_inherited_share_completes_then_later_share_is_rejected() {
         })
         .unwrap_or_else(|_| panic!("share-race poison probe must retain"));
     let target_account = assembly
+        .fields
         .account
         .as_ref()
         .unwrap_or_else(|| panic!("target retains account"));
@@ -820,6 +837,7 @@ fn admission_first_inherited_share_completes_then_later_share_is_rejected() {
         .operation
         .as_ref()
         .unwrap_or_else(|| panic!("target retains operation"))
+        .common
         .coordinator
         .retained_ledger();
     let identity = try_share_retained_block_after_admission::<
@@ -831,13 +849,14 @@ fn admission_first_inherited_share_completes_then_later_share_is_rejected() {
     >(
         ledger,
         share_admission,
-        assembly.ordinary_handle_share_work,
+        assembly.fields.ordinary_handle_share_work,
         assembly
+            .fields
             .canonical_table
             .as_mut()
             .and_then(PolicyRetainedAllocation::table_mut_during_construction)
             .unwrap_or_else(|| panic!("target retains canonical table")),
-        assembly.set_id,
+        assembly.fields.set_id,
         RetainedMembershipDestination::Canonical,
         0,
         1,
@@ -874,14 +893,16 @@ fn prepared_handoff_is_a_pure_move_after_later_account_poison() {
             Ok::<_, RetainedBuildFailureCode>(PanickingDropProbe(&DROP_COUNT))
         })
         .unwrap_or_else(|_| panic!("handoff poison probe must retain"));
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     let operation = test_operation_on_account_with_control(
+        &mut invocation_root,
         &account,
         64,
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
     let prepared = operation
-        .prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(92))
+        .prepare_minimal_fallback(PreparationFailureCode::domain(92))
         .unwrap_or_else(|_| panic!("healthy account must prepare fallback"));
     drop(poisoner);
     let before_handoff = account.snapshot();
@@ -906,35 +927,42 @@ fn eligibility_first_capability_completes_preparation_after_later_account_poison
             Ok::<_, RetainedBuildFailureCode>(PanickingDropProbe(&DROP_COUNT))
         })
         .unwrap_or_else(|_| panic!("eligibility race poison probe must retain"));
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     let operation = test_operation_on_account_with_control(
+        &mut invocation_root,
         &account,
         64,
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
-    let ledger = operation.coordinator.retained_ledger().test_probe();
+    let ledger = operation.common.coordinator.retained_ledger().test_probe();
     let eligibility_entered = StdArc::new(Barrier::new(2));
     let eligibility_resume = StdArc::new(Barrier::new(2));
     let worker_entered = StdArc::clone(&eligibility_entered);
     let worker_resume = StdArc::clone(&eligibility_resume);
-    let worker = thread::spawn(move || {
-        install_publication_eligibility_pause(worker_entered, worker_resume);
-        operation.prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(93))
+    let (prepared, poisoned) = thread::scope(|scope| {
+        let account = &account;
+        let worker = scope.spawn(move || {
+            worker_entered.wait();
+            assert!(!ledger.is_available());
+            assert_eq!(ledger.active_reservations(), 0);
+            assert_eq!(ledger.current_live_bytes(), 0);
+            drop(poisoner);
+            let poisoned = account.snapshot();
+            assert!(poisoned.poisoned());
+            worker_resume.wait();
+            poisoned
+        });
+
+        install_publication_eligibility_pause(eligibility_entered, eligibility_resume);
+        let prepared = operation.prepare_minimal_fallback(PreparationFailureCode::domain(93));
+        let poisoned = worker
+            .join()
+            .unwrap_or_else(|_| panic!("eligibility-first worker must remain contained"));
+        let prepared =
+            prepared.unwrap_or_else(|_| panic!("eligibility-first preparation must complete"));
+        (prepared, poisoned)
     });
-
-    eligibility_entered.wait();
-    assert!(!ledger.is_available());
-    assert_eq!(ledger.active_reservations(), 0);
-    assert_eq!(ledger.current_live_bytes(), 0);
-    drop(poisoner);
-    let poisoned = account.snapshot();
-    assert!(poisoned.poisoned());
-    eligibility_resume.wait();
-
-    let prepared = worker
-        .join()
-        .unwrap_or_else(|_| panic!("eligibility-first worker must remain contained"))
-        .unwrap_or_else(|_| panic!("eligibility-first preparation must complete"));
     assert_eq!(account.snapshot(), poisoned);
     let published = handoff_for_test(prepared);
     assert!(matches!(
@@ -953,14 +981,16 @@ fn poisoned_joint_commit_account_cannot_be_substituted_with_healthy_foreign_acco
     let foreign_factory = account_factory(1);
     let foreign_account = account(&foreign_factory, u64::MAX, 128);
     let foreign_before = foreign_account.snapshot();
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     let operation = test_operation_on_account_with_control(
+        &mut invocation_root,
         &owned_account,
         64,
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
-    let ledger = operation.coordinator.retained_ledger().test_probe();
-    let mut assembly: TestPublication<u64, u64> = operation
+    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("poison-first publication must open"));
     let (canonical, evidence) = retain_scalar_success(&mut assembly);
@@ -1029,7 +1059,9 @@ fn poisoned_foreign_account_cannot_replace_healthy_joint_commit_account() {
             Ok::<_, RetainedBuildFailureCode>(PanickingDropProbe(&DROP_COUNT))
         })
         .unwrap_or_else(|_| panic!("foreign-account poison probe must retain"));
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     let operation = test_operation_on_account_with_control(
+        &mut invocation_root,
         &owned_account,
         64,
         RetainedBatchLimits::new(2, 2),
@@ -1041,7 +1073,7 @@ fn poisoned_foreign_account_cannot_replace_healthy_joint_commit_account() {
     assert!(!owned_account.snapshot().poisoned());
 
     let prepared = operation
-        .prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(94))
+        .prepare_minimal_fallback(PreparationFailureCode::domain(94))
         .unwrap_or_else(|_| panic!("the healthy owned account must authorize joint commit"));
     assert!(!owned_account.snapshot().poisoned());
     assert_eq!(foreign_account.snapshot(), foreign_poisoned);
@@ -1066,14 +1098,16 @@ fn primary_eligibility_first_capability_completes_after_later_account_poison() {
             Ok::<_, RetainedBuildFailureCode>(PanickingDropProbe(&DROP_COUNT))
         })
         .unwrap_or_else(|_| panic!("primary eligibility race poison probe must retain"));
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     let operation = test_operation_on_account_with_control(
+        &mut invocation_root,
         &account,
         64,
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
-    let ledger = operation.coordinator.retained_ledger().test_probe();
-    let mut assembly: TestPublication<u64, u64> = operation
+    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("primary eligibility publication must open"));
     let (canonical, evidence) = retain_scalar_success(&mut assembly);
@@ -1093,40 +1127,45 @@ fn primary_eligibility_first_capability_completes_after_later_account_poison() {
     let eligibility_resume = StdArc::new(Barrier::new(2));
     let worker_entered = StdArc::clone(&eligibility_entered);
     let worker_resume = StdArc::clone(&eligibility_resume);
-    let worker = thread::spawn(move || {
-        install_publication_eligibility_pause(worker_entered, worker_resume);
-        validated.try_prepare(final_progress())
+    let (prepared, poisoned) = thread::scope(|scope| {
+        let account = &account;
+        let worker = scope.spawn(move || {
+            worker_entered.wait();
+            assert!(!ledger.is_available());
+            assert_eq!(ledger.active_reservations(), 0);
+            assert_eq!(ledger.current_live_bytes(), 0);
+            let at_eligibility = account.snapshot();
+            assert!(!at_eligibility.poisoned());
+            assert_eq!(
+                at_eligibility
+                    .live_retained_bytes()
+                    .checked_add(fallback_charge.bytes),
+                Some(before_prepare.live_retained_bytes()),
+                "fallback storage must be discarded before final eligibility linearizes"
+            );
+            assert_eq!(
+                at_eligibility
+                    .live_retained_allocations()
+                    .checked_add(fallback_charge.allocations),
+                Some(before_prepare.live_retained_allocations()),
+                "fallback ownership must be acknowledged before final eligibility linearizes"
+            );
+            drop(poisoner);
+            let poisoned = account.snapshot();
+            assert!(poisoned.poisoned());
+            worker_resume.wait();
+            poisoned
+        });
+
+        install_publication_eligibility_pause(eligibility_entered, eligibility_resume);
+        let prepared = validated.try_prepare(final_progress());
+        let poisoned = worker
+            .join()
+            .unwrap_or_else(|_| panic!("primary eligibility worker must remain contained"));
+        let prepared =
+            prepared.unwrap_or_else(|_| panic!("primary eligibility preparation must complete"));
+        (prepared, poisoned)
     });
-
-    eligibility_entered.wait();
-    assert!(!ledger.is_available());
-    assert_eq!(ledger.active_reservations(), 0);
-    assert_eq!(ledger.current_live_bytes(), 0);
-    let at_eligibility = account.snapshot();
-    assert!(!at_eligibility.poisoned());
-    assert_eq!(
-        at_eligibility
-            .live_retained_bytes()
-            .checked_add(fallback_charge.bytes),
-        Some(before_prepare.live_retained_bytes()),
-        "fallback storage must be discarded before final eligibility linearizes"
-    );
-    assert_eq!(
-        at_eligibility
-            .live_retained_allocations()
-            .checked_add(fallback_charge.allocations),
-        Some(before_prepare.live_retained_allocations()),
-        "fallback ownership must be acknowledged before final eligibility linearizes"
-    );
-    drop(poisoner);
-    let poisoned = account.snapshot();
-    assert!(poisoned.poisoned());
-    eligibility_resume.wait();
-
-    let prepared = worker
-        .join()
-        .unwrap_or_else(|_| panic!("primary eligibility worker must remain contained"))
-        .unwrap_or_else(|_| panic!("primary eligibility preparation must complete"));
     let after_prepare = account.snapshot();
     assert_eq!(
         after_prepare.live_retained_bytes(),
@@ -1290,18 +1329,21 @@ fn action_admission_counter_exhaustion_is_a_clean_non_poisoning_rejection() {
 #[test]
 fn side_owner_escape_keeps_physical_and_operation_attribution_fail_closed() {
     let factory = account_factory(1);
-    let operation = test_operation(&factory, 64);
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = test_operation(&mut invocation_root, &factory, 64);
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("side-owner publication must open"));
     let ledger = assembly
         .operation
         .as_ref()
         .expect("side-owner assembly retains operation")
+        .common
         .coordinator
         .retained_ledger()
         .test_probe();
     let account = assembly
+        .fields
         .account
         .as_ref()
         .expect("side-owner assembly retains account")
@@ -1337,6 +1379,7 @@ fn side_owner_escape_keeps_physical_and_operation_attribution_fail_closed() {
     drop(lock_recovering_poison(&side_owner).take());
     assert_eq!(ledger.current_live_bytes(), retained_live);
     drop(assembly);
+    drop(invocation_root);
     drop(account);
     assert_eq!(factory.snapshot().live_accounts(), 1);
 }
@@ -1417,14 +1460,21 @@ fn allocation_failure_rolls_back_block_attribution_before_build() {
     static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
 
     let factory = account_factory(1);
-    let operation = test_operation_with_writer_limits(&factory, 64, RetainedBatchLimits::new(2, 2));
-    let mut assembly: TestPublication<PanickingDropProbe, u64> = operation
+    let mut invocation_root: TestInvocationRoot<PanickingDropProbe, u64> = InvocationRoot::new();
+    let operation = test_operation_with_writer_limits(
+        &mut invocation_root,
+        &factory,
+        64,
+        RetainedBatchLimits::new(2, 2),
+    );
+    let mut assembly: TestPublication<'_, PanickingDropProbe, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("publication assembly must open"));
     let probe = assembly
         .operation
         .as_ref()
         .expect("assembly retains the operation")
+        .common
         .coordinator
         .retained_ledger()
         .test_probe();
@@ -1449,6 +1499,7 @@ fn allocation_failure_rolls_back_block_attribution_before_build() {
     assert_eq!(probe.active_reservations(), before_active);
     assert_eq!(probe.current_live_bytes(), before_live);
     drop(assembly);
+    drop(invocation_root);
     assert_eq!(factory.snapshot().live_accounts(), 0);
 }
 

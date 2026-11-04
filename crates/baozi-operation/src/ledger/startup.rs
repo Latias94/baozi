@@ -1,8 +1,8 @@
 use super::{
     AttributionBatchCreateError, AttributionBatchPlan, AttributionReservationBatch,
-    CanonicalOutput, CounterClass, FallbackBatchBaseline, Ledger, LedgerCause, LedgerLimits,
-    LedgerState, OperationAttributionReservation, OutcomeEvidenceDestination, OutputCommitment,
-    PublicationDestination, ReservationCore, StorageCoveringReservation, dimension_entry, lock,
+    CanonicalOutput, CounterClass, FallbackBatchBaseline, Ledger, LedgerCause, LedgerState,
+    OperationAttributionReservation, OutcomeEvidenceDestination, OutputCommitment,
+    PublicationDestination, ReservationCore, StorageCoveringReservation, lock,
 };
 use crate::retained::{AdmittedStartupLedgerGraph, ReadyStartupGraphSplitAuthority};
 use crate::{CapacityPlan, OperationOwner};
@@ -63,9 +63,8 @@ pub(crate) const STARTUP_ACCOUNT_SHARE_STEP_COUNT: usize = 4;
 
 /// One retained allocation attribution that startup must be able to reserve.
 ///
-/// The phase remains part of the qualified value even though the current frozen policy has no
-/// phase-specific limit. That keeps startup qualification ready for a future phase-qualified
-/// `LedgerLimits<P, D>` without weakening today's dimension and operation-wide checks.
+/// The phase is checked against the existing ledger's frozen catalogue together with the
+/// dimension and operation-wide live limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct StartupRetainedAttribution<P, D> {
     phase: P,
@@ -80,6 +79,10 @@ impl<P, D> StartupRetainedAttribution<P, D> {
             dimension,
             bytes,
         }
+    }
+
+    pub(crate) const fn bytes(&self) -> u64 {
+        self.bytes
     }
 }
 
@@ -96,9 +99,8 @@ impl<D> StartupAccountShareStep<D> {
 
 /// The exact linear work steps consumed by retained startup's four account shares.
 ///
-/// The fixed step count is defined only by this envelope. Qualification and execution both consume
-/// these stored steps, so adding or removing an account share cannot silently drift from the pure
-/// ledger proof.
+/// The fixed step count is defined only by this envelope. Current-state preflight and execution
+/// both use these stored steps, so their work requirements stay aligned.
 pub(crate) struct StartupAccountShareEnvelope<D> {
     steps: [StartupAccountShareStep<D>; STARTUP_ACCOUNT_SHARE_STEP_COUNT],
 }
@@ -156,11 +158,10 @@ where
     }
 }
 
-/// Consuming output of one successful startup-ledger qualification.
+/// The exact typed requests admitted together against the existing startup ledger.
 ///
-/// This remains crate-private: outside callers cannot inspect or synthesize startup admission
-/// evidence, while the retained owner can consume the exact typed inputs without reconstructing
-/// them after crossing the side-effect boundary.
+/// These inputs carry no admission proof. Read-only preflight and graph admission both check
+/// their complete envelope against the current ledger before creating graph storage.
 pub(crate) struct StartupLedgerPlanParts<O, P, D>
 where
     O: OperationOwner,
@@ -173,269 +174,34 @@ where
     pub(crate) commitments: [OutputCommitment<D, OutcomeEvidenceDestination>; 2],
 }
 
-/// Sealed proof that every deterministic ledger action needed by retained startup fits policy.
-///
-/// The only constructor is `LedgerLimits::try_qualify_startup`. Qualification is read-only and
-/// allocation-free, so ordinary policy rejection happens before a ledger, coordinator, physical
-/// account admission, or allocator can observe startup.
-#[must_use = "startup qualification must be consumed before crossing the side-effect boundary"]
-pub(crate) struct StartupLedgerPlan<O, P, D>
+impl<O, P, D> StartupLedgerPlanParts<O, P, D>
 where
     O: OperationOwner,
     P: Copy + Ord,
     D: Copy + Ord,
 {
-    limits: LedgerLimits<D>,
-    parts: StartupLedgerPlanParts<O, P, D>,
-}
+    fn validate_graph_capacity(&self) -> Result<(), AttributionBatchCreateError<D>> {
+        if self.batches.fallback.attribution_limit == 0
+            || self.batches.evidence.attribution_limit == 0
+            || self.batches.fallback.commitment_limit == 0
+            || self.batches.evidence.commitment_limit == 0
+        {
+            return Err(AttributionBatchCreateError::CapacityOverflow);
+        }
+        Ok(())
+    }
 
-impl<O, P, D> StartupLedgerPlan<O, P, D>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord,
-{
-    pub(crate) const fn retained_bytes(&self) -> [u64; 2] {
+    fn reservation_specs(
+        &self,
+    ) -> [StartupReservationSpec<P, D>; STARTUP_RESERVATION_COUNT as usize] {
         [
-            self.parts.retained_attributions[0].bytes,
-            self.parts.retained_attributions[1].bytes,
+            StartupReservationSpec::for_batch(&self.batches.canonical_assembly),
+            StartupReservationSpec::for_batch(&self.batches.evidence_assembly),
+            StartupReservationSpec::for_batch(&self.batches.fallback),
+            StartupReservationSpec::for_batch(&self.batches.evidence),
+            StartupReservationSpec::for_retained(self.retained_attributions[0]),
+            StartupReservationSpec::for_retained(self.retained_attributions[1]),
         ]
-    }
-
-    pub(crate) fn into_parts(self) -> (LedgerLimits<D>, StartupLedgerPlanParts<O, P, D>) {
-        (self.limits, self.parts)
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct StartupLiveEnvelope<D> {
-    dimension: D,
-    bytes: u64,
-}
-
-impl<D> StartupLiveEnvelope<D> {
-    const fn new(dimension: D, bytes: u64) -> Self {
-        Self { dimension, bytes }
-    }
-}
-
-impl<D> LedgerLimits<D>
-where
-    D: Copy + Ord + fmt::Debug,
-{
-    /// Purely qualifies the complete deterministic ledger envelope for retained startup.
-    pub(crate) fn try_qualify_startup<O, P>(
-        self,
-        batches: StartupAttributionBatchPlans<O, P, D>,
-        retained_attributions: [StartupRetainedAttribution<P, D>; 2],
-        account_shares: StartupAccountShareEnvelope<D>,
-        commitments: [OutputCommitment<D, OutcomeEvidenceDestination>; 2],
-    ) -> Result<StartupLedgerPlan<O, P, D>, LedgerCause<D>>
-    where
-        O: OperationOwner,
-        P: Copy + Ord,
-    {
-        let live = [
-            StartupLiveEnvelope::new(
-                batches.fallback.capacity_dimension,
-                batches.fallback.planned_bytes,
-            ),
-            StartupLiveEnvelope::new(
-                retained_attributions[0].dimension,
-                retained_attributions[0].bytes,
-            ),
-            StartupLiveEnvelope::new(
-                batches.evidence.capacity_dimension,
-                batches.evidence.planned_bytes,
-            ),
-            StartupLiveEnvelope::new(
-                retained_attributions[1].dimension,
-                retained_attributions[1].bytes,
-            ),
-            StartupLiveEnvelope::new(
-                batches.canonical_assembly.capacity_dimension,
-                batches.canonical_assembly.planned_bytes,
-            ),
-            StartupLiveEnvelope::new(
-                batches.evidence_assembly.capacity_dimension,
-                batches.evidence_assembly.planned_bytes,
-            ),
-        ];
-
-        self.validate_startup_live_envelope(&live)?;
-        self.validate_startup_account_shares(&account_shares)?;
-        self.validate_startup_outcome_commitments(commitments)?;
-
-        Ok(StartupLedgerPlan {
-            limits: self,
-            parts: StartupLedgerPlanParts {
-                batches,
-                retained_attributions,
-                account_shares,
-                commitments,
-            },
-        })
-    }
-
-    fn validate_startup_live_envelope<const N: usize>(
-        &self,
-        live: &[StartupLiveEnvelope<D>; N],
-    ) -> Result<(), LedgerCause<D>> {
-        let mut operation_live = 0_u64;
-        for (index, envelope) in live.iter().copied().enumerate() {
-            let entry = dimension_entry(&self.dimensions, envelope.dimension).ok_or(
-                LedgerCause::UnknownDimension {
-                    dimension: envelope.dimension,
-                },
-            )?;
-            let dimension_limit =
-                entry
-                    .policy
-                    .live_byte_limit
-                    .ok_or(LedgerCause::DimensionNotReservable {
-                        dimension: envelope.dimension,
-                    })?;
-            let dimension_live = live[..=index]
-                .iter()
-                .filter(|candidate| candidate.dimension == envelope.dimension)
-                .try_fold(0_u64, |bytes, candidate| {
-                    bytes
-                        .checked_add(candidate.bytes)
-                        .ok_or(LedgerCause::ArithmeticOverflow {
-                            class: CounterClass::Live,
-                            dimension: envelope.dimension,
-                        })
-                })?;
-            if dimension_live > dimension_limit {
-                return Err(LedgerCause::LimitExceeded {
-                    class: CounterClass::Live,
-                    dimension: envelope.dimension,
-                    value: dimension_live,
-                    limit: dimension_limit,
-                });
-            }
-            operation_live = operation_live.checked_add(envelope.bytes).ok_or(
-                LedgerCause::ArithmeticOverflow {
-                    class: CounterClass::Live,
-                    dimension: envelope.dimension,
-                },
-            )?;
-            if operation_live > self.operation_live_byte_limit {
-                return Err(LedgerCause::LimitExceeded {
-                    class: CounterClass::Live,
-                    dimension: envelope.dimension,
-                    value: operation_live,
-                    limit: self.operation_live_byte_limit,
-                });
-            }
-        }
-        Ok(())
-    }
-
-    fn validate_startup_account_shares(
-        &self,
-        account_shares: &StartupAccountShareEnvelope<D>,
-    ) -> Result<(), LedgerCause<D>> {
-        let all = || {
-            account_shares
-                .steps
-                .iter()
-                .flat_map(|step| step.charges.iter())
-                .copied()
-        };
-        for (index, (dimension, _)) in all().enumerate() {
-            let policy = self
-                .dimension(dimension)
-                .ok_or(LedgerCause::UnknownDimension { dimension })?;
-            if all().take(index).any(|(previous, _)| previous == dimension) {
-                continue;
-            }
-
-            let attempted = all()
-                .filter(|(candidate, _)| *candidate == dimension)
-                .try_fold(0_u64, |total, (_, amount)| {
-                    total
-                        .checked_add(amount)
-                        .ok_or(LedgerCause::ArithmeticOverflow {
-                            class: CounterClass::Attempted,
-                            dimension,
-                        })
-                })?;
-            if attempted > policy.attempted_limit {
-                return Err(LedgerCause::LimitExceeded {
-                    class: CounterClass::Attempted,
-                    dimension,
-                    value: attempted,
-                    limit: policy.attempted_limit,
-                });
-            }
-
-            let consumed = all()
-                .filter(|(candidate, _)| *candidate == dimension)
-                .try_fold(0_u64, |total, (_, amount)| {
-                    total
-                        .checked_add(amount)
-                        .ok_or(LedgerCause::ArithmeticOverflow {
-                            class: CounterClass::Consumed,
-                            dimension,
-                        })
-                })?;
-            if consumed > attempted {
-                return Err(LedgerCause::ConsumedExceedsAttempted {
-                    dimension,
-                    consumed,
-                    attempted,
-                });
-            }
-            if consumed > policy.consumed_limit {
-                return Err(LedgerCause::LimitExceeded {
-                    class: CounterClass::Consumed,
-                    dimension,
-                    value: consumed,
-                    limit: policy.consumed_limit,
-                });
-            }
-        }
-        Ok(())
-    }
-
-    fn validate_startup_outcome_commitments(
-        &self,
-        commitments: [OutputCommitment<D, OutcomeEvidenceDestination>; 2],
-    ) -> Result<(), LedgerCause<D>> {
-        for (index, commitment) in commitments.iter().copied().enumerate() {
-            let entry = dimension_entry(&self.dimensions, commitment.dimension).ok_or(
-                LedgerCause::UnknownDimension {
-                    dimension: commitment.dimension,
-                },
-            )?;
-            if commitments[..index]
-                .iter()
-                .any(|previous| previous.dimension == commitment.dimension)
-            {
-                continue;
-            }
-            let amount = commitments
-                .iter()
-                .filter(|candidate| candidate.dimension == commitment.dimension)
-                .try_fold(0_u64, |total, candidate| {
-                    total
-                        .checked_add(candidate.amount)
-                        .ok_or(LedgerCause::ArithmeticOverflow {
-                            class: CounterClass::PublishedOutcomeEvidence,
-                            dimension: commitment.dimension,
-                        })
-                })?;
-            if amount > entry.policy.published_outcome_evidence_limit {
-                return Err(LedgerCause::LimitExceeded {
-                    class: CounterClass::PublishedOutcomeEvidence,
-                    dimension: commitment.dimension,
-                    value: amount,
-                    limit: entry.policy.published_outcome_evidence_limit,
-                });
-            }
-        }
-        Ok(())
     }
 }
 
@@ -631,7 +397,7 @@ pub(crate) struct StartupLedgerGraphSeal {
 
 /// Test-only view of the internal borrowed graph builder.
 ///
-/// Production crosses the consuming `into_admitted_startup_attribution_graph` boundary instead.
+/// Production binds the same graph to the ledger that remains in its outer invocation.
 #[cfg(test)]
 pub(crate) struct StartupAttributionGraphAdmission<O, P, D>
 where
@@ -696,6 +462,15 @@ where
     P: Copy + Ord,
     D: Copy + Ord,
 {
+    pub(crate) fn belongs_to(&self, ledger: &Ledger<O, P, D>) -> bool {
+        self.ownership.as_ref().is_some_and(|ownership| {
+            ownership
+                .runtime_owners
+                .iter()
+                .all(|owner| Arc::ptr_eq(owner, &ledger.state))
+        })
+    }
+
     fn try_allocate_backings(
         &mut self,
         canonical_assembly: StartupBatchAllocationPlans,
@@ -799,16 +574,38 @@ where
     P: Copy + Ord,
     D: Copy + Ord + fmt::Debug,
 {
-    /// Atomically admits and binds the complete ledger side of retained startup.
-    pub(crate) fn into_admitted_startup_attribution_graph(
-        self,
+    /// Checks the complete startup request against current work and storage without admitting it.
+    #[cfg(test)]
+    pub(crate) fn preflight_startup_attribution_graph(
+        &self,
+        parts: &StartupLedgerPlanParts<O, P, D>,
+    ) -> Result<(), AttributionBatchCreateError<D>> {
+        parts.validate_graph_capacity()?;
+        let bindings = self.bind_startup_ledger(
+            parts.reservation_specs(),
+            &parts.account_shares,
+            parts.commitments,
+        );
+        let work_state = self
+            .work
+            .borrow_state()
+            .map_err(AttributionBatchCreateError::Ledger)?;
+        let state = lock(&self.state);
+        Self::ensure_open(&state).map_err(AttributionBatchCreateError::Ledger)?;
+        self.preflight_startup_ledger(&state, &work_state, bindings)
+            .map(|_| ())
+            .map_err(AttributionBatchCreateError::Ledger)
+    }
+
+    /// Atomically admits the complete graph without moving the invocation's ledger.
+    pub(crate) fn try_bind_startup_attribution_graph(
+        &self,
         parts: StartupLedgerPlanParts<O, P, D>,
     ) -> Result<AdmittedStartupLedgerGraph<O, P, D>, AttributionBatchCreateError<D>> {
         let (graph, account_shares) = self.try_build_startup_attribution_graph(parts)?;
         Ok(AdmittedStartupLedgerGraph::from_ledger_startup(
             StartupLedgerGraphSeal { _private: () },
             graph,
-            self,
             account_shares,
         ))
     }
@@ -831,9 +628,11 @@ where
         &self,
         parts: StartupLedgerPlanParts<O, P, D>,
     ) -> Result<BuiltStartupAttributionGraph<O, P, D>, AttributionBatchCreateError<D>> {
+        parts.validate_graph_capacity()?;
+        let reservation_specs = parts.reservation_specs();
         let StartupLedgerPlanParts {
             batches,
-            retained_attributions,
+            retained_attributions: _,
             account_shares,
             commitments,
         } = parts;
@@ -844,22 +643,6 @@ where
             evidence,
         } = batches;
 
-        if fallback.attribution_limit == 0
-            || evidence.attribution_limit == 0
-            || fallback.commitment_limit == 0
-            || evidence.commitment_limit == 0
-        {
-            return Err(AttributionBatchCreateError::CapacityOverflow);
-        }
-
-        let reservation_specs = [
-            StartupReservationSpec::for_batch(&canonical_assembly),
-            StartupReservationSpec::for_batch(&evidence_assembly),
-            StartupReservationSpec::for_batch(&fallback),
-            StartupReservationSpec::for_batch(&evidence),
-            StartupReservationSpec::for_retained(retained_attributions[0]),
-            StartupReservationSpec::for_retained(retained_attributions[1]),
-        ];
         let StartupLedgerCommit { cores, commitments } = self
             .try_admit_startup_ledger(reservation_specs, &account_shares, commitments)
             .map_err(AttributionBatchCreateError::Ledger)?;
@@ -903,9 +686,42 @@ where
         &self,
         reservation_specs: [StartupReservationSpec<P, D>; STARTUP_RESERVATION_COUNT as usize],
         account_shares: &StartupAccountShareEnvelope<D>,
-        mut commitments: [OutputCommitment<D, OutcomeEvidenceDestination>; 2],
+        commitments: [OutputCommitment<D, OutcomeEvidenceDestination>; 2],
     ) -> Result<StartupLedgerCommit<O, P, D>, LedgerCause<D>> {
-        // Resolve owner keys without guards, but replay errors at their original preflight stage.
+        let bindings = self.bind_startup_ledger(reservation_specs, account_shares, commitments);
+        let work_state = self.work.borrow_state()?;
+        let mut state = lock(&self.state);
+        Self::ensure_open(&state)?;
+        let admission = self.preflight_startup_ledger(&state, &work_state, bindings)?;
+        commit_startup_ledger(&mut state, &admission);
+        drop(state);
+        drop(work_state);
+        let StartupLedgerAdmission {
+            reservations,
+            commitments,
+            ..
+        } = admission;
+        Ok(StartupLedgerCommit {
+            cores: StartupLedgerCores::from_array(reservations.map(|projection| {
+                ReservationCore::new(
+                    Arc::clone(&self.state),
+                    projection.spec.phase,
+                    projection.phase_position,
+                    projection.spec.dimension,
+                    projection.dimension_position,
+                    projection.spec.bytes,
+                )
+            })),
+            commitments,
+        })
+    }
+
+    fn bind_startup_ledger(
+        &self,
+        reservation_specs: [StartupReservationSpec<P, D>; STARTUP_RESERVATION_COUNT as usize],
+        account_shares: &StartupAccountShareEnvelope<D>,
+        mut commitments: [OutputCommitment<D, OutcomeEvidenceDestination>; 2],
+    ) -> StartupLedgerBindings<'_, P, D> {
         let reservations = reservation_specs.map(|spec| StartupReservationBinding {
             spec,
             phase_position: self.bound_phase_position(spec.phase),
@@ -942,38 +758,13 @@ where
             commitment.dimension_position = position;
             Ok(())
         });
-        let bindings = StartupLedgerBindings {
+        StartupLedgerBindings {
             reservations,
             work,
             work_amounts: work_specs.map(|(_, amount)| amount),
             commitments,
             commitment_bindings,
-        };
-        let work_state = self.work.borrow_state()?;
-        let mut state = lock(&self.state);
-        Self::ensure_open(&state)?;
-        let admission = self.preflight_startup_ledger(&state, &work_state, bindings)?;
-        commit_startup_ledger(&mut state, &admission);
-        drop(state);
-        drop(work_state);
-        let StartupLedgerAdmission {
-            reservations,
-            commitments,
-            ..
-        } = admission;
-        Ok(StartupLedgerCommit {
-            cores: StartupLedgerCores::from_array(reservations.map(|projection| {
-                ReservationCore::new(
-                    Arc::clone(&self.state),
-                    projection.spec.phase,
-                    projection.phase_position,
-                    projection.spec.dimension,
-                    projection.dimension_position,
-                    projection.spec.bytes,
-                )
-            })),
-            commitments,
-        })
+        }
     }
 
     fn preflight_startup_ledger(

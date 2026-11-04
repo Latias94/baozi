@@ -105,6 +105,18 @@ impl PostProcessControl {
         self
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_progress_observer(
+        mut self,
+        observer: impl baozi_operation::ProgressObserver<
+            PostProcessProgressPhase,
+            PostProcessProgressUnit,
+        >,
+    ) -> Self {
+        self.inner = self.inner.with_progress_observer(observer);
+        self
+    }
+
     pub(crate) fn into_runtime(self) -> RuntimePostProcessControl {
         self.inner
     }

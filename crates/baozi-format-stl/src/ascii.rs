@@ -3,31 +3,33 @@ use crate::parser::{ParsedMesh, ParsedStl};
 use baozi_import::authoring::Vec3;
 use baozi_import::{
     ConformedTextInput, DiagnosticByteRange, DiagnosticCode, DiagnosticSeverity,
-    ImportProgressPhase, ImportStorageClass, ImportWorkClass, ImportWorkGroup, MeteredString,
-    MeteredVec, ParseExecution, ParseFailure, ParseResult, TextConformanceViolation,
-    TextConformanceViolationKind, TextDecodingMode, TextDiagnosticLocation, TextInputLine,
-    TextInputOptions,
+    ImportProgressPhase, ImportStorageClass, ImportWorkClass, MeteredString, MeteredVec,
+    ParseChildren, ParseFailure, ParseResult, ParseRoot, ParseServices, ParseWorkLayout,
+    TextConformanceViolation, TextConformanceViolationKind, TextDecodingMode,
+    TextDiagnosticLocation, TextInputLine, TextInputOptions,
 };
 
 const CHECKPOINT_CHUNK_BYTES: usize = 4 * 1024;
 
 pub(crate) fn parse<'session>(
-    exec: &mut ParseExecution<'_, 'session>,
+    root: &mut ParseRoot<'_, '_, 'session>,
 ) -> ParseResult<ParsedStl<'session>> {
     let options = TextInputOptions::new(TextDecodingMode::RejectInvalid, "stl-text-input")
         .with_decoded_resource("stl-decoded-text")
         .with_line_resource("line-bytes")
         .with_line_index_resource("stl-line-index-bytes");
-    exec.with_conformed_text_input(
-        exec.diagnostic_source(),
-        options,
-        |exec, input, _recoveries| AsciiParser::new(exec)?.parse(exec, input),
-    )?
-    .map_err(|violation| text_conformance_failure(exec, violation))
+    let source = root.services()?.diagnostic_source();
+    root.with_conformed_text_input(source, options, |children, input, _recoveries| {
+        AsciiParser::new(children)?.parse(children, input)
+    })?
+    .map_err(|violation| match root.services() {
+        Ok(mut services) => text_conformance_failure(&mut services, violation),
+        Err(cause) => cause,
+    })
 }
 
 fn text_conformance_failure(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     violation: TextConformanceViolation,
 ) -> ParseFailure {
     let raw_offset = violation.raw_range().map(DiagnosticByteRange::start);
@@ -81,7 +83,7 @@ fn text_conformance_failure(
 }
 
 fn byte_conformance_failure(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     raw_offset: Option<u64>,
     missing_range_reason: &'static str,
     failure: impl FnOnce(u64) -> StlFailure,
@@ -93,7 +95,7 @@ fn byte_conformance_failure(
 }
 
 fn internal_text_conformance_failure(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     reason: &'static str,
 ) -> ParseFailure {
     exec.format_failure(StlFailure::content(
@@ -103,36 +105,38 @@ fn internal_text_conformance_failure(
     ))
 }
 
-struct AsciiParser<'region, 'session> {
-    record_work: ImportWorkGroup<'region, 1>,
-    line_work: ImportWorkGroup<'region, 1>,
-    token_work: ImportWorkGroup<'region, 2>,
-    solid_work: ImportWorkGroup<'region, 2>,
-    mesh_work: ImportWorkGroup<'region, 1>,
-    facet_work: ImportWorkGroup<'region, 3>,
+struct AsciiParser<'op, 'session> {
+    record_work: ParseWorkLayout<'op, 1>,
+    line_work: ParseWorkLayout<'op, 1>,
+    token_work: ParseWorkLayout<'op, 2>,
+    solid_work: ParseWorkLayout<'op, 2>,
+    mesh_work: ParseWorkLayout<'op, 1>,
+    facet_work: ParseWorkLayout<'op, 3>,
     parsed: ParsedStl<'session>,
     state: State,
     current: Option<SolidBuilder<'session>>,
 }
 
-impl<'region, 'session> AsciiParser<'region, 'session> {
-    fn new(exec: &mut ParseExecution<'region, 'session>) -> ParseResult<Self> {
+impl<'op, 'session> AsciiParser<'op, 'session> {
+    fn new(children: &mut ParseChildren<'_, 'op, 'session>) -> ParseResult<Self> {
         Ok(Self {
-            record_work: exec.bind_work_group([ImportWorkClass::Records])?,
-            line_work: exec.bind_work_group([ImportWorkClass::LineBytes])?,
-            token_work: exec
-                .bind_work_group([ImportWorkClass::Tokens, ImportWorkClass::TokenBytes])?,
-            solid_work: exec
-                .bind_work_group([ImportWorkClass::Solids, ImportWorkClass::StringBytes])?,
-            mesh_work: exec.bind_work_group([ImportWorkClass::Meshes])?,
-            facet_work: exec.bind_work_group([
+            record_work: children.bind_group([ImportWorkClass::Records])?,
+            line_work: children.bind_group([ImportWorkClass::LineBytes])?,
+            token_work: children
+                .bind_group([ImportWorkClass::Tokens, ImportWorkClass::TokenBytes])?,
+            solid_work: children
+                .bind_group([ImportWorkClass::Solids, ImportWorkClass::StringBytes])?,
+            mesh_work: children.bind_group([ImportWorkClass::Meshes])?,
+            facet_work: children.bind_group([
                 ImportWorkClass::Faces,
                 ImportWorkClass::Vertices,
                 ImportWorkClass::AttributeCells,
             ])?,
             parsed: ParsedStl {
                 material_color: None,
-                meshes: exec.metered_vec(ImportStorageClass::FormatNormalization, "stl-meshes"),
+                meshes: children
+                    .services()?
+                    .metered_vec(ImportStorageClass::FormatNormalization, "stl-meshes"),
             },
             state: State::Start,
             current: None,
@@ -141,39 +145,41 @@ impl<'region, 'session> AsciiParser<'region, 'session> {
 
     fn parse(
         mut self,
-        exec: &mut ParseExecution<'region, 'session>,
+        children: &mut ParseChildren<'_, 'op, 'session>,
         input: &ConformedTextInput<'session>,
     ) -> ParseResult<ParsedStl<'session>> {
-        let mut token_buffer = TokenBuffer::new(exec);
+        let mut token_buffer = TokenBuffer::new(&mut children.services()?);
         for line in input.lines() {
-            exec.with_work(&self.record_work, [1], |_exec, work| work.complete_all())?;
+            children.child(&self.record_work, [1], |child| {
+                child.run([1], || Ok::<_, ParseFailure>(()))
+            })?;
             let line_number = u32::try_from(line.number())
-                .map_err(|_| exec.allocation_failure("stl-line-number"))?;
-            self.parse_line(exec, &line, line_number, &mut token_buffer)?;
+                .map_err(|_| children.error_view().allocation_failure("stl-line-number"))?;
+            self.parse_line(children, &line, line_number, &mut token_buffer)?;
         }
-        self.finish_file(exec)?;
+        self.finish_file(&mut children.services()?)?;
         Ok(self.parsed)
     }
 
     fn parse_line(
         &mut self,
-        exec: &mut ParseExecution<'region, 'session>,
+        children: &mut ParseChildren<'_, 'op, 'session>,
         line: &TextInputLine<'_, 'session>,
         line_number: u32,
         token_buffer: &mut TokenBuffer<'session>,
     ) -> ParseResult<()> {
         let text = line.text();
-        account_line_bytes(exec, &self.line_work, text)?;
-        let tokens = tokenize(exec, &self.token_work, text, token_buffer)?;
+        account_line_bytes(children, &self.line_work, text)?;
+        let tokens = tokenize(children, &self.token_work, text, token_buffer)?;
         if tokens.is_empty() {
             return Ok(());
         }
-        let first = required_token(exec, &tokens, 0)?;
+        let first = required_token(&mut children.services()?, &tokens, 0)?;
 
         let state = std::mem::replace(&mut self.state, State::Start);
         match state {
-            State::Start => self.parse_start_line(exec, line, text, &tokens, line_number),
-            State::InSolid => self.parse_solid_line(exec, text, &tokens, line_number),
+            State::Start => self.parse_start_line(children, line, text, &tokens, line_number),
+            State::InSolid => self.parse_solid_line(children, text, &tokens, line_number),
             State::NeedOuterLoop { normal } => {
                 if tokens_match(&tokens, &["outer", "loop"]) {
                     self.state = State::InLoop {
@@ -184,7 +190,7 @@ impl<'region, 'session> AsciiParser<'region, 'session> {
                     Ok(())
                 } else {
                     Err(self.failure(
-                        exec,
+                        &mut children.services()?,
                         "outer-loop",
                         "expected-after-facet-normal",
                         line_number,
@@ -200,14 +206,15 @@ impl<'region, 'session> AsciiParser<'region, 'session> {
                 if keyword_is(first, "vertex") {
                     if vertex_count == vertices.len() {
                         return Err(self.failure(
-                            exec,
+                            &mut children.services()?,
                             "facet",
                             "more-than-three-vertices",
                             line_number,
                             first.column,
                         ));
                     }
-                    let vertex = parse_vec3(exec, &tokens, "vertex", line_number)?;
+                    let vertex =
+                        parse_vec3(&mut children.services()?, &tokens, "vertex", line_number)?;
                     vertices[vertex_count] = vertex;
                     vertex_count += 1;
                     self.state = State::InLoop {
@@ -219,7 +226,7 @@ impl<'region, 'session> AsciiParser<'region, 'session> {
                 } else if tokens_match(&tokens, &["endloop"]) {
                     if vertex_count != vertices.len() {
                         return Err(self.failure(
-                            exec,
+                            &mut children.services()?,
                             "facet",
                             "fewer-than-three-vertices",
                             line_number,
@@ -230,7 +237,7 @@ impl<'region, 'session> AsciiParser<'region, 'session> {
                     Ok(())
                 } else {
                     Err(self.failure(
-                        exec,
+                        &mut children.services()?,
                         "facet-loop",
                         "expected-vertex-or-endloop",
                         line_number,
@@ -240,12 +247,12 @@ impl<'region, 'session> AsciiParser<'region, 'session> {
             }
             State::NeedEndFacet { normal, vertices } => {
                 if tokens_match(&tokens, &["endfacet"]) {
-                    self.push_facet(exec, normal, &vertices)?;
+                    self.push_facet(children, normal, &vertices)?;
                     self.state = State::InSolid;
                     Ok(())
                 } else {
                     Err(self.failure(
-                        exec,
+                        &mut children.services()?,
                         "facet",
                         "expected-endfacet",
                         line_number,
@@ -258,45 +265,51 @@ impl<'region, 'session> AsciiParser<'region, 'session> {
 
     fn parse_start_line(
         &mut self,
-        exec: &mut ParseExecution<'region, 'session>,
+        children: &mut ParseChildren<'_, 'op, 'session>,
         decoded_line: &TextInputLine<'_, 'session>,
         line: &str,
         tokens: &TokenLine<'_, '_>,
         line_number: u32,
     ) -> ParseResult<()> {
-        let first = required_token(exec, tokens, 0)?;
+        let first = required_token(&mut children.services()?, tokens, 0)?;
         if !keyword_is(first, "solid") {
             return Err(self.failure(
-                exec,
+                &mut children.services()?,
                 "document",
                 "expected-solid",
                 line_number,
                 first.column,
             ));
         }
-        self.start_solid(exec, decoded_line, line, tokens)
+        self.start_solid(children, decoded_line, line, tokens)
     }
 
     fn parse_solid_line(
         &mut self,
-        exec: &mut ParseExecution<'region, 'session>,
+        children: &mut ParseChildren<'_, 'op, 'session>,
         line: &str,
         tokens: &TokenLine<'_, '_>,
         line_number: u32,
     ) -> ParseResult<()> {
-        let first = required_token(exec, tokens, 0)?;
+        let first = required_token(&mut children.services()?, tokens, 0)?;
         if keyword_is(first, "facet") {
-            let normal = parse_facet_normal(exec, tokens, line_number)?;
+            let normal = parse_facet_normal(&mut children.services()?, tokens, line_number)?;
             self.state = State::NeedOuterLoop { normal };
             Ok(())
         } else if keyword_is(first, "endsolid") {
             let name = trailing_text_after_first_token(line, tokens);
-            self.finish_solid(exec, name, line_number, first.column)
+            self.finish_solid(children, name, line_number, first.column)
         } else if keyword_is(first, "solid") {
-            Err(self.failure(exec, "solid", "nested-solid", line_number, first.column))
+            Err(self.failure(
+                &mut children.services()?,
+                "solid",
+                "nested-solid",
+                line_number,
+                first.column,
+            ))
         } else {
             Err(self.failure(
-                exec,
+                &mut children.services()?,
                 "solid",
                 "expected-facet-or-endsolid",
                 line_number,
@@ -307,31 +320,33 @@ impl<'region, 'session> AsciiParser<'region, 'session> {
 
     fn start_solid(
         &mut self,
-        exec: &mut ParseExecution<'region, 'session>,
+        children: &mut ParseChildren<'_, 'op, 'session>,
         decoded_line: &TextInputLine<'_, 'session>,
         line: &str,
         tokens: &TokenLine<'_, '_>,
     ) -> ParseResult<()> {
         let name_value = trailing_text_after_first_token(line, tokens);
+        let exec = &mut children.services()?;
         let name_bytes = name_value
             .map(|name| usize_amount(exec, name.len(), "stl-solid-name"))
             .transpose()?
             .unwrap_or(0);
-        exec.with_work(
+        children.child(
             &self.solid_work,
             [1, name_bytes],
-            |exec, work| -> ParseResult<()> {
+            |child| -> ParseResult<()> {
                 let name = match name_value {
-                    Some(value) => Some(work.run([0, name_bytes], || -> ParseResult<_> {
-                        let mut owned = exec.metered_string(
+                    Some(value) => {
+                        let mut owned = child.services()?.metered_string(
                             ImportStorageClass::SceneConstruction,
                             "stl-solid-name",
                         );
-                        owned.try_push_str(exec, value)?;
-                        Ok(owned)
-                    })?),
+                        child.append_string([0, name_bytes], &mut owned, value)?;
+                        Some(owned)
+                    }
                     None => None,
                 };
+                let exec = &mut child.services()?;
                 let first = required_token(exec, tokens, 0)?;
                 let column_offset = first
                     .column
@@ -358,23 +373,26 @@ impl<'region, 'session> AsciiParser<'region, 'session> {
                         "invalid-solid-start",
                     ))
                 })?;
-                self.current = Some(SolidBuilder::new(exec, name, start_location));
-                self.state = State::InSolid;
-                work.complete([1, 0])
+                let current = SolidBuilder::new(exec, name, start_location);
+                child.run([1, 0], || {
+                    self.current = Some(current);
+                    self.state = State::InSolid;
+                    Ok(())
+                })
             },
         )
     }
 
     fn finish_solid(
         &mut self,
-        exec: &mut ParseExecution<'region, 'session>,
+        children: &mut ParseChildren<'_, 'op, 'session>,
         name: Option<&str>,
         line_number: u32,
         column: u32,
     ) -> ParseResult<()> {
         let Some(current) = self.current.take() else {
             return Err(self.failure(
-                exec,
+                &mut children.services()?,
                 "endsolid",
                 "without-active-solid",
                 line_number,
@@ -382,12 +400,18 @@ impl<'region, 'session> AsciiParser<'region, 'session> {
             ));
         };
         let start_name = current.name.as_ref().map_or("", MeteredString::as_str);
-        if !solid_names_match(exec, start_name, name.unwrap_or(""))? {
-            return Err(self.failure(exec, "endsolid", "name-mismatch", line_number, column));
+        if !solid_names_match(&mut children.services()?, start_name, name.unwrap_or(""))? {
+            return Err(self.failure(
+                &mut children.services()?,
+                "endsolid",
+                "name-mismatch",
+                line_number,
+                column,
+            ));
         }
 
         if current.face_count == 0 {
-            exec.emit_text_diagnostic_with(
+            children.services()?.emit_text_diagnostic_with(
                 DiagnosticSeverity::Warning,
                 DiagnosticCode::new("stl.empty_solid")
                     .expect("static STL diagnostic code must be valid"),
@@ -398,18 +422,17 @@ impl<'region, 'session> AsciiParser<'region, 'session> {
                 format_args!("ASCII STL solid contains no facets"),
             )?;
         } else {
-            exec.with_work(&self.mesh_work, [1], |exec, work| -> ParseResult<()> {
-                work.run_all(|| {
-                    self.parsed.meshes.try_push(
-                        exec,
-                        ParsedMesh {
-                            name: current.name,
-                            positions: current.positions,
-                            normals: current.normals,
-                            colors: None,
-                        },
-                    )
-                })
+            children.child(&self.mesh_work, [1], |child| -> ParseResult<()> {
+                child.push_growing(
+                    [1],
+                    &mut self.parsed.meshes,
+                    ParsedMesh {
+                        name: current.name,
+                        positions: current.positions,
+                        normals: current.normals,
+                        colors: None,
+                    },
+                )
             })?;
         }
 
@@ -419,63 +442,68 @@ impl<'region, 'session> AsciiParser<'region, 'session> {
 
     fn push_facet(
         &mut self,
-        exec: &mut ParseExecution<'region, 'session>,
+        children: &mut ParseChildren<'_, 'op, 'session>,
         normal: Vec3,
         vertices: &[Vec3; 3],
     ) -> ParseResult<()> {
         let positions = vertices.map(vec3_components);
         let normals = [vec3_components(normal); 3];
-        exec.with_work(
-            &self.facet_work,
-            [1, 3, 6],
-            |exec, work| -> ParseResult<()> {
-                let Some(current) = self.current.as_mut() else {
-                    return Err(exec.format_failure(StlFailure::content(
-                        StlFailureCode::InternalInvariant,
-                        "facet",
-                        "outside-solid",
-                    )));
-                };
-                work.run([0, 3, 3], || {
-                    current.positions.try_extend_from_slice(exec, &positions)
-                })?;
-                #[cfg(test)]
-                crate::control_tests::facet_completed(
-                    crate::control_tests::CompletionSite::AsciiFacet,
-                    current.face_count,
-                    current.positions.as_slice(),
-                    current.normals.as_slice(),
-                );
-                work.run([0, 0, 3], || {
-                    current.normals.try_extend_from_slice(exec, &normals)
-                })?;
-                #[cfg(test)]
-                crate::control_tests::facet_completed(
-                    crate::control_tests::CompletionSite::AsciiFacet,
-                    current.face_count,
-                    current.positions.as_slice(),
-                    current.normals.as_slice(),
-                );
-                work.run([1, 0, 0], || -> ParseResult<()> {
-                    current.face_count = current
-                        .face_count
-                        .checked_add(1)
-                        .ok_or_else(|| exec.allocation_failure("stl-face-counter"))?;
-                    Ok(())
-                })?;
-                #[cfg(test)]
-                crate::control_tests::facet_completed(
-                    crate::control_tests::CompletionSite::AsciiFacet,
-                    current.face_count,
-                    current.positions.as_slice(),
-                    current.normals.as_slice(),
-                );
+        children.child(&self.facet_work, [1, 3, 6], |child| -> ParseResult<()> {
+            let Some(current) = self.current.as_mut() else {
+                return Err(child.services()?.format_failure(StlFailure::content(
+                    StlFailureCode::InternalInvariant,
+                    "facet",
+                    "outside-solid",
+                )));
+            };
+            child.run_returned_with_storage::<_, StlFailure>(|mut storage| {
+                storage.reserve_vec(&mut current.positions, positions.len())?;
+                storage.poll()?;
+                current
+                    .positions
+                    .try_extend_from_slice_reserved(&positions)?;
+                Ok(((), [0, 3, 3]))
+            })?;
+            #[cfg(test)]
+            crate::control_tests::facet_completed(
+                crate::control_tests::CompletionSite::AsciiFacet,
+                current.face_count,
+                current.positions.as_slice(),
+                current.normals.as_slice(),
+            );
+            child.run_returned_with_storage::<_, StlFailure>(|mut storage| {
+                storage.reserve_vec(&mut current.normals, normals.len())?;
+                storage.poll()?;
+                current.normals.try_extend_from_slice_reserved(&normals)?;
+                Ok(((), [0, 0, 3]))
+            })?;
+            #[cfg(test)]
+            crate::control_tests::facet_completed(
+                crate::control_tests::CompletionSite::AsciiFacet,
+                current.face_count,
+                current.positions.as_slice(),
+                current.normals.as_slice(),
+            );
+            let errors = child.error_view();
+            child.run([1, 0, 0], || -> ParseResult<()> {
+                current.face_count = current
+                    .face_count
+                    .checked_add(1)
+                    .ok_or_else(|| errors.allocation_failure("stl-face-counter"))?;
                 Ok(())
-            },
-        )
+            })?;
+            #[cfg(test)]
+            crate::control_tests::facet_completed(
+                crate::control_tests::CompletionSite::AsciiFacet,
+                current.face_count,
+                current.positions.as_slice(),
+                current.normals.as_slice(),
+            );
+            Ok(())
+        })
     }
 
-    fn finish_file(&self, exec: &mut ParseExecution<'_, '_>) -> ParseResult<()> {
+    fn finish_file(&self, exec: &mut ParseServices<'_, '_, '_>) -> ParseResult<()> {
         let reason = match &self.state {
             State::Start => return Ok(()),
             State::InSolid => "ended-before-endsolid",
@@ -492,7 +520,7 @@ impl<'region, 'session> AsciiParser<'region, 'session> {
 
     fn failure(
         &self,
-        exec: &mut ParseExecution<'_, '_>,
+        exec: &mut ParseServices<'_, '_, '_>,
         subject: &'static str,
         reason: &'static str,
         line: u32,
@@ -508,17 +536,17 @@ impl<'region, 'session> AsciiParser<'region, 'session> {
     }
 }
 
-fn account_line_bytes<'region>(
-    exec: &mut ParseExecution<'region, '_>,
-    group: &ImportWorkGroup<'region, 1>,
+fn account_line_bytes<'op>(
+    children: &mut ParseChildren<'_, 'op, '_>,
+    group: &ParseWorkLayout<'op, 1>,
     line: &str,
 ) -> ParseResult<()> {
-    let amount = usize_amount(exec, line.len(), "stl-line-bytes")?;
-    exec.with_work(group, [amount], |exec, work| -> ParseResult<()> {
+    let amount = usize_amount(&children.services()?, line.len(), "stl-line-bytes")?;
+    children.child(group, [amount], |child| -> ParseResult<()> {
         for _ in (CHECKPOINT_CHUNK_BYTES..line.len()).step_by(CHECKPOINT_CHUNK_BYTES) {
-            exec.poll()?;
+            child.poll()?;
         }
-        work.complete_all()
+        child.run([amount], || Ok(()))
     })
 }
 
@@ -536,7 +564,7 @@ const fn vec3_components(value: Vec3) -> [f32; 3] {
 
 impl<'session> SolidBuilder<'session> {
     fn new(
-        exec: &mut ParseExecution<'_, 'session>,
+        exec: &mut ParseServices<'_, '_, 'session>,
         name: Option<MeteredString<'session>>,
         start_location: TextDiagnosticLocation<'session>,
     ) -> Self {
@@ -586,7 +614,7 @@ struct TokenBuffer<'session> {
 }
 
 impl<'session> TokenBuffer<'session> {
-    fn new(exec: &mut ParseExecution<'_, 'session>) -> Self {
+    fn new(exec: &mut ParseServices<'_, '_, 'session>) -> Self {
         Self {
             values: exec.metered_vec(ImportStorageClass::FormatNormalization, "stl-tokens"),
         }
@@ -621,9 +649,9 @@ impl<'line> TokenLine<'line, '_> {
     }
 }
 
-fn tokenize<'line, 'buffer, 'region, 'session>(
-    exec: &mut ParseExecution<'region, 'session>,
-    group: &ImportWorkGroup<'region, 2>,
+fn tokenize<'line, 'buffer, 'op, 'session>(
+    children: &mut ParseChildren<'_, 'op, 'session>,
+    group: &ParseWorkLayout<'op, 2>,
     line: &'line str,
     tokens: &'buffer mut TokenBuffer<'session>,
 ) -> ParseResult<TokenLine<'line, 'buffer>> {
@@ -633,19 +661,19 @@ fn tokenize<'line, 'buffer, 'region, 'session>(
 
     for (index, byte) in line.bytes().enumerate() {
         if index >= next_poll {
-            exec.poll()?;
+            children.services()?.poll()?;
             next_poll = next_poll.saturating_add(4096);
         }
         if byte.is_ascii_whitespace() {
             if let Some(token_start) = start.take() {
-                push_token(exec, group, tokens, line, token_start, index)?;
+                push_token(children, group, tokens, line, token_start, index)?;
             }
         } else if start.is_none() {
             start = Some(index);
         }
     }
     if let Some(token_start) = start {
-        push_token(exec, group, tokens, line, token_start, line.len())?;
+        push_token(children, group, tokens, line, token_start, line.len())?;
     }
     Ok(TokenLine {
         line,
@@ -653,31 +681,32 @@ fn tokenize<'line, 'buffer, 'region, 'session>(
     })
 }
 
-fn push_token<'region, 'session>(
-    exec: &mut ParseExecution<'region, 'session>,
-    group: &ImportWorkGroup<'region, 2>,
+fn push_token<'op, 'session>(
+    children: &mut ParseChildren<'_, 'op, 'session>,
+    group: &ParseWorkLayout<'op, 2>,
     tokens: &mut TokenBuffer<'session>,
     line: &str,
     start: usize,
     end: usize,
 ) -> ParseResult<()> {
     let text = &line[start..end];
-    let token_bytes = usize_amount(exec, text.len(), "stl-token-bytes")?;
-    exec.with_work(group, [1, token_bytes], |exec, work| -> ParseResult<()> {
+    let token_bytes = usize_amount(&children.services()?, text.len(), "stl-token-bytes")?;
+    children.child(group, [1, token_bytes], |child| -> ParseResult<()> {
+        let errors = child.error_view();
         let column = u32::try_from(start)
             .ok()
             .and_then(|value| value.checked_add(1))
-            .ok_or_else(|| exec.allocation_failure("stl-token-column"))?;
-        work.run_all(|| {
-            tokens
-                .values
-                .try_push(exec, TokenSpan { start, end, column })
-        })
+            .ok_or_else(|| errors.allocation_failure("stl-token-column"))?;
+        child.push_growing(
+            [1, token_bytes],
+            &mut tokens.values,
+            TokenSpan { start, end, column },
+        )
     })
 }
 
 fn parse_facet_normal(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     tokens: &TokenLine<'_, '_>,
     line_number: u32,
 ) -> ParseResult<Vec3> {
@@ -694,7 +723,7 @@ fn parse_facet_normal(
 }
 
 fn parse_vec3(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     tokens: &TokenLine<'_, '_>,
     keyword: &'static str,
     line_number: u32,
@@ -716,7 +745,7 @@ fn parse_vec3(
 }
 
 fn parse_vec3_components(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     tokens: &TokenLine<'_, '_>,
     start: usize,
     line_number: u32,
@@ -732,7 +761,7 @@ fn parse_vec3_components(
 }
 
 fn required_token<'line>(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     tokens: &TokenLine<'line, '_>,
     index: usize,
 ) -> ParseResult<Token<'line>> {
@@ -746,7 +775,7 @@ fn required_token<'line>(
 }
 
 fn parse_f32(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     token: Token<'_>,
     line_number: u32,
 ) -> ParseResult<f32> {
@@ -767,7 +796,7 @@ fn parse_f32(
 }
 
 fn usize_amount(
-    exec: &ParseExecution<'_, '_>,
+    exec: &ParseServices<'_, '_, '_>,
     value: usize,
     resource: &'static str,
 ) -> Result<u64, ParseFailure> {
@@ -775,7 +804,7 @@ fn usize_amount(
 }
 
 fn diagnostic_range(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     start: u64,
     end: u64,
 ) -> ParseResult<DiagnosticByteRange> {
@@ -799,7 +828,7 @@ fn trailing_text_after_first_token<'line>(
 }
 
 fn solid_names_match(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     start: &str,
     end: &str,
 ) -> ParseResult<bool> {

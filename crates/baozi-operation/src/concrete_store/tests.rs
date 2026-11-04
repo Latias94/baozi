@@ -3,9 +3,11 @@ use super::*;
 use super::activation::{
     CanonicalActivationDescription, CanonicalActivationOutcome, CanonicalActivationPlanSealer,
     CanonicalActivationRequest, CanonicalActivationSeal, CanonicalActivationSessionPolicy,
-    CanonicalFailureRequirements, CanonicalMaterializationRole, CanonicalSealedActivationPlan,
-    CanonicalSuccessRequirements, CanonicalTableShape, CanonicalValidationRole,
-    FailureEvidenceDecision, FailureEvidenceOutcome, mint_canonical_activation_request,
+    CanonicalBodyOperation, CanonicalBodyStart, CanonicalFailureRequirements,
+    CanonicalInvocationHost, CanonicalInvocationOutcome, CanonicalMaterializationRole,
+    CanonicalSealedActivationPlan, CanonicalSuccessRequirements, CanonicalTableShape,
+    CanonicalValidationRole, FailureEvidenceDecision, FailureEvidenceOutcome,
+    mint_canonical_activation_request,
 };
 
 use std::num::{NonZeroU32, NonZeroU64};
@@ -143,8 +145,9 @@ struct TestTag;
 #[derive(Clone, Copy)]
 struct TestRootTag;
 
-type TestOperation = RetainedStoreOperation<TestOwner, TestProgress, TestUnit>;
-type TestAssembly = RetainedStorePublicationAssembly<TestOwner, TestProgress, TestUnit>;
+type TestInvocationRoot = StoreInvocationRoot<TestOwner, TestProgress, TestUnit>;
+type TestOperation<'inv> = RetainedStoreOperation<'inv, TestOwner, TestProgress, TestUnit>;
+type TestAssembly<'inv> = RetainedStorePublicationAssembly<'inv, TestOwner, TestProgress, TestUnit>;
 
 fn test_failure_terminal_plan(
     keys: TestKeys,
@@ -179,41 +182,57 @@ fn test_account(factory: &PhysicalStorageAccountFactory) -> PhysicalStorageAccou
 fn activation_rich_failure_open_recovery_upgrades_the_requested_cause() {
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation(&account, u64::MAX);
-    let failure = CanonicalFailureRequirements::new(
-        CanonicalTableShape::new(1, 1).expect("activation evidence shape"),
-    );
-    let policy = CanonicalActivationSessionPolicy::new(
-        RetainedStoreWriterRole::new(keys.phase, keys.dimension, keys.dimension),
-        RetainedStoreWriterRole::new(keys.phase, keys.dimension, keys.dimension),
-        CanonicalMaterializationRole::new(keys.work_dimension, keys.work_dimension),
-        CanonicalValidationRole::new(keys.phase, keys.work_dimension, keys.work_dimension),
-        keys.dimension,
-        keys.dimension,
-    );
-    let outcome_owner = operation
-        .into_session_outcome_owner(
-            policy,
-            RetainedStoreBatchLimits::new(2, 2).unwrap(),
-            failure,
-        )
-        .expect("session activation owner");
-    let outcome: CanonicalActivationOutcome<
-        TestOwner,
-        TestProgress,
-        TestUnit,
-        (),
-        (),
-        ScalarSequence<u8>,
-        TestTag,
-    > = outcome_owner
-        .plan_and_activate_scoped(|planning| planning.reject((), 77))
-        .expect("preflight rejection remains a recoverable activation outcome");
-    let rejected = match outcome {
-        CanonicalActivationOutcome::NeverActivated(rejected) => rejected,
-        CanonicalActivationOutcome::Activated(_)
-        | CanonicalActivationOutcome::Rejected(_)
-        | CanonicalActivationOutcome::Fallback(_) => {
+    let mut invocation_host =
+        CanonicalInvocationHost::<TestOwner, TestProgress, TestUnit, (), ()>::new();
+    let finish = invocation_host
+        .run_body(|parts, disposition| {
+            let (operation, keys) = test_body_operation(parts.startup, &account, u64::MAX);
+            let failure = CanonicalFailureRequirements::new(
+                CanonicalTableShape::new(1, 1).expect("activation evidence shape"),
+            );
+            let policy = CanonicalActivationSessionPolicy::new(
+                RetainedStoreWriterRole::new(keys.phase, keys.dimension, keys.dimension),
+                RetainedStoreWriterRole::new(keys.phase, keys.dimension, keys.dimension),
+                CanonicalMaterializationRole::new(keys.work_dimension, keys.work_dimension),
+                CanonicalValidationRole::new(keys.phase, keys.work_dimension, keys.work_dimension),
+                keys.dimension,
+                keys.dimension,
+            );
+            let outcome_owner = operation
+                .into_session_outcome_owner(
+                    policy,
+                    RetainedStoreBatchLimits::new(2, 2).unwrap(),
+                    failure,
+                )
+                .expect("session activation owner");
+            let outcome: CanonicalActivationOutcome<
+                '_,
+                TestOwner,
+                TestProgress,
+                TestUnit,
+                (),
+                (),
+                ScalarSequence<u8>,
+                TestTag,
+            > = outcome_owner
+                .plan_and_activate_scoped(parts.output, parts.activation, |planning| {
+                    planning.reject((), 77)
+                })
+                .expect("preflight rejection remains a recoverable activation outcome");
+            match outcome {
+                CanonicalActivationOutcome::NeverActivated(rejected) => {
+                    rejected.request_finish(disposition).unwrap();
+                }
+                CanonicalActivationOutcome::Activated(_)
+                | CanonicalActivationOutcome::Rejected(_) => {
+                    panic!("preflight rejection must remain never activated")
+                }
+            }
+        })
+        .unwrap();
+    let rejected = match finish.resume().outcome {
+        CanonicalInvocationOutcome::NeverActivated(rejected) => rejected,
+        _ => {
             panic!("preflight rejection must remain never activated")
         }
     };
@@ -247,76 +266,90 @@ fn activation_builder_panic_preserves_the_exact_completed_work_prefix() {
 
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation(&account, u64::MAX);
-    let failure = CanonicalFailureRequirements::new(
-        CanonicalTableShape::new(1, 1).expect("activation evidence shape"),
-    );
-    let success = CanonicalSuccessRequirements::new(
-        CanonicalTableShape::new(1, 1).expect("activation canonical shape"),
-        2,
-        1,
-        NonZeroU64::MIN,
-    )
-    .expect("activation success requirements");
-    let policy = CanonicalActivationSessionPolicy::new(
-        RetainedStoreWriterRole::new(keys.phase, keys.dimension, keys.dimension),
-        RetainedStoreWriterRole::new(keys.phase, keys.dimension, keys.dimension),
-        CanonicalMaterializationRole::new(keys.work_dimension, keys.work_dimension),
-        CanonicalValidationRole::new(keys.phase, keys.work_dimension, keys.work_dimension),
-        keys.dimension,
-        keys.dimension,
-    );
-    let outcome_owner = operation
-        .into_session_outcome_owner(
-            policy,
-            RetainedStoreBatchLimits::new(2, 2).unwrap(),
-            failure,
-        )
-        .expect("session activation owner");
-    let mut success = Some(success);
+    let mut invocation_host =
+        CanonicalInvocationHost::<TestOwner, TestProgress, TestUnit, (), ()>::new();
     let mut observed_work = None;
-
-    let result = outcome_owner.plan_and_activate_scoped(|mut planning| {
-        let mut semantic = planning
-            .begin_semantic_work()
-            .expect("semantic work session");
-        semantic.run_unit(|| ()).expect("semantic work completion");
-        let completion = semantic.finish_exact().expect("semantic completion");
-        let activation_plan = TestActivationDescription::new(
-            success
-                .take()
-                .expect("the test success requirements are consumed exactly once"),
-            (),
+    let mut observed_containment = None;
+    let body_result = invocation_host.run_body(|parts, _disposition| {
+        let (operation, keys) = test_body_operation(parts.startup, &account, u64::MAX);
+        let failure = CanonicalFailureRequirements::new(
+            CanonicalTableShape::new(1, 1).expect("activation evidence shape"),
         );
-        let permit = match planning.seal_activation(activation_plan, completion) {
-            CanonicalActivationSeal::Sealed(permit) => permit,
-            CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
-        };
-        permit.activate(|mut lane, _plan| {
-            let cause = lane
-                .try_retain_sequence(
-                    SequencePlan::<u8>::new(COMPLETED + 1).expect("sequence plan"),
-                    TestTag,
-                    |writer| {
-                        for value in 0..COMPLETED {
-                            writer.push(u8::try_from(value % 251).expect("bounded test scalar"))?;
-                        }
-                        panic!("contained canonical completion-prefix panic");
-                    },
-                )
-                .expect_err("builder panic must enter activation containment");
-            assert!(matches!(cause, StoreRuntimeError::BuilderPanicked));
-            observed_work = Some(
-                lane.test_dimension_evidence(keys.work_dimension)
-                    .expect("the live materialization owner retains its completed prefix"),
-            );
-            lane.reject::<(), (), ScalarSequence<u8>, TestTag>((), 74)
-        })
+        let success = CanonicalSuccessRequirements::new(
+            CanonicalTableShape::new(1, 1).expect("activation canonical shape"),
+            2,
+            1,
+            NonZeroU64::MIN,
+        )
+        .expect("activation success requirements");
+        let policy = CanonicalActivationSessionPolicy::new(
+            RetainedStoreWriterRole::new(keys.phase, keys.dimension, keys.dimension),
+            RetainedStoreWriterRole::new(keys.phase, keys.dimension, keys.dimension),
+            CanonicalMaterializationRole::new(keys.work_dimension, keys.work_dimension),
+            CanonicalValidationRole::new(keys.phase, keys.work_dimension, keys.work_dimension),
+            keys.dimension,
+            keys.dimension,
+        );
+        let outcome_owner = operation
+            .into_session_outcome_owner(
+                policy,
+                RetainedStoreBatchLimits::new(2, 2).unwrap(),
+                failure,
+            )
+            .expect("session activation owner");
+        let mut success = Some(success);
+        let result = outcome_owner.plan_and_activate_scoped(
+            parts.output,
+            parts.activation,
+            |mut planning| {
+                let ((), completion) = planning
+                    .with_semantic_work(|semantic| {
+                        semantic.run_unit(|| ()).expect("semantic work completion");
+                        Ok::<(), StoreRuntimeError>(())
+                    })
+                    .expect("semantic completion");
+                let activation_plan = TestActivationDescription::new(
+                    success
+                        .take()
+                        .expect("the test success requirements are consumed exactly once"),
+                    (),
+                );
+                let permit = match planning.seal_activation(activation_plan, completion) {
+                    CanonicalActivationSeal::Sealed(permit) => permit,
+                    CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
+                };
+                permit.activate(|mut lane, _plan| {
+                    let cause = lane
+                        .try_retain_sequence(
+                            SequencePlan::<u8>::new(COMPLETED + 1).expect("sequence plan"),
+                            TestTag,
+                            |writer| {
+                                for value in 0..COMPLETED {
+                                    writer.push(
+                                        u8::try_from(value % 251).expect("bounded test scalar"),
+                                    )?;
+                                }
+                                panic!("contained canonical completion-prefix panic");
+                            },
+                        )
+                        .expect_err("builder panic must enter activation containment");
+                    assert!(matches!(cause, StoreRuntimeError::BuilderPanicked));
+                    observed_work = Some(
+                        lane.test_dimension_evidence(keys.work_dimension)
+                            .expect("the live materialization owner retains its completed prefix"),
+                    );
+                    lane.reject::<(), (), ScalarSequence<u8>, TestTag>((), 74)
+                })
+            },
+        );
+        observed_containment = Some(match result {
+            Err(containment) => containment,
+            Ok(_) => panic!("builder panic must not produce an activation outcome"),
+        });
     });
-    let containment = match result {
-        Err(containment) => containment,
-        Ok(_) => panic!("builder panic must not produce an activation outcome"),
-    };
+    assert!(body_result.is_err());
+    drop(body_result);
+    let containment = observed_containment.expect("the actual activation fault must be retained");
     assert_eq!(
         containment.cause().reason(),
         AccountPoisonReason::RetainedBuilderPanicked
@@ -348,11 +381,13 @@ fn test_writer_plan(
     )
 }
 
-fn test_operation(
+fn test_operation<'inv>(
+    root: impl Into<StoreInvocationStart<'inv, TestOwner, TestProgress, TestUnit>>,
     account: &PhysicalStorageAccount,
     evidence_limit: u64,
-) -> (TestOperation, TestKeys) {
+) -> (TestOperation<'inv>, TestKeys) {
     test_operation_with_control_and_work_limits(
+        root,
         account,
         evidence_limit,
         OperationControl::default(),
@@ -361,14 +396,16 @@ fn test_operation(
     )
 }
 
-fn test_operation_with_control_and_work_limits(
+fn test_operation_with_control_and_work_limits<'inv>(
+    root: impl Into<StoreInvocationStart<'inv, TestOwner, TestProgress, TestUnit>>,
     account: &PhysicalStorageAccount,
     evidence_limit: u64,
     control: OperationControl<TestProgress, TestUnit>,
     attempted_limit: u64,
     consumed_limit: u64,
-) -> (TestOperation, TestKeys) {
+) -> (TestOperation<'inv>, TestKeys) {
     test_operation_with_control_work_and_evidence_limits(
+        root,
         account,
         evidence_limit,
         control,
@@ -378,14 +415,56 @@ fn test_operation_with_control_and_work_limits(
     )
 }
 
-fn test_operation_with_control_work_and_evidence_limits(
+fn test_operation_with_control_work_and_evidence_limits<'inv>(
+    root: impl Into<StoreInvocationStart<'inv, TestOwner, TestProgress, TestUnit>>,
     account: &PhysicalStorageAccount,
     evidence_limit: u64,
     control: OperationControl<TestProgress, TestUnit>,
     attempted_limit: u64,
     consumed_limit: u64,
     max_evidence_members: usize,
-) -> (TestOperation, TestKeys) {
+) -> (TestOperation<'inv>, TestKeys) {
+    let (ledger_plan, start, keys) = test_operation_plan(
+        evidence_limit,
+        attempted_limit,
+        consumed_limit,
+        max_evidence_members,
+    );
+    (
+        TestOperation::try_start(root, control, ledger_plan, account, start)
+            .expect("test operation"),
+        keys,
+    )
+}
+
+fn test_body_operation<'inv>(
+    start: CanonicalBodyStart<'inv, TestOwner, TestProgress, TestUnit>,
+    account: &PhysicalStorageAccount,
+    evidence_limit: u64,
+) -> (
+    CanonicalBodyOperation<'inv, TestOwner, TestProgress, TestUnit>,
+    TestKeys,
+) {
+    let (ledger, plan, keys) = test_operation_plan(evidence_limit, u64::MAX, u64::MAX, 1);
+    (
+        CanonicalBodyOperation::try_start(
+            start,
+            OperationControl::default(),
+            ledger,
+            account,
+            plan,
+        )
+        .expect("test body operation"),
+        keys,
+    )
+}
+
+fn test_operation_plan(
+    evidence_limit: u64,
+    attempted_limit: u64,
+    consumed_limit: u64,
+    max_evidence_members: usize,
+) -> (StoreLedgerPlan, RetainedStoreStartPlan, TestKeys) {
     let (domain, keys) = test_vocabulary();
     let failure_terminal_work = RetainedStoreFailureTerminalWorkPlan::new(
         keys.failure_terminal_dimension,
@@ -436,15 +515,13 @@ fn test_operation_with_control_work_and_evidence_limits(
         1,
         failure_terminal_work,
     );
-    (
-        TestOperation::try_start(control, ledger_plan, account, start).expect("test operation"),
-        keys,
-    )
+    (ledger_plan, start, keys)
 }
 
-fn test_operation_with_failure_terminal_work(
+fn test_operation_with_failure_terminal_work<'inv>(
+    root: &'inv mut TestInvocationRoot,
     account: &PhysicalStorageAccount,
-) -> (TestOperation, TestKeys) {
+) -> (TestOperation<'inv>, TestKeys) {
     let (domain, keys) = test_vocabulary();
     let failure_terminal_work = RetainedStoreFailureTerminalWorkPlan::new(
         keys.failure_terminal_dimension,
@@ -487,14 +564,20 @@ fn test_operation_with_failure_terminal_work(
         failure_terminal_work,
     );
     (
-        TestOperation::try_start(OperationControl::default(), ledger_plan, account, start)
-            .expect("failure-terminal test operation"),
+        TestOperation::try_start(
+            root,
+            OperationControl::default(),
+            ledger_plan,
+            account,
+            start,
+        )
+        .expect("failure-terminal test operation"),
         keys,
     )
 }
 
-fn test_simple_controlled_validation_graph(
-    assembly: &mut TestAssembly,
+fn test_simple_controlled_validation_graph<'inv>(
+    assembly: &mut TestAssembly<'inv>,
 ) -> (
     CanonicalSequenceRef<u8, TestRootTag>,
     OutcomeEvidenceSequenceRef<u8, TestTag>,
@@ -707,8 +790,15 @@ fn zero_ordinary_partition_matches_terminal_budget_but_rejects_store_start() {
         failure_terminal_work,
     );
 
+    let mut invocation_root = TestInvocationRoot::new();
     assert!(matches!(
-        TestOperation::try_start(OperationControl::default(), ledger_plan, &account, start),
+        TestOperation::try_start(
+            &mut invocation_root,
+            OperationControl::default(),
+            ledger_plan,
+            &account,
+            start,
+        ),
         Err(RetainedStoreStartError::Runtime(StoreRuntimeError::Ledger(
             LedgerCause::LimitExceeded { .. }
         )))
@@ -783,9 +873,15 @@ fn public_store_start_accepts_exact_terminal_and_startup_work_partition() {
         1,
         failure_terminal_work,
     );
-    let operation =
-        TestOperation::try_start(OperationControl::default(), ledger_plan, &account, start)
-            .expect("exact terminal and startup work must admit operation");
+    let mut invocation_root = TestInvocationRoot::new();
+    let operation = TestOperation::try_start(
+        &mut invocation_root,
+        OperationControl::default(),
+        ledger_plan,
+        &account,
+        start,
+    )
+    .expect("exact terminal and startup work must admit operation");
     drop(
         operation
             .prepare_minimal_fallback(REQUESTED_CAUSE)
@@ -804,7 +900,8 @@ fn evidence_only_success_freezes_work_without_publishing_primary_output() {
 
     let factory = test_factory();
     let account = test_account(&factory);
-    let (mut operation, keys) = test_operation(&account, u64::MAX);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (mut operation, keys) = test_operation(&mut invocation_root, &account, u64::MAX);
     operation
         .producer_host()
         .charge_observed_batch([(keys.work_dimension, COMPLETED_WORK)])
@@ -858,7 +955,9 @@ fn evidence_only_final_cancellation_publishes_the_admitted_fallback() {
     let factory = test_factory();
     let account = test_account(&factory);
     let cancellation = crate::CancellationToken::new();
+    let mut invocation_root = TestInvocationRoot::new();
     let (operation, keys) = test_operation_with_control_and_work_limits(
+        &mut invocation_root,
         &account,
         u64::MAX,
         OperationControl::default().with_cancellation(cancellation.clone()),
@@ -907,7 +1006,8 @@ fn evidence_only_final_cancellation_publishes_the_admitted_fallback() {
 fn evidence_only_primary_binding_panic_fails_closed() {
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, _) = test_operation(&account, u64::MAX);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, _) = test_operation(&mut invocation_root, &account, u64::MAX);
     crate::retained::panic_next_evidence_only_primary_bind();
 
     assert!(matches!(
@@ -957,8 +1057,15 @@ fn store_start_rejects_failure_terminal_dimension_used_by_ordinary_paths() {
         failure_terminal_work,
     );
 
+    let mut invocation_root = TestInvocationRoot::new();
     assert!(matches!(
-        TestOperation::try_start(OperationControl::default(), ledger_plan, &account, start),
+        TestOperation::try_start(
+            &mut invocation_root,
+            OperationControl::default(),
+            ledger_plan,
+            &account,
+            start,
+        ),
         Err(RetainedStoreStartError::InvalidTerminalLimits)
     ));
 }
@@ -1132,8 +1239,15 @@ fn public_store_start_rejects_multi_dimension_extra_capacity_without_side_effect
         failure_terminal_work,
     );
 
+    let mut invocation_root = TestInvocationRoot::new();
     assert!(matches!(
-        TestOperation::try_start(OperationControl::default(), ledger_plan, &account, start),
+        TestOperation::try_start(
+            &mut invocation_root,
+            OperationControl::default(),
+            ledger_plan,
+            &account,
+            start,
+        ),
         Err(RetainedStoreStartError::InvalidTerminalLimits)
     ));
     assert_eq!(account.snapshot(), before_account);
@@ -1156,7 +1270,9 @@ fn public_store_start_rejects_multi_dimension_extra_capacity_without_side_effect
 fn ordinary_control_cannot_spend_failure_terminal_work() {
     let factory = test_factory();
     let account = test_account(&factory);
-    let (mut operation, keys) = test_operation_with_failure_terminal_work(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (mut operation, keys) =
+        test_operation_with_failure_terminal_work(&mut invocation_root, &account);
 
     {
         let mut checkpoint = operation.control_checkpoint();
@@ -1199,7 +1315,8 @@ fn publication_assembly_minimal_fallback_freezes_requested_domain_cause() {
 
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation(&account, 16);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = test_operation(&mut invocation_root, &account, 16);
     let assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 1, 1))
         .expect("minimal-fallback assembly");
@@ -1222,7 +1339,8 @@ fn failure_assembly_minimal_fallback_freezes_requested_domain_cause() {
 
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation(&account, 16);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = test_operation(&mut invocation_root, &account, 16);
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 1, 1))
         .expect("failure assembly");
@@ -1251,7 +1369,8 @@ fn admission_downgrade_cause_overrides_later_minimal_fallback_code() {
 
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation(&account, 16);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = test_operation(&mut invocation_root, &account, 16);
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 1, 1))
         .expect("validated success assembly");
@@ -1368,8 +1487,14 @@ fn poisoned_account_rejects_before_frozen_phase_catalog_construction() {
     );
     let before_catalog_entries = crate::ledger::test_phase_catalog_construction_entries();
 
-    let rejected =
-        TestOperation::try_start(OperationControl::default(), ledger_plan, &account, start);
+    let mut invocation_root = TestInvocationRoot::new();
+    let rejected = TestOperation::try_start(
+        &mut invocation_root,
+        OperationControl::default(),
+        ledger_plan,
+        &account,
+        start,
+    );
 
     assert!(matches!(
         rejected,
@@ -1392,7 +1517,8 @@ fn public_store_start_enters_retained_allocators_after_ready_only() {
     let factory = test_factory();
     let account = test_account(&factory);
 
-    let (operation, _) = test_operation(&account, u64::MAX);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, _) = test_operation(&mut invocation_root, &account, u64::MAX);
 
     assert_eq!(
         crate::retained::take_startup_ready_final_owner_allocator_entries(),
@@ -1410,6 +1536,7 @@ fn public_store_start_enters_retained_allocators_after_ready_only() {
     );
 
     drop(operation);
+    drop(invocation_root);
     drop(account);
     assert_eq!(factory.snapshot().live_accounts(), 0);
 }
@@ -1418,7 +1545,9 @@ fn public_store_start_enters_retained_allocators_after_ready_only() {
 fn verified_work_rejection_activates_failure_terminal_work_before_evidence_append() {
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation_with_failure_terminal_work(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) =
+        test_operation_with_failure_terminal_work(&mut invocation_root, &account);
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 1, 1))
         .expect("success-capable publication");
@@ -1473,7 +1602,9 @@ fn verified_work_rejection_activates_failure_terminal_work_before_evidence_appen
 fn protected_commitment_failure_seals_success_assembly_evidence() {
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation_with_failure_terminal_work(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) =
+        test_operation_with_failure_terminal_work(&mut invocation_root, &account);
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 1, 1))
         .expect("success-capable publication");
@@ -1519,7 +1650,9 @@ fn protected_commitment_failure_seals_success_assembly_evidence() {
 fn protected_commitment_failure_seals_failure_assembly_evidence() {
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation_with_failure_terminal_work(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) =
+        test_operation_with_failure_terminal_work(&mut invocation_root, &account);
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 1, 1))
         .expect("success-capable publication");
@@ -1564,7 +1697,9 @@ fn burned_failure_terminal_operation_returns_only_minimal_fallback_authority() {
 
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation_with_failure_terminal_work(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) =
+        test_operation_with_failure_terminal_work(&mut invocation_root, &account);
     let plan = RetainedStorePublicationPlan::rich_failure(
         RetainedStoreBlockTablePlan::new(test_writer_plan(keys, 2, 2), 1, 1)
             .expect("failure-only table plan"),
@@ -1610,7 +1745,9 @@ fn burned_failure_terminal_transcript_returns_only_minimal_fallback_authority() 
 
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation_with_failure_terminal_work(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) =
+        test_operation_with_failure_terminal_work(&mut invocation_root, &account);
     let mut transcript = operation
         .try_begin_rich_failure_transcript(test_writer_plan(keys, 2, 2))
         .expect("failure transcript must begin");
@@ -1658,7 +1795,9 @@ fn retryable_open_recovery_maps_its_exact_cause_before_handoff() {
 
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation_with_failure_terminal_work(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) =
+        test_operation_with_failure_terminal_work(&mut invocation_root, &account);
     let invalid_writer = RetainedStoreWriterPlan::new(
         keys.unregistered_phase,
         keys.dimension,
@@ -1704,7 +1843,9 @@ fn unregistered_publication_keys_preserve_failure_terminal_retry_authority() {
 
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation_with_failure_terminal_work(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) =
+        test_operation_with_failure_terminal_work(&mut invocation_root, &account);
     let invalid_phase_writer = RetainedStoreWriterPlan::new(
         keys.unregistered_phase,
         keys.dimension,
@@ -1831,8 +1972,14 @@ fn public_store_start_rejection_never_enters_retained_allocator() {
         failure_terminal_work,
     );
 
-    let rejected =
-        TestOperation::try_start(OperationControl::default(), ledger_plan, &account, start);
+    let mut invocation_root = TestInvocationRoot::new();
+    let rejected = TestOperation::try_start(
+        &mut invocation_root,
+        OperationControl::default(),
+        ledger_plan,
+        &account,
+        start,
+    );
 
     assert!(rejected.is_err());
     assert_eq!(
@@ -1899,9 +2046,15 @@ fn phase_completion_validates_domain_and_catalog_before_monotonic_progress() {
         1,
         failure_terminal_work,
     );
-    let operation =
-        TestOperation::try_start(OperationControl::default(), ledger_plan, &account, start)
-            .expect("test operation");
+    let mut invocation_root = TestInvocationRoot::new();
+    let operation = TestOperation::try_start(
+        &mut invocation_root,
+        OperationControl::default(),
+        ledger_plan,
+        &account,
+        start,
+    )
+    .expect("test operation");
 
     assert_eq!(
         operation.try_complete_phase(foreign_phase),
@@ -1992,8 +2145,14 @@ fn frozen_phase_catalog_allocation_failure_rejects_without_physical_admission() 
     let before_catalog_entries = crate::ledger::test_phase_catalog_construction_entries();
     crate::ledger::test_fail_next_evidence_allocation();
 
-    let rejected =
-        TestOperation::try_start(OperationControl::default(), ledger_plan, &account, start);
+    let mut invocation_root = TestInvocationRoot::new();
+    let rejected = TestOperation::try_start(
+        &mut invocation_root,
+        OperationControl::default(),
+        ledger_plan,
+        &account,
+        start,
+    );
 
     assert!(matches!(
         rejected,
@@ -2045,7 +2204,8 @@ fn record_capacity_plan_allocator_and_physical_accounting_are_exact() {
 
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation(&account, u64::MAX);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = test_operation(&mut invocation_root, &account, u64::MAX);
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 3, 1))
         .expect("record accounting assembly");
@@ -2094,7 +2254,8 @@ fn record_capacity_plan_allocator_and_physical_accounting_are_exact() {
 fn membership_rollback_storage_failure_poisoned_the_store_and_quarantines_accounting() {
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation(&account, u64::MAX);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = test_operation(&mut invocation_root, &account, u64::MAX);
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 1, 1))
         .expect("membership rollback assembly");
@@ -2150,7 +2311,8 @@ fn membership_rollback_storage_failure_poisoned_the_store_and_quarantines_accoun
 fn containment_mapping_preserves_retained_charge_and_restricts_the_facade_immediately() {
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation(&account, u64::MAX);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = test_operation(&mut invocation_root, &account, u64::MAX);
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 1, 1))
         .expect("containment mapping assembly");
@@ -2185,7 +2347,8 @@ fn containment_mapping_preserves_retained_charge_and_restricts_the_facade_immedi
 fn builder_panic_retains_physical_and_operation_charges_fail_closed() {
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation(&account, u64::MAX);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = test_operation(&mut invocation_root, &account, u64::MAX);
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 1, 1))
         .expect("builder-panic assembly");
@@ -2251,7 +2414,8 @@ fn concrete_builder_callbacks_use_only_the_raw_fatal_panic_boundary() {
 fn clean_membership_rejection_releases_storage_and_attribution_once() {
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation(&account, u64::MAX);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = test_operation(&mut invocation_root, &account, u64::MAX);
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 1, 1))
         .expect("clean membership rollback assembly");
@@ -2302,7 +2466,8 @@ fn clean_membership_rejection_releases_storage_and_attribution_once() {
 fn primary_rejection_dependency_unwind_stops_before_attribution_ack() {
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation(&account, 4);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = test_operation(&mut invocation_root, &account, 4);
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 2, 1))
         .expect("primary rejection assembly");
@@ -2403,7 +2568,8 @@ fn primary_rejection_dependency_unwind_stops_before_attribution_ack() {
 fn controlled_builders_and_validation_poll_and_charge_exact_work() {
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation(&account, 16);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = test_operation(&mut invocation_root, &account, 16);
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 2, 1))
         .expect("controlled assembly");
@@ -2473,7 +2639,8 @@ fn controlled_builders_and_validation_poll_and_charge_exact_work() {
 fn controlled_validation_rejects_released_preexisting_planning_reservation() {
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation(&account, 16);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = test_operation(&mut invocation_root, &account, 16);
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 1, 1))
         .expect("controlled assembly");
@@ -2512,7 +2679,8 @@ fn controlled_bytes_and_utf8_write_exact_payloads_and_charge_exact_work() {
 
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation(&account, 16);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = test_operation(&mut invocation_root, &account, 16);
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 3, 1))
         .expect("controlled payload assembly");
@@ -2609,7 +2777,9 @@ fn controlled_bytes_and_utf8_write_exact_payloads_and_charge_exact_work() {
 fn controlled_bytes_map_work_rejection_like_controlled_sequences() {
     let factory = test_factory();
     let account = test_account(&factory);
+    let mut invocation_root = TestInvocationRoot::new();
     let (operation, keys) = test_operation_with_control_and_work_limits(
+        &mut invocation_root,
         &account,
         16,
         OperationControl::default(),
@@ -2665,7 +2835,9 @@ fn controlled_utf8_maps_cancellation_like_controlled_sequences() {
     let factory = test_factory();
     let account = test_account(&factory);
     let cancellation = crate::CancellationToken::new();
+    let mut invocation_root = TestInvocationRoot::new();
     let (operation, keys) = test_operation_with_control_and_work_limits(
+        &mut invocation_root,
         &account,
         16,
         OperationControl::default().with_cancellation(cancellation.clone()),
@@ -2722,7 +2894,9 @@ fn controlled_work_stops_after_the_first_fault_without_charging_more_work() {
     let factory = test_factory();
     let account = test_account(&factory);
     let cancellation = crate::CancellationToken::new();
+    let mut invocation_root = TestInvocationRoot::new();
     let (operation, keys) = test_operation_with_control_and_work_limits(
+        &mut invocation_root,
         &account,
         16,
         OperationControl::default().with_cancellation(cancellation.clone()),
@@ -2763,7 +2937,8 @@ fn controlled_work_stops_after_the_first_fault_without_charging_more_work() {
 fn controlled_bytes_underwrite_rolls_back_and_remains_retryable() {
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation(&account, 16);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = test_operation(&mut invocation_root, &account, 16);
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 1, 1))
         .expect("binary retry assembly");
@@ -2823,7 +2998,8 @@ fn controlled_utf8_rejects_non_fitting_multibyte_text_and_remains_retryable() {
 
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation(&account, 16);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = test_operation(&mut invocation_root, &account, 16);
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 1, 1))
         .expect("UTF-8 retry assembly");
@@ -2881,7 +3057,8 @@ fn controlled_utf8_rejects_non_fitting_multibyte_text_and_remains_retryable() {
 fn controlled_builder_domain_rejection_rolls_back_and_remains_retryable() {
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation(&account, 16);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = test_operation(&mut invocation_root, &account, 16);
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 1, 1))
         .expect("controlled retry assembly");
@@ -2934,7 +3111,9 @@ fn controlled_builder_domain_rejection_rolls_back_and_remains_retryable() {
 fn ignored_control_error_is_sticky_and_permanently_rejects_success() {
     let factory = test_factory();
     let account = test_account(&factory);
+    let mut invocation_root = TestInvocationRoot::new();
     let (operation, keys) = test_operation_with_control_and_work_limits(
+        &mut invocation_root,
         &account,
         16,
         OperationControl::default(),
@@ -3032,7 +3211,9 @@ fn ignored_control_error_is_sticky_and_permanently_rejects_success() {
 fn direct_rich_failure_preserves_work_cause_across_rejection_and_fallback() {
     let factory = test_factory();
     let account = test_account(&factory);
+    let mut invocation_root = TestInvocationRoot::new();
     let (operation, keys) = test_operation_with_control_work_and_evidence_limits(
+        &mut invocation_root,
         &account,
         16,
         OperationControl::default(),
@@ -3099,7 +3280,10 @@ fn direct_rich_failure_preserves_work_cause_across_rejection_and_fallback() {
 fn controlled_error_from_another_operation_is_not_a_verified_callback_cause() {
     let first_factory = test_factory();
     let first_account = test_account(&first_factory);
+    let mut invocation_root = TestInvocationRoot::new();
+    let mut invocation_root_2 = TestInvocationRoot::new();
     let (first_operation, first_keys) = test_operation_with_control_and_work_limits(
+        &mut invocation_root,
         &first_account,
         16,
         OperationControl::default(),
@@ -3128,7 +3312,8 @@ fn controlled_error_from_another_operation_is_not_a_verified_callback_cause() {
 
     let second_factory = test_factory();
     let second_account = test_account(&second_factory);
-    let (second_operation, second_keys) = test_operation(&second_account, 16);
+    let (second_operation, second_keys) =
+        test_operation(&mut invocation_root_2, &second_account, 16);
     let mut second_assembly = second_operation
         .try_publication_assembly(test_publication_plan(second_keys, 1, 1))
         .expect("second assembly");
@@ -3168,7 +3353,10 @@ fn controlled_error_from_another_operation_is_not_a_verified_callback_cause() {
 fn controlled_validation_rejects_a_work_cause_from_another_operation() {
     let first_factory = test_factory();
     let first_account = test_account(&first_factory);
+    let mut invocation_root = TestInvocationRoot::new();
+    let mut invocation_root_2 = TestInvocationRoot::new();
     let (first_operation, first_keys) = test_operation_with_control_and_work_limits(
+        &mut invocation_root,
         &first_account,
         16,
         OperationControl::default(),
@@ -3198,7 +3386,8 @@ fn controlled_validation_rejects_a_work_cause_from_another_operation() {
 
     let second_factory = test_factory();
     let second_account = test_account(&second_factory);
-    let (second_operation, second_keys) = test_operation(&second_account, 16);
+    let (second_operation, second_keys) =
+        test_operation(&mut invocation_root_2, &second_account, 16);
     let mut second_assembly = second_operation
         .try_publication_assembly(test_publication_plan(second_keys, 1, 1))
         .expect("second assembly");
@@ -3231,7 +3420,9 @@ fn cancellation_interruption_preserves_rich_failure_owner() {
     let factory = test_factory();
     let account = test_account(&factory);
     let cancellation = crate::CancellationToken::new();
+    let mut invocation_root = TestInvocationRoot::new();
     let (operation, keys) = test_operation_with_control_and_work_limits(
+        &mut invocation_root,
         &account,
         16,
         OperationControl::default().with_cancellation(cancellation.clone()),
@@ -3278,7 +3469,9 @@ fn cancellation_interruption_preserves_rich_failure_owner() {
 fn budget_interruption_preserves_rich_failure_owner() {
     let factory = test_factory();
     let account = test_account(&factory);
+    let mut invocation_root = TestInvocationRoot::new();
     let (operation, keys) = test_operation_with_control_and_work_limits(
+        &mut invocation_root,
         &account,
         16,
         OperationControl::default(),
@@ -3326,8 +3519,11 @@ fn invalid_controlled_validation_dimension_returns_the_writable_assembly() {
     let first_account = test_account(&first_factory);
     let second_factory = test_factory();
     let second_account = test_account(&second_factory);
-    let (first_operation, first_keys) = test_operation(&first_account, 16);
-    let (_second_operation, second_keys) = test_operation(&second_account, 16);
+    let mut invocation_root = TestInvocationRoot::new();
+    let mut invocation_root_2 = TestInvocationRoot::new();
+    let (first_operation, first_keys) = test_operation(&mut invocation_root, &first_account, 16);
+    let (_second_operation, second_keys) =
+        test_operation(&mut invocation_root_2, &second_account, 16);
     let mut assembly = first_operation
         .try_publication_assembly(test_publication_plan(first_keys, 1, 1))
         .expect("first assembly");
@@ -3369,7 +3565,8 @@ fn controlled_validation_distinguishes_semantic_rejection_from_panic() {
     {
         let factory = test_factory();
         let account = test_account(&factory);
-        let (operation, keys) = test_operation(&account, 16);
+        let mut invocation_root = TestInvocationRoot::new();
+        let (operation, keys) = test_operation(&mut invocation_root, &account, 16);
         let mut assembly = operation
             .try_publication_assembly(test_publication_plan(keys, 1, 1))
             .expect("semantic assembly");
@@ -3389,7 +3586,8 @@ fn controlled_validation_distinguishes_semantic_rejection_from_panic() {
     {
         let factory = test_factory();
         let account = test_account(&factory);
-        let (operation, keys) = test_operation(&account, 16);
+        let mut invocation_root_2 = TestInvocationRoot::new();
+        let (operation, keys) = test_operation(&mut invocation_root_2, &account, 16);
         let mut assembly = operation
             .try_publication_assembly(test_publication_plan(keys, 1, 1))
             .expect("panic assembly");
@@ -3473,7 +3671,7 @@ fn open_recovery_apis_keep_cause_and_linear_authority_opaque() {
 
     let store_declaration = type_declaration(store, "pub struct RetainedStoreOpenRecovery");
     let store_implementation =
-        implementation_block(store, "impl<O, PP, U, L> RetainedStoreOpenRecovery");
+        implementation_block(store, "impl<'inv, O, PP, U, L> RetainedStoreOpenRecovery");
     assert!(!store.contains("pub enum RetainedStoreOpenRecovery"));
     assert!(!store_declaration.contains("pub cause:"));
     assert!(!store_declaration.contains("pub authority:"));
@@ -3502,8 +3700,10 @@ fn open_recovery_apis_keep_cause_and_linear_authority_opaque() {
 
     let transcript_declaration =
         type_declaration(transcript, "pub struct StoreTranscriptOpenRecovery");
-    let transcript_implementation =
-        implementation_block(transcript, "impl<O, PP, U, L> StoreTranscriptOpenRecovery");
+    let transcript_implementation = implementation_block(
+        transcript,
+        "impl<'inv, O, PP, U, L> StoreTranscriptOpenRecovery",
+    );
     assert!(!transcript.contains("pub enum StoreTranscriptOpenRecovery"));
     assert!(!transcript_declaration.contains("pub cause:"));
     assert!(!transcript_declaration.contains("pub authority:"));
@@ -3583,8 +3783,11 @@ fn retained_store_control_checkpoint_enforces_domain_catalog_and_live_owner() {
     let first_account = test_account(&first_factory);
     let second_factory = test_factory();
     let second_account = test_account(&second_factory);
-    let (mut first, first_keys) = test_operation(&first_account, u64::MAX);
-    let (mut second, second_keys) = test_operation(&second_account, u64::MAX);
+    let mut invocation_root = TestInvocationRoot::new();
+    let mut invocation_root_2 = TestInvocationRoot::new();
+    let (mut first, first_keys) = test_operation(&mut invocation_root, &first_account, u64::MAX);
+    let (mut second, second_keys) =
+        test_operation(&mut invocation_root_2, &second_account, u64::MAX);
 
     let mut second_reservation = second
         .control_checkpoint()
@@ -3660,8 +3863,11 @@ fn live_owner_validation_latches_ledger_before_immediate_fallback() {
     let first_account = test_account(&first_factory);
     let second_factory = test_factory();
     let second_account = test_account(&second_factory);
-    let (mut first, _first_keys) = test_operation(&first_account, u64::MAX);
-    let (mut second, second_keys) = test_operation(&second_account, u64::MAX);
+    let mut invocation_root = TestInvocationRoot::new();
+    let mut invocation_root_2 = TestInvocationRoot::new();
+    let (mut first, _first_keys) = test_operation(&mut invocation_root, &first_account, u64::MAX);
+    let (mut second, second_keys) =
+        test_operation(&mut invocation_root_2, &second_account, u64::MAX);
     let second_reservation = second
         .control_checkpoint()
         .reserve(second_keys.phase, second_keys.dimension, 3)
@@ -3706,14 +3912,20 @@ fn control_and_owner_mismatch_preserve_the_first_terminal_cause_in_both_orders()
     let foreign_factory = test_factory();
     let foreign_account = test_account(&foreign_factory);
     let cancellation = crate::CancellationToken::new();
+    let mut invocation_root = TestInvocationRoot::new();
+    let mut invocation_root_2 = TestInvocationRoot::new();
+    let mut invocation_root_3 = TestInvocationRoot::new();
+    let mut invocation_root_4 = TestInvocationRoot::new();
     let (mut control_first, _control_keys) = test_operation_with_control_and_work_limits(
+        &mut invocation_root,
         &control_account,
         u64::MAX,
         OperationControl::default().with_cancellation(cancellation.clone()),
         u64::MAX,
         u64::MAX,
     );
-    let (mut foreign, foreign_keys) = test_operation(&foreign_account, u64::MAX);
+    let (mut foreign, foreign_keys) =
+        test_operation(&mut invocation_root_2, &foreign_account, u64::MAX);
     let foreign_reservation = foreign
         .control_checkpoint()
         .reserve(foreign_keys.phase, foreign_keys.dimension, 1)
@@ -3758,6 +3970,7 @@ fn control_and_owner_mismatch_preserve_the_first_terminal_cause_in_both_orders()
     let second_foreign_account = test_account(&second_foreign_factory);
     let cancellation = crate::CancellationToken::new();
     let (mut ledger_first, _ledger_keys) = test_operation_with_control_and_work_limits(
+        &mut invocation_root_3,
         &ledger_account,
         u64::MAX,
         OperationControl::default().with_cancellation(cancellation.clone()),
@@ -3765,7 +3978,7 @@ fn control_and_owner_mismatch_preserve_the_first_terminal_cause_in_both_orders()
         u64::MAX,
     );
     let (mut second_foreign, second_foreign_keys) =
-        test_operation(&second_foreign_account, u64::MAX);
+        test_operation(&mut invocation_root_4, &second_foreign_account, u64::MAX);
     let second_foreign_reservation = second_foreign
         .control_checkpoint()
         .reserve(second_foreign_keys.phase, second_foreign_keys.dimension, 1)
@@ -3809,7 +4022,8 @@ fn control_and_owner_mismatch_preserve_the_first_terminal_cause_in_both_orders()
 fn publication_assembly_lends_transient_control_without_mutating_tables() {
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation(&account, u64::MAX);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = test_operation(&mut invocation_root, &account, u64::MAX);
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 1, 1))
         .expect("transient-control assembly");
@@ -4119,7 +4333,9 @@ fn canonical_share_api_requires_derived_lineage_and_the_sealed_shareable_kind() 
         "pub fn try_share_canonical<SourceRootKind, SourceRootTag, SlotKind, SlotTag>",
     );
     assert!(
-        source.contains("RetainedStorePublicationAssembly<O, PP, U, CanonicalInheritanceSource>")
+        source.contains(
+            "RetainedStorePublicationAssembly<'inv, O, PP, U, CanonicalInheritanceSource>"
+        )
     );
     assert!(method.contains("PublishedCanonicalStore<SourceRootKind, SourceRootTag>"));
     assert!(method.contains("source_ref: CanonicalStoreRef<SlotKind, SlotTag>"));

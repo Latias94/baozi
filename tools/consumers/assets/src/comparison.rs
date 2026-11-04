@@ -706,12 +706,12 @@ mod reader_adoption_tests {
             &self,
             _: &Probe<'_>,
             _: &ReadHint,
-            _: &DetectionScope<'_>,
+            _: &mut DetectionScope<'_, '_>,
         ) -> DetectionResult<DetectionOutcome> {
             Ok(DetectionOutcome::Match(ReadConfidence::Certain))
         }
 
-        fn parse(&self, _: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
+        fn parse(&self, _: &Self::Options, scope: &mut ParseContext<'_, '_>) -> ParseResult<()> {
             let positions = [
                 1.0,
                 -0.0,

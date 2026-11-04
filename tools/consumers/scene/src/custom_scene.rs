@@ -50,12 +50,12 @@ impl Format for CustomScene {
         &self,
         _probe: &Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_, '_>) -> ParseResult<()> {
         let parent = if scope.primary_bytes() == b"bad-parent" {
             3
         } else {

@@ -40,8 +40,11 @@ fn publish_scene(
     let spatial = SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]);
     let appearance = AppearanceAuthoringBatch::empty();
     let profile = profile_fixture(spatial, nodes, appearance, geometry, deformation, animation);
+    let mut construction_root_1 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let parts = successful_parts(
         NodeSceneTestTransaction::with_account(
+            &mut construction_root_1,
             account,
             test_limits(),
             SceneAuthoringBatch::new(

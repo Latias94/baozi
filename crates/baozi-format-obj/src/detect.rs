@@ -6,7 +6,7 @@ use baozi_import::{
 pub(crate) fn can_read(
     probe: &Probe<'_>,
     hint: &ReadHint,
-    scope: &DetectionScope<'_>,
+    scope: &mut DetectionScope<'_, '_>,
 ) -> DetectionResult<DetectionOutcome> {
     let extension_match = hint
         .extension()
@@ -28,7 +28,7 @@ pub(crate) fn can_read(
 fn looks_like_obj(
     bytes: &[u8],
     probe_is_complete: bool,
-    scope: &DetectionScope<'_>,
+    scope: &mut DetectionScope<'_, '_>,
 ) -> DetectionResult<bool> {
     let Some((text, bytes_are_valid_utf8)) = valid_utf8_prefix(bytes, scope)? else {
         return Ok(false);
@@ -45,7 +45,7 @@ fn looks_like_obj(
 
 fn strip_bom_accounted<'text>(
     text: &'text str,
-    scope: &DetectionScope<'_>,
+    scope: &mut DetectionScope<'_, '_>,
 ) -> DetectionResult<&'text str> {
     const UTF8_BOM: &str = "\u{feff}";
     let inspected = text.len().min(UTF8_BOM.len());
@@ -83,7 +83,7 @@ fn scan_obj_text(text: &str) -> bool {
 
 fn valid_utf8_prefix<'bytes>(
     bytes: &'bytes [u8],
-    scope: &DetectionScope<'_>,
+    scope: &mut DetectionScope<'_, '_>,
 ) -> DetectionResult<Option<(&'bytes str, bool)>> {
     let decoded = account_detection_work(scope, bytes.len(), || std::str::from_utf8(bytes))?;
     Ok(match decoded {
@@ -100,14 +100,14 @@ fn valid_utf8_prefix<'bytes>(
 
 fn terminated_lines<'text>(
     text: &'text str,
-    scope: &DetectionScope<'_>,
+    scope: &mut DetectionScope<'_, '_>,
 ) -> DetectionResult<&'text str> {
     let newline = account_detection_work(scope, text.len(), || text.rfind('\n'))?;
     Ok(newline.map_or("", |newline| &text[..=newline]))
 }
 
 fn account_detection_work<T>(
-    scope: &DetectionScope<'_>,
+    scope: &mut DetectionScope<'_, '_>,
     byte_count: usize,
     work: impl FnOnce() -> T,
 ) -> DetectionResult<T> {

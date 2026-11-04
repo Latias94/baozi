@@ -1611,7 +1611,11 @@ fn central_validation_rejects_corrupted_typed_appearance_before_generation() {
             GltfCapabilityScope::All,
             GltfCapabilityMutation::Baseline,
             |input| {
+                let mut invocation_root_1 =
+                    crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new(
+                    );
                 let terminal = NodeSceneTestTransaction::with_account(
+                    &mut invocation_root_1,
                     &account,
                     test_limits(),
                     input,
@@ -1646,6 +1650,7 @@ fn central_validation_rejects_corrupted_typed_appearance_before_generation() {
                     0,
                     "{fault:?}",
                 );
+                drop(invocation_root_1);
                 assert_released(failure, &account);
                 assert!(!account.snapshot().poisoned(), "{fault:?}");
             },
@@ -1666,7 +1671,11 @@ fn central_validation_rejects_corrupted_typed_deformation_before_generation() {
             GltfCapabilityScope::All,
             GltfCapabilityMutation::Baseline,
             |input| {
+                let mut invocation_root_2 =
+                    crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new(
+                    );
                 let terminal = NodeSceneTestTransaction::with_account(
+                    &mut invocation_root_2,
                     &account,
                     test_limits(),
                     input,
@@ -1701,6 +1710,7 @@ fn central_validation_rejects_corrupted_typed_deformation_before_generation() {
                     0,
                     "{fault:?}",
                 );
+                drop(invocation_root_2);
                 assert_released(failure, &account);
                 assert!(!account.snapshot().poisoned(), "{fault:?}");
             },
@@ -1721,7 +1731,11 @@ fn central_validation_rejects_corrupted_typed_animation_before_generation() {
             GltfCapabilityScope::All,
             GltfCapabilityMutation::Baseline,
             |input| {
+                let mut invocation_root_3 =
+                    crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new(
+                    );
                 let terminal = NodeSceneTestTransaction::with_account(
+                    &mut invocation_root_3,
                     &account,
                     test_limits(),
                     input,
@@ -1756,6 +1770,7 @@ fn central_validation_rejects_corrupted_typed_animation_before_generation() {
                     0,
                     "{fault:?}",
                 );
+                drop(invocation_root_3);
                 assert_released(failure, &account);
                 assert!(!account.snapshot().poisoned(), "{fault:?}");
             },
@@ -1787,7 +1802,10 @@ fn build_gltf_scene_input_with_generation_source(
     mutation: GltfCapabilityMutation,
     reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
 ) -> NodeSceneSuccessParts {
+    let mut invocation_root_4 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let terminal = NodeSceneTestTransaction::with_account(
+        &mut invocation_root_4,
         account,
         test_limits(),
         input,
@@ -3441,7 +3459,10 @@ fn reject_gltf_mutation(
 ) {
     let (prepared, rejection) =
         with_gltf_scene_input(GltfCapabilityScope::All, mutation, |input| {
+            let mut root =
+                crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
             match NodeSceneTestTransaction::with_account(
+                &mut root,
                 account,
                 test_limits(),
                 input,
@@ -3579,7 +3600,10 @@ fn gltf_construction_one_short_work_limit_publishes_only_rich_failure() {
         GltfCapabilityScope::All,
         GltfCapabilityMutation::Baseline,
         |input| {
+            let mut invocation_root_5 =
+                crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
             let build = NodeSceneTestTransaction::with_account(
+                &mut invocation_root_5,
                 &account,
                 test_limits_with_work(work_limit),
                 input,
@@ -3607,6 +3631,7 @@ fn gltf_construction_one_short_work_limit_publishes_only_rich_failure() {
                 terminal_failure_class(failure.ledger_evidence()),
                 StorePreparationFailureClass::Ledger,
             );
+            drop(invocation_root_5);
             assert_released(failure, &account);
         },
     );
@@ -3622,37 +3647,44 @@ fn gltf_cancellation_after_validation_publishes_only_rich_failure() {
         GltfCapabilityScope::All,
         GltfCapabilityMutation::Baseline,
         |input| {
-            let build = NodeSceneTestTransaction::with_account_and_cancellation(
-                &account,
-                test_limits(),
-                input,
-                SceneValidationLimits::default(),
-                cancellation.clone(),
-            )
-            .expect("cancellable glTF Scene input admission")
-            .finish_draft()
-            .expect("glTF input must activate before cancellation");
-            let owner = match build {
-                NodeSceneDraftBuild::Draft { owner } => owner,
-                NodeSceneDraftBuild::Failure { .. } => {
-                    panic!("glTF input must reach central validation before cancellation")
-                }
-            };
+            let mut invocation_root_6 =
+                crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+            let failure = {
+                let build = NodeSceneTestTransaction::with_account_and_cancellation(
+                    &mut invocation_root_6,
+                    &account,
+                    test_limits(),
+                    input,
+                    SceneValidationLimits::default(),
+                    cancellation.clone(),
+                )
+                .expect("cancellable glTF Scene input admission")
+                .finish_draft()
+                .expect("glTF input must activate before cancellation");
+                let owner = match build {
+                    NodeSceneDraftBuild::Draft { owner } => owner,
+                    NodeSceneDraftBuild::Failure { .. } => {
+                        panic!("glTF input must reach central validation before cancellation")
+                    }
+                };
 
-            cancellation.cancel();
-            let failure = rich_failure(
-                owner
-                    .prepare_with_generation_source(
-                        SceneParseOutcome::Accepted,
-                        SceneGenerationId::reserve,
-                    )
-                    .expect("cancelled glTF construction must prepare rich failure")
-                    .handoff(),
-            );
-            assert_eq!(
-                terminal_failure_class(failure.ledger_evidence()),
-                StorePreparationFailureClass::Control,
-            );
+                cancellation.cancel();
+                let failure = rich_failure(
+                    owner
+                        .prepare_with_generation_source(
+                            SceneParseOutcome::Accepted,
+                            SceneGenerationId::reserve,
+                        )
+                        .expect("cancelled glTF construction must prepare rich failure")
+                        .handoff(),
+                );
+                assert_eq!(
+                    terminal_failure_class(failure.ledger_evidence()),
+                    StorePreparationFailureClass::Control,
+                );
+                failure
+            };
+            drop(invocation_root_6);
             assert_released(failure, &account);
         },
     );
@@ -3732,21 +3764,26 @@ fn full_gltf_physical_quotas_release_every_reachable_failure_until_first_success
             for max_live_allocations in 1..=128 {
                 let account = test_account(&factory, max_live_allocations);
                 let generation_source = AtomicU64::new(0);
+                let mut invocation_root_7 =
+                    crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new(
+                    );
                 let terminal = match NodeSceneTestTransaction::with_account(
+                    &mut invocation_root_7,
                     &account,
                     test_limits(),
                     input,
                     SceneValidationLimits::default(),
                 ) {
-                    Ok(operation) => Some(
-                        operation
-                            .finish_draft()
-                            .expect("physical quota rejection must retain a clean scoped outcome")
+                    Ok(operation) => match operation.finish_draft() {
+                        Ok(build) => Some(build
                             .publish_with_generation_source_for_test(|| {
                                 SceneGenerationId::reserve_from(&generation_source)
                             })
                             .expect("physical quota rejection must publish an exact terminal"),
-                    ),
+                        ),
+                        Err(crate::canonical_scene::store::construction::SceneConstructionError::Start(_)) => None,
+                        Err(cause) => panic!("physical quota rejection must retain a clean scoped outcome: {cause}"),
+                    },
                     Err(_) => None,
                 };
                 let published = match terminal {
@@ -3792,6 +3829,7 @@ fn full_gltf_physical_quotas_release_every_reachable_failure_until_first_success
                     u64::from(published),
                     "only a successful quota may reserve a generation: {max_live_allocations}",
                 );
+                drop(invocation_root_7);
                 let physical = account.snapshot();
                 assert_eq!(
                     physical.live_retained_bytes(),

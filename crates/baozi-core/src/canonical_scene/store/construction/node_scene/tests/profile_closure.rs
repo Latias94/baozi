@@ -143,7 +143,7 @@ enum ProfileClosureAuthoringPreflightDisposition {
 impl ProfileClosureAuthoringPreflightDisposition {
     fn from_build_result(
         scenario_id: &'static str,
-        result: Result<NodeSceneDraftBuild, SceneConstructionError>,
+        result: Result<NodeSceneDraftBuild<'_>, SceneConstructionError>,
     ) -> Self {
         match result.unwrap_or_else(|error| {
             panic!("profile-closure negative case {scenario_id} failed to finish: {error:?}")
@@ -442,7 +442,10 @@ fn build_profile_closure_scene_variant(
     variant: ProfileClosureInputVariant,
 ) -> NodeSceneSuccessParts {
     with_profile_closure_input_variant(variant, |input| {
+        let mut invocation_root_1 =
+            crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
         let build = NodeSceneTestTransaction::with_account(
+            &mut invocation_root_1,
             account,
             test_limits(),
             input,
@@ -992,7 +995,10 @@ fn observe_profile_closure_negative_case(
     let (disposition, before_preflight) = with_profile_closure_input_variant(
         case.input_variant(),
         |input| {
+            let mut invocation_root_2 =
+                crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
             let operation = NodeSceneTestTransaction::with_account(
+                &mut invocation_root_2,
                 &account,
                 test_limits(),
                 input,
@@ -1004,13 +1010,17 @@ fn observe_profile_closure_negative_case(
                     case.scenario_id()
                 )
             });
-            let before_preflight = account.snapshot();
+            let mut before_preflight = None;
+            let build = operation.finish_draft_with_observer(|| {
+                before_preflight = Some(account.snapshot());
+            });
             (
                 ProfileClosureAuthoringPreflightDisposition::from_build_result(
                     case.scenario_id(),
-                    operation.finish_draft(),
+                    build,
                 ),
-                before_preflight,
+                before_preflight
+                    .expect("the admitted operation must observe its preflight baseline"),
             )
         },
     );

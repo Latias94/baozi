@@ -14,6 +14,12 @@ pub(crate) struct ExclusiveStorage<'op, O, P, D> {
     owner: PhantomData<fn() -> O>,
 }
 
+impl<'op, O, P, D> ExclusiveStorage<'op, O, P, D> {
+    pub(crate) fn progress_evidence(&self) -> ProgressEvidenceStorage<'op, O, P, D> {
+        ProgressEvidenceStorage::new(self.state)
+    }
+}
+
 type WorkAndStorage<'op, O, P, D> = (ExclusiveWork<'op, D>, ExclusiveStorage<'op, O, P, D>);
 
 impl<O: OperationOwner, P: Copy + Ord, D: Copy + Ord + fmt::Debug> Ledger<O, P, D> {
@@ -49,11 +55,60 @@ impl<D: Copy + Ord + fmt::Debug> ExclusiveWork<'_, D> {
         dimensions: [D; N],
     ) -> Result<WorkLayout<N>, LedgerCause<D>> {
         let layout = WorkLayout::bind(self.catalog, &dimensions, WorkGrant::Ordinary)?;
-        if self.work.header.integrity_fault {
-            return Err(LedgerCause::FinalSnapshotShapeMismatch);
-        }
-        layout.validate_binding(self.work.header, &dimensions)?;
+        layout.validate_active(&self.work)?;
         Ok(layout)
+    }
+
+    pub(crate) fn charge_attempted<const N: usize>(
+        &mut self,
+        layout: WorkLayout<N>,
+        amounts: [u64; N],
+    ) -> Result<(), LedgerCause<D>> {
+        layout.validate_active(&self.work)?;
+        layout.charge_attempted_in_order(&mut self.work, amounts)
+    }
+
+    pub(crate) fn complete_observed<const N: usize>(
+        &mut self,
+        layout: WorkLayout<N>,
+        amounts: [u64; N],
+    ) -> Result<(), LedgerCause<D>> {
+        layout.validate_active(&self.work)?;
+        layout.consume_observed_in_order(&mut self.work, amounts)
+    }
+
+    pub(crate) fn complete_direct<const N: usize>(
+        &mut self,
+        layout: WorkLayout<N>,
+        amounts: [u64; N],
+    ) -> Result<(), LedgerCause<D>> {
+        layout.validate_active(&self.work)?;
+        layout.consume_direct_atomic(&mut self.work, amounts)
+    }
+
+    pub(crate) fn charge_observed<const N: usize>(
+        &mut self,
+        layout: WorkLayout<N>,
+        amounts: [u64; N],
+    ) -> Result<(), LedgerCause<D>> {
+        layout.validate_active(&self.work)?;
+        layout.charge_observed_ordered(&mut self.work, amounts)
+    }
+
+    pub(crate) fn dimension_evidence<O: OperationOwner, P: Copy + Ord>(
+        &self,
+        storage: &ExclusiveStorage<'_, O, P, D>,
+        dimension: D,
+    ) -> Result<DimensionSnapshot, LedgerCause<D>> {
+        self.bind([dimension])?;
+        let position = self
+            .catalog
+            .binary_search(&dimension)
+            .map_err(|_| LedgerCause::UnknownDimension { dimension })?;
+        Ok(dimension_snapshot(DimensionState::join(
+            self.work.rows[position].state,
+            lock(storage.state).dimensions[position].state,
+        )))
     }
 
     pub(crate) fn check_quiescent(&self) -> Result<(), LedgerCause<D>> {
@@ -92,7 +147,60 @@ impl<D: Copy + Ord + fmt::Debug> ExclusiveWork<'_, D> {
     }
 }
 
-impl<O: OperationOwner, P: Copy + Ord, D: Copy + Ord + fmt::Debug> ExclusiveStorage<'_, O, P, D> {
+impl<'op, O: OperationOwner, P: Copy + Ord, D: Copy + Ord + fmt::Debug>
+    ExclusiveStorage<'op, O, P, D>
+{
+    pub(crate) fn storage_observation(
+        &self,
+        dimension: D,
+    ) -> Result<LedgerStorageObservation<'op, P, D>, LedgerCause<D>> {
+        let position = self
+            .catalog
+            .binary_search(&dimension)
+            .map_err(|_| LedgerCause::UnknownDimension { dimension })?;
+        Ok(LedgerStorageObservation {
+            state: self.state,
+            position,
+            local: PhantomData,
+        })
+    }
+
+    pub(crate) fn validate_live_owner(
+        &self,
+        reservation: &LiveReservation<O, P, D>,
+    ) -> Result<(), LedgerCause<D>> {
+        Ledger::<O, P, D>::check_reservation_in(self.state, reservation)
+    }
+
+    pub(crate) fn transition(
+        &self,
+        reservation: &mut LiveReservation<O, P, D>,
+        phase: P,
+        dimension: D,
+        bytes: u64,
+    ) -> Result<(), LedgerCause<D>> {
+        Ledger::<O, P, D>::transition_reservations_in(
+            self.state,
+            self.operation_live_byte_limit,
+            std::slice::from_mut(reservation),
+            phase,
+            dimension,
+            bytes,
+            ReservationPositions {
+                dimension: self
+                    .catalog
+                    .binary_search(&dimension)
+                    .map_err(|_| LedgerCause::UnknownDimension { dimension }),
+                phase: self
+                    .phases
+                    .iter()
+                    .find(|entry| entry.phase == phase)
+                    .map(|entry| entry.state_position)
+                    .ok_or(LedgerCause::UnknownPhase),
+            },
+        )
+    }
+
     pub(crate) fn reserve(
         &self,
         phase: P,
@@ -128,12 +236,7 @@ impl<O: OperationOwner, P: Copy + Ord, D: Copy + Ord + fmt::Debug> ExclusiveStor
         reservation: &mut LiveReservation<O, P, D>,
         bytes: u64,
     ) -> Result<(), LedgerCause<D>> {
-        if !reservation.core.is_owned_by(self.state) {
-            return Err(LedgerCause::OwnerMismatch);
-        }
-        if !reservation.core.active {
-            return Err(LedgerCause::InactiveReservation);
-        }
+        self.validate_live_owner(reservation)?;
         Ledger::<O, P, D>::resize_core_in(
             self.state,
             self.operation_live_byte_limit,

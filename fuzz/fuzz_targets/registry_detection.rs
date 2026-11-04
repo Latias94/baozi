@@ -232,7 +232,7 @@ impl Format for SyntheticImporter {
         &self,
         probe: &Probe<'_>,
         _hint: &ReadHint,
-        scope: &DetectionScope<'_>,
+        scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         let measured = match self.plan {
             DetectorPlan::ProbeByte { offset, .. }
@@ -249,7 +249,7 @@ impl Format for SyntheticImporter {
         }
     }
 
-    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_, '_>) -> ParseResult<()> {
         let provenance_ids = [ProvenanceLocalId::new(0)];
         let operation_kind = OperationKind::Generated;
         let provenance_nodes = [ProvenanceNodeAuthoring::operation(

@@ -65,6 +65,7 @@ impl<State> std::error::Error for StoreTranscriptStateError<State> {
 /// Linear result of transcript-bound success validation.
 #[must_use = "every branch retains or terminates the complete publication owner"]
 pub enum StoreTranscriptSuccessValidation<
+    'inv,
     O,
     PP,
     U,
@@ -79,6 +80,7 @@ pub enum StoreTranscriptSuccessValidation<
 {
     Valid(
         ValidatedTranscriptStoreSuccess<
+            'inv,
             O,
             PP,
             U,
@@ -88,13 +90,14 @@ pub enum StoreTranscriptSuccessValidation<
             EvidenceTag,
         >,
     ),
-    Rejected(StoreFailureContinuationExecution<O, PP, U, EvidenceKind, EvidenceTag>),
-    FallbackOnly(StoreFallbackOnly<O, PP, U>),
+    Rejected(StoreFailureContinuationExecution<'inv, O, PP, U, EvidenceKind, EvidenceTag>),
+    FallbackOnly(StoreFallbackOnly<'inv, O, PP, U>),
 }
 
 /// Validated success paired with its allocation-free downgrade authority.
 #[must_use = "prepare success, downgrade it, or deliberately publish minimal fallback"]
 pub struct ValidatedTranscriptStoreSuccess<
+    'inv,
     O,
     PP,
     U,
@@ -107,12 +110,22 @@ pub struct ValidatedTranscriptStoreSuccess<
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    raw: ValidatedStoreSuccess<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>,
+    raw: ValidatedStoreSuccess<
+        'inv,
+        O,
+        PP,
+        U,
+        CanonicalKind,
+        CanonicalTag,
+        EvidenceKind,
+        EvidenceTag,
+    >,
     continuation: StoreTranscriptContinuation,
 }
 
-impl<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
+impl<'inv, O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
     ValidatedTranscriptStoreSuccess<
+        'inv,
         O,
         PP,
         U,
@@ -150,7 +163,7 @@ where
     pub fn downgrade_to_rich_failure(
         self,
         fallback_cause: u32,
-    ) -> StoreFailureContinuationExecution<O, PP, U, EvidenceKind, EvidenceTag> {
+    ) -> StoreFailureContinuationExecution<'inv, O, PP, U, EvidenceKind, EvidenceTag> {
         let Self { raw, continuation } = self;
         StoreFailureContinuationExecution::new(
             raw.downgrade_to_rich_failure(fallback_cause),
@@ -170,15 +183,15 @@ where
 
 /// Linear result of transcript-bound rich-failure validation.
 #[must_use = "every branch retains or terminates the complete publication owner"]
-pub enum StoreTranscriptFailureValidation<O, PP, U, EvidenceKind, EvidenceTag>
+pub enum StoreTranscriptFailureValidation<'inv, O, PP, U, EvidenceKind, EvidenceTag>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    Valid(ValidatedStoreFailure<O, PP, U, EvidenceKind, EvidenceTag>),
-    Rejected(StoreFailureContinuationExecution<O, PP, U, EvidenceKind, EvidenceTag>),
-    FallbackOnly(StoreFallbackOnly<O, PP, U>),
+    Valid(ValidatedStoreFailure<'inv, O, PP, U, EvidenceKind, EvidenceTag>),
+    Rejected(StoreFailureContinuationExecution<'inv, O, PP, U, EvidenceKind, EvidenceTag>),
+    FallbackOnly(StoreFallbackOnly<'inv, O, PP, U>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,13 +227,13 @@ impl EvidenceState {
 ///
 /// Retain instructions still allocate their admitted payload storage according to each ticket.
 #[must_use = "complete the planned tail, validate it, or deliberately publish minimal fallback"]
-pub struct StoreFailureContinuationExecution<O, PP, U, EvidenceKind, EvidenceTag>
+pub struct StoreFailureContinuationExecution<'inv, O, PP, U, EvidenceKind, EvidenceTag>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    assembly: StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>,
+    assembly: StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
     continuation: StoreTranscriptContinuation,
     state: FailureExecutionState,
 }
@@ -246,15 +259,15 @@ macro_rules! execute_tail_block {
     };
 }
 
-impl<O, PP, U, EvidenceKind, EvidenceTag>
-    StoreFailureContinuationExecution<O, PP, U, EvidenceKind, EvidenceTag>
+impl<'inv, O, PP, U, EvidenceKind, EvidenceTag>
+    StoreFailureContinuationExecution<'inv, O, PP, U, EvidenceKind, EvidenceTag>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     fn new(
-        assembly: StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>,
+        assembly: StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
         continuation: StoreTranscriptContinuation,
     ) -> Self {
         let actual = evidence_state(&assembly);
@@ -349,7 +362,7 @@ where
         ticket: &PlannedStoreInstruction<Plan, Tag, Destination>,
         delta: CounterDelta,
         action: impl FnOnce(
-            &mut StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>,
+            &mut StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
         ) -> Result<T, StoreRuntimeError>,
     ) -> Result<T, StoreExecutionError> {
         self.ensure(ticket)?;
@@ -502,7 +515,7 @@ where
             OutcomeEvidenceStoreRef<NextEvidenceKind, NextEvidenceTag>,
         ) -> bool,
     ) -> Result<
-        StoreTranscriptFailureValidation<O, PP, U, NextEvidenceKind, NextEvidenceTag>,
+        StoreTranscriptFailureValidation<'inv, O, PP, U, NextEvidenceKind, NextEvidenceTag>,
         StoreTranscriptStateError<Self>,
     >
     where
@@ -544,8 +557,8 @@ where
     }
 }
 
-fn evidence_state<O, PP, U, EvidenceKind, EvidenceTag>(
-    assembly: &StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>,
+fn evidence_state<'inv, O, PP, U, EvidenceKind, EvidenceTag>(
+    assembly: &StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
 ) -> EvidenceState
 where
     O: OperationOwner,
@@ -572,10 +585,10 @@ fn evidence_state_at(endpoint: super::TranscriptEndpoint) -> EvidenceState {
     }
 }
 
-fn map_failure_validation<O, PP, U, EvidenceKind, EvidenceTag>(
-    validation: StoreFailureValidation<O, PP, U, EvidenceKind, EvidenceTag>,
+fn map_failure_validation<'inv, O, PP, U, EvidenceKind, EvidenceTag>(
+    validation: StoreFailureValidation<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
     continuation: StoreTranscriptContinuation,
-) -> StoreTranscriptFailureValidation<O, PP, U, EvidenceKind, EvidenceTag>
+) -> StoreTranscriptFailureValidation<'inv, O, PP, U, EvidenceKind, EvidenceTag>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -594,7 +607,7 @@ where
     }
 }
 
-impl<O, PP, U, L> RetainedStoreExecution<O, PP, U, L>
+impl<'inv, O, PP, U, L> RetainedStoreExecution<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -620,6 +633,7 @@ where
         ) -> bool,
     ) -> Result<
         StoreTranscriptSuccessValidation<
+            'inv,
             O,
             PP,
             U,
@@ -679,7 +693,7 @@ where
             OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
         ) -> bool,
     ) -> Result<
-        StoreTranscriptFailureValidation<O, PP, U, EvidenceKind, EvidenceTag>,
+        StoreTranscriptFailureValidation<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
         StoreTranscriptStateError<Self>,
     >
     where

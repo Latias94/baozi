@@ -4,22 +4,32 @@ use super::*;
 
 #[cfg(test)]
 thread_local! {
-    static PANIC_NEXT_EVIDENCE_ONLY_PRIMARY_BIND: std::cell::Cell<bool> = const {
-        std::cell::Cell::new(false)
+    static PANIC_NEXT_PRIMARY_BIND: std::cell::Cell<Option<bool>> = const {
+        std::cell::Cell::new(None)
     };
 }
 
 #[cfg(test)]
 pub(crate) fn panic_next_evidence_only_primary_bind() {
-    PANIC_NEXT_EVIDENCE_ONLY_PRIMARY_BIND.with(|panic| panic.set(true));
+    PANIC_NEXT_PRIMARY_BIND.with(|panic| panic.set(Some(false)));
+}
+
+#[cfg(test)]
+pub(crate) fn panic_next_canonical_primary_bind() {
+    PANIC_NEXT_PRIMARY_BIND.with(|panic| panic.set(Some(true)));
 }
 
 #[cfg(test)]
 fn maybe_panic_evidence_only_primary_bind(publish_canonical: bool) {
-    if !publish_canonical
-        && PANIC_NEXT_EVIDENCE_ONLY_PRIMARY_BIND.with(|panic| panic.replace(false))
-    {
-        panic!("injected evidence-only primary bind panic");
+    if PANIC_NEXT_PRIMARY_BIND.with(|panic| {
+        if panic.get() == Some(publish_canonical) {
+            panic.set(None);
+            true
+        } else {
+            false
+        }
+    }) {
+        panic!("injected terminal primary bind panic");
     }
 }
 
@@ -403,15 +413,6 @@ where
 {
     proof: Option<crate::ledger::TypedFreezeProof<O, P, D>>,
     physical: Option<ExactPreDiscardSuccess<P, D, F, CanonicalBlock, EvidenceBlock>>,
-}
-
-pub(super) enum FrozenSuccessPrimaryTransition<O, P, D, F, CanonicalBlock, EvidenceBlock>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord,
-{
-    Success(TerminalSuccessFreezeGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>),
 }
 
 pub(super) enum EvidenceOnlySuccessPrimaryTransition<O, P, D, F, CanonicalBlock, EvidenceBlock>
@@ -1933,18 +1934,159 @@ where
     }
 }
 
-pub(super) enum TerminalPrimaryTransition<O, P, D, F, CanonicalBlock, EvidenceBlock>
+#[must_use = "the selected unqualified terminal graph must be finished or contained"]
+pub(super) enum TerminalPreFreezeTransition<O, P, D, F, CanonicalBlock, EvidenceBlock>
 where
     O: OperationOwner,
     P: Copy + Ord,
     D: Copy + Ord,
 {
-    Success(TerminalSuccessFreezeGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>),
-    Rich(TerminalRichFreezeGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>),
-    Fallback(
-        TerminalFallbackGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>,
-        PreparationFailureCode,
-    ),
+    Success {
+        guard: TerminalPrimaryGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        canonical_root: RetainedSlotIdentity,
+        evidence_root: RetainedSlotIdentity,
+    },
+    Rich {
+        guard: TerminalPrimaryGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        evidence_root: RetainedSlotIdentity,
+        cause: PreparationFailureCode,
+    },
+    Fallback {
+        guard: TerminalFallbackGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        cause: PreparationFailureCode,
+    },
+}
+
+impl<O, P, D, F, CanonicalBlock, EvidenceBlock>
+    TerminalPreFreezeTransition<O, P, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: TerminalEvidenceKey,
+    D: TerminalEvidenceKey + fmt::Debug,
+{
+    fn physical(
+        &self,
+    ) -> &TerminalPhysicalOwnershipManifest<P, D, F, CanonicalBlock, EvidenceBlock> {
+        match self {
+            Self::Success { guard, .. } | Self::Rich { guard, .. } => guard.physical(),
+            Self::Fallback { guard, .. } => guard
+                .physical
+                .as_ref()
+                .unwrap_or_else(|| unreachable_final_owner_state()),
+        }
+    }
+
+    fn contain_new_fault(self, reason: AccountPoisonReason) -> FinalizationContainmentError {
+        match self {
+            Self::Success { guard, .. } | Self::Rich { guard, .. } => {
+                guard.contain_new_fault(reason)
+            }
+            Self::Fallback { guard, .. } => guard.contain_new_fault(reason),
+        }
+    }
+
+    fn contain_after_recorded(self, reason: AccountPoisonReason) -> FinalizationContainmentError {
+        match self {
+            Self::Success { guard, .. } | Self::Rich { guard, .. } => {
+                guard.contain_after_recorded(reason)
+            }
+            Self::Fallback { guard, .. } => guard.contain_after_recorded(reason),
+        }
+    }
+
+    pub(super) fn check_payload_cleanup(self) -> Result<Self, FinalizationContainmentError> {
+        let preflight = self
+            .physical()
+            .account()
+            .try_begin_account_preflight()
+            .map(drop);
+        match preflight {
+            Ok(()) => Ok(self),
+            Err(quarantine) => {
+                Err(self.contain_after_recorded(quarantined_account_reason(quarantine)))
+            }
+        }
+    }
+
+    pub(super) fn contain_activation_fault(self) -> FinalizationContainmentError {
+        match self.check_payload_cleanup() {
+            Ok(state) => state.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified),
+            Err(cause) => cause,
+        }
+    }
+
+    pub(super) fn finish_success(
+        self,
+        set_id: RetainedSetId,
+    ) -> Result<
+        RetainedSuccessJointCommitIntent<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        RetainedPublicationPrepareError,
+    > {
+        let Self::Success {
+            mut guard,
+            canonical_root,
+            evidence_root,
+        } = self
+        else {
+            return Err(RetainedPublicationPrepareError::FinalizationContainment(
+                self.contain_activation_fault(),
+            ));
+        };
+        let physical = guard
+            .physical
+            .take()
+            .unwrap_or_else(|| unreachable_final_owner_state())
+            .finish_pre_discard_success(canonical_root, evidence_root);
+        let proof = guard
+            .attribution
+            .take()
+            .unwrap_or_else(|| unreachable_final_owner_state())
+            .finish(true);
+        TerminalSuccessFreezeGuard::new(proof, physical)
+            .try_form_joint_commit_intent(set_id)
+            .map_err(RetainedPublicationPrepareError::FinalizationContainment)
+    }
+
+    pub(super) fn finish(
+        self,
+        set_id: RetainedSetId,
+    ) -> Result<
+        RetainedSuccessJointCommitFormation<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        RetainedPublicationPrepareError,
+    > {
+        match self {
+            success @ Self::Success { .. } => success
+                .finish_success(set_id)
+                .map(RetainedSuccessJointCommitFormation::Intent),
+            Self::Rich {
+                mut guard,
+                evidence_root,
+                cause,
+            } => {
+                let physical = guard
+                    .physical
+                    .take()
+                    .unwrap_or_else(|| unreachable_final_owner_state());
+                let proof = guard
+                    .attribution
+                    .take()
+                    .unwrap_or_else(|| unreachable_final_owner_state())
+                    .finish(false);
+                TerminalRichFreezeGuard::new(proof, physical, evidence_root, cause)
+                    .into_prepared(set_id)
+                    .map(RetainedSuccessJointCommitFormation::PreparedFailure)
+                    .map_err(RetainedPublicationPrepareError::FinalizationContainment)
+            }
+            Self::Fallback { guard, cause } => guard
+                .try_prepare(cause)
+                .map(RetainedSuccessJointCommitFormation::PreparedFailure),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_evidence_is_frozen(&self) -> bool {
+        self.physical().evidence().allocation().as_ref().is_frozen()
+    }
 }
 
 pub(super) struct TerminalPrimaryGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
@@ -2060,11 +2202,11 @@ where
         RetainedPublicationPrepareError::FinalizationContainment(containment)
     }
 
-    pub(super) fn try_advance_frozen_success(
+    pub(super) fn try_classify_frozen_success(
         mut self,
         terminal: RetainedTerminalMode,
     ) -> Result<
-        FrozenSuccessPrimaryTransition<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        TerminalPreFreezeTransition<O, P, D, F, CanonicalBlock, EvidenceBlock>,
         RetainedPublicationPrepareError,
     > {
         let RetainedTerminalMode::Success {
@@ -2094,19 +2236,11 @@ where
                 containment,
             ));
         }
-        let physical = self
-            .physical
-            .take()
-            .unwrap_or_else(|| unreachable_final_owner_state())
-            .finish_pre_discard_success(canonical_root, evidence_root);
-        let proof = self
-            .attribution
-            .take()
-            .unwrap_or_else(|| unreachable_final_owner_state())
-            .finish(true);
-        Ok(FrozenSuccessPrimaryTransition::Success(
-            TerminalSuccessFreezeGuard::new(proof, physical),
-        ))
+        Ok(TerminalPreFreezeTransition::Success {
+            guard: self,
+            canonical_root,
+            evidence_root,
+        })
     }
 
     pub(super) fn try_advance_evidence_only_success(
@@ -2145,11 +2279,11 @@ where
         ))
     }
 
-    pub(super) fn try_advance(
+    pub(super) fn try_classify(
         mut self,
         mut terminal: RetainedTerminalMode,
     ) -> Result<
-        TerminalPrimaryTransition<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        TerminalPreFreezeTransition<O, P, D, F, CanonicalBlock, EvidenceBlock>,
         RetainedPublicationPrepareError,
     > {
         let publish_canonical = matches!(terminal, RetainedTerminalMode::Success { .. });
@@ -2162,10 +2296,10 @@ where
                     RetainedTerminalMode::Success { evidence_root, .. } => evidence_root,
                     RetainedTerminalMode::RichFailure { cause, .. }
                     | RetainedTerminalMode::MinimalFallback { cause } => {
-                        return Ok(TerminalPrimaryTransition::Fallback(
-                            self.into_fallback(),
-                            cause_after_primary_ledger_rejection(cause),
-                        ));
+                        return Ok(TerminalPreFreezeTransition::Fallback {
+                            guard: self.into_fallback(),
+                            cause: cause_after_primary_ledger_rejection(cause),
+                        });
                     }
                 };
                 match self.try_bind_once(false) {
@@ -2173,10 +2307,10 @@ where
                         return Err(self.contain_primary_binding_panic(payload));
                     }
                     Ok(Err(_cause)) => {
-                        return Ok(TerminalPrimaryTransition::Fallback(
-                            self.into_fallback(),
-                            PreparationFailureCode::ledger(),
-                        ));
+                        return Ok(TerminalPreFreezeTransition::Fallback {
+                            guard: self.into_fallback(),
+                            cause: PreparationFailureCode::ledger(),
+                        });
                     }
                     Ok(Ok(())) => {
                         terminal = RetainedTerminalMode::RichFailure {
@@ -2201,19 +2335,11 @@ where
                     containment,
                 ));
             }
-            let physical = self
-                .physical
-                .take()
-                .unwrap_or_else(|| unreachable_final_owner_state())
-                .finish_pre_discard_success(canonical_root, evidence_root);
-            let proof = self
-                .attribution
-                .take()
-                .unwrap_or_else(|| unreachable_final_owner_state())
-                .finish(true);
-            return Ok(TerminalPrimaryTransition::Success(
-                TerminalSuccessFreezeGuard::new(proof, physical),
-            ));
+            return Ok(TerminalPreFreezeTransition::Success {
+                guard: self,
+                canonical_root,
+                evidence_root,
+            });
         }
 
         let (evidence_root, cause) = match terminal {
@@ -2225,17 +2351,11 @@ where
                 unreachable_final_owner_state()
             }
         };
-        let physical = self
-            .physical
-            .take()
-            .unwrap_or_else(|| unreachable_final_owner_state());
-        let proof = match self.attribution.take() {
-            Some(attribution) => attribution.finish(false),
-            None => unreachable_final_owner_state(),
-        };
-        Ok(TerminalPrimaryTransition::Rich(
-            TerminalRichFreezeGuard::new(proof, physical, evidence_root, cause),
-        ))
+        Ok(TerminalPreFreezeTransition::Rich {
+            guard: self,
+            evidence_root,
+            cause,
+        })
     }
 }
 
@@ -2302,6 +2422,19 @@ where
             None => unreachable_final_owner_state(),
         };
         let cause = physical.contain_new_fault(reason);
+        self.retain_attribution_after_physical_containment();
+        cause
+    }
+
+    fn contain_after_recorded(
+        mut self,
+        reason: AccountPoisonReason,
+    ) -> FinalizationContainmentError {
+        let physical = match self.physical.take() {
+            Some(physical) => physical,
+            None => unreachable_final_owner_state(),
+        };
+        let cause = physical.contain_after_recorded(reason);
         self.retain_attribution_after_physical_containment();
         cause
     }

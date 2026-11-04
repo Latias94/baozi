@@ -18,18 +18,17 @@ use super::{
     OutcomeEvidenceRecordRef, OutcomeEvidenceRecordRowWriter, OutcomeEvidenceRecordView,
     OutcomeEvidenceRecordWriter, OutcomeEvidenceSequenceRef, OutcomeEvidenceStoreRef,
     OutcomeEvidenceUtf8Ref, PreparedStoreFailureOutcome, PreparedStoreFallback,
-    PreparedStoreSuccessOutcome, PublishedCanonicalStore, RawStoreBorrowedWorkPermit,
-    RawStoreFailureAssembly, RecordBlock, RecordPlan, RetainedAllocationPlan,
-    RetainedBuildFailureCode, RetainedStoreBatchLimits, RetainedStoreBlockTablePlan,
-    RetainedStoreControlCheckpoint, RetainedStoreFailureTerminalWorkPlan,
-    RetainedStoreFailureTerminalWorkRequirement, RetainedStoreOperation, RetainedStoreProducerHost,
-    RetainedStorePublicationAssembly, RetainedStorePublicationPlan, RetainedStoreReservation,
-    RetainedStoreWorkControl, RetainedStoreWriterPlan, RetainedStoreWriterRole, ScalarSequence,
-    SequencePlan, SequenceWriter, ShareableStoreKind, StoreBoundWorkGroup,
-    StoreBuildCallbackFailure, StoreBuildError, StoreControlledError,
+    PublishedCanonicalStore, RawStoreBorrowedWorkPermit, RawStoreFailureAssembly, RecordBlock,
+    RecordPlan, RetainedAllocationPlan, RetainedBuildFailureCode, RetainedStoreBatchLimits,
+    RetainedStoreBlockTablePlan, RetainedStoreControlCheckpoint,
+    RetainedStoreFailureTerminalWorkPlan, RetainedStoreFailureTerminalWorkRequirement,
+    RetainedStoreOperation, RetainedStoreProducerHost, RetainedStorePublicationAssembly,
+    RetainedStorePublicationPlan, RetainedStoreReservation, RetainedStoreWorkControl,
+    RetainedStoreWriterPlan, RetainedStoreWriterRole, ScalarSequence, SequencePlan, SequenceWriter,
+    ShareableStoreKind, StoreBuildCallbackFailure, StoreBuildError, StoreControlledError,
     StoreControlledSuccessValidation, StoreDimensionKey, StoreEvidenceValidationSession,
-    StoreExecutionServices, StoreExecutionWork, StoreFailureAssembly, StoreFailureValidation,
-    StoreFallbackOnly, StoreKeyDomain, StorePhaseKey, StorePlanError, StorePrepareError,
+    StoreFailureAssembly, StoreFailureValidation, StoreFallbackOnly, StoreInvocation,
+    StoreInvocationLayout, StoreKeyDomain, StorePhaseKey, StorePlanError, StorePrepareError,
     StoreRuntimeError, StoreSuccessFreezeContribution, StoreSuccessFreezePermit,
     StoreSuccessFreezePermitIssue, StoreValidationSession, StoreWorkError, StoredBlock,
     StoredScalar, Utf8Block, Utf8Plan, Utf8Writer, ValidatedStoreFailure, ValidatedStoreSuccess,
@@ -52,12 +51,24 @@ mod canonical;
 mod canonical_validation;
 mod failure_evidence;
 mod fallback;
+mod final_state;
+pub use final_state::CanonicalFinal;
+mod host;
+pub use host::{
+    CanonicalActivationSlots, CanonicalBodyOperation, CanonicalBodyParts, CanonicalBodyStart,
+    CanonicalBoundBodyError, CanonicalBoundBodyParts, CanonicalBoundBodyStart,
+    CanonicalBoundInvocationFinish, CanonicalCauseSlot, CanonicalDispositionSlot,
+    CanonicalGenerationSlots, CanonicalInvocationBodyError, CanonicalInvocationCompletion,
+    CanonicalInvocationFinish, CanonicalInvocationHost, CanonicalInvocationOutcome,
+    CanonicalOperationCompletion, CanonicalOperationPublication, CanonicalOutputSlot,
+    CanonicalProofSlot, CanonicalValidationSlots,
+};
 mod payload_owner;
 mod preflight;
 mod typed_storage;
 pub use typed_storage::CanonicalRetainedStorageBuildControl;
 mod work_batch;
-use payload_owner::PayloadOwner;
+use payload_owner::{PayloadLoan, PayloadOwner, PayloadPair};
 
 pub use canonical_validation::{
     CanonicalValidationCheckpoint, CanonicalValidationMember, CanonicalValidationPlanning,
@@ -540,7 +551,7 @@ where
     reason = "the private activation helper keeps one admitted permit coupled to one writer factory"
 )]
 fn try_retain_activation_canonical_writer<O, PP, U, L, W, Kind, Tag>(
-    assembly: &mut RetainedStorePublicationAssembly<O, PP, U, L>,
+    assembly: &mut RetainedStorePublicationAssembly<'_, O, PP, U, L>,
     allocation: RetainedAllocationPlan,
     work_dimension: StoreDimensionKey,
     work: NonZeroU64,
@@ -607,7 +618,7 @@ where
     reason = "the private activation helper keeps exact source lineage, one admitted permit, and one writer factory coupled"
 )]
 fn try_rewrite_activation_canonical_writer<O, PP, U, SourceRootKind, SourceRootTag, W, Kind, Tag>(
-    assembly: &mut RetainedStorePublicationAssembly<O, PP, U, CanonicalInheritanceSource>,
+    assembly: &mut RetainedStorePublicationAssembly<'_, O, PP, U, CanonicalInheritanceSource>,
     source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
     source_ref: CanonicalStoreRef<Kind, Tag>,
     allocation: RetainedAllocationPlan,
@@ -701,7 +712,7 @@ where
     reason = "the private mapped-copy helper binds both exact source and destination record plans to one linear writer"
 )]
 fn try_copy_activation_canonical_records<O, PP, U, SourceRootKind, SourceRootTag, Tag>(
-    assembly: &mut RetainedStorePublicationAssembly<O, PP, U, CanonicalInheritanceSource>,
+    assembly: &mut RetainedStorePublicationAssembly<'_, O, PP, U, CanonicalInheritanceSource>,
     source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
     source_ref: CanonicalRecordRef<Tag>,
     source_plan: RecordPlan,
@@ -1145,30 +1156,30 @@ where
     visited: u64,
 }
 
-struct ScopedDormantActivation<O, PP, U, L>
+struct ScopedDormantActivation<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    operation: Option<RetainedStoreOperation<O, PP, U, L>>,
+    operation: Option<RetainedStoreOperation<'inv, O, PP, U, L>>,
     containment_anchor: RetainedPlanningContainmentAnchor,
     contain_if_abandoned: bool,
 }
 
-impl<O, PP, U, L> ScopedDormantActivation<O, PP, U, L>
+impl<'inv, O, PP, U, L> ScopedDormantActivation<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    fn operation(&self) -> &RetainedStoreOperation<O, PP, U, L> {
+    fn operation(&self) -> &RetainedStoreOperation<'inv, O, PP, U, L> {
         self.operation
             .as_ref()
             .expect("an armed dormant activation owns exactly one retained-store operation")
     }
 
-    fn operation_mut(&mut self) -> &mut RetainedStoreOperation<O, PP, U, L> {
+    fn operation_mut(&mut self) -> &mut RetainedStoreOperation<'inv, O, PP, U, L> {
         self.operation
             .as_mut()
             .expect("an armed dormant activation owns exactly one retained-store operation")
@@ -1176,7 +1187,7 @@ where
 
     fn into_operation(
         mut self,
-    ) -> Result<RetainedStoreOperation<O, PP, U, L>, StoreActivationContainment> {
+    ) -> Result<RetainedStoreOperation<'inv, O, PP, U, L>, StoreActivationContainment> {
         let Some(operation) = self.operation.take() else {
             let containment_anchor = self.containment_anchor.share();
             self.contain_if_abandoned = false;
@@ -1189,7 +1200,7 @@ where
     }
 }
 
-impl<O, PP, U, L> Drop for ScopedDormantActivation<O, PP, U, L>
+impl<'inv, O, PP, U, L> Drop for ScopedDormantActivation<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1215,13 +1226,13 @@ where
 /// remains available only through its narrow borrowed capabilities. Exact canonical writer capacity
 /// stays inside the single-use success request emitted by a sealed construction plan.
 #[must_use = "the session outcome owner must resolve or activate its retained operation"]
-pub struct RetainedStoreSessionOutcomeOwner<O, PP, U, L = FreshStoreLineage>
+pub struct RetainedStoreSessionOutcomeOwner<'inv, O, PP, U, L = FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    dormant: ScopedDormantActivation<O, PP, U, L>,
+    dormant: ScopedDormantActivation<'inv, O, PP, U, L>,
     policy: CanonicalActivationSessionPolicy,
     scoped_failure: BoundScopedFailureRequest,
     failure_work: FailureEvidenceWorkBudget,
@@ -1257,13 +1268,14 @@ impl StoreActivationContainmentAnchor {
     }
 }
 
-fn finish_rejected_session<O, PP, U, E, L>(
-    assembly: RetainedStorePublicationAssembly<O, PP, U, L>,
+fn finish_rejected_session<'inv, O, PP, U, E, L>(
+    assembly: RetainedStorePublicationAssembly<'inv, O, PP, U, L>,
+    cause_slot: CanonicalCauseSlot<'inv, StoreCanonicalRejection<E>>,
     failure_work: FailureEvidenceWorkBudget,
     outcome_evidence_destination_dimension: StoreDimensionKey,
     cause: StoreCanonicalRejection<E>,
     failure_code: PreparationFailureCode,
-) -> Result<RejectedCanonicalStoreSession<O, PP, U, E>, StoreActivationContainment>
+) -> Result<RejectedCanonicalStoreSession<'inv, O, PP, U, E>, StoreActivationContainment>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1272,7 +1284,15 @@ where
     #[cfg(test)]
     inject_scoped_transition_panic(ScopedTransitionPanicPoint::FinishRejectedSession);
 
-    let cause = ManuallyDrop::new(cause);
+    let cause = match cause_slot.place(cause) {
+        Ok(cause) => ManuallyDrop::new(cause),
+        Err(cause) => {
+            let _ = drop_scoped_value(cause);
+            return Err(StoreActivationContainment {
+                cause: assembly.contain_activation_fault(),
+            });
+        }
+    };
     let RetainedStorePublicationAssembly {
         raw,
         fallback_cause: _,
@@ -1386,7 +1406,7 @@ fn drop_materialization<T, E, Kind, Tag>(
     }
 }
 
-fn drop_scoped_value<T>(value: T) -> Result<(), ()> {
+pub(super) fn drop_scoped_value<T>(value: T) -> Result<(), ()> {
     match catch_unwind(AssertUnwindSafe(|| drop(value))) {
         Ok(()) => Ok(()),
         Err(payload) => {
@@ -1488,27 +1508,8 @@ fn failure_work_envelope_exhausted() -> StoreRuntimeError {
     )
 }
 
-fn prepare_product_graph_fallback<O, PP, U>(
-    fallback: StoreFallbackOnly<O, PP, U>,
-) -> Result<VerifiedMinimalFallback<StoreRuntimeError>, StoreActivationContainment>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    match fallback.prepare_minimal_fallback() {
-        Ok(prepared) => Ok(VerifiedMinimalFallback::new(
-            prepared,
-            activation_product_graph_cause(),
-        )),
-        Err(StorePrepareError::FinalizationContainment(cause)) => {
-            Err(StoreActivationContainment { cause })
-        }
-    }
-}
-
 fn contain_operation<O, PP, U, L>(
-    operation: RetainedStoreOperation<O, PP, U, L>,
+    operation: RetainedStoreOperation<'_, O, PP, U, L>,
 ) -> StoreActivationContainment
 where
     O: OperationOwner,
@@ -1528,7 +1529,7 @@ where
 
 // Keeping the linear operation owner inline avoids an unmetered allocation on activation failure.
 #[allow(clippy::large_enum_variant)]
-enum ActivationOpenFailure<O, PP, U, L>
+enum ActivationOpenFailure<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1537,22 +1538,22 @@ where
     // The account may already be quarantined by the faulting physical action. Keeping the
     // operation here delays final ownership-graph containment until caller-owned inputs drop.
     DeferredContainment {
-        operation: RetainedStoreOperation<O, PP, U, L>,
+        operation: RetainedStoreOperation<'inv, O, PP, U, L>,
     },
     Recoverable {
         cause: StoreRuntimeError,
         failure_code: PreparationFailureCode,
         fallback_only: bool,
         // Keep the recoverable operation last so its physical baseline observes any unwind.
-        operation: RetainedStoreOperation<O, PP, U, L>,
+        operation: RetainedStoreOperation<'inv, O, PP, U, L>,
     },
 }
 
 #[allow(clippy::result_large_err, clippy::type_complexity)]
 fn try_open_activation<O, PP, U, L>(
-    operation: RetainedStoreOperation<O, PP, U, L>,
+    operation: RetainedStoreOperation<'_, O, PP, U, L>,
     plan: RetainedStorePublicationPlan,
-) -> Result<RetainedStorePublicationAssembly<O, PP, U, L>, ActivationOpenFailure<O, PP, U, L>>
+) -> Result<RetainedStorePublicationAssembly<'_, O, PP, U, L>, ActivationOpenFailure<'_, O, PP, U, L>>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1679,6 +1680,7 @@ where
 /// transitions. No ledger key, operation owner, publication authority, or generation identity can
 /// escape this interface.
 pub struct CanonicalPlanning<
+    'inv,
     'scope,
     O,
     PP,
@@ -1693,24 +1695,26 @@ pub struct CanonicalPlanning<
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    driver: &'scope mut ScopedActivationDriver<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+    driver:
+        &'scope mut ScopedActivationDriver<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
     receipt_brand: &'scope ScopedReceiptBrand,
 }
 
-/// Linear role-bound semantic-work session for authority-free semantic preflight.
+/// Borrowed role-bound view of the operation's semantic preflight host.
 ///
 /// Each `run_unit` admits its own attempted unit immediately before the action and advances
 /// consumed work only after that action returns normally. Scratch storage remains metered by the
-/// same operation without exposing a raw phase, dimension, ledger, or operation owner.
+/// same operation without exposing a raw phase, dimension, ledger, or operation owner. Only
+/// `CanonicalPlanning::with_semantic_work` constructs and finishes the actual host; clients
+/// receive a mutable loan and cannot forget its cleanup by forgetting that loan.
 pub struct CanonicalSemanticWorkSession<'borrow, 'scope, O, PP, U, L = FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    work: StoreExecutionWork<'borrow, O>,
-    work_group: StoreBoundWorkGroup<'borrow, 1>,
-    services: StoreExecutionServices<'borrow, O, PP, U>,
+    context: StoreInvocation<'borrow, O, PP, U>,
+    work_group: StoreInvocationLayout<'borrow, 1>,
     first_fault: &'borrow mut Option<ActivationFirstFault>,
     phase: StorePhaseKey,
     scratch_dimension: StoreDimensionKey,
@@ -1718,8 +1722,17 @@ where
     receipt_brand: &'scope ScopedReceiptBrand,
     completed_any: bool,
     resolved: bool,
-    lineage: PhantomData<&'borrow mut RetainedStoreOperation<O, PP, U, L>>,
+    lineage: PhantomData<&'borrow mut RetainedStoreOperation<'borrow, O, PP, U, L>>,
     scope: PhantomData<fn(&'scope ()) -> &'scope ()>,
+}
+
+/// A semantic pass preserves its domain rejection separately from runtime qualification.
+#[derive(Debug)]
+pub enum CanonicalSemanticWorkError<E> {
+    /// Entry or successful completion could not be qualified by the actual invocation.
+    Runtime(StoreRuntimeError),
+    /// The normally returned domain rejection. The planning host retains any runtime fault.
+    Rejected(E),
 }
 
 /// Linear proof that one scoped semantic pass completed at least one metered action.
@@ -1817,6 +1830,7 @@ impl<'scope, P> CanonicalSealedActivationPlan<'scope, P> {
 /// interprets the core plan.
 #[must_use = "the activation permit must activate exactly once"]
 pub struct CanonicalActivationPermit<
+    'inv,
     'scope,
     O,
     PP,
@@ -1836,8 +1850,9 @@ pub struct CanonicalActivationPermit<
         clippy::type_complexity,
         reason = "the U4e permit borrows the complete inline linear driver without allocation"
     )]
-    driver:
-        Option<&'scope mut ScopedActivationDriver<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>>,
+    driver: Option<
+        &'scope mut ScopedActivationDriver<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+    >,
     request: Option<BoundScopedSuccessRequest>,
     plan: Option<P>,
     receipt_brand: &'scope ScopedReceiptBrand,
@@ -1851,6 +1866,7 @@ pub struct CanonicalActivationPermit<
 /// contained fail closed.
 #[must_use = "resolve the unsealed activation exactly once"]
 pub struct CanonicalActivationSealFailure<
+    'inv,
     'scope,
     O,
     PP,
@@ -1870,8 +1886,9 @@ pub struct CanonicalActivationSealFailure<
         clippy::type_complexity,
         reason = "the U4e resolver borrows the complete inline linear driver without allocation"
     )]
-    driver:
-        Option<&'scope mut ScopedActivationDriver<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>>,
+    driver: Option<
+        &'scope mut ScopedActivationDriver<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+    >,
     plan: Option<P>,
     receipt_brand: &'scope ScopedReceiptBrand,
 }
@@ -1883,6 +1900,7 @@ pub struct CanonicalActivationSealFailure<
     reason = "the linear activation permit remains inline so no unmetered allocation is introduced"
 )]
 pub enum CanonicalActivationSeal<
+    'inv,
     'scope,
     O,
     PP,
@@ -1898,9 +1916,23 @@ pub enum CanonicalActivationSeal<
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    Sealed(CanonicalActivationPermit<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>),
+    Sealed(
+        CanonicalActivationPermit<'inv, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>,
+    ),
     Unsealed(
-        CanonicalActivationSealFailure<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>,
+        CanonicalActivationSealFailure<
+            'inv,
+            'scope,
+            O,
+            PP,
+            U,
+            T,
+            E,
+            CanonicalKind,
+            CanonicalTag,
+            L,
+            P,
+        >,
     ),
 }
 
@@ -1925,41 +1957,44 @@ enum ScopedSemanticState {
     Rejected,
 }
 
-enum ScopedPendingActivation<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
+enum ScopedPendingActivation<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    Activated(ActivatedCanonicalStoreSession<O, PP, U, T, CanonicalKind, CanonicalTag, L>),
-    Rejected(RejectedCanonicalStoreSession<O, PP, U, E>),
-    NeverActivated(NeverActivatedStoreSession<O, PP, U, E, L>),
+    Activated(ActivatedCanonicalStoreSession<'inv, O, PP, U, T, CanonicalKind, CanonicalTag, L>),
+    Rejected(RejectedCanonicalStoreSession<'inv, O, PP, U, E>),
+    NeverActivated(NeverActivatedStoreSession<'inv, O, PP, U, E, L>),
 }
 
 #[allow(
     clippy::large_enum_variant,
     reason = "the scoped state keeps every linear terminal owner inline for fail-closed containment without allocation"
 )]
-enum ScopedActivationState<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
+enum ScopedActivationState<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    Dormant(ScopedDormantActivation<O, PP, U, L>),
+    Dormant(ScopedDormantActivation<'inv, O, PP, U, L>),
     Transitioning,
-    Pending(ScopedPendingActivation<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>),
+    Pending(ScopedPendingActivation<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>),
     Contained(StoreActivationContainment),
     Finished,
 }
 
-struct ScopedActivationDriver<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
+struct ScopedActivationDriver<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    state: ScopedActivationState<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+    output: Option<CanonicalOutputSlot<'inv, T>>,
+    never: Option<CanonicalCauseSlot<'inv, StoreNeverActivatedCause<E>>>,
+    rejection: Option<CanonicalCauseSlot<'inv, StoreCanonicalRejection<E>>>,
+    state: ScopedActivationState<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
     containment_anchor: RetainedPlanningContainmentAnchor,
     roles: Option<BoundActivationRoles>,
     failure: Option<BoundScopedFailureRequest>,
@@ -2385,13 +2420,13 @@ struct VerifiedRejection<E> {
 }
 
 /// Canonical-only lane borrowed for exactly one materialization callback.
-pub struct CanonicalLane<'lane, O, PP, U, L = FreshStoreLineage>
+pub struct CanonicalLane<'inv, 'lane, O, PP, U, L = FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    assembly: &'lane mut RetainedStorePublicationAssembly<O, PP, U, L>,
+    assembly: &'lane mut RetainedStorePublicationAssembly<'inv, O, PP, U, L>,
     first_fault: &'lane mut Option<ActivationFirstFault>,
     materialization_phase: StorePhaseKey,
     materialization_work_dimension: StoreDimensionKey,
@@ -2431,6 +2466,7 @@ pub enum StoreCanonicalRejection<E> {
 /// The activation seam deliberately exposes no writable assembly or raw ownership bridge.
 #[must_use = "the candidate must be prepared or explicitly downgraded"]
 pub struct ActivatedCanonicalStoreSession<
+    'inv,
     O,
     PP,
     U,
@@ -2444,7 +2480,7 @@ pub struct ActivatedCanonicalStoreSession<
     U: ProgressUnit,
 {
     canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
-    owner: PayloadOwner<T, RetainedStorePublicationAssembly<O, PP, U, L>>,
+    owner: PayloadOwner<PayloadLoan<'inv, T>, RetainedStorePublicationAssembly<'inv, O, PP, U, L>>,
     failure_work: FailureEvidenceWorkBudget,
     validation_phase: StorePhaseKey,
     validation_work_dimension: StoreDimensionKey,
@@ -2479,11 +2515,26 @@ pub enum OutcomeEvidenceDecision<Kind, Tag> {
     Abort,
 }
 
-type CandidatePayloadOwner<O, PP, U, T, Proof, CK, CT, EK, ET> =
-    PayloadOwner<Proof, PayloadOwner<T, ValidatedStoreSuccess<O, PP, U, CK, CT, EK, ET>>>;
+type CandidatePayloadOwner<'inv, O, PP, U, T, Proof, CK, CT, EK, ET> = PayloadOwner<
+    PayloadLoan<'inv, Proof>,
+    PayloadOwner<PayloadLoan<'inv, T>, ValidatedStoreSuccess<'inv, O, PP, U, CK, CT, EK, ET>>,
+>;
 
-type FrozenPayloadOwner<O, PP, U, T, Proof, CK, CT, EK, ET> =
-    PayloadOwner<T, PayloadOwner<Proof, StoreSuccessFreezePermit<O, PP, U, CK, CT, EK, ET>>>;
+type FrozenPayloadOwner<'inv, O, PP, U, T, Proof, CK, CT, EK, ET> = PayloadOwner<
+    PayloadLoan<'inv, T>,
+    PayloadOwner<
+        PayloadLoan<'inv, Proof>,
+        StoreSuccessFreezePermit<'inv, O, PP, U, CK, CT, EK, ET>,
+    >,
+>;
+
+type JointPayloadOwner<'inv, O, PP, U, T, Proof, CK, CT, EK, ET> = PayloadOwner<
+    PayloadLoan<'inv, T>,
+    PayloadOwner<
+        PayloadLoan<'inv, Proof>,
+        StoreSuccessFreezeContribution<'inv, O, PP, U, CK, CT, EK, ET>,
+    >,
+>;
 
 /// Candidate after central semantic validation. It contains no writable or raw store seam.
 ///
@@ -2492,6 +2543,7 @@ type FrozenPayloadOwner<O, PP, U, T, Proof, CK, CT, EK, ET> =
 /// core-owned generation admission before either side can prepare a success.
 #[must_use = "the validated candidate must enter the later joint-commit transition"]
 pub struct CanonicalCandidateStoreSession<
+    'inv,
     O,
     PP,
     U,
@@ -2508,6 +2560,7 @@ pub struct CanonicalCandidateStoreSession<
 {
     destinations: ZeroCommitDestinationFacts,
     owner: CandidatePayloadOwner<
+        'inv,
         O,
         PP,
         U,
@@ -2526,6 +2579,7 @@ pub struct CanonicalCandidateStoreSession<
 /// Payload and proof stay coupled to their physical owner through explicit destructor checks.
 #[must_use = "the freeze permit must be rejected or bound to one scoped joint commit"]
 pub struct CanonicalFreezePermit<
+    'inv,
     O,
     PP,
     U,
@@ -2541,6 +2595,7 @@ pub struct CanonicalFreezePermit<
     U: ProgressUnit,
 {
     owner: FrozenPayloadOwner<
+        'inv,
         O,
         PP,
         U,
@@ -2558,14 +2613,17 @@ pub struct CanonicalFreezePermit<
 /// Scoped operation contribution for one core-owned joint commit.
 ///
 /// The invariant lifetime brand prevents this contribution from escaping its binder or being
-/// paired with a seal from another invocation. This contribution owns its physical graph;
-/// callback payloads have already moved into the binder's separately owned values.
+/// paired with a seal from another invocation. The actual output and proof stay coupled to
+/// their original physical graph until the selected terminal branch has been prepared.
 #[must_use = "the scoped joint commit must be prepared with its matching seal"]
 pub struct CanonicalJointCommit<
+    'inv,
     'joint,
     O,
     PP,
     U,
+    T,
+    Proof,
     CanonicalKind,
     CanonicalTag,
     EvidenceKind,
@@ -2578,15 +2636,29 @@ pub struct CanonicalJointCommit<
     _failure_work: FailureEvidenceWorkBudget,
     _destinations: ZeroCommitDestinationFacts,
     joint: PhantomData<fn(&'joint mut ()) -> &'joint mut ()>,
-    store: StoreSuccessFreezeContribution<
+    owner: JointPayloadOwner<
+        'inv,
         O,
         PP,
         U,
+        T,
+        Proof,
         CanonicalKind,
         CanonicalTag,
         EvidenceKind,
         EvidenceTag,
     >,
+}
+
+/// Exact success payloads returned after their frozen joint commit.
+///
+/// Rejection and interruption are resolved before the freeze permit is issued. A later
+/// preparation fault contains the original graph instead of publishing another outcome.
+#[must_use = "joint success owns the exact output, proof, and committed store"]
+pub struct CanonicalJointSuccess<T, Proof, CK, CT, EK, ET> {
+    pub output: T,
+    pub proof: Proof,
+    pub store: super::PreparedStoreSuccess<CK, CT, EK, ET>,
 }
 
 /// Single-use seal paired with one scoped joint-commit contribution.
@@ -2601,6 +2673,7 @@ pub struct CanonicalJointSeal<'joint> {
 /// Exact result of issuing the generation freeze permit.
 #[must_use = "every freeze-permit branch retains the exact terminal owner"]
 pub enum CanonicalFreezePermitIssue<
+    'inv,
     O,
     PP,
     U,
@@ -2617,6 +2690,7 @@ pub enum CanonicalFreezePermitIssue<
 {
     Ready(
         CanonicalFreezePermit<
+            'inv,
             O,
             PP,
             U,
@@ -2630,6 +2704,7 @@ pub enum CanonicalFreezePermitIssue<
     ),
     Interrupted(
         RootedFailureEvidence<
+            'inv,
             O,
             PP,
             U,
@@ -2641,6 +2716,7 @@ pub enum CanonicalFreezePermitIssue<
     ),
     DestinationRejected(
         RootedFailureEvidence<
+            'inv,
             O,
             PP,
             U,
@@ -2706,6 +2782,7 @@ impl ZeroCommitDestinationFacts {
 /// A centrally rejected canonical candidate with an eager-cleaned, rooted failure owner.
 #[must_use = "the rejected candidate must validate rich evidence or prepare fallback"]
 pub struct CentrallyRejectedCanonicalStoreSession<
+    'inv,
     O,
     PP,
     U,
@@ -2719,6 +2796,7 @@ pub struct CentrallyRejectedCanonicalStoreSession<
     U: ProgressUnit,
 {
     root: RootedFailureEvidence<
+        'inv,
         O,
         PP,
         U,
@@ -2731,6 +2809,7 @@ pub struct CentrallyRejectedCanonicalStoreSession<
 
 /// Rich-failure validation result for a centrally rejected canonical candidate.
 pub type CanonicalRejectionFailureValidation<
+    'inv,
     O,
     PP,
     U,
@@ -2738,22 +2817,32 @@ pub type CanonicalRejectionFailureValidation<
     EvidenceKind,
     EvidenceTag,
     State = OrdinaryFailureState,
-> = RootedFailureValidation<O, PP, U, StoreCanonicalRejection<E>, EvidenceKind, EvidenceTag, State>;
+> = RootedFailureValidation<
+    'inv,
+    O,
+    PP,
+    U,
+    StoreCanonicalRejection<E>,
+    EvidenceKind,
+    EvidenceTag,
+    State,
+>;
 
 /// A centrally interrupted candidate with a trusted control or ledger cause.
 #[must_use = "the interrupted candidate must validate evidence or prepare fallback"]
-pub struct InterruptedCanonicalStoreSession<O, PP, U, EvidenceKind, EvidenceTag>
+pub struct InterruptedCanonicalStoreSession<'inv, O, PP, U, EvidenceKind, EvidenceTag>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    root: RootedFailureEvidence<O, PP, U, StoreWorkError, EvidenceKind, EvidenceTag>,
+    root: RootedFailureEvidence<'inv, O, PP, U, StoreWorkError, EvidenceKind, EvidenceTag>,
 }
 
 /// Opaque validation outcome for a materialized canonical session.
 #[must_use = "every central-validation branch retains its exact owner"]
 pub enum CanonicalCentralValidationOutcome<
+    'inv,
     O,
     PP,
     U,
@@ -2771,6 +2860,7 @@ pub enum CanonicalCentralValidationOutcome<
 {
     Candidate(
         CanonicalCandidateStoreSession<
+            'inv,
             O,
             PP,
             U,
@@ -2782,21 +2872,21 @@ pub enum CanonicalCentralValidationOutcome<
             EvidenceTag,
         >,
     ),
-    Rejected(CentrallyRejectedCanonicalStoreSession<O, PP, U, E, EvidenceKind, EvidenceTag>),
+    Rejected(CentrallyRejectedCanonicalStoreSession<'inv, O, PP, U, E, EvidenceKind, EvidenceTag>),
     /// No terminal preparation has occurred. Release ordinary scratch reservations before
     /// calling `prepare_minimal_fallback` on this owner.
-    Fallback(PendingMinimalFallback<O, PP, U>),
-    Interrupted(InterruptedCanonicalStoreSession<O, PP, U, EvidenceKind, EvidenceTag>),
+    Fallback(PendingMinimalFallback<'inv, O, PP, U>),
+    Interrupted(InterruptedCanonicalStoreSession<'inv, O, PP, U, EvidenceKind, EvidenceTag>),
 }
 
 /// One-shot canonical outcome-evidence writer used only before central validation.
-pub struct CanonicalOutcomeEvidenceLane<'lane, O, PP, U, L = FreshStoreLineage>
+pub struct CanonicalOutcomeEvidenceLane<'inv, 'lane, O, PP, U, L = FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    assembly: &'lane mut RetainedStorePublicationAssembly<O, PP, U, L>,
+    assembly: &'lane mut RetainedStorePublicationAssembly<'inv, O, PP, U, L>,
     first_fault: &'lane mut Option<ActivationFirstFault>,
     failure_work: &'lane mut FailureEvidenceWorkBudget,
     work_dimension: StoreDimensionKey,
@@ -2809,13 +2899,13 @@ pub enum FailureEvidenceDecision<Kind, Tag> {
 }
 
 /// Unrooted failure owner shared by materialization rejection and never-activation.
-struct UnrootedFailureEvidence<O, PP, U, Cause>
+struct UnrootedFailureEvidence<'inv, O, PP, U, Cause>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    owner: PayloadOwner<Cause, RawStoreFailureAssembly<O, PP, U>>,
+    owner: PayloadOwner<PayloadLoan<'inv, Cause>, RawStoreFailureAssembly<'inv, O, PP, U>>,
     domain: StoreKeyDomain,
     failure_code: PreparationFailureCode,
     failure_work: FailureEvidenceWorkBudget,
@@ -2824,27 +2914,27 @@ where
 
 /// Verified post-activation rejection after eager canonical cleanup.
 #[must_use = "rejected canonical state must build rich evidence or prepare minimal fallback"]
-pub struct RejectedCanonicalStoreSession<O, PP, U, E>
+pub struct RejectedCanonicalStoreSession<'inv, O, PP, U, E>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    owner: UnrootedFailureEvidence<O, PP, U, StoreCanonicalRejection<E>>,
+    owner: UnrootedFailureEvidence<'inv, O, PP, U, StoreCanonicalRejection<E>>,
 }
 
 /// Failure-evidence construction result for a rejected canonical candidate.
-pub type CanonicalRejectionEvidenceOutcome<O, PP, U, E, EvidenceKind, EvidenceTag> =
-    FailureEvidenceOutcome<O, PP, U, StoreCanonicalRejection<E>, EvidenceKind, EvidenceTag>;
+pub type CanonicalRejectionEvidenceOutcome<'inv, O, PP, U, E, EvidenceKind, EvidenceTag> =
+    FailureEvidenceOutcome<'inv, O, PP, U, StoreCanonicalRejection<E>, EvidenceKind, EvidenceTag>;
 
 /// One-shot failure-evidence lane. It is consumed together with the owner and cannot be reopened.
-pub struct FailureEvidenceLane<'lane, O, PP, U>
+pub struct FailureEvidenceLane<'inv, 'lane, O, PP, U>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    raw: &'lane mut RawStoreFailureAssembly<O, PP, U>,
+    raw: &'lane mut RawStoreFailureAssembly<'inv, O, PP, U>,
     first_fault: &'lane mut Option<ActivationFirstFault>,
     failure_work: &'lane mut FailureEvidenceWorkBudget,
 }
@@ -2863,7 +2953,7 @@ pub struct FrozenFailureState {
 
 trait FailureLifecycleState {
     fn validate_commitment<O, PP, U, EvidenceKind, EvidenceTag>(
-        validated: &mut ValidatedStoreFailure<O, PP, U, EvidenceKind, EvidenceTag>,
+        validated: &mut ValidatedStoreFailure<'_, O, PP, U, EvidenceKind, EvidenceTag>,
         outcome_evidence_destination_dimension: StoreDimensionKey,
     ) -> Result<(), StoreRuntimeError>
     where
@@ -2874,7 +2964,7 @@ trait FailureLifecycleState {
 
 impl FailureLifecycleState for OrdinaryFailureState {
     fn validate_commitment<O, PP, U, EvidenceKind, EvidenceTag>(
-        validated: &mut ValidatedStoreFailure<O, PP, U, EvidenceKind, EvidenceTag>,
+        validated: &mut ValidatedStoreFailure<'_, O, PP, U, EvidenceKind, EvidenceTag>,
         outcome_evidence_destination_dimension: StoreDimensionKey,
     ) -> Result<(), StoreRuntimeError>
     where
@@ -2891,7 +2981,7 @@ impl FailureLifecycleState for OrdinaryFailureState {
 
 impl FailureLifecycleState for FrozenFailureState {
     fn validate_commitment<O, PP, U, EvidenceKind, EvidenceTag>(
-        validated: &mut ValidatedStoreFailure<O, PP, U, EvidenceKind, EvidenceTag>,
+        validated: &mut ValidatedStoreFailure<'_, O, PP, U, EvidenceKind, EvidenceTag>,
         _outcome_evidence_destination_dimension: StoreDimensionKey,
     ) -> Result<(), StoreRuntimeError>
     where
@@ -2910,6 +3000,7 @@ impl FailureLifecycleState for FrozenFailureState {
 /// Rooted failure evidence. No mutation API is exposed after the one-shot lane completes.
 #[must_use = "rooted failure evidence must be validated or prepared"]
 pub struct RootedFailureEvidence<
+    'inv,
     O,
     PP,
     U,
@@ -2922,7 +3013,10 @@ pub struct RootedFailureEvidence<
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    owner: PayloadOwner<Cause, StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>>,
+    owner: PayloadOwner<
+        PayloadLoan<'inv, Cause>,
+        StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
+    >,
     failure_work: FailureEvidenceWorkBudget,
     outcome_evidence_destination_dimension: StoreDimensionKey,
     _lifecycle: PhantomData<State>,
@@ -2931,6 +3025,7 @@ pub struct RootedFailureEvidence<
 /// Result of validating an already-rooted failure graph.
 #[must_use = "the validated or rejected failure owner must be consumed"]
 pub enum RootedFailureValidation<
+    'inv,
     O,
     PP,
     U,
@@ -2943,13 +3038,14 @@ pub enum RootedFailureValidation<
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    Valid(ValidatedFailureEvidence<O, PP, U, Cause, EvidenceKind, EvidenceTag, State>),
-    Rejected(RejectedFailureEvidence<O, PP, U, Cause, EvidenceKind, EvidenceTag>),
+    Valid(ValidatedFailureEvidence<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag, State>),
+    Rejected(RejectedFailureEvidence<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag>),
     Fallback(VerifiedMinimalFallback<StoreRuntimeError>),
 }
 
 #[must_use = "validated failure evidence must be prepared or downgraded"]
 pub struct ValidatedFailureEvidence<
+    'inv,
     O,
     PP,
     U,
@@ -2962,7 +3058,10 @@ pub struct ValidatedFailureEvidence<
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    owner: PayloadOwner<Cause, ValidatedStoreFailure<O, PP, U, EvidenceKind, EvidenceTag>>,
+    owner: PayloadOwner<
+        PayloadLoan<'inv, Cause>,
+        ValidatedStoreFailure<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
+    >,
     _lifecycle: PhantomData<State>,
 }
 
@@ -2975,13 +3074,16 @@ pub struct PreparedFailureEvidence<Cause, EvidenceKind, EvidenceTag> {
 }
 
 #[must_use = "rejected failure evidence must prepare the minimal fallback"]
-pub struct RejectedFailureEvidence<O, PP, U, Cause, EvidenceKind, EvidenceTag>
+pub struct RejectedFailureEvidence<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    owner: PayloadOwner<Cause, StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>>,
+    owner: PayloadOwner<
+        PayloadLoan<'inv, Cause>,
+        StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
+    >,
 }
 
 /// Minimal fallback whose typed source cause remains available without exposing physical state.
@@ -2999,26 +3101,25 @@ pub struct VerifiedMinimalFallback<Cause> {
 /// prepares terminal evidence. Valid retained-output reservations may outlive preparation under
 /// their existing protocol. Dropping this owner uses the fallback-only owner's cleanup protocol.
 #[must_use = "the pending fallback must be prepared after caller cleanup or deliberately dropped"]
-pub struct PendingMinimalFallback<O, PP, U>
+pub struct PendingMinimalFallback<'inv, O, PP, U>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    cause: StoreRuntimeError,
-    fallback: StoreFallbackOnly<O, PP, U>,
+    owner: PayloadOwner<PayloadLoan<'inv, StoreRuntimeError>, StoreFallbackOnly<'inv, O, PP, U>>,
 }
 
 // Both variants are linear terminal owners. Boxing the larger owner would bypass the store ledger.
 #[allow(clippy::large_enum_variant)]
 #[must_use = "the rooted evidence or minimal fallback owner must be consumed"]
-pub enum FailureEvidenceOutcome<O, PP, U, Cause, EvidenceKind, EvidenceTag>
+pub enum FailureEvidenceOutcome<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    Rooted(RootedFailureEvidence<O, PP, U, Cause, EvidenceKind, EvidenceTag>),
+    Rooted(RootedFailureEvidence<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag>),
     MinimalFallback(VerifiedMinimalFallback<Cause>),
 }
 
@@ -3029,42 +3130,42 @@ pub enum StoreNeverActivatedCause<E> {
     Runtime(StoreRuntimeError),
 }
 
-enum NeverActivatedAuthority<O, PP, U, L>
+enum NeverActivatedAuthority<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    Operation(RetainedStoreOperation<O, PP, U, L>),
-    FallbackOnly(RetainedStoreOperation<O, PP, U, L>),
+    Operation(RetainedStoreOperation<'inv, O, PP, U, L>),
+    FallbackOnly(RetainedStoreOperation<'inv, O, PP, U, L>),
 }
 
 /// Session state proving that no canonical lane was exposed.
 #[must_use = "never-activated state must publish rich evidence or minimal fallback"]
-pub struct NeverActivatedStoreSession<O, PP, U, E, L = FreshStoreLineage>
+pub struct NeverActivatedStoreSession<'inv, O, PP, U, E, L = FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    owner: NeverActivatedOwner<O, PP, U, E, L>,
+    owner: NeverActivatedOwner<'inv, O, PP, U, E, L>,
     failure_code: PreparationFailureCode,
     outcome_evidence_plan: RetainedStoreBlockTablePlan,
     failure_work: FailureEvidenceWorkBudget,
     outcome_evidence_destination_dimension: StoreDimensionKey,
 }
 
-struct NeverActivatedOwner<O, PP, U, E, L>
+struct NeverActivatedOwner<'inv, O, PP, U, E, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    cause: Option<StoreNeverActivatedCause<E>>,
-    authority: Option<NeverActivatedAuthority<O, PP, U, L>>,
+    cause: Option<PayloadLoan<'inv, StoreNeverActivatedCause<E>>>,
+    authority: Option<NeverActivatedAuthority<'inv, O, PP, U, L>>,
 }
 
-impl<O, PP, U, E, L> NeverActivatedOwner<O, PP, U, E, L>
+impl<'inv, O, PP, U, E, L> NeverActivatedOwner<'inv, O, PP, U, E, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -3073,8 +3174,8 @@ where
     fn into_parts(
         mut self,
     ) -> (
-        StoreNeverActivatedCause<E>,
-        NeverActivatedAuthority<O, PP, U, L>,
+        PayloadLoan<'inv, StoreNeverActivatedCause<E>>,
+        NeverActivatedAuthority<'inv, O, PP, U, L>,
     ) {
         (
             self.cause.take().expect("the cause is transferred once"),
@@ -3085,7 +3186,7 @@ where
     }
 }
 
-impl<O, PP, U, E, L> Drop for NeverActivatedOwner<O, PP, U, E, L>
+impl<'inv, O, PP, U, E, L> Drop for NeverActivatedOwner<'inv, O, PP, U, E, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -3114,10 +3215,10 @@ where
     }
 }
 
-fn prepare_operation_minimal<O, PP, U, L, Cause>(
-    mut operation: RetainedStoreOperation<O, PP, U, L>,
+fn prepare_operation_minimal<'inv, O, PP, U, L, Cause>(
+    mut operation: RetainedStoreOperation<'inv, O, PP, U, L>,
     failure_code: PreparationFailureCode,
-    cause: Cause,
+    cause: PayloadLoan<'inv, Cause>,
 ) -> Result<VerifiedMinimalFallback<Cause>, StoreActivationContainment>
 where
     O: OperationOwner,
@@ -3137,10 +3238,10 @@ where
         });
     }
     let prepared = raw
-        .prepare_minimal_fallback::<super::StoredBlock, super::StoredBlock>(failure_code)
+        .prepare_minimal_fallback(failure_code)
         .map(|raw| classify_prepared_fallback(raw, domain));
     match prepared {
-        Ok(prepared) => Ok(VerifiedMinimalFallback::new(prepared, cause)),
+        Ok(prepared) => Ok(VerifiedMinimalFallback::new(prepared, cause.into_owned())),
         Err(error) => {
             let _ = drop_scoped_value(cause);
             Err(StoreActivationContainment {
@@ -3150,11 +3251,12 @@ where
     }
 }
 
-fn defer_assembly_minimal<O, PP, U, L>(
-    mut assembly: RetainedStorePublicationAssembly<O, PP, U, L>,
+fn defer_assembly_minimal<'inv, O, PP, U, L>(
+    mut assembly: RetainedStorePublicationAssembly<'inv, O, PP, U, L>,
+    cause_slot: CanonicalCauseSlot<'inv, StoreRuntimeError>,
     cause: StoreRuntimeError,
     failure_code: PreparationFailureCode,
-) -> Result<PendingMinimalFallback<O, PP, U>, StoreActivationContainment>
+) -> Result<PendingMinimalFallback<'inv, O, PP, U>, StoreActivationContainment>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -3177,7 +3279,7 @@ where
             cause: raw.contain_activation_fault(),
         });
     }
-    Ok(PendingMinimalFallback::new(
+    PendingMinimalFallback::new(
         StoreFallbackOnly {
             state: super::StoreFallbackState::Assembly {
                 raw,
@@ -3185,8 +3287,9 @@ where
             },
             domain,
         },
+        cause_slot,
         ManuallyDrop::into_inner(cause),
-    ))
+    )
 }
 
 const fn map_raw_prepare_error(
@@ -3198,7 +3301,7 @@ const fn map_raw_prepare_error(
 }
 
 fn prepare_operation_minimal_direct<O, PP, U, L>(
-    mut operation: RetainedStoreOperation<O, PP, U, L>,
+    mut operation: RetainedStoreOperation<'_, O, PP, U, L>,
     failure_code: PreparationFailureCode,
 ) -> Result<PreparedStoreFallback, StorePrepareError>
 where
@@ -3217,7 +3320,7 @@ where
             raw.contain_activation_fault(),
         ));
     }
-    raw.prepare_minimal_fallback::<super::StoredBlock, super::StoredBlock>(failure_code)
+    raw.prepare_minimal_fallback(failure_code)
         .map(|raw| classify_prepared_fallback(raw, domain))
         .map_err(StorePrepareError::from_raw)
 }
@@ -3225,6 +3328,7 @@ where
 /// Scoped activation disposition. No raw assembly is present in any outcome.
 #[must_use = "every branch retains its exact linear session owner"]
 pub enum CanonicalActivationOutcome<
+    'inv,
     O,
     PP,
     U,
@@ -3238,10 +3342,9 @@ pub enum CanonicalActivationOutcome<
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    Activated(ActivatedCanonicalStoreSession<O, PP, U, T, CanonicalKind, CanonicalTag, L>),
-    Rejected(RejectedCanonicalStoreSession<O, PP, U, E>),
-    NeverActivated(NeverActivatedStoreSession<O, PP, U, E, L>),
-    Fallback(VerifiedMinimalFallback<StoreRuntimeError>),
+    Activated(ActivatedCanonicalStoreSession<'inv, O, PP, U, T, CanonicalKind, CanonicalTag, L>),
+    Rejected(RejectedCanonicalStoreSession<'inv, O, PP, U, E>),
+    NeverActivated(NeverActivatedStoreSession<'inv, O, PP, U, E, L>),
 }
 
 /// Fail-closed activation result retaining the quarantined account snapshot.
@@ -3388,8 +3491,23 @@ mod scoped_transition_tests {
         }
     }
 
-    type TestOperation = RetainedStoreOperation<TestOwner, TestProgress, TestUnit>;
-    type TestOutcome = CanonicalActivationOutcome<
+    type TestInvocationHost = CanonicalInvocationHost<
+        TestOwner,
+        TestProgress,
+        TestUnit,
+        (),
+        (),
+        TestRejection,
+        TestRejection,
+        (),
+        ScalarSequence<u8>,
+        CanonicalTag,
+        ScalarSequence<u8>,
+        CanonicalTag,
+    >;
+    type TestOperation<'inv> = CanonicalBodyOperation<'inv, TestOwner, TestProgress, TestUnit>;
+    type TestOutcome<'inv> = CanonicalActivationOutcome<
+        'inv,
         TestOwner,
         TestProgress,
         TestUnit,
@@ -3442,7 +3560,24 @@ mod scoped_transition_tests {
         )
     }
 
-    fn operation(account: &PhysicalStorageAccount) -> (TestOperation, TestKeys) {
+    fn operation<'inv>(
+        root: CanonicalBodyStart<'inv, TestOwner, TestProgress, TestUnit>,
+        account: &PhysicalStorageAccount,
+    ) -> (TestOperation<'inv>, TestKeys) {
+        operation_with_control_and_evidence_limit(
+            root,
+            account,
+            OperationControl::default(),
+            u64::MAX,
+        )
+    }
+
+    fn operation_with_control_and_evidence_limit<'inv>(
+        root: CanonicalBodyStart<'inv, TestOwner, TestProgress, TestUnit>,
+        account: &PhysicalStorageAccount,
+        control: OperationControl<TestProgress, TestUnit>,
+        evidence_limit: u64,
+    ) -> (TestOperation<'inv>, TestKeys) {
         let domain = StoreKeyDomain::try_new(test_catalog()).unwrap();
         let keys = TestKeys {
             phase: domain.try_admit_phase(phase_semantic(1)).unwrap(),
@@ -3464,7 +3599,7 @@ mod scoped_transition_tests {
             u64::MAX,
             u64::MAX,
         )
-        .with_published_outcome_evidence_limit(u64::MAX);
+        .with_published_outcome_evidence_limit(evidence_limit);
         let limits = LedgerLimits::new(
             u64::MAX,
             [
@@ -3488,8 +3623,7 @@ mod scoped_transition_tests {
             failure_terminal_work,
         );
         (
-            TestOperation::try_start(OperationControl::default(), ledger_plan, account, start)
-                .unwrap(),
+            TestOperation::try_start(root, control, ledger_plan, account, start).unwrap(),
             keys,
         )
     }
@@ -3525,85 +3659,130 @@ mod scoped_transition_tests {
 
     #[test]
     fn semantic_result_drop_fault_preserves_runtime_first_cause_and_latches_contract() {
+        let account = account();
         let dropped = Cell::new(false);
-        let mut first_fault = None;
+        let mut invocation_host = TestInvocationHost::new();
+        let body = invocation_host.run_body(|parts, _disposition| {
+            let CanonicalBodyParts {
+                startup: invocation_root,
+                output,
+                activation,
+                ..
+            } = parts;
+            let (operation, keys) = operation(invocation_root, &account);
+            let (policy, evidence_limits, failure, _) = scoped_shape(keys);
+            let owner = operation
+                .into_session_outcome_owner(policy, evidence_limits, failure)
+                .unwrap();
+            let result: Result<TestOutcome<'_>, StoreActivationContainment> = owner
+                .plan_and_activate_scoped(output, activation, |mut planning| {
+                    let finished = planning.with_semantic_work(|semantic| {
+                        let result = preserve_runtime_fault_then_drop_result(
+                            semantic.first_fault,
+                            StoreRuntimeError::Control(crate::ControlCause::DeadlineExceeded),
+                            PanickingResultDrop(&dropped),
+                        );
 
-        let result = preserve_runtime_fault_then_drop_result(
-            &mut first_fault,
-            StoreRuntimeError::Control(crate::ControlCause::DeadlineExceeded),
-            PanickingResultDrop(&dropped),
-        );
+                        assert!(matches!(
+                            &result,
+                            Err(StoreRuntimeError::Control(
+                                crate::ControlCause::DeadlineExceeded
+                            ))
+                        ));
+                        assert!(dropped.get());
+                        result.map(|_| ())
+                    });
 
-        assert!(matches!(
-            result,
-            Err(StoreRuntimeError::Control(
-                crate::ControlCause::DeadlineExceeded
-            ))
-        ));
-        assert!(dropped.get());
-        let first_fault = first_fault.expect("the runtime first cause remains recorded");
-        assert!(matches!(
-            first_fault.cause,
-            StoreRuntimeError::Control(crate::ControlCause::DeadlineExceeded)
-        ));
-        assert!(first_fault.contract_seen);
+                    assert!(matches!(
+                        finished,
+                        Err(CanonicalSemanticWorkError::Rejected(
+                            StoreRuntimeError::Control(crate::ControlCause::DeadlineExceeded)
+                        ))
+                    ));
+                    let first_fault = planning
+                        .driver
+                        .first_fault
+                        .as_ref()
+                        .expect("the runtime first cause remains recorded");
+                    assert!(matches!(
+                        &first_fault.cause,
+                        StoreRuntimeError::Control(crate::ControlCause::DeadlineExceeded)
+                    ));
+                    assert!(first_fault.contract_seen);
+                    planning.reject(TestRejection::Requested, 7)
+                });
+
+            assert!(result.is_err());
+            assert!(account.snapshot().poisoned());
+        });
+        assert!(body.is_err());
     }
 
     fn assert_owner_consuming_transition_panic_is_contained(point: ScopedTransitionPanicPoint) {
         let account = account();
-        let (operation, keys) = operation(&account);
-        let (policy, evidence_limits, failure, success) = scoped_shape(keys);
-        let (request_identity, request) = mint_canonical_activation_request().unwrap();
-        let success = success.with_request_identity(request_identity);
-        let owner = operation
-            .into_session_outcome_owner(policy, evidence_limits, failure)
-            .unwrap();
-        let mut success = Some(success);
+        let mut invocation_host = TestInvocationHost::new();
+        let body = invocation_host.run_body(|parts, _disposition| {
+            let CanonicalBodyParts {
+                startup: invocation_root,
+                output,
+                activation,
+                ..
+            } = parts;
+            let (operation, keys) = operation(invocation_root, &account);
+            let (policy, evidence_limits, failure, success) = scoped_shape(keys);
+            let (request_identity, request) = mint_canonical_activation_request().unwrap();
+            let success = success.with_request_identity(request_identity);
+            let owner = operation
+                .into_session_outcome_owner(policy, evidence_limits, failure)
+                .unwrap();
+            let mut success = Some(success);
 
-        let mut request = Some(request);
-        let result: Result<TestOutcome, StoreActivationContainment> = owner
-            .plan_and_activate_scoped(|mut planning| {
-                let mut semantic = planning.begin_semantic_work().unwrap();
-                semantic.run_unit(|| ()).unwrap();
-                let completion = semantic.finish_exact().unwrap();
-                let permit = match planning.seal_activation(
-                    TestActivationDescription {
-                        request: request
-                            .take()
-                            .expect("the test activation request is consumed exactly once"),
-                        requirements: success
-                            .take()
-                            .expect("the test success requirements are consumed exactly once"),
-                        execution: (),
-                    },
-                    completion,
-                ) {
-                    CanonicalActivationSeal::Sealed(permit) => permit,
-                    CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
-                };
-                test_panic_scoped_transition_at(point);
-                permit.activate(|lane, _plan| match point {
-                    ScopedTransitionPanicPoint::TryOpenActivation => {
-                        panic!("try_open_activation fault must run before materialization")
-                    }
-                    ScopedTransitionPanicPoint::FinishRejectedSession => lane
-                        .reject::<(), _, ScalarSequence<u8>, CanonicalTag>(
-                            TestRejection::Requested,
-                            7,
-                        ),
-                })
-            });
+            let mut request = Some(request);
+            let result: Result<TestOutcome<'_>, StoreActivationContainment> = owner
+                .plan_and_activate_scoped(output, activation, |mut planning| {
+                    let ((), completion) = planning
+                        .with_semantic_work(|semantic| semantic.run_unit(|| ()))
+                        .unwrap();
+                    let permit = match planning.seal_activation(
+                        TestActivationDescription {
+                            request: request
+                                .take()
+                                .expect("the test activation request is consumed exactly once"),
+                            requirements: success
+                                .take()
+                                .expect("the test success requirements are consumed exactly once"),
+                            execution: (),
+                        },
+                        completion,
+                    ) {
+                        CanonicalActivationSeal::Sealed(permit) => permit,
+                        CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
+                    };
+                    test_panic_scoped_transition_at(point);
+                    permit.activate(|lane, _plan| match point {
+                        ScopedTransitionPanicPoint::TryOpenActivation => {
+                            panic!("try_open_activation fault must run before materialization")
+                        }
+                        ScopedTransitionPanicPoint::FinishRejectedSession => lane
+                            .reject::<(), _, ScalarSequence<u8>, CanonicalTag>(
+                                TestRejection::Requested,
+                                7,
+                            ),
+                    })
+                });
 
-        assert!(result.is_err());
-        assert!(!test_scoped_transition_panic_is_armed());
-        let snapshot = account.snapshot();
-        assert!(snapshot.poisoned());
-        assert_eq!(
-            snapshot
-                .first_poison_evidence()
-                .map(|evidence| evidence.reason()),
-            Some(crate::AccountPoisonReason::OwnershipGraphUnverified)
-        );
+            assert!(result.is_err());
+            assert!(!test_scoped_transition_panic_is_armed());
+            let snapshot = account.snapshot();
+            assert!(snapshot.poisoned());
+            assert_eq!(
+                snapshot
+                    .first_poison_evidence()
+                    .map(|evidence| evidence.reason()),
+                Some(crate::AccountPoisonReason::OwnershipGraphUnverified)
+            );
+        });
+        assert!(body.is_err());
     }
 
     #[test]
@@ -3616,206 +3795,234 @@ mod scoped_transition_tests {
     #[test]
     fn panic_inside_try_open_activation_drops_scoped_inputs_before_containment() {
         let account = account();
-        let (operation, keys) = operation(&account);
-        let (policy, evidence_limits, failure, success) = scoped_shape(keys);
-        let owner = operation
-            .into_session_outcome_owner(policy, evidence_limits, failure)
-            .unwrap();
-        let mut success = Some(success);
-        let physical_baseline = account.snapshot();
-        assert!(!physical_baseline.poisoned());
-        assert!(physical_baseline.live_retained_allocations() > 0);
-        let reservation_released = Cell::new(false);
-        let plan_marker_dropped = Cell::new(false);
-        let plan_poison_seen_while_dropping = Cell::new(false);
-        let plan_poison_events_while_dropping = Cell::new(u128::MAX);
-        let materializer_dropped = Cell::new(false);
-        let materializer_poison_seen_while_dropping = Cell::new(false);
-        let materializer_poison_events_while_dropping = Cell::new(u128::MAX);
+        let mut invocation_host = TestInvocationHost::new();
+        let body = invocation_host.run_body(|parts, _disposition| {
+            let CanonicalBodyParts {
+                startup: invocation_root,
+                output,
+                activation,
+                ..
+            } = parts;
+            let (operation, keys) = operation(invocation_root, &account);
+            let (policy, evidence_limits, failure, success) = scoped_shape(keys);
+            let owner = operation
+                .into_session_outcome_owner(policy, evidence_limits, failure)
+                .unwrap();
+            let mut success = Some(success);
+            let physical_baseline = account.snapshot();
+            assert!(!physical_baseline.poisoned());
+            assert!(physical_baseline.live_retained_allocations() > 0);
+            let reservation_released = Cell::new(false);
+            let plan_marker_dropped = Cell::new(false);
+            let plan_poison_seen_while_dropping = Cell::new(false);
+            let plan_poison_events_while_dropping = Cell::new(u128::MAX);
+            let materializer_dropped = Cell::new(false);
+            let materializer_poison_seen_while_dropping = Cell::new(false);
+            let materializer_poison_events_while_dropping = Cell::new(u128::MAX);
 
-        let result: Result<TestOutcome, StoreActivationContainment> = owner
-            .plan_and_activate_scoped(|mut planning| {
-                let mut semantic = planning.begin_semantic_work().unwrap();
-                let scratch = semantic.reserve(1).unwrap();
-                semantic.validate_live_owner(&scratch).unwrap();
-                semantic.run_unit(|| ()).unwrap();
-                let completion = semantic.finish_exact().unwrap();
-                let plan = PanickingTrackedPlan {
-                    scratch: Some(scratch),
-                    reservation_released: &reservation_released,
-                    marker: Some(TransitionDropMarker {
-                        dropped: &plan_marker_dropped,
+            let result: Result<TestOutcome<'_>, StoreActivationContainment> = owner
+                .plan_and_activate_scoped(output, activation, |mut planning| {
+                    let (scratch, completion) = planning
+                        .with_semantic_work(|semantic| {
+                            let scratch = semantic.reserve(1)?;
+                            semantic.validate_live_owner(&scratch)?;
+                            semantic.run_unit(|| ())?;
+                            Ok::<_, StoreRuntimeError>(scratch)
+                        })
+                        .unwrap();
+                    let plan = PanickingTrackedPlan {
+                        scratch: Some(scratch),
+                        reservation_released: &reservation_released,
+                        marker: Some(TransitionDropMarker {
+                            dropped: &plan_marker_dropped,
+                            account: &account,
+                            poison_seen_while_dropping: &plan_poison_seen_while_dropping,
+                            poison_event_count_while_dropping: &plan_poison_events_while_dropping,
+                        }),
+                    };
+                    let permit = match planning.seal_activation(
+                        TestActivationDescription::new(
+                            success
+                                .take()
+                                .expect("the test success requirements are consumed exactly once"),
+                            plan,
+                        ),
+                        completion,
+                    ) {
+                        CanonicalActivationSeal::Sealed(permit) => permit,
+                        CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
+                    };
+                    let materializer_marker = TransitionDropMarker {
+                        dropped: &materializer_dropped,
                         account: &account,
-                        poison_seen_while_dropping: &plan_poison_seen_while_dropping,
-                        poison_event_count_while_dropping: &plan_poison_events_while_dropping,
-                    }),
-                };
-                let permit = match planning.seal_activation(
-                    TestActivationDescription::new(
-                        success
-                            .take()
-                            .expect("the test success requirements are consumed exactly once"),
-                        plan,
-                    ),
-                    completion,
-                ) {
-                    CanonicalActivationSeal::Sealed(permit) => permit,
-                    CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
-                };
-                let materializer_marker = TransitionDropMarker {
-                    dropped: &materializer_dropped,
-                    account: &account,
-                    poison_seen_while_dropping: &materializer_poison_seen_while_dropping,
-                    poison_event_count_while_dropping: &materializer_poison_events_while_dropping,
-                };
-                test_panic_scoped_transition_at(ScopedTransitionPanicPoint::TryOpenActivation);
-                permit.activate(
-                    move |_lane,
-                          _plan|
-                          -> CanonicalMaterialization<
-                        '_,
-                        (),
-                        TestRejection,
-                        ScalarSequence<u8>,
-                        CanonicalTag,
-                    > {
-                        let _ = &materializer_marker;
-                        panic!("try_open_activation fault must run before materialization")
-                    },
-                )
-            });
+                        poison_seen_while_dropping: &materializer_poison_seen_while_dropping,
+                        poison_event_count_while_dropping:
+                            &materializer_poison_events_while_dropping,
+                    };
+                    test_panic_scoped_transition_at(ScopedTransitionPanicPoint::TryOpenActivation);
+                    permit.activate(
+                        move |_lane,
+                              _plan|
+                              -> CanonicalMaterialization<
+                            '_,
+                            (),
+                            TestRejection,
+                            ScalarSequence<u8>,
+                            CanonicalTag,
+                        > {
+                            let _ = &materializer_marker;
+                            panic!("try_open_activation fault must run before materialization")
+                        },
+                    )
+                });
 
-        assert!(result.is_err());
-        assert!(!test_scoped_transition_panic_is_armed());
-        assert!(reservation_released.get());
-        assert!(plan_marker_dropped.get());
-        assert!(!plan_poison_seen_while_dropping.get());
-        assert_eq!(plan_poison_events_while_dropping.get(), 0);
-        assert!(materializer_dropped.get());
-        assert!(!materializer_poison_seen_while_dropping.get());
-        assert_eq!(materializer_poison_events_while_dropping.get(), 0);
-        let snapshot = account.snapshot();
-        assert!(snapshot.poisoned());
-        assert!(snapshot.poison_event_count() > 0);
-        assert!(snapshot.poison_event_count_exact());
-        assert!(snapshot.poison_event_domain_valid());
-        assert_eq!(
-            snapshot
-                .first_poison_evidence()
-                .map(|evidence| evidence.reason()),
-            Some(crate::AccountPoisonReason::OwnershipGraphUnverified)
-        );
-        assert_eq!(
-            snapshot.live_retained_bytes(),
-            physical_baseline.live_retained_bytes()
-        );
-        assert_eq!(
-            snapshot.live_retained_allocations(),
-            physical_baseline.live_retained_allocations()
-        );
+            assert!(result.is_err());
+            assert!(!test_scoped_transition_panic_is_armed());
+            assert!(reservation_released.get());
+            assert!(plan_marker_dropped.get());
+            assert!(!plan_poison_seen_while_dropping.get());
+            assert_eq!(plan_poison_events_while_dropping.get(), 0);
+            assert!(materializer_dropped.get());
+            assert!(!materializer_poison_seen_while_dropping.get());
+            assert_eq!(materializer_poison_events_while_dropping.get(), 0);
+            let snapshot = account.snapshot();
+            assert!(snapshot.poisoned());
+            assert!(snapshot.poison_event_count() > 0);
+            assert!(snapshot.poison_event_count_exact());
+            assert!(snapshot.poison_event_domain_valid());
+            assert_eq!(
+                snapshot
+                    .first_poison_evidence()
+                    .map(|evidence| evidence.reason()),
+                Some(crate::AccountPoisonReason::OwnershipGraphUnverified)
+            );
+            assert_eq!(
+                snapshot.live_retained_bytes(),
+                physical_baseline.live_retained_bytes()
+            );
+            assert_eq!(
+                snapshot.live_retained_allocations(),
+                physical_baseline.live_retained_allocations()
+            );
+        });
+        assert!(body.is_err());
     }
 
     #[test]
     fn fail_closed_publication_open_releases_scoped_inputs_before_final_containment() {
         let account = account();
-        let (operation, keys) = operation(&account);
-        let (policy, evidence_limits, failure, success) = scoped_shape(keys);
-        let owner = operation
-            .into_session_outcome_owner(policy, evidence_limits, failure)
-            .unwrap();
-        let mut success = Some(success);
-        let physical_baseline = account.snapshot();
-        let reservation_released = Cell::new(false);
-        let plan_marker_dropped = Cell::new(false);
-        let plan_poison_seen_while_dropping = Cell::new(false);
-        let plan_poison_events_while_dropping = Cell::new(u128::MAX);
-        let materializer_dropped = Cell::new(false);
-        let materializer_poison_seen_while_dropping = Cell::new(false);
-        let materializer_poison_events_while_dropping = Cell::new(u128::MAX);
+        let mut invocation_host = TestInvocationHost::new();
+        let body = invocation_host.run_body(|parts, _disposition| {
+            let CanonicalBodyParts {
+                startup: invocation_root,
+                output,
+                activation,
+                ..
+            } = parts;
+            let (operation, keys) = operation(invocation_root, &account);
+            let (policy, evidence_limits, failure, success) = scoped_shape(keys);
+            let owner = operation
+                .into_session_outcome_owner(policy, evidence_limits, failure)
+                .unwrap();
+            let mut success = Some(success);
+            let physical_baseline = account.snapshot();
+            let reservation_released = Cell::new(false);
+            let plan_marker_dropped = Cell::new(false);
+            let plan_poison_seen_while_dropping = Cell::new(false);
+            let plan_poison_events_while_dropping = Cell::new(u128::MAX);
+            let materializer_dropped = Cell::new(false);
+            let materializer_poison_seen_while_dropping = Cell::new(false);
+            let materializer_poison_events_while_dropping = Cell::new(u128::MAX);
 
-        let result: Result<TestOutcome, StoreActivationContainment> = owner
-            .plan_and_activate_scoped(|mut planning| {
-                let mut semantic = planning.begin_semantic_work().unwrap();
-                let scratch = semantic.reserve(1).unwrap();
-                semantic.validate_live_owner(&scratch).unwrap();
-                semantic.run_unit(|| ()).unwrap();
-                let completion = semantic.finish_exact().unwrap();
-                let plan = PanickingTrackedPlan {
-                    scratch: Some(scratch),
-                    reservation_released: &reservation_released,
-                    marker: Some(TransitionDropMarker {
-                        dropped: &plan_marker_dropped,
+            let result: Result<TestOutcome<'_>, StoreActivationContainment> = owner
+                .plan_and_activate_scoped(output, activation, |mut planning| {
+                    let (scratch, completion) = planning
+                        .with_semantic_work(|semantic| {
+                            let scratch = semantic.reserve(1)?;
+                            semantic.validate_live_owner(&scratch)?;
+                            semantic.run_unit(|| ())?;
+                            Ok::<_, StoreRuntimeError>(scratch)
+                        })
+                        .unwrap();
+                    let plan = PanickingTrackedPlan {
+                        scratch: Some(scratch),
+                        reservation_released: &reservation_released,
+                        marker: Some(TransitionDropMarker {
+                            dropped: &plan_marker_dropped,
+                            account: &account,
+                            poison_seen_while_dropping: &plan_poison_seen_while_dropping,
+                            poison_event_count_while_dropping: &plan_poison_events_while_dropping,
+                        }),
+                    };
+                    let permit = match planning.seal_activation(
+                        TestActivationDescription::new(
+                            success
+                                .take()
+                                .expect("the test success requirements are consumed exactly once"),
+                            plan,
+                        ),
+                        completion,
+                    ) {
+                        CanonicalActivationSeal::Sealed(permit) => permit,
+                        CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
+                    };
+                    let materializer_marker = TransitionDropMarker {
+                        dropped: &materializer_dropped,
                         account: &account,
-                        poison_seen_while_dropping: &plan_poison_seen_while_dropping,
-                        poison_event_count_while_dropping: &plan_poison_events_while_dropping,
-                    }),
-                };
-                let permit = match planning.seal_activation(
-                    TestActivationDescription::new(
-                        success
-                            .take()
-                            .expect("the test success requirements are consumed exactly once"),
-                        plan,
-                    ),
-                    completion,
-                ) {
-                    CanonicalActivationSeal::Sealed(permit) => permit,
-                    CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
-                };
-                let materializer_marker = TransitionDropMarker {
-                    dropped: &materializer_dropped,
-                    account: &account,
-                    poison_seen_while_dropping: &materializer_poison_seen_while_dropping,
-                    poison_event_count_while_dropping: &materializer_poison_events_while_dropping,
-                };
-                crate::retained::panic_next_publication_account_open();
-                permit.activate(
-                    move |_lane,
-                          _plan|
-                          -> CanonicalMaterialization<
-                        '_,
-                        (),
-                        TestRejection,
-                        ScalarSequence<u8>,
-                        CanonicalTag,
-                    > {
-                        let _ = &materializer_marker;
-                        panic!("a fail-closed publication open must not enter materialization")
-                    },
-                )
-            });
+                        poison_seen_while_dropping: &materializer_poison_seen_while_dropping,
+                        poison_event_count_while_dropping:
+                            &materializer_poison_events_while_dropping,
+                    };
+                    crate::retained::panic_next_publication_account_open();
+                    permit.activate(
+                        move |_lane,
+                              _plan|
+                              -> CanonicalMaterialization<
+                            '_,
+                            (),
+                            TestRejection,
+                            ScalarSequence<u8>,
+                            CanonicalTag,
+                        > {
+                            let _ = &materializer_marker;
+                            panic!("a fail-closed publication open must not enter materialization")
+                        },
+                    )
+                });
 
-        assert!(result.is_err());
-        assert!(reservation_released.get());
-        assert!(plan_marker_dropped.get());
-        assert!(plan_poison_seen_while_dropping.get());
-        assert!(materializer_dropped.get());
-        assert!(materializer_poison_seen_while_dropping.get());
-        let poison_events_before_final_containment = plan_poison_events_while_dropping.get();
-        assert!(poison_events_before_final_containment > 0);
-        assert_eq!(
-            materializer_poison_events_while_dropping.get(),
-            poison_events_before_final_containment
-        );
-        let snapshot = account.snapshot();
-        assert!(snapshot.poisoned());
-        assert!(snapshot.poison_event_count() > poison_events_before_final_containment);
-        assert!(snapshot.poison_event_count_exact());
-        assert!(snapshot.poison_event_domain_valid());
-        assert_eq!(
-            snapshot
-                .first_poison_evidence()
-                .map(|evidence| evidence.reason()),
-            Some(crate::AccountPoisonReason::OwnershipGraphUnverified)
-        );
-        assert_eq!(
-            snapshot.live_retained_bytes(),
-            physical_baseline.live_retained_bytes()
-        );
-        assert_eq!(
-            snapshot.live_retained_allocations(),
-            physical_baseline.live_retained_allocations()
-        );
+            assert!(result.is_err());
+            assert!(reservation_released.get());
+            assert!(plan_marker_dropped.get());
+            assert!(plan_poison_seen_while_dropping.get());
+            assert!(materializer_dropped.get());
+            assert!(materializer_poison_seen_while_dropping.get());
+            let poison_events_before_final_containment = plan_poison_events_while_dropping.get();
+            assert!(poison_events_before_final_containment > 0);
+            assert_eq!(
+                materializer_poison_events_while_dropping.get(),
+                poison_events_before_final_containment
+            );
+            let snapshot = account.snapshot();
+            assert!(snapshot.poisoned());
+            assert!(snapshot.poison_event_count() > poison_events_before_final_containment);
+            assert!(snapshot.poison_event_count_exact());
+            assert!(snapshot.poison_event_domain_valid());
+            assert_eq!(
+                snapshot
+                    .first_poison_evidence()
+                    .map(|evidence| evidence.reason()),
+                Some(crate::AccountPoisonReason::OwnershipGraphUnverified)
+            );
+            assert_eq!(
+                snapshot.live_retained_bytes(),
+                physical_baseline.live_retained_bytes()
+            );
+            assert_eq!(
+                snapshot.live_retained_allocations(),
+                physical_baseline.live_retained_allocations()
+            );
+        });
+        assert!(body.is_err());
     }
 
     #[test]
@@ -3832,37 +4039,325 @@ mod scoped_transition_tests {
             RetainedOutput,
         }
 
-        for charge in [ScratchCharge::Ordinary, ScratchCharge::RetainedOutput] {
+        for (charge, forget_pending) in [
+            (ScratchCharge::Ordinary, false),
+            (ScratchCharge::RetainedOutput, false),
+            (ScratchCharge::Ordinary, true),
+            (ScratchCharge::RetainedOutput, true),
+        ] {
             let account = account();
-            let (mut operation, keys) = operation(&account);
-            let plan = crate::CapacityPlan::for_type::<u8>(0, 0, 4).unwrap();
-            let bytes = plan.envelope_delta_bytes().unwrap();
-            let reservation = match charge {
-                ScratchCharge::Ordinary => operation
-                    .control_checkpoint()
-                    .reserve(keys.phase, keys.dimension, bytes)
-                    .unwrap(),
-                ScratchCharge::RetainedOutput => operation
-                    .reserve_retained_storage(keys.phase, keys.dimension, bytes, 1)
-                    .unwrap(),
-            };
-            let mut scratch = Vec::new();
-            scratch
-                .try_reserve_exact(plan.allocator_additional())
-                .unwrap();
-            plan.finish(scratch.len(), scratch.capacity()).unwrap();
-            scratch.extend_from_slice(&[7_u8, 9, 10, 11]);
+            let mut invocation_host = TestInvocationHost::new();
+            {
+                let mut probe_and_keys = None;
+                let finish = invocation_host.run_body(|parts, disposition| {
+                let CanonicalBodyParts {
+                    startup: invocation_root,
+                    output,
+                    proof,
+                    activation,
+                    validation,
+                    ..
+                } = parts;
+                let (mut operation, keys) = operation(invocation_root, &account);
+                let plan = crate::CapacityPlan::for_type::<u8>(0, 0, 4).unwrap();
+                let bytes = plan.envelope_delta_bytes().unwrap();
+                let reservation = match charge {
+                    ScratchCharge::Ordinary => operation
+                        .control_checkpoint()
+                        .reserve(keys.phase, keys.dimension, bytes)
+                        .unwrap(),
+                    ScratchCharge::RetainedOutput => operation
+                        .reserve_retained_storage(keys.phase, keys.dimension, bytes, 1)
+                        .unwrap(),
+                };
+                let mut scratch = Vec::new();
+                scratch
+                    .try_reserve_exact(plan.allocator_additional())
+                    .unwrap();
+                plan.finish(scratch.len(), scratch.capacity()).unwrap();
+                scratch.extend_from_slice(&[7_u8, 9, 10, 11]);
 
-            let (policy, evidence_limits, failure, success) = scoped_shape(keys);
+                let (policy, evidence_limits, failure, success) = scoped_shape(keys);
+                let owner = operation
+                    .into_session_outcome_owner(policy, evidence_limits, failure)
+                    .unwrap();
+                let mut description = Some(TestActivationDescription::new(success, ()));
+                let outcome: TestOutcome<'_> = owner
+                    .plan_and_activate_scoped(output, activation, |mut planning| {
+                        let (_, completion) = planning
+                            .with_semantic_work(|semantic| semantic.run_unit(|| scratch[0]))
+                            .unwrap();
+                        let permit = match planning
+                            .seal_activation(description.take().unwrap(), completion)
+                        {
+                            CanonicalActivationSeal::Sealed(permit) => permit,
+                            CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
+                        };
+                        permit.activate(|mut lane, _plan| {
+                            let root = lane
+                                .try_retain_sequence(
+                                    SequencePlan::<u8>::new(1).unwrap(),
+                                    CanonicalTag,
+                                    |writer| writer.push(scratch[0]),
+                                )
+                                .unwrap();
+                            lane.complete(root, ())
+                        })
+                    })
+                    .unwrap();
+                let activated = match outcome {
+                    CanonicalActivationOutcome::Activated(activated) => activated,
+                    _ => panic!("borrowed scratch must allow activation"),
+                };
+                let probe = activated.owner.storage().raw.test_ledger_probe();
+                let builder_called = Cell::new(false);
+                let outcome = activated
+                    .validate_centrally(
+                        proof,
+                        validation,
+                        CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
+                        |lane, _output| {
+                            crate::retained::fail_next_final_owner_allocation();
+                            let cause = lane
+                                .try_retain_sequence(
+                                    SequencePlan::<u8>::new(1).unwrap(),
+                                    CanonicalTag,
+                                    |writer| {
+                                        builder_called.set(true);
+                                        writer.push(scratch[1])
+                                    },
+                                )
+                                .unwrap_err();
+                            assert!(matches!(cause, StoreRuntimeError::AllocationFailed));
+                            lane.abort::<ScalarSequence<u8>, CanonicalTag>()
+                        },
+                        |planning, _output| {
+                            planning.validate_with(
+                                |_| Ok(()),
+                                |_session,
+                                 _canonical,
+                                 _evidence,
+                                 &mut ()|
+                                 -> Result<
+                                    CanonicalValidationDecision<(), TestRejection>,
+                                    StoreWorkError,
+                                > {
+                                    unreachable!("failed evidence allocation must skip validation")
+                                },
+                            )
+                        },
+                    )
+                    .unwrap();
+                let fallback = match outcome {
+                    CanonicalCentralValidationOutcome::Fallback(fallback) => fallback,
+                    _ => {
+                        panic!("verified allocation failure must return pending fallback authority")
+                    }
+                };
+                assert!(matches!(
+                    fallback.cause(),
+                    StoreRuntimeError::AllocationFailed
+                ));
+                assert!(!builder_called.get());
+                assert!(!account.snapshot().poisoned());
+                assert!(probe.is_available());
+                assert!(!probe.is_terminal_qualified());
+                assert_eq!(scratch.as_slice(), &[7, 9, 10, 11]);
+
+                let live_before_release = probe.current_live_bytes();
+                let active_before_release = probe.active_reservations();
+                reservation.release_storage(scratch);
+                assert_eq!(probe.current_live_bytes(), live_before_release - bytes);
+                assert_eq!(probe.active_reservations(), active_before_release - 1);
+                probe_and_keys = Some((probe, keys));
+                fallback.request_finish(disposition).unwrap();
+                }).unwrap();
+                let completion = finish.resume();
+                let fallback = match completion.outcome {
+                    CanonicalInvocationOutcome::Fallback(fallback) => fallback,
+                    _ => panic!("the pending allocation failure must resume after body cleanup"),
+                };
+                let (probe, keys) = probe_and_keys.unwrap();
+                if forget_pending {
+                    std::mem::forget(fallback);
+                    assert!(!probe.is_terminal_qualified());
+                    assert!(account.snapshot().live_retained_allocations() > 0);
+                } else {
+                    let (prepared, cause) =
+                        fallback.prepare_minimal_fallback().unwrap().into_parts();
+                    assert!(matches!(cause, StoreRuntimeError::AllocationFailed));
+                    let published = prepared.handoff();
+                    assert_eq!(published.ledger_evidence.header().current_live_bytes(), 0);
+                    assert_eq!(published.ledger_evidence.header().active_reservations(), 0);
+                    assert_eq!(
+                        published
+                            .ledger_evidence
+                            .dimension(keys.dimension)
+                            .unwrap()
+                            .committed_canonical_output(),
+                        0
+                    );
+                    assert!(matches!(
+                        published.ledger_evidence.header().terminal_cause(),
+                        crate::StoreTerminalCause::Failure(cause)
+                            if cause.class() == crate::StorePreparationFailureClass::ProductGraph
+                    ));
+                    drop(published);
+                    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+                    assert!(!account.snapshot().poisoned());
+                }
+            }
+            if forget_pending {
+                assert!(matches!(
+                    invocation_host.test_pending_fallback_cause(),
+                    Some(StoreRuntimeError::AllocationFailed)
+                ));
+            } else {
+                assert!(invocation_host.test_pending_fallback_cause().is_none());
+            }
+            drop(invocation_host);
+            assert_eq!(account.snapshot().live_retained_allocations(), 0);
+            assert!(!account.snapshot().poisoned());
+        }
+    }
+
+    mod host_payload_tests {
+        use super::*;
+        use std::cell::RefCell;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+
+        use crate::retained::SharedRetainedStorage;
+        use crate::{AccountPoisonReason, PhysicalStorageAccountSnapshot};
+
+        type Host<T, Proof, EA = TestRejection, EV = TestRejection, EG = ()> =
+            CanonicalInvocationHost<
+                TestOwner,
+                TestProgress,
+                TestUnit,
+                T,
+                Proof,
+                EA,
+                EV,
+                EG,
+                ScalarSequence<u8>,
+                CanonicalTag,
+                ScalarSequence<u8>,
+                CanonicalTag,
+            >;
+
+        struct Probe<'a> {
+            label: &'static str,
+            events: &'a RefCell<Vec<&'static str>>,
+            account: &'a PhysicalStorageAccount,
+            panic_on_drop: bool,
+        }
+
+        impl Drop for Probe<'_> {
+            fn drop(&mut self) {
+                let snapshot = self.account.snapshot();
+                assert!(snapshot.live_retained_allocations() > 0);
+                assert!(
+                    !snapshot.poisoned(),
+                    "payloads precede physical containment"
+                );
+                self.events.borrow_mut().push(self.label);
+                if self.panic_on_drop {
+                    panic!("{} payload drop failed", self.label);
+                }
+            }
+        }
+
+        struct DropCallback<Callback: FnOnce()>(Option<Callback>);
+
+        impl<Callback: FnOnce()> Drop for DropCallback<Callback> {
+            fn drop(&mut self) {
+                self.0.take().unwrap()();
+            }
+        }
+
+        struct StorageReleaseProbe {
+            dropped: Arc<AtomicBool>,
+        }
+
+        impl Drop for StorageReleaseProbe {
+            fn drop(&mut self) {
+                assert!(!self.dropped.swap(true, Ordering::SeqCst));
+                panic!("attributed shared storage release failed");
+            }
+        }
+
+        type Activated<'inv, T> = ActivatedCanonicalStoreSession<
+            'inv,
+            TestOwner,
+            TestProgress,
+            TestUnit,
+            T,
+            ScalarSequence<u8>,
+            CanonicalTag,
+        >;
+        type Candidate<'inv, T, Proof> = CanonicalCandidateStoreSession<
+            'inv,
+            TestOwner,
+            TestProgress,
+            TestUnit,
+            T,
+            Proof,
+            ScalarSequence<u8>,
+            CanonicalTag,
+            ScalarSequence<u8>,
+            CanonicalTag,
+        >;
+
+        fn activate<'inv, T>(
+            root: CanonicalBodyStart<'inv, TestOwner, TestProgress, TestUnit>,
+            output: CanonicalOutputSlot<'inv, T>,
+            activation: CanonicalActivationSlots<'inv, TestRejection>,
+            account: &PhysicalStorageAccount,
+            value: T,
+        ) -> Activated<'inv, T> {
+            let mut value = Some(value);
+            activate_with_builder(
+                root,
+                output,
+                activation,
+                account,
+                OperationControl::default(),
+                u64::MAX,
+                |_| value.take().unwrap(),
+            )
+        }
+
+        fn activate_with_builder<'inv, T>(
+            root: CanonicalBodyStart<'inv, TestOwner, TestProgress, TestUnit>,
+            output: CanonicalOutputSlot<'inv, T>,
+            activation: CanonicalActivationSlots<'inv, TestRejection>,
+            account: &PhysicalStorageAccount,
+            control: OperationControl<TestProgress, TestUnit>,
+            evidence_limit: u64,
+            mut build: impl for<'lane> FnMut(
+                &mut CanonicalLane<'inv, 'lane, TestOwner, TestProgress, TestUnit>,
+            ) -> T,
+        ) -> Activated<'inv, T> {
+            let (operation, keys) =
+                operation_with_control_and_evidence_limit(root, account, control, evidence_limit);
+            let (policy, limits, failure, _) = scoped_shape(keys);
+            let success = CanonicalSuccessRequirements::new(
+                CanonicalTableShape::new(1, 1).unwrap(),
+                2,
+                1,
+                NonZeroU64::new(2).unwrap(),
+            )
+            .unwrap();
             let owner = operation
-                .into_session_outcome_owner(policy, evidence_limits, failure)
+                .into_session_outcome_owner(policy, limits, failure)
                 .unwrap();
             let mut description = Some(TestActivationDescription::new(success, ()));
-            let outcome: TestOutcome = owner
-                .plan_and_activate_scoped(|mut planning| {
-                    let mut semantic = planning.begin_semantic_work().unwrap();
-                    semantic.run_unit(|| scratch[0]).unwrap();
-                    let completion = semantic.finish_exact().unwrap();
+            let outcome = owner
+                .plan_and_activate_scoped(output, activation, |mut planning| {
+                    let ((), completion) = planning
+                        .with_semantic_work(|semantic| semantic.run_unit(|| ()))
+                        .unwrap();
                     let permit =
                         match planning.seal_activation(description.take().unwrap(), completion) {
                             CanonicalActivationSeal::Sealed(permit) => permit,
@@ -3873,94 +4368,1727 @@ mod scoped_transition_tests {
                             .try_retain_sequence(
                                 SequencePlan::<u8>::new(1).unwrap(),
                                 CanonicalTag,
-                                |writer| writer.push(scratch[0]),
+                                |writer| writer.push(7),
                             )
                             .unwrap();
-                        lane.complete(root, ())
+                        let value = build(&mut lane);
+                        lane.complete::<_, TestRejection, _, _>(root, value)
                     })
                 })
                 .unwrap();
-            let activated = match outcome {
+            match outcome {
                 CanonicalActivationOutcome::Activated(activated) => activated,
-                _ => panic!("borrowed scratch must allow activation"),
-            };
-            let probe = activated.owner.storage().raw.test_ledger_probe();
-            let builder_called = Cell::new(false);
+                _ => panic!("a real host payload must activate"),
+            }
+        }
+
+        fn validate<'inv, T, Proof>(
+            activated: Activated<'inv, T>,
+            proof_slot: CanonicalProofSlot<'inv, Proof>,
+            validation: CanonicalValidationSlots<'inv, TestRejection>,
+            proof: Proof,
+        ) -> Candidate<'inv, T, Proof> {
+            let mut proof = Some(proof);
             let outcome = activated
                 .validate_centrally(
+                    proof_slot,
+                    validation,
                     CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
                     |lane, _output| {
-                        crate::retained::fail_next_final_owner_allocation();
-                        let cause = lane
+                        let root = lane
                             .try_retain_sequence(
                                 SequencePlan::<u8>::new(1).unwrap(),
                                 CanonicalTag,
-                                |writer| {
-                                    builder_called.set(true);
-                                    writer.push(scratch[1])
-                                },
+                                |writer| writer.push(9),
                             )
-                            .unwrap_err();
-                        assert!(matches!(cause, StoreRuntimeError::AllocationFailed));
-                        lane.abort::<ScalarSequence<u8>, CanonicalTag>()
+                            .unwrap();
+                        lane.complete(root)
                     },
                     |planning, _output| {
                         planning.validate_with(
                             |_| Ok(()),
-                            |_session,
-                             _canonical,
-                             _evidence,
-                             &mut ()|
-                             -> Result<
-                                CanonicalValidationDecision<(), TestRejection>,
-                                StoreWorkError,
-                            > {
-                                unreachable!("failed evidence allocation must skip validation")
+                            |session, canonical, evidence, &mut ()| {
+                                assert!(session.visit_canonical_sequence(
+                                    canonical,
+                                    1,
+                                    |_, value| value == 7
+                                )?);
+                                assert!(session.visit_outcome_evidence_sequence(
+                                    evidence,
+                                    1,
+                                    |_, value| value == 9
+                                )?);
+                                Ok(CanonicalValidationDecision::<_, TestRejection>::accept(
+                                    proof.take().unwrap(),
+                                ))
                             },
                         )
                     },
                 )
                 .unwrap();
-            let fallback = match outcome {
-                CanonicalCentralValidationOutcome::Fallback(fallback) => fallback,
-                _ => panic!("verified allocation failure must return pending fallback authority"),
-            };
-            assert!(matches!(
-                fallback.cause(),
-                StoreRuntimeError::AllocationFailed
-            ));
-            assert!(!builder_called.get());
-            assert!(!account.snapshot().poisoned());
-            assert!(probe.is_available());
-            assert!(!probe.is_terminal_qualified());
-            assert_eq!(scratch.as_slice(), &[7, 9, 10, 11]);
+            match outcome {
+                CanonicalCentralValidationOutcome::Candidate(candidate) => candidate,
+                _ => panic!("a real host proof must validate"),
+            }
+        }
 
-            let live_before_release = probe.current_live_bytes();
-            let active_before_release = probe.active_reservations();
-            reservation.release_storage(scratch);
-            assert_eq!(probe.current_live_bytes(), live_before_release - bytes);
-            assert_eq!(probe.active_reservations(), active_before_release - 1);
-            let (prepared, cause) = fallback.prepare_minimal_fallback().unwrap().into_parts();
-            assert!(matches!(cause, StoreRuntimeError::AllocationFailed));
-            let published = prepared.handoff();
-            assert_eq!(published.ledger_evidence.header().current_live_bytes(), 0);
-            assert_eq!(published.ledger_evidence.header().active_reservations(), 0);
+        #[test]
+        fn joint_success_returns_original_borrowed_non_copy_output_and_proof() {
+            let account = account();
+            let events = RefCell::new(Vec::new());
+            let mut host = Host::<_, _>::new();
+            let finish = host
+                .run_body(|parts, disposition| {
+                    let CanonicalBodyParts {
+                        startup,
+                        output,
+                        proof,
+                        activation,
+                        validation,
+                        ..
+                    } = parts;
+                    let activated = activate(
+                        startup,
+                        output,
+                        activation,
+                        &account,
+                        Probe {
+                            label: "output",
+                            events: &events,
+                            account: &account,
+                            panic_on_drop: false,
+                        },
+                    );
+                    let candidate = validate(
+                        activated,
+                        proof,
+                        validation,
+                        Probe {
+                            label: "proof",
+                            events: &events,
+                            account: &account,
+                            panic_on_drop: false,
+                        },
+                    );
+                    candidate.request_finish(disposition).unwrap();
+                })
+                .unwrap();
+            let (candidate, generation) = {
+                let CanonicalInvocationCompletion {
+                    outcome,
+                    generation,
+                    ..
+                } = finish.resume();
+                let candidate = match outcome {
+                    CanonicalInvocationOutcome::Candidate(candidate) => candidate,
+                    _ => panic!("the actual validated candidate must resume"),
+                };
+                (candidate, generation)
+            };
+            let permit = match candidate
+                .try_issue_freeze_permit(
+                    generation.interruption,
+                    FinalProgress::new(TestProgress::Build, TestUnit::Items, 2),
+                )
+                .unwrap()
+            {
+                CanonicalFreezePermitIssue::Ready(permit) => permit,
+                _ => panic!("the actual candidate must issue its freeze permit"),
+            };
+            let prepared = permit.bind_joint_commit(|joint, seal| {
+                assert!(events.borrow().is_empty());
+                let result = joint.prepare(seal).unwrap();
+                assert!(events.borrow().is_empty());
+                result
+            });
+            let CanonicalJointSuccess {
+                output,
+                proof,
+                store,
+            } = prepared;
+            assert_eq!(output.label, "output");
+            assert_eq!(proof.label, "proof");
+            let published = store.handoff();
+            drop(output);
+            drop(proof);
+            assert_eq!(*events.borrow(), ["output", "proof"]);
+            drop(published);
+            drop(host);
+            assert!(!account.snapshot().poisoned());
+            assert_eq!(account.snapshot().live_retained_allocations(), 0);
+        }
+
+        #[test]
+        fn catalog_rejection_preserves_original_unwind_and_cleans_both_payloads() {
+            for unwinding in [false, true] {
+                for (output_panic, proof_panic) in
+                    [(false, false), (true, false), (false, true), (true, true)]
+                {
+                    let account = account();
+                    let events = RefCell::new(Vec::new());
+                    let rejected = Cell::new(false);
+                    let mut host = CanonicalInvocationHost::<
+                        TestOwner,
+                        TestProgress,
+                        TestUnit,
+                        _,
+                        _,
+                        TestRejection,
+                        TestRejection,
+                        (),
+                        ScalarSequence<u8>,
+                        CanonicalTag,
+                        ScalarSequence<u8>,
+                        CanonicalTag,
+                    >::new();
+                    let execution = catch_unwind(AssertUnwindSafe(|| {
+                        let mut output_value = Some(Probe {
+                            label: "output",
+                            events: &events,
+                            account: &account,
+                            panic_on_drop: output_panic,
+                        });
+                        let mut proof_value = Some(Probe {
+                            label: "proof",
+                            events: &events,
+                            account: &account,
+                            panic_on_drop: proof_panic,
+                        });
+                        let finish = host
+                            .run_body(|parts, disposition| {
+                                let activated = activate(
+                                    parts.startup,
+                                    parts.output,
+                                    parts.activation,
+                                    &account,
+                                    output_value.take().unwrap(),
+                                );
+                                let candidate = validate(
+                                    activated,
+                                    parts.proof,
+                                    parts.validation,
+                                    proof_value.take().unwrap(),
+                                );
+                                candidate.request_finish(disposition).unwrap();
+                            })
+                            .unwrap();
+                        let reject = || {
+                            match finish.admit_terminal_catalog(&[], &[]) {
+                                Err(error) => assert!(error.containment().is_some()),
+                                Ok(_) => panic!(
+                                    "the actual nonempty catalog cannot admit an empty schema"
+                                ),
+                            }
+                            rejected.set(true);
+                        };
+                        if unwinding {
+                            let _reject_during_unwind = DropCallback(Some(reject));
+                            panic!("catalog admission outer panic");
+                        } else {
+                            reject();
+                        }
+                    }));
+                    assert_eq!(*events.borrow(), ["proof", "output"]);
+                    assert_eq!(execution.is_err(), unwinding || output_panic || proof_panic);
+                    if let Err(payload) = execution {
+                        if unwinding {
+                            assert_eq!(
+                                payload.downcast_ref::<&str>(),
+                                Some(&"catalog admission outer panic")
+                            );
+                            assert!(rejected.get());
+                        } else {
+                            let first = if proof_panic { "proof" } else { "output" };
+                            assert_eq!(
+                                payload.downcast_ref::<String>(),
+                                Some(&format!("{first} payload drop failed"))
+                            );
+                        }
+                    } else {
+                        assert!(rejected.get());
+                    }
+                    let contained = account.snapshot();
+                    assert!(contained.poisoned());
+                    assert!(contained.live_retained_allocations() > 0);
+                    drop(host);
+                    assert_eq!(account.snapshot(), contained);
+                    assert_eq!(*events.borrow(), ["proof", "output"]);
+                }
+            }
+        }
+
+        fn ordinary_raw_attributed_output_failure<T: Send + Sync + 'static>(
+            minimal: bool,
+            value: T,
+            release_failed: bool,
+        ) {
+            let account = account();
+            let events = RefCell::new(Vec::new());
+            let cleanup_snapshot = Cell::new(None::<PhysicalStorageAccountSnapshot>);
+            let classified_live = Cell::new(0);
+            let classified_active = Cell::new(0);
+            let classified_physical = Cell::new(None::<PhysicalStorageAccountSnapshot>);
+            let cancel = Arc::new(AtomicBool::new(false));
+            let observer_cancel = Arc::clone(&cancel);
+            let control = OperationControl::default().with_progress_observer(
+                move |_event: crate::ProgressEvent<TestProgress, TestUnit>| {
+                    if observer_cancel.load(Ordering::SeqCst) {
+                        crate::ProgressDecision::Cancel
+                    } else {
+                        crate::ProgressDecision::Continue
+                    }
+                },
+            );
+            let header_bytes = SharedRetainedStorage::<T>::header_bytes().unwrap();
+            let mut host = Host::<_, _>::new();
+            let (prepared, ledger, keys, expected_control) = {
+                let mut value = Some(value);
+                let mut control = Some(control);
+                let mut ledger = None;
+                let finish = host.run_body(|parts, disposition| {
+                let CanonicalBodyParts {
+                    startup,
+                    output,
+                    proof,
+                    activation,
+                    validation,
+                    ..
+                } = parts;
+                let activated = activate_with_builder(
+                    startup,
+                    output,
+                    activation,
+                    &account,
+                    control.take().unwrap(),
+                    if minimal { 2 } else { u64::MAX },
+                    |lane| {
+                        let physical_before = account.snapshot();
+                        let storage = lane
+                            .try_retain_storage::<T, 0>([], 0, 0, |_| Ok(value.take().unwrap()))
+                            .unwrap();
+                        assert_eq!(
+                            account.snapshot().live_retained_bytes(),
+                            physical_before.live_retained_bytes() + header_bytes
+                        );
+                        assert_eq!(
+                            account.snapshot().live_retained_allocations(),
+                            physical_before.live_retained_allocations() + 1
+                        );
+                        (
+                            storage,
+                            DropCallback(Some(|| {
+                                assert!(
+                                    !std::thread::panicking(),
+                                    "the real shared-storage destructor must return normally"
+                                );
+                                events.borrow_mut().push("output");
+                                cleanup_snapshot.set(Some(account.snapshot()));
+                            })),
+                        )
+                    },
+                );
+                ledger = Some(activated.owner.storage().raw.test_ledger_probe());
+                let proof_ledger = activated.owner.storage().raw.test_ledger_probe();
+                let activated = if minimal {
+                    let destination = activated.outcome_evidence_destination_dimension;
+                    let (output, mut assembly) = activated.owner.into_parts();
+                    // Fill the existing evidence headroom before central evidence is added.
+                    // Baseline fallback still fits; publishing rich evidence cannot fit.
+                    assembly
+                        .try_commit_outcome_evidence(destination, 2)
+                        .unwrap();
+                    ActivatedCanonicalStoreSession {
+                        owner: PayloadOwner::new(output, assembly),
+                        ..activated
+                    }
+                } else {
+                    activated
+                };
+                let proof_events = &events;
+                let proof_classified_physical = &classified_physical;
+                let proof_cleanup_snapshot = &cleanup_snapshot;
+                let proof_classified_live = &classified_live;
+                let proof_classified_active = &classified_active;
+                let candidate = validate(
+                    activated,
+                    proof,
+                    validation,
+                    DropCallback(Some(move || {
+                        assert_eq!(*proof_events.borrow(), ["output"]);
+                        assert!(proof_ledger.is_available());
+                        assert!(!proof_ledger.is_terminal_qualified());
+                        let physical_before = proof_classified_physical.get().unwrap();
+                        let physical_after = proof_cleanup_snapshot.get().unwrap();
+                        if release_failed {
+                            assert_eq!(
+                                proof_ledger.current_live_bytes(),
+                                proof_classified_live.get()
+                            );
+                            assert_eq!(
+                                proof_ledger.active_reservations(),
+                                proof_classified_active.get()
+                            );
+                            assert_eq!(
+                                physical_after.live_retained_bytes(),
+                                physical_before.live_retained_bytes()
+                            );
+                            assert_eq!(
+                                physical_after.live_retained_allocations(),
+                                physical_before.live_retained_allocations()
+                            );
+                            let first = physical_after.first_poison_evidence().unwrap();
+                            assert_eq!(
+                                first.reason(),
+                                AccountPoisonReason::RetainedStorageReleaseUnverified
+                            );
+                            assert_eq!(first.event_ordinal(), 1);
+                            assert_eq!(physical_after.poison_event_count(), 1);
+                        } else {
+                            assert_eq!(
+                                proof_ledger.current_live_bytes(),
+                                proof_classified_live.get() - header_bytes
+                            );
+                            assert_eq!(
+                                proof_ledger.active_reservations(),
+                                proof_classified_active.get() - 1
+                            );
+                            assert_eq!(
+                                physical_after.live_retained_bytes(),
+                                physical_before.live_retained_bytes() - header_bytes
+                            );
+                            assert_eq!(
+                                physical_after.live_retained_allocations(),
+                                physical_before.live_retained_allocations() - 1
+                            );
+                            assert!(!physical_after.poisoned());
+                        }
+                        proof_events.borrow_mut().push("proof");
+                    })),
+                );
+                assert!(events.borrow().is_empty());
+                assert!(!account.snapshot().poisoned());
+                candidate.request_finish(disposition).unwrap();
+                }).unwrap();
+                let CanonicalInvocationOutcome::Candidate(candidate) = finish.resume().outcome
+                else {
+                    panic!("the actual candidate must resume before ordinary raw classification");
+                };
+                let ledger = ledger.unwrap();
+                cancel.store(true, Ordering::SeqCst);
+                let (proof, output_owner) = candidate.state.owner.into_parts();
+                let (output, store) = output_owner.into_parts();
+                let domain = store.domain;
+                let keys = TestKeys {
+                    phase: domain.try_admit_phase(phase_semantic(1)).unwrap(),
+                    dimension: domain.try_admit_dimension(dimension_semantic(1)).unwrap(),
+                    failure_terminal_dimension: domain
+                        .try_admit_dimension(dimension_semantic(2))
+                        .unwrap(),
+                };
+                let raw = store
+                    .raw
+                    .try_classify_pre_freeze(FinalProgress::new(
+                        TestProgress::Build,
+                        TestUnit::Items,
+                        2,
+                    ))
+                    .unwrap_or_else(|_| panic!("the real general classifier must select failure"));
+                let expected_control = raw.control_cause().cloned().unwrap();
+                assert!(matches!(expected_control, ControlCause::Cancelled { .. }));
+                assert!(!raw.is_success());
+                assert!(ledger.is_available());
+                assert!(!ledger.is_terminal_qualified());
+                assert!(events.borrow().is_empty());
+                assert!(!account.snapshot().poisoned());
+                let classified_dimension = ledger.dimension_evidence(keys.dimension).unwrap();
+                assert_eq!(classified_dimension.committed_canonical_output(), 0);
+                assert_eq!(classified_dimension.published_outcome_evidence(), 0);
+                classified_live.set(ledger.current_live_bytes());
+                classified_active.set(ledger.active_reservations());
+                classified_physical.set(Some(account.snapshot()));
+                // This is the ordinary raw failure rail, not the frozen canonical joint.
+                // Dispose the actual storage payloads before rechecking their original account.
+                let prepared = if drop_scoped_value(PayloadPair::new(output, proof)).is_err() {
+                    Err(StoreActivationContainment {
+                        cause: raw.contain_activation_fault(),
+                    })
+                } else {
+                    raw.check_payload_cleanup()
+                        .and_then(|raw| raw.finish().map_err(map_raw_prepare_error))
+                        .map(|(formation, control_cause)| {
+                            let crate::retained::RetainedSuccessJointCommitFormation::PreparedFailure(
+                                prepared,
+                            ) = formation
+                            else {
+                                panic!("an ordinary failure classification must retain its rail")
+                            };
+                            (
+                                crate::concrete_store::classify_prepared_failure(
+                                    prepared,
+                                    store.evidence_root,
+                                    domain,
+                                ),
+                                control_cause,
+                            )
+                        })
+                        .map_err(|cause| StoreActivationContainment { cause })
+                };
+                (prepared, ledger, keys, expected_control)
+            };
+            assert_eq!(*events.borrow(), ["output", "proof"]);
+            if release_failed {
+                let error = match prepared {
+                    Err(error) => error,
+                    Ok(_) => panic!("a normally returning failed storage release cannot freeze"),
+                };
+                let cleanup = cleanup_snapshot.get().unwrap();
+                assert_eq!(
+                    error.cause.reason(),
+                    AccountPoisonReason::RetainedStorageReleaseUnverified
+                );
+                assert_eq!(
+                    error
+                        .cause
+                        .account_poisoned()
+                        .snapshot()
+                        .first_poison_evidence(),
+                    cleanup.first_poison_evidence()
+                );
+                assert_eq!(
+                    account.snapshot().first_poison_evidence(),
+                    cleanup.first_poison_evidence()
+                );
+                assert_eq!(
+                    account.snapshot().poison_event_count(),
+                    cleanup.poison_event_count() + 6
+                );
+                assert!(ledger.is_available());
+                assert!(!ledger.is_terminal_qualified());
+                assert_eq!(ledger.current_live_bytes(), classified_live.get());
+                assert_eq!(ledger.active_reservations(), classified_active.get());
+                let contained = account.snapshot();
+                assert_eq!(
+                    contained.live_retained_bytes(),
+                    cleanup.live_retained_bytes()
+                );
+                assert_eq!(
+                    contained.live_retained_allocations(),
+                    cleanup.live_retained_allocations()
+                );
+                drop(host);
+                assert_eq!(account.snapshot(), contained);
+                assert_eq!(*events.borrow(), ["output", "proof"]);
+                return;
+            }
+
+            let (prepared, control_cause) =
+                prepared.unwrap_or_else(|_| panic!("clean typed storage must refund"));
+            assert_eq!(control_cause, Some(expected_control.clone()));
+            let expected_cause = PreparationFailureCode::from_control(&expected_control);
+            let published_ledger = match prepared {
+                PreparedStoreFailureOutcome::RichFailure(store) if !minimal => {
+                    let published = store.handoff();
+                    assert_eq!(
+                        published.outcome_evidence.outcome_evidence().root().get(0),
+                        Some(9)
+                    );
+                    drop(published.outcome_evidence);
+                    published.ledger_evidence
+                }
+                PreparedStoreFailureOutcome::MinimalFallback(store) if minimal => {
+                    let published = store.handoff();
+                    assert_eq!(published.fallback.value().code(), 91);
+                    drop(published.fallback);
+                    published.ledger_evidence
+                }
+                _ => panic!("cleanup must preserve the actual rich or minimal classification"),
+            };
+            let header = published_ledger.header();
+            assert_eq!(header.current_live_bytes(), 0);
+            assert_eq!(header.active_reservations(), 0);
+            assert!(matches!(
+                header.terminal_cause(),
+                crate::StoreTerminalCause::Failure(cause)
+                    if cause.class() == crate::StorePreparationFailureClass::Control
+                        && cause.code() == expected_cause.code()
+            ));
             assert_eq!(
-                published
-                    .ledger_evidence
+                published_ledger
                     .dimension(keys.dimension)
                     .unwrap()
                     .committed_canonical_output(),
                 0
             );
+            assert!(!ledger.is_available());
+            drop(published_ledger);
+            drop(host);
+            assert_eq!(*events.borrow(), ["output", "proof"]);
+            assert!(!account.snapshot().poisoned());
+            assert_eq!(account.snapshot().live_retained_bytes(), 0);
+            assert_eq!(account.snapshot().live_retained_allocations(), 0);
+        }
+
+        #[derive(Clone, Copy)]
+        enum JointPreparationFault {
+            Classification,
+            Qualification,
+            FinalEligibility,
+        }
+
+        fn joint_preparation_failure(
+            fault: JointPreparationFault,
+            unwinding: bool,
+            output_panic: bool,
+            proof_panic: bool,
+        ) {
+            let account = account();
+            let events = RefCell::new(Vec::new());
+            let observed = Cell::new(false);
+            let first_poison = Cell::new(None);
+            let mut host = Host::<_, _>::new();
+            let execution = catch_unwind(AssertUnwindSafe(|| {
+                let mut ledger = None;
+                let finish = host
+                    .run_body(|parts, disposition| {
+                        let CanonicalBodyParts {
+                            startup,
+                            output,
+                            proof,
+                            activation,
+                            validation,
+                            ..
+                        } = parts;
+                        let activated = activate(
+                            startup,
+                            output,
+                            activation,
+                            &account,
+                            DropCallback(Some(|| {
+                                assert!(account.snapshot().live_retained_allocations() > 0);
+                                events.borrow_mut().push("output");
+                                if output_panic {
+                                    panic!("output preparation cleanup failed");
+                                }
+                            })),
+                        );
+                        ledger = Some(activated.owner.storage().raw.test_ledger_probe());
+                        let proof_ledger = activated.owner.storage().raw.test_ledger_probe();
+                        let proof_account = &account;
+                        let proof_events = &events;
+                        let candidate = validate(
+                            activated,
+                            proof,
+                            validation,
+                            DropCallback(Some(move || {
+                                assert!(proof_account.snapshot().live_retained_allocations() > 0);
+                                proof_events.borrow_mut().push("proof");
+                                assert_eq!(
+                                    proof_ledger.is_available(),
+                                    !matches!(fault, JointPreparationFault::FinalEligibility)
+                                );
+                                assert_eq!(
+                                    proof_ledger.is_terminal_qualified(),
+                                    matches!(fault, JointPreparationFault::Qualification)
+                                );
+                                if proof_panic {
+                                    panic!("proof preparation cleanup failed");
+                                }
+                            })),
+                        );
+                        candidate.request_finish(disposition).unwrap();
+                    })
+                    .unwrap();
+                let ledger = ledger.unwrap();
+                let CanonicalInvocationCompletion {
+                    outcome,
+                    generation,
+                    ..
+                } = finish.resume();
+                let candidate = match outcome {
+                    CanonicalInvocationOutcome::Candidate(candidate) => candidate,
+                    _ => panic!("the healthy actual candidate must resume before preparation"),
+                };
+                let permit = match candidate
+                    .try_issue_freeze_permit(
+                        generation.interruption,
+                        FinalProgress::new(TestProgress::Build, TestUnit::Items, 2),
+                    )
+                    .unwrap()
+                {
+                    CanonicalFreezePermitIssue::Ready(permit) => permit,
+                    _ => panic!("the healthy actual candidate must issue its permit"),
+                };
+                let run = || {
+                    match fault {
+                        JointPreparationFault::Classification => {
+                            crate::retained::panic_next_canonical_primary_bind()
+                        }
+                        JointPreparationFault::Qualification => {
+                            crate::retained::fail_next_canonical_joint_evidence_qualification()
+                        }
+                        JointPreparationFault::FinalEligibility => {
+                            let poison = account.test_record_poison(
+                                AccountPoisonReason::RetainedStorageReleaseUnverified,
+                            );
+                            first_poison.set(poison.snapshot().first_poison_evidence());
+                        }
+                    }
+                    let error = match permit.bind_joint_commit(|joint, seal| joint.prepare(seal)) {
+                        Err(error) => error,
+                        Ok(_) => {
+                            panic!("the actual preparation fault cannot return a terminal owner")
+                        }
+                    };
+                    assert_eq!(*events.borrow(), ["output", "proof"]);
+                    assert_eq!(
+                        ledger.is_available(),
+                        !matches!(fault, JointPreparationFault::FinalEligibility)
+                    );
+                    assert_eq!(
+                        ledger.is_terminal_qualified(),
+                        matches!(fault, JointPreparationFault::Qualification)
+                    );
+                    assert!(account.snapshot().live_retained_allocations() > 0);
+                    if matches!(fault, JointPreparationFault::FinalEligibility) {
+                        assert_eq!(
+                            account.snapshot().first_poison_evidence(),
+                            first_poison.get()
+                        );
+                    } else if matches!(fault, JointPreparationFault::Qualification) {
+                        assert_eq!(
+                            error.cause.reason(),
+                            AccountPoisonReason::TerminalEvidenceFreezeUnverified
+                        );
+                    } else {
+                        assert_eq!(
+                            error.cause.reason(),
+                            AccountPoisonReason::PrimaryPublicationBindingPanicked
+                        );
+                    }
+                    observed.set(true);
+                };
+                if unwinding {
+                    let _run_during_unwind = DropCallback(Some(run));
+                    panic!("joint preparation outer panic");
+                } else {
+                    run();
+                }
+            }));
+            assert!(observed.get());
+            if unwinding {
+                let payload = execution.expect_err("the original outer panic must survive");
+                assert_eq!(
+                    payload.downcast_ref::<&str>(),
+                    Some(&"joint preparation outer panic")
+                );
+            } else {
+                assert!(execution.is_ok());
+            }
+            assert_eq!(*events.borrow(), ["output", "proof"]);
+            let contained = account.snapshot();
+            assert!(contained.poisoned());
+            assert!(contained.live_retained_allocations() > 0);
+            drop(host);
+            assert_eq!(account.snapshot(), contained);
+            assert_eq!(*events.borrow(), ["output", "proof"]);
+        }
+
+        #[test]
+        fn joint_prepare_errors_contain_payload_panics_and_preserve_existing_unwind() {
+            for fault in [
+                JointPreparationFault::Classification,
+                JointPreparationFault::Qualification,
+                JointPreparationFault::FinalEligibility,
+            ] {
+                for unwinding in [false, true] {
+                    for (output_panic, proof_panic) in
+                        [(false, false), (true, false), (false, true), (true, true)]
+                    {
+                        joint_preparation_failure(fault, unwinding, output_panic, proof_panic);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn ordinary_rich_and_minimal_failure_refund_actual_attributed_output_before_freeze() {
+            for minimal in [false, true] {
+                ordinary_raw_attributed_output_failure(minimal, 7_u64, false);
+            }
+        }
+
+        #[test]
+        fn ordinary_rich_and_minimal_failure_contain_normally_returning_storage_release_fault() {
+            for minimal in [false, true] {
+                let dropped = Arc::new(AtomicBool::new(false));
+                ordinary_raw_attributed_output_failure(
+                    minimal,
+                    StorageReleaseProbe {
+                        dropped: Arc::clone(&dropped),
+                    },
+                    true,
+                );
+                assert!(dropped.load(Ordering::SeqCst));
+            }
+        }
+
+        fn joint_payload_cleanup(forget: bool, output_panic: bool, proof_panic: bool) {
+            let account = account();
+            let events = RefCell::new(Vec::new());
+            let mut host = Host::<_, _>::new();
+            let finish = host
+                .run_body(|parts, disposition| {
+                    let CanonicalBodyParts {
+                        startup,
+                        output,
+                        proof,
+                        activation,
+                        validation,
+                        ..
+                    } = parts;
+                    let activated = activate(
+                        startup,
+                        output,
+                        activation,
+                        &account,
+                        Probe {
+                            label: "output",
+                            events: &events,
+                            account: &account,
+                            panic_on_drop: output_panic,
+                        },
+                    );
+                    let candidate = validate(
+                        activated,
+                        proof,
+                        validation,
+                        Probe {
+                            label: "proof",
+                            events: &events,
+                            account: &account,
+                            panic_on_drop: proof_panic,
+                        },
+                    );
+                    candidate.request_finish(disposition).unwrap();
+                })
+                .unwrap();
+            let (candidate, generation) = {
+                let CanonicalInvocationCompletion {
+                    outcome,
+                    generation,
+                    ..
+                } = finish.resume();
+                let candidate = match outcome {
+                    CanonicalInvocationOutcome::Candidate(candidate) => candidate,
+                    _ => panic!("the actual candidate must resume before joint cleanup"),
+                };
+                (candidate, generation)
+            };
+            let permit = match candidate
+                .try_issue_freeze_permit(
+                    generation.interruption,
+                    FinalProgress::new(TestProgress::Build, TestUnit::Items, 2),
+                )
+                .unwrap()
+            {
+                CanonicalFreezePermitIssue::Ready(permit) => permit,
+                _ => panic!("the actual candidate must issue its freeze permit"),
+            };
+            let body = catch_unwind(AssertUnwindSafe(|| {
+                permit.bind_joint_commit(|joint, seal| {
+                    drop(seal);
+                    if forget {
+                        std::mem::forget(joint);
+                    } else {
+                        drop(joint);
+                    }
+                });
+            }));
+            let result = if forget {
+                assert!(body.is_ok());
+                assert!(events.borrow().is_empty());
+                assert!(account.snapshot().live_retained_allocations() > 0);
+                catch_unwind(AssertUnwindSafe(|| drop(host)))
+            } else {
+                drop(host);
+                body
+            };
+            assert_eq!(result.is_err(), output_panic || proof_panic);
+            if let Err(payload) = result {
+                let first = if output_panic { "output" } else { "proof" };
+                assert_eq!(
+                    payload.downcast_ref::<String>(),
+                    Some(&format!("{first} payload drop failed"))
+                );
+            }
+            assert_eq!(*events.borrow(), ["output", "proof"]);
+            assert_eq!(account.snapshot().poisoned(), output_panic || proof_panic);
+            if output_panic || proof_panic {
+                assert!(account.snapshot().live_retained_allocations() > 0);
+            } else {
+                assert_eq!(account.snapshot().live_retained_allocations(), 0);
+            }
+        }
+
+        #[test]
+        fn forgotten_joint_retains_actual_payloads_until_outer_host_cleanup() {
+            for (output_panic, proof_panic) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                joint_payload_cleanup(true, output_panic, proof_panic);
+            }
+        }
+
+        #[test]
+        fn joint_drop_disposes_both_payloads_before_storage_under_each_panic_mask() {
+            for (output_panic, proof_panic) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                joint_payload_cleanup(false, output_panic, proof_panic);
+            }
+        }
+
+        fn reject_materialization<'inv, E>(
+            root: CanonicalBodyStart<'inv, TestOwner, TestProgress, TestUnit>,
+            output: CanonicalOutputSlot<'inv, ()>,
+            activation: CanonicalActivationSlots<'inv, E>,
+            account: &PhysicalStorageAccount,
+            cause: E,
+        ) -> RejectedCanonicalStoreSession<'inv, TestOwner, TestProgress, TestUnit, E> {
+            let (operation, keys) = operation(root, account);
+            let (policy, limits, failure, success) = scoped_shape(keys);
+            let owner = operation
+                .into_session_outcome_owner(policy, limits, failure)
+                .unwrap();
+            let mut description = Some(TestActivationDescription::new(success, ()));
+            let mut cause = Some(cause);
+            let outcome = owner
+                .plan_and_activate_scoped(output, activation, |mut planning| {
+                    let ((), completion) = planning
+                        .with_semantic_work(|semantic| semantic.run_unit(|| ()))
+                        .unwrap();
+                    let permit =
+                        match planning.seal_activation(description.take().unwrap(), completion) {
+                            CanonicalActivationSeal::Sealed(permit) => permit,
+                            CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
+                        };
+                    permit.activate(|lane, _plan| {
+                        lane.reject::<(), _, ScalarSequence<u8>, CanonicalTag>(
+                            cause.take().unwrap(),
+                            9,
+                        )
+                    })
+                })
+                .unwrap();
+            match outcome {
+                CanonicalActivationOutcome::Rejected(rejected) => rejected,
+                _ => panic!("the actual materialization rejection must retain its typed cause"),
+            }
+        }
+
+        #[test]
+        fn forgotten_never_activated_cause_is_disposed_by_host_before_storage() {
+            for panic_on_drop in [false, true] {
+                let account = account();
+                let events = RefCell::new(Vec::new());
+                let mut host = Host::<(), (), Probe<'_>>::new();
+                {
+                    let finish = host.run_body(|parts, disposition| {
+                    let (operation, keys) = operation(parts.startup, &account);
+                    let (policy, limits, failure, _) = scoped_shape(keys);
+                    let owner = operation
+                        .into_session_outcome_owner(policy, limits, failure)
+                        .unwrap();
+                    let outcome = owner
+                        .reject_without_activation::<(), _, ScalarSequence<u8>, CanonicalTag>(
+                            parts.activation,
+                            Probe {
+                                label: "cause",
+                                events: &events,
+                                account: &account,
+                                panic_on_drop,
+                            },
+                            9,
+                        )
+                        .unwrap();
+                    let never = match outcome {
+                        CanonicalActivationOutcome::NeverActivated(never) => never,
+                        _ => {
+                            panic!("pre-activation rejection must retain the never-activated cause")
+                        }
+                    };
+                    assert!(
+                        matches!(never.cause(), StoreNeverActivatedCause::Requested(probe) if std::ptr::eq(probe.events, &events))
+                    );
+                    never.request_finish(disposition).unwrap();
+                    }).unwrap();
+                    let CanonicalInvocationOutcome::NeverActivated(never) = finish.resume().outcome
+                    else {
+                        panic!("the actual never-activated cause must resume");
+                    };
+                    std::mem::forget(never);
+                }
+                assert!(events.borrow().is_empty());
+                let cleanup = catch_unwind(AssertUnwindSafe(|| drop(host)));
+                assert_eq!(cleanup.is_err(), panic_on_drop);
+                assert_eq!(*events.borrow(), ["cause"]);
+                assert_eq!(account.snapshot().poisoned(), panic_on_drop);
+                assert_eq!(
+                    account.snapshot().live_retained_allocations() == 0,
+                    !panic_on_drop
+                );
+            }
+        }
+
+        #[test]
+        fn forgotten_rejection_evidence_stages_keep_borrowed_cause_in_host() {
+            for stage in 0..4 {
+                let account = account();
+                let events = RefCell::new(Vec::new());
+                let mut host = Host::<(), (), Probe<'_>>::new();
+                let finish = host.run_body(|parts, disposition| {
+                let rejected = reject_materialization(
+                    parts.startup,
+                    parts.output,
+                    parts.activation,
+                    &account,
+                    Probe {
+                        label: "cause",
+                        events: &events,
+                        account: &account,
+                        panic_on_drop: false,
+                    },
+                );
+                assert!(
+                    matches!(rejected.cause(), StoreCanonicalRejection::Requested(probe) if std::ptr::eq(probe.events, &events))
+                );
+                rejected.request_finish(disposition).unwrap();
+                }).unwrap();
+                let (rejected, failure_fallback) = {
+                    let CanonicalInvocationCompletion {
+                        outcome,
+                        failure_fallback,
+                        ..
+                    } = finish.resume();
+                    let rejected = match outcome {
+                        CanonicalInvocationOutcome::Rejected(rejected) => rejected,
+                        _ => panic!("the actual materialization rejection must resume"),
+                    };
+                    (rejected, failure_fallback)
+                };
+                if stage == 0 {
+                    std::mem::forget(rejected);
+                } else {
+                    let built = rejected
+                        .build_failure_evidence(|lane| {
+                            let root = lane
+                                .try_retain_sequence(
+                                    SequencePlan::<u8>::new(1).unwrap(),
+                                    CanonicalTag,
+                                    |writer| writer.push(9),
+                                )
+                                .unwrap();
+                            FailureEvidenceDecision::Complete(root)
+                        })
+                        .unwrap();
+                    let rooted = match built {
+                        FailureEvidenceOutcome::Rooted(rooted) => rooted,
+                        _ => panic!("the real evidence graph must root"),
+                    };
+                    if stage == 1 {
+                        std::mem::forget(rooted);
+                    } else {
+                        match rooted
+                            .validate_rich_failure(failure_fallback, |session, root| {
+                                session
+                                    .visit_sequence(root, |_, value| stage == 2 && value == 9)
+                                    .unwrap()
+                            })
+                            .unwrap()
+                        {
+                            RootedFailureValidation::Valid(validated) if stage == 2 => {
+                                std::mem::forget(validated)
+                            }
+                            RootedFailureValidation::Rejected(rejected) if stage == 3 => {
+                                std::mem::forget(rejected)
+                            }
+                            _ => panic!(
+                                "evidence validation must preserve the selected typed branch"
+                            ),
+                        }
+                    }
+                }
+                assert!(events.borrow().is_empty());
+                assert!(account.snapshot().live_retained_allocations() > 0);
+                drop(host);
+                assert_eq!(*events.borrow(), ["cause"]);
+                assert!(!account.snapshot().poisoned());
+                assert_eq!(account.snapshot().live_retained_allocations(), 0);
+            }
+        }
+
+        #[test]
+        fn forgotten_central_rejection_keeps_its_distinct_borrowed_cause_in_host() {
+            let account = account();
+            let events = RefCell::new(Vec::new());
+            let mut host = Host::<(), (), TestRejection, Probe<'_>>::new();
+            {
+                let finish = host.run_body(|parts, disposition| {
+                let activated =
+                    activate(parts.startup, parts.output, parts.activation, &account, ());
+                let mut cause = Some(Probe {
+                    label: "validation cause",
+                    events: &events,
+                    account: &account,
+                    panic_on_drop: false,
+                });
+                let outcome = activated
+                    .validate_centrally(
+                        parts.proof,
+                        parts.validation,
+                        CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
+                        |lane, _| {
+                            let root = lane
+                                .try_retain_sequence(
+                                    SequencePlan::<u8>::new(1).unwrap(),
+                                    CanonicalTag,
+                                    |writer| writer.push(9),
+                                )
+                                .unwrap();
+                            lane.complete(root)
+                        },
+                        |planning, _| {
+                            planning.validate_with(
+                                |_| Ok(()),
+                                |session, canonical, evidence, &mut ()| {
+                                    assert!(session.visit_canonical_sequence(
+                                        canonical,
+                                        1,
+                                        |_, value| value == 7
+                                    )?);
+                                    assert!(session.visit_outcome_evidence_sequence(
+                                        evidence,
+                                        1,
+                                        |_, value| value == 9
+                                    )?);
+                                    Ok(CanonicalValidationDecision::<(), _>::Reject {
+                                        cause: cause.take().unwrap(),
+                                        stable_code: 9,
+                                    })
+                                },
+                            )
+                        },
+                    )
+                    .unwrap();
+                match outcome {
+                    CanonicalCentralValidationOutcome::Rejected(rejected) => {
+                        assert!(
+                            matches!(rejected.cause(), StoreCanonicalRejection::Requested(probe) if std::ptr::eq(probe.events, &events))
+                        );
+                        rejected.request_finish(disposition).unwrap();
+                    }
+                    _ => panic!(
+                        "a requested central rejection must retain the original validation cause"
+                    ),
+                }
+                }).unwrap();
+                let CanonicalInvocationOutcome::CentralRejected(rejected) = finish.resume().outcome
+                else {
+                    panic!("the actual central rejection must resume");
+                };
+                std::mem::forget(rejected);
+            }
+            assert!(events.borrow().is_empty());
+            drop(host);
+            assert_eq!(*events.borrow(), ["validation cause"]);
+            assert!(!account.snapshot().poisoned());
+            assert_eq!(account.snapshot().live_retained_allocations(), 0);
+        }
+
+        #[test]
+        fn forgotten_generation_rejection_keeps_its_distinct_borrowed_cause_in_host() {
+            let account = account();
+            let events = RefCell::new(Vec::new());
+            let mut host = Host::<(), (), TestRejection, TestRejection, Probe<'_>>::new();
+            let finish = host
+                .run_body(|parts, disposition| {
+                    let activated =
+                        activate(parts.startup, parts.output, parts.activation, &account, ());
+                    let candidate = validate(activated, parts.proof, parts.validation, ());
+                    candidate.request_finish(disposition).unwrap();
+                })
+                .unwrap();
+            let (candidate, generation) = {
+                let CanonicalInvocationCompletion {
+                    outcome,
+                    generation,
+                    ..
+                } = finish.resume();
+                let candidate = match outcome {
+                    CanonicalInvocationOutcome::Candidate(candidate) => candidate,
+                    _ => panic!("the actual candidate must resume before generation rejection"),
+                };
+                (candidate, generation)
+            };
+            let permit = match candidate
+                .try_issue_freeze_permit(
+                    generation.interruption,
+                    FinalProgress::new(TestProgress::Build, TestUnit::Items, 2),
+                )
+                .unwrap()
+            {
+                CanonicalFreezePermitIssue::Ready(permit) => permit,
+                _ => panic!("the actual candidate must freeze before generation rejection"),
+            };
+            let rejected = permit
+                .reject_generation(
+                    generation.rejection,
+                    Probe {
+                        label: "generation cause",
+                        events: &events,
+                        account: &account,
+                        panic_on_drop: false,
+                    },
+                    9,
+                )
+                .unwrap();
+            assert!(
+                matches!(rejected.cause(), StoreCanonicalRejection::Requested(probe) if std::ptr::eq(probe.events, &events))
+            );
+            std::mem::forget(rejected);
+            assert!(events.borrow().is_empty());
+            drop(host);
+            assert_eq!(*events.borrow(), ["generation cause"]);
+            assert!(!account.snapshot().poisoned());
+            assert_eq!(account.snapshot().live_retained_allocations(), 0);
+        }
+
+        #[test]
+        fn forgotten_activated_permission_without_disposition_contains_after_payload_cleanup() {
+            let account = account();
+            let events = RefCell::new(Vec::new());
+            let mut host = Host::<_, ()>::new();
+            let body = host.run_body(|parts, _disposition| {
+                let CanonicalBodyParts {
+                    startup: root,
+                    output,
+                    activation,
+                    ..
+                } = parts;
+                let activated = activate(
+                    root,
+                    output,
+                    activation,
+                    &account,
+                    Probe {
+                        label: "output",
+                        events: &events,
+                        account: &account,
+                        panic_on_drop: false,
+                    },
+                );
+                std::mem::forget(activated);
+                assert!(events.borrow().is_empty());
+                assert!(account.snapshot().live_retained_allocations() > 0);
+            });
+            let error = match body {
+                Err(error) => error,
+                Ok(_) => panic!("an unresolved body cannot acquire final authority"),
+            };
+            assert!(error.containment().is_some());
+            assert_eq!(*events.borrow(), ["output"]);
+            // The payload is still host-owned and disposed before quarantine. Its forgotten
+            // activation permission left no verified disposition, so unresolved physical
+            // attribution must remain charged instead of being reported as a healthy refund.
+            let contained = account.snapshot();
+            assert!(contained.poisoned());
+            assert!(contained.live_retained_allocations() > 0);
+            assert_eq!(
+                contained.first_poison_evidence().unwrap().reason(),
+                AccountPoisonReason::OwnershipGraphUnverified
+            );
+            drop(host);
+            assert_eq!(*events.borrow(), ["output"]);
+            assert_eq!(account.snapshot(), contained);
+        }
+
+        #[test]
+        fn forgotten_central_validation_fallback_keeps_its_actual_cause_in_host() {
+            let account = account();
+            let events = RefCell::new(Vec::new());
+            let mut host = Host::<_, ()>::new();
+            {
+                let finish = host
+                    .run_body(|parts, disposition| {
+                        let CanonicalBodyParts {
+                            startup: root,
+                            output,
+                            proof,
+                            activation,
+                            validation,
+                            ..
+                        } = parts;
+                        let activated = activate(
+                            root,
+                            output,
+                            activation,
+                            &account,
+                            Probe {
+                                label: "output",
+                                events: &events,
+                                account: &account,
+                                panic_on_drop: false,
+                            },
+                        );
+                        let outcome = activated
+                            .validate_centrally(
+                                proof,
+                                validation,
+                                CanonicalValidationProgress::new(
+                                    TestProgress::Build,
+                                    TestUnit::Items,
+                                ),
+                                |lane, _output| {
+                                    let root = lane
+                                        .try_retain_sequence(
+                                            SequencePlan::<u8>::new(1).unwrap(),
+                                            CanonicalTag,
+                                            |writer| writer.push(9),
+                                        )
+                                        .unwrap();
+                                    lane.complete(root)
+                                },
+                                |planning, _output| {
+                                    planning.validate_with(
+                                        |_| Ok(()),
+                                        |_,
+                                         _,
+                                         _,
+                                         _|
+                                         -> Result<
+                                            CanonicalValidationDecision<(), TestRejection>,
+                                            StoreWorkError,
+                                        > {
+                                            panic!("recoverable central validation panic");
+                                        },
+                                    )
+                                },
+                            )
+                            .unwrap();
+                        let fallback = match outcome {
+                            CanonicalCentralValidationOutcome::Fallback(fallback) => fallback,
+                            _ => panic!("a clean validation panic retains a pending fallback"),
+                        };
+                        assert!(matches!(fallback.cause(), StoreRuntimeError::Build(_)));
+                        assert_eq!(*events.borrow(), ["output"]);
+                        fallback.request_finish(disposition).unwrap();
+                    })
+                    .unwrap();
+                let CanonicalInvocationOutcome::Fallback(fallback) = finish.resume().outcome else {
+                    panic!("the actual central validation fallback must resume");
+                };
+                std::mem::forget(fallback);
+            }
             assert!(matches!(
-                published.ledger_evidence.header().terminal_cause(),
-                crate::StoreTerminalCause::Failure(cause)
-                    if cause.class() == crate::StorePreparationFailureClass::ProductGraph
+                host.test_pending_fallback_cause(),
+                Some(StoreRuntimeError::Build(_))
             ));
-            drop(published);
+            assert!(account.snapshot().live_retained_allocations() > 0);
+            assert!(!account.snapshot().poisoned());
+            drop(host);
             assert_eq!(account.snapshot().live_retained_allocations(), 0);
             assert!(!account.snapshot().poisoned());
+        }
+
+        fn forgotten_candidate_or_freeze(frozen: bool, output_panic: bool, proof_panic: bool) {
+            let account = account();
+            let events = RefCell::new(Vec::new());
+            let mut host = Host::<_, _>::new();
+            let finish = host
+                .run_body(|parts, disposition| {
+                    let CanonicalBodyParts {
+                        startup: root,
+                        output,
+                        proof,
+                        activation,
+                        validation,
+                        ..
+                    } = parts;
+                    let activated = activate(
+                        root,
+                        output,
+                        activation,
+                        &account,
+                        Probe {
+                            label: "output",
+                            events: &events,
+                            account: &account,
+                            panic_on_drop: output_panic,
+                        },
+                    );
+                    let candidate = validate(
+                        activated,
+                        proof,
+                        validation,
+                        Probe {
+                            label: "proof",
+                            events: &events,
+                            account: &account,
+                            panic_on_drop: proof_panic,
+                        },
+                    );
+                    candidate.request_finish(disposition).unwrap();
+                })
+                .unwrap();
+            let (candidate, generation) = {
+                let CanonicalInvocationCompletion {
+                    outcome,
+                    generation,
+                    ..
+                } = finish.resume();
+                let candidate = match outcome {
+                    CanonicalInvocationOutcome::Candidate(candidate) => candidate,
+                    _ => panic!("the actual candidate must resume before final permission cleanup"),
+                };
+                (candidate, generation)
+            };
+            if frozen {
+                let permit = match candidate
+                    .try_issue_freeze_permit(
+                        generation.interruption,
+                        FinalProgress::new(TestProgress::Build, TestUnit::Items, 2),
+                    )
+                    .unwrap()
+                {
+                    CanonicalFreezePermitIssue::Ready(permit) => permit,
+                    _ => panic!("the exact candidate must freeze"),
+                };
+                std::mem::forget(permit);
+            } else {
+                std::mem::forget(candidate);
+            }
+            assert!(events.borrow().is_empty());
+            let result = catch_unwind(AssertUnwindSafe(|| drop(host)));
+            assert_eq!(result.is_err(), output_panic || proof_panic);
+            if let Err(payload) = result {
+                let label = if (frozen && output_panic) || !proof_panic {
+                    "output"
+                } else {
+                    "proof"
+                };
+                assert_eq!(
+                    payload.downcast_ref::<String>(),
+                    Some(&format!("{label} payload drop failed"))
+                );
+            }
+            let expected = if frozen {
+                ["output", "proof"]
+            } else {
+                ["proof", "output"]
+            };
+            assert_eq!(*events.borrow(), expected);
+            let snapshot = account.snapshot();
+            assert_eq!(snapshot.poisoned(), output_panic || proof_panic);
+            if output_panic || proof_panic {
+                assert!(snapshot.live_retained_allocations() > 0);
+            } else {
+                assert_eq!(snapshot.live_retained_allocations(), 0);
+            }
+        }
+
+        #[test]
+        fn forgotten_candidate_permission_disposes_proof_before_output() {
+            forgotten_candidate_or_freeze(false, false, false);
+        }
+
+        #[test]
+        fn forgotten_freeze_permission_disposes_output_before_proof() {
+            forgotten_candidate_or_freeze(true, false, false);
+        }
+
+        #[test]
+        fn forgotten_candidate_proof_drop_panic_disposes_output_before_containment() {
+            forgotten_candidate_or_freeze(false, false, true);
+        }
+
+        #[test]
+        fn forgotten_freeze_output_drop_panic_disposes_proof_before_containment() {
+            forgotten_candidate_or_freeze(true, true, false);
+        }
+
+        #[test]
+        fn forgotten_candidate_both_payload_drop_panics_are_contained() {
+            forgotten_candidate_or_freeze(false, true, true);
+        }
+
+        #[test]
+        fn forgotten_candidate_output_drop_panic_retains_storage_for_both_values() {
+            forgotten_candidate_or_freeze(false, true, false);
+        }
+
+        #[test]
+        fn forgotten_freeze_proof_drop_panic_retains_storage_for_both_values() {
+            forgotten_candidate_or_freeze(true, false, true);
+        }
+
+        #[test]
+        fn forgotten_activated_output_drop_panic_contains_original_storage() {
+            let account = account();
+            let events = RefCell::new(Vec::new());
+            let mut host = Host::<_, ()>::new();
+            let cleanup = catch_unwind(AssertUnwindSafe(|| {
+                let body = host.run_body(|parts, _disposition| {
+                    let CanonicalBodyParts {
+                        startup: root,
+                        output,
+                        activation,
+                        ..
+                    } = parts;
+                    std::mem::forget(activate(
+                        root,
+                        output,
+                        activation,
+                        &account,
+                        Probe {
+                            label: "output",
+                            events: &events,
+                            account: &account,
+                            panic_on_drop: true,
+                        },
+                    ));
+                });
+                assert!(body.is_err());
+            }));
+            assert!(cleanup.is_err());
+            drop(host);
+            assert_eq!(*events.borrow(), ["output"]);
+            assert!(account.snapshot().poisoned());
+            assert!(account.snapshot().live_retained_allocations() > 0);
+        }
+
+        #[test]
+        fn body_unwind_keeps_original_panic_through_host_payload_cleanup() {
+            for frozen in [false, true] {
+                for (output_panic, proof_panic) in [(false, true), (true, false), (true, true)] {
+                    let account = account();
+                    let events = RefCell::new(Vec::new());
+                    let result = catch_unwind(AssertUnwindSafe(|| {
+                        let mut host = Host::<_, _>::new();
+                        let finish = host
+                            .run_body(|parts, disposition| {
+                                let CanonicalBodyParts {
+                                    startup: root,
+                                    output,
+                                    proof,
+                                    activation,
+                                    validation,
+                                    ..
+                                } = parts;
+                                let activated = activate(
+                                    root,
+                                    output,
+                                    activation,
+                                    &account,
+                                    Probe {
+                                        label: "output",
+                                        events: &events,
+                                        account: &account,
+                                        panic_on_drop: output_panic,
+                                    },
+                                );
+                                let candidate = validate(
+                                    activated,
+                                    proof,
+                                    validation,
+                                    Probe {
+                                        label: "proof",
+                                        events: &events,
+                                        account: &account,
+                                        panic_on_drop: proof_panic,
+                                    },
+                                );
+                                if !frozen {
+                                    std::mem::forget(candidate);
+                                    panic!("original body panic");
+                                }
+                                candidate.request_finish(disposition).unwrap();
+                            })
+                            .unwrap();
+                        let CanonicalInvocationCompletion {
+                            outcome,
+                            generation,
+                            ..
+                        } = finish.resume();
+                        let candidate = match outcome {
+                            CanonicalInvocationOutcome::Candidate(candidate) => candidate,
+                            _ => panic!("the actual candidate must resume before freeze"),
+                        };
+                        match candidate
+                            .try_issue_freeze_permit(
+                                generation.interruption,
+                                FinalProgress::new(TestProgress::Build, TestUnit::Items, 2),
+                            )
+                            .unwrap()
+                        {
+                            CanonicalFreezePermitIssue::Ready(permit) => std::mem::forget(permit),
+                            _ => panic!("the exact candidate must freeze"),
+                        }
+                        panic!("original body panic");
+                    }));
+                    let payload = result.unwrap_err();
+                    assert_eq!(payload.downcast_ref::<&str>(), Some(&"original body panic"));
+                    assert_eq!(
+                        *events.borrow(),
+                        if frozen {
+                            ["output", "proof"]
+                        } else {
+                            ["proof", "output"]
+                        }
+                    );
+                    assert!(account.snapshot().poisoned());
+                    assert!(account.snapshot().live_retained_allocations() > 0);
+                }
+            }
+        }
+
+        #[test]
+        #[expect(
+            clippy::drop_non_drop,
+            reason = "a denied reentry must not lend a destructible startup root"
+        )]
+        fn denied_body_reentry_keeps_storage_until_output_cleanup() {
+            let account = account();
+            let events = RefCell::new(Vec::new());
+            let mut host = Host::<_, ()>::new();
+            let finish = host
+                .run_body(|parts, disposition| {
+                    let CanonicalBodyParts {
+                        startup: root,
+                        output,
+                        proof,
+                        activation,
+                        validation,
+                        ..
+                    } = parts;
+                    let activated = activate(
+                        root,
+                        output,
+                        activation,
+                        &account,
+                        Probe {
+                            label: "output",
+                            events: &events,
+                            account: &account,
+                            panic_on_drop: false,
+                        },
+                    );
+                    let candidate = validate(activated, proof, validation, ());
+                    candidate.request_finish(disposition).unwrap();
+                })
+                .unwrap();
+            #[allow(
+                clippy::forget_non_drop,
+                reason = "the regression intentionally abandons finish before testing real host reentry"
+            )]
+            std::mem::forget(finish);
+            assert!(account.snapshot().live_retained_allocations() > 0);
+            let entered = Cell::new(false);
+            let cleanup = catch_unwind(AssertUnwindSafe(|| {
+                let reentry = host.run_body(|parts, _disposition| {
+                    entered.set(true);
+                    drop(parts.startup);
+                });
+                assert!(reentry.is_err());
+                drop(host);
+            }));
+            assert!(!entered.get());
+            assert!(
+                cleanup.is_ok(),
+                "the actual output must be destroyed while its original storage is live"
+            );
+        }
+
+        #[test]
+        fn cross_root_output_slot_denies_transaction_before_entry() {
+            for foreign_output in [false, true] {
+                let account = account();
+                let mut host = TestInvocationHost::new();
+                let mut other = TestInvocationHost::new();
+                let body = host.run_body(|own, _disposition| {
+                    let mut own = Some(own);
+                    let foreign_body = other.run_body(|foreign, _foreign_disposition| {
+                        let own = own.take().unwrap();
+                        let (output, activation) = if foreign_output {
+                            (foreign.output, own.activation)
+                        } else {
+                            (own.output, foreign.activation)
+                        };
+                        let (operation, keys) = operation(own.startup, &account);
+                        let (policy, limits, failure, _) = scoped_shape(keys);
+                        let owner = operation
+                            .into_session_outcome_owner(policy, limits, failure)
+                            .unwrap();
+                        let entered = Cell::new(false);
+                        let result: Result<TestOutcome<'_>, _> =
+                            owner.plan_and_activate_scoped(output, activation, |planning| {
+                                entered.set(true);
+                                planning.reject(TestRejection::Requested, 9)
+                            });
+                        assert!(result.is_err());
+                        assert!(!entered.get());
+                        assert!(account.snapshot().poisoned());
+                    });
+                    assert!(foreign_body.is_err());
+                });
+                assert!(body.is_err());
+            }
+        }
+
+        #[test]
+        fn cross_root_proof_slot_denies_evidence_and_validation_before_entry() {
+            for foreign_proof in [false, true] {
+                let account = account();
+                let mut host = TestInvocationHost::new();
+                let mut other = TestInvocationHost::new();
+                let body = host.run_body(|own, _disposition| {
+                    let mut own = Some(own);
+                    let foreign_body = other.run_body(|foreign, _foreign_disposition| {
+                        let own = own.take().unwrap();
+                        let (proof, validation) = if foreign_proof {
+                            (foreign.proof, own.validation)
+                        } else {
+                            (own.proof, foreign.validation)
+                        };
+                        let activated =
+                            activate(own.startup, own.output, own.activation, &account, ());
+                        let evidence_entered = Cell::new(false);
+                        let validation_entered = Cell::new(false);
+                        let result = activated.validate_centrally(
+                            proof,
+                            validation,
+                            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
+                            |_lane, _output| {
+                                evidence_entered.set(true);
+                                OutcomeEvidenceDecision::<ScalarSequence<u8>, CanonicalTag>::Abort
+                            },
+                            |planning, _output| {
+                                validation_entered.set(true);
+                                planning.validate_with(
+                            |_| Ok(()),
+                            |_, _, _, &mut ()| {
+                                Ok(CanonicalValidationDecision::<(), TestRejection>::accept(()))
+                            },
+                        )
+                            },
+                        );
+                        assert!(result.is_err());
+                        assert!(!evidence_entered.get() && !validation_entered.get());
+                        assert!(account.snapshot().poisoned());
+                    });
+                    assert!(foreign_body.is_err());
+                });
+                assert!(body.is_err());
+            }
         }
     }
 }

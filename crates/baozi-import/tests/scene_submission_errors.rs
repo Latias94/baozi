@@ -89,12 +89,12 @@ impl Format for CustomImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_, '_>) -> ParseResult<()> {
         let result = match self.input {
             Input::InvalidParent => support::submit_invalid_parent_scene(scope),
             _ => submit_triangle(scope, self.input),
@@ -108,7 +108,7 @@ impl Format for CustomImporter {
     }
 }
 
-fn submit_triangle(scope: &mut ParseContext<'_>, input: Input) -> ParseResult<()> {
+fn submit_triangle(scope: &mut ParseContext<'_, '_>, input: Input) -> ParseResult<()> {
     let roots = [NodeLocalId::new(0)];
     let nodes = [NodeAuthoringNode::new(
         Presence::Absent,

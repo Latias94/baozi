@@ -4,6 +4,7 @@ use super::*;
 use crate::document::mesh_encoding::{
     MeshAttributeUse, MeshEncodingClass, mesh_attribute_encoding,
 };
+use baozi_import::ParseServices;
 
 pub(super) const MESH_SAMPLE_WORK_PER_LANE: u64 = 8;
 
@@ -12,7 +13,7 @@ pub(super) const MESH_SAMPLE_WORK_PER_LANE: u64 = 8;
 const FLOAT_BASE_DIRECTION_SQUARED_LENGTH_TOLERANCE: f64 = 1.0e-4;
 
 pub(super) fn bind<'bytes>(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseServices<'_, '_, '_>,
     accessor: crate::document::Accessor<'_>,
     buffers: &'bytes [Option<BufferData<'_>>],
 ) -> Result<crate::document::read::Bound<'bytes>> {
@@ -69,7 +70,7 @@ pub(super) struct AccessorInfo {
 }
 
 pub(super) fn validate_mesh_attribute(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseRoot<'_, '_, '_>,
     gltf: &crate::document::Document<'_>,
     index: usize,
     owner: AccessorOwner,
@@ -107,7 +108,7 @@ pub(super) fn validate_mesh_attribute(
     }
     let semantic = usage.semantic();
     validate_accessor_layout(
-        ctx,
+        &mut ctx.services()?,
         gltf,
         AccessorLayoutCheck {
             index,
@@ -117,20 +118,28 @@ pub(super) fn validate_mesh_attribute(
             contract: AccessorContract::vertex(&[], encoding.dimensions),
         },
     )?;
-    ctx.charge_work(1 + component_count(accessor.type_) * 2)?;
-    let required = semantic == Semantic::Positions;
-    match accessor.type_ {
-        json::accessor::Type::Vec2 => {
-            MeshAccessorBounds::<2>::new(accessor, index, required)?;
-        }
-        json::accessor::Type::Vec3 => {
-            MeshAccessorBounds::<3>::new(accessor, index, required)?;
-        }
-        json::accessor::Type::Vec4 => {
-            MeshAccessorBounds::<4>::new(accessor, index, required)?;
-        }
-        _ => return Err(invalid("mesh accessor must use a vector shape").into()),
-    }
+    let amount = 1 + component_count(accessor.type_) * 2;
+    let layout = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+    ctx.child(&layout, [amount], |child| {
+        child.run([amount], || {
+            Ok::<_, ParseFailure>((|| -> Result<()> {
+                let required = semantic == Semantic::Positions;
+                match accessor.type_ {
+                    json::accessor::Type::Vec2 => {
+                        MeshAccessorBounds::<2>::new(accessor, index, required)?;
+                    }
+                    json::accessor::Type::Vec3 => {
+                        MeshAccessorBounds::<3>::new(accessor, index, required)?;
+                    }
+                    json::accessor::Type::Vec4 => {
+                        MeshAccessorBounds::<4>::new(accessor, index, required)?;
+                    }
+                    _ => return Err(invalid("mesh accessor must use a vector shape").into()),
+                }
+                Ok(())
+            })())
+        })
+    })??;
     // Keep the established base-direction restriction separate from signed morph deltas.
     if matches!(
         usage,
@@ -275,7 +284,7 @@ impl<const N: usize> MeshAccessorBounds<N> {
 }
 
 pub(super) fn collect_mesh_attribute<'scope, const N: usize>(
-    ctx: &mut ParseExecution<'_, 'scope>,
+    ctx: &mut ParseChildren<'_, '_, 'scope>,
     accessor: crate::document::Accessor<'_>,
     buffers: &[Option<BufferData<'_>>],
     semantic: Semantic,
@@ -285,117 +294,143 @@ pub(super) fn collect_mesh_attribute<'scope, const N: usize>(
     let sample_work = to_u64(expected)
         .checked_mul(4 * MESH_SAMPLE_WORK_PER_LANE)
         .and_then(|work| work.checked_add(9))
-        .ok_or_else(|| ctx.allocation_failure("gltf-mesh-sample-work"))?;
-    ctx.with_work_group(
-        [
-            (
-                ImportWorkClass::Vertices,
+        .ok_or_else(|| ctx.error_view().allocation_failure("gltf-mesh-sample-work"))?;
+    {
+        let layout = ctx.bind_group([
+            ImportWorkClass::Vertices,
+            ImportWorkClass::AttributeCells,
+            ImportWorkClass::AttributeStreams,
+            ImportWorkClass::WorkUnits,
+        ])?;
+        ctx.child(
+            &layout,
+            [
                 if semantic == Semantic::Positions {
                     to_u64(expected)
                 } else {
                     0
                 },
-            ),
-            (ImportWorkClass::AttributeCells, to_u64(expected)),
-            (ImportWorkClass::AttributeStreams, 1),
-            (ImportWorkClass::WorkUnits, sample_work),
-        ],
-        |ctx, work| -> Result<_> {
-            let invalid = |reason| GltfFailure::invalid_accessor(Some(accessor.index()), reason);
-            let mut bounds = MeshAccessorBounds::<N>::new(
-                accessor.row(),
-                accessor.index(),
-                semantic == Semantic::Positions,
-            )?;
-            let values = bind(ctx, accessor, buffers)?
-                .samples::<N>()
-                .ok_or_else(|| invalid("mesh accessor shape differs from its checked contract"))?;
-            let direction_reason = match (accessor.row().component_type, semantic) {
-                (json::accessor::ComponentType::F32, Semantic::Normals) => {
-                    Some("NORMAL must be unit length")
-                }
-                (json::accessor::ComponentType::F32, Semantic::Tangents) => {
-                    Some("TANGENT XYZ must be unit length")
-                }
-                _ => None,
-            };
-            let pad_alpha = matches!(semantic, Semantic::Colors(_)) && N == 3;
-            let scalar_count = expected
-                .checked_mul(N + usize::from(pad_alpha))
-                .ok_or_else(|| ctx.allocation_failure(allocation))?;
-            let mut output = try_vec_capacity(
-                ctx,
-                ImportStorageClass::SceneConstruction,
-                scalar_count,
-                allocation,
-            )?;
-            let mut count = 0;
-            for sample in values {
-                poll_parser_loop(ctx, count)?;
-                if count == expected {
-                    return Err(invalid("mesh accessor exceeds its admitted count").into());
-                }
-                bounds.observe(&sample)?;
-                if semantic == Semantic::Tangents
-                    && sample
-                        .decoded
-                        .get(3)
-                        .is_none_or(|&sign| sign != -1.0 && sign != 1.0)
-                {
-                    return Err(invalid("TANGENT W must be -1 or +1").into());
-                }
-                if let Some(reason) = direction_reason {
-                    let [x, y, z, ..] = sample.decoded.as_slice() else {
-                        return Err(invalid("base direction sample lacks XYZ components").into());
-                    };
-                    let (x, y, z) = (f64::from(*x), f64::from(*y), f64::from(*z));
-                    let squared_length = (x * x + y * y) + z * z;
-                    if (squared_length - 1.0).abs() > FLOAT_BASE_DIRECTION_SQUARED_LENGTH_TOLERANCE
-                    {
-                        return Err(invalid(reason).into());
+                to_u64(expected),
+                1,
+                sample_work,
+            ],
+            |child| -> Result<_> {
+                let invalid =
+                    |reason| GltfFailure::invalid_accessor(Some(accessor.index()), reason);
+                let mut bounds = MeshAccessorBounds::<N>::new(
+                    accessor.row(),
+                    accessor.index(),
+                    semantic == Semantic::Positions,
+                )?;
+                let values = bind(&mut child.services()?, accessor, buffers)?
+                    .samples::<N>()
+                    .ok_or_else(|| {
+                        invalid("mesh accessor shape differs from its checked contract")
+                    })?;
+                let direction_reason = match (accessor.row().component_type, semantic) {
+                    (json::accessor::ComponentType::F32, Semantic::Normals) => {
+                        Some("NORMAL must be unit length")
                     }
+                    (json::accessor::ComponentType::F32, Semantic::Tangents) => {
+                        Some("TANGENT XYZ must be unit length")
+                    }
+                    _ => None,
+                };
+                let pad_alpha = matches!(semantic, Semantic::Colors(_)) && N == 3;
+                let scalar_count = expected
+                    .checked_mul(N + usize::from(pad_alpha))
+                    .ok_or_else(|| child.error_view().allocation_failure(allocation))?;
+                let mut output = try_vec_capacity(
+                    &mut child.services()?,
+                    ImportStorageClass::SceneConstruction,
+                    scalar_count,
+                    allocation,
+                )?;
+                let mut count = 0;
+                for sample in values {
+                    poll_parser_loop(&mut child.services()?, count)?;
+                    child.run(
+                        [
+                            u64::from(semantic == Semantic::Positions),
+                            1,
+                            0,
+                            4 * MESH_SAMPLE_WORK_PER_LANE,
+                        ],
+                        || -> Result<()> {
+                            if count == expected {
+                                return Err(
+                                    invalid("mesh accessor exceeds its admitted count").into()
+                                );
+                            }
+                            bounds.observe(&sample)?;
+                            if semantic == Semantic::Tangents
+                                && sample
+                                    .decoded
+                                    .get(3)
+                                    .is_none_or(|&sign| sign != -1.0 && sign != 1.0)
+                            {
+                                return Err(invalid("TANGENT W must be -1 or +1").into());
+                            }
+                            if let Some(reason) = direction_reason {
+                                let [x, y, z, ..] = sample.decoded.as_slice() else {
+                                    return Err(invalid(
+                                        "base direction sample lacks XYZ components",
+                                    )
+                                    .into());
+                                };
+                                let (x, y, z) = (f64::from(*x), f64::from(*y), f64::from(*z));
+                                let squared_length = (x * x + y * y) + z * z;
+                                if (squared_length - 1.0).abs()
+                                    > FLOAT_BASE_DIRECTION_SQUARED_LENGTH_TOLERANCE
+                                {
+                                    return Err(invalid(reason).into());
+                                }
+                            }
+                            output.try_extend_from_slice_reserved(&sample.decoded)?;
+                            if pad_alpha {
+                                output.try_push_reserved(1.0)?;
+                            }
+                            Ok(())
+                        },
+                    )?;
+                    count += 1;
                 }
-                output.try_extend_from_slice_reserved(&sample.decoded)?;
-                if pad_alpha {
-                    output.try_push_reserved(1.0)?;
+                if count != expected {
+                    return Err(invalid("mesh accessor differs from its admitted count").into());
                 }
-                work.complete([
-                    u64::from(semantic == Semantic::Positions),
-                    1,
-                    0,
-                    4 * MESH_SAMPLE_WORK_PER_LANE,
-                ])?;
-                count += 1;
-            }
-            if count != expected {
-                return Err(invalid("mesh accessor differs from its admitted count").into());
-            }
-            bounds.finish()?;
-            ctx.poll()?;
-            work.complete([0, 0, 1, 9])?;
-            Ok(output)
-        },
-    )
+                bounds.finish()?;
+                child.poll()?;
+                child.run([0, 0, 1, 9], || Ok::<_, ContentError>(output))
+            },
+        )
+    }
 }
 
 /// Track distinct selected vertex accessors per view without comparing accessor pairs.
 pub(super) fn validate_vertex_views(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseRoot<'_, '_, '_>,
     document: &crate::document::Document<'_>,
     closure: &ResourceClosure<'_>,
 ) -> Result<()> {
     let root = document.tables();
-    ctx.charge_work(to_u64(root.buffer_views.len()))?;
+    let layout = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+    let length = ctx.child(&layout, [to_u64(root.buffer_views.len())], |child| {
+        child.run([to_u64(root.buffer_views.len())], || {
+            Ok::<_, ParseFailure>(root.buffer_views.len())
+        })
+    })?;
     let mut first_accessor = try_vec_filled(
-        ctx,
+        &mut ctx.services()?,
         ImportStorageClass::FormatNormalization,
-        root.buffer_views.len(),
+        length,
         None,
         "gltf-vertex-view-accessors",
     )?;
-    let mut visit = |id: json::Index, ctx: &mut ParseExecution<'_, '_>| -> Result<()> {
-        ctx.charge_work(1)?;
-        let index = id.value();
+    let mut visit = |id: json::Index, ctx: &mut ParseRoot<'_, '_, '_>| -> Result<()> {
+        let layout = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+        let index = ctx.child(&layout, [1], |child| {
+            child.run([1], || Ok::<_, ParseFailure>(id.value()))
+        })?;
         let accessor = &root.accessors[index];
         let Some(view) = accessor.buffer_view else {
             return Ok(());
@@ -414,35 +449,30 @@ pub(super) fn validate_vertex_views(
         *first = Some(index);
         Ok(())
     };
-    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
+    let work_group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
     for (index, mesh) in root.meshes.iter().enumerate() {
-        ctx.with_work(
-            &work_group,
-            [1],
-            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-        )?;
-        if !closure.meshes.as_slice()[index] {
+        let selected = ctx.child(&work_group, [1], |child| {
+            child.run([1], || {
+                Ok::<_, ParseFailure>(closure.meshes.as_slice()[index])
+            })
+        })?;
+        if !selected {
             continue;
         }
         for primitive in &mesh.primitives {
-            ctx.with_work(
-                &work_group,
-                [1],
-                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-            )?;
-            for &id in primitive.attributes.values() {
+            let attributes = ctx.child(&work_group, [1], |child| {
+                child.run([1], || Ok::<_, ParseFailure>(primitive.attributes.values()))
+            })?;
+            for &id in attributes {
                 visit(id, ctx)?;
             }
             for target in primitive.targets.iter().flatten() {
-                ctx.with_work(
-                    &work_group,
-                    [1],
-                    |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-                )?;
-                for id in [target.positions, target.normals, target.tangents]
-                    .into_iter()
-                    .flatten()
-                {
+                let accessors = ctx.child(&work_group, [1], |child| {
+                    child.run([1], || {
+                        Ok::<_, ParseFailure>([target.positions, target.normals, target.tangents])
+                    })
+                })?;
+                for id in accessors.into_iter().flatten() {
                     visit(id, ctx)?;
                 }
             }
@@ -452,7 +482,7 @@ pub(super) fn validate_vertex_views(
 }
 
 pub(super) fn validate_accessor(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseServices<'_, '_, '_>,
     gltf: &crate::document::Document<'_>,
     accessor_index: usize,
     owner: AccessorOwner,
@@ -527,7 +557,7 @@ struct AccessorLayoutCheck<'a> {
 }
 
 fn validate_accessor_layout(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseServices<'_, '_, '_>,
     gltf: &crate::document::Document<'_>,
     check: AccessorLayoutCheck<'_>,
 ) -> Result<()> {
@@ -707,23 +737,23 @@ fn validate_base_layout(
 /// The sequential backend reader assumes ordered indices; malformed streams would otherwise
 /// silently retain base values. Borrow the admitted buffers instead of collecting another table.
 pub(super) fn validate_sparse_indices(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseRoot<'_, '_, '_>,
     gltf: &crate::document::Document<'_>,
     buffers: &[Option<BufferData<'_>>],
     closure: &ResourceClosure<'_>,
 ) -> Result<()> {
     use crate::document::IndexType;
 
-    let sparse_work = ctx.bind_work_group([ImportWorkClass::DecodeWork])?;
-    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
+    let sparse_work = ctx.bind_group([ImportWorkClass::DecodeWork])?;
+    let work_group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
     for (ordinal, accessor) in gltf.accessors().enumerate() {
-        ctx.with_work(
-            &work_group,
-            [1],
-            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-        )?;
-        poll_parser_loop(ctx, ordinal)?;
-        if !closure.accessors.as_slice()[ordinal] {
+        let selected = ctx.child(&work_group, [1], |child| {
+            child.run([1], || {
+                Ok::<_, ParseFailure>(closure.accessors.as_slice()[ordinal])
+            })
+        })?;
+        poll_parser_loop(&mut ctx.services()?, ordinal)?;
+        if !selected {
             continue;
         }
         let Some(sparse) = accessor.sparse() else {
@@ -750,29 +780,31 @@ pub(super) fn validate_sparse_indices(
             .as_slice()
             .get(start..end)
             .ok_or_else(|| invalid("sparse index data is truncated"))?;
-        ctx.with_work(
+        ctx.child(
             &sparse_work,
             [to_u64(sparse.count())],
-            |ctx, work| -> Result<()> {
+            |child| -> Result<()> {
                 let mut previous = None;
                 for (ordinal, value) in bytes.chunks_exact(index_size).enumerate() {
-                    poll_parser_loop(ctx, ordinal)?;
-                    let index = match (indices.index_type(), value) {
-                        (IndexType::U8, &[x]) => u32::from(x),
-                        (IndexType::U16, &[x, y]) => u32::from(u16::from_le_bytes([x, y])),
-                        (IndexType::U32, &[x, y, z, w]) => u32::from_le_bytes([x, y, z, w]),
-                        _ => return Err(invalid("sparse index encoding is invalid").into()),
-                    };
-                    if index as usize >= accessor.count()
-                        || previous.is_some_and(|previous| index <= previous)
-                    {
-                        return Err(invalid(
-                            "sparse indices must strictly increase within accessor count",
-                        )
-                        .into());
-                    }
-                    previous = Some(index);
-                    work.complete([1])?;
+                    poll_parser_loop(&mut child.services()?, ordinal)?;
+                    child.run([1], || -> Result<()> {
+                        let index = match (indices.index_type(), value) {
+                            (IndexType::U8, &[x]) => u32::from(x),
+                            (IndexType::U16, &[x, y]) => u32::from(u16::from_le_bytes([x, y])),
+                            (IndexType::U32, &[x, y, z, w]) => u32::from_le_bytes([x, y, z, w]),
+                            _ => return Err(invalid("sparse index encoding is invalid").into()),
+                        };
+                        if index as usize >= accessor.count()
+                            || previous.is_some_and(|previous| index <= previous)
+                        {
+                            return Err(invalid(
+                                "sparse indices must strictly increase within accessor count",
+                            )
+                            .into());
+                        }
+                        previous = Some(index);
+                        Ok(())
+                    })?;
                 }
                 Ok(())
             },

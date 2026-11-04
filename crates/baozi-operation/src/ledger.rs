@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 mod commitment;
 mod evidence;
+pub(crate) use evidence::ProgressEvidenceStorage;
 mod exclusive;
 pub(crate) use exclusive::{ExclusiveStorage, ExclusiveWork};
 mod reservation;
@@ -51,7 +52,7 @@ use snapshot::{
 pub(crate) use startup::{
     STARTUP_ACCOUNT_SHARE_STEP_COUNT, StartupAccountShareEnvelope, StartupAccountShareStep,
     StartupAttributionBatchPlans, StartupAttributionGraph, StartupLedgerGraphSeal,
-    StartupLedgerPlan, StartupLedgerPlanParts, StartupRetainedAttribution,
+    StartupLedgerPlanParts, StartupRetainedAttribution,
 };
 
 #[cfg(test)]
@@ -1109,6 +1110,21 @@ enum PublicationState {
     Published,
 }
 
+#[derive(Clone, Copy)]
+enum FallbackBaselineQualification {
+    Attachment,
+    Terminal,
+}
+
+impl FallbackBaselineQualification {
+    fn accepts_coverage(self, actual: u64, expected: u64) -> bool {
+        match self {
+            Self::Attachment => actual >= expected,
+            Self::Terminal => actual == expected,
+        }
+    }
+}
+
 /// Shared accounting state branded by one operation domain.
 pub(crate) struct Ledger<O, P, D> {
     work: LocalWork<D>,
@@ -1360,19 +1376,64 @@ where
         Ok(())
     }
 
-    pub(crate) fn configure_protected_work(&self, dimension: D) -> Result<(), LedgerCause<D>> {
-        let position = self
-            .work
-            .catalogue()
-            .binary_search(&dimension)
-            .map_err(|_| LedgerCause::UnknownDimension { dimension })?;
+    fn protected_work_dimension_position(&self, dimension: D) -> Result<usize, LedgerCause<D>> {
+        let position = self.bound_dimension_position(dimension)?;
         self.work.check_quiescent()?;
-        let mut work = self.work.borrow_state_mut()?;
+        Ok(position)
+    }
+
+    fn validate_protected_work_configuration(work: &WorkState<D>) -> Result<(), LedgerCause<D>> {
         if work.header.mode != WorkMode::Ordinary || work.header.protected_dimension.is_some() {
             return Err(LedgerCause::InactiveLinearWorkPermit);
         }
+        Ok(())
+    }
+
+    /// Checks protected-work eligibility without installing a dimension or changing work state.
+    #[cfg(test)]
+    pub(crate) fn preflight_configure_protected_work(
+        &self,
+        dimension: D,
+    ) -> Result<(), LedgerCause<D>> {
+        self.protected_work_dimension_position(dimension)?;
+        let work = self.work.borrow_state()?;
+        Self::validate_protected_work_configuration(&work)
+    }
+
+    pub(crate) fn configure_protected_work(&self, dimension: D) -> Result<(), LedgerCause<D>> {
+        let position = self.protected_work_dimension_position(dimension)?;
+        let mut work = self.work.borrow_state_mut()?;
+        Self::validate_protected_work_configuration(&work)?;
         work.header.protected_dimension = Some(position);
         Ok(())
+    }
+
+    /// Qualifies the bound dormant failure pool without granting work or changing its mode.
+    pub(crate) fn preflight_protected_work_attachment<const N: usize>(
+        &self,
+        dimension: D,
+        charges: &[(D, u64); N],
+        repetitions: NonZeroU64,
+    ) -> Result<(), LedgerCause<D>> {
+        let position = self.protected_work_dimension_position(dimension)?;
+        let work = self.work.borrow_state()?;
+        if work.header.mode != WorkMode::Ordinary
+            || work.header.protected_dimension != Some(position)
+        {
+            return Err(LedgerCause::InactiveLinearWorkPermit);
+        }
+        let layout = work::WorkLayout::bind(
+            self.work.catalogue(),
+            &charges.map(|(dimension, _)| dimension),
+            WorkGrant::Protected,
+        )?;
+        layout.preflight_repeated_observed(
+            self.work.catalogue(),
+            &work.rows,
+            &work.header,
+            charges.map(|(_, amount)| amount),
+            repetitions,
+        )
     }
 
     /// Activates the one prequalified private failure dimension after ordinary sealing.
@@ -2271,6 +2332,29 @@ where
         dimension: D,
         bytes: u64,
     ) -> Result<(), LedgerCause<D>> {
+        Self::transition_reservations_in(
+            &self.state,
+            self.operation_live_byte_limit,
+            reservations,
+            phase,
+            dimension,
+            bytes,
+            ReservationPositions {
+                dimension: self.bound_dimension_position(dimension),
+                phase: self.bound_phase_position(phase),
+            },
+        )
+    }
+
+    fn transition_reservations_in(
+        storage: &Arc<Mutex<LedgerState<P, D>>>,
+        operation_live_byte_limit: u64,
+        reservations: &mut [LiveReservation<O, P, D>],
+        phase: P,
+        dimension: D,
+        bytes: u64,
+        positions: ReservationPositions<D>,
+    ) -> Result<(), LedgerCause<D>> {
         if reservations.is_empty() && bytes != 0 {
             return Err(LedgerCause::SplitExceedsReservation {
                 requested: bytes,
@@ -2278,7 +2362,7 @@ where
             });
         }
         for reservation in reservations.iter() {
-            self.check_reservation(reservation)?;
+            Self::check_reservation_in(storage, reservation)?;
             if reservation.core.retained_output {
                 return Err(LedgerCause::OwnerMismatch);
             }
@@ -2292,16 +2376,14 @@ where
                     dimension,
                 })
         })?;
-        let dimension_position = self.bound_dimension_position(dimension);
-        let phase_position = self.bound_phase_position(phase);
-        let mut state = lock(&self.state);
+        let mut state = lock(storage);
         Self::ensure_open(&state)?;
-        let dimension_position = dimension_position?;
+        let dimension_position = positions.dimension?;
         let dimension_limit = state.dimensions[dimension_position]
             .policy
             .live_byte_limit
             .ok_or(LedgerCause::DimensionNotReservable { dimension })?;
-        let phase_position = phase_position?;
+        let phase_position = positions.phase?;
         if reservations.iter().any(|reservation| {
             reservation.core.dimension_position >= state.dimensions.len()
                 || reservation.core.phase_position >= state.phase_states.len()
@@ -2357,12 +2439,12 @@ where
             });
         }
         let operation_live = project(state.current_live_bytes, source_bytes)?;
-        if !operation_live_is_unchanged && operation_live > self.operation_live_byte_limit {
+        if !operation_live_is_unchanged && operation_live > operation_live_byte_limit {
             return Err(LedgerCause::LimitExceeded {
                 class: CounterClass::Live,
                 dimension,
                 value: operation_live,
-                limit: self.operation_live_byte_limit,
+                limit: operation_live_byte_limit,
             });
         }
         let phase_live = project(
@@ -2559,21 +2641,6 @@ where
         })
     }
 
-    pub(crate) fn try_grow_progress_evidence<T>(
-        &self,
-        values: &mut Vec<T>,
-        desired_capacity: usize,
-        retained_bytes: &mut u64,
-    ) -> Result<(), LedgerEvidenceError> {
-        evidence::try_grow_shared_evidence_vec(
-            &self.state,
-            values,
-            desired_capacity,
-            retained_bytes,
-            LedgerEvidencePurpose::Progress,
-        )
-    }
-
     pub(crate) fn release_progress_evidence(&self, retained_bytes: u64) {
         let mut state = lock(&self.state);
         debug_assert!(state.current_evidence_bytes >= retained_bytes);
@@ -2732,10 +2799,32 @@ where
         &self,
         baseline: &mut FallbackBatchBaseline<O, P, D>,
     ) -> Result<(), LedgerCause<D>> {
-        self.work.validate_integrity()?;
+        self.try_bind_fallback_baseline_with(baseline, FallbackBaselineQualification::Terminal)
+    }
+
+    /// Qualifies an actual startup baseline while unrelated storage and work remain owned.
+    ///
+    /// Success leaves all accounting and batch ownership unchanged. Exact terminal residue and
+    /// protected-work eligibility are checked separately at their respective boundaries.
+    pub(crate) fn try_attach_fallback_baseline(
+        &self,
+        baseline: &mut FallbackBatchBaseline<O, P, D>,
+    ) -> Result<(), LedgerCause<D>> {
+        self.try_bind_fallback_baseline_with(baseline, FallbackBaselineQualification::Attachment)
+    }
+
+    fn try_bind_fallback_baseline_with(
+        &self,
+        baseline: &mut FallbackBatchBaseline<O, P, D>,
+        qualification: FallbackBaselineQualification,
+    ) -> Result<(), LedgerCause<D>> {
+        match qualification {
+            FallbackBaselineQualification::Attachment => self.ensure_work_open()?,
+            FallbackBaselineQualification::Terminal => self.work.validate_integrity()?,
+        }
         let work = self.work.borrow_state()?;
         let state = lock(&self.state);
-        self.validate_fallback_baseline_locked(&state, &work, baseline)?;
+        self.validate_fallback_baseline_locked(&state, &work, baseline, qualification)?;
         preflight_typed_publication_batch(&state, &baseline.canonical_assembly)?;
         preflight_typed_publication_batch(&state, &baseline.evidence_assembly)?;
         preflight_typed_publication_batch(&state, &baseline.fallback)?;
@@ -2752,6 +2841,7 @@ where
         state: &LedgerState<P, D>,
         work: &WorkState<D>,
         baseline: &FallbackBatchBaseline<O, P, D>,
+        qualification: FallbackBaselineQualification,
     ) -> Result<(), LedgerCause<D>> {
         if !baseline.canonical_assembly.validate_owner(&self.state)
             || !baseline.evidence_assembly.validate_owner(&self.state)
@@ -2785,22 +2875,33 @@ where
             .and_then(|bytes| baseline.fallback.live_bytes()?.checked_add(bytes))
             .and_then(|bytes| baseline.evidence.live_bytes()?.checked_add(bytes))
             .ok_or(LedgerCause::LiveReservationsRemain { bytes: u64::MAX })?;
-        Self::ensure_terminal_preflight(state, work)?;
-        validate_final_snapshot_shape(state, work)?;
-        if state.active_reservations
-            != expected_active
-                .checked_add(state.retained_output_reservations)
-                .ok_or(LedgerCause::ActiveReservationsRemain { count: u64::MAX })?
-        {
+        match qualification {
+            FallbackBaselineQualification::Attachment => {
+                Self::ensure_open(state)?;
+                if state.dimensions.len() != work.rows.len()
+                    || state.dimensions.len() != state.dimension_snapshot_staging.len()
+                    || !phase_catalog_shape_is_valid(state)
+                {
+                    return Err(LedgerCause::FinalSnapshotShapeMismatch);
+                }
+            }
+            FallbackBaselineQualification::Terminal => {
+                Self::ensure_terminal_preflight(state, work)?;
+                validate_final_snapshot_shape(state, work)?;
+            }
+        }
+        let covered_active = expected_active
+            .checked_add(state.retained_output_reservations)
+            .ok_or(LedgerCause::ActiveReservationsRemain { count: u64::MAX })?;
+        if !qualification.accepts_coverage(state.active_reservations, covered_active) {
             return Err(LedgerCause::ActiveReservationsRemain {
                 count: state.active_reservations,
             });
         }
-        if state.current_live_bytes
-            != expected_live
-                .checked_add(state.retained_output_bytes)
-                .ok_or(LedgerCause::LiveReservationsRemain { bytes: u64::MAX })?
-        {
+        let covered_live = expected_live
+            .checked_add(state.retained_output_bytes)
+            .ok_or(LedgerCause::LiveReservationsRemain { bytes: u64::MAX })?;
+        if !qualification.accepts_coverage(state.current_live_bytes, covered_live) {
             return Err(LedgerCause::PublicationLiveMismatch {
                 transaction_bytes: expected_live,
                 ledger_bytes: state.current_live_bytes,
@@ -3120,7 +3221,15 @@ where
             .and_then(|bytes| bytes.checked_add(baseline.fallback.live_bytes()?))
             .ok_or(LedgerCause::LiveReservationsRemain { bytes: u64::MAX })?;
 
-        Self::ensure_terminal_preflight(state, work)?;
+        // The exact pair only stages destinations after the body requests cleanup. It neither
+        // publishes nor reopens ordinary work; actual primary binding still requires closed work.
+        let sealed_destination_pair = canonical_extra.is_some()
+            && evidence_extra.is_some()
+            && state.publication == PublicationState::Closing
+            && work.header.mode == WorkMode::OrdinarySealed;
+        if !sealed_destination_pair {
+            Self::ensure_terminal_preflight(state, work)?;
+        }
         validate_final_snapshot_shape(state, work)?;
         let active_after_transition = state
             .active_reservations
@@ -3245,7 +3354,14 @@ where
         &self,
         reservation: &LiveReservation<O, P, D>,
     ) -> Result<(), LedgerCause<D>> {
-        if !reservation.core.is_owned_by(&self.state) {
+        Self::check_reservation_in(&self.state, reservation)
+    }
+
+    fn check_reservation_in(
+        storage: &Arc<Mutex<LedgerState<P, D>>>,
+        reservation: &LiveReservation<O, P, D>,
+    ) -> Result<(), LedgerCause<D>> {
+        if !reservation.core.is_owned_by(storage) {
             return Err(LedgerCause::OwnerMismatch);
         }
         if !reservation.core.active {
@@ -5594,6 +5710,7 @@ fn release_positioned_bytes_locked<P, D>(
         .saturating_sub(bytes);
 }
 
+#[cfg(test)]
 fn dimension_entry<D: Copy + Ord>(
     dimensions: &[DimensionEntry<D>],
     dimension: D,
@@ -5880,6 +5997,9 @@ fn release_retained_output_attributions<P, D>(state: &mut LedgerState<P, D>) {
     state.retained_output_bytes = 0;
     state.retained_output_reservations = 0;
 }
+
+#[cfg(test)]
+mod baseline_attachment_tests;
 
 #[cfg(test)]
 mod tests;

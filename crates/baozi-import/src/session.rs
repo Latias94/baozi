@@ -18,20 +18,24 @@ use crate::loss::ImportLossEvidence;
 use crate::metered_storage::AccountedVec;
 use crate::outcome::{
     AccountedErrorContext, DetectionEvidence, ImportFailure, ImportFailureParts,
-    ImportFailureStoreOwner, ImportPhase, ImportPhaseEvidence, ImportReport, ImportReportParts,
-    ImportResult, ImportRunError,
+    ImportFailureStoreOwner, ImportInitializationError, ImportPhase, ImportPhaseEvidence,
+    ImportReport, ImportReportParts, ImportResult, ImportRunError,
 };
 use crate::registry::{ParseInvocationError, RegistryEntry};
 use crate::request::ImportPlan;
-use crate::resource_graph::ResourceGraph;
+use crate::resource_graph::{ResourceGraph, SuccessfulInputManifest};
 use crate::scope::{
     FailureEvidenceStorage, ParseContext, ParseContextParts, ParseFailureKind, read_opened_asset,
 };
 use crate::source_scope::{LiveSourceScopeRecord, SourceScopeRecord};
+#[cfg(test)]
+use crate::store::ImportStoreBodyParts;
 use crate::store::{
-    ImportStoreBootstrapRequirements, ImportStoreExecution, ImportStoreFailureCauseAuthority,
-    ImportStoreReservation, ImportStoreSceneBoundary, ImportStoreSessionOwner,
-    ImportStoreTerminalEvidence, ImportStoreTerminalOutcome, try_import_store_bootstrap,
+    ImportRootExecution, ImportStoreBootstrap, ImportStoreBootstrapRequirements,
+    ImportStoreFailureCauseAuthority, ImportStoreFinish, ImportStoreFinishRequest,
+    ImportStoreInvocationRoot, ImportStoreReservation, ImportStoreSceneBoundary,
+    ImportStoreSessionOwner, ImportStoreTerminalEvidence, ImportStoreTerminalOutcome, finish_scene,
+    try_import_store_bootstrap,
 };
 use baozi_core::__scene_integration::integration::SceneParseOutcome;
 use baozi_core::FormatId;
@@ -39,10 +43,12 @@ use baozi_io::{
     __semantic_identity::same_authority_resolver_v1, AssetIo, AssetOpenError, AssetOpenErrorKind,
     AssetOpenStage, AssetPath, AuthorityDomain, OpenedAsset,
 };
-use baozi_operation::{ControlCause, LedgerLimits, LedgerLimitsError};
+use baozi_operation::__retained_store_integration::activation::CanonicalBoundBodyError;
+use baozi_operation::{ControlCause, LedgerLimits, LedgerLimitsError, PhysicalStorageAccount};
 use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReadHint {
@@ -120,16 +126,7 @@ fn import_asset_with_resolver_and_ledger_limits<'a>(
     control: ImportOperationControl,
     ledger_limits: Result<LedgerLimits<ImportDimension>, LedgerLimitsError<ImportDimension>>,
 ) -> ImportResult<ImportReport> {
-    let store = try_start_store(request, control, ledger_limits)?;
-    #[cfg(feature = "tracing")]
-    let _span = tracing::info_span!("baozi.import").entered();
-
-    let mut session = ImportSession::new(request, io, source, resolver, store);
-    let execution = session.execute(SessionCreatedProof::new());
-    match execution {
-        Ok(()) => session.finalize_success(),
-        Err(cause) => session.finalize_failure(cause),
-    }
+    run_import_session(request, io, source, resolver, None, control, ledger_limits)
 }
 
 /// Imports an immutable caller-owned byte slice through one directly admitted primary snapshot.
@@ -148,48 +145,140 @@ pub fn import_bytes(
     control: ImportOperationControl,
 ) -> ImportResult<ImportReport> {
     let ledger_limits = import_ledger_limits(request.limits());
-    let store = try_start_store(request, control, ledger_limits)?;
-    #[cfg(feature = "tracing")]
-    let _span = tracing::info_span!("baozi.import").entered();
-
     let primary_io = DirectBytesAuthority::new();
-    let mut session = ImportSession::new(
+    run_import_session(
         request,
         &primary_io,
         source,
         ResolverBinding::custom(&DenyDependencies),
-        store,
-    );
-    let execution = session.execute_bytes(bytes, SessionCreatedProof::new());
-    match execution {
-        Ok(()) => session.finalize_success(),
-        Err(cause) => session.finalize_failure(cause),
+        Some(bytes),
+        control,
+        ledger_limits,
+    )
+}
+
+// Initialization temporaries end before the parser's call chain begins. These failures
+// have no session evidence and do not need the complete operation-failure owner.
+fn prepare_import_entry(
+    request: &ImportPlan,
+    ledger_limits: Result<LedgerLimits<ImportDimension>, LedgerLimitsError<ImportDimension>>,
+) -> Result<(PhysicalStorageAccount, ImportStoreBootstrap), ImportInitializationError> {
+    ledger_limits.map_err(ImportInitializationError::ledger_limits)?;
+    let account = request.try_create_storage_account().map_err(|_| {
+        ImportInitializationError::retained_store("physical-storage-account-unavailable")
+    })?;
+    let requirements =
+        ImportStoreBootstrapRequirements::for_node_scene(request.limits()).map_err(|_| {
+            ImportInitializationError::retained_store("retained-store-bootstrap-rejected")
+        })?;
+    let bootstrap = try_import_store_bootstrap(request.limits(), requirements)
+        .map_err(|_| ImportInitializationError::retained_store("retained-store-plan-rejected"))?;
+    Ok((account, bootstrap))
+}
+
+#[allow(
+    clippy::result_large_err,
+    reason = "the outer frame retains the complete owned import evidence through body cleanup"
+)]
+fn run_import_session(
+    request: &ImportPlan,
+    primary_io: &dyn AssetIo,
+    source: AssetPath,
+    resolver: ResolverBinding<'_>,
+    bytes: Option<&[u8]>,
+    control: ImportOperationControl,
+    ledger_limits: Result<LedgerLimits<ImportDimension>, LedgerLimitsError<ImportDimension>>,
+) -> ImportResult<ImportReport> {
+    let (account, bootstrap) =
+        prepare_import_entry(request, ledger_limits).map_err(ImportRunError::initialization)?;
+    let (ledger_plan, start_plan, bootstrap) = bootstrap.into_bound_parts();
+    let mut host = ImportStoreInvocationRoot::new();
+    let mut source = Some(source);
+    let mut bootstrap = Some(bootstrap);
+    let mut startup_error = None;
+    let mut data = None;
+    let mut finish_request = None;
+    let body = {
+        let source = &mut source;
+        let bootstrap = &mut bootstrap;
+        let startup_error = &mut startup_error;
+        let data = &mut data;
+        let finish_request = &mut finish_request;
+        host.run_bound_body(
+            control,
+            ledger_plan,
+            &account,
+            start_plan,
+            move |parts, disposition| {
+                let bootstrap = bootstrap
+                    .take()
+                    .expect("the retained import body starts once");
+                let store = match ImportStoreSessionOwner::try_attach_in_body(parts, bootstrap) {
+                    Ok(store) => store,
+                    Err(_cause) => {
+                        *startup_error = Some(ImportRunError::retained_store_initialization(
+                            "retained-store-start-rejected",
+                        ));
+                        return;
+                    }
+                };
+                #[cfg(feature = "tracing")]
+                let _span = tracing::info_span!("baozi.import").entered();
+                let data = data.insert(ImportSessionData::new(
+                    request,
+                    source
+                        .take()
+                        .expect("the outer frame retains the import source"),
+                ));
+                let mut session = ImportSession::new(request, primary_io, resolver, data, store);
+                let execution = match bytes {
+                    Some(bytes) => session.execute_bytes(bytes, SessionCreatedProof::new()),
+                    None => session.execute(SessionCreatedProof::new()),
+                };
+                let (store, outcome) = session.stage(execution);
+                *finish_request = Some(store.request_finish(disposition, outcome));
+            },
+        )
+    };
+    if let Some(cause) = startup_error {
+        return Err(cause);
     }
+    let body = match body {
+        Err(CanonicalBoundBodyError::Start(_cause)) => {
+            return Err(ImportRunError::retained_store_initialization(
+                "retained-store-start-rejected",
+            ));
+        }
+        body => body,
+    };
+    let data = data
+        .ok_or_else(|| ImportRunError::finalization("canonical-failure-finalization-contained"))?;
+    let finish_request = finish_request
+        .ok_or_else(|| data.finalization_error())?
+        .map_err(|_cause| data.finalization_error())?;
+    let finish = body
+        .map_err(|_| data.finalization_error())?
+        .into_attached()
+        .map_err(|_| data.finalization_error())?;
+    data.finish(finish, finish_request)
 }
 
 #[allow(
     clippy::result_large_err,
     reason = "import errors retain the linear terminal owner without post-terminal allocation"
 )]
-fn try_start_store(
+#[cfg(test)]
+fn try_start_store<'inv>(
+    parts: ImportStoreBodyParts<'inv>,
     request: &ImportPlan,
     control: ImportOperationControl,
     ledger_limits: Result<LedgerLimits<ImportDimension>, LedgerLimitsError<ImportDimension>>,
-) -> Result<ImportStoreSessionOwner, ImportRunError> {
-    ledger_limits.map_err(ImportRunError::initialization)?;
-    let account = request.try_create_storage_account().map_err(|_| {
-        ImportRunError::retained_store_initialization("physical-storage-account-unavailable")
-    })?;
-    let requirements =
-        ImportStoreBootstrapRequirements::for_node_scene(request.limits()).map_err(|_| {
-            ImportRunError::retained_store_initialization("retained-store-bootstrap-rejected")
-        })?;
-    let bootstrap = try_import_store_bootstrap(request.limits(), requirements).map_err(|_| {
-        ImportRunError::retained_store_initialization("retained-store-plan-rejected")
-    })?;
-    ImportStoreSessionOwner::try_start(control, &account, bootstrap).map_err(|_cause| {
-        ImportRunError::retained_store_initialization("retained-store-start-rejected")
-    })
+) -> Result<ImportStoreSessionOwner<'inv>, ImportRunError> {
+    let (account, bootstrap) =
+        prepare_import_entry(request, ledger_limits).map_err(ImportRunError::initialization)?;
+    ImportStoreSessionOwner::try_start_in_body(parts, control, &account, bootstrap).map_err(
+        |_cause| ImportRunError::retained_store_initialization("retained-store-start-rejected"),
+    )
 }
 
 struct DirectBytesAuthority {
@@ -225,13 +314,17 @@ impl AssetIo for DirectBytesAuthority {
     }
 }
 
-struct ImportSession<'a> {
+struct ImportSession<'a, 'session, 'inv> {
     request: &'a ImportPlan,
     primary_io: &'a dyn AssetIo,
-    source: AssetPath,
     resolver: ResolverBinding<'a>,
+    data: &'session mut ImportSessionData,
+    store: ImportStoreSessionOwner<'inv>,
+}
+
+struct ImportSessionData {
+    source: AssetPath,
     dependency_origin_issuer: DependencyOriginIssuer,
-    store: ImportStoreSessionOwner,
     diagnostics: Option<RefCell<DiagnosticSink>>,
     resource_graph: Option<RefCell<ResourceGraph>>,
     optional_dependency_evidence: RefCell<AccountedVec<crate::OptionalDependencyEvidence>>,
@@ -246,23 +339,30 @@ struct ImportSession<'a> {
     effective_limits: Option<ResourceLimits>,
     detection: AccountedVec<DetectionEvidence>,
     last_completed: ImportPhaseEvidence,
+    report: Option<TerminalReportEvidence>,
+    staging: Option<ImportSessionStaging>,
 }
 
-impl<'a> ImportSession<'a> {
-    fn new(
-        request: &'a ImportPlan,
-        primary_io: &'a dyn AssetIo,
-        source: AssetPath,
-        resolver: ResolverBinding<'a>,
-        store: ImportStoreSessionOwner,
-    ) -> Self {
+#[allow(
+    clippy::large_enum_variant,
+    reason = "owned manifest and original accounted cause remain inline through retained body cleanup"
+)]
+enum ImportSessionStaging {
+    Success {
+        format: Arc<crate::FormatDescriptor>,
+        successful_input_manifest: SuccessfulInputManifest,
+    },
+    Failure {
+        selected_format: Option<FormatId>,
+        cause: TerminalFailureCause,
+    },
+}
+
+impl ImportSessionData {
+    fn new(request: &ImportPlan, source: AssetPath) -> Self {
         Self {
-            request,
-            primary_io,
             source,
-            resolver,
             dependency_origin_issuer: DependencyOriginIssuer::new(),
-            store,
             diagnostics: Some(RefCell::new(DiagnosticSink::new(
                 request.limits().max_diagnostics,
                 request.limits().max_diagnostic_bytes,
@@ -282,7 +382,35 @@ impl<'a> ImportSession<'a> {
             effective_limits: None,
             detection: AccountedVec::new(),
             last_completed: ImportPhaseEvidence::new(ImportPhase::SessionCreated),
+            report: None,
+            staging: None,
         }
+    }
+}
+
+impl<'a, 'session, 'inv> ImportSession<'a, 'session, 'inv> {
+    fn new(
+        request: &'a ImportPlan,
+        primary_io: &'a dyn AssetIo,
+        resolver: ResolverBinding<'a>,
+        data: &'session mut ImportSessionData,
+        store: ImportStoreSessionOwner<'inv>,
+    ) -> Self {
+        Self {
+            request,
+            primary_io,
+            resolver,
+            data,
+            store,
+        }
+    }
+
+    fn stage(
+        self,
+        execution: Result<(), ImportCause>,
+    ) -> (ImportStoreSessionOwner<'inv>, SceneParseOutcome) {
+        let outcome = self.data.stage_execution(execution);
+        (self.store, outcome)
     }
 
     fn execute(&mut self, created: SessionCreatedProof) -> Result<(), ImportCause> {
@@ -315,12 +443,11 @@ impl<'a> ImportSession<'a> {
                     code: "primary-authority-panicked",
                 }
             })?;
-        let (opened, backend_hard_limit) = {
-            let mut exec = self.store.execution().map_err(store_cause)?;
+        let (opened, backend_hard_limit) = self.store.with_root_execution(|exec| {
             let opened = open_asset(
-                &mut exec,
+                exec,
                 self.primary_io,
-                &self.source,
+                &self.data.source,
                 AssetOpenContext::Primary,
             )
             .map_err(|cause| match cause {
@@ -331,7 +458,7 @@ impl<'a> ImportSession<'a> {
             })?;
             if !opened
                 .asset()
-                .matches_identity(&expected_domain, &self.source)
+                .matches_identity(&expected_domain, &self.data.source)
             {
                 return Err(ImportCause::TrustedExtension {
                     boundary: TrustedExtensionBoundary::AssetIo,
@@ -341,34 +468,37 @@ impl<'a> ImportSession<'a> {
             let backend_hard_limit = opened.asset().backend_hard_limit();
             exec.charge_consumed(ImportDimension::AssetOpen, 1)
                 .map_err(store_cause)?;
-            (opened, backend_hard_limit)
-        };
-        let snapshot = {
-            let mut exec = self.store.execution().map_err(store_cause)?;
-            read_opened_asset(
-                &mut exec,
-                opened,
-                ImportLedgerPhase::PrimarySnapshot,
-                ImportProgressPhase::AcquirePrimary,
-                ImportDimension::PrimaryBytes,
-                self.request.limits().max_primary_asset_bytes,
-                self.request.limits().max_total_asset_bytes,
-            )
-        }
-        .map_err(Self::scope_cause)?;
-        {
-            let mut exec = self.store.execution().map_err(store_cause)?;
-            self.resource_graph
-                .as_mut()
-                .expect("session is active")
-                .get_mut()
-                .bind_primary(&mut exec, &expected_domain, &self.source, &snapshot)
-        }
-        .map_err(|cause| Self::scope_cause(cause.into_scope_cause()))?;
-        self.primary_authority = Some(expected_domain);
-        self.primary_backend_hard_limit = backend_hard_limit;
-        self.primary_snapshot = Some(snapshot);
-        self.last_completed = ImportPhaseEvidence::new(ImportPhase::PrimaryBound);
+            Ok((opened, backend_hard_limit))
+        })?;
+        let snapshot = self
+            .store
+            .with_root_execution(|exec| {
+                read_opened_asset(
+                    exec,
+                    opened,
+                    ImportLedgerPhase::PrimarySnapshot,
+                    ImportProgressPhase::AcquirePrimary,
+                    ImportDimension::PrimaryBytes,
+                    self.request.limits().max_primary_asset_bytes,
+                    self.request.limits().max_total_asset_bytes,
+                )
+            })
+            .map_err(Self::scope_cause)?;
+        self.store
+            .with_root_execution(|exec| {
+                self.data
+                    .resource_graph
+                    .as_mut()
+                    .expect("session is active")
+                    .get_mut()
+                    .bind_primary(exec, &expected_domain, &self.data.source, &snapshot)
+                    .map_err(|cause| cause.into_scope_cause())
+            })
+            .map_err(Self::scope_cause)?;
+        self.data.primary_authority = Some(expected_domain);
+        self.data.primary_backend_hard_limit = backend_hard_limit;
+        self.data.primary_snapshot = Some(snapshot);
+        self.data.last_completed = ImportPhaseEvidence::new(ImportPhase::PrimaryBound);
         Ok(PrimaryBoundProof::new())
     }
 
@@ -393,8 +523,7 @@ impl<'a> ImportSession<'a> {
                 resource: "direct-primary-snapshot",
             })
         })?;
-        let snapshot = {
-            let mut exec = self.store.execution().map_err(store_cause)?;
+        let snapshot = self.store.with_root_execution(|exec| {
             exec.charge_attempted(ImportDimension::PrimaryBytes, byte_count)
                 .and_then(|()| exec.charge_attempted(ImportDimension::TotalAssetBytes, byte_count))
                 .map_err(store_cause)?;
@@ -408,7 +537,7 @@ impl<'a> ImportSession<'a> {
             snapshot
                 .try_reserve(bytes.len(), "direct-primary-snapshot", |capacity_bytes| {
                     reserve_required_bytes(
-                        &mut exec,
+                        exec,
                         ImportLedgerPhase::PrimarySnapshot,
                         ImportDimension::PrimaryBytes,
                         capacity_bytes,
@@ -427,26 +556,28 @@ impl<'a> ImportSession<'a> {
                 (ImportDimension::TotalAssetBytes, byte_count),
             ])
             .map_err(store_cause)?;
-            snapshot
-        };
-        {
-            let mut exec = self.store.execution().map_err(store_cause)?;
-            self.resource_graph
-                .as_mut()
-                .expect("session is active")
-                .get_mut()
-                .bind_primary(&mut exec, &primary_authority, &self.source, &snapshot)
-        }
-        .map_err(|cause| Self::scope_cause(cause.into_scope_cause()))?;
-        self.primary_snapshot = Some(snapshot);
+            Ok(snapshot)
+        })?;
+        self.store
+            .with_root_execution(|exec| {
+                self.data
+                    .resource_graph
+                    .as_mut()
+                    .expect("session is active")
+                    .get_mut()
+                    .bind_primary(exec, &primary_authority, &self.data.source, &snapshot)
+                    .map_err(|cause| cause.into_scope_cause())
+            })
+            .map_err(Self::scope_cause)?;
+        self.data.primary_snapshot = Some(snapshot);
         self.report_boundary_progress(
             ImportProgressPhase::AcquirePrimary,
             ImportProgressUnit::Bytes,
             byte_count,
             Some(byte_count),
         )?;
-        self.primary_authority = Some(primary_authority);
-        self.last_completed = ImportPhaseEvidence::new(ImportPhase::PrimaryBound);
+        self.data.primary_authority = Some(primary_authority);
+        self.data.last_completed = ImportPhaseEvidence::new(ImportPhase::PrimaryBound);
         Ok(PrimaryBoundProof::new())
     }
 
@@ -458,7 +589,7 @@ impl<'a> ImportSession<'a> {
         let _span = tracing::info_span!("baozi.detect").entered();
 
         self.poll_boundary()?;
-        let bytes = self.primary_snapshot.as_ref().ok_or_else(|| {
+        let bytes = self.data.primary_snapshot.as_ref().ok_or_else(|| {
             Self::scope_cause(ScopeAbortCause::DescriptorContract {
                 code: "primary-proof-without-snapshot",
             })
@@ -468,17 +599,18 @@ impl<'a> ImportSession<'a> {
                 .unwrap_or(usize::MAX)
                 .min(bytes.len());
         let probe = Probe::new(&bytes[..probe_len], bytes.len() as u64);
-        let _hint_reservation = {
-            let mut exec = self.store.execution().map_err(store_cause)?;
-            reserve_exact_bytes(
-                &mut exec,
-                ImportLedgerPhase::Detection,
-                ImportDimension::ScratchBytes,
-                self.source.as_str().len() as u64,
-            )
-        }
-        .map_err(Self::scope_cause)?;
-        let hint = ReadHint::from_source(self.source.try_clone().map_err(|_| {
+        let _hint_reservation = self
+            .store
+            .with_root_execution(|exec| {
+                reserve_exact_bytes(
+                    exec,
+                    ImportLedgerPhase::Detection,
+                    ImportDimension::ScratchBytes,
+                    self.data.source.as_str().len() as u64,
+                )
+            })
+            .map_err(Self::scope_cause)?;
+        let hint = ReadHint::from_source(self.data.source.try_clone().map_err(|_| {
             Self::scope_cause(ScopeAbortCause::Allocation {
                 resource: "detection-source-hint",
             })
@@ -490,18 +622,18 @@ impl<'a> ImportSession<'a> {
             }
         };
         let mut entries = AccountedVec::new();
-        {
-            let mut exec = self.store.execution().map_err(store_cause)?;
-            entries.try_reserve(entry_count, "detection-candidates", |bytes| {
-                reserve_required_bytes(
-                    &mut exec,
-                    ImportLedgerPhase::Detection,
-                    ImportDimension::ScratchBytes,
-                    bytes,
-                )
+        self.store
+            .with_root_execution(|exec| {
+                entries.try_reserve(entry_count, "detection-candidates", |bytes| {
+                    reserve_required_bytes(
+                        exec,
+                        ImportLedgerPhase::Detection,
+                        ImportDimension::ScratchBytes,
+                        bytes,
+                    )
+                })
             })
-        }
-        .map_err(Self::scope_cause)?;
+            .map_err(Self::scope_cause)?;
         match self.request.config().format_selection() {
             FormatSelection::Forced(id) => {
                 if let Some(entry) = self.request.entry(id) {
@@ -522,50 +654,49 @@ impl<'a> ImportSession<'a> {
                 }
             }
         }
-        if !self.detection.is_empty() || self.detection.capacity_bytes() != 0 {
+        if !self.data.detection.is_empty() || self.data.detection.capacity_bytes() != 0 {
             return Err(Self::scope_cause(ScopeAbortCause::DescriptorContract {
                 code: "detection-storage-reserved-more-than-once",
             }));
         }
-        {
-            let mut exec = self.store.execution().map_err(store_cause)?;
-            self.detection
-                .try_reserve(entries.len(), "detection-evidence", |bytes| {
-                    reserve_retained_bytes(
-                        &mut exec,
-                        ImportLedgerPhase::OutcomeFinalization,
-                        ImportDimension::ScratchBytes,
-                        bytes,
-                    )
-                })
-        }
-        .map_err(Self::scope_cause)?;
+        self.store
+            .with_root_execution(|exec| {
+                self.data
+                    .detection
+                    .try_reserve(entries.len(), "detection-evidence", |bytes| {
+                        reserve_retained_bytes(
+                            exec,
+                            ImportLedgerPhase::OutcomeFinalization,
+                            ImportDimension::ScratchBytes,
+                            bytes,
+                        )
+                    })
+            })
+            .map_err(Self::scope_cause)?;
         let total = entries.len() as u64;
         for (index, entry) in entries.iter().enumerate() {
             self.store
-                .execution()
-                .and_then(|mut exec| exec.poll())
+                .with_root_execution(|exec| exec.poll())
                 .map_err(store_cause)?;
-            let (outcome, latched) = {
-                let exec = self.store.execution().map_err(store_cause)?;
-                let scope = DetectionScope::new(exec, &self.terminal).map_err(store_cause)?;
-                let outcome = entry.detect(&probe, &hint, &scope);
-                let latched = scope.into_terminal_abort();
-                (outcome, latched)
-            };
-            if let Some(abort) = latched {
-                return Err(ImportCause::Scope(abort));
-            }
+            let outcome = self.store.with_root_execution(|exec| {
+                let mut scope =
+                    DetectionScope::new(exec, &self.data.terminal).map_err(store_cause)?;
+                let outcome = entry.detect(&probe, &hint, &mut scope);
+                if let Some(abort) = scope.into_terminal_abort() {
+                    return Err(ImportCause::Scope(abort));
+                }
+                Ok(outcome)
+            })?;
             self.store
-                .execution()
-                .and_then(|mut exec| exec.poll())
+                .with_root_execution(|exec| exec.poll())
                 .map_err(store_cause)?;
             let outcome = outcome.map_err(|_| {
                 Self::scope_cause(ScopeAbortCause::DescriptorContract {
                     code: "detection-abort-without-terminal-cause",
                 })
             })?;
-            self.detection
+            self.data
+                .detection
                 .try_push_reserved(DetectionEvidence::new(entry.format_id().clone(), outcome))
                 .map_err(|_| {
                     Self::scope_cause(ScopeAbortCause::DescriptorContract {
@@ -573,8 +704,7 @@ impl<'a> ImportSession<'a> {
                     })
                 })?;
             self.store
-                .execution()
-                .and_then(|mut exec| {
+                .with_root_execution(|exec| {
                     exec.report_progress(
                         ImportProgressPhase::Detect,
                         ImportProgressUnit::Candidates,
@@ -586,8 +716,8 @@ impl<'a> ImportSession<'a> {
         }
 
         let selected = self.choose_candidate(&entries)?;
-        self.selected = Some(selected);
-        self.last_completed = ImportPhaseEvidence::new(ImportPhase::SelectionCompleted);
+        self.data.selected = Some(selected);
+        self.data.last_completed = ImportPhaseEvidence::new(ImportPhase::SelectionCompleted);
         Ok(SelectionCompletedProof::new())
     }
 
@@ -603,7 +733,7 @@ impl<'a> ImportSession<'a> {
                 .first()
                 .cloned()
                 .ok_or(ImportCause::UnsupportedFormat)?;
-            return match self.detection.first().map(DetectionEvidence::outcome) {
+            return match self.data.detection.first().map(DetectionEvidence::outcome) {
                 Some(DetectionOutcome::Match(_)) | Some(DetectionOutcome::Inconclusive(_)) => {
                     Ok(entry)
                 }
@@ -622,22 +752,22 @@ impl<'a> ImportSession<'a> {
         }
 
         let mut candidates = AccountedVec::new();
-        {
-            let mut exec = self.store.execution().map_err(store_cause)?;
-            candidates.try_reserve(entries.len(), "detection-candidate-ranking", |bytes| {
-                reserve_required_bytes(
-                    &mut exec,
-                    ImportLedgerPhase::Detection,
-                    ImportDimension::ScratchBytes,
-                    bytes,
-                )
+        self.store
+            .with_root_execution(|exec| {
+                candidates.try_reserve(entries.len(), "detection-candidate-ranking", |bytes| {
+                    reserve_required_bytes(
+                        exec,
+                        ImportLedgerPhase::Detection,
+                        ImportDimension::ScratchBytes,
+                        bytes,
+                    )
+                })
             })
-        }
-        .map_err(Self::scope_cause)?;
+            .map_err(Self::scope_cause)?;
         for candidate in
             entries
                 .iter()
-                .zip(self.detection.iter())
+                .zip(self.data.detection.iter())
                 .filter_map(|(entry, evidence)| match evidence.outcome() {
                     DetectionOutcome::Match(confidence) => Some((entry.clone(), *confidence)),
                     _ => None,
@@ -682,23 +812,23 @@ impl<'a> ImportSession<'a> {
             return Ok(entry.clone());
         }
         let mut extension_matches = AccountedVec::new();
-        {
-            let mut exec = self.store.execution().map_err(store_cause)?;
-            extension_matches.try_reserve(
-                candidates.len(),
-                "extension-detection-candidates",
-                |bytes| {
-                    reserve_required_bytes(
-                        &mut exec,
-                        ImportLedgerPhase::Detection,
-                        ImportDimension::ScratchBytes,
-                        bytes,
-                    )
-                },
-            )
-        }
-        .map_err(Self::scope_cause)?;
-        if let Some(extension) = self.source.extension() {
+        self.store
+            .with_root_execution(|exec| {
+                extension_matches.try_reserve(
+                    candidates.len(),
+                    "extension-detection-candidates",
+                    |bytes| {
+                        reserve_required_bytes(
+                            exec,
+                            ImportLedgerPhase::Detection,
+                            ImportDimension::ScratchBytes,
+                            bytes,
+                        )
+                    },
+                )
+            })
+            .map_err(Self::scope_cause)?;
+        if let Some(extension) = self.data.source.extension() {
             for candidate in candidates.iter().filter(|(entry, _)| {
                 entry
                     .descriptor()
@@ -731,14 +861,17 @@ impl<'a> ImportSession<'a> {
 
     fn no_selection_cause(&self) -> ImportCause {
         let had_match = self
+            .data
             .detection
             .iter()
             .any(|evidence| matches!(evidence.outcome(), DetectionOutcome::Match(_)));
         let had_inconclusive = self
+            .data
             .detection
             .iter()
             .any(|evidence| matches!(evidence.outcome(), DetectionOutcome::Inconclusive(_)));
         let had_fault = self
+            .data
             .detection
             .iter()
             .any(|evidence| matches!(evidence.outcome(), DetectionOutcome::Fault(_)));
@@ -758,18 +891,18 @@ impl<'a> ImportSession<'a> {
         mut candidates: AccountedVec<(RegistryEntry, ReadConfidence)>,
     ) -> Result<RegistryEntry, ImportCause> {
         let mut format_ids = AccountedVec::new();
-        {
-            let mut exec = self.store.execution().map_err(store_cause)?;
-            format_ids.try_reserve(candidates.len(), "ambiguous-format-candidates", |bytes| {
-                reserve_retained_bytes(
-                    &mut exec,
-                    ImportLedgerPhase::OutcomeFinalization,
-                    ImportDimension::ScratchBytes,
-                    bytes,
-                )
+        self.store
+            .with_root_execution(|exec| {
+                format_ids.try_reserve(candidates.len(), "ambiguous-format-candidates", |bytes| {
+                    reserve_retained_bytes(
+                        exec,
+                        ImportLedgerPhase::OutcomeFinalization,
+                        ImportDimension::ScratchBytes,
+                        bytes,
+                    )
+                })
             })
-        }
-        .map_err(Self::scope_cause)?;
+            .map_err(Self::scope_cause)?;
         while let Some((entry, _)) = candidates.pop() {
             format_ids
                 .try_push_reserved(entry.format_id().clone())
@@ -782,28 +915,30 @@ impl<'a> ImportSession<'a> {
         drop(candidates);
         format_ids.sort_unstable();
         format_ids.dedup();
-        let candidates = {
-            let mut exec = self.store.execution().map_err(store_cause)?;
-            crate::error::DetectionCandidates::try_new(format_ids, &mut exec)
-        }
-        .map_err(Self::scope_cause)?;
+        let candidates = self
+            .store
+            .with_root_execution(|exec| {
+                crate::error::DetectionCandidates::try_new(format_ids, exec)
+            })
+            .map_err(Self::scope_cause)?;
         Err(ImportCause::Detection(DetectionFailure::Ambiguous {
             candidates,
         }))
     }
 
     fn freeze_selected_limits(&mut self, entry: &RegistryEntry) -> Result<(), ImportCause> {
-        if self.effective_limits.is_some() {
+        if self.data.effective_limits.is_some() {
             return Err(Self::scope_cause(ScopeAbortCause::DescriptorContract {
                 code: "selected-limits-frozen-more-than-once",
             }));
         }
-        self.effective_limits = Some(self.request.limits().effective_for_selected_format(
+        self.data.effective_limits = Some(self.request.limits().effective_for_selected_format(
             entry.descriptor().text_profile(),
-            self.primary_backend_hard_limit,
+            self.data.primary_backend_hard_limit,
         ));
-        if let Some(limits) = self.effective_limits.as_ref() {
-            self.resource_graph
+        if let Some(limits) = self.data.effective_limits.as_ref() {
+            self.data
+                .resource_graph
                 .as_mut()
                 .expect("session is active")
                 .get_mut()
@@ -811,13 +946,13 @@ impl<'a> ImportSession<'a> {
                 .map_err(|cause| Self::scope_cause(cause.into_scope_cause()))?;
         }
         let tightening = {
-            let effective_limits = self.effective_limits.as_ref().ok_or_else(|| {
+            let effective_limits = self.data.effective_limits.as_ref().ok_or_else(|| {
                 Self::scope_cause(ScopeAbortCause::DescriptorContract {
                     code: "selected-limits-not-frozen",
                 })
             })?;
-            let mut exec = self.store.execution().map_err(store_cause)?;
-            tighten_selected_format_limits(&mut exec, effective_limits)
+            self.store
+                .with_root_execution(|exec| tighten_selected_format_limits(exec, effective_limits))
         };
         tightening.map_err(|cause| Self::scope_cause(cause.into_scope_abort_cause()))
     }
@@ -827,7 +962,7 @@ impl<'a> ImportSession<'a> {
         let _span = tracing::info_span!("baozi.parse").entered();
 
         self.poll_boundary()?;
-        let entry = self.selected.as_ref().cloned().ok_or_else(|| {
+        let entry = self.data.selected.as_ref().cloned().ok_or_else(|| {
             Self::scope_cause(ScopeAbortCause::DescriptorContract {
                 code: "selection-proof-without-entry",
             })
@@ -838,7 +973,7 @@ impl<'a> ImportSession<'a> {
                 code: "foreign-import-plan-invocation",
             })
         })?;
-        let effective_limits = self.effective_limits.as_ref().ok_or_else(|| {
+        let effective_limits = self.data.effective_limits.as_ref().ok_or_else(|| {
             Self::scope_cause(ScopeAbortCause::DescriptorContract {
                 code: "selection-proof-without-effective-limits",
             })
@@ -847,30 +982,34 @@ impl<'a> ImportSession<'a> {
             let mut context = ParseContext::new(ParseContextParts {
                 entry: entry.clone(),
                 primary_io: self.primary_io,
-                primary_authority: self.primary_authority.as_ref().ok_or_else(|| {
+                primary_authority: self.data.primary_authority.as_ref().ok_or_else(|| {
                     Self::scope_cause(ScopeAbortCause::DescriptorContract {
                         code: "selection-proof-without-primary-authority",
                     })
                 })?,
-                primary_source: &self.source,
-                primary_bytes: self.primary_snapshot.as_ref().ok_or_else(|| {
+                primary_source: &self.data.source,
+                primary_bytes: self.data.primary_snapshot.as_ref().ok_or_else(|| {
                     Self::scope_cause(ScopeAbortCause::DescriptorContract {
                         code: "selection-proof-without-primary-snapshot",
                     })
                 })?,
                 resolver: self.resolver,
-                dependency_origin_issuer: &self.dependency_origin_issuer,
+                dependency_origin_issuer: &self.data.dependency_origin_issuer,
                 conformance_policy: self.request.config().conformance_policy(),
                 loss_policy: self.request.config().loss_policy(),
                 limits: effective_limits,
                 store_owner: &mut self.store,
-                diagnostics: self.diagnostics.as_ref().expect("session is active"),
-                resource_graph: self.resource_graph.as_ref().expect("session is active"),
-                optional_dependency_evidence: &self.optional_dependency_evidence,
-                loss_evidence: &self.loss_evidence,
-                source_scope_record: &self.source_scope_record,
-                format_failure_storage: &self.format_failure_storage,
-                terminal: &self.terminal,
+                diagnostics: self.data.diagnostics.as_ref().expect("session is active"),
+                resource_graph: self
+                    .data
+                    .resource_graph
+                    .as_ref()
+                    .expect("session is active"),
+                optional_dependency_evidence: &self.data.optional_dependency_evidence,
+                loss_evidence: &self.data.loss_evidence,
+                source_scope_record: &self.data.source_scope_record,
+                format_failure_storage: &self.data.format_failure_storage,
+                terminal: &self.data.terminal,
             });
             let parsed = invocation.parse(&mut context);
             let latched = context.take_terminal_abort();
@@ -879,10 +1018,10 @@ impl<'a> ImportSession<'a> {
         let completed_boundary = self.store.completed_scene_boundary().map_err(store_cause)?;
         match completed_boundary {
             Some(ImportStoreSceneBoundary::DraftBuilt) => {
-                self.last_completed = ImportPhaseEvidence::new(ImportPhase::DraftBuilt);
+                self.data.last_completed = ImportPhaseEvidence::new(ImportPhase::DraftBuilt);
             }
             Some(ImportStoreSceneBoundary::Validated) => {
-                self.last_completed = ImportPhaseEvidence::new(ImportPhase::Validated);
+                self.data.last_completed = ImportPhaseEvidence::new(ImportPhase::Validated);
             }
             None => {}
         }
@@ -914,7 +1053,7 @@ impl<'a> ImportSession<'a> {
                     }));
                 }
                 ParseFailureKind::Format(envelope) => {
-                    if !self.format_failure_storage.borrow().format_captured
+                    if !self.data.format_failure_storage.borrow().format_captured
                         || !envelope.has_storage()
                     {
                         return Err(Self::scope_cause(ScopeAbortCause::DescriptorContract {
@@ -925,7 +1064,7 @@ impl<'a> ImportSession<'a> {
                 }
             },
             Ok(Ok(())) => {
-                if self.format_failure_storage.borrow().is_active() {
+                if self.data.format_failure_storage.borrow().is_active() {
                     return Err(Self::scope_cause(ScopeAbortCause::DescriptorContract {
                         code: "format-failure-was-swallowed",
                     }));
@@ -949,49 +1088,141 @@ impl<'a> ImportSession<'a> {
         Ok(())
     }
 
+    fn poll_boundary(&mut self) -> Result<(), ImportCause> {
+        self.store
+            .with_root_execution(|exec| exec.poll())
+            .map_err(store_cause)
+    }
+
+    fn report_boundary_progress(
+        &mut self,
+        phase: ImportProgressPhase,
+        unit: ImportProgressUnit,
+        completed: u64,
+        total: Option<u64>,
+    ) -> Result<(), ImportCause> {
+        self.store
+            .with_root_execution(|exec| exec.report_progress(phase, unit, completed, total))
+            .map_err(store_cause)
+    }
+
+    fn charge_open_attempt(&mut self) -> Result<(), ImportCause> {
+        self.store
+            .with_root_execution(|exec| exec.charge_attempted(ImportDimension::AssetOpen, 1))
+            .map_err(store_cause)
+    }
+
+    fn scope_cause(cause: ScopeAbortCause) -> ImportCause {
+        ImportCause::Scope(ScopeAbort::new(cause))
+    }
+}
+
+impl ImportSessionData {
+    fn stage_execution(&mut self, execution: Result<(), ImportCause>) -> SceneParseOutcome {
+        let staging = match execution.and_then(|()| self.stage_success()) {
+            Ok(staging) => staging,
+            Err(cause) => ImportSessionStaging::Failure {
+                selected_format: self
+                    .selected
+                    .as_ref()
+                    .map(|entry| entry.format_id().clone()),
+                cause: self.take_failure_cause(cause),
+            },
+        };
+        let outcome = match &staging {
+            ImportSessionStaging::Success { .. } => SceneParseOutcome::Accepted,
+            ImportSessionStaging::Failure { .. } => SceneParseOutcome::Rejected,
+        };
+        self.staging = Some(staging);
+        let report = self.take_report_staging();
+        self.release_transient_live();
+        self.report = Some(report.into_terminal());
+        drop(self.selected.take());
+        outcome
+    }
+
+    fn stage_success(&mut self) -> Result<ImportSessionStaging, ImportCause> {
+        if self.format_failure_storage.get_mut().is_active() {
+            return Err(ImportCause::Scope(ScopeAbort::new(
+                ScopeAbortCause::DescriptorContract {
+                    code: "format-failure-was-swallowed",
+                },
+            )));
+        }
+        let format = self
+            .selected
+            .as_ref()
+            .map(RegistryEntry::descriptor_handle)
+            .ok_or(ImportCause::TrustedExtension {
+                boundary: TrustedExtensionBoundary::Importer,
+                code: "scene-without-selected-format",
+            })?;
+        let successful_input_manifest = self
+            .resource_graph
+            .as_mut()
+            .ok_or(ScopeAbortCause::DescriptorContract {
+                code: "resource-graph-missing-at-success",
+            })
+            .and_then(|graph| {
+                graph
+                    .get_mut()
+                    .take_manifest()
+                    .map_err(|cause| cause.into_scope_cause())
+            })
+            .map_err(|cause| ImportCause::Scope(ScopeAbort::new(cause)))?;
+        Ok(ImportSessionStaging::Success {
+            format,
+            successful_input_manifest,
+        })
+    }
+
+    fn finalization_error(&self) -> ImportRunError {
+        ImportRunError::finalization(match self.staging.as_ref() {
+            Some(ImportSessionStaging::Success { .. }) => "canonical-scene-finalization-contained",
+            Some(ImportSessionStaging::Failure { .. }) | None => {
+                "canonical-failure-finalization-contained"
+            }
+        })
+    }
+
     #[allow(
         clippy::result_large_err,
         reason = "terminal import failures retain complete bounded session evidence without heap indirection"
     )]
-    fn finalize_success(mut self) -> ImportResult<ImportReport> {
-        if self.format_failure_storage.get_mut().is_active() {
-            let cause = Self::scope_cause(ScopeAbortCause::DescriptorContract {
-                code: "format-failure-was-swallowed",
-            });
-            return self.finalize_failure(cause);
+    fn finish(
+        mut self,
+        finish: ImportStoreFinish<'_>,
+        request: ImportStoreFinishRequest,
+    ) -> ImportResult<ImportReport> {
+        let terminal = finish_scene(finish, request).map_err(|_| self.finalization_error())?;
+        match self
+            .staging
+            .take()
+            .ok_or_else(|| self.finalization_error())?
+        {
+            ImportSessionStaging::Success {
+                format,
+                successful_input_manifest,
+            } => self.finish_success(terminal, format, successful_input_manifest),
+            ImportSessionStaging::Failure {
+                selected_format,
+                cause,
+            } => self.finish_failure(terminal, selected_format, cause),
         }
-        let Some(format) = self.selected.as_ref().map(RegistryEntry::descriptor_handle) else {
-            return self.finalize_failure(ImportCause::TrustedExtension {
-                boundary: TrustedExtensionBoundary::Importer,
-                code: "scene-without-selected-format",
-            });
-        };
-        let successful_input_manifest = match match self.resource_graph.as_mut().map(|graph| {
-            graph
-                .get_mut()
-                .take_manifest()
-                .map_err(|cause| cause.into_scope_cause())
-        }) {
-            Some(result) => result,
-            None => Err(ScopeAbortCause::DescriptorContract {
-                code: "resource-graph-missing-at-success",
-            }),
-        } {
-            Ok(manifest) => manifest,
-            Err(cause) => {
-                let cause = Self::scope_cause(cause);
-                return self.finalize_failure(cause);
-            }
-        };
-        let staging = self.take_report_staging();
-        self.release_transient_live();
-        let staging = staging.into_terminal();
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn finish_success(
+        self,
+        terminal: ImportStoreTerminalOutcome,
+        format: Arc<crate::FormatDescriptor>,
+        successful_input_manifest: SuccessfulInputManifest,
+    ) -> ImportResult<ImportReport> {
+        let staging = self
+            .report
+            .expect("the body staged retained report evidence");
         let source = self.source;
         let mut last_completed = self.last_completed;
-        let terminal = self
-            .store
-            .finish_scene(SceneParseOutcome::Accepted)
-            .map_err(|_| ImportRunError::finalization("canonical-scene-finalization-contained"))?;
         match terminal {
             ImportStoreTerminalOutcome::Success {
                 scene,
@@ -1076,23 +1307,17 @@ impl<'a> ImportSession<'a> {
         clippy::result_large_err,
         reason = "import failures retain the linear terminal owner without post-terminal allocation"
     )]
-    fn finalize_failure(mut self, cause: ImportCause) -> ImportResult<ImportReport> {
-        let selected_format = self
-            .selected
-            .as_ref()
-            .map(|entry| entry.format_id().clone());
-        let staging = self.take_report_staging();
-        let cause = self.take_failure_cause(cause);
-        self.release_transient_live();
-        let staging = staging.into_terminal();
+    fn finish_failure(
+        self,
+        terminal: ImportStoreTerminalOutcome,
+        selected_format: Option<FormatId>,
+        cause: TerminalFailureCause,
+    ) -> ImportResult<ImportReport> {
+        let staging = self
+            .report
+            .expect("the body staged retained report evidence");
         let source = self.source;
         let last_completed = self.last_completed;
-        let terminal = self
-            .store
-            .finish_scene(SceneParseOutcome::Rejected)
-            .map_err(|_cause| {
-                ImportRunError::finalization("canonical-failure-finalization-contained")
-            })?;
         let failure = match terminal {
             ImportStoreTerminalOutcome::Success { .. } => {
                 return Err(ImportRunError::finalization(
@@ -1169,37 +1394,6 @@ impl<'a> ImportSession<'a> {
             ),
             terminal_control_cause: None,
         }
-    }
-
-    fn poll_boundary(&mut self) -> Result<(), ImportCause> {
-        self.store
-            .execution()
-            .and_then(|mut exec| exec.poll())
-            .map_err(store_cause)
-    }
-
-    fn report_boundary_progress(
-        &mut self,
-        phase: ImportProgressPhase,
-        unit: ImportProgressUnit,
-        completed: u64,
-        total: Option<u64>,
-    ) -> Result<(), ImportCause> {
-        self.store
-            .execution()
-            .and_then(|mut exec| exec.report_progress(phase, unit, completed, total))
-            .map_err(store_cause)
-    }
-
-    fn charge_open_attempt(&mut self) -> Result<(), ImportCause> {
-        self.store
-            .execution()
-            .and_then(|exec| exec.charge_attempted(ImportDimension::AssetOpen, 1))
-            .map_err(store_cause)
-    }
-
-    fn scope_cause(cause: ScopeAbortCause) -> ImportCause {
-        ImportCause::Scope(ScopeAbort::new(cause))
     }
 }
 
@@ -1362,7 +1556,7 @@ fn store_cause(cause: crate::store::ImportStoreHostError) -> ImportCause {
 }
 
 fn reserve_exact_bytes(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut ImportRootExecution<'_, '_>,
     phase: ImportLedgerPhase,
     dimension: ImportDimension,
     bytes: u64,
@@ -1376,7 +1570,7 @@ fn reserve_exact_bytes(
 }
 
 fn reserve_required_bytes(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut ImportRootExecution<'_, '_>,
     phase: ImportLedgerPhase,
     dimension: ImportDimension,
     bytes: u64,
@@ -1391,7 +1585,7 @@ fn reserve_required_bytes(
 }
 
 fn reserve_retained_bytes(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut ImportRootExecution<'_, '_>,
     phase: ImportLedgerPhase,
     dimension: ImportDimension,
     bytes: u64,
@@ -1480,7 +1674,7 @@ mod tests {
         fn parse(
             &self,
             _options: &Self::Options,
-            _context: &mut ParseContext<'_>,
+            _context: &mut ParseContext<'_, '_>,
         ) -> ParseResult<()> {
             panic!("ledger initialization failure must not invoke the importer")
         }
@@ -1645,29 +1839,50 @@ mod tests {
         };
         let request = initialization_test_request_with_limits(limits);
         let io = DirectBytesAuthority::new();
-        let store = try_start_store(
-            &request,
-            ImportOperationControl::default(),
-            import_ledger_limits(request.limits()),
-        )
-        .expect("the retained import store must start");
-        let mut session = ImportSession::new(
-            &request,
-            &io,
-            AssetPath::new("asset.direct-reservation").expect("valid test path"),
-            ResolverBinding::custom(&DenyDependencies),
-            store,
-        );
-        let payload =
-            vec![0; usize::try_from(LIVE_LIMIT + 1).expect("the test payload length fits usize")];
+        let mut root = ImportStoreInvocationRoot::new();
+        let finish = root
+            .run_body(|parts, disposition| {
+                let store = try_start_store(
+                    parts,
+                    &request,
+                    ImportOperationControl::default(),
+                    import_ledger_limits(request.limits()),
+                )
+                .expect("the retained import store must start");
+                let mut data = ImportSessionData::new(
+                    &request,
+                    AssetPath::new("asset.direct-reservation").expect("valid test path"),
+                );
+                let mut session = ImportSession::new(
+                    &request,
+                    &io,
+                    ResolverBinding::custom(&DenyDependencies),
+                    &mut data,
+                    store,
+                );
+                let payload = vec![
+                    0;
+                    usize::try_from(LIVE_LIMIT + 1)
+                        .expect("the test payload length fits usize")
+                ];
 
-        assert!(
-            session
-                .bind_primary_bytes(&payload, SessionCreatedProof::new())
-                .is_err(),
-            "the payload allocation must be admitted before copying"
-        );
-        assert!(session.primary_snapshot.is_none());
-        assert_eq!(session.last_completed.phase(), ImportPhase::SessionCreated);
+                assert!(
+                    session
+                        .bind_primary_bytes(&payload, SessionCreatedProof::new())
+                        .is_err(),
+                    "the payload allocation must be admitted before copying"
+                );
+                assert!(session.data.primary_snapshot.is_none());
+                assert_eq!(
+                    session.data.last_completed.phase(),
+                    ImportPhase::SessionCreated
+                );
+                session
+                    .store
+                    .request_finish(disposition, SceneParseOutcome::Rejected)
+                    .unwrap();
+            })
+            .unwrap();
+        let _finish = finish;
     }
 }

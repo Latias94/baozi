@@ -60,18 +60,15 @@ pub(crate) fn generate(
     operation: &mut ActiveRuntime<'_>,
     keys: RuntimeKeys,
 ) -> Result<GeneratedTangents, InputError> {
+    enum PendingTangents {
+        F32(Option<ScratchVec<[f32; 4]>>),
+        F64(Option<ScratchVec<[f64; 4]>>),
+    }
+
     let mut values = if source.wide_output {
-        let mut values = ScratchVec::new(operation, keys, source.corners as usize)?;
-        for _ in 0..source.corners {
-            run_unit(operation, || values.values_mut().push([0.0_f64; 4]))?;
-        }
-        TangentValues::F64(values)
+        PendingTangents::F64(None)
     } else {
-        let mut values = ScratchVec::new(operation, keys, source.corners as usize)?;
-        for _ in 0..source.corners {
-            run_unit(operation, || values.values_mut().push([0.0_f32; 4]))?;
-        }
-        TangentValues::F32(values)
+        PendingTangents::F32(None)
     };
     for face in 0..source.corners as usize / 3 {
         let mut positions = [[0.0; 3]; 3];
@@ -98,7 +95,7 @@ pub(crate) fn generate(
             uvs[local] = read(source.uvs, vertex, original_corner, operation)?;
         }
         match &mut values {
-            TangentValues::F32(values) => {
+            PendingTangents::F32(values) => {
                 // All declared inputs are F32 in this branch. These are exact reversals of
                 // the logical-read widening, preserving the F32 exact-product kernel.
                 let generated = run_unit(operation, || {
@@ -110,13 +107,9 @@ pub(crate) fn generate(
                     )
                 })?
                 .map_err(InputError::Issue)?;
-                for (local, tangent) in generated.into_iter().enumerate() {
-                    run_unit(operation, || {
-                        values.values_mut()[3 * face + local] = tangent
-                    })?;
-                }
+                append_triangle(values, generated, source.corners as usize, operation, keys)?;
             }
-            TangentValues::F64(values) => {
+            PendingTangents::F64(values) => {
                 let generated = run_unit(operation, || {
                     super::wide::triangle_with_sources(
                         face,
@@ -127,15 +120,38 @@ pub(crate) fn generate(
                     )
                 })?
                 .map_err(InputError::Issue)?;
-                for (local, tangent) in generated.into_iter().enumerate() {
-                    run_unit(operation, || {
-                        values.values_mut()[3 * face + local] = tangent
-                    })?;
-                }
+                append_triangle(values, generated, source.corners as usize, operation, keys)?;
             }
         }
     }
+    let values = match values {
+        PendingTangents::F32(values) => TangentValues::F32(match values {
+            Some(values) => values,
+            None => ScratchVec::new(operation, keys, source.corners as usize)?,
+        }),
+        PendingTangents::F64(values) => TangentValues::F64(match values {
+            Some(values) => values,
+            None => ScratchVec::new(operation, keys, source.corners as usize)?,
+        }),
+    };
     Ok(GeneratedTangents { values })
+}
+
+fn append_triangle<T>(
+    values: &mut Option<ScratchVec<T>>,
+    generated: [T; 3],
+    count: usize,
+    operation: &mut ActiveRuntime<'_>,
+    keys: RuntimeKeys,
+) -> Result<(), InputError> {
+    let values = match values {
+        Some(values) => values,
+        None => values.insert(ScratchVec::new(operation, keys, count)?),
+    };
+    for tangent in generated {
+        run_unit(operation, || values.values_mut().push(tangent))?;
+    }
+    Ok(())
 }
 
 pub(crate) fn is_f64(attribute: AttributeRef<'_>) -> bool {

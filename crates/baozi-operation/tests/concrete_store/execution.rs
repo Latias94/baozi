@@ -29,11 +29,12 @@ impl CancellationSignal for CountedCancellation {
     }
 }
 
-fn operation_with_work_policy(
+fn operation_with_work_policy<'inv>(
+    root: &'inv mut TestInvocationRoot,
     account: &PhysicalStorageAccount,
     control: OperationControl<TestProgress, TestUnit>,
     work_policy: DimensionPolicy,
-) -> (TestOperation, TestKeys) {
+) -> (TestOperation<'inv>, TestKeys) {
     let TestVocabulary { domain, keys } = test_vocabulary();
     let unconsumable_work = work_policy.attempted_limit() - work_policy.consumed_limit();
     let failure_work = RetainedStoreFailureTerminalWorkPlan::with_evidence_work(
@@ -84,7 +85,7 @@ fn operation_with_work_policy(
         failure_work,
     );
     (
-        TestOperation::try_start(control, ledger_plan, account, start).unwrap(),
+        TestOperation::try_start(root, control, ledger_plan, account, start).unwrap(),
         keys,
     )
 }
@@ -102,8 +103,8 @@ fn write_unit(
     permit.finish()
 }
 
-fn rejected_success_evidence(
-    operation: TestOperation,
+fn rejected_success_evidence<'inv>(
+    operation: TestOperation<'inv>,
     expected: StorePreparationFailureClass,
 ) -> StoreLedgerEvidence {
     let prepared = operation
@@ -135,7 +136,8 @@ fn assert_work(
 fn borrowed_storage_observation_reads_logical_capacity_before_operation_detach() {
     let factory = factory(1);
     let account = account(&factory);
-    let (mut operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (mut operation, keys) = operation(&mut invocation_root, &account);
     let physical = account.snapshot();
     {
         let (work, mut services) = operation.execution().unwrap();
@@ -192,8 +194,13 @@ fn group_and_partial_permit_survive_real_storage_and_progress() {
             ProgressDecision::Continue
         },
     );
-    let (mut operation, keys) =
-        operation_with_work_policy(&account, control, DimensionPolicy::counter(16, 16, 0));
+    let mut invocation_root = TestInvocationRoot::new();
+    let (mut operation, keys) = operation_with_work_policy(
+        &mut invocation_root,
+        &account,
+        control,
+        DimensionPolicy::counter(16, 16, 0),
+    );
     let baseline = operation
         .producer_host()
         .dimension_state(keys.dimension)
@@ -323,7 +330,9 @@ fn group_and_partial_permit_survive_real_storage_and_progress() {
 fn idle_sequence_keeps_retained_share_work_and_storage_on_the_same_authority() {
     let factory = factory(1);
     let account = account(&factory);
+    let mut invocation_root = TestInvocationRoot::new();
     let (mut operation, keys) = operation_with_work_policy(
+        &mut invocation_root,
         &account,
         OperationControl::default(),
         DimensionPolicy::counter(16, 16, 0),
@@ -401,7 +410,9 @@ fn idle_sequence_keeps_retained_share_work_and_storage_on_the_same_authority() {
 fn tightened_policy_rejects_refill_once_and_preserves_the_written_prefix() {
     let factory = factory(1);
     let account = account(&factory);
+    let mut invocation_root = TestInvocationRoot::new();
     let (mut operation, keys) = operation_with_work_policy(
+        &mut invocation_root,
         &account,
         OperationControl::default(),
         DimensionPolicy::counter(8, 8, 0),
@@ -460,8 +471,13 @@ fn exact_work_is_independent_of_entry_periodic_and_final_poll_counts() {
                 observed_events.fetch_add(1, Ordering::SeqCst);
                 ProgressDecision::Continue
             });
-        let (mut operation, keys) =
-            operation_with_work_policy(&account, control, DimensionPolicy::counter(512, 512, 0));
+        let mut invocation_root = TestInvocationRoot::new();
+        let (mut operation, keys) = operation_with_work_policy(
+            &mut invocation_root,
+            &account,
+            control,
+            DimensionPolicy::counter(512, 512, 0),
+        );
         signal.polls.store(0, Ordering::SeqCst);
         let mut physical = [0; 257];
         {
@@ -529,7 +545,9 @@ fn cancellation_is_observed_at_entry_or_within_the_explicit_action_bound() {
         let factory = factory(1);
         let account = account(&factory);
         let signal = CountedCancellation::default();
+        let mut invocation_root = TestInvocationRoot::new();
         let (mut operation, keys) = operation_with_work_policy(
+            &mut invocation_root,
             &account,
             OperationControl::default().with_cancellation(signal.clone()),
             DimensionPolicy::counter(1024, 1024, 0),
@@ -624,7 +642,9 @@ fn final_checkpoint_preserves_partial_envelope_prefixes_including_a_zero_action_
         let factory = factory(1);
         let account = account(&factory);
         let signal = CountedCancellation::default();
+        let mut invocation_root = TestInvocationRoot::new();
         let (mut operation, keys) = operation_with_work_policy(
+            &mut invocation_root,
             &account,
             OperationControl::default().with_cancellation(signal.clone()),
             DimensionPolicy::counter(512, 512, 0),
@@ -666,7 +686,9 @@ fn explicit_checkpoint_resets_the_debt_shared_by_nested_control_reborrows() {
     let factory = factory(1);
     let account = account(&factory);
     let signal = CountedCancellation::default();
+    let mut invocation_root = TestInvocationRoot::new();
     let (mut operation, keys) = operation_with_work_policy(
+        &mut invocation_root,
         &account,
         OperationControl::default().with_cancellation(signal.clone()),
         DimensionPolicy::counter(1024, 1024, 0),
@@ -715,7 +737,9 @@ fn every_action_checks_attempted_and_consumed_budgets_between_control_polls() {
                 CounterClass::Consumed => DimensionPolicy::counter(512, allowed as u64, 0),
                 _ => unreachable!(),
             };
+            let mut invocation_root = TestInvocationRoot::new();
             let (mut operation, keys) = operation_with_work_policy(
+                &mut invocation_root,
                 &account,
                 OperationControl::default().with_cancellation(signal.clone()),
                 policy,
@@ -786,7 +810,9 @@ fn finish_region_rejects_forgotten_fully_completed_and_zero_amount_permits() {
     for amount in [0, 3] {
         let factory = factory(1);
         let account = account(&factory);
+        let mut invocation_root = TestInvocationRoot::new();
         let (mut operation, keys) = operation_with_work_policy(
+            &mut invocation_root,
             &account,
             OperationControl::default(),
             DimensionPolicy::counter(16, 16, 0),
@@ -829,7 +855,9 @@ fn dropping_fully_completed_and_zero_amount_permits_still_prevents_success() {
     for amount in [0, 3] {
         let factory = factory(1);
         let account = account(&factory);
+        let mut invocation_root = TestInvocationRoot::new();
         let (mut operation, keys) = operation_with_work_policy(
+            &mut invocation_root,
             &account,
             OperationControl::default(),
             DimensionPolicy::counter(16, 16, 0),
@@ -868,7 +896,9 @@ fn dropping_fully_completed_and_zero_amount_permits_still_prevents_success() {
 fn ignored_incomplete_finish_keeps_the_exact_prefix_and_sticky_failure() {
     let factory = factory(1);
     let account = account(&factory);
+    let mut invocation_root = TestInvocationRoot::new();
     let (mut operation, keys) = operation_with_work_policy(
+        &mut invocation_root,
         &account,
         OperationControl::default(),
         DimensionPolicy::counter(16, 16, 0),
@@ -906,7 +936,8 @@ fn binding_rejects_foreign_unplanned_and_protected_keys_before_zero_work() {
     for invalid_role in 0..3 {
         let factory = factory(1);
         let account = account(&factory);
-        let (mut operation, keys) = operation(&account);
+        let mut invocation_root = TestInvocationRoot::new();
+        let (mut operation, keys) = operation(&mut invocation_root, &account);
         let baseline = operation
             .producer_host()
             .dimension_state(keys.dimension)
@@ -954,7 +985,9 @@ fn binding_rejects_foreign_unplanned_and_protected_keys_before_zero_work() {
 fn parser_parent_child_and_storage_share_one_owner_without_callback_borrows() {
     let factory = factory(1);
     let account = account(&factory);
+    let mut invocation_root = TestInvocationRoot::new();
     let (mut operation, keys) = operation_with_work_policy(
+        &mut invocation_root,
         &account,
         OperationControl::default(),
         DimensionPolicy::counter(16, 16, 0),
@@ -1012,7 +1045,9 @@ fn ignored_parser_item_rejection_keeps_ordered_attempts_and_stops_success() {
     use baozi_operation::__retained_store_integration::activation::StoreParserWorkError;
     let factory = factory(1);
     let account = account(&factory);
+    let mut invocation_root = TestInvocationRoot::new();
     let (mut operation, keys) = operation_with_work_policy(
+        &mut invocation_root,
         &account,
         OperationControl::default(),
         DimensionPolicy::counter(16, 16, 0),
@@ -1043,7 +1078,9 @@ fn ignored_parser_completion_and_incomplete_finish_errors_remain_terminal() {
     for incomplete_finish in [false, true] {
         let factory = factory(1);
         let account = account(&factory);
+        let mut invocation_root = TestInvocationRoot::new();
         let (mut operation, keys) = operation_with_work_policy(
+            &mut invocation_root,
             &account,
             OperationControl::default(),
             DimensionPolicy::counter(16, 16, 0),
@@ -1090,7 +1127,9 @@ fn forgotten_zero_and_completed_parser_channels_prevent_finalization() {
     for amount in [0, 1] {
         let factory = factory(1);
         let account = account(&factory);
+        let mut invocation_root = TestInvocationRoot::new();
         let (mut operation, keys) = operation_with_work_policy(
+            &mut invocation_root,
             &account,
             OperationControl::default(),
             DimensionPolicy::counter(16, 16, 0),
@@ -1122,7 +1161,9 @@ fn bound_storage_rejects_foreign_keys_before_polling_or_admitting_bytes() {
             let factory = factory(1);
             let account = account(&factory);
             let signal = CountedCancellation::default();
+            let mut invocation_root = TestInvocationRoot::new();
             let (mut operation, keys) = operation_with_work_policy(
+                &mut invocation_root,
                 &account,
                 OperationControl::default().with_cancellation(signal.clone()),
                 DimensionPolicy::counter(16, 16, 0),
@@ -1187,13 +1228,17 @@ fn bound_services_reject_foreign_live_tokens_without_changing_the_source_capacit
         for action in 0..4 {
             let factory = factory(1);
             let account = account(&factory);
+            let mut invocation_root = TestInvocationRoot::new();
             let (mut source, source_keys) = operation_with_work_policy(
+                &mut invocation_root,
                 &account,
                 OperationControl::default(),
                 DimensionPolicy::counter(16, 16, 0),
             );
             let signal = CountedCancellation::default();
+            let mut invocation_root_2 = TestInvocationRoot::new();
             let (mut receiver, receiver_keys) = operation_with_work_policy(
+                &mut invocation_root_2,
                 &account,
                 OperationControl::default().with_cancellation(signal.clone()),
                 DimensionPolicy::counter(16, 16, 0),
@@ -1291,8 +1336,13 @@ fn ordinary_loans_end_before_progress_and_keep_the_same_poll_frontiers() {
             assert_eq!(event.completed(), (index + 1) as u64);
             ProgressDecision::Continue
         });
-    let (mut operation, keys) =
-        operation_with_work_policy(&account, control, DimensionPolicy::counter(16, 16, 0));
+    let mut invocation_root = TestInvocationRoot::new();
+    let (mut operation, keys) = operation_with_work_policy(
+        &mut invocation_root,
+        &account,
+        control,
+        DimensionPolicy::counter(16, 16, 0),
+    );
     let physical = account.snapshot();
     {
         let (work, mut services) = operation.execution().unwrap();
@@ -1349,7 +1399,9 @@ fn weighted_control_frontiers_do_not_charge_estimated_inner_work() {
         let factory = factory(1);
         let account = account(&factory);
         let signal = CountedCancellation::default();
+        let mut invocation_root = TestInvocationRoot::new();
         let (mut operation, keys) = operation_with_work_policy(
+            &mut invocation_root,
             &account,
             OperationControl::default().with_cancellation(signal.clone()),
             DimensionPolicy::counter(64, 64, 0),
@@ -1390,7 +1442,9 @@ fn weighted_frontier_cancellation_precedes_next_action_and_retains_cause_on_regi
     let factory = factory(1);
     let account = account(&factory);
     let signal = CountedCancellation::default();
+    let mut invocation_root = TestInvocationRoot::new();
     let (mut operation, keys) = operation_with_work_policy(
+        &mut invocation_root,
         &account,
         OperationControl::default().with_cancellation(signal.clone()),
         DimensionPolicy::counter(8, 8, 0),
@@ -1437,7 +1491,9 @@ fn invalid_control_cost_is_sticky_without_running_or_charging_work() {
     for invalid in [0_u16, 257, u16::MAX] {
         let factory = factory(1);
         let account = account(&factory);
+        let mut invocation_root = TestInvocationRoot::new();
         let (mut operation, keys) = operation_with_work_policy(
+            &mut invocation_root,
             &account,
             OperationControl::default(),
             DimensionPolicy::counter(8, 8, 0),

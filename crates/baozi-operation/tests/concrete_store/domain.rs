@@ -278,8 +278,14 @@ fn retained_store_start_rejects_phase_outside_frozen_catalog_without_retained_si
         failure_terminal_work,
     );
 
-    let rejected =
-        TestOperation::try_start(OperationControl::default(), ledger_plan, &account, start);
+    let mut invocation_root = TestInvocationRoot::new();
+    let rejected = TestOperation::try_start(
+        &mut invocation_root,
+        OperationControl::default(),
+        ledger_plan,
+        &account,
+        start,
+    );
 
     let cause = match rejected {
         Err(cause) => cause,
@@ -343,8 +349,14 @@ fn retained_store_start_preflights_every_dimension_key_without_side_effects() {
             failure_terminal_work,
         );
 
-        let rejected =
-            TestOperation::try_start(OperationControl::default(), ledger_plan, &account, start);
+        let mut invocation_root = TestInvocationRoot::new();
+        let rejected = TestOperation::try_start(
+            &mut invocation_root,
+            OperationControl::default(),
+            ledger_plan,
+            &account,
+            start,
+        );
 
         assert!(matches!(
             rejected,
@@ -418,8 +430,14 @@ fn retained_store_start_rejects_foreign_phase_and_dimension_domains_without_side
             failure_terminal_work,
         );
 
-        let rejected =
-            TestOperation::try_start(OperationControl::default(), ledger_plan, &account, start);
+        let mut invocation_root = TestInvocationRoot::new();
+        let rejected = TestOperation::try_start(
+            &mut invocation_root,
+            OperationControl::default(),
+            ledger_plan,
+            &account,
+            start,
+        );
 
         assert!(matches!(
             rejected,

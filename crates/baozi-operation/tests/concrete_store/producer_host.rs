@@ -12,11 +12,12 @@ impl ProgressObserver<TestProgress, TestUnit> for CancelProgress {
     }
 }
 
-fn operation_with_producer_dimensions(
+fn operation_with_producer_dimensions<'inv>(
+    root: &'inv mut TestInvocationRoot,
     account: &PhysicalStorageAccount,
     control: OperationControl<TestProgress, TestUnit>,
     other_policy: DimensionPolicy,
-) -> (TestOperation, TestKeys) {
+) -> (TestOperation<'inv>, TestKeys) {
     let TestVocabulary { domain, keys } = test_vocabulary();
     let failure_terminal_work = unbounded_failure_terminal_work(keys);
     let primary_attempted_limit = failure_terminal_work
@@ -59,13 +60,16 @@ fn operation_with_producer_dimensions(
         failure_terminal_work,
     );
     (
-        TestOperation::try_start(control, ledger_plan, account, start)
+        TestOperation::try_start(root, control, ledger_plan, account, start)
             .expect("producer-host operation"),
         keys,
     )
 }
 
-fn requested_fallback_evidence(operation: TestOperation, cause: u32) -> StoreLedgerEvidence {
+fn requested_fallback_evidence<'inv>(
+    operation: TestOperation<'inv>,
+    cause: u32,
+) -> StoreLedgerEvidence {
     operation
         .prepare_minimal_fallback(cause)
         .expect("producer-host operation remains terminally publishable")
@@ -77,7 +81,8 @@ fn requested_fallback_evidence(operation: TestOperation, cause: u32) -> StoreLed
 fn explicit_partial_work_preserves_attempted_and_completed_prefix() {
     let factory = factory(1);
     let account = account(&factory);
-    let (mut operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (mut operation, keys) = operation(&mut invocation_root, &account);
     let baseline = operation
         .producer_host()
         .dimension_state(keys.dimension)
@@ -117,7 +122,8 @@ fn explicit_partial_work_preserves_attempted_and_completed_prefix() {
 fn exact_work_completion_resolves_without_changing_the_requested_terminal_cause() {
     let factory = factory(1);
     let account = account(&factory);
-    let (mut operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (mut operation, keys) = operation(&mut invocation_root, &account);
 
     {
         let mut host = operation.producer_host();
@@ -141,7 +147,8 @@ fn exact_work_completion_resolves_without_changing_the_requested_terminal_cause(
 fn incomplete_exact_finish_latches_product_graph_and_preserves_the_prefix() {
     let factory = factory(1);
     let account = account(&factory);
-    let (mut operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (mut operation, keys) = operation(&mut invocation_root, &account);
     let baseline = operation
         .producer_host()
         .dimension_state(keys.dimension)
@@ -176,7 +183,8 @@ fn incomplete_exact_finish_latches_product_graph_and_preserves_the_prefix() {
 fn unresolved_drop_latches_product_graph_without_refunding_attempted_work() {
     let factory = factory(1);
     let account = account(&factory);
-    let (mut operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (mut operation, keys) = operation(&mut invocation_root, &account);
     let baseline = operation
         .producer_host()
         .dimension_state(keys.dimension)
@@ -207,7 +215,9 @@ fn unresolved_drop_latches_product_graph_without_refunding_attempted_work() {
 fn grouped_completion_records_two_dimension_prefixes_together() {
     let factory = factory(1);
     let account = account(&factory);
+    let mut invocation_root = TestInvocationRoot::new();
     let (mut operation, keys) = operation_with_producer_dimensions(
+        &mut invocation_root,
         &account,
         OperationControl::default(),
         DimensionPolicy::counter(16, 16, 0),
@@ -251,7 +261,9 @@ fn grouped_completion_records_two_dimension_prefixes_together() {
 fn split_parser_accounting_preserves_attempted_and_consumed_prefixes() {
     let factory = factory(1);
     let account = account(&factory);
+    let mut invocation_root = TestInvocationRoot::new();
     let (mut operation, keys) = operation_with_producer_dimensions(
+        &mut invocation_root,
         &account,
         OperationControl::default(),
         DimensionPolicy::counter(16, 16, 0),
@@ -297,7 +309,8 @@ fn split_parser_accounting_preserves_attempted_and_consumed_prefixes() {
 fn split_parser_batches_validate_every_dimension_before_charging() {
     let factory = factory(1);
     let account = account(&factory);
-    let (mut operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (mut operation, keys) = operation(&mut invocation_root, &account);
     let baseline = operation
         .producer_host()
         .dimension_state(keys.dimension)
@@ -337,7 +350,8 @@ fn direct_consumed_batches_reject_late_invalid_keys_without_changing_the_prefix(
     for invalid_kind in 0..3 {
         let factory = factory(1);
         let account = account(&factory);
-        let (mut operation, keys) = operation(&account);
+        let mut invocation_root = TestInvocationRoot::new();
+        let (mut operation, keys) = operation(&mut invocation_root, &account);
         let invalid = match invalid_kind {
             0 => foreign_dimension(),
             1 => keys.other_dimension,
@@ -396,7 +410,8 @@ fn direct_consumed_batches_reject_late_invalid_keys_without_changing_the_prefix(
 fn direct_accounting_preserves_domain_then_outstanding_then_membership_precedence() {
     let factory = factory(1);
     let account = account(&factory);
-    let (mut operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (mut operation, keys) = operation(&mut invocation_root, &account);
     {
         let mut host = operation.producer_host();
         let mut permit = host.try_begin_observed_work([(keys.dimension, 3)]).unwrap();
@@ -448,7 +463,9 @@ fn direct_accounting_preserves_domain_then_outstanding_then_membership_precedenc
 fn direct_accounting_resumes_after_a_normally_resolved_partial_permit() {
     let factory = factory(1);
     let account = account(&factory);
+    let mut invocation_root = TestInvocationRoot::new();
     let (mut operation, keys) = operation_with_producer_dimensions(
+        &mut invocation_root,
         &account,
         OperationControl::default(),
         DimensionPolicy::counter(16, 16, 0),
@@ -508,7 +525,9 @@ fn direct_accounting_resumes_after_a_normally_resolved_partial_permit() {
 fn group_overrun_is_side_effect_free_and_latches_product_graph() {
     let factory = factory(1);
     let account = account(&factory);
+    let mut invocation_root = TestInvocationRoot::new();
     let (mut operation, keys) = operation_with_producer_dimensions(
+        &mut invocation_root,
         &account,
         OperationControl::default(),
         DimensionPolicy::counter(16, 16, 0),
@@ -556,7 +575,8 @@ fn group_overrun_is_side_effect_free_and_latches_product_graph() {
 fn forgotten_observed_work_permit_blocks_terminal_preparation() {
     let factory = factory(1);
     let account = account(&factory);
-    let (mut operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (mut operation, keys) = operation(&mut invocation_root, &account);
     {
         let mut host = operation.producer_host();
         let permit = host
@@ -576,7 +596,8 @@ fn progress_observer_cancellation_is_sticky_control_evidence() {
     let factory = factory(1);
     let account = account(&factory);
     let control = OperationControl::default().with_progress_observer(CancelProgress);
-    let (mut operation, _keys) = operation_with_control(&account, control);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (mut operation, _keys) = operation_with_control(&mut invocation_root, &account, control);
 
     assert!(matches!(
         operation
@@ -598,7 +619,9 @@ fn progress_observer_cancellation_is_sticky_control_evidence() {
 fn producer_policy_can_only_tighten_and_remains_domain_qualified() {
     let factory = factory(1);
     let account = account(&factory);
+    let mut invocation_root = TestInvocationRoot::new();
     let (mut operation, keys) = operation_with_producer_dimensions(
+        &mut invocation_root,
         &account,
         OperationControl::default(),
         DimensionPolicy::counter(8, 8, 0),
@@ -633,7 +656,8 @@ fn producer_host_rejects_foreign_and_unplanned_dimensions_before_work() {
     let factory = factory(2);
     let account_a = account(&factory);
     let account_b = account(&factory);
-    let (mut foreign_operation, _keys) = operation(&account_a);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (mut foreign_operation, _keys) = operation(&mut invocation_root, &account_a);
     assert!(matches!(
         foreign_operation
             .producer_host()
@@ -646,7 +670,8 @@ fn producer_host_rejects_foreign_and_unplanned_dimensions_before_work() {
         StorePreparationFailureClass::Ledger
     );
 
-    let (mut unplanned_operation, keys) = operation(&account_b);
+    let mut invocation_root_2 = TestInvocationRoot::new();
+    let (mut unplanned_operation, keys) = operation(&mut invocation_root_2, &account_b);
     assert!(matches!(
         unplanned_operation
             .producer_host()

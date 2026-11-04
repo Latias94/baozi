@@ -66,18 +66,20 @@ impl Format for NestedRequiredImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         context.with_execution(|exec| -> ParseResult<()> {
-            let sidecar = exec.dependency(
-                &exec.root_origin(),
-                &role("sidecar.required"),
-                "materials/library.side",
-            )?;
+            let origin = exec.services()?.root_origin();
+            let sidecar =
+                exec.dependency(&origin, &role("sidecar.required"), "materials/library.side")?;
             let sidecar = exec.into_available_dependency(sidecar)?;
             let payload =
                 exec.dependency(&sidecar.origin(), &role("payload.required"), self.reference);

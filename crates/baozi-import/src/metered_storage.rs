@@ -610,22 +610,23 @@ mod tests {
     use crate::ledger::{ImportDimension, ImportLedgerPhase, ImportOperationControl};
     use crate::limits::ResourceLimits;
     use crate::store::{
-        ImportStoreBootstrapRequirements, ImportStoreHostError, ImportStoreSessionOwner,
-        try_import_store_bootstrap,
+        ImportStoreBodyParts, ImportStoreBootstrapRequirements, ImportStoreHostError,
+        ImportStoreInvocationRoot, ImportStoreSessionOwner, try_import_store_bootstrap,
     };
+    use baozi_core::__scene_integration::integration::SceneParseOutcome;
     use baozi_operation::__retained_store_integration::authority::StoreStorageObservation;
     use baozi_operation::{
         PhysicalStorageAccount, PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryLimits,
         PhysicalStorageAccountLimits,
     };
 
-    struct StoreHarness {
-        owner: ImportStoreSessionOwner,
+    struct StoreHarness<'inv> {
+        owner: ImportStoreSessionOwner<'inv>,
         account: PhysicalStorageAccount,
     }
 
-    impl StoreHarness {
-        fn new() -> Self {
+    impl<'inv> StoreHarness<'inv> {
+        fn new(parts: ImportStoreBodyParts<'inv>) -> Self {
             let limits = ResourceLimits::default();
             let requirements = ImportStoreBootstrapRequirements::for_node_scene(&limits)
                 .expect("test retained-store requirements are valid");
@@ -642,7 +643,8 @@ mod tests {
                         .expect("test account limits are valid"),
                 )
                 .expect("test physical account must allocate");
-            let owner = ImportStoreSessionOwner::try_start(
+            let owner = ImportStoreSessionOwner::try_start_in_body(
+                parts,
                 ImportOperationControl::default(),
                 &account,
                 bootstrap,
@@ -659,9 +661,7 @@ mod tests {
             bytes: u64,
         ) -> Result<ImportStoreReservation, ScopeAbortCause> {
             self.owner
-                .execution()
-                .unwrap()
-                .reserve(phase, dimension, bytes)
+                .with_root_execution(|exec| exec.reserve(phase, dimension, bytes))
                 .map_err(|cause| cause.into_scope_abort_cause())
         }
 
@@ -678,21 +678,40 @@ mod tests {
 
         fn live_bytes(&mut self, dimension: ImportDimension) -> u64 {
             self.owner
-                .execution()
-                .unwrap()
-                .dimension_state(dimension)
+                .with_root_execution(|exec| exec.dimension_state(dimension))
                 .unwrap()
                 .live_bytes()
         }
+    }
 
-        fn assert_released(self) {
-            let Self { owner, account } = self;
-            drop(owner);
-            let released = account.snapshot();
-            assert_eq!(released.live_retained_bytes(), 0);
-            assert_eq!(released.live_retained_allocations(), 0);
-            assert!(!released.poisoned());
-        }
+    fn assert_store_released(account: PhysicalStorageAccount) {
+        let released = account.snapshot();
+        assert_eq!(released.live_retained_bytes(), 0);
+        assert_eq!(released.live_retained_allocations(), 0);
+        assert!(!released.poisoned());
+    }
+
+    fn with_store_body(body: impl for<'inv> FnOnce(&mut StoreHarness<'inv>)) {
+        let mut root = ImportStoreInvocationRoot::new();
+        let mut body = Some(body);
+        let mut account = None;
+        let finish = root
+            .run_body(|parts, disposition| {
+                let mut store = StoreHarness::new(parts);
+                body.take().unwrap()(&mut store);
+                let StoreHarness {
+                    owner,
+                    account: started_account,
+                } = store;
+                owner
+                    .request_finish(disposition, SceneParseOutcome::Rejected)
+                    .unwrap();
+                account = Some(started_account);
+            })
+            .expect("the inspected import body must record its actual disposition");
+        let _finish = finish;
+        drop(root);
+        assert_store_released(account.unwrap());
     }
 
     struct DropProbe<'op> {
@@ -746,271 +765,286 @@ mod tests {
 
     #[test]
     fn owner_drops_elements_before_releasing_capacity() {
-        let mut store = StoreHarness::new();
-        let exec = &mut store.owner.execution().unwrap();
-        let storage = exec.storage_observation(ImportDimension::ScratchBytes);
-        let baseline = storage.live_bytes();
-        let mut values = AccountedVec::new();
-        values
-            .try_reserve(1, "drop-order", |bytes| {
-                exec.reserve(
-                    ImportLedgerPhase::Detection,
-                    ImportDimension::ScratchBytes,
-                    bytes,
-                )
-                .map_err(ImportStoreHostError::into_scope_abort_cause)
-            })
-            .unwrap();
-        values
-            .try_push_reserved(DropProbe {
-                storage,
-                expected_live_bytes: baseline + values.capacity_bytes(),
-            })
-            .unwrap_or_else(|_| panic!("reserved slot must accept the probe"));
-        drop(values);
-        assert_eq!(storage.live_bytes(), baseline);
-        store.assert_released();
+        with_store_body(|store| {
+            store
+                .owner
+                .with_root_execution(|exec| {
+                    let storage = exec.storage_observation(ImportDimension::ScratchBytes);
+                    let baseline = storage.live_bytes();
+                    let mut values = AccountedVec::new();
+                    values
+                        .try_reserve(1, "drop-order", |bytes| {
+                            exec.reserve(
+                                ImportLedgerPhase::Detection,
+                                ImportDimension::ScratchBytes,
+                                bytes,
+                            )
+                            .map_err(ImportStoreHostError::into_scope_abort_cause)
+                        })
+                        .unwrap();
+                    values
+                        .try_push_reserved(DropProbe {
+                            storage,
+                            expected_live_bytes: baseline + values.capacity_bytes(),
+                        })
+                        .unwrap_or_else(|_| panic!("reserved slot must accept the probe"));
+                    drop(values);
+                    assert_eq!(storage.live_bytes(), baseline);
+                    Ok::<_, ImportStoreHostError>(())
+                })
+                .unwrap();
+        });
     }
 
     #[test]
     fn consuming_iteration_holds_capacity_until_remaining_elements_drop() {
-        let mut store = StoreHarness::new();
-        let exec = &mut store.owner.execution().unwrap();
-        let storage = exec.storage_observation(ImportDimension::ScratchBytes);
-        let baseline = storage.live_bytes();
-        let mut values = AccountedVec::new();
-        values
-            .try_reserve(2, "into-iter-drop-order", |bytes| {
-                exec.reserve(
-                    ImportLedgerPhase::Detection,
-                    ImportDimension::ScratchBytes,
-                    bytes,
-                )
-                .map_err(ImportStoreHostError::into_scope_abort_cause)
-            })
-            .unwrap();
-        let expected_live_bytes = baseline + values.capacity_bytes();
-        for _ in 0..2 {
-            values
-                .try_push_reserved(DropProbe {
-                    storage,
-                    expected_live_bytes,
+        with_store_body(|store| {
+            store
+                .owner
+                .with_root_execution(|exec| {
+                    let storage = exec.storage_observation(ImportDimension::ScratchBytes);
+                    let baseline = storage.live_bytes();
+                    let mut values = AccountedVec::new();
+                    values
+                        .try_reserve(2, "into-iter-drop-order", |bytes| {
+                            exec.reserve(
+                                ImportLedgerPhase::Detection,
+                                ImportDimension::ScratchBytes,
+                                bytes,
+                            )
+                            .map_err(ImportStoreHostError::into_scope_abort_cause)
+                        })
+                        .unwrap();
+                    let expected_live_bytes = baseline + values.capacity_bytes();
+                    for _ in 0..2 {
+                        values
+                            .try_push_reserved(DropProbe {
+                                storage,
+                                expected_live_bytes,
+                            })
+                            .unwrap_or_else(|_| panic!("reserved slot must accept the probe"));
+                    }
+                    let mut values = values.into_iter();
+                    drop(values.next());
+                    assert_eq!(storage.live_bytes(), expected_live_bytes);
+                    drop(values);
+                    assert_eq!(storage.live_bytes(), baseline);
+                    Ok::<_, ImportStoreHostError>(())
                 })
-                .unwrap_or_else(|_| panic!("reserved slot must accept the probe"));
-        }
-        let mut values = values.into_iter();
-        drop(values.next());
-        assert_eq!(storage.live_bytes(), expected_live_bytes);
-        drop(values);
-        assert_eq!(storage.live_bytes(), baseline);
-        store.assert_released();
+                .unwrap();
+        });
     }
 
     #[test]
     fn metered_vector_drops_elements_before_releasing_its_complete_token() {
-        let mut store = StoreHarness::new();
-        let baseline = store.live_bytes(ImportDimension::CanonicalOutputBytes);
-        crate::scope::testing::with_context(&mut store.owner, |context| {
-            context
-                .with_execution(|exec| -> crate::ParseResult<_> {
-                    let storage = crate::scope::testing::storage_observation(
-                        exec,
-                        ImportDimension::CanonicalOutputBytes,
-                    );
-                    let mut values = exec
-                        .metered_vec(ImportStorageClass::SceneConstruction, "metered-drop-order");
-                    values.try_reserve(exec, 1)?;
-                    let expected =
-                        u64::try_from(values.capacity() * std::mem::size_of::<DropProbe<'_>>())
-                            .unwrap();
-                    assert_eq!(
-                        values.capacity.as_ref().map(ImportStoreReservation::bytes),
-                        Some(expected)
-                    );
-                    values.try_push(
-                        exec,
-                        DropProbe {
-                            storage,
-                            expected_live_bytes: baseline + expected,
-                        },
-                    )?;
-                    drop(values);
-                    assert_eq!(storage.live_bytes(), baseline);
-                    Ok(())
-                })
-                .unwrap();
+        with_store_body(|store| {
+            let baseline = store.live_bytes(ImportDimension::CanonicalOutputBytes);
+            crate::scope::testing::with_context(&mut store.owner, |context| {
+                context
+                    .with_execution(|exec| -> crate::ParseResult<_> {
+                        let storage = crate::scope::testing::storage_observation(
+                            exec,
+                            ImportDimension::CanonicalOutputBytes,
+                        );
+                        let mut values = exec.services()?.metered_vec(
+                            ImportStorageClass::SceneConstruction,
+                            "metered-drop-order",
+                        );
+                        values.try_reserve(&mut exec.services()?, 1)?;
+                        let expected =
+                            u64::try_from(values.capacity() * std::mem::size_of::<DropProbe<'_>>())
+                                .unwrap();
+                        assert_eq!(
+                            values.capacity.as_ref().map(ImportStoreReservation::bytes),
+                            Some(expected)
+                        );
+                        values.try_push(
+                            &mut exec.services()?,
+                            DropProbe {
+                                storage,
+                                expected_live_bytes: baseline + expected,
+                            },
+                        )?;
+                        drop(values);
+                        assert_eq!(storage.live_bytes(), baseline);
+                        Ok(())
+                    })
+                    .unwrap();
+            });
         });
-        store.assert_released();
     }
 
     #[test]
     fn failed_candidates_preserve_the_live_owner_and_release_candidate_capacity() {
-        let mut store = StoreHarness::new();
-        let mut values = AccountedVec::new();
-        values
-            .try_reserve(1, "candidate", |bytes| store.reserve_scratch(bytes))
-            .expect("initial capacity");
-        values
-            .try_push_reserved(7_u64)
-            .unwrap_or_else(|_| panic!("initial slot"));
-        let original_capacity = values.capacity();
-        let original_bytes = values.capacity_bytes();
-        let original_live = store.live_bytes(ImportDimension::ScratchBytes);
+        with_store_body(|store| {
+            let mut values = AccountedVec::new();
+            values
+                .try_reserve(1, "candidate", |bytes| store.reserve_scratch(bytes))
+                .expect("initial capacity");
+            values
+                .try_push_reserved(7_u64)
+                .unwrap_or_else(|_| panic!("initial slot"));
+            let original_capacity = values.capacity();
+            let original_bytes = values.capacity_bytes();
+            let original_live = store.live_bytes(ImportDimension::ScratchBytes);
 
-        FAIL_NEXT_ALLOCATION.with(|fault| fault.set(true));
-        assert!(matches!(
-            values.try_reserve(1, "candidate", |bytes| store.reserve_scratch(bytes)),
-            Err(ScopeAbortCause::Allocation {
-                resource: "candidate"
-            })
-        ));
-        assert_eq!(&*values, &[7]);
-        assert_eq!(values.capacity(), original_capacity);
-        assert_eq!(values.capacity_bytes(), original_bytes);
-        assert_eq!(
-            store.live_bytes(ImportDimension::ScratchBytes),
-            original_live
-        );
+            FAIL_NEXT_ALLOCATION.with(|fault| fault.set(true));
+            assert!(matches!(
+                values.try_reserve(1, "candidate", |bytes| store.reserve_scratch(bytes)),
+                Err(ScopeAbortCause::Allocation {
+                    resource: "candidate"
+                })
+            ));
+            assert_eq!(&*values, &[7]);
+            assert_eq!(values.capacity(), original_capacity);
+            assert_eq!(values.capacity_bytes(), original_bytes);
+            assert_eq!(
+                store.live_bytes(ImportDimension::ScratchBytes),
+                original_live
+            );
 
-        FAIL_NEXT_QUALIFICATION.with(|fault| fault.set(true));
-        assert!(matches!(
-            values.try_reserve(1, "candidate", |bytes| store.reserve_scratch(bytes)),
-            Err(ScopeAbortCause::CapacityEnvelope {
-                resource: "candidate",
-                cause: CapacityPlanError::CapacityEnvelopeViolated { .. },
-            })
-        ));
-        assert_eq!(&*values, &[7]);
-        assert_eq!(values.capacity(), original_capacity);
-        assert_eq!(values.capacity_bytes(), original_bytes);
-        assert_eq!(
-            store.live_bytes(ImportDimension::ScratchBytes),
-            original_live
-        );
+            FAIL_NEXT_QUALIFICATION.with(|fault| fault.set(true));
+            assert!(matches!(
+                values.try_reserve(1, "candidate", |bytes| store.reserve_scratch(bytes)),
+                Err(ScopeAbortCause::CapacityEnvelope {
+                    resource: "candidate",
+                    cause: CapacityPlanError::CapacityEnvelopeViolated { .. },
+                })
+            ));
+            assert_eq!(&*values, &[7]);
+            assert_eq!(values.capacity(), original_capacity);
+            assert_eq!(values.capacity_bytes(), original_bytes);
+            assert_eq!(
+                store.live_bytes(ImportDimension::ScratchBytes),
+                original_live
+            );
+        });
     }
 
     #[test]
     fn undercovered_capacity_reservation_is_rejected_before_allocation() {
-        let mut store = StoreHarness::new();
-        let baseline = store.live_bytes(ImportDimension::ScratchBytes);
-        let mut values = AccountedVec::<u64>::new();
+        with_store_body(|store| {
+            let baseline = store.live_bytes(ImportDimension::ScratchBytes);
+            let mut values = AccountedVec::<u64>::new();
 
-        let result = values.try_reserve(1, "undercovered-capacity", |bytes| {
-            assert!(bytes > 0, "a non-ZST vector must require capacity coverage");
-            store.reserve_scratch(bytes - 1)
+            let result = values.try_reserve(1, "undercovered-capacity", |bytes| {
+                assert!(bytes > 0, "a non-ZST vector must require capacity coverage");
+                store.reserve_scratch(bytes - 1)
+            });
+
+            assert!(matches!(
+                result,
+                Err(ScopeAbortCause::DescriptorContract {
+                    code: "accounted-capacity-reservation-under-covered"
+                })
+            ));
+            assert!(values.is_empty());
+            assert_eq!(values.capacity(), 0);
+            assert_eq!(store.live_bytes(ImportDimension::ScratchBytes), baseline);
+            drop(values);
         });
-
-        assert!(matches!(
-            result,
-            Err(ScopeAbortCause::DescriptorContract {
-                code: "accounted-capacity-reservation-under-covered"
-            })
-        ));
-        assert!(values.is_empty());
-        assert_eq!(values.capacity(), 0);
-        assert_eq!(store.live_bytes(ImportDimension::ScratchBytes), baseline);
-        drop(values);
-        store.assert_released();
     }
 
     #[test]
     fn failed_reservation_preserves_the_live_owner() {
-        let mut store = StoreHarness::new();
-        let mut values = AccountedVec::new();
-        values
-            .try_reserve(1, "reserve-failure", |bytes| store.reserve_scratch(bytes))
-            .expect("initial capacity");
-        values
-            .try_push_reserved(5_u64)
-            .unwrap_or_else(|_| panic!("initial slot"));
-        let original_capacity = values.capacity();
-        let original_live = store.live_bytes(ImportDimension::ScratchBytes);
+        with_store_body(|store| {
+            let mut values = AccountedVec::new();
+            values
+                .try_reserve(1, "reserve-failure", |bytes| store.reserve_scratch(bytes))
+                .expect("initial capacity");
+            values
+                .try_push_reserved(5_u64)
+                .unwrap_or_else(|_| panic!("initial slot"));
+            let original_capacity = values.capacity();
+            let original_live = store.live_bytes(ImportDimension::ScratchBytes);
 
-        assert!(matches!(
-            values.try_reserve(1, "reserve-failure", |_| {
+            assert!(matches!(
+                values.try_reserve(1, "reserve-failure", |_| {
+                    Err(ScopeAbortCause::Allocation {
+                        resource: "reserve-failure",
+                    })
+                }),
                 Err(ScopeAbortCause::Allocation {
-                    resource: "reserve-failure",
+                    resource: "reserve-failure"
                 })
-            }),
-            Err(ScopeAbortCause::Allocation {
-                resource: "reserve-failure"
-            })
-        ));
-        assert_eq!(&*values, &[5]);
-        assert_eq!(values.capacity(), original_capacity);
-        assert_eq!(
-            store.live_bytes(ImportDimension::ScratchBytes),
-            original_live
-        );
+            ));
+            assert_eq!(&*values, &[5]);
+            assert_eq!(values.capacity(), original_capacity);
+            assert_eq!(
+                store.live_bytes(ImportDimension::ScratchBytes),
+                original_live
+            );
+        });
     }
 
     #[test]
     fn successful_replacement_accounts_overlap_then_retires_the_old_owner() {
-        let mut store = StoreHarness::new();
-        let baseline = store.live_bytes(ImportDimension::ScratchBytes);
-        let mut values = AccountedVec::new();
-        values
-            .try_reserve(1, "replacement", |bytes| store.reserve_scratch(bytes))
-            .expect("initial capacity");
-        values
-            .try_push_reserved(1_u64)
-            .unwrap_or_else(|_| panic!("initial slot"));
-        let old_bytes = values.capacity_bytes();
+        with_store_body(|store| {
+            let baseline = store.live_bytes(ImportDimension::ScratchBytes);
+            let mut values = AccountedVec::new();
+            values
+                .try_reserve(1, "replacement", |bytes| store.reserve_scratch(bytes))
+                .expect("initial capacity");
+            values
+                .try_push_reserved(1_u64)
+                .unwrap_or_else(|_| panic!("initial slot"));
+            let old_bytes = values.capacity_bytes();
 
-        let candidate = values
-            .prepare_replacement(1, "replacement", |bytes| store.reserve_scratch(bytes))
-            .expect("candidate preparation")
-            .expect("growth requires a candidate");
-        let replacement_bytes = candidate.replacement.capacity_bytes();
-        assert_eq!(
-            store.live_bytes(ImportDimension::ScratchBytes),
-            baseline + old_bytes + replacement_bytes
-        );
+            let candidate = values
+                .prepare_replacement(1, "replacement", |bytes| store.reserve_scratch(bytes))
+                .expect("candidate preparation")
+                .expect("growth requires a candidate");
+            let replacement_bytes = candidate.replacement.capacity_bytes();
+            assert_eq!(
+                store.live_bytes(ImportDimension::ScratchBytes),
+                baseline + old_bytes + replacement_bytes
+            );
 
-        candidate.commit();
-        assert_eq!(&*values, &[1]);
-        assert_eq!(
-            store.live_bytes(ImportDimension::ScratchBytes),
-            baseline + replacement_bytes
-        );
-        assert_eq!(values.capacity_bytes(), replacement_bytes);
-        drop(values);
-        assert_eq!(store.live_bytes(ImportDimension::ScratchBytes), baseline);
-        store.assert_released();
+            candidate.commit();
+            assert_eq!(&*values, &[1]);
+            assert_eq!(
+                store.live_bytes(ImportDimension::ScratchBytes),
+                baseline + replacement_bytes
+            );
+            assert_eq!(values.capacity_bytes(), replacement_bytes);
+            drop(values);
+            assert_eq!(store.live_bytes(ImportDimension::ScratchBytes), baseline);
+        });
     }
 
     #[test]
     fn abandoned_replacement_preserves_the_live_owner() {
-        let mut store = StoreHarness::new();
-        let mut values = AccountedVec::new();
-        values
-            .try_reserve(1, "abandoned-replacement", |bytes| {
-                store.reserve_scratch(bytes)
-            })
-            .expect("initial capacity");
-        values
-            .try_push_reserved(11_u64)
-            .unwrap_or_else(|_| panic!("initial slot"));
-        let original_capacity = values.capacity();
-        let original_bytes = values.capacity_bytes();
-        let original_live = store.live_bytes(ImportDimension::ScratchBytes);
+        with_store_body(|store| {
+            let mut values = AccountedVec::new();
+            values
+                .try_reserve(1, "abandoned-replacement", |bytes| {
+                    store.reserve_scratch(bytes)
+                })
+                .expect("initial capacity");
+            values
+                .try_push_reserved(11_u64)
+                .unwrap_or_else(|_| panic!("initial slot"));
+            let original_capacity = values.capacity();
+            let original_bytes = values.capacity_bytes();
+            let original_live = store.live_bytes(ImportDimension::ScratchBytes);
 
-        let candidate = values
-            .prepare_replacement(1, "abandoned-replacement", |bytes| {
-                store.reserve_scratch(bytes)
-            })
-            .expect("candidate preparation")
-            .expect("growth requires a candidate");
-        assert!(store.live_bytes(ImportDimension::ScratchBytes) > original_live);
-        drop(candidate);
+            let candidate = values
+                .prepare_replacement(1, "abandoned-replacement", |bytes| {
+                    store.reserve_scratch(bytes)
+                })
+                .expect("candidate preparation")
+                .expect("growth requires a candidate");
+            assert!(store.live_bytes(ImportDimension::ScratchBytes) > original_live);
+            drop(candidate);
 
-        assert_eq!(&*values, &[11]);
-        assert_eq!(values.capacity(), original_capacity);
-        assert_eq!(values.capacity_bytes(), original_bytes);
-        assert_eq!(
-            store.live_bytes(ImportDimension::ScratchBytes),
-            original_live
-        );
+            assert_eq!(&*values, &[11]);
+            assert_eq!(values.capacity(), original_capacity);
+            assert_eq!(values.capacity_bytes(), original_bytes);
+            assert_eq!(
+                store.live_bytes(ImportDimension::ScratchBytes),
+                original_live
+            );
+        });
     }
 
     #[test]
@@ -1025,30 +1059,30 @@ mod tests {
             }
         }
 
-        let mut store = StoreHarness::new();
-        let baseline = store.live_bytes(ImportDimension::ScratchBytes);
-        let alive = std::cell::Cell::new(true);
-        let mut values = AccountedVec::new();
-        values
-            .try_reserve(1, "terminal-owner", |bytes| store.reserve_scratch(bytes))
-            .expect("terminal capacity");
-        values
-            .try_push_reserved(TerminalValue { alive: &alive })
-            .unwrap_or_else(|_| panic!("reserved terminal slot"));
+        with_store_body(|store| {
+            let baseline = store.live_bytes(ImportDimension::ScratchBytes);
+            let alive = std::cell::Cell::new(true);
+            let mut values = AccountedVec::new();
+            values
+                .try_reserve(1, "terminal-owner", |bytes| store.reserve_scratch(bytes))
+                .expect("terminal capacity");
+            values
+                .try_push_reserved(TerminalValue { alive: &alive })
+                .unwrap_or_else(|_| panic!("reserved terminal slot"));
 
-        let original_live = store.live_bytes(ImportDimension::ScratchBytes);
-        assert_eq!(original_live, baseline + values.capacity_bytes());
-        let moved = values;
-        assert_eq!(moved.len(), 1);
-        assert!(alive.get());
-        assert_eq!(
-            store.live_bytes(ImportDimension::ScratchBytes),
-            original_live
-        );
+            let original_live = store.live_bytes(ImportDimension::ScratchBytes);
+            assert_eq!(original_live, baseline + values.capacity_bytes());
+            let moved = values;
+            assert_eq!(moved.len(), 1);
+            assert!(alive.get());
+            assert_eq!(
+                store.live_bytes(ImportDimension::ScratchBytes),
+                original_live
+            );
 
-        drop(moved);
-        assert_eq!(store.live_bytes(ImportDimension::ScratchBytes), baseline);
-        assert!(!alive.get());
-        store.assert_released();
+            drop(moved);
+            assert_eq!(store.live_bytes(ImportDimension::ScratchBytes), baseline);
+            assert!(!alive.get());
+        });
     }
 }

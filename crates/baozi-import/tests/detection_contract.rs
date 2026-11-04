@@ -113,7 +113,7 @@ impl Format for TestImporter {
         &self,
         probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        scope: &DetectionScope<'_>,
+        scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         if probe.bytes().is_empty() {
             Ok(self.detector.outcome(probe))
@@ -124,7 +124,7 @@ impl Format for TestImporter {
         }
     }
 
-    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_, '_>) -> ParseResult<()> {
         match &self.parser {
             ParseBehavior::Success => support::submit_minimal_scene(scope),
             ParseBehavior::FormatFailure => {

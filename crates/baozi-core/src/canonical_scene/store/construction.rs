@@ -6,14 +6,15 @@
 #[cfg(test)]
 use std::num::{NonZeroU32, NonZeroU64};
 
-#[cfg(test)]
-use baozi_operation::__retained_store_integration::activation::CanonicalFailureTerminalWorkPlan;
 use baozi_operation::__retained_store_integration::activation::StoreActivationContainment;
+#[cfg(test)]
+use baozi_operation::__retained_store_integration::activation::{
+    CanonicalBodyOperation, CanonicalFailureTerminalWorkPlan, CanonicalInvocationHost,
+};
 use baozi_operation::__retained_store_integration::authority::RetainedStoreStartError;
 #[cfg(test)]
 use baozi_operation::__retained_store_integration::authority::{
-    FreshStoreLineage, RetainedStoreOperation, RetainedStoreSharePlan, RetainedStoreStartPlan,
-    RetainedStoreWriterPlan,
+    FreshStoreLineage, RetainedStoreSharePlan, RetainedStoreStartPlan, RetainedStoreWriterPlan,
 };
 #[cfg(test)]
 use baozi_operation::{
@@ -109,7 +110,80 @@ pub(in crate::canonical_scene::store) struct SceneConstructionOwner;
 impl OperationOwner for SceneConstructionOwner {}
 
 #[cfg(test)]
-type SceneStoreOperation<L = FreshStoreLineage> = RetainedStoreOperation<
+type SceneCanonicalInvocationHost<
+    T = node_scene::NodeSceneLaneOutput,
+    Proof = node_scene::NodeSceneLaneValidationProof,
+    EA = node_scene::NodeSceneLaneRejection,
+    EV = node_scene::NodeSceneLaneRejection,
+    EG = node_scene::NodeSceneLaneGenerationRejection,
+    ET = super::schema::NodeSceneOutcomeEvidenceSchema,
+> = CanonicalInvocationHost<
+    SceneConstructionOwner,
+    SceneConstructionPhase,
+    SceneConstructionUnit,
+    T,
+    Proof,
+    EA,
+    EV,
+    EG,
+    baozi_operation::RecordBlock,
+    super::schema::SceneDirectorySchema,
+    baozi_operation::RecordBlock,
+    ET,
+>;
+
+#[cfg(test)]
+fn finish_test_scene_operation<'inv, T, Proof, EA, EV, EG, ET>(
+    host: &'inv mut SceneCanonicalInvocationHost<T, Proof, EA, EV, EG, ET>,
+    account: &baozi_operation::PhysicalStorageAccount,
+) -> baozi_operation::__retained_store_integration::activation::CanonicalInvocationCompletion<
+    'inv,
+    SceneConstructionOwner,
+    SceneConstructionPhase,
+    SceneConstructionUnit,
+    T,
+    Proof,
+    EA,
+    EV,
+    EG,
+    baozi_operation::RecordBlock,
+    super::schema::SceneDirectorySchema,
+    baozi_operation::RecordBlock,
+    ET,
+> {
+    host.run_body(|parts, disposition| {
+        let start = try_plan_scene_operation(
+            SceneConstructionLimits {
+                operation_live_bytes: u64::MAX,
+                dimension_live_bytes: u64::MAX,
+                attempted_work: u64::MAX,
+                consumed_work: u64::MAX,
+                committed_output: u64::MAX,
+                published_evidence: u64::MAX,
+            },
+            OperationControl::default(),
+            8,
+            SceneFailureEvidenceWork::exact_single_record(NODE_SCENE_EVIDENCE_FIELD_COUNT),
+        )
+        .unwrap();
+        SceneStoreOperation::try_start(
+            parts.startup,
+            start.control,
+            start.ledger_plan,
+            account,
+            start.start_plan,
+        )
+        .unwrap()
+        .request_unchanged(disposition)
+        .unwrap();
+    })
+    .unwrap()
+    .resume()
+}
+
+#[cfg(test)]
+type SceneStoreOperation<'inv, L = FreshStoreLineage> = CanonicalBodyOperation<
+    'inv,
     SceneConstructionOwner,
     SceneConstructionPhase,
     SceneConstructionUnit,
@@ -156,6 +230,13 @@ pub(crate) enum SceneConstructionStartError {
 #[cfg(test)]
 #[derive(Debug, Error)]
 pub(crate) enum SceneConstructionError {
+    #[error("canonical Scene operation startup failed")]
+    Start(#[from] SceneConstructionStartError),
+    #[error("canonical Scene body did not retain its exact disposition")]
+    Body(
+        #[from]
+        baozi_operation::__retained_store_integration::activation::CanonicalInvocationBodyError,
+    ),
     #[error("the canonical Scene retained-store publication plan is invalid")]
     StorePlan(#[from] StorePlanError),
     #[error("canonical Scene retained-store construction failed")]

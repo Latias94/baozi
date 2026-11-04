@@ -1,13 +1,13 @@
 use baozi_operation::__retained_store_integration::activation::{
-    CanonicalFreezePermitIssue, CanonicalJointSeal, RootedFailureValidation,
+    CanonicalCauseSlot, CanonicalFreezePermitIssue, CanonicalGenerationSlots,
+    CanonicalJointSuccess, RootedFailureValidation,
 };
 use baozi_operation::__retained_store_integration::authority::{
-    CanonicalInheritanceSource, PreparedStoreFailure, PreparedStoreFailureOutcome,
-    PreparedStoreFallback, PreparedStoreSuccess, PreparedStoreSuccessOutcome,
+    PreparedStoreFailure, PreparedStoreFailureOutcome, PreparedStoreFallback, PreparedStoreSuccess,
 };
 use baozi_operation::{
     FinalProgress, OperationOwner, ProgressPhase, ProgressUnit, PublishedOutcomeEvidenceStore,
-    RecordBlock, StoreLedgerEvidence,
+    RecordBlock, StoreLedgerEvidence, StoreRuntimeError,
 };
 
 use crate::canonical_scene::store::schema::{NodeSceneOutcomeEvidenceSchema, SceneDirectorySchema};
@@ -16,7 +16,7 @@ use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenera
 use super::super::super::{
     GENERATION_EXHAUSTED_CODE, SceneConstructionError, burn_generation_reservation,
 };
-use super::super::publication::{NodeSceneLaneJointCommit, validate_node_scene_failure_evidence};
+use super::super::publication::validate_node_scene_failure_evidence;
 use super::super::{
     ActivatedNodeSceneCandidate, NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneFallback,
     NodeSceneRichFailure, PendingNodeSceneFailure, PreparedNodeSceneFailure,
@@ -91,14 +91,14 @@ pub(in crate::canonical_scene::store) enum NodeSceneEditTerminal {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum NodeSceneEditGenerationRejection {
+pub(in crate::canonical_scene::store) enum NodeSceneEditGenerationRejection {
     Exhausted,
     RemapInvariant,
 }
 
 macro_rules! prepare_frozen_edit_failure {
-    ($rooted:expr, $counts:expr) => {{
-        let validation = $rooted.validate_rich_failure(|session, root| {
+    ($rooted:expr, $failure_fallback:expr, $counts:expr) => {{
+        let validation = $rooted.validate_rich_failure($failure_fallback, |session, root| {
             validate_node_scene_failure_evidence(session, root, $counts)
         })?;
         match validation {
@@ -122,66 +122,10 @@ macro_rules! prepare_frozen_edit_failure {
     }};
 }
 
-struct ScopedNodeSceneEditJointCommit<'joint, O, PP, U>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    generation: ReservedSceneGeneration,
-    tables: crate::canonical_scene::store::typed_storage::SceneTables,
-    proof: crate::canonical_scene::store::validation::NodeSceneValidationProof,
-    invalidations: CanonicalInvalidations,
-    remaps: CanonicalRemapSet,
-    seal: CanonicalJointSeal<'joint>,
-    joint: NodeSceneLaneJointCommit<'joint, O, PP, U>,
-}
-
-impl<O, PP, U> ScopedNodeSceneEditJointCommit<'_, O, PP, U>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    fn prepare(self) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
-        let Self {
-            generation,
-            proof,
-            tables,
-            invalidations,
-            remaps,
-            seal,
-            joint,
-        } = self;
-        match joint.prepare(seal)? {
-            PreparedStoreSuccessOutcome::Success(store) => Ok(PreparedNodeSceneEdit::success(
-                PreparedNodeSceneEditSuccess {
-                    generation,
-                    store,
-                    proof,
-                    tables,
-                    invalidations,
-                    remaps,
-                },
-            )),
-            PreparedStoreSuccessOutcome::RichFailure(store) => {
-                burn_generation_reservation(generation);
-                Ok(PreparedNodeSceneEdit::rich_failure(
-                    PreparedNodeSceneEditRichFailure { store },
-                ))
-            }
-            PreparedStoreSuccessOutcome::MinimalFallback(store) => {
-                burn_generation_reservation(generation);
-                Ok(PreparedNodeSceneEdit::minimal_fallback(
-                    PreparedNodeSceneEditMinimalFallback { store },
-                ))
-            }
-        }
-    }
-}
-
-pub(super) fn prepare_edit_candidate<O, PP, U>(
-    candidate: ActivatedNodeSceneCandidate<O, PP, U>,
+pub(super) fn prepare_edit_candidate<'inv, O, PP, U>(
+    candidate: ActivatedNodeSceneCandidate<'inv, O, PP, U>,
+    generation_slots: CanonicalGenerationSlots<'inv, NodeSceneEditGenerationRejection>,
+    failure_fallback: CanonicalCauseSlot<'inv, StoreRuntimeError>,
     input_generation: SceneGenerationId,
     invalidations: CanonicalInvalidations,
     final_progress: FinalProgress<PP, U>,
@@ -193,17 +137,22 @@ where
     U: ProgressUnit,
 {
     let evidence_counts = candidate.output().inner().evidence_counts;
-    match candidate.try_issue_freeze_permit(final_progress)? {
+    match candidate.try_issue_freeze_permit(generation_slots.interruption, final_progress)? {
         CanonicalFreezePermitIssue::Ready(permit) => {
             let generation =
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(reserve_generation)) {
                     Ok(Ok(generation)) => generation,
                     Ok(Err(SceneGenerationError::Exhausted)) => {
                         let rejected = permit.reject_generation(
+                            generation_slots.rejection,
                             NodeSceneEditGenerationRejection::Exhausted,
                             GENERATION_EXHAUSTED_CODE,
                         )?;
-                        return prepare_frozen_edit_failure!(rejected, evidence_counts);
+                        return prepare_frozen_edit_failure!(
+                            rejected,
+                            failure_fallback,
+                            evidence_counts
+                        );
                     }
                     Err(payload) => {
                         let _ = permit.contain_generation_fault();
@@ -216,51 +165,64 @@ where
                     Err(_) => {
                         burn_generation_reservation(generation);
                         let rejected = permit.reject_generation(
+                            generation_slots.rejection,
                             NodeSceneEditGenerationRejection::RemapInvariant,
                             NODE_SCENE_BUILD_INVARIANT_CODE,
                         )?;
-                        return prepare_frozen_edit_failure!(rejected, evidence_counts);
+                        return prepare_frozen_edit_failure!(
+                            rejected,
+                            failure_fallback,
+                            evidence_counts
+                        );
                     }
                 };
-            permit.bind_joint_commit(|output, proof, joint, seal| {
-                ScopedNodeSceneEditJointCommit {
-                    generation,
-                    proof: proof.into_inner(),
-                    tables: output.into_tables(),
-                    invalidations,
-                    remaps,
-                    seal,
-                    joint,
-                }
-                .prepare()
+            permit.bind_joint_commit(|joint, seal| {
+                let CanonicalJointSuccess {
+                    output,
+                    proof,
+                    store,
+                } = joint.prepare(seal)?;
+                Ok(PreparedNodeSceneEdit::success(
+                    PreparedNodeSceneEditSuccess {
+                        generation,
+                        store,
+                        proof: proof.into_inner(),
+                        tables: output.into_tables(),
+                        invalidations,
+                        remaps,
+                    },
+                ))
             })
         }
         CanonicalFreezePermitIssue::Interrupted(interrupted) => {
-            prepare_frozen_edit_failure!(interrupted, evidence_counts)
+            prepare_frozen_edit_failure!(interrupted, failure_fallback, evidence_counts)
         }
         CanonicalFreezePermitIssue::DestinationRejected(rejected) => {
-            let validation = rejected.validate_rich_failure(|session, root| {
-                validate_node_scene_failure_evidence(session, root, evidence_counts)
-            })?;
+            let validation =
+                rejected.validate_rich_failure(failure_fallback, |session, root| {
+                    validate_node_scene_failure_evidence(session, root, evidence_counts)
+                })?;
             prepare_ordinary_failure_validation(validation, final_progress)
         }
     }
 }
 
-pub(super) fn prepare_pending_edit_failure<O, PP, U>(
-    pending: PendingNodeSceneFailure<O, PP, U, CanonicalInheritanceSource>,
+pub(super) fn prepare_pending_edit_failure<'inv, O, PP, U>(
+    pending: PendingNodeSceneFailure<'inv, O, PP, U>,
+    failure_fallback: CanonicalCauseSlot<'inv, StoreRuntimeError>,
 ) -> Result<PreparedNodeSceneEdit, SceneConstructionError>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    let (prepared, _authoring_rejection, _control_cause) = pending.prepare()?;
+    let (prepared, _authoring_rejection, _control_cause) = pending.prepare(failure_fallback)?;
     Ok(map_prepared_node_scene_failure(prepared))
 }
 
 fn prepare_ordinary_failure_validation<O, PP, U, Cause>(
     validation: RootedFailureValidation<
+        '_,
         O,
         PP,
         U,

@@ -179,7 +179,7 @@ impl<'a> Probe<'a> {
 ///
 /// fn parse_wrong_options<F: Format<Options = u8>>(
 ///     format: &F,
-///     context: &mut ParseContext<'_>,
+///     context: &mut ParseContext<'_, '_>,
 /// ) -> ParseResult<()> {
 ///     format.parse(&false, context)
 /// }
@@ -215,12 +215,13 @@ pub trait Format: Send + Sync + RefUnwindSafe + 'static {
         &self,
         _probe: &Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::NoMatch)
     }
 
-    fn parse(&self, options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()>;
+    fn parse(&self, options: &Self::Options, context: &mut ParseContext<'_, '_>)
+    -> ParseResult<()>;
 }
 
 #[derive(Clone, PartialEq, Eq)]

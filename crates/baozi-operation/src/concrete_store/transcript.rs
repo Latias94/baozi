@@ -430,24 +430,24 @@ impl std::error::Error for StoreTranscriptStartCause {
 
 /// Start failure that reports its exact cause and preserves the untouched operation.
 #[must_use = "recover the operation or deliberately publish its pre-admitted fallback"]
-pub struct StoreTranscriptStartError<O, PP, U, L = FreshStoreLineage>
+pub struct StoreTranscriptStartError<'inv, O, PP, U, L = FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    operation: RetainedStoreOperation<O, PP, U, L>,
+    operation: RetainedStoreOperation<'inv, O, PP, U, L>,
     cause: StoreTranscriptStartCause,
 }
 
-impl<O, PP, U, L> StoreTranscriptStartError<O, PP, U, L>
+impl<'inv, O, PP, U, L> StoreTranscriptStartError<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     fn new(
-        operation: RetainedStoreOperation<O, PP, U, L>,
+        operation: RetainedStoreOperation<'inv, O, PP, U, L>,
         cause: StoreTranscriptStartCause,
     ) -> Self {
         Self { operation, cause }
@@ -459,12 +459,12 @@ where
     }
 
     /// Recovers the untouched operation so the caller can provide corrected writer plans.
-    pub fn into_operation(self) -> RetainedStoreOperation<O, PP, U, L> {
+    pub fn into_operation(self) -> RetainedStoreOperation<'inv, O, PP, U, L> {
         self.operation
     }
 }
 
-impl<O, PP, U, L> fmt::Debug for StoreTranscriptStartError<O, PP, U, L>
+impl<'inv, O, PP, U, L> fmt::Debug for StoreTranscriptStartError<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -478,7 +478,7 @@ where
     }
 }
 
-impl<O, PP, U, L> fmt::Display for StoreTranscriptStartError<O, PP, U, L>
+impl<'inv, O, PP, U, L> fmt::Display for StoreTranscriptStartError<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -493,7 +493,7 @@ where
     }
 }
 
-impl<O, PP, U, L> std::error::Error for StoreTranscriptStartError<O, PP, U, L>
+impl<'inv, O, PP, U, L> std::error::Error for StoreTranscriptStartError<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -595,12 +595,12 @@ impl StoreTranscriptContinuation {
     }
 }
 
-pub(super) struct PrimaryTranscriptParts<O, PP, U, L = FreshStoreLineage>
+pub(super) struct PrimaryTranscriptParts<'inv, O, PP, U, L = FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     pub(super) continuation: StoreTranscriptContinuation,
-    pub(super) assembly: RetainedStorePublicationAssembly<O, PP, U, L>,
+    pub(super) assembly: RetainedStorePublicationAssembly<'inv, O, PP, U, L>,
 }

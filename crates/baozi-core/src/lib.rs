@@ -65,15 +65,22 @@ mod validation_control;
 ///
 /// ```compile_fail,E0616
 /// use baozi_core::__scene_integration::integration::SceneValidationProof;
-/// fn extract(proof: SceneValidationProof) { let _ = proof.0; }
+/// fn extract(proof: SceneValidationProof) { let _ = proof.scene; }
 /// ```
 ///
-/// The handoff token carries actual table ownership and cannot publish twice:
+/// The prepared success keeps its proof and physical owner private:
+///
+/// ```compile_fail,E0616
+/// use baozi_core::__scene_integration::integration::PreparedSceneSuccess;
+/// fn extract(prepared: PreparedSceneSuccess) { let _ = prepared.store; }
+/// ```
+///
+/// The inseparable prepared success cannot publish twice:
 ///
 /// ```compile_fail,E0382
-/// use baozi_core::__scene_integration::integration::SceneHandoffToken;
-/// fn duplicate(token: SceneHandoffToken) -> (SceneHandoffToken, SceneHandoffToken) {
-///     (token, token)
+/// use baozi_core::__scene_integration::integration::PreparedSceneSuccess;
+/// fn duplicate(prepared: PreparedSceneSuccess) -> (PreparedSceneSuccess, PreparedSceneSuccess) {
+///     (prepared, prepared)
 /// }
 /// ```
 #[doc(hidden)]

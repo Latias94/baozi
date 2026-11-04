@@ -1,11 +1,11 @@
 use super::{
     BuiltCornerProjection, BuiltGeometryStreams, CornerChannelSelection, FaceVertex,
-    IndexedCornerChannel, IndexedPosition, MeshWorkGroups, ObjFailure, ParsedObj, canonical_u32,
-    mtl, usize_amount,
+    IndexedCornerChannel, IndexedPosition, MeshWorkGroups, ObjFailure, ParsedObj, mtl,
+    usize_amount,
 };
 use baozi_import::{
-    CapacityPlan, ImportStorageClass, ImportWorkClass, ImportWorkGroup, MeteredVec, ParseExecution,
-    ParseResult,
+    CapacityPlan, ImportStorageClass, ImportWorkClass, MeteredVec, ParseChildren, ParseErrorView,
+    ParsePieceError, ParseResult, ParseServices, ParseWorkLayout,
 };
 
 // Each row touches one source/corner and at most one XYZ/UVW value, below eight actions.
@@ -58,25 +58,28 @@ pub(super) fn eligible(
     fits().unwrap_or(false)
 }
 
-fn for_rows<'region, 'session>(
-    exec: &mut ParseExecution<'region, 'session>,
-    group: &ImportWorkGroup<'region, 1>,
+fn for_rows<'op, 'session>(
+    children: &mut ParseChildren<'_, 'op, 'session>,
+    group: &ParseWorkLayout<'op, 1>,
     len: usize,
     resource: &'static str,
-    mut visit: impl FnMut(&mut ParseExecution<'region, 'session>, usize) -> ParseResult<()>,
+    mut visit: impl FnMut(ParseErrorView<'session>, usize) -> Result<(), ParsePieceError<ObjFailure>>,
 ) -> ParseResult<()> {
     #[cfg(test)]
-    super::dense_tests::before_rows(exec, resource)?;
+    super::dense_tests::before_rows(&mut children.services()?, resource)?;
     let mut start = 0;
     while start < len {
         let end = start.saturating_add(ROWS_PER_POLL).min(len);
-        let amount = usize_amount(exec, end - start, resource)?;
-        exec.with_work(group, [amount], |exec, work| -> ParseResult<()> {
+        let amount = usize_amount(&children.services()?, end - start, resource)?;
+        children.child(group, [amount], |work| -> ParseResult<()> {
+            let errors = work.error_view();
             for cursor in start..end {
-                visit(exec, cursor)?;
-                #[cfg(test)]
-                super::dense_tests::row_completed(resource);
-                work.complete([1])?;
+                work.run_returned_with_storage(|_storage| {
+                    visit(errors, cursor)?;
+                    #[cfg(test)]
+                    super::dense_tests::row_completed(resource);
+                    Ok(((), [1]))
+                })?;
             }
             Ok(())
         })?;
@@ -91,66 +94,70 @@ struct SourceRemap<'session> {
 }
 
 impl<'session> SourceRemap<'session> {
-    fn new<'region>(
-        exec: &mut ParseExecution<'region, 'session>,
-        work: &ImportWorkGroup<'region, 1>,
+    fn new<'op>(
+        children: &mut ParseChildren<'_, 'op, 'session>,
+        work: &ParseWorkLayout<'op, 1>,
         count: usize,
         resources: [&'static str; 3],
     ) -> ParseResult<Self> {
         let [indices_resource, sources_resource, init_resource] = resources;
+        let exec = &mut children.services()?;
         let mut indices =
             exec.metered_vec(ImportStorageClass::FormatNormalization, indices_resource);
         let mut sources =
             exec.metered_vec(ImportStorageClass::FormatNormalization, sources_resource);
         indices.try_reserve(exec, count)?;
         sources.try_reserve(exec, count)?;
-        for_rows(exec, work, count, init_resource, |_exec, _| {
-            indices.try_push_reserved(None)
+        for_rows(children, work, count, init_resource, |_errors, _| {
+            indices
+                .try_push_reserved(None)
+                .map_err(ParsePieceError::Parse)
         })?;
         Ok(Self { indices, sources })
     }
 
     fn observe(
         &mut self,
-        exec: &mut ParseExecution<'_, '_>,
+        errors: ParseErrorView<'_>,
         source: usize,
         source_error: &'static str,
         index_resource: &'static str,
-    ) -> ParseResult<u32> {
+    ) -> Result<u32, ParsePieceError<ObjFailure>> {
         let slot = self
             .indices
             .as_mut_slice()
             .get_mut(source)
-            .ok_or_else(|| exec.format_failure(ObjFailure::internal(source_error)))?;
+            .ok_or_else(|| ParsePieceError::Format(ObjFailure::internal(source_error)))?;
         if let Some(index) = *slot {
             return Ok(index);
         }
-        let index = canonical_u32(exec, self.sources.len(), index_resource)?;
+        let index = u32::try_from(self.sources.len())
+            .map_err(|_| errors.allocation_failure(index_resource))?;
         self.sources.try_push_reserved(source)?;
         *slot = Some(index);
         Ok(index)
     }
 
-    fn get(&self, exec: &mut ParseExecution<'_, '_>, source: usize) -> ParseResult<u32> {
+    fn get(&self, source: usize) -> Result<u32, ParsePieceError<ObjFailure>> {
         self.indices
             .as_slice()
             .get(source)
             .copied()
             .flatten()
             .ok_or_else(|| {
-                exec.format_failure(ObjFailure::internal("obj-dense-source-remap-missing"))
+                ParsePieceError::Format(ObjFailure::internal("obj-dense-source-remap-missing"))
             })
     }
 
-    fn sort(&mut self, exec: &mut ParseExecution<'_, 'session>) -> ParseResult<()> {
-        mtl::interruptible_sort_by(exec, &mut self.sources, |exec, work, left, right| {
-            work.run_leaf(exec, || left.cmp(right))
+    fn sort(&mut self, children: &mut ParseChildren<'_, '_, 'session>) -> ParseResult<()> {
+        mtl::interruptible_sort_by(children, &mut self.sources, |work, left, right| {
+            work.run_leaf(|| left.cmp(right))
         })
     }
 }
 
 fn projection<'session, T>(
-    exec: &mut ParseExecution<'_, 'session>,
+    exec: &mut ParseServices<'_, '_, 'session>,
     values: usize,
     corners: usize,
     resources: [&'static str; 2],
@@ -166,17 +173,17 @@ fn projection<'session, T>(
     })
 }
 
-pub(super) fn materialize<'region, 'session>(
-    exec: &mut ParseExecution<'region, 'session>,
-    groups: &MeshWorkGroups<'region>,
+pub(super) fn materialize<'op, 'session>(
+    children: &mut ParseChildren<'_, 'op, 'session>,
+    groups: &MeshWorkGroups<'op>,
     parsed: &ParsedObj<'_>,
     corners: &[FaceVertex],
     channels: CornerChannelSelection,
     attribute_stream_count: usize,
 ) -> ParseResult<BuiltGeometryStreams<'session>> {
-    let work = exec.bind_work_group([ImportWorkClass::WorkUnits])?;
+    let work = children.bind_group([ImportWorkClass::WorkUnits])?;
     let mut position_remap = SourceRemap::new(
-        exec,
+        children,
         &work,
         parsed.positions.len(),
         [
@@ -185,31 +192,34 @@ pub(super) fn materialize<'region, 'session>(
             "obj-dense-position-init-work",
         ],
     )?;
+    let exec = &mut children.services()?;
     let mut indices = exec.metered_vec(
         ImportStorageClass::FormatNormalization,
         "obj-segment-indices",
     );
     indices.try_reserve(exec, corners.len())?;
     for_rows(
-        exec,
+        children,
         &work,
         corners.len(),
         "obj-dense-position-discovery-work",
-        |exec, cursor| {
+        |errors, cursor| {
             let index = position_remap.observe(
-                exec,
+                errors,
                 corners[cursor].position,
                 "obj-position-source-index-out-of-range",
                 "obj-vertex-index-space",
             )?;
-            indices.try_push_reserved(index)
+            indices
+                .try_push_reserved(index)
+                .map_err(ParsePieceError::Parse)
         },
     )?;
 
     let mut texcoord_lanes = 2_u8;
     let mut texcoord_remap = if channels.texcoords {
         let mut remap = SourceRemap::new(
-            exec,
+            children,
             &work,
             parsed.texcoords.len(),
             [
@@ -219,23 +229,23 @@ pub(super) fn materialize<'region, 'session>(
             ],
         )?;
         for_rows(
-            exec,
+            children,
             &work,
             corners.len(),
             "obj-dense-texcoord-discovery-work",
-            |exec, cursor| {
+            |errors, cursor| {
                 let source = corners[cursor].texcoord.ok_or_else(|| {
-                    exec.format_failure(ObjFailure::internal(
+                    ParsePieceError::Format(ObjFailure::internal(
                         "complete-texcoord-channel-has-missing-index",
                     ))
                 })?;
                 let value = parsed.texcoords.as_slice().get(source).ok_or_else(|| {
-                    exec.format_failure(ObjFailure::internal(
+                    ParsePieceError::Format(ObjFailure::internal(
                         "obj-texcoord-source-index-out-of-range",
                     ))
                 })?;
                 remap.observe(
-                    exec,
+                    errors,
                     source,
                     "obj-texcoord-source-index-out-of-range",
                     "obj-texcoord-source-index-space",
@@ -244,14 +254,14 @@ pub(super) fn materialize<'region, 'session>(
                 Ok(())
             },
         )?;
-        remap.sort(exec)?;
+        remap.sort(children)?;
         Some(remap)
     } else {
         None
     };
     let mut normal_remap = if channels.normals {
         let mut remap = SourceRemap::new(
-            exec,
+            children,
             &work,
             parsed.normals.len(),
             [
@@ -261,18 +271,18 @@ pub(super) fn materialize<'region, 'session>(
             ],
         )?;
         for_rows(
-            exec,
+            children,
             &work,
             corners.len(),
             "obj-dense-normal-discovery-work",
-            |exec, cursor| {
+            |errors, cursor| {
                 let source = corners[cursor].normal.ok_or_else(|| {
-                    exec.format_failure(ObjFailure::internal(
+                    ParsePieceError::Format(ObjFailure::internal(
                         "complete-normal-channel-has-missing-index",
                     ))
                 })?;
                 remap.observe(
-                    exec,
+                    errors,
                     source,
                     "obj-normal-source-index-out-of-range",
                     "obj-normal-source-index-space",
@@ -280,13 +290,14 @@ pub(super) fn materialize<'region, 'session>(
                 Ok(())
             },
         )?;
-        remap.sort(exec)?;
+        remap.sort(children)?;
         Some(remap)
     } else {
         None
     };
 
     let texcoords = if let Some(remap) = texcoord_remap.as_mut() {
+        let exec = &mut children.services()?;
         let scalar_count = remap
             .sources
             .len()
@@ -302,18 +313,19 @@ pub(super) fn materialize<'region, 'session>(
             ],
         )?;
         for_rows(
-            exec,
+            children,
             &work,
             remap.sources.len(),
             "obj-dense-texcoord-projection-work",
-            |exec, cursor| {
+            |errors, cursor| {
                 let source = remap.sources.as_slice()[cursor];
                 let value = parsed.texcoords.as_slice().get(source).ok_or_else(|| {
-                    exec.format_failure(ObjFailure::internal(
+                    ParsePieceError::Format(ObjFailure::internal(
                         "obj-texcoord-source-index-out-of-range",
                     ))
                 })?;
-                let index = canonical_u32(exec, cursor, "obj-texcoord-source-index-space")?;
+                let index = u32::try_from(cursor)
+                    .map_err(|_| errors.allocation_failure("obj-texcoord-source-index-space"))?;
                 built
                     .source_values
                     .try_extend_from_slice_reserved(&value.values[..usize::from(texcoord_lanes)])?;
@@ -322,19 +334,20 @@ pub(super) fn materialize<'region, 'session>(
             },
         )?;
         for_rows(
-            exec,
+            children,
             &work,
             corners.len(),
             "obj-dense-texcoord-indices-work",
-            |exec, cursor| {
+            |_errors, cursor| {
                 let source = corners[cursor].texcoord.ok_or_else(|| {
-                    exec.format_failure(ObjFailure::internal(
+                    ParsePieceError::Format(ObjFailure::internal(
                         "complete-texcoord-channel-has-missing-index",
                     ))
                 })?;
                 built
                     .source_indices
-                    .try_push_reserved(remap.get(exec, source)?)
+                    .try_push_reserved(remap.get(source)?)
+                    .map_err(ParsePieceError::Parse)
             },
         )?;
         Some(built)
@@ -343,7 +356,7 @@ pub(super) fn materialize<'region, 'session>(
     };
     let normals = if let Some(remap) = normal_remap.as_mut() {
         let mut built = projection(
-            exec,
+            &mut children.services()?,
             remap.sources.len(),
             corners.len(),
             [
@@ -352,11 +365,11 @@ pub(super) fn materialize<'region, 'session>(
             ],
         )?;
         for_rows(
-            exec,
+            children,
             &work,
             remap.sources.len(),
             "obj-dense-normal-projection-work",
-            |exec, cursor| {
+            |errors, cursor| {
                 let source = remap.sources.as_slice()[cursor];
                 let value = parsed
                     .normals
@@ -364,30 +377,32 @@ pub(super) fn materialize<'region, 'session>(
                     .get(source)
                     .copied()
                     .ok_or_else(|| {
-                        exec.format_failure(ObjFailure::internal(
+                        ParsePieceError::Format(ObjFailure::internal(
                             "obj-normal-source-index-out-of-range",
                         ))
                     })?;
-                let index = canonical_u32(exec, cursor, "obj-normal-source-index-space")?;
+                let index = u32::try_from(cursor)
+                    .map_err(|_| errors.allocation_failure("obj-normal-source-index-space"))?;
                 built.source_values.try_push_reserved(value)?;
                 remap.indices.as_mut_slice()[source] = Some(index);
                 Ok(())
             },
         )?;
         for_rows(
-            exec,
+            children,
             &work,
             corners.len(),
             "obj-dense-normal-indices-work",
-            |exec, cursor| {
+            |_errors, cursor| {
                 let source = corners[cursor].normal.ok_or_else(|| {
-                    exec.format_failure(ObjFailure::internal(
+                    ParsePieceError::Format(ObjFailure::internal(
                         "complete-normal-channel-has-missing-index",
                     ))
                 })?;
                 built
                     .source_indices
-                    .try_push_reserved(remap.get(exec, source)?)
+                    .try_push_reserved(remap.get(source)?)
+                    .map_err(ParsePieceError::Parse)
             },
         )?;
         Some(built)
@@ -395,6 +410,7 @@ pub(super) fn materialize<'region, 'session>(
         None
     };
 
+    let exec = &mut children.services()?;
     let scalar_count = position_remap
         .sources
         .len()
@@ -408,22 +424,30 @@ pub(super) fn materialize<'region, 'session>(
     #[cfg(test)]
     super::dense_tests::before_rows(exec, "obj-dense-position-values-work")?;
     for sources in position_remap.sources.as_slice().chunks(ROWS_PER_POLL) {
-        let amount = usize_amount(exec, sources.len(), "obj-geometry-materialization-work")?;
-        exec.with_work(
+        let amount = usize_amount(
+            &children.services()?,
+            sources.len(),
+            "obj-geometry-materialization-work",
+        )?;
+        children.child(
             &groups.materialization,
             [amount, amount],
-            |exec, work| -> ParseResult<()> {
+            |work| -> ParseResult<()> {
                 for source in sources {
-                    let position = parsed.positions.as_slice().get(*source).ok_or_else(|| {
-                        exec.format_failure(ObjFailure::internal(
-                            "obj-position-source-index-out-of-range",
-                        ))
+                    work.run_returned_with_storage::<_, ObjFailure>(|_storage| {
+                        let position =
+                            parsed.positions.as_slice().get(*source).ok_or_else(|| {
+                                ParsePieceError::Format(ObjFailure::internal(
+                                    "obj-position-source-index-out-of-range",
+                                ))
+                            })?;
+                        positions.try_extend_from_slice_reserved(&[
+                            position.x, position.y, position.z,
+                        ])?;
+                        #[cfg(test)]
+                        super::dense_tests::row_completed("obj-dense-position-values-work");
+                        Ok(((), [1, 1]))
                     })?;
-                    positions
-                        .try_extend_from_slice_reserved(&[position.x, position.y, position.z])?;
-                    #[cfg(test)]
-                    super::dense_tests::row_completed("obj-dense-position-values-work");
-                    work.complete([1, 1])?;
                 }
                 Ok(())
             },

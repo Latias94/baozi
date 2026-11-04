@@ -135,9 +135,9 @@ use crate::owner::OperationOwner;
 #[cfg(test)]
 use crate::retained::RetainedAllocationError;
 use crate::retained::{
-    BlockEmplacer, BlockPlacement, BorrowedRetainedWorkPermit, RetainedSuccessFreezeContribution,
-    RetainedSuccessFreezePermit, RetainedSuccessFreezePermitIssue,
-    RetainedSuccessJointCommitFormation, RetainedSuccessJointCommitIntent,
+    BlockEmplacer, BlockPlacement, BorrowedRetainedWorkPermit, RetainedPreFreezeClassification,
+    RetainedSuccessFreezeContribution, RetainedSuccessFreezePermit,
+    RetainedSuccessFreezePermitIssue,
 };
 use crate::retained::{
     CanonicalLeafInheritanceError, CanonicalRetainedLeafPolicy, CanonicalRetainedRewriteMap,
@@ -168,12 +168,15 @@ use validation::{
 #[doc(hidden)]
 pub mod activation;
 mod batch;
+mod deferred;
+pub use deferred::TerminalStoreLineage;
 mod execution;
 pub use execution::{
-    StoreBoundWorkGroup, StoreExecutionPermit, StoreExecutionServices, StoreExecutionWork,
-    StoreExtensionResult, StoreFailureStorage, StoreImporterBoundary, StoreInvocation,
-    StoreInvocationError, StoreInvocationLayout, StoreInvocationParser, StoreOrdinaryStorage,
-    StoreParserWorkError, StoreParserWorkScope,
+    StoreActionExecution, StoreBoundWorkGroup, StoreChildAdmission, StoreExecutionPermit,
+    StoreExecutionServices, StoreExecutionWork, StoreExtensionResult, StoreFailureStorage,
+    StoreImporterBoundary, StoreInvocation, StoreInvocationError, StoreInvocationLayout,
+    StoreInvocationParser, StoreInvocationServices, StoreOrdinaryStorage, StoreParserWorkError,
+    StoreParserWorkScope, StoreScanReturn,
 };
 mod terminal_output;
 mod transcript;
@@ -1696,6 +1699,7 @@ fn record_cell(storage: &RecordStorage, row: usize, field: usize) -> Option<&Rec
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RetainedStoreStartError {
+    InvocationAlreadyStarted,
     InvalidTerminalLimits,
     Runtime(StoreRuntimeError),
 }
@@ -1703,6 +1707,9 @@ pub enum RetainedStoreStartError {
 impl fmt::Display for RetainedStoreStartError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvocationAlreadyStarted => {
+                formatter.write_str("the invocation root has already entered")
+            }
             Self::InvalidTerminalLimits => {
                 formatter.write_str("retained store terminal limits are invalid")
             }
@@ -1715,13 +1722,39 @@ impl std::error::Error for RetainedStoreStartError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Runtime(cause) => Some(cause),
-            Self::InvalidTerminalLimits => None,
+            Self::InvocationAlreadyStarted | Self::InvalidTerminalLimits => None,
         }
     }
 }
 
-type RawStoreOperation<O, PP, U> =
-    RetainedOperation<O, StorePhaseKey, PP, U, StoreDimensionKey, StoreFallbackEnvelope>;
+type RawStoreOperation<'inv, O, PP, U> = RetainedOperation<
+    'inv,
+    O,
+    StorePhaseKey,
+    PP,
+    U,
+    StoreDimensionKey,
+    StoreFallbackEnvelope,
+    StoredBlock,
+    StoredBlock,
+>;
+type RawStoreAttachment<'inv, 'account, O, PP, U> = crate::retained::PendingRetainedAttachment<
+    'inv,
+    'account,
+    O,
+    StorePhaseKey,
+    PP,
+    U,
+    StoreDimensionKey,
+    StoreFallbackEnvelope,
+    StoredBlock,
+    StoredBlock,
+>;
+type BoundStoreParts<'inv, 'account, O, PP, U> = (
+    RawStoreAttachment<'inv, 'account, O, PP, U>,
+    StoreKeyDomain,
+    StoreFallbackEnvelope,
+);
 type RawStoreControlCheckpoint<'a, O, PP, U> =
     RetainedControlCheckpoint<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
 type RawStoreProducerHost<'a, O, PP, U> =
@@ -1732,7 +1765,8 @@ type RawStoreWorkControl<'a, O, PP, U> =
     RetainedWorkControl<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
 type RawStoreBorrowedWorkPermit<'borrow, 'operation, O, PP, U> =
     BorrowedRetainedWorkPermit<'borrow, 'operation, O, StorePhaseKey, PP, U, StoreDimensionKey>;
-type RawStoreAssembly<O, PP, U> = RetainedPublicationAssembly<
+type RawStoreAssembly<'inv, O, PP, U> = RetainedPublicationAssembly<
+    'inv,
     O,
     StorePhaseKey,
     PP,
@@ -1742,7 +1776,8 @@ type RawStoreAssembly<O, PP, U> = RetainedPublicationAssembly<
     StoredBlock,
     StoredBlock,
 >;
-type RawStoreFailureAssembly<O, PP, U> = RetainedFailureAssembly<
+type RawStoreFailureAssembly<'inv, O, PP, U> = RetainedFailureAssembly<
+    'inv,
     O,
     StorePhaseKey,
     PP,
@@ -1752,7 +1787,8 @@ type RawStoreFailureAssembly<O, PP, U> = RetainedFailureAssembly<
     StoredBlock,
     StoredBlock,
 >;
-type RawValidatedStoreSuccess<O, PP, U> = ValidatedRetainedSuccess<
+type RawValidatedStoreSuccess<'inv, O, PP, U> = ValidatedRetainedSuccess<
+    'inv,
     O,
     StorePhaseKey,
     PP,
@@ -1762,7 +1798,8 @@ type RawValidatedStoreSuccess<O, PP, U> = ValidatedRetainedSuccess<
     StoredBlock,
     StoredBlock,
 >;
-type RawValidatedStoreFailure<O, PP, U> = ValidatedRetainedFailure<
+type RawValidatedStoreFailure<'inv, O, PP, U> = ValidatedRetainedFailure<
+    'inv,
     O,
     StorePhaseKey,
     PP,
@@ -1772,7 +1809,8 @@ type RawValidatedStoreFailure<O, PP, U> = ValidatedRetainedFailure<
     StoredBlock,
     StoredBlock,
 >;
-type RawStoreFallbackOnly<O, PP, U> = RetainedFallbackOnly<
+type RawStoreFallbackOnly<'inv, O, PP, U> = RetainedFallbackOnly<
+    'inv,
     O,
     StorePhaseKey,
     PP,
@@ -1794,7 +1832,7 @@ type RawStoreFallbackOnly<O, PP, U> = RetainedFallbackOnly<
 /// };
 ///
 /// fn bind_from_fresh<O, PP, U, SourceRootKind, SourceRootTag>(
-///     assembly: &mut RetainedStorePublicationAssembly<O, PP, U, FreshStoreLineage>,
+///     assembly: &mut RetainedStorePublicationAssembly<'_, O, PP, U, FreshStoreLineage>,
 ///     source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
 ///     dimension: StoreDimensionKey,
 /// ) where
@@ -1820,8 +1858,8 @@ pub struct CanonicalInheritanceSource {
 }
 
 /// Store operation statically bound to one exact canonical source generation.
-pub type DerivedRetainedStoreOperation<O, PP, U> =
-    RetainedStoreOperation<O, PP, U, CanonicalInheritanceSource>;
+pub type DerivedRetainedStoreOperation<'inv, O, PP, U> =
+    RetainedStoreOperation<'inv, O, PP, U, CanonicalInheritanceSource>;
 
 /// Opaque live-storage reservation owned by the concrete retained-store protocol.
 ///
@@ -1845,7 +1883,7 @@ where
 /// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit, StoreDimensionKey};
 /// use baozi_operation::__retained_store_integration::authority::RetainedStoreOperation;
 /// fn outlive<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
-///     mut operation: RetainedStoreOperation<O, P, U>, dimension: StoreDimensionKey,
+///     mut operation: RetainedStoreOperation<'_, O, P, U>, dimension: StoreDimensionKey,
 /// ) {
 ///     let (work, _) = operation.execution().unwrap();
 ///     let observation = work.storage_observation(dimension).unwrap();
@@ -2503,20 +2541,210 @@ where
     }
 }
 
-/// Linear owner for one coordinator, physical account, and pre-admitted fallback.
-#[must_use = "the retained store operation must be opened or published as fallback"]
-pub struct RetainedStoreOperation<O, PP, U, L = FreshStoreLineage>
+/// Lexical owner of the invocation's actual coordinator and control state.
+pub struct StoreInvocationRoot<O, PP, U>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    raw: RawStoreOperation<O, PP, U>,
+    raw: crate::retained::InvocationRoot<
+        O,
+        StorePhaseKey,
+        PP,
+        U,
+        StoreDimensionKey,
+        StoreFallbackEnvelope,
+        StoredBlock,
+        StoredBlock,
+    >,
+}
+
+/// Short startup permission. The physical root remains installed in its lexical owner.
+pub struct StoreInvocationStart<'inv, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    root: &'inv mut StoreInvocationRoot<O, PP, U>,
+    not_send_or_sync: PhantomData<std::rc::Rc<()>>,
+}
+
+/// One bound invocation before its retained graph is attached.
+///
+/// The ledger and control remain in the outer root. This entry frame keeps the original
+/// account admission and source policy; attachment accepts no replacement inputs.
+///
+/// ```
+/// use baozi_operation::__retained_store_integration::authority::{
+///     BoundStoreOperation, RetainedStoreOperation, RetainedStoreStartError,
+/// };
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+/// fn attach<'root, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     entry: BoundStoreOperation<'root, '_, O, P, U>,
+/// ) -> Result<RetainedStoreOperation<'root, O, P, U>, RetainedStoreStartError> {
+///     entry.attach()
+/// }
+/// ```
+///
+/// A replacement account cannot be supplied at attachment:
+///
+/// ```compile_fail,E0061
+/// use baozi_operation::__retained_store_integration::authority::BoundStoreOperation;
+/// use baozi_operation::{OperationOwner, PhysicalStorageAccount, ProgressPhase, ProgressUnit};
+/// fn replace<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     entry: BoundStoreOperation<'_, '_, O, P, U>, other: &PhysicalStorageAccount,
+/// ) {
+///     let _ = entry.attach(other);
+/// }
+/// ```
+///
+/// A numeric permission still cannot escape its prework callback:
+///
+/// ```compile_fail,E0521
+/// use baozi_operation::__retained_store_integration::authority::BoundStoreOperation;
+/// use baozi_operation::__retained_store_integration::activation::StoreInvocationError;
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+/// fn escape<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     mut entry: BoundStoreOperation<'_, '_, O, P, U>,
+/// ) {
+///     let mut escaped = None;
+///     let _ = entry.with_exclusive_execution::<_, StoreInvocationError>(|work| {
+///         escaped = Some(work);
+///         Ok(())
+///     });
+///     drop(escaped);
+/// }
+/// ```
+pub struct BoundStoreOperation<'inv, 'account, O, PP, U, L = FreshStoreLineage>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    raw: RawStoreAttachment<'inv, 'account, O, PP, U>,
+    domain: StoreKeyDomain,
+    fallback: StoreFallbackEnvelope,
+    lineage: L,
+}
+
+impl<'inv, O, PP, U, L> BoundStoreOperation<'inv, '_, O, PP, U, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    /// Attaches against the existing invocation's actual current counters and policies.
+    pub fn attach(
+        self,
+    ) -> Result<RetainedStoreOperation<'inv, O, PP, U, L>, RetainedStoreStartError> {
+        let Self {
+            raw,
+            domain,
+            fallback,
+            lineage,
+        } = self;
+        raw.attach(|| Ok(fallback))
+            .map(|raw| RetainedStoreOperation {
+                raw,
+                domain,
+                lineage,
+            })
+            .map_err(map_store_start_error)
+    }
+}
+
+impl<'inv, O, PP, U> From<&'inv mut StoreInvocationRoot<O, PP, U>>
+    for StoreInvocationStart<'inv, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn from(root: &'inv mut StoreInvocationRoot<O, PP, U>) -> Self {
+        Self {
+            root,
+            not_send_or_sync: PhantomData,
+        }
+    }
+}
+
+impl<O, PP, U> StoreInvocationRoot<O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    pub const fn new() -> Self {
+        Self {
+            raw: crate::retained::InvocationRoot::new(),
+        }
+    }
+
+    /// Lends startup authority without exposing a replaceable root reference.
+    pub fn startup(&mut self) -> StoreInvocationStart<'_, O, PP, U> {
+        self.into()
+    }
+
+    pub(super) fn invocation_identity(&self) -> *const () {
+        self.raw.invocation_identity()
+    }
+
+    pub(super) fn contain_payload_failure(&mut self) -> Option<FinalizationContainmentError> {
+        self.raw.contain_payload_failure()
+    }
+
+    pub(super) fn record_payload_failure(&mut self, code: u32) {
+        self.raw.record_payload_failure(code);
+    }
+
+    pub(super) fn matches_terminal_catalog(
+        &self,
+        phases: &[StorePhaseSemanticId],
+        dimensions: &[StoreDimensionSemanticId],
+    ) -> bool {
+        self.raw.terminal_catalog().is_some_and(|ledger| {
+            ledger.catalog_shape_is_strictly_ordered(dimensions.len(), phases.len())
+                && phases.iter().enumerate().all(|(index, semantic)| {
+                    ledger
+                        .phase_at(index)
+                        .is_some_and(|key| key.semantic_id() == *semantic)
+                })
+                && dimensions.iter().enumerate().all(|(index, semantic)| {
+                    ledger
+                        .dimension_at(index)
+                        .is_some_and(|key| key.semantic_id() == *semantic)
+                })
+        })
+    }
+}
+
+impl<O, PP, U> Default for StoreInvocationRoot<O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Linear owner for one coordinator, physical account, and pre-admitted fallback.
+#[must_use = "the retained store operation must be opened or published as fallback"]
+pub struct RetainedStoreOperation<'inv, O, PP, U, L = FreshStoreLineage>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    raw: RawStoreOperation<'inv, O, PP, U>,
     domain: StoreKeyDomain,
     lineage: L,
 }
 
-impl<O, PP, U, L> RetainedStoreOperation<O, PP, U, L>
+impl<'inv, O, PP, U, L> RetainedStoreOperation<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -2731,8 +2959,10 @@ where
     pub fn try_publication_assembly(
         self,
         plan: RetainedStorePublicationPlan,
-    ) -> Result<RetainedStorePublicationAssembly<O, PP, U, L>, RetainedStoreOpenError<O, PP, U, L>>
-    {
+    ) -> Result<
+        RetainedStorePublicationAssembly<'inv, O, PP, U, L>,
+        RetainedStoreOpenError<'inv, O, PP, U, L>,
+    > {
         if self.raw.is_terminal_only() {
             return Err(RetainedStoreOpenError {
                 recovery: Some(StoreOpenRecoveryAuthority::FallbackOnly(
@@ -2824,7 +3054,7 @@ where
     }
 }
 
-impl<O, PP, U> RetainedStoreOperation<O, PP, U, FreshStoreLineage>
+impl<'inv, O, PP, U> RetainedStoreOperation<'inv, O, PP, U, FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -2832,50 +3062,89 @@ where
 {
     /// Starts a fresh operation that cannot inherit from any canonical source.
     pub fn try_start(
+        root: impl Into<StoreInvocationStart<'inv, O, PP, U>>,
         control: OperationControl<PP, U>,
         ledger_plan: StoreLedgerPlan,
         account: &PhysicalStorageAccount,
         plan: RetainedStoreStartPlan,
     ) -> Result<Self, RetainedStoreStartError> {
-        try_start_store_raw(control, ledger_plan, account, None, plan).map(|(raw, domain)| Self {
-            raw,
-            domain,
-            lineage: FreshStoreLineage { _private: () },
-        })
+        Self::bind(root, control, ledger_plan, account, plan)?.attach()
+    }
+
+    /// Binds the actual entry once, before client work or retained attachment.
+    pub fn bind<'account>(
+        root: impl Into<StoreInvocationStart<'inv, O, PP, U>>,
+        control: OperationControl<PP, U>,
+        ledger_plan: StoreLedgerPlan,
+        account: &'account PhysicalStorageAccount,
+        plan: RetainedStoreStartPlan,
+    ) -> Result<BoundStoreOperation<'inv, 'account, O, PP, U>, RetainedStoreStartError> {
+        bind_store_raw(root.into(), control, ledger_plan, account, None, plan).map(
+            |(raw, domain, fallback)| BoundStoreOperation {
+                raw,
+                domain,
+                fallback,
+                lineage: FreshStoreLineage { _private: () },
+            },
+        )
     }
 
     /// Starts an operation that may inherit only from `source`'s exact canonical generation.
     ///
     /// The physical account and canonical source-map capacity are derived from `source`.
     pub fn try_start_derived<SourceRootKind, SourceRootTag>(
+        root: impl Into<StoreInvocationStart<'inv, O, PP, U>>,
         control: OperationControl<PP, U>,
         ledger_plan: StoreLedgerPlan,
         source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
         plan: RetainedStoreStartPlan,
-    ) -> Result<DerivedRetainedStoreOperation<O, PP, U>, RetainedStoreStartError> {
+    ) -> Result<DerivedRetainedStoreOperation<'inv, O, PP, U>, RetainedStoreStartError> {
+        Self::bind_derived(root, control, ledger_plan, source, plan)?.attach()
+    }
+
+    /// Binds the account and exact source generation before client work.
+    pub fn bind_derived<'account, SourceRootKind, SourceRootTag>(
+        root: impl Into<StoreInvocationStart<'inv, O, PP, U>>,
+        control: OperationControl<PP, U>,
+        ledger_plan: StoreLedgerPlan,
+        source: &'account PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
+        plan: RetainedStoreStartPlan,
+    ) -> Result<
+        BoundStoreOperation<'inv, 'account, O, PP, U, CanonicalInheritanceSource>,
+        RetainedStoreStartError,
+    > {
         let source = source.share_source();
-        try_start_store_raw(control, ledger_plan, source.account(), Some(source), plan).map(
-            |(raw, domain)| RetainedStoreOperation {
-                raw,
-                domain,
-                lineage: CanonicalInheritanceSource { _private: () },
-            },
+        bind_store_raw(
+            root.into(),
+            control,
+            ledger_plan,
+            source.account(),
+            Some(source),
+            plan,
         )
+        .map(|(raw, domain, fallback)| BoundStoreOperation {
+            raw,
+            domain,
+            fallback,
+            lineage: CanonicalInheritanceSource { _private: () },
+        })
     }
 }
 
-fn try_start_store_raw<O, PP, U>(
+fn bind_store_raw<'inv, 'account, O, PP, U>(
+    root: StoreInvocationStart<'inv, O, PP, U>,
     control: OperationControl<PP, U>,
     ledger_plan: StoreLedgerPlan,
-    account: &PhysicalStorageAccount,
+    account: &'account PhysicalStorageAccount,
     source: Option<&PublishedCanonicalOutput<StoredBlock>>,
     plan: RetainedStoreStartPlan,
-) -> Result<(RawStoreOperation<O, PP, U>, StoreKeyDomain), RetainedStoreStartError>
+) -> Result<BoundStoreParts<'inv, 'account, O, PP, U>, RetainedStoreStartError>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    let root = root.root;
     let (terminal_phase, dimensions, failure_terminal_dimension) = plan.keys_for_start_validation();
     if !ledger_plan.owns_phase(terminal_phase) {
         return Err(RetainedStoreStartError::Runtime(
@@ -2945,37 +3214,47 @@ where
     .with_failure_terminal_work(failure_terminal_work);
     let (domain, ledger_limits, phases) = ledger_plan.into_parts();
     let result = match source {
-        Some(source) => RetainedOperation::try_start_derived_with_phase_catalog(
+        Some(source) => RetainedOperation::bind_derived_with_phase_catalog(
+            &mut root.raw,
             control,
-            ledger_limits,
-            &phases,
+            (ledger_limits, &phases),
             account,
             source.aggregate(),
             raw_plan,
-            || Ok(fallback),
         ),
-        None => RetainedOperation::try_start_with_phase_catalog(
+        None => RetainedOperation::bind_with_phase_catalog(
+            &mut root.raw,
             control,
-            ledger_limits,
-            &phases,
+            (ledger_limits, &phases),
             account,
             raw_plan,
-            || Ok(fallback),
         ),
     };
     result
-        .map(|raw| (raw, domain))
-        .map_err(|cause| match cause {
-            RetainedOperationStartError::InvalidTerminalLimits => {
-                RetainedStoreStartError::InvalidTerminalLimits
-            }
-            RetainedOperationStartError::TerminalEvidenceCatalogInvariant => {
-                RetainedStoreStartError::Runtime(StoreRuntimeError::ConstructionInvariantUnverified)
-            }
-            RetainedOperationStartError::Writer(cause) => {
-                RetainedStoreStartError::Runtime(map_writer_error(&cause))
-            }
-        })
+        .map(|raw| (raw, domain, fallback))
+        .map_err(map_store_start_error)
+}
+
+fn map_store_start_error(
+    cause: RetainedOperationStartError<StoreDimensionKey>,
+) -> RetainedStoreStartError {
+    match cause {
+        RetainedOperationStartError::Control(cause) => {
+            RetainedStoreStartError::Runtime(StoreRuntimeError::Control(cause))
+        }
+        RetainedOperationStartError::InvocationAlreadyStarted => {
+            RetainedStoreStartError::InvocationAlreadyStarted
+        }
+        RetainedOperationStartError::InvalidTerminalLimits => {
+            RetainedStoreStartError::InvalidTerminalLimits
+        }
+        RetainedOperationStartError::TerminalEvidenceCatalogInvariant => {
+            RetainedStoreStartError::Runtime(StoreRuntimeError::ConstructionInvariantUnverified)
+        }
+        RetainedOperationStartError::Writer(cause) => {
+            RetainedStoreStartError::Runtime(map_writer_error(&cause))
+        }
+    }
 }
 
 /// Narrow owner returned after the single-use failure-terminal authority has been consumed.
@@ -2983,16 +3262,16 @@ where
 /// This owner deliberately exposes only the pre-admitted minimal fallback. It cannot reopen block
 /// tables, create checkpoints, or begin a new transcript.
 #[must_use = "publish the pre-admitted minimal fallback"]
-pub(crate) struct StoreOpenFallbackOnly<O, PP, U, L = FreshStoreLineage>
+pub(crate) struct StoreOpenFallbackOnly<'inv, O, PP, U, L = FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    operation: RetainedStoreOperation<O, PP, U, L>,
+    operation: RetainedStoreOperation<'inv, O, PP, U, L>,
 }
 
-impl<O, PP, U, L> StoreOpenFallbackOnly<O, PP, U, L>
+impl<'inv, O, PP, U, L> StoreOpenFallbackOnly<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -3007,7 +3286,7 @@ where
     }
 }
 
-impl<O, PP, U, L> fmt::Debug for StoreOpenFallbackOnly<O, PP, U, L>
+impl<'inv, O, PP, U, L> fmt::Debug for StoreOpenFallbackOnly<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -3020,14 +3299,14 @@ where
     }
 }
 
-enum StoreOpenRecoveryAuthority<O, PP, U, L>
+enum StoreOpenRecoveryAuthority<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    Retry(RetainedStoreOperation<O, PP, U, L>),
-    FallbackOnly(StoreOpenFallbackOnly<O, PP, U, L>),
+    Retry(RetainedStoreOperation<'inv, O, PP, U, L>),
+    FallbackOnly(StoreOpenFallbackOnly<'inv, O, PP, U, L>),
 }
 
 /// Exact open cause coupled to the authority proven safe after rollback.
@@ -3037,17 +3316,17 @@ where
 /// [`Self::retry_publication_assembly`], while fallback consumes this complete wrapper through
 /// [`Self::prepare_minimal_fallback_with`].
 #[must_use = "retry the publication or map the exact cause before publishing minimal fallback"]
-pub struct RetainedStoreOpenRecovery<O, PP, U, L = FreshStoreLineage>
+pub struct RetainedStoreOpenRecovery<'inv, O, PP, U, L = FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     cause: StoreRuntimeError,
-    authority: StoreOpenRecoveryAuthority<O, PP, U, L>,
+    authority: StoreOpenRecoveryAuthority<'inv, O, PP, U, L>,
 }
 
-impl<O, PP, U, L> RetainedStoreOpenRecovery<O, PP, U, L>
+impl<'inv, O, PP, U, L> RetainedStoreOpenRecovery<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -3079,8 +3358,10 @@ where
     pub fn retry_publication_assembly(
         self,
         plan: RetainedStorePublicationPlan,
-    ) -> Result<RetainedStorePublicationAssembly<O, PP, U, L>, RetainedStoreOpenError<O, PP, U, L>>
-    {
+    ) -> Result<
+        RetainedStorePublicationAssembly<'inv, O, PP, U, L>,
+        RetainedStoreOpenError<'inv, O, PP, U, L>,
+    > {
         match self.authority {
             StoreOpenRecoveryAuthority::Retry(operation) => {
                 operation.try_publication_assembly(plan)
@@ -3110,7 +3391,7 @@ where
     }
 }
 
-impl<O, PP, U, L> fmt::Debug for RetainedStoreOpenRecovery<O, PP, U, L>
+impl<'inv, O, PP, U, L> fmt::Debug for RetainedStoreOpenRecovery<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -3132,17 +3413,17 @@ where
 
 /// Failure to open concrete retained tables, preserving only the authority proven safe to return.
 #[must_use = "recover the remaining authority or let the fail-closed owner drop"]
-pub struct RetainedStoreOpenError<O, PP, U, L = FreshStoreLineage>
+pub struct RetainedStoreOpenError<'inv, O, PP, U, L = FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    recovery: Option<StoreOpenRecoveryAuthority<O, PP, U, L>>,
+    recovery: Option<StoreOpenRecoveryAuthority<'inv, O, PP, U, L>>,
     cause: StoreRuntimeError,
 }
 
-impl<O, PP, U, L> RetainedStoreOpenError<O, PP, U, L>
+impl<'inv, O, PP, U, L> RetainedStoreOpenError<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -3156,7 +3437,7 @@ where
     /// Couples the exact cause to recoverable authority, or returns the fail-closed cause.
     pub fn into_disposition(
         self,
-    ) -> Result<RetainedStoreOpenRecovery<O, PP, U, L>, StoreRuntimeError> {
+    ) -> Result<RetainedStoreOpenRecovery<'inv, O, PP, U, L>, StoreRuntimeError> {
         match self.recovery {
             Some(authority) => Ok(RetainedStoreOpenRecovery {
                 cause: self.cause,
@@ -3167,7 +3448,7 @@ where
     }
 }
 
-impl<O, PP, U, L> fmt::Debug for RetainedStoreOpenError<O, PP, U, L>
+impl<'inv, O, PP, U, L> fmt::Debug for RetainedStoreOpenError<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -3187,7 +3468,7 @@ where
     }
 }
 
-impl<O, PP, U, L> fmt::Display for RetainedStoreOpenError<O, PP, U, L>
+impl<'inv, O, PP, U, L> fmt::Display for RetainedStoreOpenError<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -3202,7 +3483,7 @@ where
     }
 }
 
-impl<O, PP, U, L> std::error::Error for RetainedStoreOpenError<O, PP, U, L>
+impl<'inv, O, PP, U, L> std::error::Error for RetainedStoreOpenError<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -3219,20 +3500,20 @@ where
 /// panics and aborting panic runtimes require process isolation and are outside this in-process
 /// contract.
 #[must_use = "the retained store assembly must be validated or published as fallback"]
-pub struct RetainedStorePublicationAssembly<O, PP, U, L = FreshStoreLineage>
+pub struct RetainedStorePublicationAssembly<'inv, O, PP, U, L = FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    raw: RawStoreAssembly<O, PP, U>,
+    raw: RawStoreAssembly<'inv, O, PP, U>,
     fallback_cause: Option<PreparationFailureCode>,
     success_rejection: Option<PreparationFailureCode>,
     domain: StoreKeyDomain,
     lineage: L,
 }
 
-impl<O, PP, U, L> RetainedStorePublicationAssembly<O, PP, U, L>
+impl<'inv, O, PP, U, L> RetainedStorePublicationAssembly<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -4238,7 +4519,16 @@ where
             CanonicalStoreRef<CanonicalKind, CanonicalTag>,
             OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
         ) -> bool,
-    ) -> StoreSuccessValidation<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
+    ) -> StoreSuccessValidation<
+        'inv,
+        O,
+        PP,
+        U,
+        CanonicalKind,
+        CanonicalTag,
+        EvidenceKind,
+        EvidenceTag,
+    >
     where
         CanonicalTag: Copy + Send + Sync + 'static,
         EvidenceTag: Copy + Send + Sync + 'static,
@@ -4334,6 +4624,7 @@ where
             &mut RetainedStoreWorkControl<'control, O, PP, U>,
         ) -> Result<bool, StoreWorkError>,
     ) -> StoreControlledSuccessValidation<
+        'inv,
         O,
         PP,
         U,
@@ -4501,7 +4792,7 @@ where
             &mut StoreEvidenceValidationSession<'session, 'storage>,
             OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
         ) -> bool,
-    ) -> StoreFailureValidation<O, PP, U, EvidenceKind, EvidenceTag>
+    ) -> StoreFailureValidation<'inv, O, PP, U, EvidenceKind, EvidenceTag>
     where
         EvidenceTag: Copy + Send + Sync + 'static,
     {
@@ -4558,7 +4849,7 @@ where
     }
 }
 
-impl<O, PP, U> RetainedStorePublicationAssembly<O, PP, U, CanonicalInheritanceSource>
+impl<'inv, O, PP, U> RetainedStorePublicationAssembly<'inv, O, PP, U, CanonicalInheritanceSource>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -4811,20 +5102,40 @@ where
 
 /// Linear result of exact success-graph validation.
 #[must_use = "every validation branch retains the complete publication owner"]
-pub enum StoreSuccessValidation<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
-where
+pub enum StoreSuccessValidation<
+    'inv,
+    O,
+    PP,
+    U,
+    CanonicalKind,
+    CanonicalTag,
+    EvidenceKind,
+    EvidenceTag,
+> where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    Valid(ValidatedStoreSuccess<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>),
-    Rejected(StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>),
-    FallbackOnly(StoreFallbackOnly<O, PP, U>),
+    Valid(
+        ValidatedStoreSuccess<
+            'inv,
+            O,
+            PP,
+            U,
+            CanonicalKind,
+            CanonicalTag,
+            EvidenceKind,
+            EvidenceTag,
+        >,
+    ),
+    Rejected(StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>),
+    FallbackOnly(StoreFallbackOnly<'inv, O, PP, U>),
 }
 
 /// Linear result of controlled exact success-graph validation.
 #[must_use = "every controlled validation branch retains the complete publication owner"]
 pub enum StoreControlledSuccessValidation<
+    'inv,
     O,
     PP,
     U,
@@ -4839,34 +5150,78 @@ pub enum StoreControlledSuccessValidation<
     U: ProgressUnit,
 {
     InvalidWorkDimension {
-        assembly: RetainedStorePublicationAssembly<O, PP, U, L>,
+        assembly: RetainedStorePublicationAssembly<'inv, O, PP, U, L>,
         cause: StoreRuntimeError,
     },
-    Valid(ValidatedStoreSuccess<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>),
-    Rejected(StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>),
+    Valid(
+        ValidatedStoreSuccess<
+            'inv,
+            O,
+            PP,
+            U,
+            CanonicalKind,
+            CanonicalTag,
+            EvidenceKind,
+            EvidenceTag,
+        >,
+    ),
+    Rejected(StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>),
     Interrupted {
-        failure: StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>,
+        failure: StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
         cause: StoreWorkError,
     },
-    FallbackOnly(StoreFallbackOnly<O, PP, U>),
+    FallbackOnly(StoreFallbackOnly<'inv, O, PP, U>),
 }
 
 /// Exact success closure whose graph can no longer be mutated.
 #[must_use = "validated retained success must be prepared or deliberately dropped"]
-pub struct ValidatedStoreSuccess<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
-where
+pub struct ValidatedStoreSuccess<
+    'inv,
+    O,
+    PP,
+    U,
+    CanonicalKind,
+    CanonicalTag,
+    EvidenceKind,
+    EvidenceTag,
+> where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    raw: RawValidatedStoreSuccess<O, PP, U>,
+    raw: RawValidatedStoreSuccess<'inv, O, PP, U>,
     canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
     evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
     domain: StoreKeyDomain,
 }
 
-impl<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
-    ValidatedStoreSuccess<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
+pub(super) struct DeferredStoreSuccess<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag> {
+    canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
+    evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
+    domain: StoreKeyDomain,
+}
+
+impl<O, PP, U> StoreInvocationRoot<O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    pub(super) fn resume_deferred_success<CK, CT, EK, ET>(
+        &mut self,
+        pending: DeferredStoreSuccess<CK, CT, EK, ET>,
+    ) -> Option<ValidatedStoreSuccess<'_, O, PP, U, CK, CT, EK, ET>> {
+        Some(ValidatedStoreSuccess {
+            raw: self.raw.resume_deferred_success()?,
+            canonical_root: pending.canonical_root,
+            evidence_root: pending.evidence_root,
+            domain: pending.domain,
+        })
+    }
+}
+
+impl<'inv, O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
+    ValidatedStoreSuccess<'inv, O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -4874,6 +5229,31 @@ where
 {
     pub(super) const fn canonical_member_count(&self) -> usize {
         self.raw.canonical_member_count()
+    }
+
+    pub(super) fn defer_until_body_cleanup(
+        self,
+    ) -> Result<DeferredStoreSuccess<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>, Self>
+    {
+        let Self {
+            raw,
+            canonical_root,
+            evidence_root,
+            domain,
+        } = self;
+        match raw.defer_until_body_cleanup() {
+            Ok(()) => Ok(DeferredStoreSuccess {
+                canonical_root,
+                evidence_root,
+                domain,
+            }),
+            Err(raw) => Err(Self {
+                raw,
+                canonical_root,
+                evidence_root,
+                domain,
+            }),
+        }
     }
 
     pub(super) const fn outcome_evidence_member_count(&self) -> usize {
@@ -4895,6 +5275,7 @@ where
         final_progress: FinalProgress<PP, U>,
     ) -> Result<
         StoreSuccessFreezePermitIssue<
+            'inv,
             O,
             PP,
             U,
@@ -4962,7 +5343,7 @@ where
     pub fn downgrade_to_rich_failure(
         self,
         fallback_cause: u32,
-    ) -> StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag> {
+    ) -> StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag> {
         let fallback_cause = PreparationFailureCode::domain(fallback_cause);
         StoreFailureAssembly {
             raw: self.raw.downgrade_to_rich_failure(fallback_cause),
@@ -5000,7 +5381,8 @@ where
     }
 }
 
-type RawStoreSuccessFreezePermit<O, PP, U> = RetainedSuccessFreezePermit<
+type RawStoreSuccessFreezePermit<'inv, O, PP, U> = RetainedSuccessFreezePermit<
+    'inv,
     O,
     StorePhaseKey,
     PP,
@@ -5011,20 +5393,12 @@ type RawStoreSuccessFreezePermit<O, PP, U> = RetainedSuccessFreezePermit<
     StoredBlock,
 >;
 
-type RawStoreSuccessFreezeContribution<O, PP, U> = RetainedSuccessFreezeContribution<
+type RawStoreSuccessFreezeContribution<'inv, O, PP, U> = RetainedSuccessFreezeContribution<
+    'inv,
     O,
     StorePhaseKey,
     PP,
     U,
-    StoreDimensionKey,
-    StoreFallbackEnvelope,
-    StoredBlock,
-    StoredBlock,
->;
-
-type RawStoreSuccessJointCommitIntent<O> = RetainedSuccessJointCommitIntent<
-    O,
-    StorePhaseKey,
     StoreDimensionKey,
     StoreFallbackEnvelope,
     StoredBlock,
@@ -5032,6 +5406,7 @@ type RawStoreSuccessJointCommitIntent<O> = RetainedSuccessJointCommitIntent<
 >;
 
 pub(super) struct StoreSuccessFreezePermit<
+    'inv,
     O,
     PP,
     U,
@@ -5044,13 +5419,14 @@ pub(super) struct StoreSuccessFreezePermit<
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    raw: RawStoreSuccessFreezePermit<O, PP, U>,
+    raw: RawStoreSuccessFreezePermit<'inv, O, PP, U>,
     canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
     evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
     domain: StoreKeyDomain,
 }
 
 pub(super) enum StoreSuccessFreezePermitIssue<
+    'inv,
     O,
     PP,
     U,
@@ -5064,20 +5440,30 @@ pub(super) enum StoreSuccessFreezePermitIssue<
     U: ProgressUnit,
 {
     Ready(
-        StoreSuccessFreezePermit<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>,
+        StoreSuccessFreezePermit<
+            'inv,
+            O,
+            PP,
+            U,
+            CanonicalKind,
+            CanonicalTag,
+            EvidenceKind,
+            EvidenceTag,
+        >,
     ),
     RichFailure {
-        failure: StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>,
+        failure: StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
         cause: PreparationFailureCode,
         control_cause: Option<ControlCause>,
     },
     DestinationRejected {
-        failure: StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>,
+        failure: StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
         cause: PreparationFailureCode,
     },
 }
 
 pub(super) struct StoreSuccessFreezeContribution<
+    'inv,
     O,
     PP,
     U,
@@ -5090,49 +5476,14 @@ pub(super) struct StoreSuccessFreezeContribution<
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    raw: RawStoreSuccessFreezeContribution<O, PP, U>,
+    raw: RawStoreSuccessFreezeContribution<'inv, O, PP, U>,
     canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
     evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
     domain: StoreKeyDomain,
 }
 
-pub(super) struct StoreSuccessJointCommitIntent<
-    O,
-    CanonicalKind,
-    CanonicalTag,
-    EvidenceKind,
-    EvidenceTag,
-> where
-    O: OperationOwner,
-{
-    raw: RawStoreSuccessJointCommitIntent<O>,
-    canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
-    evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
-    domain: StoreKeyDomain,
-}
-
-#[must_use = "joint-commit formation retains the exact success or prepared failure owner"]
-#[allow(
-    clippy::large_enum_variant,
-    reason = "The intent owns the exact retained publication batches; boxing would add an allocation on the no-fail handoff path."
-)]
-pub(super) enum StoreSuccessJointCommitFormation<
-    O,
-    CanonicalKind,
-    CanonicalTag,
-    EvidenceKind,
-    EvidenceTag,
-> where
-    O: OperationOwner,
-{
-    Intent(
-        StoreSuccessJointCommitIntent<O, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>,
-    ),
-    PreparedFailure(PreparedStoreFailureOutcome<EvidenceKind, EvidenceTag>),
-}
-
-impl<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
-    StoreSuccessFreezePermit<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
+impl<'inv, O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
+    StoreSuccessFreezePermit<'inv, O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -5153,7 +5504,7 @@ where
         self,
         stable_code: u32,
     ) -> Result<
-        StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>,
+        StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
         FinalizationContainmentError,
     > {
         let cause = PreparationFailureCode::domain(stable_code);
@@ -5169,6 +5520,7 @@ where
     pub(super) fn into_contribution(
         self,
     ) -> StoreSuccessFreezeContribution<
+        'inv,
         O,
         PP,
         U,
@@ -5186,73 +5538,41 @@ where
     }
 }
 
-impl<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
-    StoreSuccessFreezeContribution<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
+impl<'inv, O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
+    StoreSuccessFreezeContribution<
+        'inv,
+        O,
+        PP,
+        U,
+        CanonicalKind,
+        CanonicalTag,
+        EvidenceKind,
+        EvidenceTag,
+    >
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    pub(super) fn prepare(
-        self,
-    ) -> Result<
-        PreparedStoreSuccessOutcome<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>,
-        FinalizationContainmentError,
-    > {
-        match self
-            .try_form_joint_commit_intent()
-            .map_err(|error| match error {
-                RetainedPublicationPrepareError::FinalizationContainment(cause) => cause,
-            })? {
-            StoreSuccessJointCommitFormation::Intent(intent) => intent
-                .qualify_and_commit()
-                .map(PreparedStoreSuccessOutcome::Success),
-            StoreSuccessJointCommitFormation::PreparedFailure(
-                PreparedStoreFailureOutcome::RichFailure(prepared),
-            ) => Ok(PreparedStoreSuccessOutcome::RichFailure(prepared)),
-            StoreSuccessJointCommitFormation::PreparedFailure(
-                PreparedStoreFailureOutcome::MinimalFallback(prepared),
-            ) => Ok(PreparedStoreSuccessOutcome::MinimalFallback(prepared)),
-        }
+    pub(super) fn contain_activation_fault(self) -> FinalizationContainmentError {
+        self.raw.contain_activation_fault()
     }
 
-    fn try_form_joint_commit_intent(
-        self,
-    ) -> Result<
-        StoreSuccessJointCommitFormation<O, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>,
-        RetainedPublicationPrepareError,
-    > {
-        match self.raw.try_form_joint_commit_intent()? {
-            RetainedSuccessJointCommitFormation::Intent(raw) => Ok(
-                StoreSuccessJointCommitFormation::Intent(StoreSuccessJointCommitIntent {
-                    raw,
-                    canonical_root: self.canonical_root,
-                    evidence_root: self.evidence_root,
-                    domain: self.domain,
-                }),
-            ),
-            RetainedSuccessJointCommitFormation::PreparedFailure(raw) => {
-                Ok(StoreSuccessJointCommitFormation::PreparedFailure(
-                    classify_prepared_failure(raw, self.evidence_root, self.domain),
-                ))
-            }
-        }
-    }
-}
-
-impl<O, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
-    StoreSuccessJointCommitIntent<O, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
-where
-    O: OperationOwner,
-{
-    fn qualify_and_commit(
+    pub(super) fn try_prepare(
         self,
     ) -> Result<
         PreparedStoreSuccess<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>,
         FinalizationContainmentError,
     > {
+        let intent = self
+            .raw
+            .try_classify_pre_freeze()
+            .and_then(RetainedPreFreezeClassification::finish_success)
+            .map_err(|error| match error {
+                RetainedPublicationPrepareError::FinalizationContainment(cause) => cause,
+            })?;
         Ok(prepared_store_success_from_raw(
-            self.raw.qualify_and_commit_frozen_exact()?,
+            intent.qualify_and_commit_frozen_exact()?,
             self.canonical_root,
             self.evidence_root,
             self.domain,
@@ -5265,21 +5585,21 @@ where
 /// Its retained-block builder callbacks have the same single-unwind containment boundary as the
 /// success-capable assembly; double panics and aborting runtimes require process isolation.
 #[must_use = "the failure assembly must be validated or published as fallback"]
-pub struct StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>
+pub struct StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    raw: RawStoreFailureAssembly<O, PP, U>,
+    raw: RawStoreFailureAssembly<'inv, O, PP, U>,
     fallback_only: bool,
     forced_cause: Option<PreparationFailureCode>,
     evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
     domain: StoreKeyDomain,
 }
 
-impl<O, PP, U, PreservedEvidenceKind, PreservedEvidenceTag>
-    StoreFailureAssembly<O, PP, U, PreservedEvidenceKind, PreservedEvidenceTag>
+impl<'inv, O, PP, U, PreservedEvidenceKind, PreservedEvidenceTag>
+    StoreFailureAssembly<'inv, O, PP, U, PreservedEvidenceKind, PreservedEvidenceTag>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -5494,7 +5814,7 @@ where
             &mut StoreEvidenceValidationSession<'session, 'storage>,
             OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
         ) -> bool,
-    ) -> StoreFailureValidation<O, PP, U, EvidenceKind, EvidenceTag>
+    ) -> StoreFailureValidation<'inv, O, PP, U, EvidenceKind, EvidenceTag>
     where
         EvidenceTag: Copy + Send + Sync + 'static,
     {
@@ -5537,7 +5857,7 @@ where
                 StoreDimensionKey,
             >,
         ) -> bool,
-    ) -> StoreFailureValidation<O, PP, U, EvidenceKind, EvidenceTag>
+    ) -> StoreFailureValidation<'inv, O, PP, U, EvidenceKind, EvidenceTag>
     where
         EvidenceTag: Copy + Send + Sync + 'static,
     {
@@ -5597,19 +5917,20 @@ where
 
 /// Linear result of exact rich-failure validation.
 #[must_use = "every failure-validation branch retains the publication owner"]
-pub enum StoreFailureValidation<O, PP, U, EvidenceKind, EvidenceTag>
+pub enum StoreFailureValidation<'inv, O, PP, U, EvidenceKind, EvidenceTag>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    Valid(ValidatedStoreFailure<O, PP, U, EvidenceKind, EvidenceTag>),
-    Rejected(StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>),
-    FallbackOnly(StoreFallbackOnly<O, PP, U>),
+    Valid(ValidatedStoreFailure<'inv, O, PP, U, EvidenceKind, EvidenceTag>),
+    Rejected(StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>),
+    FallbackOnly(StoreFallbackOnly<'inv, O, PP, U>),
 }
 
 fn map_failure_validation<O, PP, U, EvidenceKind, EvidenceTag>(
     validation: RetainedFailureValidation<
+        '_,
         O,
         StorePhaseKey,
         PP,
@@ -5622,7 +5943,7 @@ fn map_failure_validation<O, PP, U, EvidenceKind, EvidenceTag>(
     evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
     domain: StoreKeyDomain,
     forced_cause: Option<PreparationFailureCode>,
-) -> StoreFailureValidation<O, PP, U, EvidenceKind, EvidenceTag>
+) -> StoreFailureValidation<'_, O, PP, U, EvidenceKind, EvidenceTag>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -5660,19 +5981,20 @@ where
 
 /// Exact rich-failure closure whose graph can no longer be mutated.
 #[must_use = "validated rich failure must be prepared or deliberately dropped"]
-pub struct ValidatedStoreFailure<O, PP, U, EvidenceKind, EvidenceTag>
+pub struct ValidatedStoreFailure<'inv, O, PP, U, EvidenceKind, EvidenceTag>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    raw: RawValidatedStoreFailure<O, PP, U>,
+    raw: RawValidatedStoreFailure<'inv, O, PP, U>,
     forced_cause: Option<PreparationFailureCode>,
     evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
     domain: StoreKeyDomain,
 }
 
-impl<O, PP, U, EvidenceKind, EvidenceTag> ValidatedStoreFailure<O, PP, U, EvidenceKind, EvidenceTag>
+impl<'inv, O, PP, U, EvidenceKind, EvidenceTag>
+    ValidatedStoreFailure<'inv, O, PP, U, EvidenceKind, EvidenceTag>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -5783,33 +6105,33 @@ where
     }
 }
 
-enum StoreFallbackState<O, PP, U>
+enum StoreFallbackState<'inv, O, PP, U>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     Assembly {
-        raw: RawStoreAssembly<O, PP, U>,
+        raw: RawStoreAssembly<'inv, O, PP, U>,
         cause: PreparationFailureCode,
     },
-    FailureAssembly(RawStoreFailureAssembly<O, PP, U>),
-    Validated(RawStoreFallbackOnly<O, PP, U>),
+    FailureAssembly(RawStoreFailureAssembly<'inv, O, PP, U>),
+    Validated(RawStoreFallbackOnly<'inv, O, PP, U>),
 }
 
 /// Terminal-only state after panic, invalid root, or poisoned graph containment.
 #[must_use = "fallback-only state can publish only the pre-admitted minimal fallback"]
-pub struct StoreFallbackOnly<O, PP, U>
+pub struct StoreFallbackOnly<'inv, O, PP, U>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    state: StoreFallbackState<O, PP, U>,
+    state: StoreFallbackState<'inv, O, PP, U>,
     domain: StoreKeyDomain,
 }
 
-impl<O, PP, U> StoreFallbackOnly<O, PP, U>
+impl<'inv, O, PP, U> StoreFallbackOnly<'inv, O, PP, U>
 where
     O: OperationOwner,
     PP: ProgressPhase,

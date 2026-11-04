@@ -20,7 +20,10 @@ fn directory_and_evidence_revisions_gate_scene_publication() {
             ("evidence", None, Some(revision)),
         ] {
             let generation_source = AtomicU64::new(0);
+            let mut invocation_root_1 =
+                crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
             let build = finish_node_batch_with_faults(
+                &mut invocation_root_1,
                 &account,
                 test_limits(),
                 single_trs_batch(),
@@ -170,7 +173,10 @@ fn central_validation_rejects_corrupted_spatial_storage_and_placement_closure() 
             animations,
             profile.batch(),
         );
+        let mut invocation_root_2 =
+            crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
         let build = NodeSceneTestTransaction::with_account(
+            &mut invocation_root_2,
             &account,
             test_limits(),
             input,
@@ -224,6 +230,7 @@ fn central_validation_rejects_corrupted_spatial_storage_and_placement_closure() 
             root.scalar::<u32>(0, node_scene_evidence_field::SCHEMA_REVISION),
             Some(1)
         );
+        drop(invocation_root_2);
         assert_released(failure, &account);
         assert!(!account.snapshot().poisoned(), "{fault:?}");
     }

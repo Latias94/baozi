@@ -78,24 +78,31 @@ impl Format for ContractImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         context.with_execution(|exec| -> ParseResult<()> {
+            let mut services = exec.services()?;
             self.parse_calls.fetch_add(1, Ordering::AcqRel);
             *self
                 .captured_limits
                 .lock()
-                .expect("captured-limit mutex must remain available") = Some(exec.limits().clone());
+                .expect("captured-limit mutex must remain available") =
+                Some(services.limits().clone());
 
             if matches!(self.behavior, ParserBehavior::Recover) {
-                exec.record_format_recovery(
+                let source = services.diagnostic_source();
+                services.record_format_recovery(
                     DiagnosticCode::new(RECOVERY_CODE)
                         .expect("static diagnostic code must be valid"),
-                    exec.diagnostic_source(),
+                    source,
                     DiagnosticByteRange::new(1, 4).expect("static byte range must be valid"),
                     format_args!("replaced invalid UTF-8"),
                 )?;

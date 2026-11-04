@@ -19,9 +19,9 @@ use crate::geometry::TopologyKind;
 use crate::identity::SceneGenerationId;
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalActivationOutcome, CanonicalActivationSeal, CanonicalCentralValidationOutcome,
-    CanonicalFreezePermitIssue, CanonicalValidationProgress, StoreNeverActivatedCause,
+    CanonicalFreezePermitIssue, CanonicalSemanticWorkError, CanonicalValidationProgress,
+    StoreNeverActivatedCause,
 };
-use baozi_operation::__retained_store_integration::authority::PreparedStoreSuccessOutcome;
 
 fn source(
     account: &baozi_operation::PhysicalStorageAccount,
@@ -147,7 +147,10 @@ fn source(
         animation,
         profile.batch(),
     );
+    let mut invocation_root_1 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let draft = NodeSceneTestTransaction::with_account(
+        &mut invocation_root_1,
         account,
         test_limits(),
         input,
@@ -204,158 +207,187 @@ fn run(
         },
     )
     .unwrap();
-    let mut operation = SceneStoreOperation::try_start_derived(
-        start.control,
-        start.ledger_plan,
-        &scene.as_node_scene().canonical,
-        start.start_plan,
-    )
-    .unwrap();
-    let mut mappings = SceneGeometryPlanStorage::try_new(
-        &mut operation,
-        start.keys.phase,
-        start.keys.dimension,
-        edits.len(),
-    )
-    .unwrap();
-    let mut secondary = SceneGeometryPlanStorage::try_new(
-        &mut operation,
-        start.keys.phase,
-        start.keys.dimension,
-        usize::from(replan),
-    )
-    .unwrap();
-    let mut rejected = SceneGeometryPlanStorage::try_new(
-        &mut operation,
-        start.keys.phase,
-        start.keys.dimension,
-        usize::from(replan),
-    )
-    .unwrap();
-    let owner = operation
-        .into_session_outcome_owner(
-            node_scene_activation_roles(start.keys).session_policy(),
-            writer,
-            failure,
-        )
-        .unwrap();
-    let mut transaction = admission.into_geometry_transaction(
-        scene,
-        edits,
-        mappings.scratch(),
-        OptionsDigest::sha256([91; 32]),
-        SceneValidationLimits::default(),
-    );
-    let activated = owner
-        .plan_and_activate_scoped(|mut planning| {
-            let mut semantic = planning.begin_semantic_work().unwrap();
-            let sealed = match transaction.preflight(&mut semantic) {
-                Ok(plan) => plan,
-                Err(cause) => {
-                    let _ = semantic.finish_rejected();
-                    return planning.reject(cause, 0x5534_0002);
-                }
-            };
-            if replan {
-                let EditStoragePlan::Selection(a) = transaction.storage.unwrap() else {
-                    panic!("selected A plan")
-                };
-                let before = [target_words(a, 0), target_words(a, 1)];
-                let b = GeometrySelectionPlan::try_new(
-                    scene.as_node_scene().read_geometry(),
-                    &edits[1..2],
-                    secondary.scratch(),
-                    &mut semantic,
+    let mut invocation_root_2 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::<
+            SceneEditOutput,
+            SceneEditValidationProof,
+            SceneEditRejection,
+            SceneEditRejection,
+            super::super::SceneEditGenerationRejection,
+            super::super::SceneEditEvidenceTag,
+        >::new();
+    let mut inputs = Some((start, failure, admission));
+    let finish = invocation_root_2
+        .run_body(|parts, disposition| {
+            let (start, failure, admission) = inputs.take().unwrap();
+            let mut operation = SceneStoreOperation::try_start_derived(
+                parts.startup,
+                start.control,
+                start.ledger_plan,
+                &scene.as_node_scene().canonical,
+                start.start_plan,
+            )
+            .unwrap();
+            let mut mappings = SceneGeometryPlanStorage::try_new(
+                &mut operation,
+                start.keys.phase,
+                start.keys.dimension,
+                edits.len(),
+            )
+            .unwrap();
+            let mut secondary = SceneGeometryPlanStorage::try_new(
+                &mut operation,
+                start.keys.phase,
+                start.keys.dimension,
+                usize::from(replan),
+            )
+            .unwrap();
+            let mut rejected = SceneGeometryPlanStorage::try_new(
+                &mut operation,
+                start.keys.phase,
+                start.keys.dimension,
+                usize::from(replan),
+            )
+            .unwrap();
+            let owner = operation
+                .into_session_outcome_owner(
+                    node_scene_activation_roles(start.keys).session_policy(),
+                    writer,
+                    failure,
                 )
                 .unwrap();
-                assert_eq!(target_words(b, 0)[11], 1);
-                assert_eq!(target_words(b, 0)[12], 18);
-                // Initialization, row lookup, two triangles and the private mapping write complete;
-                // the next writer action rejects while A retains its already sealed mapping.
-                assert!(
-                    GeometrySelectionPlan::try_new(
-                        scene.as_node_scene().read_geometry(),
-                        &edits[1..2],
-                        rejected.scratch(),
-                        &mut FailAfter(5)
-                    )
-                    .is_err()
-                );
-                assert_eq!(target_words(a, 0), before[0]);
-                assert_eq!(target_words(a, 1), before[1]);
-                assert_eq!(before[1][11], 7);
-                assert_eq!(before[1][12], 39);
-            }
-            let completion = semantic.finish_exact().unwrap();
-            match planning.seal_activation(sealed, completion) {
-                CanonicalActivationSeal::Sealed(permit) => {
-                    permit.activate(|lane, plan| plan.materialize(lane))
-                }
-                CanonicalActivationSeal::Unsealed(failure) => failure.finish(),
-            }
-        })
-        .unwrap();
-    let postflight = transaction.finish();
-    let activated = match activated {
-        CanonicalActivationOutcome::Activated(value) => {
-            assert!(expected_rejection.is_none());
-            value
-        }
-        CanonicalActivationOutcome::NeverActivated(value) => {
-            let StoreNeverActivatedCause::Requested(cause) = value.cause() else {
-                panic!("typed core rejection")
-            };
-            match expected_rejection {
-                Some(false) => assert!(matches!(cause, SceneEditRejection::TangentDependency)),
-                Some(true) => assert!(matches!(
-                    cause,
-                    SceneEditRejection::MorphDependency {
-                        semantic: MorphDeltaSemantic::Tangent
+            let mut transaction = admission.into_geometry_transaction(
+                scene,
+                edits,
+                mappings.scratch(),
+                OptionsDigest::sha256([91; 32]),
+                SceneValidationLimits::default(),
+            );
+            let activated = owner
+                .plan_and_activate_scoped(parts.output, parts.activation, |mut planning| {
+                    let (sealed, completion) = match planning.with_semantic_work(|semantic| {
+                        let sealed = transaction.preflight(semantic)?;
+                        if replan {
+                            let EditStoragePlan::Selection(a) = transaction.storage.unwrap() else {
+                                panic!("selected A plan")
+                            };
+                            let before = [target_words(a, 0), target_words(a, 1)];
+                            let b = GeometrySelectionPlan::try_new(
+                                scene.as_node_scene().read_geometry(),
+                                &edits[1..2],
+                                secondary.scratch(),
+                                semantic,
+                            )
+                            .unwrap();
+                            assert_eq!(target_words(b, 0)[11], 1);
+                            assert_eq!(target_words(b, 0)[12], 18);
+                            // Initialization, row lookup, two triangles and the private mapping write complete;
+                            // the next writer action rejects while A retains its already sealed mapping.
+                            assert!(
+                                GeometrySelectionPlan::try_new(
+                                    scene.as_node_scene().read_geometry(),
+                                    &edits[1..2],
+                                    rejected.scratch(),
+                                    &mut FailAfter(5)
+                                )
+                                .is_err()
+                            );
+                            assert_eq!(target_words(a, 0), before[0]);
+                            assert_eq!(target_words(a, 1), before[1]);
+                            assert_eq!(before[1][11], 7);
+                            assert_eq!(before[1][12], 39);
+                        }
+                        Ok(sealed)
+                    }) {
+                        Ok(ready) => ready,
+                        Err(CanonicalSemanticWorkError::Rejected(cause)) => {
+                            return planning.reject(cause, 0x5534_0002);
+                        }
+                        Err(CanonicalSemanticWorkError::Runtime(cause)) => {
+                            panic!("selected semantic work failed: {cause:?}")
+                        }
+                    };
+                    match planning.seal_activation(sealed, completion) {
+                        CanonicalActivationSeal::Sealed(permit) => {
+                            permit.activate(|lane, plan| plan.materialize(lane))
+                        }
+                        CanonicalActivationSeal::Unsealed(failure) => failure.finish(),
                     }
-                )),
-                None => panic!("unexpected rejection: {cause:?}"),
-            }
+                })
+                .unwrap();
+            let postflight = transaction.finish();
+            let activated = match activated {
+                CanonicalActivationOutcome::Activated(value) => {
+                    assert!(expected_rejection.is_none());
+                    value
+                }
+                CanonicalActivationOutcome::NeverActivated(value) => {
+                    let StoreNeverActivatedCause::Requested(cause) = value.cause() else {
+                        panic!("typed core rejection")
+                    };
+                    match expected_rejection {
+                        Some(false) => {
+                            assert!(matches!(cause, SceneEditRejection::TangentDependency))
+                        }
+                        Some(true) => assert!(matches!(
+                            cause,
+                            SceneEditRejection::MorphDependency {
+                                semantic: MorphDeltaSemantic::Tangent
+                            }
+                        )),
+                        None => panic!("unexpected rejection: {cause:?}"),
+                    }
+                    drop(mappings);
+                    drop(secondary);
+                    drop(rejected);
+                    value.request_finish(disposition).unwrap();
+                    return;
+                }
+                _ => panic!("selected core activation must resolve"),
+            };
+            let central = activated
+                .validate_centrally(
+                    parts.proof,
+                    parts.validation,
+                    CanonicalValidationProgress::new(
+                        SceneConstructionPhase::Validation,
+                        SceneConstructionUnit::WorkUnits,
+                    ),
+                    |lane, output| postflight.build_evidence(lane, output),
+                    |planning, output| postflight.validate_candidate(planning, output),
+                )
+                .unwrap();
             drop(mappings);
             drop(secondary);
             drop(rejected);
-            let (fallback, _) = value.prepare_minimal_fallback().unwrap().into_parts();
+            let CanonicalCentralValidationOutcome::Candidate(candidate) = central else {
+                panic!("centrally validated selected candidate")
+            };
+            candidate.request_finish(disposition).unwrap();
+        })
+        .unwrap();
+    let completion = finish.resume();
+    let candidate = match completion.outcome {
+        baozi_operation::__retained_store_integration::activation::CanonicalInvocationOutcome::Candidate(candidate) => candidate,
+        baozi_operation::__retained_store_integration::activation::CanonicalInvocationOutcome::NeverActivated(rejected) => {
+            let (fallback, _) = rejected.prepare_minimal_fallback().unwrap().into_parts();
             drop(fallback.handoff());
             return None;
         }
-        _ => panic!("selected core activation must resolve"),
+        _ => panic!("selected edit must restore its actual disposition"),
     };
-    let central = activated
-        .validate_centrally(
-            CanonicalValidationProgress::new(
-                SceneConstructionPhase::Validation,
-                SceneConstructionUnit::WorkUnits,
-            ),
-            |lane, output| postflight.build_evidence(lane, output),
-            |planning, output| postflight.validate_candidate(planning, output),
-        )
-        .unwrap();
-    drop(mappings);
-    drop(secondary);
-    drop(rejected);
-    let CanonicalCentralValidationOutcome::Candidate(candidate) = central else {
-        panic!("centrally validated selected candidate")
-    };
-    let CanonicalFreezePermitIssue::Ready(permit) =
-        candidate.try_issue_freeze_permit(final_progress()).unwrap()
+    let CanonicalFreezePermitIssue::Ready(permit) = candidate
+        .try_issue_freeze_permit(completion.generation.interruption, final_progress())
+        .unwrap()
     else {
         panic!("selected freeze")
     };
-    let published = consume_scene_edit_freeze_permit(
-        permit,
-        |_| panic!("generation admission"),
-        |token, joint, seal| {
-            let PreparedStoreSuccessOutcome::Success(store) = joint.prepare(seal).unwrap() else {
-                panic!("selected success")
-            };
-            token.handoff(store).unwrap().into_parts()
-        },
-    )
-    .unwrap();
+    let SceneEditPublication::Success(published) =
+        consume_scene_edit_freeze_permit(permit, completion.generation.rejection).unwrap()
+    else {
+        panic!("selected success")
+    };
+    let published = published.into_parts();
     Some((published.0, published.1))
 }
 

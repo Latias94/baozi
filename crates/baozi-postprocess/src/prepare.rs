@@ -2,6 +2,8 @@
 
 #[cfg(test)]
 mod cancellation_tests;
+#[cfg(test)]
+pub(crate) mod cleanup_tests;
 mod input;
 mod options;
 mod report;
@@ -13,19 +15,20 @@ pub use options::{
 pub use report::{GeometryPreparationReport, PreparedPrimitiveReport};
 
 use crate::direct_error::FailureOwner;
-use crate::operation::PostProcessOwner;
-use crate::operation::runtime::{EditOperation, REJECTION_CODE, ScratchVec, final_progress};
-use crate::scene_edit::{EditCause, EditFailure, PreparedEdit, execute_changed};
+use crate::operation::runtime::{REJECTION_CODE, ScratchVec};
+use crate::scene_edit::{
+    EditCanonicalSlots, EditCause, EditFailure, EditTerminal, PreparedEdit, validate_changed,
+};
 use crate::{
     PostProcessControl, PostProcessReport, PostProcessResourceEvidence, PostProcessRunError,
     PostProcessRunFailure, PostProcessRunOutcome,
 };
 use baozi_core::__scene_integration::integration::{
     SceneEditBootstrap, SceneEditEvidence, SceneGeometryReplacement, SceneTriangleOrigins,
-    try_start_scene_edit_operation,
+    run_scene_edit_body,
 };
 use baozi_core::{PrimitiveId, ValidatedScene};
-use baozi_operation::__retained_store_integration::authority::PreparedStoreEvidenceOnlyOutcome;
+use baozi_operation::__retained_store_integration::activation::CanonicalBoundBodyError;
 
 /// Scalar counts for the selected evidence wire format, accumulated with replacement admission.
 #[derive(Default)]
@@ -214,191 +217,251 @@ pub(crate) fn run(
             PostProcessRunError::ResourcePolicyInitialization,
         ));
     };
-    let mut operation = match try_start_scene_edit_operation::<PostProcessOwner, _, _>(
-        &input,
+    let mut invocation_host = crate::operation::runtime::EditHost::new();
+    let source_generation = input.generation();
+    let mut body_cause = None;
+    let mut body_containment = None;
+    let source = &input;
+    let local_cause = &mut body_cause;
+    let containment = &mut body_containment;
+    let mut activation = Some((admission, failure_requirements));
+    let body = run_scene_edit_body(
+        &mut invocation_host,
+        source,
         control.into_runtime(),
         ledger,
         start,
-    ) {
-        Ok(o) => o,
-        Err(e) => {
-            return Err(failure(
-                input,
-                PreparationFailure::new(PreparationCause::Start(e)),
-                invocation,
-            ));
-        }
-    };
-    let prepared =
-        match crate::operation::runtime::with_execution(&mut operation, keys, |runtime| {
-            input::prepare(&input, targets, options, runtime, keys)
-        }) {
-            Ok(p) => p,
-            Err(e) => return Err(failure(input, reject(operation, e), invocation)),
-        };
-    let any_changed =
-        match crate::operation::runtime::with_execution(&mut operation, keys, |runtime| {
-            for primitive in prepared.values() {
-                if crate::operation::runtime::run_unit(runtime, || primitive.changed())? {
-                    return Ok::<_, baozi_operation::StoreRuntimeError>(true);
+        move |parts, disposition| {
+            let mut startup = parts.startup;
+            let prepared = match startup.with_action_execution(keys.work, |runtime| {
+                input::prepare(source, targets, options, runtime, keys)
+            }) {
+                Ok(prepared) => prepared,
+                Err(cause) => {
+                    *local_cause = Some(cause);
+                    if let Err(cause) = startup.request_failure(disposition, REJECTION_CODE) {
+                        *local_cause = Some(cause.into());
+                    }
+                    return;
                 }
-            }
-            Ok(false)
-        }) {
-            Ok(changed) => changed,
-            Err(error) => {
+            };
+            let any_changed = match startup.with_action_execution(keys.work, |runtime| {
+                for primitive in prepared.values() {
+                    if crate::operation::runtime::run_unit(runtime, || primitive.changed())? {
+                        return Ok::<_, baozi_operation::StoreRuntimeError>(true);
+                    }
+                }
+                Ok(false)
+            }) {
+                Ok(changed) => changed,
+                Err(cause) => {
+                    drop(prepared);
+                    *local_cause = Some(cause.into());
+                    if let Err(cause) = startup.request_failure(disposition, REJECTION_CODE) {
+                        *local_cause = Some(cause.into());
+                    }
+                    return;
+                }
+            };
+            if !any_changed {
                 drop(prepared);
-                return Err(failure(input, reject(operation, error.into()), invocation));
+                if let Err(cause) = startup.request_unchanged(disposition) {
+                    *local_cause = Some(cause.into());
+                }
+                return;
             }
-        };
-    if !any_changed {
-        drop(prepared);
-        return match operation.prepare_evidence_only_success(final_progress()) {
-            Ok(PreparedStoreEvidenceOnlyOutcome::Success(p)) => {
-                let resources =
-                    PostProcessResourceEvidence::from_store(p.handoff().ledger_evidence);
-                let report = report_for(
-                    invocation,
-                    options,
-                    input.generation(),
-                    input.generation(),
-                    resources,
-                    None,
-                );
-                Ok(PostProcessRunOutcome::new(input, report))
-            }
-            Ok(PreparedStoreEvidenceOnlyOutcome::MinimalFallback(p)) => Err(failure(
-                input,
-                fallback(p, PreparationCause::Transaction),
-                invocation,
-            )),
-            Err(e) => Err(failure(
-                input,
-                PreparationFailure::new(PreparationCause::Publication(e)),
-                invocation,
-            )),
-        };
-    }
-    let mut replacements =
-        match crate::operation::runtime::with_execution(&mut operation, keys, |runtime| {
-            ScratchVec::new(runtime, keys, prepared.values().len())
-        }) {
-            Ok(v) => v,
-            Err(e) => {
-                drop(prepared);
-                return Err(failure(input, reject(operation, e.into()), invocation));
-            }
-        };
-    let mut evidence_work = SelectionEvidenceWork::default();
-    let append_result =
-        crate::operation::runtime::with_execution(&mut operation, keys, |runtime| {
-            for p in prepared.values() {
-                let mut edit = SceneGeometryReplacement::new(p.target);
-                edit.origins = p.origins.as_ref().map(|o| SceneTriangleOrigins {
-                    triangles: o.triangles.values(),
-                    face_offsets: o.face_offsets.values(),
-                });
-                edit.normals = p.normals.as_ref().map(|n| n.values());
-                edit.tangents = p.tangents.as_ref().map(|t| t.values());
-                edit.remove_tangents = p.remove_tangents;
-                edit.smooth = p.smooth;
-                edit.normal_domain = p.normal_domain;
-                edit.uv_set = p.uv_set;
-                edit.uv_domain = p.uv_domain;
-                let appended = crate::operation::runtime::run_unit(runtime, || {
-                    let (triangles, face_offsets) = edit
-                        .origins
-                        .map_or((0, 0), |o| (o.triangles.len(), o.face_offsets.len()));
-                    evidence_work.include(triangles, face_offsets)?;
-                    replacements.values_mut().push(edit);
-                    Some(())
-                });
-                let cause = match appended {
-                    Ok(Some(())) => continue,
-                    Ok(None) => baozi_operation::StoreRuntimeError::Plan(
-                        baozi_operation::StorePlanError::SizeOverflow,
-                    ),
-                    Err(e) => e,
+            let mut operation = match startup.attach() {
+                Ok(operation) => operation,
+                Err(cause) => {
+                    drop(prepared);
+                    *local_cause = Some(PreparationCause::Start(cause));
+                    return;
+                }
+            };
+            let mut replacements =
+                match crate::operation::runtime::with_execution(&mut operation, keys, |runtime| {
+                    ScratchVec::new(runtime, keys, prepared.values().len())
+                }) {
+                    Ok(replacements) => replacements,
+                    Err(cause) => {
+                        drop(prepared);
+                        *local_cause = Some(cause.into());
+                        *containment = operation
+                            .request_minimal_fallback(disposition, REJECTION_CODE)
+                            .err();
+                        return;
+                    }
                 };
-                return Err(cause);
-            }
-            Ok(())
-        });
-    if let Err(cause) = append_result {
-        drop(replacements);
-        drop(prepared);
-        return Err(failure(input, reject(operation, cause.into()), invocation));
-    }
-    let qualified = evidence_work
-        .validation_work()
-        .ok_or(baozi_operation::StoreRuntimeError::Plan(
-            baozi_operation::StorePlanError::SizeOverflow,
-        ))
-        .and_then(|work| {
-            operation.qualify_failure_validation_work(
-                keys.work,
-                SceneEditBootstrap::success_evidence_members(),
-                work,
-            )
-        });
-    if let Err(e) = qualified {
-        drop(replacements);
-        drop(prepared);
-        return Err(failure(input, reject(operation, e.into()), invocation));
-    }
-    let mappings =
-        match baozi_core::__scene_integration::integration::SceneGeometryPlanStorage::try_new(
-            &mut operation,
-            keys.planning,
-            keys.scratch,
-            replacements.values().len(),
-        ) {
-            Ok(mappings) => mappings,
-            Err(error) => {
+            let mut evidence_work = SelectionEvidenceWork::default();
+            let append_result =
+                crate::operation::runtime::with_execution(&mut operation, keys, |runtime| {
+                    for p in prepared.values() {
+                        let mut edit = SceneGeometryReplacement::new(p.target);
+                        edit.origins = p.origins.as_ref().map(|o| SceneTriangleOrigins {
+                            triangles: o.triangles.values(),
+                            face_offsets: o.face_offsets.values(),
+                        });
+                        edit.normals = p.normals.as_ref().map(|n| n.values());
+                        edit.tangents = p.tangents.as_ref().map(|t| t.values());
+                        edit.remove_tangents = p.remove_tangents;
+                        edit.smooth = p.smooth;
+                        edit.normal_domain = p.normal_domain;
+                        edit.uv_set = p.uv_set;
+                        edit.uv_domain = p.uv_domain;
+                        let appended = crate::operation::runtime::run_unit(runtime, || {
+                            let (triangles, face_offsets) = edit
+                                .origins
+                                .map_or((0, 0), |o| (o.triangles.len(), o.face_offsets.len()));
+                            evidence_work.include(triangles, face_offsets)?;
+                            replacements.values_mut().push(edit);
+                            Some(())
+                        });
+                        let cause = match appended {
+                            Ok(Some(())) => continue,
+                            Ok(None) => baozi_operation::StoreRuntimeError::Plan(
+                                baozi_operation::StorePlanError::SizeOverflow,
+                            ),
+                            Err(e) => e,
+                        };
+                        return Err(cause);
+                    }
+                    Ok(())
+                });
+            if let Err(cause) = append_result {
                 drop(replacements);
                 drop(prepared);
-                return Err(failure(input, reject(operation, error.into()), invocation));
+                *local_cause = Some(cause.into());
+                *containment = operation
+                    .request_minimal_fallback(disposition, REJECTION_CODE)
+                    .err();
+                return;
             }
-        };
-    let owner = match operation.into_session_outcome_owner(
-        keys.session_policy(),
-        writer_limits,
-        failure_requirements,
-    ) {
-        Ok(o) => o,
-        Err(e) => {
-            drop(mappings);
+            let qualified = evidence_work
+                .validation_work()
+                .ok_or(baozi_operation::StoreRuntimeError::Plan(
+                    baozi_operation::StorePlanError::SizeOverflow,
+                ))
+                .and_then(|work| {
+                    operation.qualify_failure_validation_work(
+                        keys.work,
+                        SceneEditBootstrap::success_evidence_members(),
+                        work,
+                    )
+                });
+            if let Err(cause) = qualified {
+                drop(replacements);
+                drop(prepared);
+                *local_cause = Some(cause.into());
+                *containment = operation
+                    .request_minimal_fallback(disposition, REJECTION_CODE)
+                    .err();
+                return;
+            }
+            let mappings =
+                match baozi_core::__scene_integration::integration::SceneGeometryPlanStorage::try_new(
+                    &mut operation,
+                    keys.planning,
+                    keys.scratch,
+                    replacements.values().len(),
+                ) {
+                    Ok(mappings) => mappings,
+                    Err(cause) => {
+                        drop(replacements);
+                        drop(prepared);
+                        *local_cause = Some(cause.into());
+                        *containment = operation
+                            .request_minimal_fallback(disposition, REJECTION_CODE)
+                            .err();
+                        return;
+                    }
+                };
+            let (admission, failure_requirements) = activation
+                .take()
+                .expect("the retained edit body activates at most once");
+            let owner = match operation.into_session_outcome_owner(
+                keys.session_policy(),
+                writer_limits,
+                failure_requirements,
+            ) {
+                Ok(owner) => owner,
+                Err(cause) => {
+                    drop(mappings);
+                    drop(replacements);
+                    drop(prepared);
+                    *containment = Some(cause);
+                    return;
+                }
+            };
+            #[cfg(test)]
+            cleanup_tests::selection_ready(&prepared, replacements.values());
+            let requested = validate_changed(
+                source,
+                owner,
+                EditCanonicalSlots {
+                    output: parts.output,
+                    proof: parts.proof,
+                    activation: parts.activation,
+                    validation: parts.validation,
+                },
+                admission,
+                PreparedEdit::Selection {
+                    replacements: replacements.values(),
+                    mappings,
+                    digest: options.digest(),
+                    limits: baozi_core::SceneValidationLimits::default()
+                        .with_max_work(options.budgets.max_work_actions)
+                        .with_max_scratch_bytes(options.budgets.storage_bytes)
+                        .with_max_canonical_bytes(options.budgets.storage_bytes),
+                },
+                disposition,
+            );
             drop(replacements);
             drop(prepared);
+            *containment = requested.err();
+        },
+    );
+    let result = match body {
+        Ok(finish) => crate::scene_edit::finish_bound_edit(finish),
+        Err(CanonicalBoundBodyError::Start(cause)) => {
             return Err(failure(
                 input,
-                PreparationFailure::new(PreparationCause::Containment(e)),
+                PreparationFailure::new(PreparationCause::Start(cause)),
                 invocation,
             ));
         }
+        Err(CanonicalBoundBodyError::Body(error)) => {
+            if let Some(source) = error.containment().copied().or(body_containment) {
+                Err(EditFailure::new(EditCause::Containment { source }))
+            } else {
+                return Err(failure(
+                    input,
+                    PreparationFailure::new(body_cause.unwrap_or(PreparationCause::Transaction)),
+                    invocation,
+                ));
+            }
+        }
     };
-    let result = execute_changed(
-        &input,
-        owner,
-        admission,
-        PreparedEdit::Selection {
-            replacements: replacements.values(),
-            mappings,
-            digest: options.digest(),
-            limits: baozi_core::SceneValidationLimits::default()
-                .with_max_work(options.budgets.max_work_actions)
-                .with_max_scratch_bytes(options.budgets.storage_bytes)
-                .with_max_canonical_bytes(options.budgets.storage_bytes),
-        },
-    );
-    drop(replacements);
-    drop(prepared);
     match result {
-        Ok((scene, SceneEditEvidence::Selection(evidence), resources)) => {
+        Ok(EditTerminal::Unchanged { resources }) => {
             let report = report_for(
                 invocation,
                 options,
-                input.generation(),
+                source_generation,
+                source_generation,
+                resources,
+                None,
+            );
+            Ok(PostProcessRunOutcome::new(input, report))
+        }
+        Ok(EditTerminal::Changed {
+            scene,
+            evidence: SceneEditEvidence::Selection(evidence),
+            resources,
+        }) => {
+            let report = report_for(
+                invocation,
+                options,
+                source_generation,
                 scene.generation(),
                 resources,
                 Some(evidence),
@@ -410,36 +473,20 @@ pub(crate) fn run(
             PreparationFailure::new(PreparationCause::Transaction),
             invocation,
         )),
-        Err(e) => Err(failure(input, e.into(), invocation)),
-    }
-}
-
-fn reject(operation: EditOperation, cause: PreparationCause) -> PreparationFailure {
-    match operation.prepare_minimal_fallback(REJECTION_CODE) {
-        Ok(p) => fallback(p, cause),
-        Err(e) => PreparationFailure::new(PreparationCause::Publication(e)),
-    }
-}
-fn fallback(
-    p: baozi_operation::__retained_store_integration::authority::PreparedStoreFallback,
-    cause: PreparationCause,
-) -> PreparationFailure {
-    let p = p.handoff();
-    let cause = match p.ledger_evidence.header().terminal_cause() {
-        baozi_operation::StoreTerminalCause::Failure(failure)
-            if failure.class() == baozi_operation::StorePreparationFailureClass::Control =>
-        {
-            match cause {
-                c @ PreparationCause::Control(_) => c,
-                _ => PreparationCause::FinalControl,
+        Err(error) => {
+            let mut error = PreparationFailure::from(error);
+            if let Some(cause) = body_cause {
+                error.cause = match error.cause {
+                    PreparationCause::Transaction => cause,
+                    PreparationCause::FinalControl => match cause {
+                        cause @ PreparationCause::Control(_) => cause,
+                        _ => PreparationCause::FinalControl,
+                    },
+                    cause => cause,
+                };
             }
+            Err(failure(input, error, invocation))
         }
-        _ => cause,
-    };
-    PreparationFailure {
-        cause,
-        resources: Some(PostProcessResourceEvidence::from_store(p.ledger_evidence)),
-        owner: FailureOwner::Fallback { _owner: p.fallback },
     }
 }
 

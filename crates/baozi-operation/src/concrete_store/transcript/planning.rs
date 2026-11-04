@@ -54,13 +54,13 @@ use crate::{OperationOwner, ProgressPhase, ProgressUnit};
 /// }
 /// ```
 #[must_use = "open the transcript, recover it, or publish the pre-admitted fallback"]
-pub struct RetainedStoreTranscript<O, PP, U, L = FreshStoreLineage>
+pub struct RetainedStoreTranscript<'inv, O, PP, U, L = FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    operation: RetainedStoreOperation<O, PP, U, L>,
+    operation: RetainedStoreOperation<'inv, O, PP, U, L>,
     identity: TranscriptId,
     canonical_writer: Option<RetainedStoreWriterPlan>,
     evidence_writer: RetainedStoreWriterPlan,
@@ -70,14 +70,16 @@ where
 }
 
 /// Result of opening structural transcript planning for an admitted store operation.
-pub type StoreTranscriptStartResult<O, PP, U, L = FreshStoreLineage> =
-    Result<RetainedStoreTranscript<O, PP, U, L>, StoreTranscriptStartError<O, PP, U, L>>;
+pub type StoreTranscriptStartResult<'inv, O, PP, U, L = FreshStoreLineage> = Result<
+    RetainedStoreTranscript<'inv, O, PP, U, L>,
+    StoreTranscriptStartError<'inv, O, PP, U, L>,
+>;
 
 /// Result of consuming a complete transcript plan into its execution phase.
-pub type StoreTranscriptOpenResult<O, PP, U, L = FreshStoreLineage> =
-    Result<RetainedStoreExecution<O, PP, U, L>, StoreTranscriptOpenError<O, PP, U, L>>;
+pub type StoreTranscriptOpenResult<'inv, O, PP, U, L = FreshStoreLineage> =
+    Result<RetainedStoreExecution<'inv, O, PP, U, L>, StoreTranscriptOpenError<'inv, O, PP, U, L>>;
 
-impl<O, PP, U, L> RetainedStoreOperation<O, PP, U, L>
+impl<'inv, O, PP, U, L> RetainedStoreOperation<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -87,23 +89,23 @@ where
         self,
         canonical_writer: RetainedStoreWriterPlan,
         evidence_writer: RetainedStoreWriterPlan,
-    ) -> StoreTranscriptStartResult<O, PP, U, L> {
+    ) -> StoreTranscriptStartResult<'inv, O, PP, U, L> {
         begin_transcript(self, Some(canonical_writer), evidence_writer)
     }
 
     pub fn try_begin_rich_failure_transcript(
         self,
         evidence_writer: RetainedStoreWriterPlan,
-    ) -> StoreTranscriptStartResult<O, PP, U, L> {
+    ) -> StoreTranscriptStartResult<'inv, O, PP, U, L> {
         begin_transcript(self, None, evidence_writer)
     }
 }
 
-fn begin_transcript<O, PP, U, L>(
-    operation: RetainedStoreOperation<O, PP, U, L>,
+fn begin_transcript<'inv, O, PP, U, L>(
+    operation: RetainedStoreOperation<'inv, O, PP, U, L>,
     canonical_writer: Option<RetainedStoreWriterPlan>,
     evidence_writer: RetainedStoreWriterPlan,
-) -> StoreTranscriptStartResult<O, PP, U, L>
+) -> StoreTranscriptStartResult<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -212,7 +214,7 @@ macro_rules! plan_simple_batch {
     };
 }
 
-impl<O, PP, U, L> RetainedStoreTranscript<O, PP, U, L>
+impl<'inv, O, PP, U, L> RetainedStoreTranscript<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -534,7 +536,7 @@ where
         }
     }
 
-    pub fn try_open(self) -> StoreTranscriptOpenResult<O, PP, U, L> {
+    pub fn try_open(self) -> StoreTranscriptOpenResult<'inv, O, PP, U, L> {
         let plan = match self.publication_plan() {
             Ok(plan) => plan,
             Err(cause) => {
@@ -602,7 +604,7 @@ where
     }
 }
 
-impl<O, PP, U> RetainedStoreTranscript<O, PP, U, CanonicalInheritanceSource>
+impl<'inv, O, PP, U> RetainedStoreTranscript<'inv, O, PP, U, CanonicalInheritanceSource>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -701,14 +703,14 @@ fn plan_runtime_error(error: StoreTranscriptPlanError) -> StoreRuntimeError {
     clippy::large_enum_variant,
     reason = "linear transcript recovery stays inline so fallback containment never allocates indirection"
 )]
-enum StoreTranscriptRecoveryAuthority<O, PP, U, L>
+enum StoreTranscriptRecoveryAuthority<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    Retry(RetainedStoreTranscript<O, PP, U, L>),
-    FallbackOnly(StoreOpenFallbackOnly<O, PP, U, L>),
+    Retry(RetainedStoreTranscript<'inv, O, PP, U, L>),
+    FallbackOnly(StoreOpenFallbackOnly<'inv, O, PP, U, L>),
 }
 
 /// Exact transcript-open cause coupled to the authority proven safe after rollback.
@@ -716,17 +718,17 @@ where
 /// The transcript and fallback owner remain private. Repair uses the narrow planning methods on
 /// this wrapper, retry consumes the complete wrapper, and fallback must classify its exact cause.
 #[must_use = "repair and retry the transcript or map the exact cause before fallback"]
-pub struct StoreTranscriptOpenRecovery<O, PP, U, L = FreshStoreLineage>
+pub struct StoreTranscriptOpenRecovery<'inv, O, PP, U, L = FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     cause: StoreRuntimeError,
-    authority: StoreTranscriptRecoveryAuthority<O, PP, U, L>,
+    authority: StoreTranscriptRecoveryAuthority<'inv, O, PP, U, L>,
 }
 
-impl<O, PP, U, L> StoreTranscriptOpenRecovery<O, PP, U, L>
+impl<'inv, O, PP, U, L> StoreTranscriptOpenRecovery<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -752,7 +754,7 @@ where
 
     fn retry_transcript_mut(
         &mut self,
-    ) -> Result<&mut RetainedStoreTranscript<O, PP, U, L>, StoreTranscriptPlanError> {
+    ) -> Result<&mut RetainedStoreTranscript<'inv, O, PP, U, L>, StoreTranscriptPlanError> {
         match &mut self.authority {
             StoreTranscriptRecoveryAuthority::Retry(transcript) => Ok(transcript),
             StoreTranscriptRecoveryAuthority::FallbackOnly(_) => Err(
@@ -776,7 +778,7 @@ where
     }
 
     /// Retries opening without exposing the transcript or fallback owner.
-    pub fn retry_open(self) -> StoreTranscriptOpenResult<O, PP, U, L> {
+    pub fn retry_open(self) -> StoreTranscriptOpenResult<'inv, O, PP, U, L> {
         match self.authority {
             StoreTranscriptRecoveryAuthority::Retry(transcript) => transcript.try_open(),
             StoreTranscriptRecoveryAuthority::FallbackOnly(owner) => {
@@ -805,7 +807,7 @@ where
     }
 }
 
-impl<O, PP, U> StoreTranscriptOpenRecovery<O, PP, U, CanonicalInheritanceSource>
+impl<'inv, O, PP, U> StoreTranscriptOpenRecovery<'inv, O, PP, U, CanonicalInheritanceSource>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -826,7 +828,7 @@ where
     }
 }
 
-impl<O, PP, U, L> fmt::Debug for StoreTranscriptOpenRecovery<O, PP, U, L>
+impl<'inv, O, PP, U, L> fmt::Debug for StoreTranscriptOpenRecovery<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -848,17 +850,17 @@ where
 
 /// Failure to open transcript-derived block tables.
 #[must_use = "recover the remaining authority or let the fail-closed owner drop"]
-pub struct StoreTranscriptOpenError<O, PP, U, L = FreshStoreLineage>
+pub struct StoreTranscriptOpenError<'inv, O, PP, U, L = FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    recovery: Option<StoreTranscriptRecoveryAuthority<O, PP, U, L>>,
+    recovery: Option<StoreTranscriptRecoveryAuthority<'inv, O, PP, U, L>>,
     cause: StoreRuntimeError,
 }
 
-impl<O, PP, U, L> StoreTranscriptOpenError<O, PP, U, L>
+impl<'inv, O, PP, U, L> StoreTranscriptOpenError<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -870,7 +872,7 @@ where
 
     pub fn into_disposition(
         self,
-    ) -> Result<StoreTranscriptOpenRecovery<O, PP, U, L>, StoreRuntimeError> {
+    ) -> Result<StoreTranscriptOpenRecovery<'inv, O, PP, U, L>, StoreRuntimeError> {
         match self.recovery {
             Some(authority) => Ok(StoreTranscriptOpenRecovery {
                 cause: self.cause,
@@ -881,7 +883,7 @@ where
     }
 }
 
-impl<O, PP, U, L> fmt::Debug for StoreTranscriptOpenError<O, PP, U, L>
+impl<'inv, O, PP, U, L> fmt::Debug for StoreTranscriptOpenError<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -901,7 +903,7 @@ where
     }
 }
 
-impl<O, PP, U, L> fmt::Display for StoreTranscriptOpenError<O, PP, U, L>
+impl<'inv, O, PP, U, L> fmt::Display for StoreTranscriptOpenError<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -916,7 +918,7 @@ where
     }
 }
 
-impl<O, PP, U, L> std::error::Error for StoreTranscriptOpenError<O, PP, U, L>
+impl<'inv, O, PP, U, L> std::error::Error for StoreTranscriptOpenError<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,

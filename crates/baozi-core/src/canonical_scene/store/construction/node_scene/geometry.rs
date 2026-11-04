@@ -31,7 +31,7 @@ where
 }
 
 pub(super) fn retain_nodes<O, PP, U, L, R>(
-    lane: &mut CanonicalLane<'_, O, PP, U, L>,
+    lane: &mut CanonicalLane<'_, '_, O, PP, U, L>,
     plan: NodeStoragePlan,
     batch: &ValidatedNodeBatch<'_, R>,
     #[cfg(test)] faults: &mut NodeSceneBuildFaults,
@@ -74,7 +74,7 @@ where
 }
 
 pub(super) fn retain_geometry<O, PP, U, L, R, NR>(
-    lane: &mut CanonicalLane<'_, O, PP, U, L>,
+    lane: &mut CanonicalLane<'_, '_, O, PP, U, L>,
     plan: GeometryStoragePlan,
     batch: &ValidatedGeometryBatch<'_, R>,
     nodes: &ValidatedNodeBatch<'_, NR>,

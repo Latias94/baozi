@@ -63,7 +63,7 @@ const TANGENTS: [f32; 20] = [
     0.0, -1.0,
 ];
 
-pub(super) fn submit(context: &mut ParseContext<'_>) -> ParseResult<()> {
+pub(super) fn submit(context: &mut ParseContext<'_, '_>) -> ParseResult<()> {
     let mut attributes = Vec::new();
     for _ in 0..2 {
         attributes.extend([

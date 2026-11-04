@@ -713,8 +713,8 @@ where
         self.batches.as_ref().map(inspect)
     }
 
-    pub(super) fn into_parts(
-        mut self,
+    pub(super) fn take_parts(
+        &mut self,
     ) -> (
         DetachedRetainedPart<F>,
         DetachedRetainedPart<TerminalLedgerEvidence<P, D>>,
@@ -893,7 +893,7 @@ where
         self.try_discard_all()
     }
 
-    pub(super) fn try_bind(
+    pub(super) fn try_attach(
         mut self,
         ledger: &Ledger<O, P, D>,
     ) -> Result<Self, RetainedWriterError<D>>
@@ -905,7 +905,7 @@ where
                 Some(batches) => batches,
                 None => unreachable_final_owner_state(),
             };
-            ledger.try_bind_fallback_baseline(batches)
+            ledger.try_attach_fallback_baseline(batches)
         }));
         match bind_result {
             Err(payload) => {

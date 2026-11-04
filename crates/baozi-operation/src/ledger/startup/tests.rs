@@ -26,7 +26,7 @@ enum Dimension {
 }
 
 #[test]
-fn startup_qualification_has_one_production_module() {
+fn startup_current_state_admission_has_one_production_module() {
     let ledger_root = include_str!("../../ledger.rs");
     let reservation = include_str!("../reservation.rs");
     let startup = include_str!("../startup.rs");
@@ -39,8 +39,10 @@ fn startup_qualification_has_one_production_module() {
     assert!(!ledger_root.contains("pub(crate) struct StartupLedgerPlan<"));
     assert!(reservation.contains("pub(crate) struct AttributionReservationBatch<"));
     assert!(!reservation.contains("TypedFreezeProof"));
-    assert!(startup.contains("pub(crate) struct StartupLedgerPlan<"));
-    assert!(startup.contains("pub(crate) fn try_qualify_startup<"));
+    assert!(!startup.contains("pub(crate) struct StartupLedgerPlan<"));
+    assert!(!startup.contains("fn try_qualify_startup<"));
+    assert!(startup.contains("pub(crate) struct StartupLedgerPlanParts<"));
+    assert!(startup.contains("pub(crate) fn preflight_startup_attribution_graph("));
     assert!(startup.contains("pub(crate) struct StartupAttributionGraph<"));
     assert!(!crate_root.contains("StartupAttributionGraph"));
     assert!(!startup.contains("ensure_phase("));
@@ -66,9 +68,14 @@ fn startup_qualification_has_one_production_module() {
         "fn into_runtime_baseline(",
         1,
     );
+    assert_eq!(
+        graph_without_ready_split.matches("pub(crate) fn ").count(),
+        1,
+        "the graph exposes only its actual-ledger identity check"
+    );
+    assert!(graph_without_ready_split.contains("pub(crate) fn belongs_to("));
     for forbidden in [
         "pub fn ",
-        "pub(crate) fn ",
         "pub(super)",
         "pub(in ",
         "fn accept",
@@ -251,7 +258,7 @@ fn graph_batch_plans_with_terminal_limits(
     )
 }
 
-fn qualify_graph_from_batches(
+fn graph_request_from_batches(
     batches: StartupAttributionBatchPlans<Owner, Phase, Dimension>,
     retained: [StartupRetainedAttribution<Phase, Dimension>; 2],
 ) -> (
@@ -265,19 +272,17 @@ fn qualify_graph_from_batches(
         batches.fallback.planned_bytes,
         batches.evidence.planned_bytes,
     ];
-    let qualified = graph_limits(u64::MAX, u64::MAX, u64::MAX, u64::MAX, u64::MAX)
-        .try_qualify_startup(
-            batches,
-            retained,
-            startup_account_shares(),
-            startup_commitments(Dimension::Records, Dimension::Records),
-        )
-        .expect("startup graph qualification");
-    let (limits, parts) = qualified.into_parts();
+    let limits = graph_limits(u64::MAX, u64::MAX, u64::MAX, u64::MAX, u64::MAX);
+    let parts = StartupLedgerPlanParts {
+        batches,
+        retained_attributions: retained,
+        account_shares: startup_account_shares(),
+        commitments: startup_commitments(Dimension::Records, Dimension::Records),
+    };
     (limits, parts, covers)
 }
 
-fn qualify_graph(
+fn graph_request(
     phases: [Phase; 4],
     dimensions: [Dimension; 4],
     retained: [(Phase, Dimension, u64); 2],
@@ -286,7 +291,7 @@ fn qualify_graph(
     StartupLedgerPlanParts<Owner, Phase, Dimension>,
     [u64; 4],
 ) {
-    qualify_graph_from_batches(
+    graph_request_from_batches(
         graph_batch_plans(phases, dimensions),
         retained.map(|(phase, dimension, bytes)| {
             StartupRetainedAttribution::new(phase, dimension, bytes)
@@ -294,12 +299,12 @@ fn qualify_graph(
     )
 }
 
-fn default_qualified_graph() -> (
+fn default_graph_request() -> (
     LedgerLimits<Dimension>,
     StartupLedgerPlanParts<Owner, Phase, Dimension>,
     [u64; 4],
 ) {
-    qualify_graph(
+    graph_request(
         [Phase::Build; 4],
         [Dimension::Bytes; 4],
         [
@@ -311,6 +316,93 @@ fn default_qualified_graph() -> (
 
 fn frozen_graph_ledger(limits: LedgerLimits<Dimension>) -> Ledger<Owner, Phase, Dimension> {
     Ledger::try_new(limits, &[Phase::Build, Phase::Finalize]).expect("frozen startup graph ledger")
+}
+
+fn preflight_startup(
+    ledger: &Ledger<Owner, Phase, Dimension>,
+    parts: &StartupLedgerPlanParts<Owner, Phase, Dimension>,
+) -> Result<(), LedgerCause<Dimension>> {
+    let dimensions = [Dimension::Bytes, Dimension::Records, Dimension::Scratch];
+    let phases = [Phase::Build, Phase::Finalize];
+    let dimensions_before = dimensions.map(|dimension| ledger.dimension_evidence(dimension));
+    let phases_before = phases.map(|phase| ledger.phase_evidence(phase));
+    let storage_before = {
+        let state = lock(&ledger.state);
+        (
+            state.current_live_bytes,
+            state.peak_live_bytes,
+            state.active_reservations,
+            state.current_evidence_bytes,
+            state.peak_evidence_bytes,
+            state.publication,
+        )
+    };
+    let work_before = {
+        let state = ledger.work.borrow_state().expect("current work state");
+        state
+            .rows
+            .iter()
+            .map(|row| (row.policy, row.state))
+            .collect::<Vec<_>>()
+    };
+    let owners_before = Arc::strong_count(&ledger.state);
+    let allocations_before = test_startup_graph_allocation_entries();
+    let batch_allocations_before = test_attribution_batch_allocation_entries();
+    let releases_before = test_startup_graph_storage_releases();
+    let release_locks_before = test_startup_graph_ledger_release_locks();
+
+    let result = ledger.preflight_startup_attribution_graph(parts);
+
+    assert_eq!(
+        dimensions.map(|dimension| ledger.dimension_evidence(dimension)),
+        dimensions_before
+    );
+    assert_eq!(
+        phases.map(|phase| ledger.phase_evidence(phase)),
+        phases_before
+    );
+    {
+        let state = lock(&ledger.state);
+        assert_eq!(
+            (
+                state.current_live_bytes,
+                state.peak_live_bytes,
+                state.active_reservations,
+                state.current_evidence_bytes,
+                state.peak_evidence_bytes,
+                state.publication,
+            ),
+            storage_before
+        );
+    }
+    {
+        let state = ledger.work.borrow_state().expect("unchanged work state");
+        assert_eq!(
+            state
+                .rows
+                .iter()
+                .map(|row| (row.policy, row.state))
+                .collect::<Vec<_>>(),
+            work_before
+        );
+    }
+    assert_eq!(Arc::strong_count(&ledger.state), owners_before);
+    assert_eq!(test_startup_graph_allocation_entries(), allocations_before);
+    assert_eq!(
+        test_attribution_batch_allocation_entries(),
+        batch_allocations_before
+    );
+    assert_eq!(test_startup_graph_storage_releases(), releases_before);
+    assert_eq!(
+        test_startup_graph_ledger_release_locks(),
+        release_locks_before
+    );
+
+    match result {
+        Ok(()) => Ok(()),
+        Err(AttributionBatchCreateError::Ledger(cause)) => Err(cause),
+        Err(error) => panic!("valid graph capacity must reach ledger preflight: {error:?}"),
+    }
 }
 
 fn vec_capacity_bytes<T>(values: &Vec<T>) -> u64 {
@@ -361,22 +453,20 @@ fn ledger_graph_observation(
 }
 
 #[test]
-fn startup_qualification_preserves_the_exact_typed_envelope() {
+fn startup_preflight_preserves_the_exact_typed_envelope() {
     let batches = startup_batch_plans(Dimension::Bytes);
     let batch_bytes = startup_batch_bytes(&batches);
     let retained_attributions = startup_attributions(Dimension::Bytes, Dimension::Bytes);
     let total_live = batch_bytes.checked_add(8).expect("test live envelope");
-    let limits = startup_limits(total_live, total_live, 12, 12, 10);
+    let ledger = frozen_graph_ledger(startup_limits(total_live, total_live, 12, 12, 10));
+    let parts = StartupLedgerPlanParts {
+        batches,
+        retained_attributions,
+        account_shares: startup_account_shares(),
+        commitments: startup_commitments(Dimension::Records, Dimension::Records),
+    };
 
-    let qualified = limits
-        .try_qualify_startup(
-            batches,
-            retained_attributions,
-            startup_account_shares(),
-            startup_commitments(Dimension::Records, Dimension::Records),
-        )
-        .expect("the exact startup envelope must qualify");
-    let (limits, parts) = qualified.into_parts();
+    preflight_startup(&ledger, &parts).expect("the exact startup envelope must fit current state");
 
     assert_eq!(startup_batch_bytes(&parts.batches), batch_bytes);
     assert_eq!(parts.retained_attributions, retained_attributions);
@@ -402,7 +492,7 @@ fn startup_qualification_preserves_the_exact_typed_envelope() {
     assert_eq!(parts.commitments[0].amount(), 4);
     assert_eq!(parts.commitments[1].dimension(), Dimension::Records);
     assert_eq!(parts.commitments[1].amount(), 6);
-    assert_eq!(limits.dimension_count(), 2);
+    assert_eq!(ledger.work.catalogue().len(), 2);
 }
 
 #[test]
@@ -411,102 +501,99 @@ fn startup_live_and_observed_work_are_independent_on_the_same_dimension() {
     let total_live = startup_batch_bytes(&batches)
         .checked_add(8)
         .expect("test live envelope");
-    let limits = startup_limits(total_live, total_live, 12, 12, 10);
+    let ledger = frozen_graph_ledger(startup_limits(total_live, total_live, 12, 12, 10));
     let account_shares =
         StartupAccountShareEnvelope::four_identical([(Dimension::Bytes, 1), (Dimension::Bytes, 2)]);
 
+    let parts = StartupLedgerPlanParts {
+        batches,
+        retained_attributions: startup_attributions(Dimension::Bytes, Dimension::Bytes),
+        account_shares,
+        commitments: startup_commitments(Dimension::Bytes, Dimension::Bytes),
+    };
+
     assert!(
-        limits
-            .try_qualify_startup(
-                batches,
-                startup_attributions(Dimension::Bytes, Dimension::Bytes),
-                account_shares,
-                startup_commitments(Dimension::Bytes, Dimension::Bytes),
-            )
-            .is_ok(),
+        preflight_startup(&ledger, &parts).is_ok(),
         "live reservations and observed work use independent ledger counter classes"
     );
 }
 
 #[test]
-fn startup_qualification_rejects_unknown_dimensions_without_allocation() {
+fn startup_preflight_rejects_unknown_dimensions_without_allocation() {
+    let ledger = frozen_graph_ledger(startup_limits(
+        u64::MAX,
+        u64::MAX,
+        u64::MAX,
+        u64::MAX,
+        u64::MAX,
+    ));
     let allocations_before = test_attribution_batch_allocation_entries();
 
-    assert!(matches!(
-        startup_limits(u64::MAX, u64::MAX, u64::MAX, u64::MAX, u64::MAX).try_qualify_startup(
-            startup_batch_plans(Dimension::Unknown),
-            startup_attributions(Dimension::Bytes, Dimension::Bytes),
-            startup_account_shares(),
-            startup_commitments(Dimension::Records, Dimension::Records),
-        ),
-        Err(LedgerCause::UnknownDimension {
-            dimension: Dimension::Unknown,
-        })
-    ));
-    assert!(matches!(
-        startup_limits(u64::MAX, u64::MAX, u64::MAX, u64::MAX, u64::MAX).try_qualify_startup(
-            startup_batch_plans(Dimension::Bytes),
-            startup_attributions(Dimension::Unknown, Dimension::Bytes),
-            startup_account_shares(),
-            startup_commitments(Dimension::Records, Dimension::Records),
-        ),
-        Err(LedgerCause::UnknownDimension {
-            dimension: Dimension::Unknown,
-        })
-    ));
-    assert!(matches!(
-        startup_limits(u64::MAX, u64::MAX, u64::MAX, u64::MAX, u64::MAX).try_qualify_startup(
-            startup_batch_plans(Dimension::Bytes),
-            startup_attributions(Dimension::Bytes, Dimension::Bytes),
-            StartupAccountShareEnvelope::four_identical([
+    for parts in [
+        StartupLedgerPlanParts {
+            batches: startup_batch_plans(Dimension::Unknown),
+            retained_attributions: startup_attributions(Dimension::Bytes, Dimension::Bytes),
+            account_shares: startup_account_shares(),
+            commitments: startup_commitments(Dimension::Records, Dimension::Records),
+        },
+        StartupLedgerPlanParts {
+            batches: startup_batch_plans(Dimension::Bytes),
+            retained_attributions: startup_attributions(Dimension::Unknown, Dimension::Bytes),
+            account_shares: startup_account_shares(),
+            commitments: startup_commitments(Dimension::Records, Dimension::Records),
+        },
+        StartupLedgerPlanParts {
+            batches: startup_batch_plans(Dimension::Bytes),
+            retained_attributions: startup_attributions(Dimension::Bytes, Dimension::Bytes),
+            account_shares: StartupAccountShareEnvelope::four_identical([
                 (Dimension::Unknown, 1),
                 (Dimension::Records, 2),
             ]),
-            startup_commitments(Dimension::Records, Dimension::Records),
-        ),
-        Err(LedgerCause::UnknownDimension {
-            dimension: Dimension::Unknown,
-        })
-    ));
-    assert!(matches!(
-        startup_limits(u64::MAX, u64::MAX, u64::MAX, u64::MAX, u64::MAX).try_qualify_startup(
-            startup_batch_plans(Dimension::Bytes),
-            startup_attributions(Dimension::Bytes, Dimension::Bytes),
-            startup_account_shares(),
-            startup_commitments(Dimension::Unknown, Dimension::Records),
-        ),
-        Err(LedgerCause::UnknownDimension {
-            dimension: Dimension::Unknown,
-        })
-    ));
+            commitments: startup_commitments(Dimension::Records, Dimension::Records),
+        },
+        StartupLedgerPlanParts {
+            batches: startup_batch_plans(Dimension::Bytes),
+            retained_attributions: startup_attributions(Dimension::Bytes, Dimension::Bytes),
+            account_shares: startup_account_shares(),
+            commitments: startup_commitments(Dimension::Unknown, Dimension::Records),
+        },
+    ] {
+        assert_eq!(
+            preflight_startup(&ledger, &parts),
+            Err(LedgerCause::UnknownDimension {
+                dimension: Dimension::Unknown,
+            })
+        );
+    }
 
     assert_eq!(
         test_attribution_batch_allocation_entries(),
         allocations_before,
-        "qualification rejection must not allocate a batch"
+        "current-state preflight rejection must not allocate a batch"
     );
 }
 
 #[test]
-fn startup_qualification_checks_live_dimension_and_operation_limits() {
+fn startup_preflight_checks_live_dimension_and_operation_limits() {
     let batches = startup_batch_plans(Dimension::Bytes);
     let total_live = startup_batch_bytes(&batches)
         .checked_add(8)
         .expect("test live envelope");
-    let dimension_limited = startup_limits(
+    let dimension_limited = frozen_graph_ledger(startup_limits(
         u64::MAX,
         total_live.checked_sub(1).expect("nonzero envelope"),
         12,
         12,
         10,
-    );
+    ));
+    let parts = StartupLedgerPlanParts {
+        batches,
+        retained_attributions: startup_attributions(Dimension::Bytes, Dimension::Bytes),
+        account_shares: startup_account_shares(),
+        commitments: startup_commitments(Dimension::Records, Dimension::Records),
+    };
     assert!(matches!(
-        dimension_limited.try_qualify_startup(
-            batches,
-            startup_attributions(Dimension::Bytes, Dimension::Bytes),
-            startup_account_shares(),
-            startup_commitments(Dimension::Records, Dimension::Records),
-        ),
+        preflight_startup(&dimension_limited, &parts),
         Err(LedgerCause::LimitExceeded {
             class: CounterClass::Live,
             dimension: Dimension::Bytes,
@@ -515,21 +602,15 @@ fn startup_qualification_checks_live_dimension_and_operation_limits() {
         }) if value == total_live && limit == total_live - 1
     ));
 
-    let batches = startup_batch_plans(Dimension::Bytes);
-    let operation_limited = startup_limits(
+    let operation_limited = frozen_graph_ledger(startup_limits(
         total_live.checked_sub(1).expect("nonzero envelope"),
         total_live,
         12,
         12,
         10,
-    );
+    ));
     assert!(matches!(
-        operation_limited.try_qualify_startup(
-            batches,
-            startup_attributions(Dimension::Bytes, Dimension::Bytes),
-            startup_account_shares(),
-            startup_commitments(Dimension::Records, Dimension::Records),
-        ),
+        preflight_startup(&operation_limited, &parts),
         Err(LedgerCause::LimitExceeded {
             class: CounterClass::Live,
             dimension: Dimension::Bytes,
@@ -538,30 +619,32 @@ fn startup_qualification_checks_live_dimension_and_operation_limits() {
         }) if value == total_live && limit == total_live - 1
     ));
 
-    let non_reservable = startup_limits(u64::MAX, u64::MAX, 12, 12, 10);
+    let non_reservable = frozen_graph_ledger(startup_limits(u64::MAX, u64::MAX, 12, 12, 10));
+    let parts = StartupLedgerPlanParts {
+        batches: startup_batch_plans(Dimension::Records),
+        retained_attributions: startup_attributions(Dimension::Bytes, Dimension::Bytes),
+        account_shares: startup_account_shares(),
+        commitments: startup_commitments(Dimension::Records, Dimension::Records),
+    };
     assert!(matches!(
-        non_reservable.try_qualify_startup(
-            startup_batch_plans(Dimension::Records),
-            startup_attributions(Dimension::Bytes, Dimension::Bytes),
-            startup_account_shares(),
-            startup_commitments(Dimension::Records, Dimension::Records),
-        ),
+        preflight_startup(&non_reservable, &parts),
         Err(LedgerCause::DimensionNotReservable {
             dimension: Dimension::Records,
         })
     ));
 
-    let live_overflow = startup_limits(u64::MAX, u64::MAX, 12, 12, 10);
+    let live_overflow = frozen_graph_ledger(startup_limits(u64::MAX, u64::MAX, 12, 12, 10));
+    let parts = StartupLedgerPlanParts {
+        batches: startup_batch_plans(Dimension::Bytes),
+        retained_attributions: [
+            StartupRetainedAttribution::new(Phase::Build, Dimension::Bytes, u64::MAX),
+            StartupRetainedAttribution::new(Phase::Build, Dimension::Bytes, 0),
+        ],
+        account_shares: startup_account_shares(),
+        commitments: startup_commitments(Dimension::Records, Dimension::Records),
+    };
     assert!(matches!(
-        live_overflow.try_qualify_startup(
-            startup_batch_plans(Dimension::Bytes),
-            [
-                StartupRetainedAttribution::new(Phase::Build, Dimension::Bytes, u64::MAX,),
-                StartupRetainedAttribution::new(Phase::Build, Dimension::Bytes, 0),
-            ],
-            startup_account_shares(),
-            startup_commitments(Dimension::Records, Dimension::Records),
-        ),
+        preflight_startup(&live_overflow, &parts),
         Err(LedgerCause::ArithmeticOverflow {
             class: CounterClass::Live,
             dimension: Dimension::Bytes,
@@ -570,19 +653,20 @@ fn startup_qualification_checks_live_dimension_and_operation_limits() {
 }
 
 #[test]
-fn startup_qualification_aggregates_four_account_shares() {
+fn startup_preflight_aggregates_four_account_shares() {
     let batches = startup_batch_plans(Dimension::Bytes);
     let total_live = startup_batch_bytes(&batches)
         .checked_add(8)
         .expect("test live envelope");
-    let attempted_limited = startup_limits(total_live, total_live, 11, 11, 10);
+    let attempted_limited = frozen_graph_ledger(startup_limits(total_live, total_live, 11, 11, 10));
+    let mut parts = StartupLedgerPlanParts {
+        batches,
+        retained_attributions: startup_attributions(Dimension::Bytes, Dimension::Bytes),
+        account_shares: startup_account_shares(),
+        commitments: startup_commitments(Dimension::Records, Dimension::Records),
+    };
     assert!(matches!(
-        attempted_limited.try_qualify_startup(
-            batches,
-            startup_attributions(Dimension::Bytes, Dimension::Bytes),
-            startup_account_shares(),
-            startup_commitments(Dimension::Records, Dimension::Records),
-        ),
+        preflight_startup(&attempted_limited, &parts),
         Err(LedgerCause::LimitExceeded {
             class: CounterClass::Attempted,
             dimension: Dimension::Records,
@@ -591,15 +675,9 @@ fn startup_qualification_aggregates_four_account_shares() {
         })
     ));
 
-    let batches = startup_batch_plans(Dimension::Bytes);
-    let consumed_limited = startup_limits(total_live, total_live, 12, 11, 10);
+    let consumed_limited = frozen_graph_ledger(startup_limits(total_live, total_live, 12, 11, 10));
     assert!(matches!(
-        consumed_limited.try_qualify_startup(
-            batches,
-            startup_attributions(Dimension::Bytes, Dimension::Bytes),
-            startup_account_shares(),
-            startup_commitments(Dimension::Records, Dimension::Records),
-        ),
+        preflight_startup(&consumed_limited, &parts),
         Err(LedgerCause::LimitExceeded {
             class: CounterClass::Consumed,
             dimension: Dimension::Records,
@@ -608,18 +686,19 @@ fn startup_qualification_aggregates_four_account_shares() {
         })
     ));
 
-    let batches = startup_batch_plans(Dimension::Bytes);
-    let share_overflow = startup_limits(total_live, total_live, u64::MAX, u64::MAX, 10);
+    let share_overflow = frozen_graph_ledger(startup_limits(
+        total_live,
+        total_live,
+        u64::MAX,
+        u64::MAX,
+        10,
+    ));
+    parts.account_shares = StartupAccountShareEnvelope::four_identical([
+        (Dimension::Records, u64::MAX),
+        (Dimension::Records, 0),
+    ]);
     assert!(matches!(
-        share_overflow.try_qualify_startup(
-            batches,
-            startup_attributions(Dimension::Bytes, Dimension::Bytes),
-            StartupAccountShareEnvelope::four_identical([
-                (Dimension::Records, u64::MAX),
-                (Dimension::Records, 0),
-            ]),
-            startup_commitments(Dimension::Records, Dimension::Records),
-        ),
+        preflight_startup(&share_overflow, &parts),
         Err(LedgerCause::ArithmeticOverflow {
             class: CounterClass::Attempted,
             dimension: Dimension::Records,
@@ -628,19 +707,20 @@ fn startup_qualification_aggregates_four_account_shares() {
 }
 
 #[test]
-fn startup_qualification_checked_sums_outcome_evidence_commitments() {
+fn startup_preflight_checked_sums_outcome_evidence_commitments() {
     let batches = startup_batch_plans(Dimension::Bytes);
     let total_live = startup_batch_bytes(&batches)
         .checked_add(8)
         .expect("test live envelope");
-    let evidence_limited = startup_limits(total_live, total_live, 12, 12, 9);
+    let evidence_limited = frozen_graph_ledger(startup_limits(total_live, total_live, 12, 12, 9));
+    let mut parts = StartupLedgerPlanParts {
+        batches,
+        retained_attributions: startup_attributions(Dimension::Bytes, Dimension::Bytes),
+        account_shares: startup_account_shares(),
+        commitments: startup_commitments(Dimension::Records, Dimension::Records),
+    };
     assert!(matches!(
-        evidence_limited.try_qualify_startup(
-            batches,
-            startup_attributions(Dimension::Bytes, Dimension::Bytes),
-            startup_account_shares(),
-            startup_commitments(Dimension::Records, Dimension::Records),
-        ),
+        preflight_startup(&evidence_limited, &parts),
         Err(LedgerCause::LimitExceeded {
             class: CounterClass::PublishedOutcomeEvidence,
             dimension: Dimension::Records,
@@ -649,18 +729,14 @@ fn startup_qualification_checked_sums_outcome_evidence_commitments() {
         })
     ));
 
-    let batches = startup_batch_plans(Dimension::Bytes);
-    let overflow_limits = startup_limits(total_live, total_live, 12, 12, u64::MAX);
+    let overflow_ledger =
+        frozen_graph_ledger(startup_limits(total_live, total_live, 12, 12, u64::MAX));
+    parts.commitments = [
+        OutputCommitment::new(Dimension::Records, u64::MAX),
+        OutputCommitment::new(Dimension::Records, 1),
+    ];
     assert!(matches!(
-        overflow_limits.try_qualify_startup(
-            batches,
-            startup_attributions(Dimension::Bytes, Dimension::Bytes),
-            startup_account_shares(),
-            [
-                OutputCommitment::new(Dimension::Records, u64::MAX),
-                OutputCommitment::new(Dimension::Records, 1),
-            ],
-        ),
+        preflight_startup(&overflow_ledger, &parts),
         Err(LedgerCause::ArithmeticOverflow {
             class: CounterClass::PublishedOutcomeEvidence,
             dimension: Dimension::Records,
@@ -669,15 +745,257 @@ fn startup_qualification_checked_sums_outcome_evidence_commitments() {
 }
 
 #[test]
+fn startup_preflight_includes_existing_live_and_observed_work() {
+    let (_, parts, covers) = default_graph_request();
+    let total_live = covers
+        .into_iter()
+        .try_fold(8_u64, u64::checked_add)
+        .expect("startup live envelope");
+    for (operation_limit, dimension_limit, fits) in [
+        (total_live + 11, total_live + 11, true),
+        (total_live + 10, u64::MAX, false),
+        (u64::MAX, total_live + 10, false),
+    ] {
+        let ledger = frozen_graph_ledger(graph_limits(
+            operation_limit,
+            dimension_limit,
+            u64::MAX,
+            19,
+            15,
+        ));
+        ledger
+            .charge_attempted(Dimension::Records, 7)
+            .expect("existing attempted work");
+        ledger
+            .charge_consumed(Dimension::Records, 3)
+            .expect("existing consumed work");
+        let live = ledger
+            .reserve(Phase::Build, Dimension::Bytes, 11)
+            .expect("existing live bytes");
+
+        if fits {
+            assert_eq!(preflight_startup(&ledger, &parts), Ok(()));
+        } else {
+            assert_eq!(
+                preflight_startup(&ledger, &parts),
+                Err(LedgerCause::LimitExceeded {
+                    class: CounterClass::Live,
+                    dimension: Dimension::Bytes,
+                    value: total_live + 11,
+                    limit: total_live + 10,
+                })
+            );
+        }
+        assert_eq!(
+            ledger_graph_observation(&ledger),
+            (11, 1, 11, 0, 0, 7, 3, 0)
+        );
+        drop(live);
+    }
+}
+
+#[test]
+fn startup_preflight_uses_current_share_policy_and_pending_consumption() {
+    let (limits, parts, _) = default_graph_request();
+    let ledger = frozen_graph_ledger(limits);
+    let work = ledger
+        .bind_work([Dimension::Records])
+        .expect("share work binding");
+    let pending = work
+        .admit_observed([4], super::super::WorkLane::Internal)
+        .expect("existing pending work");
+    ledger
+        .tighten_dimension_policy(
+            Dimension::Records,
+            DimensionPolicy::counter(16, 16, u64::MAX)
+                .with_published_outcome_evidence_limit(u64::MAX),
+        )
+        .expect("exact share headroom");
+    assert_eq!(preflight_startup(&ledger, &parts), Ok(()));
+
+    ledger
+        .tighten_dimension_policy(
+            Dimension::Records,
+            DimensionPolicy::counter(16, 15, u64::MAX)
+                .with_published_outcome_evidence_limit(u64::MAX),
+        )
+        .expect("one-short current share headroom");
+    assert_eq!(
+        preflight_startup(&ledger, &parts),
+        Err(LedgerCause::LimitExceeded {
+            class: CounterClass::Consumed,
+            dimension: Dimension::Records,
+            value: 16,
+            limit: 15,
+        })
+    );
+    assert_eq!(ledger_graph_observation(&ledger), (0, 0, 0, 0, 0, 4, 0, 0));
+    pending
+        .finish_partial()
+        .expect("release existing pending work");
+    assert_eq!(preflight_startup(&ledger, &parts), Ok(()));
+}
+
+#[test]
+fn startup_preflight_includes_current_outcome_evidence_and_policy() {
+    let (limits, parts, _) = default_graph_request();
+    let ledger = frozen_graph_ledger(limits);
+    {
+        let mut state = lock(&ledger.state);
+        let records = state
+            .dimensions
+            .iter_mut()
+            .find(|entry| entry.dimension == Dimension::Records)
+            .expect("record dimension");
+        records.state.published_outcome_evidence = 1;
+    }
+    ledger
+        .tighten_dimension_policy(
+            Dimension::Records,
+            DimensionPolicy::counter(u64::MAX, u64::MAX, u64::MAX)
+                .with_published_outcome_evidence_limit(11),
+        )
+        .expect("exact evidence headroom");
+    assert_eq!(preflight_startup(&ledger, &parts), Ok(()));
+
+    ledger
+        .tighten_dimension_policy(
+            Dimension::Records,
+            DimensionPolicy::counter(u64::MAX, u64::MAX, u64::MAX)
+                .with_published_outcome_evidence_limit(10),
+        )
+        .expect("one-short evidence headroom");
+    assert_eq!(
+        preflight_startup(&ledger, &parts),
+        Err(LedgerCause::LimitExceeded {
+            class: CounterClass::PublishedOutcomeEvidence,
+            dimension: Dimension::Records,
+            value: 11,
+            limit: 10,
+        })
+    );
+
+    {
+        let mut state = lock(&ledger.state);
+        let records = state
+            .dimensions
+            .iter_mut()
+            .find(|entry| entry.dimension == Dimension::Records)
+            .expect("record dimension");
+        records.state.published_outcome_evidence = u64::MAX;
+    }
+    assert_eq!(
+        preflight_startup(&ledger, &parts),
+        Err(LedgerCause::ArithmeticOverflow {
+            class: CounterClass::PublishedOutcomeEvidence,
+            dimension: Dimension::Records,
+        })
+    );
+}
+
+#[test]
+fn startup_preflight_preserves_live_work_and_commitment_error_order() {
+    let (_, mut parts, covers) = default_graph_request();
+    let total_live = covers
+        .into_iter()
+        .try_fold(8_u64, u64::checked_add)
+        .expect("startup live envelope");
+    let ledger = frozen_graph_ledger(graph_limits(u64::MAX, total_live - 1, u64::MAX, 11, 11));
+    parts.account_shares = StartupAccountShareEnvelope::four_identical([
+        (Dimension::Unknown, 1),
+        (Dimension::Records, 2),
+    ]);
+    parts.commitments[0] = OutputCommitment::new(Dimension::Unknown, 4);
+    assert_eq!(
+        preflight_startup(&ledger, &parts),
+        Err(LedgerCause::LimitExceeded {
+            class: CounterClass::Live,
+            dimension: Dimension::Bytes,
+            value: total_live,
+            limit: total_live - 1,
+        })
+    );
+
+    let ledger = frozen_graph_ledger(graph_limits(u64::MAX, u64::MAX, u64::MAX, 11, 11));
+    parts.account_shares = startup_account_shares();
+    assert_eq!(
+        preflight_startup(&ledger, &parts),
+        Err(LedgerCause::LimitExceeded {
+            class: CounterClass::Attempted,
+            dimension: Dimension::Records,
+            value: 12,
+            limit: 11,
+        })
+    );
+
+    let ledger = frozen_graph_ledger(graph_limits(u64::MAX, u64::MAX, u64::MAX, 3, 3));
+    parts.account_shares = StartupAccountShareEnvelope::four_identical([
+        (Dimension::Records, 1),
+        (Dimension::Bytes, u64::MAX),
+    ]);
+    assert_eq!(
+        preflight_startup(&ledger, &parts),
+        Err(LedgerCause::LimitExceeded {
+            class: CounterClass::Attempted,
+            dimension: Dimension::Records,
+            value: 4,
+            limit: 3,
+        })
+    );
+    parts.account_shares = StartupAccountShareEnvelope::four_identical([
+        (Dimension::Bytes, u64::MAX),
+        (Dimension::Records, 1),
+    ]);
+    assert_eq!(
+        preflight_startup(&ledger, &parts),
+        Err(LedgerCause::ArithmeticOverflow {
+            class: CounterClass::Attempted,
+            dimension: Dimension::Bytes,
+        })
+    );
+}
+
+#[test]
+fn startup_preflight_checks_current_publication_before_deferred_bindings() {
+    use super::super::PublicationState;
+
+    for (publication, cause) in [
+        (
+            PublicationState::Closing,
+            LedgerCause::PublicationAlreadyPending,
+        ),
+        (
+            PublicationState::Pending,
+            LedgerCause::PublicationAlreadyPending,
+        ),
+        (
+            PublicationState::TerminalQualified,
+            LedgerCause::PublicationAlreadyCompleted,
+        ),
+        (
+            PublicationState::Published,
+            LedgerCause::PublicationAlreadyCompleted,
+        ),
+    ] {
+        let (limits, mut parts, _) = default_graph_request();
+        let ledger = frozen_graph_ledger(limits);
+        lock(&ledger.state).publication = publication;
+        parts.batches.canonical_assembly.phase = Phase::Unknown;
+        assert_eq!(preflight_startup(&ledger, &parts), Err(cause));
+    }
+}
+
+#[test]
 fn startup_graph_owns_exact_envelopes_and_drops_storage_before_one_ledger_rollback() {
     test_reset_startup_graph_probes(None);
-    let (limits, parts, covers) = default_qualified_graph();
+    let (limits, parts, covers) = default_graph_request();
     let ledger = frozen_graph_ledger(limits);
     let total_live = covers
         .into_iter()
         .try_fold(8_u64, u64::checked_add)
         .expect("startup graph live bytes");
 
+    assert_eq!(preflight_startup(&ledger, &parts), Ok(()));
     let (graph, account_shares) = ledger
         .try_admit_startup_attribution_graph(parts)
         .expect("startup graph admission")
@@ -744,7 +1062,7 @@ fn startup_graph_owns_exact_envelopes_and_drops_storage_before_one_ledger_rollba
 #[test]
 fn startup_graph_accounts_cross_dimension_and_phase_reservations_exactly() {
     test_reset_startup_graph_probes(None);
-    let (limits, parts, covers) = qualify_graph(
+    let (limits, parts, covers) = graph_request(
         [Phase::Build, Phase::Finalize, Phase::Build, Phase::Finalize],
         [
             Dimension::Bytes,
@@ -758,6 +1076,7 @@ fn startup_graph_accounts_cross_dimension_and_phase_reservations_exactly() {
         ],
     );
     let ledger = frozen_graph_ledger(limits);
+    assert_eq!(preflight_startup(&ledger, &parts), Ok(()));
     let graph = ledger
         .try_admit_startup_attribution_graph(parts)
         .expect("cross-phase startup graph");
@@ -835,7 +1154,7 @@ fn startup_graph_rejects_missing_terminal_slots_before_ledger_or_allocator_side_
         graph_batch_plans_with_terminal_limits(1, 1, 1, 0),
     ] {
         test_reset_startup_graph_probes(None);
-        let (limits, parts, _) = qualify_graph_from_batches(
+        let (limits, parts, _) = graph_request_from_batches(
             batches,
             [
                 StartupRetainedAttribution::new(Phase::Build, Dimension::Bytes, 3),
@@ -845,6 +1164,10 @@ fn startup_graph_rejects_missing_terminal_slots_before_ledger_or_allocator_side_
         let ledger = frozen_graph_ledger(limits);
         let before = ledger_graph_observation(&ledger);
 
+        assert!(matches!(
+            ledger.preflight_startup_attribution_graph(&parts),
+            Err(AttributionBatchCreateError::CapacityOverflow)
+        ));
         assert!(matches!(
             ledger.try_admit_startup_attribution_graph(parts),
             Err(AttributionBatchCreateError::CapacityOverflow)
@@ -883,22 +1206,38 @@ fn startup_graph_commit_tail_is_infallible_and_has_no_dynamic_phase_path() {
         .split("fn try_admit_startup_ledger(")
         .nth(1)
         .expect("startup ledger admission exists")
-        .split("fn preflight_startup_ledger(")
+        .split("fn bind_startup_ledger(")
         .next()
         .expect("startup admission boundary exists");
-    assert!(admission.contains("preflight_startup_ledger"));
+    assert_eq!(admission.matches("preflight_startup_ledger(").count(), 1);
+    assert_eq!(admission.matches("bind_startup_ledger(").count(), 1);
     assert!(admission.contains("commit_startup_ledger"));
     assert!(!admission.contains("try_reserve"));
     assert!(!admission.contains("ensure_phase"));
+    let preflight = startup
+        .split("pub(crate) fn preflight_startup_attribution_graph(")
+        .nth(1)
+        .expect("read-only startup graph preflight exists")
+        .split("pub(crate) fn try_bind_startup_attribution_graph(")
+        .next()
+        .expect("read-only preflight boundary exists");
+    assert_eq!(preflight.matches("bind_startup_ledger(").count(), 1);
+    assert_eq!(preflight.matches("preflight_startup_ledger(").count(), 1);
+    assert!(!preflight.contains("commit_startup_ledger"));
+    assert!(!admission.contains("preflight_startup_attribution_graph"));
 }
 
 #[test]
 fn startup_graph_rejects_unknown_phase_and_invalid_dimensions_without_a_prefix() {
     test_reset_startup_graph_probes(None);
-    let (limits, parts, _) = default_qualified_graph();
+    let (limits, parts, _) = default_graph_request();
     let ledger = Ledger::<Owner, Phase, Dimension>::try_new(limits, &[])
         .expect("empty frozen catalog is valid for an unknown-phase fixture");
     let before = ledger_graph_observation(&ledger);
+    assert_eq!(
+        preflight_startup(&ledger, &parts),
+        Err(LedgerCause::UnknownPhase)
+    );
     assert!(matches!(
         ledger.try_admit_startup_attribution_graph(parts),
         Err(AttributionBatchCreateError::Ledger(
@@ -909,7 +1248,7 @@ fn startup_graph_rejects_unknown_phase_and_invalid_dimensions_without_a_prefix()
     assert_eq!(test_startup_graph_allocation_entries(), 0);
 
     test_reset_startup_graph_probes(None);
-    let (limits, parts, _) = qualify_graph(
+    let (limits, parts, _) = graph_request(
         [Phase::Unknown, Phase::Build, Phase::Build, Phase::Build],
         [Dimension::Bytes; 4],
         [
@@ -919,6 +1258,10 @@ fn startup_graph_rejects_unknown_phase_and_invalid_dimensions_without_a_prefix()
     );
     let ledger = frozen_graph_ledger(limits);
     let before = ledger_graph_observation(&ledger);
+    assert_eq!(
+        preflight_startup(&ledger, &parts),
+        Err(LedgerCause::UnknownPhase)
+    );
     assert!(matches!(
         ledger.try_admit_startup_attribution_graph(parts),
         Err(AttributionBatchCreateError::Ledger(
@@ -929,10 +1272,16 @@ fn startup_graph_rejects_unknown_phase_and_invalid_dimensions_without_a_prefix()
     assert_eq!(test_startup_graph_allocation_entries(), 0);
 
     test_reset_startup_graph_probes(None);
-    let (limits, mut parts, _) = default_qualified_graph();
+    let (limits, mut parts, _) = default_graph_request();
     parts.batches.canonical_assembly.capacity_dimension = Dimension::Unknown;
     let ledger = frozen_graph_ledger(limits);
     let before = ledger_graph_observation(&ledger);
+    assert_eq!(
+        preflight_startup(&ledger, &parts),
+        Err(LedgerCause::UnknownDimension {
+            dimension: Dimension::Unknown,
+        })
+    );
     assert!(matches!(
         ledger.try_admit_startup_attribution_graph(parts),
         Err(AttributionBatchCreateError::Ledger(
@@ -945,10 +1294,16 @@ fn startup_graph_rejects_unknown_phase_and_invalid_dimensions_without_a_prefix()
     assert_eq!(test_startup_graph_allocation_entries(), 0);
 
     test_reset_startup_graph_probes(None);
-    let (limits, mut parts, _) = default_qualified_graph();
+    let (limits, mut parts, _) = default_graph_request();
     parts.batches.canonical_assembly.capacity_dimension = Dimension::Records;
     let ledger = frozen_graph_ledger(limits);
     let before = ledger_graph_observation(&ledger);
+    assert_eq!(
+        preflight_startup(&ledger, &parts),
+        Err(LedgerCause::DimensionNotReservable {
+            dimension: Dimension::Records,
+        })
+    );
     assert!(matches!(
         ledger.try_admit_startup_attribution_graph(parts),
         Err(AttributionBatchCreateError::Ledger(
@@ -964,7 +1319,7 @@ fn startup_graph_rejects_unknown_phase_and_invalid_dimensions_without_a_prefix()
 #[test]
 fn startup_graph_runtime_live_work_and_commitment_limits_are_atomic() {
     test_reset_startup_graph_probes(None);
-    let (_, parts, covers) = default_qualified_graph();
+    let (_, parts, covers) = default_graph_request();
     let total_live = covers
         .into_iter()
         .try_fold(8_u64, u64::checked_add)
@@ -992,7 +1347,7 @@ fn startup_graph_runtime_live_work_and_commitment_limits_are_atomic() {
     assert_eq!(test_startup_graph_allocation_entries(), 0);
 
     test_reset_startup_graph_probes(None);
-    let (_, parts, covers) = default_qualified_graph();
+    let (_, parts, covers) = default_graph_request();
     let total_live = covers
         .into_iter()
         .try_fold(8_u64, u64::checked_add)
@@ -1020,7 +1375,7 @@ fn startup_graph_runtime_live_work_and_commitment_limits_are_atomic() {
     assert_eq!(test_startup_graph_allocation_entries(), 0);
 
     test_reset_startup_graph_probes(None);
-    let (_, parts, _) = default_qualified_graph();
+    let (_, parts, _) = default_graph_request();
     let ledger = frozen_graph_ledger(graph_limits(u64::MAX, u64::MAX, u64::MAX, 11, 11));
     let before = ledger_graph_observation(&ledger);
     assert!(matches!(
@@ -1038,7 +1393,7 @@ fn startup_graph_runtime_live_work_and_commitment_limits_are_atomic() {
     assert_eq!(test_startup_graph_allocation_entries(), 0);
 
     test_reset_startup_graph_probes(None);
-    let (_, parts, _) = default_qualified_graph();
+    let (_, parts, _) = default_graph_request();
     let ledger = frozen_graph_ledger(graph_limits(u64::MAX, u64::MAX, u64::MAX, u64::MAX, 11));
     let before = ledger_graph_observation(&ledger);
     assert!(matches!(
@@ -1056,7 +1411,7 @@ fn startup_graph_runtime_live_work_and_commitment_limits_are_atomic() {
     assert_eq!(test_startup_graph_allocation_entries(), 0);
 
     test_reset_startup_graph_probes(None);
-    let (_, parts, _) = default_qualified_graph();
+    let (_, parts, _) = default_graph_request();
     let ledger = frozen_graph_ledger(graph_limits_with_published(
         u64::MAX,
         u64::MAX,
@@ -1084,7 +1439,7 @@ fn startup_graph_runtime_live_work_and_commitment_limits_are_atomic() {
 #[test]
 fn startup_graph_overflow_checks_leave_all_prior_ledger_state_unchanged() {
     test_reset_startup_graph_probes(None);
-    let (limits, parts, _) = default_qualified_graph();
+    let (limits, parts, _) = default_graph_request();
     let ledger = frozen_graph_ledger(limits);
     ledger
         .charge_attempted(Dimension::Records, u64::MAX)
@@ -1093,6 +1448,13 @@ fn startup_graph_overflow_checks_leave_all_prior_ledger_state_unchanged() {
         .charge_consumed(Dimension::Records, u64::MAX)
         .expect("maximum consumed baseline");
     let before = ledger_graph_observation(&ledger);
+    assert_eq!(
+        preflight_startup(&ledger, &parts),
+        Err(LedgerCause::ArithmeticOverflow {
+            class: CounterClass::Attempted,
+            dimension: Dimension::Records,
+        })
+    );
     assert!(matches!(
         ledger.try_admit_startup_attribution_graph(parts),
         Err(AttributionBatchCreateError::Ledger(
@@ -1106,12 +1468,19 @@ fn startup_graph_overflow_checks_leave_all_prior_ledger_state_unchanged() {
     assert_eq!(test_startup_graph_allocation_entries(), 0);
 
     test_reset_startup_graph_probes(None);
-    let (limits, parts, _) = default_qualified_graph();
+    let (limits, parts, _) = default_graph_request();
     let ledger = frozen_graph_ledger(limits);
     let live = ledger
         .reserve(Phase::Build, Dimension::Bytes, u64::MAX)
         .expect("maximum live baseline");
     let before = ledger_graph_observation(&ledger);
+    assert_eq!(
+        preflight_startup(&ledger, &parts),
+        Err(LedgerCause::ArithmeticOverflow {
+            class: CounterClass::Live,
+            dimension: Dimension::Bytes,
+        })
+    );
     assert!(matches!(
         ledger.try_admit_startup_attribution_graph(parts),
         Err(AttributionBatchCreateError::Ledger(
@@ -1126,13 +1495,20 @@ fn startup_graph_overflow_checks_leave_all_prior_ledger_state_unchanged() {
     drop(live);
 
     test_reset_startup_graph_probes(None);
-    let (limits, parts, _) = default_qualified_graph();
+    let (limits, parts, _) = default_graph_request();
     let ledger = frozen_graph_ledger(limits);
     {
         let mut state = lock(&ledger.state);
         state.active_reservations = u64::MAX;
     }
     let before = ledger_graph_observation(&ledger);
+    assert_eq!(
+        preflight_startup(&ledger, &parts),
+        Err(LedgerCause::ArithmeticOverflow {
+            class: CounterClass::Live,
+            dimension: Dimension::Bytes,
+        })
+    );
     assert!(matches!(
         ledger.try_admit_startup_attribution_graph(parts),
         Err(AttributionBatchCreateError::Ledger(
@@ -1147,7 +1523,7 @@ fn startup_graph_overflow_checks_leave_all_prior_ledger_state_unchanged() {
     lock(&ledger.state).active_reservations = 0;
 
     test_reset_startup_graph_probes(None);
-    let (limits, parts, _) = default_qualified_graph();
+    let (limits, parts, _) = default_graph_request();
     let ledger = frozen_graph_ledger(limits);
     let build_position = ledger
         .bound_phase_position(Phase::Build)
@@ -1161,6 +1537,13 @@ fn startup_graph_overflow_checks_leave_all_prior_ledger_state_unchanged() {
         .phase_evidence(Phase::Build)
         .expect("build phase evidence");
     let before = ledger_graph_observation(&ledger);
+    assert_eq!(
+        preflight_startup(&ledger, &parts),
+        Err(LedgerCause::ArithmeticOverflow {
+            class: CounterClass::Live,
+            dimension: Dimension::Bytes,
+        })
+    );
     assert!(matches!(
         ledger.try_admit_startup_attribution_graph(parts),
         Err(AttributionBatchCreateError::Ledger(
@@ -1188,7 +1571,7 @@ fn startup_graph_overflow_checks_leave_all_prior_ledger_state_unchanged() {
 fn every_startup_graph_allocator_failure_drops_eight_backings_then_rolls_back_six_cores_once() {
     for failure_index in 0..8 {
         test_reset_startup_graph_probes(Some(failure_index));
-        let (limits, parts, _) = default_qualified_graph();
+        let (limits, parts, _) = default_graph_request();
         let ledger = frozen_graph_ledger(limits);
 
         assert!(matches!(
@@ -1218,7 +1601,7 @@ fn startup_graph_allocator_failpoints_are_thread_local() {
         .map(|failure_index| {
             std::thread::spawn(move || {
                 test_reset_startup_graph_probes(Some(failure_index));
-                let (limits, parts, _) = default_qualified_graph();
+                let (limits, parts, _) = default_graph_request();
                 let ledger = frozen_graph_ledger(limits);
 
                 assert!(matches!(

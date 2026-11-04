@@ -159,12 +159,16 @@ impl Format for ObjImporter {
         &self,
         probe: &Probe<'_>,
         hint: &ReadHint,
-        scope: &DetectionScope<'_>,
+        scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         detect::can_read(probe, hint, scope)
     }
 
-    fn parse(&self, options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         parser::read_obj(options, context)
     }
 }

@@ -7,8 +7,9 @@ use crate::retained::{
     ExecutionPermit, ExecutionServices, ExecutionWork,
 };
 pub use exclusive::{
-    StoreExtensionResult, StoreFailureStorage, StoreImporterBoundary, StoreInvocation,
-    StoreInvocationError, StoreInvocationLayout, StoreInvocationParser,
+    StoreActionExecution, StoreChildAdmission, StoreExtensionResult, StoreFailureStorage,
+    StoreImporterBoundary, StoreInvocation, StoreInvocationError, StoreInvocationLayout,
+    StoreInvocationParser, StoreInvocationServices, StoreScanReturn,
 };
 
 /// Work authority borrowed from one active invocation, separate from its storage and control.
@@ -568,7 +569,9 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit>
     }
 }
 
-impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, L> RetainedStoreOperation<O, PP, U, L> {
+impl<'inv, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, L>
+    RetainedStoreOperation<'inv, O, PP, U, L>
+{
     /// Lends concrete disjoint execution capabilities until the consuming transition begins.
     #[allow(
         clippy::type_complexity,

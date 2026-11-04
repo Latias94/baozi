@@ -51,7 +51,10 @@ fn measured_scene(
     );
     let mut result = None;
     let allocations = allocation_counter::measure(|| {
+        let mut invocation_root_1 =
+            crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
         let build = NodeSceneTestTransaction::with_account(
+            &mut invocation_root_1,
             account,
             test_limits(),
             input,
@@ -100,9 +103,12 @@ fn measured_edit(
         .expect("scale transform edit planning") else {
             panic!("the replacement transform must differ from the input");
         };
+        let mut root =
+            crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
         result = Some(
             pending
                 .prepare(
+                    &mut root,
                     source.as_node_scene(),
                     test_limits(),
                     OperationControl::default(),
@@ -230,7 +236,10 @@ fn storage_scale_pipeline_preserves_admission_budget_and_cancellation() {
         profile.batch(),
     );
 
+    let mut invocation_root_2 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let denied = NodeSceneTestTransaction::with_account(
+        &mut invocation_root_2,
         &account,
         SceneConstructionLimits {
             operation_live_bytes: 0,
@@ -238,12 +247,18 @@ fn storage_scale_pipeline_preserves_admission_budget_and_cancellation() {
         },
         input,
         SceneValidationLimits::default(),
-    );
+    )
+    .map_err(crate::canonical_scene::store::construction::SceneConstructionError::from)
+    .and_then(|operation| operation.finish_draft());
     assert!(denied.is_err(), "zero-byte operation admission must fail");
     drop(denied);
+    drop(invocation_root_2);
     assert_account_released(&account);
 
+    let mut invocation_root_3 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let build = NodeSceneTestTransaction::with_account(
+        &mut invocation_root_3,
         &account,
         test_limits_with_work(10),
         input,
@@ -268,11 +283,15 @@ fn storage_scale_pipeline_preserves_admission_budget_and_cancellation() {
     assert_eq!(work.attempted(), 11);
     assert_eq!(work.consumed(), 10);
     assert_eq!(work.committed_canonical_output(), 0);
+    drop(invocation_root_3);
     assert_released(failure, &account);
 
     let cancellation = CancelOnSignalPoll::new();
     cancellation.cancel_after_additional_polls(1);
+    let mut invocation_root_4 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let build = NodeSceneTestTransaction::with_account_and_cancellation(
+        &mut invocation_root_4,
         &account,
         test_limits(),
         input,
@@ -295,6 +314,7 @@ fn storage_scale_pipeline_preserves_admission_budget_and_cancellation() {
             .committed_canonical_output(),
         0
     );
+    drop(invocation_root_4);
     assert_released(failure, &account);
 }
 

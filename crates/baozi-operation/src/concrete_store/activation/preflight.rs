@@ -4,6 +4,23 @@ use crate::concrete_store::{StoreExecutionServices, StoreExecutionWork};
 #[cfg(test)]
 mod tests;
 
+fn reject_semantic_entry<F, E>(
+    body: ManuallyDrop<Option<F>>,
+    first_fault: &mut Option<ActivationFirstFault>,
+    cause: StoreRuntimeError,
+) -> CanonicalSemanticWorkError<E> {
+    let _ = preserve_first_fault::<()>(first_fault, Err(cause));
+    if drop_optional_callback(body).is_err() {
+        note_later_contract::<()>(
+            first_fault,
+            Err(StoreRuntimeError::ConstructionInvariantUnverified),
+        );
+    }
+    CanonicalSemanticWorkError::Runtime(
+        preserved_fault(first_fault).unwrap_or(StoreRuntimeError::ConstructionInvariantUnverified),
+    )
+}
+
 fn canonical_build_work(units: Option<usize>) -> Result<NonZeroU64, StoreRuntimeError> {
     let units = units.ok_or(StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
     let units =
@@ -12,7 +29,7 @@ fn canonical_build_work(units: Option<usize>) -> Result<NonZeroU64, StoreRuntime
 }
 
 fn contain_dormant_activation<O, PP, U, L>(
-    dormant: ScopedDormantActivation<O, PP, U, L>,
+    dormant: ScopedDormantActivation<'_, O, PP, U, L>,
 ) -> StoreActivationContainment
 where
     O: OperationOwner,
@@ -25,7 +42,7 @@ where
     }
 }
 
-impl<O, PP, U, L> RetainedStoreOperation<O, PP, U, L>
+impl<'inv, O, PP, U, L> RetainedStoreOperation<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -66,7 +83,8 @@ where
         policy: CanonicalActivationSessionPolicy,
         outcome_evidence_writer_limits: RetainedStoreBatchLimits,
         failure_requirements: CanonicalFailureRequirements,
-    ) -> Result<RetainedStoreSessionOutcomeOwner<O, PP, U, L>, StoreActivationContainment> {
+    ) -> Result<RetainedStoreSessionOutcomeOwner<'inv, O, PP, U, L>, StoreActivationContainment>
+    {
         let (canonical_phase, canonical_dimensions) =
             policy.canonical_writer.keys_for_publication_validation();
         let outcome_evidence_writer = policy
@@ -127,7 +145,7 @@ where
     }
 }
 
-impl<O, PP, U, L> RetainedStoreSessionOutcomeOwner<O, PP, U, L>
+impl<'inv, O, PP, U, L> RetainedStoreSessionOutcomeOwner<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -164,6 +182,21 @@ where
         StoreRuntimeError,
     > {
         self.dormant.operation_mut().execution()
+    }
+
+    /// Lends the existing root with the ordinary loan's original entry checkpoint.
+    /// Owned callback results leave after numeric cleanup; the caller's next explicit frontier
+    /// or root entry observes any recorded failure, as with the original ordinary loan.
+    pub fn with_root_execution<R, E: From<crate::concrete_store::StoreInvocationError>>(
+        &mut self,
+        boundary: &crate::concrete_store::StoreImporterBoundary,
+        body: impl for<'op> FnOnce(
+            &mut crate::concrete_store::StoreInvocation<'op, O, PP, U>,
+        ) -> Result<R, E>,
+    ) -> Result<R, E> {
+        self.dormant
+            .operation_mut()
+            .with_root_execution(boundary, body)
     }
 
     /// Lends the existing Dormant root to the one executor; activation authority never escapes.
@@ -227,14 +260,15 @@ where
     )]
     pub fn reject_without_activation<T, E, CanonicalKind, CanonicalTag>(
         self,
+        activation: CanonicalActivationSlots<'inv, E>,
         cause: E,
         stable_code: u32,
     ) -> Result<
-        CanonicalActivationOutcome<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+        CanonicalActivationOutcome<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
         StoreActivationContainment,
     > {
         let mut cause = Some(cause);
-        self.plan_and_activate_scoped(move |planning| {
+        self.run_plan_and_activate_scoped(None, activation, move |planning| {
             planning.reject(
                 cause
                     .take()
@@ -256,14 +290,16 @@ where
     )]
     pub fn plan_and_activate_scoped<T, E, CanonicalKind, CanonicalTag>(
         self,
+        output: CanonicalOutputSlot<'inv, T>,
+        activation: CanonicalActivationSlots<'inv, E>,
         transaction: impl for<'scope> FnMut(
-            CanonicalPlanning<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+            CanonicalPlanning<'inv, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
         ) -> CanonicalScopedDisposition<'scope>,
     ) -> Result<
-        CanonicalActivationOutcome<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+        CanonicalActivationOutcome<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
         StoreActivationContainment,
     > {
-        self.run_plan_and_activate_scoped(transaction)
+        self.run_plan_and_activate_scoped(Some(output), activation, transaction)
     }
 
     #[allow(
@@ -273,11 +309,13 @@ where
     )]
     fn run_plan_and_activate_scoped<T, E, CanonicalKind, CanonicalTag>(
         self,
+        output: Option<CanonicalOutputSlot<'inv, T>>,
+        activation: CanonicalActivationSlots<'inv, E>,
         transaction: impl for<'scope> FnMut(
-            CanonicalPlanning<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+            CanonicalPlanning<'inv, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
         ) -> CanonicalScopedDisposition<'scope>,
     ) -> Result<
-        CanonicalActivationOutcome<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+        CanonicalActivationOutcome<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
         StoreActivationContainment,
     > {
         let Self {
@@ -295,6 +333,8 @@ where
             },
             scoped_failure,
             failure_work,
+            output,
+            activation,
             transaction,
         )
     }
@@ -306,16 +346,18 @@ where
     clippy::type_complexity,
     reason = "the scoped driver keeps every linear owner inline across the complete activation transaction"
 )]
-fn run_scoped_activation<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>(
-    dormant: ScopedDormantActivation<O, PP, U, L>,
+fn run_scoped_activation<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>(
+    dormant: ScopedDormantActivation<'inv, O, PP, U, L>,
     roles: BoundActivationRoles,
     scoped_failure: BoundScopedFailureRequest,
     failure_work: FailureEvidenceWorkBudget,
+    output: Option<CanonicalOutputSlot<'inv, T>>,
+    activation: CanonicalActivationSlots<'inv, E>,
     transaction: impl for<'scope> FnMut(
-        CanonicalPlanning<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+        CanonicalPlanning<'inv, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
     ) -> CanonicalScopedDisposition<'scope>,
 ) -> Result<
-    CanonicalActivationOutcome<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+    CanonicalActivationOutcome<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
     StoreActivationContainment,
 >
 where
@@ -324,11 +366,18 @@ where
     U: ProgressUnit,
 {
     let planning_baseline = dormant.operation().raw.planning_baseline();
+    let output_is_valid = output
+        .as_ref()
+        .is_none_or(|slot| slot.is_vacant_for(dormant.operation().raw.invocation_identity()))
+        && activation.is_vacant_for(dormant.operation().raw.invocation_identity());
     let prior_failure = dormant.operation().activation_terminal_cause();
     let containment_anchor = dormant.containment_anchor.share();
     let mut transaction = ManuallyDrop::new(Some(transaction));
     let receipt_brand = ScopedReceiptBrand { _private: 0 };
     let mut driver = ScopedActivationDriver {
+        output,
+        never: Some(activation.never),
+        rejection: Some(activation.rejection),
         state: ScopedActivationState::Dormant(dormant),
         containment_anchor,
         roles: Some(roles),
@@ -339,6 +388,9 @@ where
         semantic_state: ScopedSemanticState::NotStarted,
     };
     let result = catch_unwind(AssertUnwindSafe(|| {
+        if !output_is_valid {
+            return false;
+        }
         // A selected terminal cannot lend ordinary execution. Preserve its exact code and
         // resolve the dormant owner before any semantic callback, as activation opening does.
         if let Some(failure_code) = prior_failure {
@@ -373,7 +425,7 @@ where
 }
 
 fn contain_scoped_pending<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>(
-    pending: ScopedPendingActivation<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+    pending: ScopedPendingActivation<'_, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
 ) -> StoreActivationContainment
 where
     O: OperationOwner,
@@ -432,8 +484,8 @@ where
     }
 }
 
-impl<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
-    ScopedActivationDriver<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
+impl<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
+    ScopedActivationDriver<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -464,7 +516,7 @@ where
         let _ = preserve_first_fault(first_fault, result);
     }
 
-    fn planning_is_quiescent(&self, operation: &RetainedStoreOperation<O, PP, U, L>) -> bool {
+    fn planning_is_quiescent(&self, operation: &RetainedStoreOperation<'inv, O, PP, U, L>) -> bool {
         !matches!(self.semantic_state, ScopedSemanticState::Active)
             && operation
                 .raw
@@ -473,7 +525,7 @@ where
 
     fn assembly_is_quiescent(
         &self,
-        assembly: &RetainedStorePublicationAssembly<O, PP, U, L>,
+        assembly: &RetainedStorePublicationAssembly<'inv, O, PP, U, L>,
         publication_storage_baseline: RetainedPlanningBaseline,
     ) -> bool {
         !matches!(self.semantic_state, ScopedSemanticState::Active)
@@ -484,7 +536,7 @@ where
 
     fn install_pending(
         &mut self,
-        pending: ScopedPendingActivation<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+        pending: ScopedPendingActivation<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
     ) {
         self.state = ScopedActivationState::Pending(pending);
         self.roles.take();
@@ -516,7 +568,7 @@ where
     fn finish(
         &mut self,
     ) -> Result<
-        CanonicalActivationOutcome<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+        CanonicalActivationOutcome<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
         StoreActivationContainment,
     > {
         let state = std::mem::replace(&mut self.state, ScopedActivationState::Transitioning);
@@ -640,22 +692,38 @@ where
                 return;
             }
         };
-        self.install_pending(ScopedPendingActivation::NeverActivated(
-            NeverActivatedStoreSession::runtime(
-                operation,
-                failure.outcome_evidence_plan,
-                self.failure_work,
-                failure.outcome_evidence_destination_dimension,
-                cause,
-                failure_code,
-                false,
-            ),
-        ));
+        let slot = self
+            .never
+            .take()
+            .expect("never-activation installs its cause once");
+        let pending = NeverActivatedStoreSession::runtime(
+            operation,
+            slot,
+            &failure,
+            self.failure_work,
+            cause,
+            failure_code,
+            false,
+        );
+        self.install_never_activated(pending);
+    }
+
+    fn install_never_activated(
+        &mut self,
+        pending: Result<
+            NeverActivatedStoreSession<'inv, O, PP, U, E, L>,
+            StoreActivationContainment,
+        >,
+    ) {
+        match pending {
+            Ok(pending) => self.install_pending(ScopedPendingActivation::NeverActivated(pending)),
+            Err(containment) => self.state = ScopedActivationState::Contained(containment),
+        }
     }
 }
 
-impl<O, PP, U, T, E, CanonicalKind, CanonicalTag, L> Drop
-    for ScopedActivationDriver<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
+impl<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L> Drop
+    for ScopedActivationDriver<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -671,21 +739,29 @@ where
     }
 }
 
-impl<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
-    CanonicalPlanning<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
+impl<'inv, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
+    CanonicalPlanning<'inv, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    /// Starts one semantic-work session whose actions are admitted by operation as they execute.
+    /// Runs one semantic pass while the operation owns its unique numeric loan and cleanup.
     ///
     /// No caller-declared total crosses this boundary. Each [`CanonicalSemanticWorkSession::run_unit`]
     /// call records its own attempted unit before the action and its consumed unit only after the
     /// action returns normally.
-    pub fn begin_semantic_work<'borrow>(
-        &'borrow mut self,
-    ) -> Result<CanonicalSemanticWorkSession<'borrow, 'scope, O, PP, U, L>, StoreRuntimeError> {
+    /// Plans may retain input borrows and outer-scoped reservations. The numeric session cannot
+    /// escape this callback, and sealing or activation occurs only after it has ended.
+    #[doc = include_str!("preflight/semantic_contracts.md")]
+    pub fn with_semantic_work<R, Rejection>(
+        &mut self,
+        body: impl for<'work> FnMut(
+            &mut CanonicalSemanticWorkSession<'work, 'scope, O, PP, U, L>,
+        ) -> Result<R, Rejection>,
+    ) -> Result<(R, CanonicalSemanticCompletion<'scope>), CanonicalSemanticWorkError<Rejection>>
+    {
+        let mut body = ManuallyDrop::new(Some(body));
         let receipt_brand = self.receipt_brand;
         let ScopedActivationDriver {
             state,
@@ -695,51 +771,59 @@ where
             ..
         } = self.driver;
         if !matches!(semantic_state, ScopedSemanticState::NotStarted) {
-            return preserve_first_fault(
+            *semantic_state = ScopedSemanticState::Rejected;
+            return Err(reject_semantic_entry(
+                body,
                 first_fault,
-                Err(StoreRuntimeError::ConstructionInvariantUnverified),
-            );
+                StoreRuntimeError::ConstructionInvariantUnverified,
+            ));
         }
         if let Some(cause) = preserved_fault(first_fault) {
             *semantic_state = ScopedSemanticState::Rejected;
-            return Err(cause);
+            return Err(reject_semantic_entry(body, first_fault, cause));
         }
         let Some(roles) = roles.as_ref() else {
-            return preserve_first_fault(
+            *semantic_state = ScopedSemanticState::Rejected;
+            return Err(reject_semantic_entry(
+                body,
                 first_fault,
-                Err(StoreRuntimeError::ConstructionInvariantUnverified),
-            );
+                StoreRuntimeError::ConstructionInvariantUnverified,
+            ));
         };
         let (phase, work_dimension, scratch_dimension) = roles.authoring_keys();
         let operation = match state {
             ScopedActivationState::Dormant(dormant) => dormant.operation_mut(),
             _ => {
-                return preserve_first_fault(
+                *semantic_state = ScopedSemanticState::Rejected;
+                return Err(reject_semantic_entry(
+                    body,
                     first_fault,
-                    Err(StoreRuntimeError::ConstructionInvariantUnverified),
-                );
+                    StoreRuntimeError::ConstructionInvariantUnverified,
+                ));
             }
         };
-        let (work, services) = match preserve_first_fault(first_fault, operation.execution()) {
-            Ok(execution) => execution,
+        let mut context = match operation.invocation_context(None) {
+            Ok(context) => context,
             Err(cause) => {
                 *semantic_state = ScopedSemanticState::Rejected;
-                return Err(cause);
+                return Err(reject_semantic_entry(body, first_fault, cause));
             }
         };
-        let work_group = match preserve_first_fault(first_fault, work.bind_group([work_dimension]))
-        {
+        if let Err(cause) = context.ordinary_storage().checkpoint() {
+            *semantic_state = ScopedSemanticState::Rejected;
+            return Err(reject_semantic_entry(body, first_fault, cause));
+        }
+        let work_group = match context.bind_work([work_dimension]) {
             Ok(group) => group,
             Err(cause) => {
                 *semantic_state = ScopedSemanticState::Rejected;
-                return Err(cause);
+                return Err(reject_semantic_entry(body, first_fault, cause));
             }
         };
         *semantic_state = ScopedSemanticState::Active;
-        Ok(CanonicalSemanticWorkSession {
-            work,
+        let mut semantic = CanonicalSemanticWorkSession {
+            context,
             work_group,
-            services,
             first_fault,
             phase,
             scratch_dimension,
@@ -749,7 +833,67 @@ where
             resolved: false,
             lineage: PhantomData,
             scope: PhantomData,
-        })
+        };
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            body.as_mut()
+                .expect("the semantic callback remains retained until controlled cleanup")(
+                &mut semantic,
+            )
+        }));
+        let result = match result {
+            Ok(result) => result,
+            Err(payload) => {
+                note_later_contract::<()>(
+                    semantic.first_fault,
+                    Err(StoreRuntimeError::ConstructionInvariantUnverified),
+                );
+                if drop_optional_callback(body).is_err() {
+                    note_later_contract::<()>(
+                        semantic.first_fault,
+                        Err(StoreRuntimeError::ConstructionInvariantUnverified),
+                    );
+                }
+                drop(semantic);
+                std::panic::resume_unwind(payload);
+            }
+        };
+        // Captures are disposed before the final semantic checkpoint and completion issuance.
+        if drop_optional_callback(body).is_err() {
+            note_later_contract::<()>(
+                semantic.first_fault,
+                Err(StoreRuntimeError::ConstructionInvariantUnverified),
+            );
+            if drop_scoped_value(result).is_err() {
+                note_later_contract::<()>(
+                    semantic.first_fault,
+                    Err(StoreRuntimeError::ConstructionInvariantUnverified),
+                );
+            }
+            let _ = semantic.finish_rejected();
+            return Err(CanonicalSemanticWorkError::Runtime(
+                preserved_fault(semantic.first_fault)
+                    .unwrap_or(StoreRuntimeError::ConstructionInvariantUnverified),
+            ));
+        }
+        match result {
+            Ok(value) => match semantic.finish_exact() {
+                Ok(completion) => Ok((value, completion)),
+                Err(cause) => {
+                    if drop_scoped_value(value).is_err() {
+                        note_later_contract::<()>(
+                            semantic.first_fault,
+                            Err(StoreRuntimeError::ConstructionInvariantUnverified),
+                        );
+                    }
+                    Err(CanonicalSemanticWorkError::Runtime(cause))
+                }
+            },
+            Err(rejection) => {
+                // The caller keeps its domain owner; planning.reject consults the first fault.
+                let _ = semantic.finish_rejected();
+                Err(CanonicalSemanticWorkError::Rejected(rejection))
+            }
+        }
     }
 
     /// Seals one opaque activation plan after exact semantic work and role binding succeed.
@@ -757,7 +901,19 @@ where
         self,
         description: D,
         completion: CanonicalSemanticCompletion<'scope>,
-    ) -> CanonicalActivationSeal<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, D::Execution>
+    ) -> CanonicalActivationSeal<
+        'inv,
+        'scope,
+        O,
+        PP,
+        U,
+        T,
+        E,
+        CanonicalKind,
+        CanonicalTag,
+        L,
+        D::Execution,
+    >
     where
         D: CanonicalActivationDescription,
     {
@@ -820,16 +976,19 @@ where
                 } else if let Some(failure) = self.driver.failure.take() {
                     match dormant.into_operation() {
                         Ok(operation) => {
-                            self.driver
-                                .install_pending(ScopedPendingActivation::NeverActivated(
-                                    NeverActivatedStoreSession::requested(
-                                        operation,
-                                        failure.outcome_evidence_plan,
-                                        self.driver.failure_work,
-                                        failure.outcome_evidence_destination_dimension,
-                                        rejection,
-                                    ),
-                                ))
+                            let slot = self
+                                .driver
+                                .never
+                                .take()
+                                .expect("requested never-activation installs its cause once");
+                            let pending = NeverActivatedStoreSession::requested(
+                                operation,
+                                slot,
+                                &failure,
+                                self.driver.failure_work,
+                                rejection,
+                            );
+                            self.driver.install_never_activated(pending);
                         }
                         Err(containment) => {
                             let _ = drop_verified_rejection(rejection);
@@ -904,28 +1063,29 @@ impl<P, M> Drop for ScopedActivationInputs<P, M> {
     clippy::large_enum_variant,
     reason = "the transition keeps the operation or assembly owner inline to prevent ownerless unwind without allocation"
 )]
-enum ScopedTransitionOwner<O, PP, U, L>
+enum ScopedTransitionOwner<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    Operation(RetainedStoreOperation<O, PP, U, L>),
-    Assembly(RetainedStorePublicationAssembly<O, PP, U, L>),
+    Operation(RetainedStoreOperation<'inv, O, PP, U, L>),
+    Assembly(RetainedStorePublicationAssembly<'inv, O, PP, U, L>),
 }
 
-struct ScopedOwnerTransition<'driver, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
+struct ScopedOwnerTransition<'inv, 'driver, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    driver: &'driver mut ScopedActivationDriver<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
-    owner: Option<ScopedTransitionOwner<O, PP, U, L>>,
+    driver:
+        &'driver mut ScopedActivationDriver<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+    owner: Option<ScopedTransitionOwner<'inv, O, PP, U, L>>,
 }
 
-impl<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>
-    CanonicalActivationSealFailure<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>
+impl<'inv, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>
+    CanonicalActivationSealFailure<'inv, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -959,8 +1119,20 @@ where
     }
 }
 
-impl<O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P> Drop
-    for CanonicalActivationSealFailure<'_, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>
+impl<'inv, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P> Drop
+    for CanonicalActivationSealFailure<
+        'inv,
+        'scope,
+        O,
+        PP,
+        U,
+        T,
+        E,
+        CanonicalKind,
+        CanonicalTag,
+        L,
+        P,
+    >
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -983,15 +1155,25 @@ where
     }
 }
 
-impl<'driver, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
-    ScopedOwnerTransition<'driver, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
+impl<'inv, 'driver, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
+    ScopedOwnerTransition<'inv, 'driver, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     fn begin(
-        driver: &'driver mut ScopedActivationDriver<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+        driver: &'driver mut ScopedActivationDriver<
+            'inv,
+            O,
+            PP,
+            U,
+            T,
+            E,
+            CanonicalKind,
+            CanonicalTag,
+            L,
+        >,
     ) -> Self {
         let state = std::mem::replace(&mut driver.state, ScopedActivationState::Transitioning);
         let ScopedActivationState::Dormant(dormant) = state else {
@@ -1012,7 +1194,7 @@ where
         Self { driver, owner }
     }
 
-    fn take_operation(&mut self) -> Option<RetainedStoreOperation<O, PP, U, L>> {
+    fn take_operation(&mut self) -> Option<RetainedStoreOperation<'inv, O, PP, U, L>> {
         match self.owner.take() {
             Some(ScopedTransitionOwner::Operation(operation)) => Some(operation),
             Some(owner @ ScopedTransitionOwner::Assembly(_)) => {
@@ -1023,7 +1205,7 @@ where
         }
     }
 
-    fn put_operation(&mut self, operation: RetainedStoreOperation<O, PP, U, L>) {
+    fn put_operation(&mut self, operation: RetainedStoreOperation<'inv, O, PP, U, L>) {
         self.owner = Some(ScopedTransitionOwner::Operation(operation));
     }
 
@@ -1073,11 +1255,11 @@ where
         self.driver.first_fault.is_none()
     }
 
-    fn put_assembly(&mut self, assembly: RetainedStorePublicationAssembly<O, PP, U, L>) {
+    fn put_assembly(&mut self, assembly: RetainedStorePublicationAssembly<'inv, O, PP, U, L>) {
         self.owner = Some(ScopedTransitionOwner::Assembly(assembly));
     }
 
-    fn assembly_mut(&mut self) -> Option<&mut RetainedStorePublicationAssembly<O, PP, U, L>> {
+    fn assembly_mut(&mut self) -> Option<&mut RetainedStorePublicationAssembly<'inv, O, PP, U, L>> {
         match self.owner.as_mut() {
             Some(ScopedTransitionOwner::Assembly(assembly)) => Some(assembly),
             _ => None,
@@ -1096,7 +1278,7 @@ where
         }
     }
 
-    fn take_assembly(&mut self) -> Option<RetainedStorePublicationAssembly<O, PP, U, L>> {
+    fn take_assembly(&mut self) -> Option<RetainedStorePublicationAssembly<'inv, O, PP, U, L>> {
         match self.owner.take() {
             Some(ScopedTransitionOwner::Assembly(assembly)) => Some(assembly),
             Some(owner @ ScopedTransitionOwner::Operation(_)) => {
@@ -1109,7 +1291,7 @@ where
 
     fn install(
         mut self,
-        pending: ScopedPendingActivation<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+        pending: ScopedPendingActivation<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
     ) {
         self.owner.take();
         self.driver.install_pending(pending);
@@ -1168,18 +1350,21 @@ where
                     let operation = self
                         .take_operation()
                         .expect("recoverable activation retains its operation owner");
-                    self.driver
-                        .install_pending(ScopedPendingActivation::NeverActivated(
-                            NeverActivatedStoreSession::runtime(
-                                operation,
-                                failure.outcome_evidence_plan,
-                                self.driver.failure_work,
-                                failure.outcome_evidence_destination_dimension,
-                                cause,
-                                failure_code,
-                                fallback_only,
-                            ),
-                        ));
+                    let slot = self
+                        .driver
+                        .never
+                        .take()
+                        .expect("recoverable open installs its cause once");
+                    let pending = NeverActivatedStoreSession::runtime(
+                        operation,
+                        slot,
+                        failure,
+                        self.driver.failure_work,
+                        cause,
+                        failure_code,
+                        fallback_only,
+                    );
+                    self.driver.install_never_activated(pending);
                 }
                 false
             }
@@ -1252,6 +1437,9 @@ where
                             .expect("runtime rejection retains its assembly");
                         match finish_rejected_session(
                             assembly,
+                            self.driver.rejection.take().expect(
+                                "runtime materialization rejection installs its cause once",
+                            ),
                             failure_work,
                             outcome_evidence_destination_dimension,
                             StoreCanonicalRejection::Runtime(fault.cause),
@@ -1283,6 +1471,21 @@ where
                     let assembly = self
                         .take_assembly()
                         .expect("activated materialization consumes its assembly once");
+                    let Some(slot) = self.driver.output.take() else {
+                        let _ = drop_scoped_value(output);
+                        self.owner = Some(ScopedTransitionOwner::Assembly(assembly));
+                        self.contain();
+                        return;
+                    };
+                    let output = match slot.place(output) {
+                        Ok(output) => output,
+                        Err(output) => {
+                            let _ = drop_scoped_value(output);
+                            self.owner = Some(ScopedTransitionOwner::Assembly(assembly));
+                            self.contain();
+                            return;
+                        }
+                    };
                     self.install(ScopedPendingActivation::Activated(
                         ActivatedCanonicalStoreSession {
                             canonical_root: root,
@@ -1304,6 +1507,10 @@ where
                     .expect("requested rejection consumes its assembly once");
                 match finish_rejected_session(
                     assembly,
+                    self.driver
+                        .rejection
+                        .take()
+                        .expect("requested materialization rejection installs its cause once"),
                     failure_work,
                     outcome_evidence_destination_dimension,
                     StoreCanonicalRejection::Requested(rejection.cause),
@@ -1321,8 +1528,8 @@ where
     }
 }
 
-impl<O, PP, U, T, E, CanonicalKind, CanonicalTag, L> Drop
-    for ScopedOwnerTransition<'_, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
+impl<'inv, 'driver, O, PP, U, T, E, CanonicalKind, CanonicalTag, L> Drop
+    for ScopedOwnerTransition<'inv, 'driver, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1345,8 +1552,8 @@ where
     }
 }
 
-impl<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>
-    CanonicalActivationPermit<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>
+impl<'inv, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>
+    CanonicalActivationPermit<'inv, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1361,7 +1568,7 @@ where
     pub fn activate(
         mut self,
         materialize: impl for<'lane> FnMut(
-            CanonicalLane<'lane, O, PP, U, L>,
+            CanonicalLane<'inv, 'lane, O, PP, U, L>,
             &P,
         ) -> CanonicalMaterialization<
             'lane,
@@ -1396,7 +1603,6 @@ where
             .take()
             .expect("sealed activation consumes the failure shape once");
         let outcome_evidence_destination_dimension = failure.outcome_evidence_destination_dimension;
-        let outcome_evidence_plan = failure.outcome_evidence_plan;
 
         if !transition.prepare_activation(&request, outcome_evidence_destination_dimension) {
             if inputs.drop_remaining().is_err() || !transition.operation_is_quiescent() {
@@ -1408,17 +1614,27 @@ where
                     let operation = transition
                         .take_operation()
                         .expect("pre-activation failure retains its operation owner");
-                    transition.install(ScopedPendingActivation::NeverActivated(
-                        NeverActivatedStoreSession::runtime(
-                            operation,
-                            outcome_evidence_plan,
-                            failure_work,
-                            outcome_evidence_destination_dimension,
-                            fault.cause,
-                            failure_code,
-                            false,
-                        ),
-                    ));
+                    let slot = transition
+                        .driver
+                        .never
+                        .take()
+                        .expect("pre-activation failure installs its cause once");
+                    match NeverActivatedStoreSession::runtime(
+                        operation,
+                        slot,
+                        &failure,
+                        failure_work,
+                        fault.cause,
+                        failure_code,
+                        false,
+                    ) {
+                        Ok(pending) => {
+                            transition.install(ScopedPendingActivation::NeverActivated(pending))
+                        }
+                        Err(containment) => {
+                            transition.driver.state = ScopedActivationState::Contained(containment)
+                        }
+                    }
                 } else {
                     transition.contain();
                 }
@@ -1502,8 +1718,8 @@ where
     }
 }
 
-impl<O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P> Drop
-    for CanonicalActivationPermit<'_, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>
+impl<'inv, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P> Drop
+    for CanonicalActivationPermit<'inv, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1606,7 +1822,10 @@ where
         if let Some(cause) = preserved_fault(self.first_fault) {
             return Err(cause);
         }
-        preserve_first_fault(self.first_fault, self.services.checkpoint())
+        preserve_first_fault(
+            self.first_fault,
+            self.context.ordinary_storage().checkpoint(),
+        )
     }
 
     /// Polls when the invocation's bounded action checkpoint has been reached.
@@ -1614,12 +1833,12 @@ where
         if let Some(cause) = preserved_fault(self.first_fault) {
             return Err(cause);
         }
-        preserve_first_fault(self.first_fault, self.services.before_action(1))
+        preserve_first_fault(self.first_fault, self.context.before_metered_action(1))
     }
 
     fn finish_checkpoint(&mut self) -> Result<(), StoreRuntimeError> {
         let poll = self.poll_now();
-        if let Err(cause) = self.work.finish_region() {
+        if let Err(cause) = self.context.check_work_quiescent() {
             let _ = preserve_first_fault::<()>(self.first_fault, Err(cause));
             note_later_contract::<()>(
                 self.first_fault,
@@ -1631,20 +1850,20 @@ where
     }
 
     fn finish_action_callback<F, R>(
-        &mut self,
+        first_fault: &mut Option<ActivationFirstFault>,
         action: ManuallyDrop<Option<F>>,
         result: Result<R, StoreRuntimeError>,
     ) -> Result<R, StoreRuntimeError> {
-        let result = preserve_first_fault(self.first_fault, result);
+        let result = preserve_first_fault(first_fault, result);
         if drop_optional_callback(action).is_err() {
             note_later_contract::<()>(
-                self.first_fault,
+                first_fault,
                 Err(StoreRuntimeError::ConstructionInvariantUnverified),
             );
             if let Ok(value) = result {
                 let _ = drop_scoped_value(value);
             }
-            return Err(preserved_fault(self.first_fault)
+            return Err(preserved_fault(first_fault)
                 .expect("callback drop failure preserves a semantic contract fault"));
         }
         result
@@ -1653,12 +1872,15 @@ where
     /// Runs one semantic action after bounded control polling and records it only on normal return.
     pub fn run_unit<R>(&mut self, action: impl FnMut() -> R) -> Result<R, StoreRuntimeError> {
         let mut action = ManuallyDrop::new(Some(action));
-        let start = self
-            .poll_if_due()
-            .and_then(|()| self.work_group.admit_observed([1]));
+        if let Err(cause) = self.poll_if_due() {
+            return Self::finish_action_callback(self.first_fault, action, Err(cause));
+        }
+        let start = self.context.admit_action(self.work_group, [1]);
         let mut observed = match preserve_first_fault(self.first_fault, start) {
             Ok(observed) => observed,
-            Err(cause) => return self.finish_action_callback(action, Err(cause)),
+            Err(cause) => {
+                return Self::finish_action_callback(self.first_fault, action, Err(cause));
+            }
         };
         let result = catch_unwind(AssertUnwindSafe(|| {
             action
@@ -1682,7 +1904,7 @@ where
                 std::panic::resume_unwind(payload);
             }
         };
-        if let Err(cause) = observed.complete([1]) {
+        if let Err(cause) = observed.complete([1]).map_err(StoreRuntimeError::Ledger) {
             let _ = preserve_first_fault::<()>(self.first_fault, Err(cause.clone()));
             if observed.finish_partial().is_err() {
                 note_later_contract::<()>(
@@ -1691,18 +1913,18 @@ where
                 );
             }
             let result = preserve_runtime_fault_then_drop_result(self.first_fault, cause, result);
-            return self.finish_action_callback(action, result);
+            return Self::finish_action_callback(self.first_fault, action, result);
         }
-        if let Err(cause) = observed.finish() {
+        if let Err(cause) = observed.finish().map_err(StoreRuntimeError::Ledger) {
             let result = preserve_runtime_fault_then_drop_result(self.first_fault, cause, result);
-            return self.finish_action_callback(action, result);
+            return Self::finish_action_callback(self.first_fault, action, result);
         }
         self.completed_any = true;
-        if let Err(cause) = self.services.completed_action(1) {
+        if let Err(cause) = self.context.completed_metered_action(1) {
             let result = preserve_runtime_fault_then_drop_result(self.first_fault, cause, result);
-            return self.finish_action_callback(action, result);
+            return Self::finish_action_callback(self.first_fault, action, result);
         }
-        self.finish_action_callback(action, Ok(result))
+        Self::finish_action_callback(self.first_fault, action, Ok(result))
     }
 
     /// Reserves metered construction scratch in the policy-owned authoring role.
@@ -1715,8 +1937,8 @@ where
         }
         preserve_first_fault(
             self.first_fault,
-            self.services
-                .ordinary()
+            self.context
+                .ordinary_storage()
                 .reserve(self.phase, self.scratch_dimension, bytes),
         )
         .map(|raw| CanonicalReservation {
@@ -1734,7 +1956,9 @@ where
         self.poll_now()?;
         preserve_first_fault(
             self.first_fault,
-            self.services.resize(&mut reservation.raw, bytes),
+            self.context
+                .ordinary_storage()
+                .resize(&mut reservation.raw, bytes),
         )
     }
 
@@ -1746,14 +1970,12 @@ where
         self.poll_now()?;
         preserve_first_fault(
             self.first_fault,
-            self.services.validate_live_owner(&reservation.raw),
+            self.context.validate_live_owner(&reservation.raw),
         )
     }
 
     /// Completes one nonempty action-derived semantic prefix.
-    pub fn finish_exact(
-        mut self,
-    ) -> Result<CanonicalSemanticCompletion<'scope>, StoreRuntimeError> {
+    fn finish_exact(&mut self) -> Result<CanonicalSemanticCompletion<'scope>, StoreRuntimeError> {
         let receipt_brand = self.receipt_brand;
         let result = self.finish_checkpoint();
         if let Err(cause) = result {
@@ -1777,7 +1999,7 @@ where
     }
 
     /// Resolves a verified semantic rejection without requiring a success completion token.
-    pub fn finish_rejected(mut self) -> Result<(), StoreRuntimeError> {
+    fn finish_rejected(&mut self) -> Result<(), StoreRuntimeError> {
         let result = self.finish_checkpoint();
         *self.state = ScopedSemanticState::Rejected;
         self.resolved = true;
@@ -1835,7 +2057,7 @@ where
     }
 }
 
-impl<'activation, O, PP, U, L> CanonicalLane<'activation, O, PP, U, L>
+impl<'inv, 'activation, O, PP, U, L> CanonicalLane<'inv, 'activation, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -2158,7 +2380,8 @@ where
     }
 }
 
-impl<'activation, O, PP, U> CanonicalLane<'activation, O, PP, U, CanonicalInheritanceSource>
+impl<'inv, 'activation, O, PP, U>
+    CanonicalLane<'inv, 'activation, O, PP, U, CanonicalInheritanceSource>
 where
     O: OperationOwner,
     PP: ProgressPhase,

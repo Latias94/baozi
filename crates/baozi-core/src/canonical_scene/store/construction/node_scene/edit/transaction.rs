@@ -37,11 +37,12 @@ pub use schema::{
 };
 
 use baozi_operation::__retained_store_integration::activation::{
-    CanonicalFailureRequirements, CanonicalLane, CanonicalReservation, CanonicalSemanticWorkSession,
+    CanonicalBodyOperation, CanonicalBodyStart, CanonicalBoundBodyError, CanonicalBoundBodyParts,
+    CanonicalBoundInvocationFinish, CanonicalDispositionSlot, CanonicalFailureRequirements,
+    CanonicalInvocationHost, CanonicalLane, CanonicalReservation, CanonicalSemanticWorkSession,
 };
 use baozi_operation::__retained_store_integration::authority::{
-    CanonicalInheritanceSource, DerivedRetainedStoreOperation, RetainedStoreOperation,
-    RetainedStoreStartError, RetainedStoreStartPlan,
+    CanonicalInheritanceSource, RetainedStoreStartError, RetainedStoreStartPlan,
 };
 use baozi_operation::__retained_store_integration::producer::{
     CanonicalActivationRequest, CanonicalTableShape,
@@ -338,22 +339,73 @@ impl SceneEditFailureEvidence {
 }
 
 /// Same-account start without exposing a physical account or canonical source-store capability.
-pub fn try_start_scene_edit_operation<O, PP, U>(
+pub fn try_start_scene_edit_operation<'inv, O, PP, U>(
+    start: CanonicalBodyStart<'inv, O, PP, U>,
     input: &ValidatedScene,
     control: OperationControl<PP, U>,
     ledger_plan: StoreLedgerPlan,
     start_plan: RetainedStoreStartPlan,
-) -> Result<DerivedRetainedStoreOperation<O, PP, U>, RetainedStoreStartError>
+) -> Result<
+    CanonicalBodyOperation<'inv, O, PP, U, CanonicalInheritanceSource>,
+    RetainedStoreStartError,
+>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    RetainedStoreOperation::<O, PP, U>::try_start_derived(
+    CanonicalBodyOperation::<O, PP, U>::try_start_derived(
+        start,
         control,
         ledger_plan,
         &input.as_node_scene().canonical,
         start_plan,
+    )
+}
+
+/// Binds the actual Scene account and generation before lending the edit body its startup view.
+#[allow(
+    clippy::type_complexity,
+    clippy::result_large_err,
+    reason = "Core binds the private Scene source while preserving the canonical host's exact typed slots"
+)]
+pub fn run_scene_edit_body<'host, 'source, O, PP, U, T, Proof, EA, EV, EG, CK, CT, EK, ET>(
+    host: &'host mut CanonicalInvocationHost<O, PP, U, T, Proof, EA, EV, EG, CK, CT, EK, ET>,
+    input: &'source ValidatedScene,
+    control: OperationControl<PP, U>,
+    ledger: StoreLedgerPlan,
+    plan: RetainedStoreStartPlan,
+    body: impl for<'call, 'entry> FnMut(
+        CanonicalBoundBodyParts<
+            'call,
+            'entry,
+            'source,
+            O,
+            PP,
+            U,
+            T,
+            Proof,
+            EA,
+            EV,
+            CanonicalInheritanceSource,
+        >,
+        CanonicalDispositionSlot<'call, CK, CT, EK, ET>,
+    ),
+) -> Result<
+    CanonicalBoundInvocationFinish<'host, 'source, O, PP, U, T, Proof, EA, EV, EG, CK, CT, EK, ET>,
+    CanonicalBoundBodyError,
+>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    host.run_bound_derived_body(
+        control,
+        ledger,
+        &input.as_node_scene().canonical,
+        plan,
+        body,
     )
 }
 
@@ -1211,7 +1263,7 @@ pub struct SceneEditOutput {
 impl<O: OperationOwner> SceneEditExecutionPlan<'_, '_, O> {
     pub fn materialize<'lane, PP: ProgressPhase, U: ProgressUnit>(
         &self,
-        mut lane: CanonicalLane<'lane, O, PP, U, CanonicalInheritanceSource>,
+        mut lane: CanonicalLane<'_, 'lane, O, PP, U, CanonicalInheritanceSource>,
     ) -> CanonicalMaterialization<
         'lane,
         SceneEditOutput,

@@ -84,6 +84,17 @@ impl<const N: usize> WorkLayout<N> {
         self.validate_role_with(header, |index| self.dimension(catalog, index))
     }
 
+    pub(in crate::ledger) fn validate_active<D: Copy>(
+        &self,
+        state: &WorkView<'_, D>,
+    ) -> Result<(), LedgerCause<D>> {
+        if state.header.integrity_fault || state.rows.len() != state.catalog.len() {
+            return Err(LedgerCause::FinalSnapshotShapeMismatch);
+        }
+        check_active_mode(state.header, self.grant)?;
+        self.validate_role_header(state.catalog, state.header)
+    }
+
     pub(in crate::ledger) fn validate_binding<D: Copy>(
         &self,
         header: &WorkHeader,
@@ -207,7 +218,7 @@ impl<const N: usize> WorkLayout<N> {
     }
 
     /// Checks a prebound startup group in the owner's existing joint observation interval.
-    pub(super) fn preflight_repeated_observed<D: Copy>(
+    pub(in crate::ledger) fn preflight_repeated_observed<D: Copy>(
         &self,
         catalog: &[D],
         rows: &[WorkEntry<D>],
@@ -350,6 +361,24 @@ impl<const N: usize> WorkLayout<N> {
             }
         }
         Ok(())
+    }
+}
+
+pub(super) fn check_active_mode<D>(
+    header: &WorkHeader,
+    grant: WorkGrant,
+) -> Result<(), LedgerCause<D>> {
+    match (header.mode, grant) {
+        (super::WorkMode::Ordinary, WorkGrant::Ordinary)
+        | (super::WorkMode::Protected, WorkGrant::Protected) => Ok(()),
+        (super::WorkMode::Closed, _) => Err(LedgerCause::PublicationAlreadyCompleted),
+        (super::WorkMode::OrdinarySealed, _)
+        | (super::WorkMode::Protected, WorkGrant::Ordinary) => {
+            Err(LedgerCause::PublicationAlreadyPending)
+        }
+        (super::WorkMode::Ordinary, WorkGrant::Protected) => {
+            Err(LedgerCause::InactiveLinearWorkPermit)
+        }
     }
 }
 

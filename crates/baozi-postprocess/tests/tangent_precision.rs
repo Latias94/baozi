@@ -65,12 +65,16 @@ impl Format for Importer {
         &self,
         _: &baozi_import::Probe<'_>,
         _: &ReadHint,
-        _: &DetectionScope<'_>,
+        _: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         let f = self.0;
         let narrow_positions = f.positions.map(|p| p.map(|v| v as f32));
         let narrow_uvs = f.uvs.map(|p| p.map(|v| v as f32));

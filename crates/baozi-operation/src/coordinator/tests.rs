@@ -151,3 +151,107 @@ fn final_gate_remains_sealed_for_protected_recovery_and_internal_share_nesting()
     assert_eq!(snapshot.current_evidence_bytes(), 0);
     assert_eq!(events.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn exclusive_progress_retains_capacity_and_releases_it_after_the_actual_parser_closes() {
+    let limits = LedgerLimits::new(
+        0,
+        [(Dimension::Ordinary, DimensionPolicy::counter(2, 2, 0))],
+    )
+    .unwrap();
+    let mut coordinator = OperationCoordinator::<Owner, Phase, Phase, Unit, Dimension>::try_new(
+        OperationControl::default(),
+        limits,
+        &[Phase::Final],
+    )
+    .unwrap();
+    let mut physical = [0_u8; 2];
+    {
+        let (mut poll, progress, ledger) = coordinator.split_exclusive_progress_and_ledger();
+        let (mut work, storage) = ledger.exclusive().unwrap();
+        let mut progress = progress.bind(storage.progress_evidence());
+        let layout = work.bind([Dimension::Ordinary]).unwrap();
+        let mut frame = layout
+            .begin_parser(
+                &mut work.work,
+                [2],
+                [None],
+                crate::ledger::ParserChannel::Child,
+            )
+            .unwrap();
+        physical[0] = 17;
+        frame.complete(&layout, &mut work.work, [1]).unwrap();
+        progress
+            .report_progress(&mut poll, Phase::Final, Unit::Work, 1, Some(2))
+            .unwrap();
+        assert_eq!(work.counters(Dimension::Ordinary).unwrap(), (2, 1, 0));
+        assert_eq!(frame.remaining, [1]);
+        assert_eq!(progress.progress.len(), 1);
+        assert_eq!(
+            *progress.progress_evidence_bytes,
+            u64::try_from(
+                progress.progress.capacity()
+                    * std::mem::size_of::<((Phase, Unit), ProgressState)>()
+            )
+            .unwrap()
+        );
+        assert!(*progress.progress_evidence_bytes > 0);
+        physical[1] = 29;
+        frame.complete(&layout, &mut work.work, [1]).unwrap();
+        frame.resolve(&mut work.work).unwrap();
+        work.check_quiescent().unwrap();
+    }
+    assert_eq!(physical, [17, 29]);
+    assert_eq!(
+        coordinator.reported_progress(Phase::Final, Unit::Work),
+        Some((1, Some(2)))
+    );
+    let retained = coordinator.progress_evidence_bytes;
+    let snapshot = coordinator.finish().unwrap();
+    assert_eq!(snapshot.current_evidence_bytes(), 0);
+    assert!(snapshot.peak_evidence_bytes() >= retained);
+    let work = snapshot.dimension(Dimension::Ordinary).unwrap();
+    assert_eq!((work.attempted(), work.consumed()), (2, 2));
+}
+
+#[test]
+fn exclusive_progress_capacity_denial_uses_the_same_budget_and_terminal_owner() {
+    let limits = LedgerLimits::new(0, [])
+        .unwrap()
+        .try_with_evidence_byte_limit(0)
+        .unwrap();
+    let mut coordinator = OperationCoordinator::<Owner, Phase, Phase, Unit, Dimension>::try_new(
+        OperationControl::default(),
+        limits,
+        &[],
+    )
+    .unwrap();
+    let cause = {
+        let (mut poll, progress, ledger) = coordinator.split_exclusive_progress_and_ledger();
+        let (work, storage) = ledger.exclusive().unwrap();
+        let mut progress = progress.bind(storage.progress_evidence());
+        let cause = progress
+            .report_progress(&mut poll, Phase::Final, Unit::Work, 1, None)
+            .unwrap_err();
+        assert!(matches!(
+            &cause,
+            ControlCause::ProgressStorage {
+                cause: ProgressStorageError::Evidence {
+                    cause: LedgerEvidenceError::LimitExceeded {
+                        purpose: crate::LedgerEvidencePurpose::Progress,
+                        limit: 0,
+                        ..
+                    }
+                }
+            }
+        ));
+        assert!(progress.progress.is_empty());
+        assert_eq!(*progress.progress_evidence_bytes, 0);
+        assert_eq!(poll.poll(), Err(cause.clone()));
+        work.check_quiescent().unwrap();
+        cause
+    };
+    let (terminal, snapshot) = coordinator.finish().unwrap_err().into_parts();
+    assert_eq!(terminal, crate::PublicationCause::Control(cause));
+    assert_eq!(snapshot.current_evidence_bytes(), 0);
+}

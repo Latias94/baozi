@@ -10,7 +10,8 @@ use baozi_operation::{
 
 type TranscriptCanonicalSource = PublishedCanonicalStore<ScalarSequence<u32>, CanonicalRootTag>;
 type TranscriptEvidenceSource = PublishedOutcomeEvidenceStore<ScalarSequence<u8>, EvidenceRootTag>;
-type DerivedTranscriptOperation = DerivedRetainedStoreOperation<TestOwner, TestProgress, TestUnit>;
+type DerivedTranscriptOperation<'inv> =
+    DerivedRetainedStoreOperation<'inv, TestOwner, TestProgress, TestUnit>;
 
 const DERIVED_TRANSCRIPT_MAX_FAILURE_EVIDENCE_MEMBERS: usize = 3;
 
@@ -25,9 +26,10 @@ fn transcript_writer(keys: TestKeys) -> RetainedStoreWriterPlan {
     writer_plan(keys, 8, 4)
 }
 
-fn derived_transcript_operation(
+fn derived_transcript_operation<'inv>(
+    root: &'inv mut TestInvocationRoot,
     source: &TranscriptCanonicalSource,
-) -> (DerivedTranscriptOperation, TestKeys) {
+) -> (DerivedTranscriptOperation<'inv>, TestKeys) {
     let TestVocabulary { domain, keys } = test_vocabulary();
     let failure_terminal_work = RetainedStoreFailureTerminalWorkPlan::new(
         keys.failure_terminal_dimension,
@@ -66,14 +68,21 @@ fn derived_transcript_operation(
         failure_terminal_work,
     );
     (
-        TestOperation::try_start_derived(OperationControl::default(), ledger_plan, source, start)
-            .unwrap(),
+        TestOperation::try_start_derived(
+            root,
+            OperationControl::default(),
+            ledger_plan,
+            source,
+            start,
+        )
+        .unwrap(),
         keys,
     )
 }
 
 fn publish_transcript_source(account: &PhysicalStorageAccount) -> TranscriptSource {
-    let (operation, keys) = operation(account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation(&mut invocation_root, account);
     let mut transcript = operation
         .try_begin_success_transcript(transcript_writer(keys), transcript_writer(keys))
         .unwrap();
@@ -134,7 +143,8 @@ fn publish_transcript_source(account: &PhysicalStorageAccount) -> TranscriptSour
 fn exact_success_transcript_prepares_zero_live_operation_and_handoffs_purely() {
     let factory = factory(1);
     let account = account(&factory);
-    let (operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation(&mut invocation_root, &account);
     let mut transcript = operation
         .try_begin_success_transcript(transcript_writer(keys), transcript_writer(keys))
         .unwrap();
@@ -235,7 +245,8 @@ fn exact_success_transcript_prepares_zero_live_operation_and_handoffs_purely() {
 fn ticket_rejection_preserves_primary_cursor_for_exact_retry() {
     let factory = factory(1);
     let account = account(&factory);
-    let (operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation(&mut invocation_root, &account);
     let mut transcript = operation
         .try_begin_success_transcript(transcript_writer(keys), transcript_writer(keys))
         .unwrap();
@@ -246,7 +257,8 @@ fn ticket_rejection_preserves_primary_cursor_for_exact_retry() {
         .plan_outcome_evidence_sequence::<u8, _>(1, EvidenceRootTag)
         .unwrap();
 
-    let (foreign_operation, foreign_keys) = super::operation(&account);
+    let mut invocation_root_2 = TestInvocationRoot::new();
+    let (foreign_operation, foreign_keys) = super::operation(&mut invocation_root_2, &account);
     let mut foreign_transcript = foreign_operation
         .try_begin_success_transcript(
             transcript_writer(foreign_keys),
@@ -320,7 +332,8 @@ fn ticket_rejection_preserves_primary_cursor_for_exact_retry() {
 fn ordinary_build_failure_leaves_instruction_retryable() {
     let factory = factory(1);
     let account = account(&factory);
-    let (operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation(&mut invocation_root, &account);
     let mut transcript = operation
         .try_begin_success_transcript(transcript_writer(keys), transcript_writer(keys))
         .unwrap();
@@ -381,7 +394,8 @@ fn ordinary_build_failure_leaves_instruction_retryable() {
 fn semantic_rejection_uses_the_precompiled_tail_and_seals_after_protected_failure() {
     let factory = factory(1);
     let account = account(&factory);
-    let (operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation(&mut invocation_root, &account);
     let mut transcript = operation
         .try_begin_success_transcript(transcript_writer(keys), transcript_writer(keys))
         .unwrap();
@@ -506,7 +520,8 @@ fn semantic_rejection_uses_the_precompiled_tail_and_seals_after_protected_failur
 fn validated_success_downgrade_reuses_the_same_failure_tail() {
     let factory = factory(1);
     let account = account(&factory);
-    let (operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation(&mut invocation_root, &account);
     let mut transcript = operation
         .try_begin_success_transcript(transcript_writer(keys), transcript_writer(keys))
         .unwrap();
@@ -590,7 +605,8 @@ fn rich_failure_mode_guard_preserves_executor_for_correct_validation() {
     let factory = factory(1);
     let account = account(&factory);
     let source = publish_transcript_source(&account);
-    let (operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation(&mut invocation_root, &account);
     let mut transcript = operation
         .try_begin_rich_failure_transcript(transcript_writer(keys))
         .unwrap();
@@ -660,7 +676,8 @@ fn incomplete_primary_validation_preserves_executor_until_completion() {
     let factory = factory(1);
     let account = account(&factory);
     let source = publish_transcript_source(&account);
-    let (operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation(&mut invocation_root, &account);
     let mut transcript = operation
         .try_begin_success_transcript(transcript_writer(keys), transcript_writer(keys))
         .unwrap();
@@ -740,7 +757,9 @@ fn same_account_shares_preserve_physical_storage_across_primary_and_failure_tail
     let account = account(&factory);
     let primary_source = publish_transcript_source(&account);
     let failure_source = publish_transcript_source(&account);
-    let (operation, keys) = derived_transcript_operation(&primary_source.canonical);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) =
+        derived_transcript_operation(&mut invocation_root, &primary_source.canonical);
     let mut transcript = operation
         .try_begin_success_transcript(transcript_writer(keys), transcript_writer(keys))
         .unwrap();
@@ -845,7 +864,8 @@ fn duplicate_canonical_share_ticket_is_an_ordinary_runtime_rejection() {
     let account = account(&factory);
     let source = publish_transcript_source(&account);
     let sibling = publish_transcript_source(&account);
-    let (operation, keys) = derived_transcript_operation(&source.canonical);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = derived_transcript_operation(&mut invocation_root, &source.canonical);
     let mut transcript = operation
         .try_begin_success_transcript(transcript_writer(keys), transcript_writer(keys))
         .unwrap();
@@ -894,7 +914,8 @@ fn duplicate_canonical_share_ticket_is_an_ordinary_runtime_rejection() {
 fn sequence_batch_counts_many_blocks_as_one_instruction() {
     let factory = factory(1);
     let account = account(&factory);
-    let (operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation(&mut invocation_root, &account);
     let first = [2_u16, 3];
     let second = [5_u16, 7, 11];
     let items = [
@@ -973,7 +994,8 @@ fn sequence_batch_counts_many_blocks_as_one_instruction() {
 fn builder_and_validator_panics_enter_terminal_containment() {
     let factory = factory(2);
     let builder_account = account(&factory);
-    let (operation, keys) = operation(&builder_account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation(&mut invocation_root, &builder_account);
     let mut transcript = operation
         .try_begin_success_transcript(transcript_writer(keys), transcript_writer(keys))
         .unwrap();
@@ -1009,7 +1031,8 @@ fn builder_and_validator_panics_enter_terminal_containment() {
     ));
 
     let validator_account = account(&factory);
-    let (operation, keys) = super::operation(&validator_account);
+    let mut invocation_root_2 = TestInvocationRoot::new();
+    let (operation, keys) = super::operation(&mut invocation_root_2, &validator_account);
     let mut transcript = operation
         .try_begin_success_transcript(transcript_writer(keys), transcript_writer(keys))
         .unwrap();
@@ -1049,7 +1072,8 @@ fn builder_and_validator_panics_enter_terminal_containment() {
 fn writer_and_commit_keys_are_qualified_before_they_become_irreversible() {
     let factory = factory(1);
     let account = account(&factory);
-    let (operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation(&mut invocation_root, &account);
     let limits = RetainedStoreBatchLimits::new(8, 4).unwrap();
     let invalid_phase_writer =
         RetainedStoreWriterPlan::new(foreign_phase(), keys.dimension, keys.dimension, limits);
@@ -1161,7 +1185,8 @@ fn share_planning_rejects_foreign_evidence_accounts_and_wrong_canonical_source_s
     let source = publish_transcript_source(&source_account);
     let foreign_source = publish_transcript_source(&foreign_account);
 
-    let (foreign_operation, foreign_keys) = operation(&foreign_account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (foreign_operation, foreign_keys) = operation(&mut invocation_root, &foreign_account);
     let mut foreign_transcript = foreign_operation
         .try_begin_success_transcript(
             transcript_writer(foreign_keys),
@@ -1183,7 +1208,8 @@ fn share_planning_rejects_foreign_evidence_accounts_and_wrong_canonical_source_s
     );
 
     let other_source = publish_transcript_source(&source_account);
-    let (operation, keys) = derived_transcript_operation(&source.canonical);
+    let mut invocation_root_2 = TestInvocationRoot::new();
+    let (operation, keys) = derived_transcript_operation(&mut invocation_root_2, &source.canonical);
     let mut transcript = operation
         .try_begin_success_transcript(transcript_writer(keys), transcript_writer(keys))
         .unwrap();
@@ -1225,7 +1251,8 @@ fn incomplete_derived_open_preserves_exact_source_authority_and_existing_tickets
     let account = account(&factory);
     let source_a = publish_transcript_source(&account);
     let source_b = publish_transcript_source(&account);
-    let (operation, keys) = derived_transcript_operation(&source_a.canonical);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = derived_transcript_operation(&mut invocation_root, &source_a.canonical);
     let mut transcript = operation
         .try_begin_success_transcript(transcript_writer(keys), transcript_writer(keys))
         .unwrap();
@@ -1272,7 +1299,8 @@ fn incomplete_derived_open_preserves_exact_source_authority_and_existing_tickets
 fn incomplete_open_returns_the_same_transcript_for_repair() {
     let factory = factory(1);
     let account = account(&factory);
-    let (operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation(&mut invocation_root, &account);
     let mut transcript = operation
         .try_begin_success_transcript(transcript_writer(keys), transcript_writer(keys))
         .unwrap();
@@ -1326,7 +1354,8 @@ fn incomplete_open_returns_the_same_transcript_for_repair() {
 fn failure_tail_builder_panic_latches_containment() {
     let factory = factory(1);
     let account = account(&factory);
-    let (operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation(&mut invocation_root, &account);
     let mut transcript = operation
         .try_begin_success_transcript(transcript_writer(keys), transcript_writer(keys))
         .unwrap();
@@ -1386,7 +1415,8 @@ fn failure_tail_builder_panic_latches_containment() {
 fn failure_validator_panic_downgrades_to_minimal_fallback() {
     let factory = factory(1);
     let account = account(&factory);
-    let (operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation(&mut invocation_root, &account);
     let mut transcript = operation
         .try_begin_rich_failure_transcript(transcript_writer(keys))
         .unwrap();

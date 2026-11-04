@@ -40,11 +40,7 @@ use crate::source_scope::{
     FinalizedSourceScopeRecord, LiveSourceScopeRecord, SourceScopeEntityKind,
     SourceScopeRecordBuilder, SourceScopeSelectionOutcome, SourceScopeSelectionRequest,
 };
-use crate::store::{
-    ImportBoundWorkGroup, ImportObservedWorkFailure, ImportParserAdmissionError,
-    ImportParserWorkScope, ImportStoreExecution, ImportStoreHostError, ImportStoreReservation,
-    ImportStoreSessionOwner, scene_validation_limits,
-};
+use crate::store::{ImportStoreReservation, ImportStoreSessionOwner, scene_validation_limits};
 use crate::text_input::{
     ConformedTextInput, TextConformanceResult, TextInputOptions, TextInputRecoveryTracker,
 };
@@ -69,16 +65,14 @@ use std::sync::Arc;
 
 mod parser_execution;
 mod storage;
-pub use parser_execution::{ParseErrorView, ParseParser, ParseRoot, ParseWorkLayout};
+pub use parser_execution::{
+    ParseChildren, ParseErrorView, ParseParser, ParsePieceError, ParseRoot, ParseScanReturn,
+    ParseWorkLayout,
+};
 pub use storage::ParseStorage;
 
 pub type ParseResult<T> = Result<T, ParseFailure>;
 type AssetSnapshotResult = Result<AccountedVec<u8>, ScopeAbortCause>;
-
-enum NegativeProofActionError {
-    Store(ImportStoreHostError),
-    Proof(RegisteredNegativeProofError),
-}
 
 fn registered_negative_proof_error(cause: RegisteredNegativeProofError) -> ScopeAbortCause {
     let code = match cause {
@@ -225,89 +219,6 @@ impl ImportWorkClass {
     }
 }
 
-/// A fixed parser work layout borrowed from one execution region.
-pub struct ImportWorkGroup<'region, const N: usize> {
-    raw: ImportBoundWorkGroup<'region, N>,
-    issuer: &'region DependencyOriginIssuer,
-    item_limits: [Option<(&'static str, u64)>; N],
-}
-
-/// One actual parser channel; physical completion is recorded immediately.
-///
-/// ```compile_fail
-/// use baozi_import::{ImportWorkClass, ParseContext, ParseFailure};
-/// fn escape(context: &mut ParseContext<'_>) {
-///     let _group = context.with_execution::<_, ParseFailure>(|exec| {
-///         exec.bind_work_group([ImportWorkClass::WorkUnits])
-///     });
-/// }
-/// ```
-pub struct ImportWorkScope<'region, const N: usize> {
-    raw: ImportParserWorkScope<'region, N>,
-    terminal: &'region RefCell<Option<ScopeAbortCause>>,
-}
-
-impl ImportWorkScope<'_, 1> {
-    pub fn replenish(&mut self, amount: u64) -> ParseResult<()> {
-        preflight_terminal(self.terminal)?;
-        self.raw
-            .replenish(amount)
-            .map_err(|cause| latch_abort(self.terminal, cause.into_scope_abort_cause()))
-    }
-}
-
-impl<const N: usize> ImportWorkScope<'_, N> {
-    pub fn remaining(&self) -> [u64; N] {
-        self.raw.remaining()
-    }
-
-    pub fn complete(&mut self, amounts: [u64; N]) -> ParseResult<()> {
-        preflight_terminal(self.terminal)?;
-        self.raw
-            .complete(amounts)
-            .map_err(|cause| latch_abort(self.terminal, cause.into_scope_abort_cause()))
-    }
-
-    pub fn complete_all(&mut self) -> ParseResult<()> {
-        preflight_terminal(self.terminal)?;
-        self.raw
-            .complete_all()
-            .map_err(|cause| latch_abort(self.terminal, cause.into_scope_abort_cause()))
-    }
-
-    pub fn run<T, E>(
-        &mut self,
-        amounts: [u64; N],
-        action: impl FnOnce() -> Result<T, E>,
-    ) -> Result<T, E>
-    where
-        E: From<ParseFailure>,
-    {
-        let value = action()?;
-        self.complete(amounts).map_err(E::from)?;
-        Ok(value)
-    }
-
-    pub fn run_all<T, E>(&mut self, action: impl FnOnce() -> Result<T, E>) -> Result<T, E>
-    where
-        E: From<ParseFailure>,
-    {
-        self.run(self.remaining(), action)
-    }
-
-    fn finish_exact(self) -> ParseResult<()> {
-        self.raw
-            .finish_exact()
-            .map_err(|cause| latch_abort(self.terminal, cause.into_scope_abort_cause()))
-    }
-
-    fn finish_partial(self) -> ParseResult<()> {
-        self.raw
-            .finish_partial()
-            .map_err(|cause| latch_abort(self.terminal, cause.into_scope_abort_cause()))
-    }
-}
-
 pub(crate) fn latch_abort(
     terminal: &RefCell<Option<ScopeAbortCause>>,
     cause: ScopeAbortCause,
@@ -341,7 +252,7 @@ impl FailureEvidenceStorage {
 }
 
 /// Exclusive outer parse authority. Scene submission occurs outside execution regions.
-pub struct ParseContext<'session> {
+pub struct ParseContext<'session, 'inv: 'session> {
     entry: RegistryEntry,
     primary_io: &'session dyn AssetIo,
     primary_authority: &'session AuthorityDomain,
@@ -362,49 +273,32 @@ pub struct ParseContext<'session> {
     dependency_failure_context: RefCell<Option<DependencyFailureContext>>,
     callback_active: Cell<bool>,
     terminal: &'session RefCell<Option<ScopeAbortCause>>,
-    store_owner: &'session mut ImportStoreSessionOwner,
+    store_owner: &'session mut ImportStoreSessionOwner<'inv>,
     not_send_or_sync: PhantomData<Rc<()>>,
 }
 
-/// Disjoint work, storage and control borrowed from the actual session owner.
-///
-/// ```compile_fail
-/// use baozi_import::{ParseContext, ParseResult};
-/// fn cross_thread(context: &mut ParseContext<'_>) -> ParseResult<()> {
-///     context.with_execution(|exec| {
-///         std::thread::scope(|threads| {
-///             threads.spawn(move || exec.poll());
-///         });
-///         Ok(())
-///     })
-/// }
-/// ```
-pub struct ParseExecution<'region, 'session: 'region> {
-    store: ImportStoreExecution<'region>,
-    entry: RegistryEntry,
+/// Common policy, evidence and storage services borrowed from one numeric invocation.
+/// Retained evidence uses that invocation's real work owner; ordinary storage remains separate.
+pub struct ParseServices<'borrow, 'op, 'session> {
+    store: crate::store::ImportStoreServices<'borrow, 'op>,
+    entry: &'borrow RegistryEntry,
     primary_io: &'session dyn AssetIo,
     primary_authority: &'session AuthorityDomain,
     primary_source: &'session AssetPath,
     primary_bytes: &'session [u8],
-    resolver: ResolverBinding<'session>,
     dependency_origin_issuer: &'session DependencyOriginIssuer,
     conformance_policy: ConformancePolicy,
     loss_policy: LossPolicy,
     limits: &'session ResourceLimits,
     diagnostics: &'session RefCell<DiagnosticSink>,
-    resource_graph: &'session RefCell<ResourceGraph>,
-    optional_dependency_evidence: &'session RefCell<AccountedVec<OptionalDependencyEvidence>>,
     loss_evidence: &'session RefCell<AccountedVec<ImportLossEvidence>>,
     source_scope_record: &'session RefCell<Option<LiveSourceScopeRecord>>,
     format_failure_storage: &'session RefCell<FailureEvidenceStorage>,
-    dependency_failure: &'region RefCell<Option<DependencyResolutionContext>>,
-    dependency_failure_context: &'region RefCell<Option<DependencyFailureContext>>,
-    callback_active: &'region Cell<bool>,
+    callback_active: &'borrow Cell<bool>,
     terminal: &'session RefCell<Option<ScopeAbortCause>>,
-    not_send_or_sync: PhantomData<Rc<()>>,
 }
 
-pub(crate) struct ParseContextParts<'session> {
+pub(crate) struct ParseContextParts<'session, 'inv: 'session> {
     pub entry: RegistryEntry,
     pub primary_io: &'session dyn AssetIo,
     pub primary_authority: &'session AuthorityDomain,
@@ -415,7 +309,7 @@ pub(crate) struct ParseContextParts<'session> {
     pub conformance_policy: ConformancePolicy,
     pub loss_policy: LossPolicy,
     pub limits: &'session ResourceLimits,
-    pub store_owner: &'session mut ImportStoreSessionOwner,
+    pub store_owner: &'session mut ImportStoreSessionOwner<'inv>,
     pub diagnostics: &'session RefCell<DiagnosticSink>,
     pub resource_graph: &'session RefCell<ResourceGraph>,
     pub optional_dependency_evidence: &'session RefCell<AccountedVec<OptionalDependencyEvidence>>,
@@ -492,8 +386,8 @@ struct DiagnosticEventMetadata<'event> {
     object_path: Option<&'event str>,
 }
 
-impl<'session> ParseContext<'session> {
-    pub(crate) fn new(parts: ParseContextParts<'session>) -> Self {
+impl<'session, 'inv: 'session> ParseContext<'session, 'inv> {
+    pub(crate) fn new(parts: ParseContextParts<'session, 'inv>) -> Self {
         Self {
             entry: parts.entry,
             primary_io: parts.primary_io,
@@ -576,59 +470,15 @@ impl<'session> ParseContext<'session> {
     }
 
     /// The result cannot borrow the execution region, while session-owned storage may leave it.
-    pub fn with_execution<R, E>(
+    pub fn with_execution<R, E: From<ParseFailure>>(
         &mut self,
-        action: impl for<'region> FnOnce(&mut ParseExecution<'region, 'session>) -> Result<R, E>,
-    ) -> Result<R, E>
-    where
-        E: From<ParseFailure>,
-    {
-        preflight_terminal(self.terminal).map_err(E::from)?;
-        self.check_execution_running().map_err(E::from)?;
-        let terminal = self.terminal;
-        let store = self
-            .store_owner
-            .execution()
-            .map_err(|cause| E::from(latch_abort(terminal, cause.into_scope_abort_cause())))?;
-        let mut exec = ParseExecution {
-            store,
-            entry: self.entry.clone(),
-            primary_io: self.primary_io,
-            primary_authority: self.primary_authority,
-            primary_source: self.primary_source,
-            primary_bytes: self.primary_bytes,
-            resolver: self.resolver,
-            dependency_origin_issuer: self.dependency_origin_issuer,
-            conformance_policy: self.conformance_policy,
-            loss_policy: self.loss_policy,
-            limits: self.limits,
-            diagnostics: self.diagnostics,
-            resource_graph: self.resource_graph,
-            optional_dependency_evidence: self.optional_dependency_evidence,
-            loss_evidence: self.loss_evidence,
-            source_scope_record: self.source_scope_record,
-            format_failure_storage: self.format_failure_storage,
-            dependency_failure: &self.dependency_failure,
-            dependency_failure_context: &self.dependency_failure_context,
-            callback_active: &self.callback_active,
-            terminal,
-            not_send_or_sync: PhantomData,
-        };
-        exec.poll().map_err(E::from)?;
-        match action(&mut exec) {
-            Ok(value) => {
-                exec.poll().map_err(E::from)?;
-                exec.store.finish_region().map_err(|cause| {
-                    E::from(latch_abort(terminal, cause.into_scope_abort_cause()))
-                })?;
-                Ok(value)
-            }
-            Err(failure) => {
-                let _ = exec.poll();
-                let _ = exec.store.finish_region();
-                Err(failure)
-            }
-        }
+        action: impl for<'op> FnOnce(&mut ParseRoot<'_, 'op, 'session>) -> Result<R, E>,
+    ) -> Result<R, E> {
+        self.with_parser_execution(|root| {
+            // Preserve the original ordinary entry's checkpoint after owner entry.
+            root.poll().map_err(E::from)?;
+            action(root)
+        })
     }
 
     pub fn submit(&mut self, input: crate::authoring::StaticSceneBuilder<'_>) -> ParseResult<()> {
@@ -713,7 +563,7 @@ impl<'session> ParseContext<'session> {
     }
 }
 
-impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
+impl<'op, 'session> ParseServices<'_, 'op, 'session> {
     pub fn source(&self) -> &'session AssetPath {
         self.primary_source
     }
@@ -745,18 +595,67 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
     pub fn root_origin(&self) -> DependencyOrigin<'session> {
         DependencyOrigin::primary(self.dependency_origin_issuer, self.primary_io)
     }
+}
+
+impl<'op, 'session> ParseRoot<'_, 'op, 'session> {
+    fn poll_active(&mut self) -> ParseResult<()> {
+        self.poll()
+    }
+
+    fn reentrant_capability_failure(&self) -> ParseFailure {
+        self.abort(ScopeAbortCause::DescriptorContract {
+            code: "parse-capability-reentered",
+        })
+    }
+
+    fn capacity_plan_error(
+        &mut self,
+        resource: &'static str,
+        cause: CapacityPlanError,
+    ) -> ParseFailure {
+        match self.services() {
+            Ok(services) => services.capacity_plan_error(resource, cause),
+            Err(cause) => cause,
+        }
+    }
 
     pub fn with_conformed_text_input<'source, T>(
         &mut self,
         source: DiagnosticSource<'source>,
         options: TextInputOptions,
         action: impl for<'input> FnOnce(
-            &mut ParseExecution<'region, 'session>,
+            &mut ParseChildren<'_, 'op, 'session>,
             &'input ConformedTextInput<'session>,
             &mut TextInputRecoveryTracker<'input, 'session>,
         ) -> ParseResult<T>,
     ) -> ParseResult<TextConformanceResult<T>> {
-        let entry = self.entry.clone();
+        self.children()?
+            .with_conformed_text_input(source, options, action)
+    }
+
+    pub fn text_input_record_cursor<'source>(
+        &mut self,
+        source: DiagnosticSource<'source>,
+        options: TextInputOptions,
+    ) -> ParseResult<
+        TextConformanceResult<crate::text_input::TextInputRecordCursor<'session, 'source>>,
+    > {
+        self.children()?.text_input_record_cursor(source, options)
+    }
+}
+
+impl<'borrow, 'op, 'session> ParseChildren<'borrow, 'op, 'session> {
+    pub fn with_conformed_text_input<'source, T>(
+        &mut self,
+        source: DiagnosticSource<'source>,
+        options: TextInputOptions,
+        action: impl for<'input> FnOnce(
+            &mut ParseChildren<'borrow, 'op, 'session>,
+            &'input ConformedTextInput<'session>,
+            &mut TextInputRecoveryTracker<'input, 'session>,
+        ) -> ParseResult<T>,
+    ) -> ParseResult<TextConformanceResult<T>> {
+        let entry = self.views.entry;
         crate::text_input::with_conformed_text_input(
             self,
             entry.descriptor().text_profile(),
@@ -773,7 +672,7 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
     ) -> ParseResult<
         TextConformanceResult<crate::text_input::TextInputRecordCursor<'session, 'source>>,
     > {
-        let entry = self.entry.clone();
+        let entry = self.views.entry;
         crate::text_input::TextInputRecordCursor::new(
             self,
             entry.descriptor().text_profile(),
@@ -781,15 +680,10 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
             options,
         )
     }
+}
 
-    pub(crate) fn diagnostic_source_is_primary(&self, source: &DiagnosticSource<'_>) -> bool {
-        source.authority() == self.primary_authority
-            && source.path() == self.primary_source
-            && std::ptr::eq(source.bytes(), self.primary_bytes)
-    }
-
-    /// Borrows ordinary capacity and poll services without numeric authority.
-    pub fn storage(&mut self) -> ParseResult<ParseStorage<'_, 'region, 'session>> {
+impl<'op, 'session> ParseServices<'_, 'op, 'session> {
+    pub fn storage(&mut self) -> ParseResult<ParseStorage<'_, 'op, 'session>> {
         self.preflight_active()?;
         let identity = self.storage_identity();
         let raw = self.store.ordinary();
@@ -979,176 +873,9 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
             terminal: self.terminal,
         }
     }
+}
 
-    pub fn poll(&mut self) -> ParseResult<()> {
-        self.poll_active()
-    }
-
-    fn poll_active(&mut self) -> ParseResult<()> {
-        self.preflight_active()?;
-        self.store
-            .poll()
-            .map_err(|cause| self.abort(cause.into_scope_abort_cause()))
-    }
-
-    pub fn charge_work(&mut self, amount: u64) -> ParseResult<()> {
-        let group = self.bind_work_group([ImportWorkClass::WorkUnits])?;
-        self.with_work(&group, [amount], |_exec, work| work.complete_all())
-    }
-
-    pub fn bind_work_group<const N: usize>(
-        &mut self,
-        classes: [ImportWorkClass; N],
-    ) -> ParseResult<ImportWorkGroup<'region, N>> {
-        self.preflight_active()?;
-        let lanes = classes.map(|class| class.accounting(self.limits));
-        let raw = self
-            .store
-            .bind_group(lanes.map(|(dimension, _)| dimension))
-            .map_err(|cause| self.abort(cause.into_scope_abort_cause()))?;
-        Ok(ImportWorkGroup {
-            raw,
-            issuer: self.dependency_origin_issuer,
-            item_limits: lanes.map(|(_, limit)| limit),
-        })
-    }
-
-    pub fn with_work<const N: usize, T, E>(
-        &mut self,
-        group: &ImportWorkGroup<'region, N>,
-        amounts: [u64; N],
-        action: impl FnOnce(&mut Self, &mut ImportWorkScope<'region, N>) -> Result<T, E>,
-    ) -> Result<T, E>
-    where
-        E: From<ParseFailure>,
-    {
-        let mut work = self
-            .begin_work_group(group, amounts, false)
-            .map_err(E::from)?;
-        match action(self, &mut work) {
-            Ok(value) => {
-                if work.remaining().into_iter().any(|amount| amount != 0) {
-                    let _ = work.finish_partial();
-                    self.poll_active().map_err(E::from)?;
-                    return Err(E::from(self.abort(ScopeAbortCause::DescriptorContract {
-                        code: "parse-work-callback-incomplete",
-                    })));
-                }
-                work.finish_exact().map_err(E::from)?;
-                self.store
-                    .completed_action(1)
-                    .map_err(|cause| E::from(self.abort(cause.into_scope_abort_cause())))?;
-                self.poll_active().map_err(E::from)?;
-                Ok(value)
-            }
-            Err(cause) => {
-                let _ = work.finish_partial();
-                let _ = self.poll_active();
-                Err(cause)
-            }
-        }
-    }
-
-    pub fn with_parent_work<const N: usize, T, E>(
-        &mut self,
-        group: &ImportWorkGroup<'region, N>,
-        amounts: [u64; N],
-        action: impl FnOnce(&mut Self, &ImportWorkScope<'region, N>) -> Result<T, E>,
-    ) -> Result<T, E>
-    where
-        E: From<ParseFailure>,
-    {
-        let mut work = self
-            .begin_work_group(group, amounts, true)
-            .map_err(E::from)?;
-        match action(self, &work) {
-            Ok(value) => {
-                if let Err(failure) = self.poll_active().and_then(|()| work.complete_all()) {
-                    let _ = work.finish_partial();
-                    return Err(E::from(failure));
-                }
-                work.finish_exact().map_err(E::from)?;
-                self.store
-                    .completed_action(1)
-                    .map_err(|cause| E::from(self.abort(cause.into_scope_abort_cause())))?;
-                self.poll_active().map_err(E::from)?;
-                Ok(value)
-            }
-            Err(cause) => {
-                let _ = work.finish_partial();
-                let _ = self.poll_active();
-                Err(cause)
-            }
-        }
-    }
-
-    /// Cold convenience adapter. Repeated parser loops should bind their group once.
-    pub fn with_work_group<const N: usize, T, E>(
-        &mut self,
-        charges: [(ImportWorkClass, u64); N],
-        action: impl FnOnce(&mut Self, &mut ImportWorkScope<'region, N>) -> Result<T, E>,
-    ) -> Result<T, E>
-    where
-        E: From<ParseFailure>,
-    {
-        let group = self
-            .bind_work_group(charges.map(|(class, _)| class))
-            .map_err(E::from)?;
-        self.with_work(&group, charges.map(|(_, amount)| amount), action)
-    }
-
-    pub fn with_parent_work_group<const N: usize, T, E>(
-        &mut self,
-        charges: [(ImportWorkClass, u64); N],
-        action: impl FnOnce(&mut Self, &ImportWorkScope<'region, N>) -> Result<T, E>,
-    ) -> Result<T, E>
-    where
-        E: From<ParseFailure>,
-    {
-        let group = self
-            .bind_work_group(charges.map(|(class, _)| class))
-            .map_err(E::from)?;
-        self.with_parent_work(&group, charges.map(|(_, amount)| amount), action)
-    }
-
-    fn begin_work_group<const N: usize>(
-        &mut self,
-        group: &ImportWorkGroup<'region, N>,
-        amounts: [u64; N],
-        parent: bool,
-    ) -> ParseResult<ImportWorkScope<'region, N>> {
-        self.check_session(group.issuer)?;
-        self.store
-            .before_action(1)
-            .map_err(|cause| self.abort(cause.into_scope_abort_cause()))?;
-        let limits = group.item_limits.map(|limit| limit.map(|(_, limit)| limit));
-        let result = if parent {
-            group.raw.begin_parser_parent(amounts, limits)
-        } else {
-            group.raw.begin_parser_child(amounts, limits)
-        };
-        let raw = result.map_err(|cause| match cause {
-            ImportParserAdmissionError::Store(cause) => self.abort(cause.into_scope_abort_cause()),
-            ImportParserAdmissionError::ItemLimit {
-                index,
-                value,
-                limit,
-            } => {
-                debug_assert!(value > limit);
-                match group.item_limits.get(index).copied().flatten() {
-                    Some((resource, _)) => {
-                        self.abort(ScopeAbortCause::ResourceLimit { resource, limit })
-                    }
-                    None => self.descriptor_contract_failure("parse-work-item-limit-lane-invalid"),
-                }
-            }
-        })?;
-        Ok(ImportWorkScope {
-            raw,
-            terminal: self.terminal,
-        })
-    }
-
+impl<'op, 'session> ParseServices<'_, 'op, 'session> {
     /// Converts a fallible allocation failure into the scope's first terminal import cause.
     pub fn allocation_failure(&self, resource: &'static str) -> ParseFailure {
         if let Err(failure) = self.preflight_active() {
@@ -1647,7 +1374,7 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
         Ok(())
     }
 
-    fn charge_loss_evidence_consumed(&self, stored_bytes: u64) -> ParseResult<()> {
+    fn charge_loss_evidence_consumed(&mut self, stored_bytes: u64) -> ParseResult<()> {
         self.store
             .charge_consumed_batch(&[
                 (ImportDimension::LossEvidenceCount, 1),
@@ -2004,7 +1731,7 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
         Ok(())
     }
 
-    fn charge_diagnostic_consumed(&self, stored_bytes: u64) -> ParseResult<()> {
+    fn charge_diagnostic_consumed(&mut self, stored_bytes: u64) -> ParseResult<()> {
         self.store
             .charge_consumed_batch(&[
                 (ImportDimension::DiagnosticCount, 1),
@@ -2036,7 +1763,9 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
             )
             .map_err(|cause| cause.into_scope_abort_cause())
     }
+}
 
+impl<'op, 'session> ParseRoot<'_, 'op, 'session> {
     /// Acquires one dependency relative to the resource that authored its hostile reference.
     ///
     /// Requiredness is derived exclusively from the selected format's frozen role declaration.
@@ -2049,7 +1778,7 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
         let resource_graph = self.resource_graph;
 
         self.poll_active()?;
-        if !origin.is_issued_by(self.dependency_origin_issuer) {
+        if !origin.is_issued_by(self.views.issuer) {
             return Err(self.abort(ScopeAbortCause::DescriptorContract {
                 code: "dependency-origin-foreign-session",
             }));
@@ -2058,7 +1787,7 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
 
         let source = match origin.node() {
             DependencyOriginNode::Primary => {
-                if !std::ptr::eq(origin.io(), self.primary_io) {
+                if !std::ptr::eq(origin.io(), self.views.primary_io) {
                     return Err(self.abort(ScopeAbortCause::DescriptorContract {
                         code: "dependency-origin-primary-backend-mismatch",
                     }));
@@ -2091,8 +1820,8 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
             DependencyOriginNode::Primary => self.authorize_dependency(
                 pending,
                 origin.io(),
-                self.primary_authority,
-                self.primary_source,
+                self.views.primary_authority,
+                self.views.source,
                 role,
                 raw_reference,
             ),
@@ -2155,7 +1884,8 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
         &self,
         role: &DependencyRoleId,
     ) -> ParseResult<DependencyRequirement> {
-        self.entry
+        self.views
+            .entry
             .descriptor()
             .dependency_requirement(role)
             .ok_or_else(|| {
@@ -2181,15 +1911,17 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
             }
         }
     }
+}
 
+impl ParseServices<'_, '_, '_> {
     pub fn format_failure<P>(&mut self, producer: P) -> ParseFailure
     where
         P: FormatFailureEvidenceProducer,
     {
         parser_execution::capture_format_failure(
-            parser_execution::FormatFailureHost::legacy(
-                &mut self.store,
-                &self.entry,
+            parser_execution::FormatFailureHost::services(
+                self.store.failure_storage(),
+                self.entry,
                 self.terminal,
                 self.callback_active,
                 self.format_failure_storage,
@@ -2197,7 +1929,9 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
             producer,
         )
     }
+}
 
+impl<'op, 'session> ParseRoot<'_, 'op, 'session> {
     fn dependency_failure(
         &self,
         relation: Option<PendingResourceRelation>,
@@ -2359,7 +2093,7 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
         ),
         DependencyResolutionFailure,
     > {
-        if raw_reference.len() > self.limits.max_path_length {
+        if raw_reference.len() > self.views.limits.max_path_length {
             let origin_source = match self
                 .clone_metered_dependency_path(origin_source, "dependency-failure-source")
             {
@@ -2373,7 +2107,7 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
                 origin_source,
                 ScopeAbortCause::ResourceLimit {
                     resource: "dependency-reference-bytes",
-                    limit: self.limits.max_path_length as u64,
+                    limit: self.views.limits.max_path_length as u64,
                 },
             ));
         }
@@ -2572,8 +2306,8 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
         let resource_graph = self.resource_graph;
 
         let (io, identity, stable_identity_schema, registered_resolver) = authorized.into_parts();
-        let backend_authority = if std::ptr::eq(io, self.primary_io) {
-            self.primary_authority.clone()
+        let backend_authority = if std::ptr::eq(io, self.views.primary_io) {
+            self.views.primary_authority.clone()
         } else {
             match catch_unwind(AssertUnwindSafe(|| io.authority_domain())) {
                 Ok(authority) => authority,
@@ -2682,7 +2416,7 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
             };
             return Ok((
                 DependencySnapshot::new(
-                    self.dependency_origin_issuer,
+                    self.views.issuer,
                     io,
                     origin_node,
                     snapshot_identity,
@@ -2796,7 +2530,7 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
                 };
                 Ok((
                     DependencySnapshot::new(
-                        self.dependency_origin_issuer,
+                        self.views.issuer,
                         io,
                         origin_node,
                         snapshot_identity,
@@ -2837,6 +2571,7 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
         // optional fallback keep the cache/evidence path; refused cleanup stays session-owned.
         let optional_fallback = pending.requirement() == DependencyRequirement::Optional
             && self
+                .views
                 .loss_policy
                 .allows(ImportLossKind::OptionalDependencyUnavailable)
             && optional_eligible(&cause);
@@ -2954,28 +2689,22 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
                 caps.verification_work(),
             ),
         ];
-        let proof = self.store.with_observed_work(charges, |_store, work| {
-            let proof = plan
-                .verify(identity.path(), registered_cause)
-                .map_err(NegativeProofActionError::Proof)?;
-            work.complete([
-                canonical_bytes,
-                caps.temporary_bytes(),
-                caps.construction_work(),
-                caps.verification_work(),
-            ])
-            .map_err(NegativeProofActionError::Store)?;
-            Ok(proof)
-        });
+        let layout = self
+            .store
+            .bind_group(charges.map(|(dimension, _)| dimension))
+            .map_err(|cause| cause.into_scope_abort_cause())?;
+        let proof = self
+            .store
+            .run_fallible_action(&layout, charges.map(|(_, amount)| amount), || {
+                let proof = plan
+                    .verify(identity.path(), registered_cause)
+                    .map_err(registered_negative_proof_error)?;
+                Ok(proof)
+            })
+            .map_err(|cause| cause.into_scope_abort_cause())?;
         match proof {
             Ok(proof) => Ok(PendingNegativeObservation::Proof(proof)),
-            Err(ImportObservedWorkFailure::Store(cause))
-            | Err(ImportObservedWorkFailure::Action(NegativeProofActionError::Store(cause))) => {
-                Err(cause.into_scope_abort_cause())
-            }
-            Err(ImportObservedWorkFailure::Action(NegativeProofActionError::Proof(cause))) => {
-                Err(registered_negative_proof_error(cause))
-            }
+            Err(cause) => Err(cause),
         }
     }
 
@@ -3009,8 +2738,8 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
             ImportLedgerPhase::DependencyAcquisition,
             ImportProgressPhase::AcquireDependency,
             ImportDimension::DependencyBytes,
-            self.limits.max_dependency_asset_bytes,
-            self.limits.max_total_asset_bytes,
+            self.views.limits.max_dependency_asset_bytes,
+            self.views.limits.max_total_asset_bytes,
         )?;
         self.charge_dependency_acquisition_work_consumed()?;
         Ok(bytes)
@@ -3084,12 +2813,12 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
                 dimension: ImportDimension::DependencyAcquisitionWork,
             })
         })?;
-        if value > self.limits.max_dependency_acquisition_work {
+        if value > self.views.limits.max_dependency_acquisition_work {
             return Err(ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
                 class: CounterClass::Consumed,
                 dimension: ImportDimension::DependencyAcquisitionWork,
                 value,
-                limit: self.limits.max_dependency_acquisition_work,
+                limit: self.views.limits.max_dependency_acquisition_work,
             }));
         }
         Ok(())
@@ -3127,6 +2856,7 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
             (optional_eligible(cause), cause.owner(), disposition)
         };
         if !self
+            .views
             .loss_policy
             .allows(ImportLossKind::OptionalDependencyUnavailable)
             || !eligible
@@ -3167,10 +2897,11 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
             }
         }
         self.complete_unavailable_relation(&mut failure, disposition)?;
-        self.emit_diagnostic(
+        let code = DiagnosticCode::new("import.optional_dependency_unavailable")
+            .map_err(|cause| self.abort(ScopeAbortCause::Diagnostic(cause)))?;
+        self.services()?.emit_diagnostic(
             DiagnosticSeverity::Warning,
-            DiagnosticCode::new("import.optional_dependency_unavailable")
-                .map_err(|cause| self.abort(ScopeAbortCause::Diagnostic(cause)))?,
+            code,
             format_args!("optional dependency role {role} is unavailable"),
         )?;
         Ok(DependencyOutcome::unavailable(evidence))
@@ -3215,7 +2946,7 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
         failure: DependencyResolutionFailure,
     ) -> ParseFailure {
         let resource_graph = self.resource_graph;
-        let format_failure_storage = self.format_failure_storage;
+        let format_failure_storage = self.views.failure_storage;
         let dependency_failure_context = self.dependency_failure_context;
 
         let failure = self.take_dependency_failure(failure);
@@ -3243,7 +2974,7 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
                 });
             }
             let (origin_authority, origin_path) = match origin.node() {
-                DependencyOriginNode::Primary => (self.primary_authority, self.primary_source),
+                DependencyOriginNode::Primary => (self.views.primary_authority, self.views.source),
                 DependencyOriginNode::Dependency(index) => {
                     let identity = graph.origin_identity(index).ok_or(
                         ScopeAbortCause::DescriptorContract {
@@ -3397,7 +3128,7 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
     }
 
     fn resize_dependency_storage_cause(
-        &self,
+        &mut self,
         reservation: &mut ImportStoreReservation,
         bytes: u64,
     ) -> Result<(), ScopeAbortCause> {
@@ -3407,6 +3138,12 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
     }
 
     fn abort(&self, cause: ScopeAbortCause) -> ParseFailure {
+        latch_abort(self.views.terminal, cause)
+    }
+}
+
+impl ParseServices<'_, '_, '_> {
+    fn abort(&self, cause: ScopeAbortCause) -> ParseFailure {
         latch_abort(self.terminal, cause)
     }
 
@@ -3414,11 +3151,14 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
         if self.callback_active.get() {
             return Err(self.reentrant_capability_failure());
         }
-        if self.terminal.borrow().is_some() {
-            Err(ParseFailure::scope())
-        } else {
-            Ok(())
-        }
+        preflight_terminal(self.terminal)
+    }
+
+    pub fn poll(&mut self) -> ParseResult<()> {
+        self.preflight_active()?;
+        self.store
+            .poll()
+            .map_err(|cause| self.abort(cause.into_scope_abort_cause()))
     }
 
     pub(crate) fn source_scope_abort(&self, cause: ScopeAbortCause) -> ParseFailure {
@@ -3426,7 +3166,7 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
     }
 
     pub(crate) fn source_scope_charge_batch(
-        &self,
+        &mut self,
         charges: &[(ImportDimension, u64); 2],
     ) -> ParseResult<()> {
         self.preflight_active()?;
@@ -3436,7 +3176,7 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
     }
 
     fn source_scope_charge_attempted(
-        &self,
+        &mut self,
         dimension: ImportDimension,
         amount: u64,
     ) -> ParseResult<()> {
@@ -3447,7 +3187,7 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
     }
 
     fn source_scope_charge_consumed(
-        &self,
+        &mut self,
         dimension: ImportDimension,
         amount: u64,
     ) -> ParseResult<()> {
@@ -3458,7 +3198,7 @@ impl<'region, 'session: 'region> ParseExecution<'region, 'session> {
     }
 
     fn charge_source_scope_bundle_consumed(
-        &self,
+        &mut self,
         loss_bytes: u64,
         diagnostic_bytes: u64,
     ) -> ParseResult<()> {
@@ -3558,7 +3298,7 @@ fn metered_copy_chunk_len<T>() -> usize {
 }
 
 fn append_metered_string(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     output: &mut String,
     value: &str,
 ) -> ParseResult<()> {
@@ -3574,14 +3314,14 @@ impl StorageIdentity<'_> {
         preflight_terminal(self.terminal)
     }
 
-    fn check(&self, exec: &ParseExecution<'_, '_>) -> ParseResult<()> {
+    fn check(&self, exec: &ParseServices<'_, '_, '_>) -> ParseResult<()> {
         exec.check_session(self.issuer)?;
         self.preflight_active()
     }
 
     fn reserve(
         &self,
-        exec: &mut ParseExecution<'_, '_>,
+        exec: &mut ParseServices<'_, '_, '_>,
         class: ImportStorageClass,
         bytes: u64,
     ) -> ParseResult<Option<ImportStoreReservation>> {
@@ -3596,7 +3336,7 @@ impl StorageIdentity<'_> {
 
     fn resize_exact(
         &self,
-        exec: &mut ParseExecution<'_, '_>,
+        exec: &mut ParseServices<'_, '_, '_>,
         reservation: &mut Option<ImportStoreReservation>,
         bytes: u64,
     ) -> ParseResult<()> {
@@ -3639,7 +3379,7 @@ impl StorageIdentity<'_> {
 impl<'session, T> MeteredVec<'session, T> {
     pub fn try_reserve(
         &mut self,
-        exec: &mut ParseExecution<'_, 'session>,
+        exec: &mut ParseServices<'_, '_, 'session>,
         additional: usize,
     ) -> ParseResult<()> {
         exec.storage()?.reserve_vec(self, additional)
@@ -3647,7 +3387,7 @@ impl<'session, T> MeteredVec<'session, T> {
 
     pub fn try_push(
         &mut self,
-        exec: &mut ParseExecution<'_, 'session>,
+        exec: &mut ParseServices<'_, '_, 'session>,
         value: T,
     ) -> ParseResult<()> {
         exec.storage()?.push_vec(self, value)
@@ -3667,7 +3407,7 @@ impl<'session, T> MeteredVec<'session, T> {
 
     pub fn try_extend_from_slice(
         &mut self,
-        exec: &mut ParseExecution<'_, 'session>,
+        exec: &mut ParseServices<'_, '_, 'session>,
         values: &[T],
     ) -> ParseResult<()>
     where
@@ -3712,27 +3452,14 @@ impl<'session, T> MeteredVec<'session, T> {
 
     pub fn try_resize(
         &mut self,
-        exec: &mut ParseExecution<'_, 'session>,
+        exec: &mut ParseServices<'_, '_, 'session>,
         len: usize,
         value: T,
     ) -> ParseResult<()>
     where
         T: Copy,
     {
-        let additional = len.saturating_sub(self.values.len());
-        self.try_reserve(exec, additional)?;
-        while self.values.len() < len {
-            self.identity.check(exec)?;
-            exec.poll()?;
-            let chunk_end = self
-                .values
-                .len()
-                .saturating_add(metered_copy_chunk_len::<T>())
-                .min(len);
-            self.values.resize(chunk_end, value);
-        }
-        self.values.truncate(len);
-        Ok(())
+        exec.storage()?.resize_vec(self, len, value)
     }
 
     /// Runs a fallible heap sort without exposing the backing vector or changing its capacity.
@@ -3821,7 +3548,7 @@ fn sift_down_fallible<T, E>(
 impl<'session, K: Ord, V> MeteredOrderedMap<'session, K, V> {
     pub fn try_reserve(
         &mut self,
-        exec: &mut ParseExecution<'_, 'session>,
+        exec: &mut ParseServices<'_, '_, 'session>,
         additional: usize,
     ) -> ParseResult<()> {
         self.identity.check(exec)?;
@@ -3864,7 +3591,7 @@ impl<'session, K: Ord, V> MeteredOrderedMap<'session, K, V> {
 
     pub fn try_insert(
         &mut self,
-        exec: &mut ParseExecution<'_, 'session>,
+        exec: &mut ParseServices<'_, '_, 'session>,
         key: K,
         value: V,
     ) -> ParseResult<Option<V>> {
@@ -3900,7 +3627,7 @@ fn metered_map_error(
 impl<'session> MeteredString<'session> {
     pub fn try_reserve(
         &mut self,
-        exec: &mut ParseExecution<'_, 'session>,
+        exec: &mut ParseServices<'_, '_, 'session>,
         additional: usize,
     ) -> ParseResult<()> {
         exec.storage()?.reserve_string(self, additional)
@@ -3908,7 +3635,7 @@ impl<'session> MeteredString<'session> {
 
     pub fn try_push_str(
         &mut self,
-        exec: &mut ParseExecution<'_, 'session>,
+        exec: &mut ParseServices<'_, '_, 'session>,
         value: &str,
     ) -> ParseResult<()> {
         exec.storage()?.append_string(self, value)
@@ -3947,7 +3674,7 @@ impl<'session> MeteredString<'session> {
 
     pub fn try_push_char(
         &mut self,
-        exec: &mut ParseExecution<'_, 'session>,
+        exec: &mut ParseServices<'_, '_, 'session>,
         value: char,
     ) -> ParseResult<()> {
         let mut encoded = [0_u8; 4];
@@ -3957,7 +3684,7 @@ impl<'session> MeteredString<'session> {
 
     pub fn try_push_usize(
         &mut self,
-        exec: &mut ParseExecution<'_, 'session>,
+        exec: &mut ParseServices<'_, '_, 'session>,
         value: usize,
     ) -> ParseResult<()> {
         self.try_write_fmt(exec, format_args!("{value}"))
@@ -3965,53 +3692,17 @@ impl<'session> MeteredString<'session> {
 
     pub fn try_write_fmt(
         &mut self,
-        exec: &mut ParseExecution<'_, 'session>,
+        exec: &mut ParseServices<'_, '_, 'session>,
         arguments: fmt::Arguments<'_>,
     ) -> ParseResult<()> {
-        self.identity.check(exec)?;
-        let mut writer = MeteredStringWriter {
-            value: self,
-            exec,
-            failure: None,
-        };
-        let result = fmt::write(&mut writer, arguments);
-        match (result, writer.failure) {
-            (_, Some(failure)) => Err(failure),
-            (Ok(()), None) => Ok(()),
-            (Err(fmt::Error), None) => {
-                Err(writer
-                    .value
-                    .identity
-                    .abort(ScopeAbortCause::DescriptorContract {
-                        code: "metered-string-format-failed",
-                    }))
-            }
-        }
-    }
-}
-
-struct MeteredStringWriter<'a, 'region, 'session> {
-    value: &'a mut MeteredString<'session>,
-    exec: &'a mut ParseExecution<'region, 'session>,
-    failure: Option<ParseFailure>,
-}
-
-impl fmt::Write for MeteredStringWriter<'_, '_, '_> {
-    fn write_str(&mut self, value: &str) -> fmt::Result {
-        match self.value.try_push_str(self.exec, value) {
-            Ok(()) => Ok(()),
-            Err(failure) => {
-                self.failure = Some(failure);
-                Err(fmt::Error)
-            }
-        }
+        exec.storage()?.write_string_fmt(self, arguments)
     }
 }
 
 impl<'session> MeteredDecodedText<'session> {
     pub fn try_push_str(
         &mut self,
-        exec: &mut ParseExecution<'_, 'session>,
+        exec: &mut ParseServices<'_, '_, 'session>,
         value: &str,
     ) -> ParseResult<()> {
         self.identity.check(exec)?;
@@ -4046,7 +3737,7 @@ impl<'session> MeteredDecodedText<'session> {
         Ok(())
     }
 
-    pub fn finish_exact(self, exec: &mut ParseExecution<'_, 'session>) -> ParseResult<Self> {
+    pub fn finish_exact(self, exec: &mut ParseServices<'_, '_, 'session>) -> ParseResult<Self> {
         self.identity.check(exec)?;
         exec.poll()?;
         if self.value.len() != self.decoded_len {
@@ -4232,7 +3923,7 @@ fn share_dependency_snapshot_with(
 }
 
 pub(crate) fn read_opened_asset(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut crate::store::ImportRootExecution<'_, '_>,
     mut opened: OpenedAssetOwner,
     ledger_phase: ImportLedgerPhase,
     progress_phase: ImportProgressPhase,
@@ -4253,7 +3944,7 @@ pub(crate) fn read_opened_asset(
 }
 
 fn read_asset_snapshot(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut crate::store::ImportRootExecution<'_, '_>,
     opened: &mut OpenedAsset,
     ledger_phase: ImportLedgerPhase,
     progress_phase: ImportProgressPhase,
@@ -4428,16 +4119,17 @@ fn read_asset_snapshot(
 }
 
 fn read_asset_chunk(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut crate::store::ImportRootExecution<'_, '_>,
     opened: &mut OpenedAsset,
     buffer: &mut [u8],
 ) -> Result<Result<usize, baozi_io::AssetReadError>, ScopeAbortCause> {
-    exec.with_observed_work([(ImportDimension::WorkUnits, 1)], |_store, work| {
+    let layout = exec
+        .bind_group([ImportDimension::WorkUnits])
+        .map_err(|cause| cause.into_scope_abort_cause())?;
+    exec.run_fallible_action(&layout, [1], || {
         match catch_unwind(AssertUnwindSafe(|| opened.read_chunk(buffer))) {
             Ok(read) => {
                 // EOF and returned read errors complete a call; a panic does not.
-                work.complete([1])
-                    .map_err(|cause| cause.into_scope_abort_cause())?;
                 Ok(read)
             }
             Err(payload) => {
@@ -4449,14 +4141,11 @@ fn read_asset_chunk(
             }
         }
     })
-    .map_err(|cause| match cause {
-        ImportObservedWorkFailure::Store(cause) => cause.into_scope_abort_cause(),
-        ImportObservedWorkFailure::Action(cause) => cause,
-    })
+    .map_err(|cause| cause.into_scope_abort_cause())?
 }
 
 fn admit_asset_bytes(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut crate::store::ImportRootExecution<'_, '_>,
     dimension: ImportDimension,
     amount: u64,
     per_resource_limit: u64,
@@ -4497,7 +4186,7 @@ fn admit_asset_bytes(
 }
 
 fn remaining_asset_bytes(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut crate::store::ImportRootExecution<'_, '_>,
     dimension: ImportDimension,
     limit: u64,
 ) -> Result<u64, ScopeAbortCause> {
@@ -4516,7 +4205,7 @@ fn remaining_asset_bytes(
 }
 
 fn charge_asset_consumed(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut crate::store::ImportRootExecution<'_, '_>,
     dimension: ImportDimension,
     amount: u64,
 ) -> Result<(), ScopeAbortCause> {
@@ -4651,9 +4340,11 @@ mod tests {
     use super::*;
     use crate::ledger::ImportOperationControl;
     use crate::store::{
-        ImportStoreBootstrapRequirements, ImportStoreHostError, ImportStoreSessionOwner,
+        ImportRootExecution, ImportStoreBodyParts, ImportStoreBootstrapRequirements,
+        ImportStoreHostError, ImportStoreInvocationRoot, ImportStoreSessionOwner,
         try_import_store_bootstrap,
     };
+    use baozi_core::__scene_integration::integration::SceneParseOutcome;
     use baozi_io::AssetPath;
     use baozi_io::{AssetLength, AuthorityDomain};
     use baozi_operation::{
@@ -4663,36 +4354,23 @@ mod tests {
     use std::io::Cursor;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    struct TestStore {
-        owner: ImportStoreSessionOwner,
+    struct TestStore<'inv> {
+        owner: ImportStoreSessionOwner<'inv>,
         account: PhysicalStorageAccount,
     }
 
-    impl TestStore {
-        fn execution(&mut self) -> ImportStoreExecution<'_> {
-            self.owner
-                .execution()
-                .expect("test execution must be available")
-        }
-
-        fn assert_released(self) {
-            let Self { owner, account } = self;
-            drop(owner);
-            let released = account.snapshot();
-            assert_eq!(released.live_retained_bytes(), 0);
-            assert_eq!(released.live_retained_allocations(), 0);
-            assert!(!released.poisoned());
-        }
+    fn assert_store_released(account: PhysicalStorageAccount) {
+        let released = account.snapshot();
+        assert_eq!(released.live_retained_bytes(), 0);
+        assert_eq!(released.live_retained_allocations(), 0);
+        assert!(!released.poisoned());
     }
 
-    fn test_store(limits: &ResourceLimits) -> TestStore {
-        test_store_with_control(limits, ImportOperationControl::default())
-    }
-
-    fn test_store_with_control(
+    fn test_store_with_control<'inv>(
+        parts: ImportStoreBodyParts<'inv>,
         limits: &ResourceLimits,
         control: ImportOperationControl,
-    ) -> TestStore {
+    ) -> TestStore<'inv> {
         let requirements = ImportStoreBootstrapRequirements::for_node_scene(limits)
             .expect("test retained-store requirements are valid");
         let bootstrap = try_import_store_bootstrap(limits, requirements)
@@ -4708,12 +4386,56 @@ mod tests {
                     .expect("test account limits are valid"),
             )
             .expect("test physical account must allocate");
-        let owner = ImportStoreSessionOwner::try_start(control, &account, bootstrap)
+        let owner = ImportStoreSessionOwner::try_start_in_body(parts, control, &account, bootstrap)
             .expect("test import store owner must start");
         TestStore { owner, account }
     }
 
-    fn current_live_bytes(host: &ImportStoreExecution<'_>) -> u64 {
+    fn with_store_body(
+        limits: ResourceLimits,
+        control: ImportOperationControl,
+        body: impl for<'inv> FnOnce(&mut TestStore<'inv>),
+    ) {
+        let mut root = ImportStoreInvocationRoot::new();
+        let mut startup = Some((control, body));
+        let mut account = None;
+        let finish = root
+            .run_body(|parts, disposition| {
+                let (control, body) = startup.take().unwrap();
+                let mut store = test_store_with_control(parts, &limits, control);
+                body(&mut store);
+                let TestStore {
+                    owner,
+                    account: started_account,
+                } = store;
+                owner
+                    .request_finish(disposition, SceneParseOutcome::Rejected)
+                    .unwrap();
+                account = Some(started_account);
+            })
+            .expect("the inspected import body must record its actual disposition");
+        let _finish = finish;
+        drop(root);
+        assert_store_released(account.unwrap());
+    }
+
+    fn with_store_root_body(
+        limits: ResourceLimits,
+        control: ImportOperationControl,
+        body: impl for<'op> FnOnce(&mut ImportRootExecution<'_, 'op>),
+    ) {
+        with_store_body(limits, control, |store| {
+            store
+                .owner
+                .with_root_execution(|root| {
+                    body(root);
+                    Ok::<_, ImportStoreHostError>(())
+                })
+                .expect("test root execution must be available");
+        });
+    }
+
+    fn current_live_bytes(host: &ImportRootExecution<'_, '_>) -> u64 {
         ImportDimension::ALL
             .into_iter()
             .map(|dimension| {
@@ -4727,112 +4449,123 @@ mod tests {
 
     #[test]
     fn completed_dependency_bytes_drop_when_snapshot_sharing_reservation_fails() {
-        let mut store = test_store(&ResourceLimits::default());
-        let host = &mut store.execution();
-        let baseline = current_live_bytes(host);
-        let payload = vec![0x5a; 64 * 1024];
-        let mut bytes = AccountedVec::new();
-        bytes
-            .try_reserve_capacity(payload.len(), "dependency-snapshot", |capacity_bytes| {
-                host.reserve(
-                    ImportLedgerPhase::DependencyAcquisition,
-                    ImportDimension::DependencyBytes,
-                    capacity_bytes,
-                )
-                .map_err(ImportStoreHostError::into_scope_abort_cause)
-            })
-            .expect("the completed dependency buffer must be admitted");
-        bytes
-            .try_extend_from_slice_reserved(&payload)
-            .expect("the admitted dependency buffer must hold the complete payload");
-        assert_eq!(bytes.len(), payload.len());
-        assert!(current_live_bytes(host) > baseline);
+        with_store_root_body(
+            ResourceLimits::default(),
+            ImportOperationControl::default(),
+            |host| {
+                let baseline = current_live_bytes(host);
+                let payload = vec![0x5a; 64 * 1024];
+                let mut bytes = AccountedVec::new();
+                bytes
+                    .try_reserve_capacity(payload.len(), "dependency-snapshot", |capacity_bytes| {
+                        host.reserve(
+                            ImportLedgerPhase::DependencyAcquisition,
+                            ImportDimension::DependencyBytes,
+                            capacity_bytes,
+                        )
+                        .map_err(ImportStoreHostError::into_scope_abort_cause)
+                    })
+                    .expect("the completed dependency buffer must be admitted");
+                bytes
+                    .try_extend_from_slice_reserved(&payload)
+                    .expect("the admitted dependency buffer must hold the complete payload");
+                assert_eq!(bytes.len(), payload.len());
+                assert!(current_live_bytes(host) > baseline);
 
-        let requested_control_bytes = Cell::new(0_u64);
-        let result = share_dependency_snapshot_with(bytes, |control_bytes| {
-            requested_control_bytes.set(control_bytes);
-            Err(ScopeAbortCause::Allocation {
-                resource: "injected-dependency-snapshot-sharing",
-            })
-        });
+                let requested_control_bytes = Cell::new(0_u64);
+                let result = share_dependency_snapshot_with(bytes, |control_bytes| {
+                    requested_control_bytes.set(control_bytes);
+                    Err(ScopeAbortCause::Allocation {
+                        resource: "injected-dependency-snapshot-sharing",
+                    })
+                });
 
-        assert!(matches!(
-            result,
-            Err(ScopeAbortCause::Allocation {
-                resource: "injected-dependency-snapshot-sharing"
-            })
-        ));
-        assert!(requested_control_bytes.get() > 0);
-        assert_eq!(current_live_bytes(host), baseline);
+                assert!(matches!(
+                    result,
+                    Err(ScopeAbortCause::Allocation {
+                        resource: "injected-dependency-snapshot-sharing"
+                    })
+                ));
+                assert!(requested_control_bytes.get() > 0);
+                assert_eq!(current_live_bytes(host), baseline);
+            },
+        );
     }
 
     #[test]
     fn session_storage_crosses_regions_with_real_parent_and_child_channels() {
-        let mut store = test_store(&ResourceLimits::default());
-        testing::with_context(&mut store.owner, |context| {
-            let mut values = context
-                .with_execution(|exec| -> ParseResult<_> {
-                    let parent = exec.bind_work_group([ImportWorkClass::Records])?;
-                    let child = exec
-                        .bind_work_group([ImportWorkClass::Tokens, ImportWorkClass::DecodeWork])?;
-                    let mut values = exec.metered_vec(
-                        ImportStorageClass::FormatNormalization,
-                        "region-owned-values",
-                    );
-                    exec.with_parent_work(&parent, [2], |exec, work| -> ParseResult<()> {
-                        assert_eq!(work.remaining(), [2]);
-                        for value in [3_u32, 5] {
-                            exec.with_work(&child, [1, 1], |exec, work| -> ParseResult<()> {
-                                values.try_push(exec, value)?;
-                                work.complete([1, 1])
+        with_store_body(
+            ResourceLimits::default(),
+            ImportOperationControl::default(),
+            |store| {
+                testing::with_context(&mut store.owner, |context| {
+                    let mut values = context
+                        .with_execution(|exec| -> ParseResult<_> {
+                            let parent = exec.bind_group([ImportWorkClass::Records])?;
+                            let child = exec.bind_group([
+                                ImportWorkClass::Tokens,
+                                ImportWorkClass::DecodeWork,
+                            ])?;
+                            let mut values = exec.services()?.metered_vec(
+                                ImportStorageClass::FormatNormalization,
+                                "region-owned-values",
+                            );
+                            exec.parent(&parent, [2], |parent| -> ParseResult<()> {
+                                assert_eq!(parent.remaining(), [2]);
+                                for value in [3_u32, 5] {
+                                    parent.child(&child, [1, 1], |child| -> ParseResult<()> {
+                                        child.push_growing([1, 1], &mut values, value)
+                                    })?;
+                                }
+                                Ok(())
                             })?;
-                        }
-                        Ok(())
-                    })?;
-                    Ok(values)
-                })
-                .unwrap();
-            context
-                .with_execution(|exec| -> ParseResult<()> {
-                    values.try_extend_from_slice(exec, &[7, 11, 13])?;
-                    assert_eq!(values.as_slice(), &[3, 5, 7, 11, 13]);
-                    for (dimension, amount) in [
-                        (ImportDimension::Records, 2),
-                        (ImportDimension::Tokens, 2),
-                        (ImportDimension::DecodeWork, 2),
-                    ] {
-                        let state = exec.store.dimension_state(dimension).unwrap();
-                        assert_eq!((state.attempted(), state.consumed()), (amount, amount));
-                    }
-                    Ok(())
-                })
-                .unwrap();
-        });
-        store.assert_released();
+                            Ok(values)
+                        })
+                        .unwrap();
+                    context
+                        .with_execution(|exec| -> ParseResult<()> {
+                            values.try_extend_from_slice(&mut exec.services()?, &[7, 11, 13])?;
+                            assert_eq!(values.as_slice(), &[3, 5, 7, 11, 13]);
+                            for (dimension, amount) in [
+                                (ImportDimension::Records, 2),
+                                (ImportDimension::Tokens, 2),
+                                (ImportDimension::DecodeWork, 2),
+                            ] {
+                                let state = exec.store.dimension_state(dimension).unwrap();
+                                assert_eq!((state.attempted(), state.consumed()), (amount, amount));
+                            }
+                            Ok(())
+                        })
+                        .unwrap();
+                });
+            },
+        );
     }
 
     #[test]
     fn incomplete_callback_keeps_the_exact_completed_prefix_and_latches_failure() {
-        let mut store = test_store(&ResourceLimits::default());
-        testing::with_context(&mut store.owner, |context| {
-            let result = context.with_execution(|exec| -> ParseResult<()> {
-                let group = exec.bind_work_group([ImportWorkClass::Tokens])?;
-                exec.with_work(&group, [3], |_exec, work| work.complete([1]))
-            });
-            assert!(result.is_err());
-            assert!(matches!(
-                context.take_terminal_abort().unwrap().cause(),
-                ScopeAbortCause::DescriptorContract {
-                    code: "parse-work-callback-incomplete"
-                },
-            ));
-        });
-        let state = store
-            .execution()
-            .dimension_state(ImportDimension::Tokens)
-            .unwrap();
-        assert_eq!((state.attempted(), state.consumed()), (3, 1));
-        store.assert_released();
+        with_store_body(
+            ResourceLimits::default(),
+            ImportOperationControl::default(),
+            |store| {
+                testing::with_context(&mut store.owner, |context| {
+                    let result = context.with_execution(|exec| -> ParseResult<()> {
+                        let group = exec.bind_group([ImportWorkClass::Tokens])?;
+                        let result = exec.child(&group, [3], |child| child.run([1], || Ok(())));
+                        let state = exec.store.dimension_state(ImportDimension::Tokens).unwrap();
+                        assert_eq!((state.attempted(), state.consumed()), (3, 1));
+                        result
+                    });
+                    assert!(result.is_err());
+                    assert!(matches!(
+                        context.take_terminal_abort().unwrap().cause(),
+                        ScopeAbortCause::DescriptorContract {
+                            code: "parse-work-callback-incomplete"
+                        },
+                    ));
+                });
+            },
+        );
     }
 
     #[test]
@@ -4911,7 +4644,7 @@ mod tests {
                 &self,
                 _probe: &crate::Probe<'_>,
                 _hint: &crate::ReadHint,
-                _scope: &crate::DetectionScope<'_>,
+                _scope: &mut crate::DetectionScope<'_, '_>,
             ) -> crate::DetectionResult<crate::DetectionOutcome> {
                 Ok(crate::DetectionOutcome::NoMatch)
             }
@@ -4919,7 +4652,7 @@ mod tests {
             fn parse(
                 &self,
                 _options: &Self::Options,
-                _scope: &mut ParseContext<'_>,
+                _scope: &mut ParseContext<'_, '_>,
             ) -> ParseResult<()> {
                 unreachable!("this test exercises the selected ParseContext directly")
             }
@@ -4964,331 +4697,343 @@ mod tests {
             if acquisition_denied {
                 limits.max_dependency_acquisition_work = 0;
             }
-            let mut store = test_store(&limits);
-            let baseline = store.account.snapshot().live_retained_bytes();
-            let host = &mut store.execution();
-            {
-                let io = baozi_io::MemoryAssetIo::new();
-                let dependency_path = AssetPath::new("dependency.bin").unwrap();
-                let payload = b"complete dependency snapshot";
-                if available {
-                    io.try_insert(dependency_path, Arc::<[u8]>::from(payload.as_slice()))
+            with_store_body(limits.clone(), ImportOperationControl::default(), |store| {
+                let baseline = store.account.snapshot().live_retained_bytes();
+                {
+                    let io = baozi_io::MemoryAssetIo::new();
+                    let dependency_path = AssetPath::new("dependency.bin").unwrap();
+                    let payload = b"complete dependency snapshot";
+                    if available {
+                        io.try_insert(dependency_path, Arc::<[u8]>::from(payload.as_slice()))
+                            .unwrap();
+                    }
+                    let authority = io.authority_domain();
+                    let source = AssetPath::new("primary.bin").unwrap();
+                    let issuer = DependencyOriginIssuer::new();
+                    let diagnostics = RefCell::new(DiagnosticSink::new(16, 4096, 512, 8192));
+                    let graph = RefCell::new(ResourceGraph::new(limits.clone()));
+                    store
+                        .owner
+                        .with_root_execution(|host| {
+                            graph
+                                .borrow_mut()
+                                .bind_primary(host, &authority, &source, b"primary")
+                                .unwrap();
+                            Ok::<_, ImportStoreHostError>(())
+                        })
                         .unwrap();
-                }
-                let authority = io.authority_domain();
-                let source = AssetPath::new("primary.bin").unwrap();
-                let issuer = DependencyOriginIssuer::new();
-                let diagnostics = RefCell::new(DiagnosticSink::new(16, 4096, 512, 8192));
-                let graph = RefCell::new(ResourceGraph::new(limits.clone()));
-                graph
-                    .borrow_mut()
-                    .bind_primary(host, &authority, &source, b"primary")
-                    .unwrap();
-                let optional_evidence = RefCell::new(AccountedVec::new());
-                let loss_evidence = RefCell::new(AccountedVec::new());
-                let source_scope = RefCell::new(None);
-                let format_failure_storage = RefCell::new(FailureEvidenceStorage::default());
-                let terminal = RefCell::new(None);
-                let loss_policy = if allow_optional {
-                    LossPolicy::preserve_or_fail()
-                        .allow(ImportLossKind::OptionalDependencyUnavailable)
-                } else {
-                    LossPolicy::preserve_or_fail()
-                };
-                let mut context = ParseContext::new(ParseContextParts {
-                    entry: entry.clone(),
-                    primary_io: &io,
-                    primary_authority: &authority,
-                    primary_source: &source,
-                    primary_bytes: b"primary",
-                    resolver: ResolverBinding::registered(
-                        baozi_io::__semantic_identity::same_authority_resolver_v1(),
-                    ),
-                    dependency_origin_issuer: &issuer,
-                    conformance_policy: ConformancePolicy::Strict,
-                    loss_policy,
-                    limits: &limits,
-                    store_owner: &mut store.owner,
-                    diagnostics: &diagnostics,
-                    resource_graph: &graph,
-                    optional_dependency_evidence: &optional_evidence,
-                    loss_evidence: &loss_evidence,
-                    source_scope_record: &source_scope,
-                    format_failure_storage: &format_failure_storage,
-                    terminal: &terminal,
-                });
-                let _ = context.with_execution(|scope| -> ParseResult<()> {
-                    let role = DependencyRoleId::new(match requirement {
-                        DependencyRequirement::Required => "required",
-                        DependencyRequirement::Optional => "optional",
-                    })
-                    .unwrap();
-                    assert_eq!(
-                        scope.frozen_dependency_requirement(&role).unwrap(),
-                        requirement
-                    );
-                    scope.charge_logical_reference().unwrap_or_else(|_| {
-                        panic!("logical reference must fit before the injected limit")
+                    let optional_evidence = RefCell::new(AccountedVec::new());
+                    let loss_evidence = RefCell::new(AccountedVec::new());
+                    let source_scope = RefCell::new(None);
+                    let format_failure_storage = RefCell::new(FailureEvidenceStorage::default());
+                    let terminal = RefCell::new(None);
+                    let loss_policy = if allow_optional {
+                        LossPolicy::preserve_or_fail()
+                            .allow(ImportLossKind::OptionalDependencyUnavailable)
+                    } else {
+                        LossPolicy::preserve_or_fail()
+                    };
+                    let mut context = ParseContext::new(ParseContextParts {
+                        entry: entry.clone(),
+                        primary_io: &io,
+                        primary_authority: &authority,
+                        primary_source: &source,
+                        primary_bytes: b"primary",
+                        resolver: ResolverBinding::registered(
+                            baozi_io::__semantic_identity::same_authority_resolver_v1(),
+                        ),
+                        dependency_origin_issuer: &issuer,
+                        conformance_policy: ConformancePolicy::Strict,
+                        loss_policy,
+                        limits: &limits,
+                        store_owner: &mut store.owner,
+                        diagnostics: &diagnostics,
+                        resource_graph: &graph,
+                        optional_dependency_evidence: &optional_evidence,
+                        loss_evidence: &loss_evidence,
+                        source_scope_record: &source_scope,
+                        format_failure_storage: &format_failure_storage,
+                        terminal: &terminal,
                     });
-                    let source_node = graph.borrow().source_for_primary().unwrap();
-                    let pending = graph
-                        .borrow_mut()
-                        .begin_relation(
-                            &mut scope.store,
-                            source_node,
-                            &role,
-                            requirement,
-                            "dependency.bin",
-                        )
+                    let _ = context.with_execution(|scope| -> ParseResult<()> {
+                        let origin = scope.services()?.root_origin();
+                        let role = DependencyRoleId::new(match requirement {
+                            DependencyRequirement::Required => "required",
+                            DependencyRequirement::Optional => "optional",
+                        })
                         .unwrap();
-                    let (pending, normalized, authorized) = scope
-                        .authorize_dependency(
-                            pending,
-                            &io,
-                            &authority,
-                            &source,
-                            &role,
-                            "dependency.bin",
-                        )
-                        .unwrap_or_else(|_| panic!("dependency authorization must succeed"));
-                    let (pending, normalized, authorized) = scope
-                        .prepare_authorized_target(pending, normalized, authorized)
-                        .unwrap_or_else(|_| panic!("dependency target planning must succeed"));
-                    graph
-                        .borrow_mut()
-                        .reserve_acquisition_capacity(&mut scope.store)
-                        .unwrap();
-                    let (failure, dimension, class, value, limit) =
-                        if matches!(failure_point, FailurePoint::SnapshotSharing) {
-                            let (io, identity, stable_identity_schema, registered_resolver) =
-                                authorized.into_parts();
-                            let identity_storage = scope
-                                .reserve_dependency_storage_cause(
-                                    identity.path().as_str().len() as u64
-                                )
-                                .unwrap();
-                            assert!(
-                                graph
-                                    .borrow_mut()
-                                    .begin_acquisition(
-                                        &mut scope.store,
-                                        identity.try_clone().unwrap(),
-                                        identity_storage
-                                    )
-                                    .unwrap()
-                            );
-                            let bytes = scope.open_and_read_dependency(io, &identity).unwrap();
-                            assert_eq!(&*bytes, payload.as_slice());
-                            let scratch = scope
-                                .store
-                                .dimension_state(ImportDimension::ScratchBytes)
-                                .unwrap();
-                            scope
-                                .store
-                                .tighten_dimension_policy(
-                                    ImportDimension::ScratchBytes,
-                                    DimensionPolicy::reservable_bytes(
-                                        u64::MAX,
-                                        u64::MAX,
-                                        0,
-                                        scratch.live_bytes(),
-                                    ),
-                                )
-                                .unwrap();
-                            let graph_work = scope
-                                .store
-                                .dimension_state(ImportDimension::ResourceGraphWork)
-                                .unwrap();
-                            scope
-                                .store
-                                .tighten_dimension_policy(
-                                    ImportDimension::ResourceGraphWork,
-                                    DimensionPolicy::counter(u64::MAX, graph_work.consumed(), 0),
-                                )
-                                .unwrap();
-                            let cause = match scope.share_dependency_snapshot(bytes) {
-                                Err(cause) => cause,
-                                Ok(_) => {
-                                    panic!("snapshot sharing must exceed the live scratch limit")
-                                }
-                            };
-                            let failure = scope.finish_dependency_resolution_failure(
-                                pending,
-                                identity,
-                                DependencyFailureObservationContext {
-                                    stable_identity_schema,
-                                    registered_resolver,
-                                    io,
-                                },
-                                normalized,
-                                cause,
-                            );
-                            (
-                                failure,
-                                ImportDimension::ScratchBytes,
-                                CounterClass::Live,
-                                scratch.live_bytes()
-                                    + shared_dependency_snapshot_allocation_bytes().unwrap() as u64,
-                                scratch.live_bytes(),
+                        assert_eq!(
+                            scope.frozen_dependency_requirement(&role).unwrap(),
+                            requirement
+                        );
+                        scope.charge_logical_reference().unwrap_or_else(|_| {
+                            panic!("logical reference must fit before the injected limit")
+                        });
+                        let source_node = graph.borrow().source_for_primary().unwrap();
+                        let pending = graph
+                            .borrow_mut()
+                            .begin_relation(
+                                &mut scope.store,
+                                source_node,
+                                &role,
+                                requirement,
+                                "dependency.bin",
                             )
-                        } else {
-                            let before = scope
-                                .store
-                                .dimension_state(ImportDimension::ResourceGraphWork)
-                                .unwrap();
-                            // Get and mark_resolving examine one slot each; the completion probe must fail.
-                            let limit = before.consumed() + 2;
-                            scope
-                                .store
-                                .tighten_dimension_policy(
-                                    ImportDimension::ResourceGraphWork,
-                                    DimensionPolicy::counter(u64::MAX, limit, 0),
+                            .unwrap();
+                        let (pending, normalized, authorized) = scope
+                            .authorize_dependency(
+                                pending,
+                                &io,
+                                &authority,
+                                &source,
+                                &role,
+                                "dependency.bin",
+                            )
+                            .unwrap_or_else(|_| panic!("dependency authorization must succeed"));
+                        let (pending, normalized, authorized) = scope
+                            .prepare_authorized_target(pending, normalized, authorized)
+                            .unwrap_or_else(|_| panic!("dependency target planning must succeed"));
+                        graph
+                            .borrow_mut()
+                            .reserve_acquisition_capacity(&mut scope.store)
+                            .unwrap();
+                        let (failure, dimension, class, value, limit) =
+                            if matches!(failure_point, FailurePoint::SnapshotSharing) {
+                                let (io, identity, stable_identity_schema, registered_resolver) =
+                                    authorized.into_parts();
+                                let identity_storage = scope
+                                    .reserve_dependency_storage_cause(
+                                        identity.path().as_str().len() as u64,
+                                    )
+                                    .unwrap();
+                                assert!(
+                                    graph
+                                        .borrow_mut()
+                                        .begin_acquisition(
+                                            &mut scope.store,
+                                            identity.try_clone().unwrap(),
+                                            identity_storage
+                                        )
+                                        .unwrap()
+                                );
+                                let bytes = scope.open_and_read_dependency(io, &identity).unwrap();
+                                assert_eq!(&*bytes, payload.as_slice());
+                                let scratch = scope
+                                    .store
+                                    .dimension_state(ImportDimension::ScratchBytes)
+                                    .unwrap();
+                                scope
+                                    .store
+                                    .tighten_dimension_policy(
+                                        ImportDimension::ScratchBytes,
+                                        DimensionPolicy::reservable_bytes(
+                                            u64::MAX,
+                                            u64::MAX,
+                                            0,
+                                            scratch.live_bytes(),
+                                        ),
+                                    )
+                                    .unwrap();
+                                let graph_work = scope
+                                    .store
+                                    .dimension_state(ImportDimension::ResourceGraphWork)
+                                    .unwrap();
+                                scope
+                                    .store
+                                    .tighten_dimension_policy(
+                                        ImportDimension::ResourceGraphWork,
+                                        DimensionPolicy::counter(
+                                            u64::MAX,
+                                            graph_work.consumed(),
+                                            0,
+                                        ),
+                                    )
+                                    .unwrap();
+                                let cause = match scope.share_dependency_snapshot(bytes) {
+                                    Err(cause) => cause,
+                                    Ok(_) => {
+                                        panic!(
+                                            "snapshot sharing must exceed the live scratch limit"
+                                        )
+                                    }
+                                };
+                                let failure = scope.finish_dependency_resolution_failure(
+                                    pending,
+                                    identity,
+                                    DependencyFailureObservationContext {
+                                        stable_identity_schema,
+                                        registered_resolver,
+                                        io,
+                                    },
+                                    normalized,
+                                    cause,
+                                );
+                                (
+                                    failure,
+                                    ImportDimension::ScratchBytes,
+                                    CounterClass::Live,
+                                    scratch.live_bytes()
+                                        + shared_dependency_snapshot_allocation_bytes().unwrap()
+                                            as u64,
+                                    scratch.live_bytes(),
                                 )
-                                .unwrap();
-                            let failure =
-                                match scope.acquire_authorized(pending, normalized, authorized) {
+                            } else {
+                                let before = scope
+                                    .store
+                                    .dimension_state(ImportDimension::ResourceGraphWork)
+                                    .unwrap();
+                                // Get and mark_resolving examine one slot each; the completion probe must fail.
+                                let limit = before.consumed() + 2;
+                                scope
+                                    .store
+                                    .tighten_dimension_policy(
+                                        ImportDimension::ResourceGraphWork,
+                                        DimensionPolicy::counter(u64::MAX, limit, 0),
+                                    )
+                                    .unwrap();
+                                let failure = match scope
+                                    .acquire_authorized(pending, normalized, authorized)
+                                {
                                     Err(failure) => failure,
                                     Ok(_) => panic!(
                                         "cache completion must reject its first unadmitted probe"
                                     ),
                                 };
-                            if acquisition_denied {
-                                (
-                                    failure,
-                                    ImportDimension::DependencyAcquisitionWork,
-                                    CounterClass::Consumed,
-                                    1,
-                                    0,
-                                )
-                            } else {
-                                (
-                                    failure,
-                                    ImportDimension::ResourceGraphWork,
-                                    CounterClass::Consumed,
-                                    limit + 1,
-                                    limit,
-                                )
-                            }
+                                if acquisition_denied {
+                                    (
+                                        failure,
+                                        ImportDimension::DependencyAcquisitionWork,
+                                        CounterClass::Consumed,
+                                        1,
+                                        0,
+                                    )
+                                } else {
+                                    (
+                                        failure,
+                                        ImportDimension::ResourceGraphWork,
+                                        CounterClass::Consumed,
+                                        limit + 1,
+                                        limit,
+                                    )
+                                }
+                            };
+                        let is_original_cause = |cause: &ScopeAbortCause| {
+                            matches!(
+                                cause,
+                                ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                                    class: actual_class,
+                                    dimension: actual_dimension,
+                                    value: actual_value,
+                                    limit: actual_limit,
+                                }) if *actual_dimension == dimension && *actual_class == class
+                                    && *actual_value == value && *actual_limit == limit
+                            )
                         };
-                    let is_original_cause = |cause: &ScopeAbortCause| {
-                        matches!(
-                            cause,
-                            ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
-                                class: actual_class,
-                                dimension: actual_dimension,
-                                value: actual_value,
-                                limit: actual_limit,
-                            }) if *actual_dimension == dimension && *actual_class == class
-                                && *actual_value == value && *actual_limit == limit
-                        )
-                    };
-                    assert!(is_original_cause(
-                        scope
-                            .dependency_failure
-                            .borrow()
-                            .as_ref()
-                            .unwrap()
-                            .cause(&graph.borrow())
-                            .unwrap()
-                    ));
-                    let opened = scope
-                        .store
-                        .dimension_state(ImportDimension::AssetOpen)
-                        .unwrap();
-                    assert_eq!(opened.attempted(), 1);
-                    assert_eq!(opened.consumed(), u64::from(available));
-                    assert_eq!(
-                        scope
+                        assert!(is_original_cause(
+                            scope
+                                .dependency_failure
+                                .borrow()
+                                .as_ref()
+                                .unwrap()
+                                .cause(&graph.borrow())
+                                .unwrap()
+                        ));
+                        let opened = scope
                             .store
-                            .dimension_state(ImportDimension::DependencyBytes)
-                            .unwrap()
-                            .consumed(),
-                        if available && !acquisition_denied {
-                            payload.len() as u64
-                        } else {
-                            0
+                            .dimension_state(ImportDimension::AssetOpen)
+                            .unwrap();
+                        assert_eq!(opened.attempted(), 1);
+                        assert_eq!(opened.consumed(), u64::from(available));
+                        assert_eq!(
+                            scope
+                                .store
+                                .dimension_state(ImportDimension::DependencyBytes)
+                                .unwrap()
+                                .consumed(),
+                            if available && !acquisition_denied {
+                                payload.len() as u64
+                            } else {
+                                0
+                            }
+                        );
+                        assert_eq!(
+                            scope
+                                .store
+                                .dimension_state(ImportDimension::DependencyAcquisitionWork)
+                                .unwrap()
+                                .consumed(),
+                            u64::from(available && !acquisition_denied)
+                        );
+                        match requirement {
+                            DependencyRequirement::Required => {
+                                let _ = scope.abort_required_dependency_failure(
+                                    &origin,
+                                    &role,
+                                    "dependency.bin",
+                                    failure,
+                                );
+                            }
+                            DependencyRequirement::Optional => {
+                                assert!(scope.resolve_optional_failure(&role, failure).is_err());
+                            }
                         }
-                    );
-                    assert_eq!(
-                        scope
-                            .store
-                            .dimension_state(ImportDimension::DependencyAcquisitionWork)
-                            .unwrap()
-                            .consumed(),
-                        u64::from(available && !acquisition_denied)
-                    );
-                    match requirement {
-                        DependencyRequirement::Required => {
-                            let origin = scope.root_origin();
-                            let _ = scope.abort_required_dependency_failure(
-                                &origin,
-                                &role,
-                                "dependency.bin",
-                                failure,
-                            );
-                        }
-                        DependencyRequirement::Optional => {
-                            assert!(scope.resolve_optional_failure(&role, failure).is_err());
-                        }
-                    }
-                    assert!(is_original_cause(terminal.borrow().as_ref().unwrap()));
-                    assert_eq!(
-                        scope
-                            .store
-                            .dimension_state(ImportDimension::CanonicalOutputBytes)
-                            .unwrap()
-                            .live_bytes(),
-                        0,
-                    );
-                    Ok(())
-                });
-                let _abort = context.take_terminal_abort().unwrap();
-                assert!(optional_evidence.borrow().is_empty());
-                assert!(loss_evidence.borrow().is_empty());
-                drop(context);
-                assert!(store.owner.completed_scene_boundary().unwrap().is_none());
-                assert!(!store.account.snapshot().poisoned());
-            }
-            assert_eq!(store.account.snapshot().live_retained_bytes(), baseline);
-            store.assert_released();
+                        assert!(is_original_cause(terminal.borrow().as_ref().unwrap()));
+                        assert_eq!(
+                            scope
+                                .store
+                                .dimension_state(ImportDimension::CanonicalOutputBytes)
+                                .unwrap()
+                                .live_bytes(),
+                            0,
+                        );
+                        Ok(())
+                    });
+                    let _abort = context.take_terminal_abort().unwrap();
+                    assert!(optional_evidence.borrow().is_empty());
+                    assert!(loss_evidence.borrow().is_empty());
+                    drop(context);
+                    assert!(store.owner.completed_scene_boundary().unwrap().is_none());
+                    assert!(!store.account.snapshot().poisoned());
+                }
+                assert_eq!(store.account.snapshot().live_retained_bytes(), baseline);
+            });
         }
     }
 
     #[test]
     fn opened_asset_snapshot_is_unique_metered_vec_storage() {
         let limits = ResourceLimits::default();
-        let mut store = test_store(&limits);
-        let host = &mut store.execution();
-        let baseline = current_live_bytes(host);
-        let payload = b"metered snapshot".to_vec();
-        let opened = OpenedAsset::new(
-            AuthorityDomain::new(),
-            AssetPath::new("scene.bin").unwrap(),
-            Cursor::new(payload.clone()),
-            Some(AssetLength::Exact(payload.len() as u64)),
-        );
+        with_store_root_body(limits.clone(), ImportOperationControl::default(), |host| {
+            let baseline = current_live_bytes(host);
+            let payload = b"metered snapshot".to_vec();
+            let opened = OpenedAsset::new(
+                AuthorityDomain::new(),
+                AssetPath::new("scene.bin").unwrap(),
+                Cursor::new(payload.clone()),
+                Some(AssetLength::Exact(payload.len() as u64)),
+            );
 
-        let snapshot = read_opened_asset(
-            host,
-            OpenedAssetOwner::new(opened),
-            ImportLedgerPhase::PrimarySnapshot,
-            ImportProgressPhase::AcquirePrimary,
-            ImportDimension::PrimaryBytes,
-            limits.max_primary_asset_bytes,
-            limits.max_total_asset_bytes,
-        )
-        .unwrap();
+            let snapshot = read_opened_asset(
+                host,
+                OpenedAssetOwner::new(opened),
+                ImportLedgerPhase::PrimarySnapshot,
+                ImportProgressPhase::AcquirePrimary,
+                ImportDimension::PrimaryBytes,
+                limits.max_primary_asset_bytes,
+                limits.max_total_asset_bytes,
+            )
+            .unwrap();
 
-        assert_eq!(&*snapshot, payload.as_slice());
-        assert!(snapshot.capacity_bytes() >= payload.len() as u64);
-        assert_eq!(
-            current_live_bytes(host),
-            baseline + snapshot.capacity_bytes()
-        );
+            assert_eq!(&*snapshot, payload.as_slice());
+            assert!(snapshot.capacity_bytes() >= payload.len() as u64);
+            assert_eq!(
+                current_live_bytes(host),
+                baseline + snapshot.capacity_bytes()
+            );
 
-        drop(snapshot);
-        assert_eq!(current_live_bytes(host), baseline);
-        store.assert_released();
+            drop(snapshot);
+            assert_eq!(current_live_bytes(host), baseline);
+        });
     }
 
     #[test]
@@ -5298,64 +5043,63 @@ mod tests {
                 max_total_asset_bytes: 2,
                 ..ResourceLimits::default()
             };
-            let mut store = test_store(&limits);
-            let host = &mut store.execution();
-            let baseline = current_live_bytes(host);
-            for (dimension, ledger_phase, progress_phase) in [
-                (
-                    ImportDimension::PrimaryBytes,
-                    ImportLedgerPhase::PrimarySnapshot,
-                    ImportProgressPhase::AcquirePrimary,
-                ),
-                (
-                    ImportDimension::DependencyBytes,
-                    ImportLedgerPhase::DependencyAcquisition,
-                    ImportProgressPhase::AcquireDependency,
-                ),
-            ] {
-                let opened = OpenedAsset::new(
-                    AuthorityDomain::new(),
-                    AssetPath::new("one-byte.bin").unwrap(),
-                    Cursor::new(b"a"),
-                    length,
-                );
-                let work_before = host.dimension_state(ImportDimension::WorkUnits).unwrap();
-                let snapshot = read_opened_asset(
-                    host,
-                    OpenedAssetOwner::new(opened),
-                    ledger_phase,
-                    progress_phase,
-                    dimension,
-                    4,
-                    2,
-                )
-                .expect("unspent total-byte credit must carry into the next resource");
-                assert_eq!(&*snapshot, b"a");
-                let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
-                assert_eq!(work.attempted() - work_before.attempted(), 2);
-                assert_eq!(work.consumed() - work_before.consumed(), 2);
-                assert_eq!(
-                    current_live_bytes(host),
-                    baseline + snapshot.capacity_bytes()
-                );
-                drop(snapshot);
+            with_store_root_body(limits.clone(), ImportOperationControl::default(), |host| {
+                let baseline = current_live_bytes(host);
+                for (dimension, ledger_phase, progress_phase) in [
+                    (
+                        ImportDimension::PrimaryBytes,
+                        ImportLedgerPhase::PrimarySnapshot,
+                        ImportProgressPhase::AcquirePrimary,
+                    ),
+                    (
+                        ImportDimension::DependencyBytes,
+                        ImportLedgerPhase::DependencyAcquisition,
+                        ImportProgressPhase::AcquireDependency,
+                    ),
+                ] {
+                    let opened = OpenedAsset::new(
+                        AuthorityDomain::new(),
+                        AssetPath::new("one-byte.bin").unwrap(),
+                        Cursor::new(b"a"),
+                        length,
+                    );
+                    let work_before = host.dimension_state(ImportDimension::WorkUnits).unwrap();
+                    let snapshot = read_opened_asset(
+                        host,
+                        OpenedAssetOwner::new(opened),
+                        ledger_phase,
+                        progress_phase,
+                        dimension,
+                        4,
+                        2,
+                    )
+                    .expect("unspent total-byte credit must carry into the next resource");
+                    assert_eq!(&*snapshot, b"a");
+                    let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
+                    assert_eq!(work.attempted() - work_before.attempted(), 2);
+                    assert_eq!(work.consumed() - work_before.consumed(), 2);
+                    assert_eq!(
+                        current_live_bytes(host),
+                        baseline + snapshot.capacity_bytes()
+                    );
+                    drop(snapshot);
+                    assert_eq!(current_live_bytes(host), baseline);
+                }
+                let total = host
+                    .dimension_state(ImportDimension::TotalAssetBytes)
+                    .unwrap();
+                assert_eq!(total.attempted(), 2);
+                assert_eq!(total.consumed(), 2);
+                let primary = host.dimension_state(ImportDimension::PrimaryBytes).unwrap();
+                assert_eq!(primary.attempted(), 2);
+                assert_eq!(primary.consumed(), 1);
+                let dependency = host
+                    .dimension_state(ImportDimension::DependencyBytes)
+                    .unwrap();
+                assert_eq!(dependency.attempted(), 1);
+                assert_eq!(dependency.consumed(), 1);
                 assert_eq!(current_live_bytes(host), baseline);
-            }
-            let total = host
-                .dimension_state(ImportDimension::TotalAssetBytes)
-                .unwrap();
-            assert_eq!(total.attempted(), 2);
-            assert_eq!(total.consumed(), 2);
-            let primary = host.dimension_state(ImportDimension::PrimaryBytes).unwrap();
-            assert_eq!(primary.attempted(), 2);
-            assert_eq!(primary.consumed(), 1);
-            let dependency = host
-                .dimension_state(ImportDimension::DependencyBytes)
-                .unwrap();
-            assert_eq!(dependency.attempted(), 1);
-            assert_eq!(dependency.consumed(), 1);
-            assert_eq!(current_live_bytes(host), baseline);
-            store.assert_released();
+            });
         }
     }
 
@@ -5371,42 +5115,42 @@ mod tests {
                 max_total_asset_bytes: 0,
                 ..ResourceLimits::default()
             };
-            let mut store = test_store(&limits);
-            let host = &mut store.execution();
-            let opened = OpenedAsset::new(
-                AuthorityDomain::new(),
-                AssetPath::new("empty.bin").unwrap(),
-                Cursor::new(b""),
-                length,
-            )
-            .with_backend_hard_limit(0);
+            with_store_root_body(limits.clone(), ImportOperationControl::default(), |host| {
+                let opened = OpenedAsset::new(
+                    AuthorityDomain::new(),
+                    AssetPath::new("empty.bin").unwrap(),
+                    Cursor::new(b""),
+                    length,
+                )
+                .with_backend_hard_limit(0);
 
-            let work_before = host.dimension_state(ImportDimension::WorkUnits).unwrap();
-            let snapshot = read_opened_asset(
-                host,
-                OpenedAssetOwner::new(opened),
-                ImportLedgerPhase::PrimarySnapshot,
-                ImportProgressPhase::AcquirePrimary,
-                ImportDimension::PrimaryBytes,
-                0,
-                0,
-            )
-            .expect("a nonempty EOF probe must accept empty input at zero credit");
+                let work_before = host.dimension_state(ImportDimension::WorkUnits).unwrap();
+                let snapshot = read_opened_asset(
+                    host,
+                    OpenedAssetOwner::new(opened),
+                    ImportLedgerPhase::PrimarySnapshot,
+                    ImportProgressPhase::AcquirePrimary,
+                    ImportDimension::PrimaryBytes,
+                    0,
+                    0,
+                )
+                .expect("a nonempty EOF probe must accept empty input at zero credit");
 
-            assert!(snapshot.is_empty());
-            assert_eq!(snapshot.capacity_bytes(), 0);
-            for dimension in [
-                ImportDimension::PrimaryBytes,
-                ImportDimension::TotalAssetBytes,
-            ] {
-                let state = host.dimension_state(dimension).unwrap();
-                assert_eq!(state.attempted(), 0);
-                assert_eq!(state.consumed(), 0);
-                assert_eq!(state.live_bytes(), 0);
-            }
-            let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
-            assert_eq!(work.attempted() - work_before.attempted(), 1);
-            assert_eq!(work.consumed() - work_before.consumed(), 1);
+                assert!(snapshot.is_empty());
+                assert_eq!(snapshot.capacity_bytes(), 0);
+                for dimension in [
+                    ImportDimension::PrimaryBytes,
+                    ImportDimension::TotalAssetBytes,
+                ] {
+                    let state = host.dimension_state(dimension).unwrap();
+                    assert_eq!(state.attempted(), 0);
+                    assert_eq!(state.consumed(), 0);
+                    assert_eq!(state.live_bytes(), 0);
+                }
+                let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
+                assert_eq!(work.attempted() - work_before.attempted(), 1);
+                assert_eq!(work.consumed() - work_before.consumed(), 1);
+            });
         }
     }
 
@@ -5414,53 +5158,52 @@ mod tests {
     fn opened_assets_preserve_exact_length_truncation_and_overrun_evidence() {
         for payload in [b"abc".as_slice(), b"abcde".as_slice()] {
             let limits = ResourceLimits::default();
-            let mut store = test_store(&limits);
-            let host = &mut store.execution();
-            let baseline = current_live_bytes(host);
-            let opened = OpenedAsset::new(
-                AuthorityDomain::new(),
-                AssetPath::new("exact.bin").unwrap(),
-                Cursor::new(payload.to_vec()),
-                Some(AssetLength::Exact(4)),
-            );
+            with_store_root_body(limits.clone(), ImportOperationControl::default(), |host| {
+                let baseline = current_live_bytes(host);
+                let opened = OpenedAsset::new(
+                    AuthorityDomain::new(),
+                    AssetPath::new("exact.bin").unwrap(),
+                    Cursor::new(payload.to_vec()),
+                    Some(AssetLength::Exact(4)),
+                );
 
-            let work_before = host.dimension_state(ImportDimension::WorkUnits).unwrap();
-            let cause = read_opened_asset(
-                host,
-                OpenedAssetOwner::new(opened),
-                ImportLedgerPhase::PrimarySnapshot,
-                ImportProgressPhase::AcquirePrimary,
-                ImportDimension::PrimaryBytes,
-                8,
-                8,
-            )
-            .expect_err("declared truncation or overrun must remain a backend contract error");
-
-            let ScopeAbortCause::AssetRead(error) = cause else {
-                panic!("expected an exact-length contract error")
-            };
-            assert!(
-                matches!(error.kind(),
-                    AssetReadErrorKind::ContractViolation(baozi_io::AssetReadContractViolation::ExactLengthTruncated { expected: 4, observed: 3 })
-                        if payload.len() == 3
-                ) || matches!(error.kind(),
-                    AssetReadErrorKind::ContractViolation(baozi_io::AssetReadContractViolation::ExactLengthExceeded { expected: 4, observed: 5 })
-                        if payload.len() == 5
+                let work_before = host.dimension_state(ImportDimension::WorkUnits).unwrap();
+                let cause = read_opened_asset(
+                    host,
+                    OpenedAssetOwner::new(opened),
+                    ImportLedgerPhase::PrimarySnapshot,
+                    ImportProgressPhase::AcquirePrimary,
+                    ImportDimension::PrimaryBytes,
+                    8,
+                    8,
                 )
-            );
-            for dimension in [
-                ImportDimension::PrimaryBytes,
-                ImportDimension::TotalAssetBytes,
-            ] {
-                let state = host.dimension_state(dimension).unwrap();
-                assert_eq!(state.attempted(), if payload.len() == 3 { 4 } else { 5 });
-                assert_eq!(state.consumed(), payload.len() as u64);
-            }
-            let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
-            assert_eq!(work.attempted() - work_before.attempted(), 2);
-            assert_eq!(work.consumed() - work_before.consumed(), 2);
-            assert_eq!(current_live_bytes(host), baseline);
-            store.assert_released();
+                .expect_err("declared truncation or overrun must remain a backend contract error");
+
+                let ScopeAbortCause::AssetRead(error) = cause else {
+                    panic!("expected an exact-length contract error")
+                };
+                assert!(
+                    matches!(error.kind(),
+                        AssetReadErrorKind::ContractViolation(baozi_io::AssetReadContractViolation::ExactLengthTruncated { expected: 4, observed: 3 })
+                            if payload.len() == 3
+                    ) || matches!(error.kind(),
+                        AssetReadErrorKind::ContractViolation(baozi_io::AssetReadContractViolation::ExactLengthExceeded { expected: 4, observed: 5 })
+                            if payload.len() == 5
+                    )
+                );
+                for dimension in [
+                    ImportDimension::PrimaryBytes,
+                    ImportDimension::TotalAssetBytes,
+                ] {
+                    let state = host.dimension_state(dimension).unwrap();
+                    assert_eq!(state.attempted(), if payload.len() == 3 { 4 } else { 5 });
+                    assert_eq!(state.consumed(), payload.len() as u64);
+                }
+                let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
+                assert_eq!(work.attempted() - work_before.attempted(), 2);
+                assert_eq!(work.consumed() - work_before.consumed(), 2);
+                assert_eq!(current_live_bytes(host), baseline);
+            });
         }
     }
 
@@ -5486,54 +5229,57 @@ mod tests {
     #[test]
     fn interrupted_asset_reads_preserve_only_completed_byte_and_call_prefixes() {
         for panics in [false, true] {
-            let mut store = test_store(&ResourceLimits::default());
-            let host = &mut store.execution();
-            let baseline = current_live_bytes(host);
-            let calls = Arc::new(AtomicU64::new(0));
-            let opened = OpenedAsset::new(
-                AuthorityDomain::new(),
-                AssetPath::new("interrupted.bin").unwrap(),
-                InterruptedAssetReader {
-                    calls: Arc::clone(&calls),
-                    panics,
+            with_store_root_body(
+                ResourceLimits::default(),
+                ImportOperationControl::default(),
+                |host| {
+                    let baseline = current_live_bytes(host);
+                    let calls = Arc::new(AtomicU64::new(0));
+                    let opened = OpenedAsset::new(
+                        AuthorityDomain::new(),
+                        AssetPath::new("interrupted.bin").unwrap(),
+                        InterruptedAssetReader {
+                            calls: Arc::clone(&calls),
+                            panics,
+                        },
+                        None,
+                    );
+
+                    let work_before = host.dimension_state(ImportDimension::WorkUnits).unwrap();
+                    let cause = read_opened_asset(
+                        host,
+                        OpenedAssetOwner::new(opened),
+                        ImportLedgerPhase::PrimarySnapshot,
+                        ImportProgressPhase::AcquirePrimary,
+                        ImportDimension::PrimaryBytes,
+                        4,
+                        4,
+                    )
+                    .expect_err("the failing read must preserve the prior completed prefix");
+
+                    assert!(
+                        matches!(cause, ScopeAbortCause::AssetRead(_)) && !panics
+                            || matches!(
+                                cause,
+                                ScopeAbortCause::TrustedExtension {
+                                    boundary: TrustedExtensionBoundary::AssetIo,
+                                    code: "asset-read-panicked"
+                                }
+                            ) && panics
+                    );
+                    assert_eq!(calls.load(Ordering::Acquire), 2);
+                    let primary = host.dimension_state(ImportDimension::PrimaryBytes).unwrap();
+                    assert_eq!(primary.attempted(), 4);
+                    assert_eq!(primary.consumed(), 1);
+                    let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
+                    assert_eq!(work.attempted() - work_before.attempted(), 2);
+                    assert_eq!(
+                        work.consumed() - work_before.consumed(),
+                        if panics { 1 } else { 2 }
+                    );
+                    assert_eq!(current_live_bytes(host), baseline);
                 },
-                None,
             );
-
-            let work_before = host.dimension_state(ImportDimension::WorkUnits).unwrap();
-            let cause = read_opened_asset(
-                host,
-                OpenedAssetOwner::new(opened),
-                ImportLedgerPhase::PrimarySnapshot,
-                ImportProgressPhase::AcquirePrimary,
-                ImportDimension::PrimaryBytes,
-                4,
-                4,
-            )
-            .expect_err("the failing read must preserve the prior completed prefix");
-
-            assert!(
-                matches!(cause, ScopeAbortCause::AssetRead(_)) && !panics
-                    || matches!(
-                        cause,
-                        ScopeAbortCause::TrustedExtension {
-                            boundary: TrustedExtensionBoundary::AssetIo,
-                            code: "asset-read-panicked"
-                        }
-                    ) && panics
-            );
-            assert_eq!(calls.load(Ordering::Acquire), 2);
-            let primary = host.dimension_state(ImportDimension::PrimaryBytes).unwrap();
-            assert_eq!(primary.attempted(), 4);
-            assert_eq!(primary.consumed(), 1);
-            let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
-            assert_eq!(work.attempted() - work_before.attempted(), 2);
-            assert_eq!(
-                work.consumed() - work_before.consumed(),
-                if panics { 1 } else { 2 }
-            );
-            assert_eq!(current_live_bytes(host), baseline);
-            store.assert_released();
         }
     }
 
@@ -5557,61 +5303,60 @@ mod tests {
             } else {
                 ImportOperationControl::default()
             };
-            let mut store = test_store_with_control(&limits, control);
-            let host = &mut store.execution();
-            let baseline = current_live_bytes(host);
-            let calls = Arc::new(AtomicU64::new(0));
-            let opened = OpenedAsset::new(
-                AuthorityDomain::new(),
-                AssetPath::new("controlled.bin").unwrap(),
-                InterruptedAssetReader {
-                    calls: Arc::clone(&calls),
-                    panics: true,
-                },
-                None,
-            );
+            with_store_root_body(limits.clone(), control, |host| {
+                let baseline = current_live_bytes(host);
+                let calls = Arc::new(AtomicU64::new(0));
+                let opened = OpenedAsset::new(
+                    AuthorityDomain::new(),
+                    AssetPath::new("controlled.bin").unwrap(),
+                    InterruptedAssetReader {
+                        calls: Arc::clone(&calls),
+                        panics: true,
+                    },
+                    None,
+                );
 
-            let work_before = host.dimension_state(ImportDimension::WorkUnits).unwrap();
-            let work_limit = work_before.attempted() + 1;
-            host.tighten_dimension_policy(
-                ImportDimension::WorkUnits,
-                DimensionPolicy::counter(work_limit, work_before.consumed() + 1, 0),
-            )
-            .expect("one backend read must fit after the startup work");
-            let cause = read_opened_asset(
-                host,
-                OpenedAssetOwner::new(opened),
-                ImportLedgerPhase::PrimarySnapshot,
-                ImportProgressPhase::AcquirePrimary,
-                ImportDimension::PrimaryBytes,
-                4,
-                4,
-            )
-            .expect_err("control or work admission must prevent a second backend call");
+                let work_before = host.dimension_state(ImportDimension::WorkUnits).unwrap();
+                let work_limit = work_before.attempted() + 1;
+                host.tighten_dimension_policy(
+                    ImportDimension::WorkUnits,
+                    DimensionPolicy::counter(work_limit, work_before.consumed() + 1, 0),
+                )
+                .expect("one backend read must fit after the startup work");
+                let cause = read_opened_asset(
+                    host,
+                    OpenedAssetOwner::new(opened),
+                    ImportLedgerPhase::PrimarySnapshot,
+                    ImportProgressPhase::AcquirePrimary,
+                    ImportDimension::PrimaryBytes,
+                    4,
+                    4,
+                )
+                .expect_err("control or work admission must prevent a second backend call");
 
-            assert!(
-                matches!(cause, ScopeAbortCause::Control(_)) && cancel
-                    || matches!(
-                        cause,
-                        ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
-                            dimension: ImportDimension::WorkUnits,
-                            limit,
-                            ..
-                        }) if limit == work_limit
-                    ) && !cancel
-            );
-            assert_eq!(calls.load(Ordering::Acquire), 1);
-            let primary = host.dimension_state(ImportDimension::PrimaryBytes).unwrap();
-            assert_eq!(primary.attempted(), 4);
-            assert_eq!(primary.consumed(), 1);
-            let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
-            assert_eq!(
-                work.attempted() - work_before.attempted(),
-                if cancel { 1 } else { 2 }
-            );
-            assert_eq!(work.consumed() - work_before.consumed(), 1);
-            assert_eq!(current_live_bytes(host), baseline);
-            store.assert_released();
+                assert!(
+                    matches!(cause, ScopeAbortCause::Control(_)) && cancel
+                        || matches!(
+                            cause,
+                            ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                                dimension: ImportDimension::WorkUnits,
+                                limit,
+                                ..
+                            }) if limit == work_limit
+                        ) && !cancel
+                );
+                assert_eq!(calls.load(Ordering::Acquire), 1);
+                let primary = host.dimension_state(ImportDimension::PrimaryBytes).unwrap();
+                assert_eq!(primary.attempted(), 4);
+                assert_eq!(primary.consumed(), 1);
+                let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
+                assert_eq!(
+                    work.attempted() - work_before.attempted(),
+                    if cancel { 1 } else { 2 }
+                );
+                assert_eq!(work.consumed() - work_before.consumed(), 1);
+                assert_eq!(current_live_bytes(host), baseline);
+            });
         }
     }
 
@@ -5647,148 +5392,176 @@ mod tests {
 
     #[test]
     fn owned_iteration_error_drops_current_and_remaining_elements_before_capacity() {
-        let mut store = test_store(&ResourceLimits::default());
-        testing::with_context(&mut store.owner, |context| {
-            let observations = RefCell::new(Vec::new());
-            context
-                .with_execution(|exec| -> ParseResult<_> {
-                    let baseline = exec
-                        .store
-                        .dimension_state(ImportDimension::CanonicalOutputBytes)
-                        .unwrap()
-                        .live_bytes();
-                    let mut values = exec.metered_vec(
-                        ImportStorageClass::SceneConstruction,
-                        "owned-iteration-error",
-                    );
-                    values.try_reserve(exec, 3)?;
-                    let storage = exec
-                        .store
-                        .storage_observation(ImportDimension::CanonicalOutputBytes);
-                    let expected_live_bytes = baseline + values.capacity.as_ref().unwrap().bytes();
-                    for id in 0..3 {
-                        values.try_push(
-                            exec,
-                            OwnedIterationDropProbe {
-                                id,
-                                storage,
-                                observations: &observations,
-                                expected_live_bytes,
-                            },
-                        )?;
-                    }
-                    let result = values.try_for_each_owned(|probe| {
-                        assert_eq!(probe.id, 0);
-                        Err::<(), _>("injected visitor failure")
-                    });
-                    assert_eq!(result, Err("injected visitor failure"));
-                    assert_owned_iteration_drop_observations(&observations, &storage, baseline);
-                    Ok(())
-                })
-                .unwrap();
-        });
-        store.assert_released();
+        with_store_body(
+            ResourceLimits::default(),
+            ImportOperationControl::default(),
+            |store| {
+                testing::with_context(&mut store.owner, |context| {
+                    let observations = RefCell::new(Vec::new());
+                    context
+                        .with_execution(|exec| -> ParseResult<_> {
+                            let baseline = exec
+                                .store
+                                .dimension_state(ImportDimension::CanonicalOutputBytes)
+                                .unwrap()
+                                .live_bytes();
+                            let mut values = exec.services()?.metered_vec(
+                                ImportStorageClass::SceneConstruction,
+                                "owned-iteration-error",
+                            );
+                            values.try_reserve(&mut exec.services()?, 3)?;
+                            let storage = testing::storage_observation(
+                                exec,
+                                ImportDimension::CanonicalOutputBytes,
+                            );
+                            let expected_live_bytes =
+                                baseline + values.capacity.as_ref().unwrap().bytes();
+                            for id in 0..3 {
+                                values.try_push(
+                                    &mut exec.services()?,
+                                    OwnedIterationDropProbe {
+                                        id,
+                                        storage,
+                                        observations: &observations,
+                                        expected_live_bytes,
+                                    },
+                                )?;
+                            }
+                            let result = values.try_for_each_owned(|probe| {
+                                assert_eq!(probe.id, 0);
+                                Err::<(), _>("injected visitor failure")
+                            });
+                            assert_eq!(result, Err("injected visitor failure"));
+                            assert_owned_iteration_drop_observations(
+                                &observations,
+                                &storage,
+                                baseline,
+                            );
+                            Ok(())
+                        })
+                        .unwrap();
+                });
+            },
+        );
     }
 
     #[test]
     fn owned_iteration_panic_drops_current_and_remaining_elements_before_capacity() {
-        let mut store = test_store(&ResourceLimits::default());
-        testing::with_context(&mut store.owner, |context| {
-            let observations = RefCell::new(Vec::new());
-            context
-                .with_execution(|exec| -> ParseResult<_> {
-                    let baseline = exec
-                        .store
-                        .dimension_state(ImportDimension::CanonicalOutputBytes)
-                        .unwrap()
-                        .live_bytes();
-                    let mut values = exec.metered_vec(
-                        ImportStorageClass::SceneConstruction,
-                        "owned-iteration-panic",
-                    );
-                    values.try_reserve(exec, 3)?;
-                    let storage = exec
-                        .store
-                        .storage_observation(ImportDimension::CanonicalOutputBytes);
-                    let expected_live_bytes = baseline + values.capacity.as_ref().unwrap().bytes();
-                    for id in 0..3 {
-                        values.try_push(
-                            exec,
-                            OwnedIterationDropProbe {
-                                id,
-                                storage,
-                                observations: &observations,
-                                expected_live_bytes,
-                            },
-                        )?;
-                    }
-                    let result = catch_unwind(AssertUnwindSafe(|| {
-                        let _ = values.try_for_each_owned(|probe| -> Result<(), ()> {
-                            assert_eq!(probe.id, 0);
-                            panic!("injected owned-iteration visitor panic");
-                        });
-                    }));
-                    assert!(result.is_err());
-                    assert_owned_iteration_drop_observations(&observations, &storage, baseline);
-                    Ok(())
-                })
-                .unwrap();
-        });
-        store.assert_released();
+        with_store_body(
+            ResourceLimits::default(),
+            ImportOperationControl::default(),
+            |store| {
+                testing::with_context(&mut store.owner, |context| {
+                    let observations = RefCell::new(Vec::new());
+                    context
+                        .with_execution(|exec| -> ParseResult<_> {
+                            let baseline = exec
+                                .store
+                                .dimension_state(ImportDimension::CanonicalOutputBytes)
+                                .unwrap()
+                                .live_bytes();
+                            let mut values = exec.services()?.metered_vec(
+                                ImportStorageClass::SceneConstruction,
+                                "owned-iteration-panic",
+                            );
+                            values.try_reserve(&mut exec.services()?, 3)?;
+                            let storage = testing::storage_observation(
+                                exec,
+                                ImportDimension::CanonicalOutputBytes,
+                            );
+                            let expected_live_bytes =
+                                baseline + values.capacity.as_ref().unwrap().bytes();
+                            for id in 0..3 {
+                                values.try_push(
+                                    &mut exec.services()?,
+                                    OwnedIterationDropProbe {
+                                        id,
+                                        storage,
+                                        observations: &observations,
+                                        expected_live_bytes,
+                                    },
+                                )?;
+                            }
+                            let result = catch_unwind(AssertUnwindSafe(|| {
+                                let _ = values.try_for_each_owned(|probe| -> Result<(), ()> {
+                                    assert_eq!(probe.id, 0);
+                                    panic!("injected owned-iteration visitor panic");
+                                });
+                            }));
+                            assert!(result.is_err());
+                            assert_owned_iteration_drop_observations(
+                                &observations,
+                                &storage,
+                                baseline,
+                            );
+                            Ok(())
+                        })
+                        .unwrap();
+                });
+            },
+        );
     }
 
     #[test]
     fn reserved_vector_copy_rejects_an_unbounded_chunk_without_mutation() {
-        let mut store = test_store(&ResourceLimits::default());
-        testing::with_context(&mut store.owner, |context| {
-            let source = vec![0_u8; METERED_COPY_POLL_INTERVAL + 1];
-            let mut values = context
-                .with_execution(|exec| -> ParseResult<_> {
-                    let mut values = exec.metered_vec(
-                        ImportStorageClass::FormatNormalization,
-                        "reserved-vector-copy-bound",
-                    );
-                    values.try_reserve(exec, source.len())?;
-                    Ok(values)
-                })
-                .unwrap();
-            assert!(values.try_extend_from_slice_reserved(&source).is_err());
-            assert!(values.is_empty());
-            assert!(matches!(
-                context.take_terminal_abort().unwrap().cause(),
-                ScopeAbortCause::DescriptorContract {
-                    code: "metered-vector-copy-chunk-too-large"
-                },
-            ));
-        });
-        store.assert_released();
+        with_store_body(
+            ResourceLimits::default(),
+            ImportOperationControl::default(),
+            |store| {
+                testing::with_context(&mut store.owner, |context| {
+                    let source = vec![0_u8; METERED_COPY_POLL_INTERVAL + 1];
+                    let mut values = context
+                        .with_execution(|exec| -> ParseResult<_> {
+                            let mut values = exec.services()?.metered_vec(
+                                ImportStorageClass::FormatNormalization,
+                                "reserved-vector-copy-bound",
+                            );
+                            values.try_reserve(&mut exec.services()?, source.len())?;
+                            Ok(values)
+                        })
+                        .unwrap();
+                    assert!(values.try_extend_from_slice_reserved(&source).is_err());
+                    assert!(values.is_empty());
+                    assert!(matches!(
+                        context.take_terminal_abort().unwrap().cause(),
+                        ScopeAbortCause::DescriptorContract {
+                            code: "metered-vector-copy-chunk-too-large"
+                        },
+                    ));
+                });
+            },
+        );
     }
 
     #[test]
     fn reserved_string_copy_rejects_an_unbounded_chunk_without_mutation() {
-        let mut store = test_store(&ResourceLimits::default());
-        testing::with_context(&mut store.owner, |context| {
-            let source = "x".repeat(METERED_COPY_POLL_INTERVAL + 1);
-            let mut value = context
-                .with_execution(|exec| -> ParseResult<_> {
-                    let mut value = exec.metered_string(
-                        ImportStorageClass::FormatNormalization,
-                        "reserved-string-copy-bound",
-                    );
-                    value.try_reserve(exec, source.len())?;
-                    Ok(value)
-                })
-                .unwrap();
-            assert!(value.try_push_str_reserved(&source).is_err());
-            assert!(value.is_empty());
-            assert!(matches!(
-                context.take_terminal_abort().unwrap().cause(),
-                ScopeAbortCause::DescriptorContract {
-                    code: "metered-string-copy-chunk-too-large"
-                },
-            ));
-        });
-        store.assert_released();
+        with_store_body(
+            ResourceLimits::default(),
+            ImportOperationControl::default(),
+            |store| {
+                testing::with_context(&mut store.owner, |context| {
+                    let source = "x".repeat(METERED_COPY_POLL_INTERVAL + 1);
+                    let mut value = context
+                        .with_execution(|exec| -> ParseResult<_> {
+                            let mut value = exec.services()?.metered_string(
+                                ImportStorageClass::FormatNormalization,
+                                "reserved-string-copy-bound",
+                            );
+                            value.try_reserve(&mut exec.services()?, source.len())?;
+                            Ok(value)
+                        })
+                        .unwrap();
+                    assert!(value.try_push_str_reserved(&source).is_err());
+                    assert!(value.is_empty());
+                    assert!(matches!(
+                        context.take_terminal_abort().unwrap().cause(),
+                        ScopeAbortCause::DescriptorContract {
+                            code: "metered-string-copy-chunk-too-large"
+                        },
+                    ));
+                });
+            },
+        );
     }
 
     #[test]
@@ -5802,204 +5575,238 @@ mod tests {
                 self.drops.set(self.drops.get() + 1);
             }
         }
-        let mut store = test_store(&ResourceLimits::default());
-        testing::with_context(&mut store.owner, |context| {
-            let drops = Cell::new(0);
-            let mut values = context
-                .with_execution(|exec| -> ParseResult<_> {
-                    let mut values = exec
-                        .metered_vec(ImportStorageClass::FormatNormalization, "dedup-drop-order");
-                    for key in [1, 1, 2, 2] {
-                        values.try_push(exec, DedupDropProbe { key, drops: &drops })?;
-                    }
-                    Ok(values)
-                })
-                .unwrap();
-            let retained = values
-                .try_partition_dedup_by(|left, right| Ok::<_, ParseFailure>(left.key == right.key))
-                .unwrap();
-            assert_eq!(retained, 2);
-            assert_eq!(values.len(), 4);
-            assert_eq!(drops.get(), 0);
-            values.truncate(retained);
-            assert_eq!(drops.get(), 2);
-            drop(values);
-            assert_eq!(drops.get(), 4);
-        });
-        store.assert_released();
+        with_store_body(
+            ResourceLimits::default(),
+            ImportOperationControl::default(),
+            |store| {
+                testing::with_context(&mut store.owner, |context| {
+                    let drops = Cell::new(0);
+                    let mut values = context
+                        .with_execution(|exec| -> ParseResult<_> {
+                            let mut values = exec.services()?.metered_vec(
+                                ImportStorageClass::FormatNormalization,
+                                "dedup-drop-order",
+                            );
+                            for key in [1, 1, 2, 2] {
+                                values.try_push(
+                                    &mut exec.services()?,
+                                    DedupDropProbe { key, drops: &drops },
+                                )?;
+                            }
+                            Ok(values)
+                        })
+                        .unwrap();
+                    let retained = values
+                        .try_partition_dedup_by(|left, right| {
+                            Ok::<_, ParseFailure>(left.key == right.key)
+                        })
+                        .unwrap();
+                    assert_eq!(retained, 2);
+                    assert_eq!(values.len(), 4);
+                    assert_eq!(drops.get(), 0);
+                    values.truncate(retained);
+                    assert_eq!(drops.get(), 2);
+                    drop(values);
+                    assert_eq!(drops.get(), 4);
+                });
+            },
+        );
     }
     #[test]
     fn exclusive_storage_crosses_regions_and_legacy_growth_uses_the_same_owner() {
-        let mut store = test_store(&ResourceLimits::default());
-        testing::with_context(&mut store.owner, |context| {
-            let (mut values, mut text) = context
-                .with_parser_execution(|root| -> ParseResult<_> {
-                    let group =
-                        root.bind_group([ImportWorkClass::Tokens, ImportWorkClass::StringBytes])?;
-                    root.child(&group, [2, 3], |child| -> ParseResult<_> {
-                        let mut values = child.storage()?.metered_vec(
-                            ImportStorageClass::FormatNormalization,
-                            "exclusive-values",
-                        );
-                        child.push_growing([1, 0], &mut values, 3_u32)?;
-                        child.push_growing([1, 0], &mut values, 5_u32)?;
-                        let mut text = child.storage()?.metered_string(
-                            ImportStorageClass::FormatNormalization,
-                            "exclusive-text",
-                        );
-                        child.append_string([0, 3], &mut text, "aé")?;
-                        assert_eq!(child.work_counters(ImportWorkClass::Tokens)?, (2, 2, 0));
-                        assert_eq!(
-                            child.work_counters(ImportWorkClass::StringBytes)?,
-                            (3, 3, 0)
-                        );
-                        Ok((values, text))
-                    })
-                })
-                .unwrap();
-            context
-                .with_execution(|exec| -> ParseResult<()> {
-                    let additional = values.capacity() + 1;
-                    values.try_reserve(exec, additional)?;
-                    values.try_extend_from_slice(exec, &[7, 11, 13])?;
-                    text.try_push_str(exec, "-legacy")?;
-                    assert_eq!(values.as_slice(), &[3, 5, 7, 11, 13]);
-                    assert_eq!(text.as_str(), "aé-legacy");
-                    let tokens = exec.store.dimension_state(ImportDimension::Tokens).unwrap();
-                    assert_eq!((tokens.attempted(), tokens.consumed()), (2, 2));
-                    Ok(())
-                })
-                .unwrap();
-        });
-        store.assert_released();
+        with_store_body(
+            ResourceLimits::default(),
+            ImportOperationControl::default(),
+            |store| {
+                testing::with_context(&mut store.owner, |context| {
+                    let (mut values, mut text) = context
+                        .with_parser_execution(|root| -> ParseResult<_> {
+                            let group = root.bind_group([
+                                ImportWorkClass::Tokens,
+                                ImportWorkClass::StringBytes,
+                            ])?;
+                            root.child(&group, [2, 3], |child| -> ParseResult<_> {
+                                let mut values = child.storage()?.metered_vec(
+                                    ImportStorageClass::FormatNormalization,
+                                    "exclusive-values",
+                                );
+                                child.push_growing([1, 0], &mut values, 3_u32)?;
+                                child.push_growing([1, 0], &mut values, 5_u32)?;
+                                let mut text = child.storage()?.metered_string(
+                                    ImportStorageClass::FormatNormalization,
+                                    "exclusive-text",
+                                );
+                                child.append_string([0, 3], &mut text, "aé")?;
+                                assert_eq!(
+                                    child.work_counters(ImportWorkClass::Tokens)?,
+                                    (2, 2, 0)
+                                );
+                                assert_eq!(
+                                    child.work_counters(ImportWorkClass::StringBytes)?,
+                                    (3, 3, 0)
+                                );
+                                Ok((values, text))
+                            })
+                        })
+                        .unwrap();
+                    context
+                        .with_execution(|exec| -> ParseResult<()> {
+                            let additional = values.capacity() + 1;
+                            values.try_reserve(&mut exec.services()?, additional)?;
+                            values.try_extend_from_slice(&mut exec.services()?, &[7, 11, 13])?;
+                            text.try_push_str(&mut exec.services()?, "-legacy")?;
+                            assert_eq!(values.as_slice(), &[3, 5, 7, 11, 13]);
+                            assert_eq!(text.as_str(), "aé-legacy");
+                            let tokens =
+                                exec.store.dimension_state(ImportDimension::Tokens).unwrap();
+                            assert_eq!((tokens.attempted(), tokens.consumed()), (2, 2));
+                            Ok(())
+                        })
+                        .unwrap();
+                });
+            },
+        );
     }
 
     #[test]
     fn exclusive_replacement_faults_preserve_old_payload_token_and_verified_prefix() {
         for qualification in [false, true] {
-            let mut store = test_store(&ResourceLimits::default());
-            testing::with_context(&mut store.owner, |context| {
-                let mut values = context
-                    .with_execution(|exec| -> ParseResult<_> {
-                        let mut values = exec.metered_vec::<u32>(
-                            ImportStorageClass::FormatNormalization,
-                            "exclusive-replacement",
-                        );
-                        values.try_reserve(exec, 4)?;
-                        while values.len() < values.capacity() {
-                            values.try_push_reserved(17)?;
-                        }
-                        Ok(values)
-                    })
-                    .unwrap();
-                let old = values.as_slice().to_vec();
-                let old_capacity = values.capacity();
-                let old_bytes = values.capacity.as_ref().unwrap().bytes();
-                let terminal = context.terminal;
-                let physical = Cell::new(0_u8);
-                let result = context.with_parser_execution(|root| -> ParseResult<()> {
-                    let group = root.bind_group([ImportWorkClass::Tokens])?;
-                    root.child(&group, [2], |child| -> ParseResult<()> {
-                        child.run([1], || {
-                            physical.set(31);
-                            Ok(())
-                        })?;
-                        if qualification {
-                            FAIL_NEXT_METERED_QUALIFICATION.with(|fault| fault.set(true));
-                        } else {
-                            inject_next_metered_allocation_failure();
-                        }
-                        let result = child.storage()?.reserve_vec(&mut values, 1);
+            with_store_body(
+                ResourceLimits::default(),
+                ImportOperationControl::default(),
+                |store| {
+                    testing::with_context(&mut store.owner, |context| {
+                        let mut values = context
+                            .with_execution(|exec| -> ParseResult<_> {
+                                let mut values = exec.services()?.metered_vec::<u32>(
+                                    ImportStorageClass::FormatNormalization,
+                                    "exclusive-replacement",
+                                );
+                                values.try_reserve(&mut exec.services()?, 4)?;
+                                while values.len() < values.capacity() {
+                                    values.try_push_reserved(17)?;
+                                }
+                                Ok(values)
+                            })
+                            .unwrap();
+                        let old = values.as_slice().to_vec();
+                        let old_capacity = values.capacity();
+                        let old_bytes = values.capacity.as_ref().unwrap().bytes();
+                        let terminal = context.terminal;
+                        let physical = Cell::new(0_u8);
+                        let result = context.with_parser_execution(|root| -> ParseResult<()> {
+                            let group = root.bind_group([ImportWorkClass::Tokens])?;
+                            root.child(&group, [2], |child| -> ParseResult<()> {
+                                child.run([1], || {
+                                    physical.set(31);
+                                    Ok(())
+                                })?;
+                                if qualification {
+                                    FAIL_NEXT_METERED_QUALIFICATION.with(|fault| fault.set(true));
+                                } else {
+                                    inject_next_metered_allocation_failure();
+                                }
+                                let result = child.storage()?.reserve_vec(&mut values, 1);
+                                assert!(result.is_err());
+                                assert_eq!(
+                                    child.work_counters(ImportWorkClass::Tokens)?,
+                                    (2, 1, 0)
+                                );
+                                result
+                            })
+                        });
                         assert!(result.is_err());
-                        assert_eq!(child.work_counters(ImportWorkClass::Tokens)?, (2, 1, 0));
-                        result
-                    })
-                });
-                assert!(result.is_err());
-                assert_eq!(physical.get(), 31);
-                assert_eq!(values.as_slice(), old);
-                assert_eq!(values.capacity(), old_capacity);
-                assert_eq!(values.capacity.as_ref().unwrap().bytes(), old_bytes);
-                if qualification {
-                    assert!(matches!(
-                        terminal.borrow().as_ref(),
-                        Some(ScopeAbortCause::CapacityEnvelope {
-                            resource: "exclusive-replacement",
-                            ..
-                        })
-                    ));
-                } else {
-                    assert!(matches!(
-                        terminal.borrow().as_ref(),
-                        Some(ScopeAbortCause::Allocation {
-                            resource: "exclusive-replacement"
-                        })
-                    ));
-                }
-            });
-            store.assert_released();
+                        assert_eq!(physical.get(), 31);
+                        assert_eq!(values.as_slice(), old);
+                        assert_eq!(values.capacity(), old_capacity);
+                        assert_eq!(values.capacity.as_ref().unwrap().bytes(), old_bytes);
+                        if qualification {
+                            assert!(matches!(
+                                terminal.borrow().as_ref(),
+                                Some(ScopeAbortCause::CapacityEnvelope {
+                                    resource: "exclusive-replacement",
+                                    ..
+                                })
+                            ));
+                        } else {
+                            assert!(matches!(
+                                terminal.borrow().as_ref(),
+                                Some(ScopeAbortCause::Allocation {
+                                    resource: "exclusive-replacement"
+                                })
+                            ));
+                        }
+                    });
+                },
+            );
         }
     }
 
     #[test]
     fn exclusive_replacement_budget_keeps_old_and_new_capacity_live_together() {
-        let mut store = test_store(&ResourceLimits::default());
-        testing::with_context(&mut store.owner, |context| {
-            let (mut values, expected_value, limit) = context
-                .with_execution(|exec| -> ParseResult<_> {
-                    let mut values = exec.metered_vec::<u32>(
-                        ImportStorageClass::FormatNormalization,
-                        "exclusive-overlap",
-                    );
-                    values.try_reserve(exec, 4)?;
-                    while values.len() < values.capacity() {
-                        values.try_push_reserved(23)?;
-                    }
-                    let old = values.capacity.as_ref().unwrap().bytes();
-                    let live = exec
-                        .store
-                        .dimension_state(ImportDimension::ScratchBytes)
-                        .unwrap()
-                        .live_bytes();
-                    let (_, replacement) = metered_vec_replacement_plans::<u32>(
-                        values.len(),
-                        values.capacity(),
-                        values.len() + 1,
-                    )
-                    .unwrap();
-                    let new = replacement.envelope_delta_bytes().unwrap();
-                    let limit = live - old + new;
-                    exec.store
-                        .tighten_dimension_policy(
-                            ImportDimension::ScratchBytes,
-                            DimensionPolicy::reservable_bytes(
-                                ResourceLimits::default().max_live_bytes,
-                                ResourceLimits::default().max_live_bytes,
-                                0,
-                                limit,
-                            ),
-                        )
+        with_store_body(
+            ResourceLimits::default(),
+            ImportOperationControl::default(),
+            |store| {
+                testing::with_context(&mut store.owner, |context| {
+                    let (mut values, expected_value, limit) = context
+                        .with_execution(|exec| -> ParseResult<_> {
+                            let mut values = exec.services()?.metered_vec::<u32>(
+                                ImportStorageClass::FormatNormalization,
+                                "exclusive-overlap",
+                            );
+                            values.try_reserve(&mut exec.services()?, 4)?;
+                            while values.len() < values.capacity() {
+                                values.try_push_reserved(23)?;
+                            }
+                            let old = values.capacity.as_ref().unwrap().bytes();
+                            let live = exec
+                                .store
+                                .dimension_state(ImportDimension::ScratchBytes)
+                                .unwrap()
+                                .live_bytes();
+                            let (_, replacement) = metered_vec_replacement_plans::<u32>(
+                                values.len(),
+                                values.capacity(),
+                                values.len() + 1,
+                            )
+                            .unwrap();
+                            let new = replacement.envelope_delta_bytes().unwrap();
+                            let limit = live - old + new;
+                            exec.store
+                                .tighten_dimension_policy(
+                                    ImportDimension::ScratchBytes,
+                                    DimensionPolicy::reservable_bytes(
+                                        ResourceLimits::default().max_live_bytes,
+                                        ResourceLimits::default().max_live_bytes,
+                                        0,
+                                        limit,
+                                    ),
+                                )
+                                .unwrap();
+                            Ok((values, live + new, limit))
+                        })
                         .unwrap();
-                    Ok((values, live + new, limit))
-                })
-                .unwrap();
-            let old = values.as_slice().to_vec();
-            let old_capacity = values.capacity();
-            let terminal = context.terminal;
-            assert!(
-                context
-                    .with_parser_execution(|root| root.storage()?.reserve_vec(&mut values, 1))
-                    .is_err()
-            );
-            assert_eq!(values.as_slice(), old);
-            assert_eq!(values.capacity(), old_capacity);
-            assert!(
-                matches!(terminal.borrow().as_ref(), Some(ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                    let old = values.as_slice().to_vec();
+                    let old_capacity = values.capacity();
+                    let terminal = context.terminal;
+                    assert!(
+                        context
+                            .with_parser_execution(|root| root
+                                .storage()?
+                                .reserve_vec(&mut values, 1))
+                            .is_err()
+                    );
+                    assert_eq!(values.as_slice(), old);
+                    assert_eq!(values.capacity(), old_capacity);
+                    assert!(
+                        matches!(terminal.borrow().as_ref(), Some(ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
                 class: CounterClass::Live, dimension: ImportDimension::ScratchBytes, value, limit: actual_limit
             })) if *value == expected_value && *actual_limit == limit)
-            );
-        });
-        store.assert_released();
+                    );
+                });
+            },
+        );
     }
 
     #[test]
@@ -6020,42 +5827,42 @@ mod tests {
             armed: Arc::clone(&armed),
             polls: Arc::clone(&polls),
         });
-        let mut store = test_store_with_control(&ResourceLimits::default(), control);
-        testing::with_context(&mut store.owner, |context| {
-            let source = "é".repeat(4097);
-            let mut text = context
-                .with_execution(|exec| -> ParseResult<_> {
-                    let mut text = exec.metered_string(
-                        ImportStorageClass::FormatNormalization,
-                        "exclusive-chunk-copy",
-                    );
-                    text.try_reserve(exec, source.len())?;
-                    Ok(text)
-                })
-                .unwrap();
-            let terminal = context.terminal;
-            let result = context.with_parser_execution(|root| -> ParseResult<()> {
-                let group = root.bind_group([ImportWorkClass::StringBytes])?;
-                root.child(&group, [8194], |child| -> ParseResult<()> {
-                    armed.store(true, Ordering::SeqCst);
-                    let result = child.append_string([8194], &mut text, &source);
-                    assert!(result.is_err());
-                    assert_eq!(
-                        child.work_counters(ImportWorkClass::StringBytes)?,
-                        (8194, 0, 0)
-                    );
-                    result
-                })
+        with_store_body(ResourceLimits::default(), control, |store| {
+            testing::with_context(&mut store.owner, |context| {
+                let source = "é".repeat(4097);
+                let mut text = context
+                    .with_execution(|exec| -> ParseResult<_> {
+                        let mut text = exec.services()?.metered_string(
+                            ImportStorageClass::FormatNormalization,
+                            "exclusive-chunk-copy",
+                        );
+                        text.try_reserve(&mut exec.services()?, source.len())?;
+                        Ok(text)
+                    })
+                    .unwrap();
+                let terminal = context.terminal;
+                let result = context.with_parser_execution(|root| -> ParseResult<()> {
+                    let group = root.bind_group([ImportWorkClass::StringBytes])?;
+                    root.child(&group, [8194], |child| -> ParseResult<()> {
+                        armed.store(true, Ordering::SeqCst);
+                        let result = child.append_string([8194], &mut text, &source);
+                        assert!(result.is_err());
+                        assert_eq!(
+                            child.work_counters(ImportWorkClass::StringBytes)?,
+                            (8194, 0, 0)
+                        );
+                        result
+                    })
+                });
+                assert!(result.is_err());
+                assert_eq!(text.as_str(), &source[..4096]);
+                assert_eq!(polls.load(Ordering::SeqCst), 3);
+                assert!(matches!(
+                    terminal.borrow().as_ref(),
+                    Some(ScopeAbortCause::Control(_))
+                ));
             });
-            assert!(result.is_err());
-            assert_eq!(text.as_str(), &source[..4096]);
-            assert_eq!(polls.load(Ordering::SeqCst), 3);
-            assert!(matches!(
-                terminal.borrow().as_ref(),
-                Some(ScopeAbortCause::Control(_))
-            ));
         });
-        store.assert_released();
     }
 
     #[test]
@@ -6076,63 +5883,67 @@ mod tests {
                 panic!("actual unused growing-push value destructor");
             }
         }
-        let mut store = test_store(&ResourceLimits::default());
-        testing::with_context(&mut store.owner, |context| {
-            let terminal = context.terminal;
-            let drops = Cell::new(0);
-            let next = Cell::new(false);
-            let physical = Cell::new(0_u8);
-            let result = context.with_parser_execution(|root| -> ParseResult<()> {
-                let group = root.bind_group([ImportWorkClass::Tokens])?;
-                root.child(&group, [2], |child| -> ParseResult<()> {
-                    child.run([1], || {
-                        physical.set(43);
-                        Ok(())
-                    })?;
-                    let mut values = child.storage()?.metered_vec(
-                        ImportStorageClass::FormatNormalization,
-                        "exclusive-unused-value",
-                    );
-                    inject_next_metered_allocation_failure();
-                    let result = catch_unwind(AssertUnwindSafe(|| {
-                        child.push_growing(
-                            [1],
-                            &mut values,
-                            UnusedValue {
-                                terminal,
-                                drops: &drops,
-                            },
-                        )
-                    }));
+        with_store_body(
+            ResourceLimits::default(),
+            ImportOperationControl::default(),
+            |store| {
+                testing::with_context(&mut store.owner, |context| {
+                    let terminal = context.terminal;
+                    let drops = Cell::new(0);
+                    let next = Cell::new(false);
+                    let physical = Cell::new(0_u8);
+                    let result = context.with_parser_execution(|root| -> ParseResult<()> {
+                        let group = root.bind_group([ImportWorkClass::Tokens])?;
+                        root.child(&group, [2], |child| -> ParseResult<()> {
+                            child.run([1], || {
+                                physical.set(43);
+                                Ok(())
+                            })?;
+                            let mut values = child.storage()?.metered_vec(
+                                ImportStorageClass::FormatNormalization,
+                                "exclusive-unused-value",
+                            );
+                            inject_next_metered_allocation_failure();
+                            let result = catch_unwind(AssertUnwindSafe(|| {
+                                child.push_growing(
+                                    [1],
+                                    &mut values,
+                                    UnusedValue {
+                                        terminal,
+                                        drops: &drops,
+                                    },
+                                )
+                            }));
+                            assert!(result.is_err());
+                            assert!(values.is_empty());
+                            assert_eq!(values.capacity(), 0);
+                            assert!(values.capacity.is_none());
+                            assert_eq!(drops.get(), 1);
+                            assert_eq!(child.work_counters(ImportWorkClass::Tokens)?, (2, 1, 0));
+                            assert!(
+                                child
+                                    .run([1], || {
+                                        next.set(true);
+                                        Ok::<_, ParseFailure>(())
+                                    })
+                                    .is_err()
+                            );
+                            Err(ParseFailure::scope())
+                        })
+                    });
                     assert!(result.is_err());
-                    assert!(values.is_empty());
-                    assert_eq!(values.capacity(), 0);
-                    assert!(values.capacity.is_none());
+                    assert_eq!(physical.get(), 43);
+                    assert!(!next.get());
                     assert_eq!(drops.get(), 1);
-                    assert_eq!(child.work_counters(ImportWorkClass::Tokens)?, (2, 1, 0));
-                    assert!(
-                        child
-                            .run([1], || {
-                                next.set(true);
-                                Ok::<_, ParseFailure>(())
-                            })
-                            .is_err()
-                    );
-                    Err(ParseFailure::scope())
-                })
-            });
-            assert!(result.is_err());
-            assert_eq!(physical.get(), 43);
-            assert!(!next.get());
-            assert_eq!(drops.get(), 1);
-            assert!(matches!(
-                terminal.borrow().as_ref(),
-                Some(ScopeAbortCause::Allocation {
-                    resource: "exclusive-unused-value"
-                })
-            ));
-        });
-        store.assert_released();
+                    assert!(matches!(
+                        terminal.borrow().as_ref(),
+                        Some(ScopeAbortCause::Allocation {
+                            resource: "exclusive-unused-value"
+                        })
+                    ));
+                });
+            },
+        );
     }
     #[test]
     fn exclusive_completion_projects_real_cause_before_returned_value_drop_panics() {
@@ -6161,90 +5972,94 @@ mod tests {
                 panic!("actual returned payload destructor after denied completion");
             }
         }
-        let mut store = test_store(&ResourceLimits::default());
-        testing::with_context(&mut store.owner, |context| {
-            context
-                .with_execution(|exec| -> ParseResult<()> {
-                    exec.store
-                        .tighten_dimension_policy(
-                            ImportDimension::Tokens,
-                            DimensionPolicy::counter(8, 1, 0),
-                        )
+        with_store_body(
+            ResourceLimits::default(),
+            ImportOperationControl::default(),
+            |store| {
+                testing::with_context(&mut store.owner, |context| {
+                    context
+                        .with_execution(|exec| -> ParseResult<()> {
+                            exec.store
+                                .tighten_dimension_policy(
+                                    ImportDimension::Tokens,
+                                    DimensionPolicy::counter(8, 1, 0),
+                                )
+                                .unwrap();
+                            Ok(())
+                        })
                         .unwrap();
-                    Ok(())
-                })
-                .unwrap();
-            let terminal = context.terminal;
-            let observed = Cell::new(false);
-            let drops = Cell::new(0);
-            let physical = Cell::new(0_u8);
-            let next = Cell::new(false);
-            let result = context.with_parser_execution(|root| -> ParseResult<()> {
-                let layout = root.bind_group([ImportWorkClass::Tokens])?;
-                root.child(&layout, [2], |child| -> ParseResult<()> {
-                    child.run([1], || {
-                        physical.set(1);
-                        Ok::<_, ParseFailure>(())
-                    })?;
-                    let caught = catch_unwind(AssertUnwindSafe(|| {
-                        let _returned = child.run([1], || {
-                            physical.set(2);
-                            Ok::<_, ParseFailure>(ReturnedValue {
-                                terminal,
-                                observed: &observed,
-                                drops: &drops,
-                            })
-                        })?;
-                        next.set(true);
-                        Ok::<_, ParseFailure>(())
-                    }));
-                    let Err(payload) = caught else {
-                        panic!("returned payload Drop must panic");
-                    };
-                    assert_eq!(
-                        payload.downcast_ref::<&'static str>().copied(),
-                        Some("actual returned payload destructor after denied completion")
-                    );
+                    let terminal = context.terminal;
+                    let observed = Cell::new(false);
+                    let drops = Cell::new(0);
+                    let physical = Cell::new(0_u8);
+                    let next = Cell::new(false);
+                    let result = context.with_parser_execution(|root| -> ParseResult<()> {
+                        let layout = root.bind_group([ImportWorkClass::Tokens])?;
+                        root.child(&layout, [2], |child| -> ParseResult<()> {
+                            child.run([1], || {
+                                physical.set(1);
+                                Ok::<_, ParseFailure>(())
+                            })?;
+                            let caught = catch_unwind(AssertUnwindSafe(|| {
+                                let _returned = child.run([1], || {
+                                    physical.set(2);
+                                    Ok::<_, ParseFailure>(ReturnedValue {
+                                        terminal,
+                                        observed: &observed,
+                                        drops: &drops,
+                                    })
+                                })?;
+                                next.set(true);
+                                Ok::<_, ParseFailure>(())
+                            }));
+                            let Err(payload) = caught else {
+                                panic!("returned payload Drop must panic");
+                            };
+                            assert_eq!(
+                                payload.downcast_ref::<&'static str>().copied(),
+                                Some("actual returned payload destructor after denied completion")
+                            );
+                            assert!(observed.get());
+                            assert_eq!(drops.get(), 1);
+                            assert_eq!(physical.get(), 2);
+                            assert_eq!(child.work_counters(ImportWorkClass::Tokens)?, (2, 1, 0));
+                            assert!(
+                                child
+                                    .run([1], || {
+                                        next.set(true);
+                                        Ok::<_, ParseFailure>(())
+                                    })
+                                    .is_err()
+                            );
+                            Err(ParseFailure::scope())
+                        })
+                    });
+                    assert!(result.is_err());
                     assert!(observed.get());
                     assert_eq!(drops.get(), 1);
                     assert_eq!(physical.get(), 2);
-                    assert_eq!(child.work_counters(ImportWorkClass::Tokens)?, (2, 1, 0));
+                    assert!(!next.get());
                     assert!(
-                        child
-                            .run([1], || {
+                        context
+                            .with_execution(|_| {
                                 next.set(true);
                                 Ok::<_, ParseFailure>(())
                             })
                             .is_err()
                     );
-                    Err(ParseFailure::scope())
-                })
-            });
-            assert!(result.is_err());
-            assert!(observed.get());
-            assert_eq!(drops.get(), 1);
-            assert_eq!(physical.get(), 2);
-            assert!(!next.get());
-            assert!(
-                context
-                    .with_execution(|_| {
-                        next.set(true);
-                        Ok::<_, ParseFailure>(())
-                    })
-                    .is_err()
-            );
-            assert!(!next.get());
-            assert!(matches!(
-                terminal.borrow().as_ref(),
-                Some(ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
-                    class: CounterClass::Consumed,
-                    dimension: ImportDimension::Tokens,
-                    value: 2,
-                    limit: 1,
-                }))
-            ));
-        });
-        store.assert_released();
+                    assert!(!next.get());
+                    assert!(matches!(
+                        terminal.borrow().as_ref(),
+                        Some(ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                            class: CounterClass::Consumed,
+                            dimension: ImportDimension::Tokens,
+                            value: 2,
+                            limit: 1,
+                        }))
+                    ));
+                });
+            },
+        );
     }
 
     #[test]
@@ -6265,55 +6080,55 @@ mod tests {
             armed: Arc::clone(&armed),
             polls: Arc::clone(&polls),
         });
-        let mut store = test_store_with_control(&ResourceLimits::default(), control);
-        testing::with_context(&mut store.owner, |context| {
-            let old = "\u{e9}".repeat(4097);
-            let mut text = context
-                .with_execution(|exec| -> ParseResult<_> {
-                    let mut text = exec.metered_string(
-                        ImportStorageClass::FormatNormalization,
-                        "exclusive-old-copy",
-                    );
-                    text.try_push_str(exec, &old)?;
-                    Ok(text)
-                })
-                .unwrap();
-            assert_eq!(text.len(), 8194);
-            let old_pointer = text.as_str().as_ptr();
-            let old_capacity = text.capacity();
-            let old_token_bytes = text.capacity.as_ref().unwrap().bytes();
-            let terminal = context.terminal;
-            let result = context.with_parser_execution(|root| -> ParseResult<()> {
-                armed.store(true, Ordering::SeqCst);
-                root.storage()?.reserve_string(&mut text, old_capacity + 1)
-            });
-            assert!(result.is_err());
-            // Initial reserve poll, backing admission, first old-copy chunk, denied next chunk.
-            assert_eq!(polls.load(Ordering::SeqCst), 4);
-            assert_eq!(text.as_str(), old);
-            assert_eq!(text.as_str().as_ptr(), old_pointer);
-            assert_eq!(text.capacity(), old_capacity);
-            assert_eq!(text.capacity.as_ref().unwrap().bytes(), old_token_bytes);
-            assert!(matches!(
-                terminal.borrow().as_ref(),
-                Some(ScopeAbortCause::Control(
-                    baozi_operation::ControlCause::Cancelled {
-                        origin: baozi_operation::CancellationOrigin::Signal,
-                    }
-                ))
-            ));
-            let next = Cell::new(false);
-            assert!(
-                context
-                    .with_execution(|_| {
-                        next.set(true);
-                        Ok::<_, ParseFailure>(())
+        with_store_body(ResourceLimits::default(), control, |store| {
+            testing::with_context(&mut store.owner, |context| {
+                let old = "\u{e9}".repeat(4097);
+                let mut text = context
+                    .with_execution(|exec| -> ParseResult<_> {
+                        let mut text = exec.services()?.metered_string(
+                            ImportStorageClass::FormatNormalization,
+                            "exclusive-old-copy",
+                        );
+                        text.try_push_str(&mut exec.services()?, &old)?;
+                        Ok(text)
                     })
-                    .is_err()
-            );
-            assert!(!next.get());
-            assert_eq!(polls.load(Ordering::SeqCst), 4);
+                    .unwrap();
+                assert_eq!(text.len(), 8194);
+                let old_pointer = text.as_str().as_ptr();
+                let old_capacity = text.capacity();
+                let old_token_bytes = text.capacity.as_ref().unwrap().bytes();
+                let terminal = context.terminal;
+                let result = context.with_parser_execution(|root| -> ParseResult<()> {
+                    armed.store(true, Ordering::SeqCst);
+                    root.storage()?.reserve_string(&mut text, old_capacity + 1)
+                });
+                assert!(result.is_err());
+                // Initial reserve poll, backing admission, first old-copy chunk, denied next chunk.
+                assert_eq!(polls.load(Ordering::SeqCst), 4);
+                assert_eq!(text.as_str(), old);
+                assert_eq!(text.as_str().as_ptr(), old_pointer);
+                assert_eq!(text.capacity(), old_capacity);
+                assert_eq!(text.capacity.as_ref().unwrap().bytes(), old_token_bytes);
+                assert!(matches!(
+                    terminal.borrow().as_ref(),
+                    Some(ScopeAbortCause::Control(
+                        baozi_operation::ControlCause::Cancelled {
+                            origin: baozi_operation::CancellationOrigin::Signal,
+                        }
+                    ))
+                ));
+                let next = Cell::new(false);
+                assert!(
+                    context
+                        .with_execution(|_| {
+                            next.set(true);
+                            Ok::<_, ParseFailure>(())
+                        })
+                        .is_err()
+                );
+                assert!(!next.get());
+                assert_eq!(polls.load(Ordering::SeqCst), 4);
+            });
         });
-        store.assert_released();
     }
 }

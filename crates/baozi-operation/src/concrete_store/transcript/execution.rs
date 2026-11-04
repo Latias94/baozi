@@ -66,13 +66,13 @@ impl TableState {
 ///
 /// Retain instructions still allocate their admitted payload storage according to each ticket.
 #[must_use = "complete primary execution or consume it into terminal fallback"]
-pub struct RetainedStoreExecution<O, PP, U, L = FreshStoreLineage>
+pub struct RetainedStoreExecution<'inv, O, PP, U, L = FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    assembly: RetainedStorePublicationAssembly<O, PP, U, L>,
+    assembly: RetainedStorePublicationAssembly<'inv, O, PP, U, L>,
     identity: TranscriptId,
     cursor: TranscriptEndpoint,
     primary_endpoint: TranscriptEndpoint,
@@ -144,14 +144,14 @@ macro_rules! execute_simple_batch {
     };
 }
 
-impl<O, PP, U, L> RetainedStoreExecution<O, PP, U, L>
+impl<'inv, O, PP, U, L> RetainedStoreExecution<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     pub(super) fn new(
-        assembly: RetainedStorePublicationAssembly<O, PP, U, L>,
+        assembly: RetainedStorePublicationAssembly<'inv, O, PP, U, L>,
         identity: TranscriptId,
         primary_endpoint: TranscriptEndpoint,
         final_endpoint: TranscriptEndpoint,
@@ -237,7 +237,7 @@ where
         ticket: &PlannedStoreInstruction<Plan, Tag, Destination>,
         delta: CounterDelta,
         action: impl FnOnce(
-            &mut RetainedStorePublicationAssembly<O, PP, U, L>,
+            &mut RetainedStorePublicationAssembly<'inv, O, PP, U, L>,
         ) -> Result<T, StoreRuntimeError>,
     ) -> Result<T, StoreExecutionError> {
         self.ensure(ticket)?;
@@ -279,7 +279,7 @@ where
         ticket: &PlannedStoreInstruction<Plan, Tag, Destination>,
         delta: CounterDelta,
         action: impl FnOnce(
-            &mut RetainedStorePublicationAssembly<O, PP, U, L>,
+            &mut RetainedStorePublicationAssembly<'inv, O, PP, U, L>,
         ) -> Result<T, StoreBatchRuntimeError>,
     ) -> Result<T, StoreExecutionError> {
         self.ensure(ticket)?;
@@ -497,7 +497,7 @@ where
     )]
     pub(super) fn try_into_primary_parts(
         self,
-    ) -> Result<PrimaryTranscriptParts<O, PP, U, L>, (Self, StoreExecutionError)> {
+    ) -> Result<PrimaryTranscriptParts<'inv, O, PP, U, L>, (Self, StoreExecutionError)> {
         if let ExecutionState::Abandoned { failed_instruction } = self.state {
             return Err((self, StoreExecutionError::Abandoned { failed_instruction }));
         }
@@ -529,7 +529,7 @@ where
     }
 }
 
-impl<O, PP, U> RetainedStoreExecution<O, PP, U, CanonicalInheritanceSource>
+impl<'inv, O, PP, U> RetainedStoreExecution<'inv, O, PP, U, CanonicalInheritanceSource>
 where
     O: OperationOwner,
     PP: ProgressPhase,

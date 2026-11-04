@@ -196,17 +196,7 @@ impl<D> LocalWork<D> {
 
     fn ensure_active(&self, state: &WorkState<D>, grant: WorkGrant) -> Result<(), LedgerCause<D>> {
         self.check_integrity(state)?;
-        match (state.header.mode, grant) {
-            (WorkMode::Ordinary, WorkGrant::Ordinary)
-            | (WorkMode::Protected, WorkGrant::Protected) => Ok(()),
-            (WorkMode::Closed, _) => Err(LedgerCause::PublicationAlreadyCompleted),
-            (WorkMode::OrdinarySealed, _) | (WorkMode::Protected, WorkGrant::Ordinary) => {
-                Err(LedgerCause::PublicationAlreadyPending)
-            }
-            (WorkMode::Ordinary, WorkGrant::Protected) => {
-                Err(LedgerCause::InactiveLinearWorkPermit)
-            }
-        }
+        kernel::check_active_mode(&state.header, grant)
     }
 
     /// Outstanding ownership is independent of remaining amounts, including zero envelopes.

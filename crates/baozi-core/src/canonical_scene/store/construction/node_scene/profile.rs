@@ -76,7 +76,7 @@ impl ProfileMaterializationPlans {
 }
 
 pub(super) fn retain_profile<O, PP, U, L, R>(
-    lane: &mut CanonicalLane<'_, O, PP, U, L>,
+    lane: &mut CanonicalLane<'_, '_, O, PP, U, L>,
     plans: &ProfileMaterializationPlans,
     batch: &ValidatedProfileBatch<'_, R>,
     #[cfg(test)] fault: &mut ProfileBuildFault,

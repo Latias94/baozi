@@ -130,8 +130,11 @@ fn build_animation_scene_with_names(
     let geometry = GeometryAuthoringBatch::empty();
     let deformation = DeformationAuthoringBatch::empty();
     let profile = profile_fixture(spatial, nodes, appearance, geometry, deformation, animation);
-    successful_parts(
+    let mut construction_root_1 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    let parts = successful_parts(
         NodeSceneTestTransaction::with_account(
+            &mut construction_root_1,
             account,
             test_limits(),
             SceneAuthoringBatch::new(
@@ -150,7 +153,9 @@ fn build_animation_scene_with_names(
         .expect("animation fixture activation")
         .publish_for_test()
         .expect("animation fixture publication"),
-    )
+    );
+    drop(construction_root_1);
+    parts
 }
 
 #[test]
@@ -443,8 +448,11 @@ fn animation_pipeline_preserves_finite_key_times_outside_declared_duration() {
     let geometry = GeometryAuthoringBatch::empty();
     let deformation = DeformationAuthoringBatch::empty();
     let profile = profile_fixture(spatial, nodes, appearance, geometry, deformation, animation);
+    let mut construction_root_2 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let parts = successful_parts(
         NodeSceneTestTransaction::with_account(
+            &mut construction_root_2,
             &account,
             test_limits(),
             SceneAuthoringBatch::new(
@@ -482,5 +490,6 @@ fn animation_pipeline_preserves_finite_key_times_outside_declared_duration() {
     assert_eq!(channel.values(), values.as_slice());
     drop(scene);
     drop(parts.report);
+    drop(construction_root_2);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
 }

@@ -598,7 +598,7 @@ mod tests {
         fn parse(
             &self,
             _options: &Self::Options,
-            _context: &mut ParseContext<'_>,
+            _context: &mut ParseContext<'_, '_>,
         ) -> ParseResult<()> {
             unreachable!("request compilation tests do not parse")
         }

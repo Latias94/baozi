@@ -118,6 +118,37 @@ impl<O: OperationOwner, P: Copy + Ord, PP, U, D: Copy + Ord + fmt::Debug>
             self.poll.recorded_control_cause()
         })
     }
+    pub(crate) fn before_action(&mut self, max_cost: u16) -> Result<(), ExecutionError<D>> {
+        if self.failure.get().is_some() {
+            return Err(self
+                .poll
+                .recorded_control_cause()
+                .map_or(ExecutionError::Stopped, ExecutionError::Control));
+        }
+        ensure_running(self.failure)?;
+        match checked_action_debt(self.debt.get(), max_cost) {
+            Err(()) => return self.reject_action_cost(),
+            Ok(None) => self.checkpoint()?,
+            Ok(Some(_)) => {}
+        }
+        Ok(())
+    }
+    pub(crate) fn completed_action(&mut self, max_cost: u16) -> Result<(), ExecutionError<D>> {
+        match checked_action_debt(self.debt.get(), max_cost) {
+            Ok(Some(next)) => {
+                self.debt.set(next);
+                Ok(())
+            }
+            Err(()) | Ok(None) => self.reject_action_cost(),
+        }
+    }
+    fn reject_action_cost(&self) -> Result<(), ExecutionError<D>> {
+        record_terminal_cause_with_precedence(
+            self.failure,
+            PreparationFailureCode::product_graph(0x4143_4f53),
+        );
+        Err(ExecutionError::Stopped)
+    }
     pub(crate) fn reserve(
         &mut self,
         phase: P,
@@ -353,39 +384,12 @@ where
     }
 
     pub(crate) fn before_action(&mut self, max_cost: u16) -> Result<(), ExecutionError<D>> {
-        if self.ordinary.failure.get().is_some() {
-            return Err(self
-                .ordinary
-                .poll
-                .recorded_control_cause()
-                .map_or(ExecutionError::Stopped, ExecutionError::Control));
-        }
-        ensure_running(self.ordinary.failure)?;
-        match checked_action_debt(self.ordinary.debt.get(), max_cost) {
-            Err(()) => return self.reject_action_cost(),
-            Ok(None) => self.checkpoint()?,
-            Ok(Some(_)) => {}
-        }
-        Ok(())
+        self.ordinary.before_action(max_cost)
     }
 
     /// Advances conservative control cost after actual work completion, never ledger consumption.
     pub(crate) fn completed_action(&mut self, max_cost: u16) -> Result<(), ExecutionError<D>> {
-        match checked_action_debt(self.ordinary.debt.get(), max_cost) {
-            Ok(Some(next)) => {
-                self.ordinary.debt.set(next);
-                Ok(())
-            }
-            Err(()) | Ok(None) => self.reject_action_cost(),
-        }
-    }
-
-    fn reject_action_cost(&self) -> Result<(), ExecutionError<D>> {
-        record_terminal_cause_with_precedence(
-            self.ordinary.failure,
-            PreparationFailureCode::product_graph(0x4143_4f53),
-        );
-        Err(ExecutionError::Stopped)
+        self.ordinary.completed_action(max_cost)
     }
 
     pub(crate) fn report_progress(
@@ -487,7 +491,8 @@ where
     }
 }
 
-impl<O, P, PP, U, D, F> RetainedOperation<O, P, PP, U, D, F>
+impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    RetainedOperation<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
     O: OperationOwner,
     P: Copy + Ord,
@@ -507,14 +512,20 @@ where
         ExecutionServices<'_, O, P, PP, U, D>,
     ) {
         let Self {
-            coordinator,
+            retained, common, ..
+        } = self;
+        let super::RetainedOperationFields {
             baseline,
             terminal_account_share_work,
+            ..
+        } = &mut **retained;
+        let OperationInvocation {
+            coordinator,
             sticky_terminal_cause,
             control_action_debt,
             execution_state,
             ..
-        } = self;
+        } = &mut **common;
         let (progress, ledger) = coordinator.split_progress_checkpoint_and_retained_ledger();
         let (poll, progress) = progress.into_parts();
         (

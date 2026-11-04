@@ -6,7 +6,7 @@ use crate::control::{
 };
 use crate::ledger::{
     Commitment, Ledger, LedgerCause, LedgerEvidenceError, LedgerLimits, LedgerSnapshot,
-    LiveReservation, PendingPublication, PublicationReservationBatch,
+    LiveReservation, PendingPublication, ProgressEvidenceStorage, PublicationReservationBatch,
 };
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -170,7 +170,7 @@ pub(crate) struct OperationProgressCheckpoint<'a, O, LP, PP, U, D> {
 
 /// Progress metadata can move independently of the invocation's unique control borrow.
 pub(crate) struct OperationProgressState<'a, O, LP, PP, U, D> {
-    ledger: &'a Ledger<O, LP, D>,
+    storage: ProgressEvidenceStorage<'a, O, LP, D>,
     progress: &'a mut Vec<((PP, U), ProgressState)>,
     progress_evidence_bytes: &'a mut u64,
     last_phase_order: &'a mut Option<u32>,
@@ -179,9 +179,50 @@ pub(crate) struct OperationProgressState<'a, O, LP, PP, U, D> {
     next_sequence: &'a mut u64,
 }
 
+/// Progress metadata before its storage-only view is bound to the invocation's real storage.
+pub(crate) struct OperationProgressFields<'a, PP, U> {
+    progress: &'a mut Vec<((PP, U), ProgressState)>,
+    progress_evidence_bytes: &'a mut u64,
+    last_phase_order: &'a mut Option<u32>,
+    delivered_events: &'a mut usize,
+    delivered_bytes: &'a mut usize,
+    next_sequence: &'a mut u64,
+}
+
+impl<'a, PP, U> OperationProgressFields<'a, PP, U> {
+    pub(crate) fn bind<O, LP, D>(
+        self,
+        storage: ProgressEvidenceStorage<'a, O, LP, D>,
+    ) -> OperationProgressState<'a, O, LP, PP, U, D> {
+        let Self {
+            progress,
+            progress_evidence_bytes,
+            last_phase_order,
+            delivered_events,
+            delivered_bytes,
+            next_sequence,
+        } = self;
+        OperationProgressState {
+            storage,
+            progress,
+            progress_evidence_bytes,
+            last_phase_order,
+            delivered_events,
+            delivered_bytes,
+            next_sequence,
+        }
+    }
+}
+
 type SplitProgress<'a, O, LP, PP, U, D> = (
     OperationPollCheckpoint<'a, PP, U>,
     OperationProgressState<'a, O, LP, PP, U, D>,
+);
+
+type SplitExclusiveProgress<'a, O, LP, PP, U, D> = (
+    OperationPollCheckpoint<'a, PP, U>,
+    OperationProgressFields<'a, PP, U>,
+    &'a mut Ledger<O, LP, D>,
 );
 
 impl<'a, O, LP, PP, U, D> OperationProgressCheckpoint<'a, O, LP, PP, U, D>
@@ -433,8 +474,8 @@ where
                 limit,
             });
         }
-        self.ledger
-            .try_grow_progress_evidence(
+        self.storage
+            .try_grow(
                 self.progress,
                 desired_capacity,
                 self.progress_evidence_bytes,
@@ -532,26 +573,6 @@ where
             next_sequence: 0,
             terminal_control_gate: None,
         })
-    }
-
-    /// Rehydrates the coordinator around a ledger whose complete startup graph already crossed
-    /// the retained Ready boundary. No ledger or physical admission work is repeated here.
-    pub(crate) fn from_started_ledger(
-        control: OperationControl<PP, U>,
-        started: crate::retained::StartedLedger<O, LP, D>,
-    ) -> Self {
-        Self {
-            control,
-            ledger: started.into_inner(),
-            terminal: None,
-            progress: Vec::new(),
-            progress_evidence_bytes: 0,
-            last_phase_order: None,
-            delivered_events: 0,
-            delivered_bytes: 0,
-            next_sequence: 0,
-            terminal_control_gate: None,
-        }
     }
 
     /// Reads the original cold control cause without polling or changing control state.
@@ -753,34 +774,12 @@ where
         OperationProgressCheckpoint<'_, O, LP, PP, U, D>,
         &Ledger<O, LP, D>,
     ) {
-        let Self {
-            control,
-            ledger,
-            terminal,
-            progress,
-            progress_evidence_bytes,
-            last_phase_order,
-            delivered_events,
-            delivered_bytes,
-            next_sequence,
-            ..
-        } = self;
+        let (poll, progress, ledger) = self.split_exclusive_progress_and_ledger();
+        let ledger = &*ledger;
         (
             OperationProgressCheckpoint {
-                poll: OperationPollCheckpoint {
-                    control,
-                    terminal,
-                    allow_preexisting_terminal: false,
-                },
-                state: OperationProgressState {
-                    ledger,
-                    progress,
-                    progress_evidence_bytes,
-                    last_phase_order,
-                    delivered_events,
-                    delivered_bytes,
-                    next_sequence,
-                },
+                poll,
+                state: progress.bind(ledger.storage_view().progress_evidence()),
             },
             ledger,
         )
@@ -805,13 +804,19 @@ where
         )
     }
 
-    pub(crate) fn split_exclusive_poll_and_ledger(
+    pub(crate) fn split_exclusive_progress_and_ledger(
         &mut self,
-    ) -> (OperationPollCheckpoint<'_, PP, U>, &mut Ledger<O, LP, D>) {
+    ) -> SplitExclusiveProgress<'_, O, LP, PP, U, D> {
         let Self {
             control,
             ledger,
             terminal,
+            progress,
+            progress_evidence_bytes,
+            last_phase_order,
+            delivered_events,
+            delivered_bytes,
+            next_sequence,
             ..
         } = self;
         (
@@ -819,6 +824,14 @@ where
                 control,
                 terminal,
                 allow_preexisting_terminal: false,
+            },
+            OperationProgressFields {
+                progress,
+                progress_evidence_bytes,
+                last_phase_order,
+                delivered_events,
+                delivered_bytes,
+                next_sequence,
             },
             ledger,
         )

@@ -21,7 +21,7 @@ pub(super) struct RewrittenNodeSceneGraph {
 }
 
 pub(super) fn try_rewrite_node_scene<'lane, 'scene, O, PP, U>(
-    lane: &mut CanonicalLane<'lane, O, PP, U, CanonicalInheritanceSource>,
+    lane: &mut CanonicalLane<'_, 'lane, O, PP, U, CanonicalInheritanceSource>,
     pending: &BoundPendingNodeSceneEdit<'scene>,
 ) -> Result<RewrittenNodeSceneGraph, StoreRuntimeError>
 where
@@ -201,7 +201,7 @@ where
 }
 
 fn rewrite_directory_with_shape<'lane, O, PP, U>(
-    lane: &mut CanonicalLane<'lane, O, PP, U, CanonicalInheritanceSource>,
+    lane: &mut CanonicalLane<'_, 'lane, O, PP, U, CanonicalInheritanceSource>,
     pending: &BoundPendingNodeSceneEdit<'_>,
 ) -> Result<CanonicalBlockRef<SceneDirectorySchema>, StoreRuntimeError>
 where

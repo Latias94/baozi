@@ -75,12 +75,16 @@ impl Format for PrecisionImporter {
         &self,
         _: &baozi_import::Probe<'_>,
         _: &ReadHint,
-        _: &DetectionScope<'_>,
+        _: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         let explicit_indices = match self.0.storage {
             Storage::Dense => [0, 1, 2, 3],
             Storage::Sparse { logical_count } => [0, 1, 2, logical_count - 1],

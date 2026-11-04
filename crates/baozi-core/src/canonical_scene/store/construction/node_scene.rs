@@ -1,14 +1,12 @@
 #[cfg(test)]
 use baozi_operation::__retained_store_integration::activation::{
-    CanonicalCandidateStoreSession, CentrallyRejectedCanonicalStoreSession,
-    InterruptedCanonicalStoreSession, NeverActivatedStoreSession, PendingMinimalFallback,
-    RejectedCanonicalStoreSession, VerifiedMinimalFallback,
+    CanonicalCandidateStoreSession, CanonicalCauseSlot, CanonicalFinal, CanonicalGenerationSlots,
+    CentrallyRejectedCanonicalStoreSession, InterruptedCanonicalStoreSession,
+    NeverActivatedStoreSession, PendingMinimalFallback, RejectedCanonicalStoreSession,
 };
 #[cfg(test)]
-use baozi_operation::__retained_store_integration::authority::PreparedStoreSuccess;
-#[cfg(test)]
 use baozi_operation::__retained_store_integration::authority::{
-    FreshStoreLineage, PreparedStoreFailure, PreparedStoreFallback,
+    PreparedStoreFailure, PreparedStoreFallback, TerminalStoreLineage,
 };
 use baozi_operation::__retained_store_integration::producer::{
     CanonicalActivationRequest, CanonicalActivationRequestIdentity,
@@ -68,9 +66,9 @@ pub use materialization::{
 mod profile;
 mod publication;
 pub use publication::{
-    NodeSceneFrozenGenerationRejection, NodeSceneHandoffPairingError, NodeSceneHandoffToken,
-    NodeSceneLaneFreezePermit, NodeSceneLaneGenerationRejection, NodeSceneLaneJointCommit,
-    NodeScenePublishedSuccess, SceneParseOutcome, consume_node_scene_freeze_permit,
+    NodeSceneLaneFreezePermit, NodeSceneLaneGenerationRejection, NodeScenePublicationError,
+    NodeScenePublishedSuccess, PreparedNodeScenePublication, PreparedNodeSceneSuccess,
+    SceneParseOutcome, consume_node_scene_freeze_permit,
 };
 mod scratch;
 pub(in crate::canonical_scene::store) use scratch::{
@@ -192,48 +190,51 @@ impl NodeSceneBuildFaults {
 }
 
 #[cfg(test)]
-type PreparedNodeStoreSuccess = PreparedStoreSuccess<
-    RecordBlock,
-    SceneDirectorySchema,
-    RecordBlock,
-    NodeSceneOutcomeEvidenceSchema,
->;
-#[cfg(test)]
 type PreparedNodeStoreFailure = PreparedStoreFailure<RecordBlock, NodeSceneOutcomeEvidenceSchema>;
 #[cfg(test)]
 type ActivatedNodeSceneCandidate<
+    'inv,
     O = SceneConstructionOwner,
     PP = SceneConstructionPhase,
     U = SceneConstructionUnit,
-> = CanonicalCandidateStoreSession<
-    O,
-    PP,
-    U,
-    materialization::NodeSceneLaneOutput,
-    materialization::NodeSceneLaneValidationProof,
-    RecordBlock,
-    SceneDirectorySchema,
-    RecordBlock,
-    NodeSceneOutcomeEvidenceSchema,
+> = CanonicalFinal<
+    CanonicalCandidateStoreSession<
+        'inv,
+        O,
+        PP,
+        U,
+        materialization::NodeSceneLaneOutput,
+        materialization::NodeSceneLaneValidationProof,
+        RecordBlock,
+        SceneDirectorySchema,
+        RecordBlock,
+        NodeSceneOutcomeEvidenceSchema,
+    >,
 >;
 #[cfg(test)]
-type RejectedNodeSceneActivation<O, PP, U> =
-    RejectedCanonicalStoreSession<O, PP, U, materialization::NodeSceneLaneRejection>;
-#[cfg(test)]
-type NeverActivatedNodeScene<O, PP, U, L = FreshStoreLineage> =
-    NeverActivatedStoreSession<O, PP, U, materialization::NodeSceneLaneRejection, L>;
-#[cfg(test)]
-type CentrallyRejectedNodeScene<O, PP, U> = CentrallyRejectedCanonicalStoreSession<
-    O,
-    PP,
-    U,
-    materialization::NodeSceneLaneRejection,
-    RecordBlock,
-    NodeSceneOutcomeEvidenceSchema,
+type RejectedNodeSceneActivation<'inv, O, PP, U> = CanonicalFinal<
+    RejectedCanonicalStoreSession<'inv, O, PP, U, materialization::NodeSceneLaneRejection>,
 >;
 #[cfg(test)]
-type InterruptedNodeScene<O, PP, U> =
-    InterruptedCanonicalStoreSession<O, PP, U, RecordBlock, NodeSceneOutcomeEvidenceSchema>;
+type NeverActivatedNodeScene<'inv, O, PP, U, L = TerminalStoreLineage> = CanonicalFinal<
+    NeverActivatedStoreSession<'inv, O, PP, U, materialization::NodeSceneLaneRejection, L>,
+>;
+#[cfg(test)]
+type CentrallyRejectedNodeScene<'inv, O, PP, U> = CanonicalFinal<
+    CentrallyRejectedCanonicalStoreSession<
+        'inv,
+        O,
+        PP,
+        U,
+        materialization::NodeSceneLaneRejection,
+        RecordBlock,
+        NodeSceneOutcomeEvidenceSchema,
+    >,
+>;
+#[cfg(test)]
+type InterruptedNodeScene<'inv, O, PP, U> = CanonicalFinal<
+    InterruptedCanonicalStoreSession<'inv, O, PP, U, RecordBlock, NodeSceneOutcomeEvidenceSchema>,
+>;
 #[derive(Debug, Error)]
 pub(in crate::canonical_scene::store) enum NodeSceneConstructionRejection<E = StoreRuntimeError>
 where
@@ -288,6 +289,7 @@ where
 #[must_use = "a pending node Scene draft owner must be centrally prepared or deliberately dropped"]
 #[cfg(test)]
 pub(in crate::canonical_scene::store) struct PendingNodeSceneDraft<
+    'inv,
     O = SceneConstructionOwner,
     PP = SceneConstructionPhase,
     U = SceneConstructionUnit,
@@ -296,7 +298,9 @@ pub(in crate::canonical_scene::store) struct PendingNodeSceneDraft<
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    candidate: ActivatedNodeSceneCandidate<O, PP, U>,
+    candidate: ActivatedNodeSceneCandidate<'inv, O, PP, U>,
+    generation_slots: CanonicalGenerationSlots<'inv, NodeSceneLaneGenerationRejection>,
+    failure_fallback: CanonicalCauseSlot<'inv, StoreRuntimeError>,
     final_progress: FinalProgress<PP, U>,
 }
 
@@ -308,6 +312,7 @@ pub(in crate::canonical_scene::store) struct PendingNodeSceneDraft<
 )]
 #[cfg(test)]
 pub(in crate::canonical_scene::store) enum NodeSceneDraftBuild<
+    'inv,
     O = SceneConstructionOwner,
     PP = SceneConstructionPhase,
     U = SceneConstructionUnit,
@@ -317,7 +322,7 @@ pub(in crate::canonical_scene::store) enum NodeSceneDraftBuild<
     U: ProgressUnit,
 {
     Draft {
-        owner: PendingNodeSceneDraft<O, PP, U>,
+        owner: PendingNodeSceneDraft<'inv, O, PP, U>,
     },
     Failure {
         authoring_rejection: Option<NodeSceneConstructionRejection<StoreRuntimeError>>,
@@ -335,36 +340,40 @@ pub(in crate::canonical_scene::store) enum NodeSceneDraftBuild<
     clippy::large_enum_variant,
     reason = "all linear failure states remain inline so deferred preparation cannot allocate"
 )]
-pub(in crate::canonical_scene::store) enum PendingNodeSceneFailure<O, PP, U, L = FreshStoreLineage>
-where
+pub(in crate::canonical_scene::store) enum PendingNodeSceneFailure<
+    'inv,
+    O,
+    PP,
+    U,
+    L = TerminalStoreLineage,
+> where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     ActivationRejected {
-        owner: RejectedNodeSceneActivation<O, PP, U>,
+        owner: RejectedNodeSceneActivation<'inv, O, PP, U>,
         evidence_plan: RecordPlan,
         evidence_counts: SceneEvidenceCounts,
         final_progress: FinalProgress<PP, U>,
     },
     NeverActivated {
-        owner: NeverActivatedNodeScene<O, PP, U, L>,
+        owner: NeverActivatedNodeScene<'inv, O, PP, U, L>,
         evidence_plan: RecordPlan,
         evidence_counts: SceneEvidenceCounts,
         final_progress: FinalProgress<PP, U>,
     },
     CentralRejected {
-        owner: CentrallyRejectedNodeScene<O, PP, U>,
+        owner: CentrallyRejectedNodeScene<'inv, O, PP, U>,
         evidence_counts: SceneEvidenceCounts,
         final_progress: FinalProgress<PP, U>,
     },
     CentralInterrupted {
-        owner: InterruptedNodeScene<O, PP, U>,
+        owner: InterruptedNodeScene<'inv, O, PP, U>,
         evidence_counts: SceneEvidenceCounts,
         final_progress: FinalProgress<PP, U>,
     },
-    PreparedFallback(VerifiedMinimalFallback<StoreRuntimeError>),
-    DeferredFallback(PendingMinimalFallback<O, PP, U>),
+    DeferredFallback(CanonicalFinal<PendingMinimalFallback<'inv, O, PP, U>>),
 }
 
 #[derive(Clone, Copy)]
@@ -509,12 +518,7 @@ pub(in crate::canonical_scene::store) enum PreparedNodeSceneFailure {
 )]
 #[cfg(test)]
 pub(in crate::canonical_scene::store) enum PreparedNodeSceneConstruction {
-    Success {
-        token: publication::NodeSceneHandoffToken,
-        // The physical publication owner must drop last so an earlier field destructor cannot
-        // escape fail-closed containment before the terminal store has been prepared.
-        store: PreparedNodeStoreSuccess,
-    },
+    Publication(PreparedNodeScenePublication),
     Failure(PreparedNodeSceneFailure),
 }
 

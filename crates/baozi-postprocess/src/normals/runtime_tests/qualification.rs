@@ -3,10 +3,9 @@
     reason = "qualification retains the real inline normal adapter failure vocabulary"
 )]
 
-use baozi_core::__scene_integration::integration::{
-    SceneEditBootstrap, SceneVectorValues, try_start_scene_edit_operation,
-};
+use baozi_core::__scene_integration::integration::SceneVectorValues;
 use baozi_core::{AttributeData, AttributeDomain, ValidatedScene};
+use baozi_operation::__retained_store_integration::activation::CanonicalOperationPublication;
 use baozi_operation::__retained_store_integration::authority::PreparedStoreEvidenceOnlyOutcome;
 use baozi_operation::{
     CancellationOrigin, ControlCause, CounterClass, DimensionPolicy, LedgerCause,
@@ -14,41 +13,34 @@ use baozi_operation::{
 };
 
 use super::{Arc, AtomicUsize, Ordering, StopAtPoll, common};
+use crate::PostProcessControl;
 use crate::normals::{NormalMode, input, kernel};
-use crate::operation::{PostProcessOwner, runtime};
-use crate::{PostProcessBudgets, PostProcessControl};
+use crate::operation::runtime;
 
 // Four startup account owners each complete one clone and one typed handle.
 const ENTRY_WORK: u64 = 8;
 
-fn start(
+fn with_operation<T>(
     scene: &ValidatedScene,
     control: PostProcessControl,
-) -> (runtime::EditOperation, runtime::RuntimeKeys) {
-    let (writer, _, _) = SceneEditBootstrap::try_new().unwrap().into_parts();
-    let (keys, ledger, plan) =
-        runtime::plan_selected_runtime(writer, PostProcessBudgets::default()).unwrap();
-    let mut operation = try_start_scene_edit_operation::<PostProcessOwner, _, _>(
-        scene,
-        control.into_runtime(),
-        ledger,
-        plan,
-    )
-    .unwrap();
-    let initial = operation
-        .producer_host()
-        .dimension_state(keys.work)
-        .unwrap();
-    assert_eq!(
-        (initial.attempted(), initial.consumed()),
-        (ENTRY_WORK, ENTRY_WORK)
-    );
-    assert!(!operation.account().snapshot().poisoned());
-    (operation, keys)
+    mut body: impl for<'inv> FnMut(&mut runtime::EditOperation<'inv>, runtime::RuntimeKeys) -> T,
+) -> (CanonicalOperationPublication, T) {
+    runtime::with_test_operation(scene, control, move |operation, keys| {
+        let initial = operation
+            .producer_host()
+            .dimension_state(keys.work)
+            .unwrap();
+        assert_eq!(
+            (initial.attempted(), initial.consumed()),
+            (ENTRY_WORK, ENTRY_WORK)
+        );
+        assert!(!operation.physical_storage_snapshot().poisoned());
+        body(operation, keys)
+    })
 }
 
 fn live_storage(operation: &runtime::EditOperation) -> (u64, u64, bool) {
-    let physical = operation.account().snapshot();
+    let physical = operation.physical_storage_snapshot();
     (
         physical.live_retained_bytes(),
         physical.live_retained_allocations(),
@@ -57,15 +49,15 @@ fn live_storage(operation: &runtime::EditOperation) -> (u64, u64, bool) {
 }
 
 fn finish(
-    operation: runtime::EditOperation,
+    operation: CanonicalOperationPublication,
     keys: runtime::RuntimeKeys,
     failure: Option<StorePreparationFailureClass>,
     attempted: u64,
     consumed: u64,
 ) {
-    let prepared = operation
-        .prepare_evidence_only_success(runtime::final_progress())
-        .expect("resolved normal work must retain its terminal owner");
+    let CanonicalOperationPublication::Unchanged(prepared) = operation else {
+        panic!("resolved normal work must retain its unchanged request");
+    };
     let evidence: StoreLedgerEvidence = match (prepared, failure) {
         (PreparedStoreEvidenceOnlyOutcome::Success(success), None) => {
             success.handoff().ledger_evidence
@@ -186,51 +178,54 @@ fn projected_flat_cancellation_keeps_periodic_and_final_short_region_prefixes() 
         (usize::MAX, COMPLETE),
     ] {
         let polls = Arc::new(AtomicUsize::new(0));
-        let (mut operation, keys) = start(
+        let (operation, (keys, failure)) = with_operation(
             &scene,
             PostProcessControl::default().with_cancellation_signal(StopAtPoll {
                 polls: polls.clone(),
                 stop,
                 panic: false,
             }),
+            |operation, keys| {
+                polls.store(0, Ordering::Relaxed);
+                let physical = live_storage(operation);
+                let mut returned_output = false;
+                let result = runtime::with_execution(operation, keys, |active| {
+                    let generated = input::generate(
+                        input::NormalInput::projected(
+                            positions,
+                            primitive.indices(),
+                            None,
+                            CORNERS as u32,
+                            NormalMode::Flat,
+                            false,
+                        ),
+                        active,
+                        keys,
+                    )?;
+                    let SceneVectorValues::F32(values) = generated.values() else {
+                        panic!("F32 positions must keep F32 normal output");
+                    };
+                    assert_eq!(values.len(), CORNERS as usize);
+                    assert!(values.iter().all(|value| *value == [0.0, 0.0, 1.0]));
+                    returned_output = true;
+                    Ok::<_, input::InputError>(())
+                });
+                assert_eq!(returned_output, stop >= 8);
+                assert_eq!(
+                    polls.load(Ordering::Relaxed),
+                    if stop == usize::MAX { 9 } else { stop + 1 }
+                );
+                let failure = if stop == usize::MAX {
+                    result.unwrap();
+                    None
+                } else {
+                    assert_cancelled(result);
+                    Some(StorePreparationFailureClass::Control)
+                };
+                assert_eq!(live_storage(operation), physical);
+                (keys, failure)
+            },
         );
-        polls.store(0, Ordering::Relaxed);
-        let physical = live_storage(&operation);
-        let mut returned_output = false;
-        let result = runtime::with_execution(&mut operation, keys, |active| {
-            let generated = input::generate(
-                input::NormalInput::projected(
-                    positions,
-                    primitive.indices(),
-                    None,
-                    CORNERS as u32,
-                    NormalMode::Flat,
-                    false,
-                ),
-                active,
-                keys,
-            )?;
-            let SceneVectorValues::F32(values) = generated.values() else {
-                panic!("F32 positions must keep F32 normal output");
-            };
-            assert_eq!(values.len(), CORNERS as usize);
-            assert!(values.iter().all(|value| *value == [0.0, 0.0, 1.0]));
-            returned_output = true;
-            Ok::<_, input::InputError>(())
-        });
-        assert_eq!(returned_output, stop >= 8);
-        assert_eq!(
-            polls.load(Ordering::Relaxed),
-            if stop == usize::MAX { 9 } else { stop + 1 }
-        );
-        let failure = if stop == usize::MAX {
-            result.unwrap();
-            None
-        } else {
-            assert_cancelled(result);
-            Some(StorePreparationFailureClass::Control)
-        };
-        assert_eq!(live_storage(&operation), physical);
         finish(operation, keys, failure, completed, completed);
         assert_eq!(scene.generation(), generation);
         assert!(import.matches_scene(&scene));
@@ -281,51 +276,54 @@ fn projected_smooth_cancellation_keeps_ordering_and_final_short_prefixes() {
         (usize::MAX, COMPLETE),
     ] {
         let polls = Arc::new(AtomicUsize::new(0));
-        let (mut operation, keys) = start(
+        let (operation, (keys, failure)) = with_operation(
             &scene,
             PostProcessControl::default().with_cancellation_signal(StopAtPoll {
                 polls: polls.clone(),
                 stop,
                 panic: false,
             }),
+            |operation, keys| {
+                polls.store(0, Ordering::Relaxed);
+                let physical = live_storage(operation);
+                let mut returned_output = false;
+                let result = runtime::with_execution(operation, keys, |active| {
+                    let generated = input::generate(
+                        input::NormalInput::projected(
+                            positions,
+                            primitive.indices(),
+                            Some(&groups),
+                            CORNERS as u32,
+                            NormalMode::Smooth,
+                            false,
+                        ),
+                        active,
+                        keys,
+                    )?;
+                    let SceneVectorValues::F32(values) = generated.values() else {
+                        panic!("F32 positions must keep F32 normal output");
+                    };
+                    assert_eq!(values.len(), CORNERS as usize);
+                    assert!(values.iter().all(|value| *value == [0.0, 0.0, 1.0]));
+                    returned_output = true;
+                    Ok::<_, input::InputError>(())
+                });
+                assert_eq!(returned_output, stop >= 20);
+                assert_eq!(
+                    polls.load(Ordering::Relaxed),
+                    if stop == usize::MAX { 21 } else { stop + 1 }
+                );
+                let failure = if stop == usize::MAX {
+                    result.unwrap();
+                    None
+                } else {
+                    assert_cancelled(result);
+                    Some(StorePreparationFailureClass::Control)
+                };
+                assert_eq!(live_storage(operation), physical);
+                (keys, failure)
+            },
         );
-        polls.store(0, Ordering::Relaxed);
-        let physical = live_storage(&operation);
-        let mut returned_output = false;
-        let result = runtime::with_execution(&mut operation, keys, |active| {
-            let generated = input::generate(
-                input::NormalInput::projected(
-                    positions,
-                    primitive.indices(),
-                    Some(&groups),
-                    CORNERS as u32,
-                    NormalMode::Smooth,
-                    false,
-                ),
-                active,
-                keys,
-            )?;
-            let SceneVectorValues::F32(values) = generated.values() else {
-                panic!("F32 positions must keep F32 normal output");
-            };
-            assert_eq!(values.len(), CORNERS as usize);
-            assert!(values.iter().all(|value| *value == [0.0, 0.0, 1.0]));
-            returned_output = true;
-            Ok::<_, input::InputError>(())
-        });
-        assert_eq!(returned_output, stop >= 20);
-        assert_eq!(
-            polls.load(Ordering::Relaxed),
-            if stop == usize::MAX { 21 } else { stop + 1 }
-        );
-        let failure = if stop == usize::MAX {
-            result.unwrap();
-            None
-        } else {
-            assert_cancelled(result);
-            Some(StorePreparationFailureClass::Control)
-        };
-        assert_eq!(live_storage(&operation), physical);
         finish(operation, keys, failure, completed, completed);
         assert_eq!(scene.generation(), generation);
         assert!(import.matches_scene(&scene));
@@ -344,53 +342,58 @@ fn enlarged_order_admission_rejects_without_retrying_the_general_algorithm() {
     // C+V=9 now requires sixteen. Even the smallest output backing rejects the latter.
     let limit =
         8 * std::mem::size_of::<[f32; 3]>() as u64 + 8 * std::mem::size_of::<usize>() as u64;
-    let (mut operation, keys) = start(&scene, PostProcessControl::default());
-    operation
-        .producer_host()
-        .tighten_dimension_policy(
-            keys.scratch,
-            DimensionPolicy::reservable_bytes(0, 0, 0, limit),
-        )
-        .unwrap();
-    let physical = live_storage(&operation);
-    let mut returned_output = false;
-    let result: Result<(), input::InputError> =
-        runtime::with_execution(&mut operation, keys, |active| {
-            input::generate(
-                input::NormalInput::projected(
-                    positions,
-                    Some(&ids),
-                    None,
-                    6,
-                    NormalMode::Smooth,
-                    false,
-                ),
-                active,
-                keys,
-            )?;
-            returned_output = true;
-            Ok(())
+    let (operation, (keys, completed)) =
+        with_operation(&scene, PostProcessControl::default(), |operation, keys| {
+            operation
+                .producer_host()
+                .tighten_dimension_policy(
+                    keys.scratch,
+                    DimensionPolicy::reservable_bytes(0, 0, 0, limit),
+                )
+                .unwrap();
+            let physical = live_storage(operation);
+            let mut returned_output = false;
+            let result: Result<(), input::InputError> =
+                runtime::with_execution(operation, keys, |active| {
+                    input::generate(
+                        input::NormalInput::projected(
+                            positions,
+                            Some(&ids),
+                            None,
+                            6,
+                            NormalMode::Smooth,
+                            false,
+                        ),
+                        active,
+                        keys,
+                    )?;
+                    returned_output = true;
+                    Ok(())
+                });
+            assert!(
+                !returned_output,
+                "storage rejection must not retry the general workspace"
+            );
+            let Err(input::InputError::Runtime(StoreRuntimeError::Ledger(
+                LedgerCause::LimitExceeded {
+                    dimension,
+                    class,
+                    value,
+                    limit: actual_limit,
+                },
+            ))) = result
+            else {
+                panic!("expected the enlarged scratch admission error, got {result:?}");
+            };
+            assert_eq!(dimension, keys.scratch);
+            assert_eq!(class, CounterClass::Live);
+            assert_eq!(actual_limit, limit);
+            assert!(value > limit);
+            assert_eq!(live_storage(operation), physical);
+            // Only output storage's two share units and its one six-row chunk completed.
+            let completed = 11;
+            (keys, completed)
         });
-    assert!(
-        !returned_output,
-        "storage rejection must not retry the general workspace"
-    );
-    let Err(input::InputError::Runtime(StoreRuntimeError::Ledger(LedgerCause::LimitExceeded {
-        dimension,
-        class,
-        value,
-        limit: actual_limit,
-    }))) = result
-    else {
-        panic!("expected the enlarged scratch admission error, got {result:?}");
-    };
-    assert_eq!(dimension, keys.scratch);
-    assert_eq!(class, CounterClass::Live);
-    assert_eq!(actual_limit, limit);
-    assert!(value > limit);
-    assert_eq!(live_storage(&operation), physical);
-    // Only output storage's two share units and its one six-row chunk completed.
-    let completed = 11;
     finish(
         operation,
         keys,
@@ -437,47 +440,50 @@ fn projected_dense_action_denial_keeps_sort_and_output_prefixes() {
     ] {
         for class in [CounterClass::Attempted, CounterClass::Consumed] {
             let polls = Arc::new(AtomicUsize::new(0));
-            let (mut operation, keys) = start(
+            let (operation, (keys, failure)) = with_operation(
                 &scene,
                 PostProcessControl::default().with_cancellation_signal(StopAtPoll {
                     polls: polls.clone(),
                     stop: usize::MAX,
                     panic: false,
                 }),
+                |operation, keys| {
+                    polls.store(0, Ordering::Relaxed);
+                    restrict_work(operation, keys, class, allowed);
+                    let physical = live_storage(operation);
+                    let mut returned_output = false;
+                    let result = runtime::with_execution(operation, keys, |active| {
+                        let generated = input::generate(
+                            input::NormalInput::projected(
+                                positions,
+                                primitive.indices(),
+                                groups,
+                                3,
+                                mode,
+                                false,
+                            ),
+                            active,
+                            keys,
+                        )?;
+                        let SceneVectorValues::F32(values) = generated.values() else {
+                            panic!("F32 positions must keep F32 output");
+                        };
+                        assert_eq!(values, [[0.0, 0.0, 1.0]; 3].as_slice());
+                        returned_output = true;
+                        Ok::<_, input::InputError>(())
+                    });
+                    assert_eq!(returned_output, allowed == complete);
+                    let failure = if allowed == complete {
+                        result.unwrap();
+                        None
+                    } else {
+                        assert_budget_rejection(result, keys, class, allowed);
+                        Some(StorePreparationFailureClass::Ledger)
+                    };
+                    assert_eq!(live_storage(operation), physical);
+                    (keys, failure)
+                },
             );
-            polls.store(0, Ordering::Relaxed);
-            restrict_work(&mut operation, keys, class, allowed);
-            let physical = live_storage(&operation);
-            let mut returned_output = false;
-            let result = runtime::with_execution(&mut operation, keys, |active| {
-                let generated = input::generate(
-                    input::NormalInput::projected(
-                        positions,
-                        primitive.indices(),
-                        groups,
-                        3,
-                        mode,
-                        false,
-                    ),
-                    active,
-                    keys,
-                )?;
-                let SceneVectorValues::F32(values) = generated.values() else {
-                    panic!("F32 positions must keep F32 output");
-                };
-                assert_eq!(values, [[0.0, 0.0, 1.0]; 3].as_slice());
-                returned_output = true;
-                Ok::<_, input::InputError>(())
-            });
-            assert_eq!(returned_output, allowed == complete);
-            let failure = if allowed == complete {
-                result.unwrap();
-                None
-            } else {
-                assert_budget_rejection(result, keys, class, allowed);
-                Some(StorePreparationFailureClass::Ledger)
-            };
-            assert_eq!(live_storage(&operation), physical);
             finish(
                 operation,
                 keys,
@@ -507,59 +513,64 @@ fn real_runtime_kernel_output_rejection_preserves_the_written_prefix() {
     // Without adapter scratch, three Position validations and one face action precede output.
     // Inspect real destination storage, independently of ledger totals.
     for written in 0..=3 {
-        let (mut operation, keys) = start(&scene, PostProcessControl::default());
-        let physical = live_storage(&operation);
-        let allowed = ENTRY_WORK + 4 + written;
-        if written < 3 {
-            restrict_work(&mut operation, keys, CounterClass::Attempted, allowed);
-        }
-        let mut output = [[73.0; 3]; 3];
-        let result = runtime::with_execution(&mut operation, keys, |active| {
-            kernel::generate_into(
-                kernel::Input {
-                    positions: primitive.positions().unwrap(),
-                    vertex_ids: kernel::VertexIds::Indexed(primitive.indices().unwrap()),
-                    smoothing_groups: None,
-                },
-                kernel::Mode::Flat,
-                kernel::Output::F32(&mut output),
-                kernel::Workspace {
-                    corner_order: &mut [],
-                    vertex_cursors: None,
-                    face_crosses: None,
-                },
-                |event| match event {
-                    kernel::WorkEvent::Begin(kind) => active.begin_action(kind.control_cost()),
-                    kernel::WorkEvent::Complete => active.complete_action(),
-                    kernel::WorkEvent::Checkpoint => active.checkpoint(),
-                },
-            )
-            .map_err(input::InputError::Kernel)
-        });
-        assert!(
-            output[..written as usize]
-                .iter()
-                .all(|value| *value == [0.0, 0.0, 1.0])
+        let (operation, (keys, failure, allowed)) =
+            with_operation(&scene, PostProcessControl::default(), |operation, keys| {
+                let physical = live_storage(operation);
+                let allowed = ENTRY_WORK + 4 + written;
+                if written < 3 {
+                    restrict_work(operation, keys, CounterClass::Attempted, allowed);
+                }
+                let mut output = [[73.0; 3]; 3];
+                let result = runtime::with_execution(operation, keys, |active| {
+                    kernel::generate_into(
+                        kernel::Input {
+                            positions: primitive.positions().unwrap(),
+                            vertex_ids: kernel::VertexIds::Indexed(primitive.indices().unwrap()),
+                            smoothing_groups: None,
+                        },
+                        kernel::Mode::Flat,
+                        kernel::Output::F32(&mut output),
+                        kernel::Workspace {
+                            corner_order: &mut [],
+                            vertex_cursors: None,
+                            face_crosses: None,
+                        },
+                        |event| match event {
+                            kernel::WorkEvent::Begin(kind) => {
+                                active.begin_action(kind.control_cost())
+                            }
+                            kernel::WorkEvent::Complete => active.complete_action(),
+                            kernel::WorkEvent::Checkpoint => active.checkpoint(),
+                        },
+                    )
+                    .map_err(input::InputError::Kernel)
+                });
+                assert!(
+                    output[..written as usize]
+                        .iter()
+                        .all(|value| *value == [0.0, 0.0, 1.0])
+                );
+                assert!(
+                    output[written as usize..]
+                        .iter()
+                        .all(|value| *value == [73.0; 3])
+                );
+                assert_eq!(live_storage(operation), physical);
+                if written < 3 {
+                    assert_budget_rejection(result, keys, CounterClass::Attempted, allowed);
+                    (keys, Some(StorePreparationFailureClass::Ledger), allowed)
+                } else {
+                    result.unwrap();
+                    (keys, None, allowed)
+                }
+            });
+        finish(
+            operation,
+            keys,
+            failure,
+            allowed + u64::from(failure.is_some()),
+            allowed,
         );
-        assert!(
-            output[written as usize..]
-                .iter()
-                .all(|value| *value == [73.0; 3])
-        );
-        assert_eq!(live_storage(&operation), physical);
-        if written < 3 {
-            assert_budget_rejection(result, keys, CounterClass::Attempted, allowed);
-            finish(
-                operation,
-                keys,
-                Some(StorePreparationFailureClass::Ledger),
-                allowed + 1,
-                allowed,
-            );
-        } else {
-            result.unwrap();
-            finish(operation, keys, None, allowed, allowed);
-        }
         assert!(primitive.normals(AttributeDomain::Corner).is_none());
     }
 }
@@ -595,7 +606,7 @@ impl baozi_import::Format for SparseTriangle {
         &self,
         _: &baozi_import::Probe<'_>,
         _: &baozi_import::ReadHint,
-        _: &baozi_import::DetectionScope<'_>,
+        _: &mut baozi_import::DetectionScope<'_, '_>,
     ) -> baozi_import::DetectionResult<baozi_import::DetectionOutcome> {
         Ok(baozi_import::DetectionOutcome::Match(
             baozi_import::ReadConfidence::Certain,
@@ -605,7 +616,7 @@ impl baozi_import::Format for SparseTriangle {
     fn parse(
         &self,
         _options: &Self::Options,
-        context: &mut baozi_import::ParseContext<'_>,
+        context: &mut baozi_import::ParseContext<'_, '_>,
     ) -> baozi_import::ParseResult<()> {
         use baozi_import::authoring::{
             AttributeSemantic, AuthoringRange, GeometryAttributeAuthoring,
@@ -673,47 +684,50 @@ fn projected_sparse_action_denial_keeps_logical_read_face_and_output_prefixes() 
     for allowed in [10, 11, 12, 13, 14, 15, 16, 17, 18] {
         for class in [CounterClass::Attempted, CounterClass::Consumed] {
             let polls = Arc::new(AtomicUsize::new(0));
-            let (mut operation, keys) = start(
+            let (operation, (keys, failure)) = with_operation(
                 &scene,
                 PostProcessControl::default().with_cancellation_signal(StopAtPoll {
                     polls: polls.clone(),
                     stop: usize::MAX,
                     panic: false,
                 }),
+                |operation, keys| {
+                    polls.store(0, Ordering::Relaxed);
+                    restrict_work(operation, keys, class, allowed);
+                    let physical = live_storage(operation);
+                    let mut returned_output = false;
+                    let result = runtime::with_execution(operation, keys, |active| {
+                        let generated = input::generate(
+                            input::NormalInput::projected(
+                                positions,
+                                primitive.indices(),
+                                None,
+                                3,
+                                NormalMode::Flat,
+                                false,
+                            ),
+                            active,
+                            keys,
+                        )?;
+                        let SceneVectorValues::F32(values) = generated.values() else {
+                            panic!("sparse F32 positions must keep F32 output");
+                        };
+                        assert_eq!(values, [[0.0, 0.0, 1.0]; 3]);
+                        returned_output = true;
+                        Ok::<_, input::InputError>(())
+                    });
+                    assert_eq!(returned_output, allowed == 18);
+                    let failure = if allowed == 18 {
+                        result.unwrap();
+                        None
+                    } else {
+                        assert_budget_rejection(result, keys, class, allowed);
+                        Some(StorePreparationFailureClass::Ledger)
+                    };
+                    assert_eq!(live_storage(operation), physical);
+                    (keys, failure)
+                },
             );
-            polls.store(0, Ordering::Relaxed);
-            restrict_work(&mut operation, keys, class, allowed);
-            let physical = live_storage(&operation);
-            let mut returned_output = false;
-            let result = runtime::with_execution(&mut operation, keys, |active| {
-                let generated = input::generate(
-                    input::NormalInput::projected(
-                        positions,
-                        primitive.indices(),
-                        None,
-                        3,
-                        NormalMode::Flat,
-                        false,
-                    ),
-                    active,
-                    keys,
-                )?;
-                let SceneVectorValues::F32(values) = generated.values() else {
-                    panic!("sparse F32 positions must keep F32 output");
-                };
-                assert_eq!(values, [[0.0, 0.0, 1.0]; 3]);
-                returned_output = true;
-                Ok::<_, input::InputError>(())
-            });
-            assert_eq!(returned_output, allowed == 18);
-            let failure = if allowed == 18 {
-                result.unwrap();
-                None
-            } else {
-                assert_budget_rejection(result, keys, class, allowed);
-                Some(StorePreparationFailureClass::Ledger)
-            };
-            assert_eq!(live_storage(&operation), physical);
             finish(
                 operation,
                 keys,

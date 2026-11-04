@@ -1,18 +1,68 @@
+use super::final_state::CanonicalFinal;
 use super::*;
 
-impl<O, PP, U> PendingMinimalFallback<O, PP, U>
+impl<'inv, O, PP, U> PendingMinimalFallback<'inv, O, PP, U>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    pub(super) fn new(fallback: StoreFallbackOnly<O, PP, U>, cause: StoreRuntimeError) -> Self {
-        Self { cause, fallback }
+    pub(super) fn new(
+        fallback: StoreFallbackOnly<'inv, O, PP, U>,
+        cause_slot: CanonicalCauseSlot<'inv, StoreRuntimeError>,
+        cause: StoreRuntimeError,
+    ) -> Result<Self, StoreActivationContainment> {
+        match cause_slot.place(cause) {
+            Ok(cause) => Ok(Self {
+                owner: PayloadOwner::new(cause, fallback),
+            }),
+            Err(cause) => {
+                let _ = drop_scoped_value(cause);
+                Err(StoreActivationContainment {
+                    cause: fallback.contain_activation_fault(),
+                })
+            }
+        }
     }
 
     /// The original evidence-construction or validation failure, before terminal preparation.
     pub const fn cause(&self) -> &StoreRuntimeError {
-        &self.cause
+        self.owner.value().value()
+    }
+
+    /// Discards candidate storage and freezes the pre-admitted fallback after caller cleanup.
+    ///
+    /// Caller-owned ordinary scratch reservations must be released first. Valid retained-output
+    /// reservations may remain live under their existing protocol. Preparation uses the existing
+    /// fallback owner without a cleanup callback, payload copy, allocation, or control poll.
+    pub(super) fn prepare_minimal_fallback(
+        self,
+    ) -> Result<VerifiedMinimalFallback<StoreRuntimeError>, StorePrepareError> {
+        let Self { owner } = self;
+        let (cause, fallback) = owner.into_parts();
+        let cause = ManuallyDrop::new(cause);
+        match fallback.prepare_minimal_fallback() {
+            Ok(prepared) => Ok(VerifiedMinimalFallback::new(
+                prepared,
+                ManuallyDrop::into_inner(cause).into_owned(),
+            )),
+            Err(error) => {
+                let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
+                Err(error)
+            }
+        }
+    }
+}
+
+impl<'inv, O, PP, U> CanonicalFinal<PendingMinimalFallback<'inv, O, PP, U>>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    /// The original evidence-construction or validation failure, before terminal preparation.
+    pub const fn cause(&self) -> &StoreRuntimeError {
+        self.state.cause()
     }
 
     /// Discards candidate storage and freezes the pre-admitted fallback after caller cleanup.
@@ -23,60 +73,71 @@ where
     pub fn prepare_minimal_fallback(
         self,
     ) -> Result<VerifiedMinimalFallback<StoreRuntimeError>, StorePrepareError> {
-        let Self { cause, fallback } = self;
-        let cause = ManuallyDrop::new(cause);
-        match fallback.prepare_minimal_fallback() {
-            Ok(prepared) => Ok(VerifiedMinimalFallback::new(
-                prepared,
-                ManuallyDrop::into_inner(cause),
-            )),
-            Err(error) => {
-                let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
-                Err(error)
-            }
-        }
+        self.state.prepare_minimal_fallback()
     }
 }
 
-impl<O, PP, U, E, L> NeverActivatedStoreSession<O, PP, U, E, L>
+impl<'inv, O, PP, U, E, L> NeverActivatedStoreSession<'inv, O, PP, U, E, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     pub(super) fn requested(
-        mut operation: RetainedStoreOperation<O, PP, U, L>,
-        outcome_evidence_plan: RetainedStoreBlockTablePlan,
+        mut operation: RetainedStoreOperation<'inv, O, PP, U, L>,
+        cause_slot: CanonicalCauseSlot<'inv, StoreNeverActivatedCause<E>>,
+        failure: &BoundScopedFailureRequest,
         failure_work: FailureEvidenceWorkBudget,
-        outcome_evidence_destination_dimension: StoreDimensionKey,
         rejection: VerifiedRejection<E>,
-    ) -> Self {
+    ) -> Result<Self, StoreActivationContainment> {
+        if !cause_slot.is_vacant_for(operation.raw.invocation_identity()) {
+            let _ = drop_scoped_value(rejection.cause);
+            return Err(contain_operation(operation));
+        }
+        let cause = match cause_slot.place(StoreNeverActivatedCause::Requested(rejection.cause)) {
+            Ok(cause) => cause,
+            Err(cause) => {
+                let _ = drop_scoped_value(cause);
+                return Err(contain_operation(operation));
+            }
+        };
         operation.latch_activation_terminal_cause(rejection.failure_code);
-        Self {
+        Ok(Self {
             owner: NeverActivatedOwner {
-                cause: Some(StoreNeverActivatedCause::Requested(rejection.cause)),
+                cause: Some(cause),
                 authority: Some(NeverActivatedAuthority::Operation(operation)),
             },
             failure_code: rejection.failure_code,
-            outcome_evidence_plan,
+            outcome_evidence_plan: failure.outcome_evidence_plan,
             failure_work,
-            outcome_evidence_destination_dimension,
-        }
+            outcome_evidence_destination_dimension: failure.outcome_evidence_destination_dimension,
+        })
     }
 
     pub(super) fn runtime(
-        mut operation: RetainedStoreOperation<O, PP, U, L>,
-        outcome_evidence_plan: RetainedStoreBlockTablePlan,
+        mut operation: RetainedStoreOperation<'inv, O, PP, U, L>,
+        cause_slot: CanonicalCauseSlot<'inv, StoreNeverActivatedCause<E>>,
+        failure: &BoundScopedFailureRequest,
         failure_work: FailureEvidenceWorkBudget,
-        outcome_evidence_destination_dimension: StoreDimensionKey,
         cause: StoreRuntimeError,
         failure_code: PreparationFailureCode,
         fallback_only: bool,
-    ) -> Self {
+    ) -> Result<Self, StoreActivationContainment> {
+        if !cause_slot.is_vacant_for(operation.raw.invocation_identity()) {
+            let _ = drop_scoped_value(cause);
+            return Err(contain_operation(operation));
+        }
+        let cause = match cause_slot.place(StoreNeverActivatedCause::Runtime(cause)) {
+            Ok(cause) => cause,
+            Err(cause) => {
+                let _ = drop_scoped_value(cause);
+                return Err(contain_operation(operation));
+            }
+        };
         operation.latch_activation_terminal_cause(failure_code);
-        Self {
+        Ok(Self {
             owner: NeverActivatedOwner {
-                cause: Some(StoreNeverActivatedCause::Runtime(cause)),
+                cause: Some(cause),
                 authority: Some(if fallback_only {
                     NeverActivatedAuthority::FallbackOnly(operation)
                 } else {
@@ -84,10 +145,10 @@ where
                 }),
             },
             failure_code,
-            outcome_evidence_plan,
+            outcome_evidence_plan: failure.outcome_evidence_plan,
             failure_work,
-            outcome_evidence_destination_dimension,
-        }
+            outcome_evidence_destination_dimension: failure.outcome_evidence_destination_dimension,
+        })
     }
 
     pub fn cause(&self) -> &StoreNeverActivatedCause<E> {
@@ -96,28 +157,47 @@ where
             .as_ref()
             .expect("a live session retains its cause")
     }
+}
+
+impl<'inv, O, PP, U, E, L> CanonicalFinal<NeverActivatedStoreSession<'inv, O, PP, U, E, L>>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    pub fn cause(&self) -> &StoreNeverActivatedCause<E> {
+        self.state.cause()
+    }
 
     #[allow(clippy::type_complexity, clippy::result_large_err)]
     pub fn build_failure_evidence<EvidenceKind, EvidenceTag>(
         self,
         build: impl for<'lane> FnMut(
-            &mut FailureEvidenceLane<'lane, O, PP, U>,
+            &mut FailureEvidenceLane<'inv, 'lane, O, PP, U>,
         ) -> FailureEvidenceDecision<EvidenceKind, EvidenceTag>,
     ) -> Result<
-        FailureEvidenceOutcome<O, PP, U, StoreNeverActivatedCause<E>, EvidenceKind, EvidenceTag>,
+        FailureEvidenceOutcome<
+            'inv,
+            O,
+            PP,
+            U,
+            StoreNeverActivatedCause<E>,
+            EvidenceKind,
+            EvidenceTag,
+        >,
         StoreActivationContainment,
     >
     where
         EvidenceTag: Copy + Send + Sync + 'static,
     {
         let build = ManuallyDrop::new(Some(build));
-        let Self {
+        let NeverActivatedStoreSession {
             owner,
             failure_code,
             outcome_evidence_plan,
             failure_work,
             outcome_evidence_destination_dimension,
-        } = self;
+        } = self.state;
         let (cause, authority) = owner.into_parts();
         match authority {
             NeverActivatedAuthority::FallbackOnly(operation) => {
@@ -200,13 +280,13 @@ where
     pub fn prepare_minimal_fallback(
         self,
     ) -> Result<VerifiedMinimalFallback<StoreNeverActivatedCause<E>>, StorePrepareError> {
-        let Self {
+        let NeverActivatedStoreSession {
             owner,
             failure_code,
             outcome_evidence_plan: _,
             failure_work: _,
             outcome_evidence_destination_dimension: _,
-        } = self;
+        } = self.state;
         let (cause, authority) = owner.into_parts();
         let operation = match authority {
             NeverActivatedAuthority::Operation(operation)
@@ -216,7 +296,7 @@ where
         match prepare_operation_minimal_direct(operation, failure_code) {
             Ok(prepared) => Ok(VerifiedMinimalFallback::new(
                 prepared,
-                ManuallyDrop::into_inner(cause),
+                ManuallyDrop::into_inner(cause).into_owned(),
             )),
             Err(error) => {
                 let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));

@@ -8,7 +8,7 @@ use baozi_import::{
     ImportDimension, ImportFailure, ImportLossDisposition, ImportLossKind, ImportLossSubject,
     ImportOperationControl, ImportPlan, ImportReport, ImportRequest, ImportRequestLayer,
     ImportResult, LossPolicy, NoFormatOptions, OptionCompileError, OptionCompileLimits,
-    ParseContext, ParseExecution, ParseResult, ReadConfidence, ReadHint, RegistryBuildLimits,
+    ParseContext, ParseResult, ParseServices, ReadConfidence, ReadHint, RegistryBuildLimits,
     RegistryBuildScope, RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, ScopeAbortCause,
     SourceScopeDetailState, SourceScopeDisposition, SourceScopeEntityKind,
     SourceScopeSelectionOutcome, SourceScopeSelectionRequest,
@@ -70,27 +70,33 @@ impl Format for SelectionImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         context.with_execution(|exec| -> ParseResult<()> {
             let document = AssetPath::new(self.document).unwrap();
             let actual = match self.actual_scene {
                 Some(index) => SourceScopeSelectionOutcome::declared_scene(document, index),
                 None => SourceScopeSelectionOutcome::parentless_node_projection(document),
             };
-            let mut builder = exec.source_scope_builder(self.requested, actual)?;
+            let mut builder = exec
+                .services()?
+                .source_scope_builder(self.requested, actual)?;
             builder.observe(
-                exec,
+                &mut exec.services()?,
                 SourceScopeEntityKind::Scene,
                 SourceScopeDisposition::Selected,
                 "scene:main",
             )?;
-            let record = builder.finish(exec)?;
-            exec.record_source_scope(record)?;
+            let record = builder.finish(&mut exec.services()?)?;
+            exec.services()?.record_source_scope(record)?;
             if self.fail_after_record {
                 return Err(exec.format_failure(TestFormatFailure));
             }
@@ -126,14 +132,18 @@ impl Format for SourceSemanticLossImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         context.with_execution(|exec| -> ParseResult<()> {
-            exec.record_source_semantic_loss(
+            exec.services()?.record_source_semantic_loss(
                 DiagnosticCode::new(SOURCE_SEMANTIC_LOSS_CODE).unwrap(),
                 SourceScopeEntityKind::AnimationChannel,
                 "/animations/3/channels/5",
@@ -175,25 +185,29 @@ impl Format for ScopeImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         context.with_execution(|exec| -> ParseResult<()> {
             match self.exit {
                 Exit::NoRecord => {}
-                Exit::TypedSuccess => record_typed(exec)?,
-                Exit::LightSuccess => record_lights(exec, self.identities)?,
+                Exit::TypedSuccess => record_typed(&mut exec.services()?)?,
+                Exit::LightSuccess => record_lights(&mut exec.services()?, self.identities)?,
                 Exit::Success | Exit::FailureAfterRecord | Exit::Duplicate => {
-                    record(exec, self.identities)?;
+                    record(&mut exec.services()?, self.identities)?;
                     match self.exit {
                         Exit::FailureAfterRecord => {
                             return Err(exec.format_failure(TestFormatFailure));
                         }
                         Exit::Duplicate => {
-                            record(exec, &["scene:duplicate"])?;
+                            record(&mut exec.services()?, &["scene:duplicate"])?;
                             unreachable!("the sealed source-scope slot must reject a duplicate")
                         }
                         _ => {}
@@ -236,20 +250,24 @@ impl Format for CancelBeforeEmptyIdentityImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         context.with_execution(|exec| -> ParseResult<()> {
-            let mut builder = exec.source_scope_builder(
+            let mut builder = exec.services()?.source_scope_builder(
                 SourceScopeSelectionRequest::DocumentDefault,
                 selection_outcome(),
             )?;
             self.cancellation.cancel();
             builder.observe(
-                exec,
+                &mut exec.services()?,
                 SourceScopeEntityKind::Scene,
                 SourceScopeDisposition::Selected,
                 "",
@@ -259,7 +277,7 @@ impl Format for CancelBeforeEmptyIdentityImporter {
     }
 }
 
-fn record(scope: &mut ParseExecution<'_, '_>, identities: &[&str]) -> ParseResult<()> {
+fn record(scope: &mut ParseServices<'_, '_, '_>, identities: &[&str]) -> ParseResult<()> {
     let mut builder = scope.source_scope_builder(
         SourceScopeSelectionRequest::DocumentDefault,
         selection_outcome(),
@@ -276,7 +294,7 @@ fn record(scope: &mut ParseExecution<'_, '_>, identities: &[&str]) -> ParseResul
     scope.record_source_scope(record)
 }
 
-fn record_typed(scope: &mut ParseExecution<'_, '_>) -> ParseResult<()> {
+fn record_typed(scope: &mut ParseServices<'_, '_, '_>) -> ParseResult<()> {
     let mut builder = scope.source_scope_builder(
         SourceScopeSelectionRequest::DocumentDefault,
         selection_outcome(),
@@ -304,7 +322,7 @@ fn record_typed(scope: &mut ParseExecution<'_, '_>) -> ParseResult<()> {
     scope.record_source_scope(record)
 }
 
-fn record_lights(scope: &mut ParseExecution<'_, '_>, identities: &[&str]) -> ParseResult<()> {
+fn record_lights(scope: &mut ParseServices<'_, '_, '_>, identities: &[&str]) -> ParseResult<()> {
     let mut builder = scope.source_scope_builder(
         SourceScopeSelectionRequest::DocumentDefault,
         selection_outcome(),

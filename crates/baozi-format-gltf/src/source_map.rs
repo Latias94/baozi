@@ -1,5 +1,8 @@
+#[cfg(test)]
+use baozi_import::ParseRoot;
 use baozi_import::{
-    ImportStorageClass, ImportWorkClass, MeteredVec, ParseExecution, ParseFailure, ParseResult,
+    ImportStorageClass, ImportWorkClass, MeteredVec, ParseChildren, ParseFailure, ParseResult,
+    ParseServices,
 };
 use std::cmp::Ordering;
 #[cfg(test)]
@@ -162,7 +165,7 @@ pub(crate) struct GltfSourceMap<'scope> {
 }
 
 impl<'scope> GltfSourceMap<'scope> {
-    pub(super) fn new(ctx: &mut ParseExecution<'_, 'scope>) -> Self {
+    pub(super) fn new(ctx: &mut ParseServices<'_, '_, 'scope>) -> Self {
         Self {
             entities: ctx.metered_vec(
                 ImportStorageClass::FormatNormalization,
@@ -177,7 +180,7 @@ impl<'scope> GltfSourceMap<'scope> {
 
     /// Builds hand-authored normalized fixtures from the real primary snapshot without a backend.
     #[cfg(test)]
-    pub(crate) fn from_primary_for_test(ctx: &mut ParseExecution<'_, 'scope>) -> ParseResult<Self> {
+    pub(crate) fn from_primary_for_test(ctx: &mut ParseRoot<'_, '_, 'scope>) -> ParseResult<Self> {
         Ok(crate::admission::admit(ctx)?.into_source_map())
     }
 
@@ -209,7 +212,7 @@ impl<'scope> GltfSourceMap<'scope> {
 
     pub(super) fn begin_entity(
         &mut self,
-        ctx: &mut ParseExecution<'_, 'scope>,
+        ctx: &mut ParseServices<'_, '_, 'scope>,
         id: SourceEntityId,
         start: SourceRange,
     ) -> ParseResult<usize> {
@@ -225,7 +228,7 @@ impl<'scope> GltfSourceMap<'scope> {
 
     pub(super) fn begin_payload(
         &mut self,
-        ctx: &mut ParseExecution<'_, 'scope>,
+        ctx: &mut ParseServices<'_, '_, 'scope>,
         payload: SourcePayload,
     ) -> ParseResult<usize> {
         let index = self.payloads.len();
@@ -237,7 +240,7 @@ impl<'scope> GltfSourceMap<'scope> {
         self.payloads.as_mut_slice().get_mut(index)
     }
 
-    pub(super) fn finish(&mut self, ctx: &mut ParseExecution<'_, '_>) -> ParseResult<()> {
+    pub(super) fn finish(&mut self, ctx: &mut ParseChildren<'_, '_, '_>) -> ParseResult<()> {
         sort_entries(ctx, &mut self.entities, |left, right| {
             left.id.cmp(&right.id)
         })?;
@@ -255,7 +258,7 @@ impl<'scope> GltfSourceMap<'scope> {
 }
 
 fn sort_entries<T>(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseChildren<'_, '_, '_>,
     entries: &mut MeteredVec<'_, T>,
     compare: impl Fn(&T, &T) -> Ordering,
 ) -> ParseResult<()> {
@@ -263,15 +266,15 @@ fn sort_entries<T>(
     if count <= 1 {
         return Ok(());
     }
-    ctx.with_work_group([(ImportWorkClass::WorkUnits, 0)], |ctx, work| {
+    let layout = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+    ctx.child(&layout, [0], |child| {
         let mut comparisons = 0_u64;
         entries.try_sort_unstable_by(|left, right| -> Result<Ordering, ParseFailure> {
             if comparisons.is_multiple_of(SORT_POLL_COMPARISONS) {
-                ctx.poll()?;
+                child.poll()?;
             }
-            work.replenish(1)?;
-            let ordering = compare(left, right);
-            work.complete([1])?;
+            child.replenish(1)?;
+            let ordering = child.run([1], || Ok::<_, ParseFailure>(compare(left, right)))?;
             comparisons += 1;
             Ok(ordering)
         })?;

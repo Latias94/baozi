@@ -4,7 +4,8 @@ use super::*;
 fn builder_panic_is_fatal_and_cannot_publish_fallback() {
     let factory = factory(1);
     let account = account(&factory);
-    let (operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation(&mut invocation_root, &account);
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 1, 1))
         .unwrap();
@@ -61,7 +62,8 @@ fn builder_panic_is_fatal_and_cannot_publish_fallback() {
 fn failure_assembly_commit_preserves_fallback_first_error_precedence() {
     let factory = factory(1);
     let account = account(&factory);
-    let (operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation(&mut invocation_root, &account);
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 1, 2))
         .unwrap();
@@ -114,7 +116,9 @@ fn semantic_rejection_can_publish_rich_failure() {
     let account = account(&factory);
     let producer = fake_producer();
     let producer_unloaded = Arc::downgrade(&producer);
+    let mut invocation_root = TestInvocationRoot::new();
     let (operation, keys) = operation_with_catalog_and_evidence_limit(
+        &mut invocation_root,
         &account,
         OperationControl::default(),
         producer.catalog,
@@ -183,7 +187,8 @@ fn semantic_rejection_can_publish_rich_failure() {
 fn success_primary_rejection_returns_the_exact_minimal_fallback_owner() {
     let factory = factory(1);
     let account = account(&factory);
-    let (operation, keys) = operation_with_evidence_limit(&account, 4);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation_with_evidence_limit(&mut invocation_root, &account, 4);
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 1, 1))
         .unwrap();
@@ -257,7 +262,8 @@ fn success_primary_rejection_returns_the_exact_minimal_fallback_owner() {
 fn rich_failure_primary_rejection_returns_the_exact_minimal_fallback_owner() {
     let factory = factory(1);
     let account = account(&factory);
-    let (operation, keys) = operation_with_evidence_limit(&account, 4);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation_with_evidence_limit(&mut invocation_root, &account, 4);
     let mut assembly = operation
         .try_publication_assembly(rich_failure_plan(keys, 1))
         .unwrap();
@@ -319,7 +325,8 @@ fn rich_failure_primary_rejection_returns_the_exact_minimal_fallback_owner() {
 fn downgrade_revalidation_panic_exposes_only_minimal_fallback() {
     let factory = factory(1);
     let account = account(&factory);
-    let (operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation(&mut invocation_root, &account);
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 1, 1))
         .unwrap();

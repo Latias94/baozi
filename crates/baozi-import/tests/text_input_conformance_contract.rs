@@ -8,7 +8,7 @@ use baozi_import::{
     FormatFailureEvidenceProducer, ImportCause, ImportConfigOverlay, ImportDimension,
     ImportFailure, ImportLossDisposition, ImportLossKind, ImportOperationControl, ImportPlan,
     ImportReport, ImportRequest, ImportRequestLayer, ImportResult, LedgerCause, LossPolicy,
-    NoFormatOptions, OptionCompileError, OptionCompileLimits, ParseContext, ParseExecution,
+    NoFormatOptions, OptionCompileError, OptionCompileLimits, ParseChildren, ParseContext,
     ParseResult, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuildScope,
     RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, ScopeAbortCause, TextBomPolicy,
     TextConformanceViolationKind, TextControlPolicy, TextDecodingMode, TextHardCaps,
@@ -167,21 +167,26 @@ impl Format for TextInputImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
-        context.with_execution(|exec| -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
+        context.with_execution(|root| -> ParseResult<()> {
             self.parse_calls.fetch_add(1, Ordering::AcqRel);
+            let diagnostic_source = root.services()?.diagnostic_source();
             match self.behavior {
                 ParserBehavior::ExpectAccepted { options, expected } => {
-                    exec
+                    root
                         .with_conformed_text_input(
-                            exec.diagnostic_source(),
+                            diagnostic_source,
                             options,
-                            |exec, accepted, recoveries| {
+                            |children, accepted, recoveries| {
                                 assert_eq!(accepted.text(), expected.text);
                                 assert_eq!(
                                     accepted
@@ -251,7 +256,7 @@ impl Format for TextInputImporter {
                                     }
                                 }
                                 assert_eq!(replacement_index, expected.replacements.len());
-                                authorize_text_obligations(exec, recoveries, accepted)
+                                authorize_text_obligations(children, recoveries, accepted)
                             },
                         )?
                         .expect("test text input must conform");
@@ -262,11 +267,11 @@ impl Format for TextInputImporter {
                     expected_kind,
                     expected_range,
                 } => {
-                    let rejected = exec
+                    let rejected = root
                         .with_conformed_text_input(
-                            exec.diagnostic_source(),
+                            diagnostic_source,
                             options,
-                            |_exec, _accepted, _recoveries| -> ParseResult<()> {
+                            |_children, _accepted, _recoveries| -> ParseResult<()> {
                                 panic!("rejected text input must not invoke the callback")
                             },
                         )?
@@ -279,24 +284,26 @@ impl Format for TextInputImporter {
                                 .expect("expected violation range must be valid")
                         })
                     );
-                    Err(exec.format_failure(TestTextFailure))
+                    Err(root.services()?.format_failure(TestTextFailure))
                 }
                 ParserBehavior::PropagateScopeFailure { options } => {
-                    exec
+                    root
                         .with_conformed_text_input(
-                            exec.diagnostic_source(),
+                            diagnostic_source,
                             options,
-                            |exec, accepted, recoveries| authorize_text_obligations(exec, recoveries, accepted),
+                            |children, accepted, recoveries| {
+                                authorize_text_obligations(children, recoveries, accepted)
+                            },
                         )?
                         .expect("test text input should only fail through the exec");
                     Ok(())
                 }
                 ParserBehavior::LeaveReplacementUnclassified { options } => {
-                    exec
+                    root
                         .with_conformed_text_input(
-                            exec.diagnostic_source(),
+                            diagnostic_source,
                             options,
-                            |_exec, accepted, _recoveries| {
+                            |_children, accepted, _recoveries| {
                                 assert!(
                                     accepted.lines().any(|line| !line.replacements().is_empty()),
                                     "the fixture must expose at least one replacement"
@@ -308,11 +315,11 @@ impl Format for TextInputImporter {
                     Ok(())
                 }
                 ParserBehavior::LeaveBomDiagnosticUnclassified { options } => {
-                    exec
+                    root
                         .with_conformed_text_input(
-                            exec.diagnostic_source(),
+                            diagnostic_source,
                             options,
-                            |_exec, accepted, _recoveries| {
+                            |_children, accepted, _recoveries| {
                                 assert!(
                                     accepted.bom().is_some_and(|bom| bom.requires_diagnostic()),
                                     "the fixture must expose a required BOM diagnostic"
@@ -324,11 +331,11 @@ impl Format for TextInputImporter {
                     Ok(())
                 }
                 ParserBehavior::ClassifyReplacementOutOfOrder { options } => {
-                    exec
+                    root
                         .with_conformed_text_input(
-                            exec.diagnostic_source(),
+                            diagnostic_source,
                             options,
-                            |exec, accepted, recoveries| {
+                            |children, accepted, recoveries| {
                                 let line = accepted
                                     .lines()
                                     .next()
@@ -337,38 +344,38 @@ impl Format for TextInputImporter {
                                     .replacements()
                                     .get(1)
                                     .expect("replacement fixture must have a second replacement");
-                                recoveries.discard_replacement(exec, replacement)
+                                recoveries.discard_replacement(&mut children.services()?, replacement)
                             },
                         )?
                         .expect("test text input must conform before replacement classification");
                     Ok(())
                 }
                 ParserBehavior::ExpectSourceRangeContractFailure { options } => {
-                    let _ = exec.with_conformed_text_input(
-                        exec.diagnostic_source(),
+                    let _ = root.with_conformed_text_input(
+                        diagnostic_source,
                         options,
-                        |_exec, _accepted, _recoveries| -> ParseResult<()> {
+                        |_children, _accepted, _recoveries| -> ParseResult<()> {
                             panic!("an invalid source range must not invoke the callback")
                         },
                     )?;
                     panic!("the source range fixture must fail before conformance")
                 }
                 ParserBehavior::CallbackFailureWithPendingObligations { options } => {
-                    let _ = exec.with_conformed_text_input(
-                        exec.diagnostic_source(),
+                    let _ = root.with_conformed_text_input(
+                        diagnostic_source,
                         options,
-                        |exec, _accepted, _recoveries| -> ParseResult<()> {
-                            Err(exec.format_failure(TestTextFailure))
+                        |children, _accepted, _recoveries| -> ParseResult<()> {
+                            Err(children.services()?.format_failure(TestTextFailure))
                         },
                     )?;
                     panic!("the callback failure must remain terminal")
                 }
                 ParserBehavior::ExpectRecoveryProtocolFailure { options, violation } => {
-                    exec
+                    root
                         .with_conformed_text_input(
-                            exec.diagnostic_source(),
+                            diagnostic_source,
                             options,
-                            |exec, accepted, recoveries| {
+                            |children, accepted, recoveries| {
                                 let bom = accepted
                                     .bom()
                                     .filter(|bom| bom.requires_diagnostic())
@@ -383,30 +390,34 @@ impl Format for TextInputImporter {
                                     .expect("the protocol fixture must expose a replacement");
                                 let bom_code = DiagnosticCode::new(ACCEPTED_BOM_CODE)
                                     .expect("static BOM diagnostic code must be valid");
+                                let mut services = children.services()?;
                                 match violation {
                                     RecoveryProtocolViolation::ReplacementBeforeBom => {
-                                        recoveries.discard_replacement(exec, replacement)
+                                        recoveries.discard_replacement(&mut services, replacement)
                                     }
                                     RecoveryProtocolViolation::BomTwice => {
-                                        recoveries.record_bom_diagnostic(exec,
+                                        recoveries.record_bom_diagnostic(
+                                            &mut services,
                                             bom,
                                             bom_code,
                                             format_args!("accepted UTF-8 BOM in test text"),
                                         )?;
-                                        recoveries.record_bom_diagnostic(exec,
+                                        recoveries.record_bom_diagnostic(
+                                            &mut services,
                                             bom,
                                             bom_code,
                                             format_args!("accepted UTF-8 BOM in test text"),
                                         )
                                     }
                                     RecoveryProtocolViolation::ReplacementTwice => {
-                                        recoveries.record_bom_diagnostic(exec,
+                                        recoveries.record_bom_diagnostic(
+                                            &mut services,
                                             bom,
                                             bom_code,
                                             format_args!("accepted UTF-8 BOM in test text"),
                                         )?;
-                                        recoveries.discard_replacement(exec, replacement)?;
-                                        recoveries.discard_replacement(exec, replacement)
+                                        recoveries.discard_replacement(&mut services, replacement)?;
+                                        recoveries.discard_replacement(&mut services, replacement)
                                     }
                                 }
                             },
@@ -419,17 +430,18 @@ impl Format for TextInputImporter {
                     line_count,
                     replacement_count,
                 } => {
-                    exec
+                    root
                         .with_conformed_text_input(
-                            exec.diagnostic_source(),
+                            diagnostic_source,
                             options,
-                            |exec, accepted, recoveries| {
+                            |children, accepted, recoveries| {
                                 let mut actual_lines = 0usize;
                                 let mut actual_replacements = 0usize;
+                                let mut services = children.services()?;
                                 for line in accepted.lines() {
                                     actual_lines += 1;
                                     actual_replacements += line.replacements().len();
-                                    recoveries.discard_replacements(exec, line.replacements())?;
+                                    recoveries.discard_replacements(&mut services, line.replacements())?;
                                 }
                                 assert_eq!(actual_lines, line_count);
                                 assert_eq!(actual_replacements, replacement_count);
@@ -445,12 +457,13 @@ impl Format for TextInputImporter {
                     expected_raw_offset,
                     expect_exhausted,
                 } => {
-                    let mut cursor = exec
-                        .text_input_record_cursor(exec.diagnostic_source(), options)?
+                    let mut cursor = root
+                        .text_input_record_cursor(diagnostic_source, options)?
                         .expect("record cursor profile must be declared");
+                    let mut children = root.children()?;
                     for (record_index, expected) in expected.iter().enumerate() {
                         cursor
-                            .with_next_record(exec, |exec, accepted, recoveries| {
+                            .with_next_record(&mut children, |children, accepted, recoveries| {
                                 let mut lines = accepted.lines();
                                 let line = lines
                                     .next()
@@ -477,7 +490,7 @@ impl Format for TextInputImporter {
                                     .expect("expected record range must be valid")
                                 );
                                 assert_eq!(line.newline(), expected.newline);
-                                authorize_text_obligations(exec, recoveries, accepted)
+                                authorize_text_obligations(children, recoveries, accepted)
                             })?
                             .expect("cursor record must conform")
                             .expect("cursor fixture must contain the expected record");
@@ -486,7 +499,7 @@ impl Format for TextInputImporter {
                     if expect_exhausted {
                         assert!(
                             cursor
-                                .with_next_record(exec, |_exec, _accepted, _recoveries| -> ParseResult<()> {
+                                .with_next_record(&mut children, |_children, _accepted, _recoveries| -> ParseResult<()> {
                                     panic!("an exhausted cursor must not invoke the callback")
                                 },)?
                                 .expect("cursor exhaustion is not a conformance violation")
@@ -496,11 +509,12 @@ impl Format for TextInputImporter {
                     Ok(())
                 }
                 ParserBehavior::ExerciseRecordCursorTransactions { options } => {
-                    let mut cursor = exec
-                        .text_input_record_cursor(exec.diagnostic_source(), options)?
+                    let mut cursor = root
+                        .text_input_record_cursor(diagnostic_source, options)?
                         .expect("record cursor profile must be declared");
+                    let mut children = root.children()?;
                     let caught = catch_unwind(AssertUnwindSafe(|| {
-                        cursor.with_next_record(exec, |_exec, _accepted, _recoveries| -> ParseResult<()> {
+                        cursor.with_next_record(&mut children, |_children, _accepted, _recoveries| -> ParseResult<()> {
                             panic!("record callback panic")
                         })
                     }));
@@ -508,13 +522,13 @@ impl Format for TextInputImporter {
                     assert_eq!(cursor.raw_offset(), 0);
 
                     cursor
-                        .with_next_record(exec, |exec, accepted, recoveries| {
+                        .with_next_record(&mut children, |children, accepted, recoveries| {
                             let line = accepted
                                 .lines()
                                 .next()
                                 .expect("retry must expose first record");
                             assert_eq!(line.text(), "a");
-                            authorize_text_obligations(exec, recoveries, accepted)
+                            authorize_text_obligations(children, recoveries, accepted)
                         })?
                         .expect("the valid retry must conform")
                         .expect("the valid retry must invoke the callback");
@@ -522,7 +536,7 @@ impl Format for TextInputImporter {
 
                     for _ in 0..2 {
                         let violation = cursor
-                            .with_next_record(exec, |_exec, _accepted, _recoveries| -> ParseResult<()> {
+                            .with_next_record(&mut children, |_children, _accepted, _recoveries| -> ParseResult<()> {
                                 panic!("an invalid record must not invoke the callback")
                             })?
                             .expect_err("the invalid record must remain a conformance violation");
@@ -542,13 +556,14 @@ impl Format for TextInputImporter {
                     options,
                     record_count,
                 } => {
-                    let mut cursor = exec
-                        .text_input_record_cursor(exec.diagnostic_source(), options)?
+                    let mut cursor = root
+                        .text_input_record_cursor(diagnostic_source, options)?
                         .expect("record cursor profile must be declared");
+                    let mut children = root.children()?;
                     for _ in 0..record_count {
                         cursor
-                            .with_next_record(exec, |exec, accepted, recoveries| {
-                                authorize_text_obligations(exec, recoveries, accepted)
+                            .with_next_record(&mut children, |children, accepted, recoveries| {
+                                authorize_text_obligations(children, recoveries, accepted)
                             })?
                             .expect("recovery record must conform")
                             .expect("recovery fixture must contain every declared record");
@@ -560,7 +575,7 @@ impl Format for TextInputImporter {
                     expected_kind,
                 } => {
                     let violation =
-                        match exec.text_input_record_cursor(exec.diagnostic_source(), options)? {
+                        match root.text_input_record_cursor(diagnostic_source, options)? {
                             Ok(_cursor) => panic!("record cursor declaration must be rejected"),
                             Err(violation) => violation,
                         };
@@ -569,10 +584,13 @@ impl Format for TextInputImporter {
                     Ok(())
                 }
                 ParserBehavior::PropagateRecordCursorFailure { options } => {
-                    let mut cursor = exec
-                        .text_input_record_cursor(exec.diagnostic_source(), options)?
+                    let mut cursor = root
+                        .text_input_record_cursor(diagnostic_source, options)?
                         .expect("record cursor profile must be declared");
-                    let _unexpected = cursor.with_next_record(exec, |_exec, _accepted, _recoveries| Ok(()))?;
+                    let _unexpected = cursor.with_next_record(
+                        &mut root.children()?,
+                        |_children, _accepted, _recoveries| Ok(()),
+                    )?;
                     panic!("the record cursor fixture must fail before invoking its callback")
                 }
             }
@@ -582,15 +600,16 @@ impl Format for TextInputImporter {
 }
 
 fn authorize_text_obligations<'session>(
-    exec: &mut ParseExecution<'_, 'session>,
+    children: &mut ParseChildren<'_, '_, 'session>,
     recoveries: &mut TextInputRecoveryTracker<'_, 'session>,
     accepted: &ConformedTextInput<'session>,
 ) -> ParseResult<()> {
+    let mut services = children.services()?;
     if let Some(bom) = accepted.bom().filter(|bom| bom.requires_diagnostic()) {
         let code = DiagnosticCode::new(ACCEPTED_BOM_CODE)
             .expect("static BOM diagnostic code must be valid");
         recoveries.record_bom_diagnostic(
-            exec,
+            &mut services,
             bom,
             code,
             format_args!("accepted UTF-8 BOM in test text"),
@@ -601,7 +620,7 @@ fn authorize_text_obligations<'session>(
     for line in accepted.lines() {
         for replacement in line.replacements() {
             recoveries.record_format_recovery(
-                exec,
+                &mut services,
                 replacement,
                 code,
                 format_args!("replaced invalid UTF-8 in test text"),

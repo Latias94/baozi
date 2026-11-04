@@ -2,7 +2,7 @@ use super::schema::*;
 use crate::GltfFailure;
 use crate::json_syntax::{DecodedScalars, IndexedValue, JsonIndex, ValueId, ValueKind};
 use baozi_import::ImportWorkClass;
-use baozi_import::{ImportStorageClass, ParseExecution, ParseResult};
+use baozi_import::{ImportStorageClass, ParseResult, ParseRoot};
 
 // Document views may be shorter than the session supplying admitted storage.
 // Keep execution explicit so decoded rows never retain an execution-region borrow.
@@ -15,7 +15,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     fn invalid<'session: 'scope>(
         &self,
         reason: &'static str,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> baozi_import::ParseFailure {
         ctx.format_failure(GltfFailure::invalid_document(reason))
     }
@@ -29,7 +29,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         id: ValueId,
         kind: ValueKind,
         reason: &'static str,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<()> {
         if self.value(id).kind == kind {
             Ok(())
@@ -41,7 +41,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     pub(super) fn object<'session: 'scope>(
         &self,
         id: ValueId,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<()> {
         self.kind(
             id,
@@ -55,31 +55,40 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         &self,
         id: ValueId,
         key: &str,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<bool> {
         let value = self.value(id);
-        ctx.charge_work((value.key_end - value.key_start) as u64 + 1)?;
-        let mut scalars = DecodedScalars::new(self.bytes, value.key_start + 1, value.key_end - 1);
-        for expected in key.chars() {
-            if scalars
-                .next_scalar()
-                .map_err(|()| self.invalid("invalid admitted key", ctx))?
-                != Some(u32::from(expected))
-            {
-                return Ok(false);
-            }
-        }
-        Ok(scalars
-            .next_scalar()
-            .map_err(|()| self.invalid("invalid admitted key", ctx))?
-            .is_none())
+        let amount = (value.key_end - value.key_start) as u64 + 1;
+        let layout = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+        let compared = ctx.child(&layout, [amount], |child| {
+            child.run([amount], || {
+                Ok::<_, baozi_import::ParseFailure>((|| -> Result<bool, GltfFailure> {
+                    let mut scalars =
+                        DecodedScalars::new(self.bytes, value.key_start + 1, value.key_end - 1);
+                    for expected in key.chars() {
+                        if scalars
+                            .next_scalar()
+                            .map_err(|()| GltfFailure::invalid_document("invalid admitted key"))?
+                            != Some(u32::from(expected))
+                        {
+                            return Ok(false);
+                        }
+                    }
+                    Ok(scalars
+                        .next_scalar()
+                        .map_err(|()| GltfFailure::invalid_document("invalid admitted key"))?
+                        .is_none())
+                })())
+            })
+        })?;
+        compared.map_err(|failure| ctx.format_failure(failure))
     }
 
     pub(super) fn field<'session: 'scope>(
         &self,
         object: ValueId,
         key: &str,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<Option<ValueId>> {
         self.object(object, ctx)?;
         for id in self.children(object) {
@@ -94,7 +103,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         &self,
         object: ValueId,
         key: &'static str,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<ValueId> {
         self.field(object, key, ctx)?
             .ok_or_else(|| self.invalid(key, ctx))
@@ -109,7 +118,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     fn raw_str<'session: 'scope>(
         &self,
         id: ValueId,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<&'scope str> {
         let value = self.value(id);
         std::str::from_utf8(&self.bytes[value.start..value.end])
@@ -120,20 +129,18 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         &self,
         start: usize,
         end: usize,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<Text<'scope>> {
         let bytes = &self.bytes[start..end];
         let mut escaped = false;
-        let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
+        let work_group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
         for chunk in bytes.chunks(crate::parser::BYTE_POLL_INTERVAL) {
-            ctx.with_work(
-                &work_group,
-                [chunk.len() as u64],
-                |_ctx, work| -> ParseResult<()> {
+            ctx.child(&work_group, [chunk.len() as u64], |child| {
+                child.run([chunk.len() as u64], || {
                     escaped |= chunk.contains(&b'\\');
-                    work.complete_all()
-                },
-            )?;
+                    Ok::<_, baozi_import::ParseFailure>(())
+                })
+            })?;
         }
         if !escaped {
             return Ok(Text::Borrowed(
@@ -143,62 +150,88 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         }
         let mut scalars = DecodedScalars::new(self.bytes, start, end);
         let mut decoded_len = 0usize;
-        ctx.with_work(
+        ctx.child(
             &work_group,
             [(end - start) as u64],
-            |ctx, work| -> ParseResult<()> {
+            |child| -> ParseResult<()> {
                 let mut polled = start;
+                let errors = child.error_view();
                 loop {
                     // A surrogate escape pair is indivisible and at most 12 raw bytes.
                     if scalars.position() - polled + 12 > crate::parser::BYTE_POLL_INTERVAL {
-                        ctx.poll()?;
+                        child.poll()?;
                         polled = scalars.position();
                     }
-                    let before = scalars.position();
-                    let Some(scalar) = scalars
-                        .next_scalar()
-                        .map_err(|()| self.invalid("invalid admitted escape", ctx))?
-                    else {
+                    if scalars.position() == end {
                         break;
-                    };
-                    let scalar = char::from_u32(scalar)
-                        .ok_or_else(|| self.invalid("invalid admitted scalar", ctx))?;
-                    decoded_len = decoded_len
-                        .checked_add(scalar.len_utf8())
-                        .ok_or_else(|| ctx.allocation_failure("gltf-document-escaped-string"))?;
-                    work.complete([(scalars.position() - before) as u64])?;
+                    }
+                    child.run_returned_with_storage(|_storage| {
+                        let before = scalars.position();
+                        let Some(scalar) = scalars.next_scalar().map_err(|()| {
+                            baozi_import::ParsePieceError::Format(GltfFailure::invalid_document(
+                                "invalid admitted escape",
+                            ))
+                        })?
+                        else {
+                            return Err(baozi_import::ParsePieceError::Format(
+                                GltfFailure::invalid_document("invalid admitted escape"),
+                            ));
+                        };
+                        let scalar = char::from_u32(scalar).ok_or_else(|| {
+                            baozi_import::ParsePieceError::Format(GltfFailure::invalid_document(
+                                "invalid admitted scalar",
+                            ))
+                        })?;
+                        decoded_len =
+                            decoded_len.checked_add(scalar.len_utf8()).ok_or_else(|| {
+                                errors.allocation_failure("gltf-document-escaped-string")
+                            })?;
+                        Ok(((), [(scalars.position() - before) as u64]))
+                    })?;
                 }
                 Ok(())
             },
         )?;
         // Admit the decoded length before the first owned byte, including empty strings.
-        let mut decoded = ctx.metered_string(
+        let mut decoded = ctx.services()?.metered_string(
             ImportStorageClass::BackendDecode,
             "gltf-document-escaped-string",
         );
-        decoded.try_reserve(ctx, decoded_len)?;
+        decoded.try_reserve(&mut ctx.services()?, decoded_len)?;
         let mut scalars = DecodedScalars::new(self.bytes, start, end);
-        ctx.with_work(
+        ctx.child(
             &work_group,
             [(end - start) as u64],
-            |ctx, work| -> ParseResult<()> {
+            |child| -> ParseResult<()> {
                 let mut polled = start;
                 loop {
                     if scalars.position() - polled + 12 > crate::parser::BYTE_POLL_INTERVAL {
-                        ctx.poll()?;
+                        child.poll()?;
                         polled = scalars.position();
                     }
-                    let before = scalars.position();
-                    let Some(scalar) = scalars
-                        .next_scalar()
-                        .map_err(|()| self.invalid("invalid admitted escape", ctx))?
-                    else {
+                    if scalars.position() == end {
                         break;
-                    };
-                    let scalar = char::from_u32(scalar)
-                        .ok_or_else(|| self.invalid("invalid admitted scalar", ctx))?;
-                    decoded.try_push_str(ctx, scalar.encode_utf8(&mut [0; 4]))?;
-                    work.complete([(scalars.position() - before) as u64])?;
+                    }
+                    child.run_returned_with_storage(|mut storage| {
+                        let before = scalars.position();
+                        let Some(scalar) = scalars.next_scalar().map_err(|()| {
+                            baozi_import::ParsePieceError::Format(GltfFailure::invalid_document(
+                                "invalid admitted escape",
+                            ))
+                        })?
+                        else {
+                            return Err(baozi_import::ParsePieceError::Format(
+                                GltfFailure::invalid_document("invalid admitted escape"),
+                            ));
+                        };
+                        let scalar = char::from_u32(scalar).ok_or_else(|| {
+                            baozi_import::ParsePieceError::Format(GltfFailure::invalid_document(
+                                "invalid admitted scalar",
+                            ))
+                        })?;
+                        storage.append_string(&mut decoded, scalar.encode_utf8(&mut [0; 4]))?;
+                        Ok(((), [(scalars.position() - before) as u64]))
+                    })?;
                 }
                 Ok(())
             },
@@ -209,7 +242,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     fn text<'session: 'scope>(
         &self,
         id: ValueId,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<Text<'scope>> {
         self.kind(
             id,
@@ -224,7 +257,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     fn name<'session: 'scope>(
         &self,
         id: ValueId,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<Option<Text<'scope>>> {
         self.field(id, "name", ctx)?
             .map(|id| self.text(id, ctx))
@@ -234,7 +267,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     pub(super) fn uint<'session: 'scope>(
         &self,
         id: ValueId,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<u64> {
         self.kind(
             id,
@@ -253,7 +286,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     fn size<'session: 'scope>(
         &self,
         id: ValueId,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<u64> {
         let value = self.uint(id, ctx)?;
         usize::try_from(value).map_err(|_| {
@@ -268,7 +301,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     fn id<'session: 'scope>(
         &self,
         id: ValueId,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<Index> {
         let value = self.uint(id, ctx)?;
         Ok(Index(u32::try_from(value).map_err(|_| {
@@ -280,7 +313,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         &self,
         object: ValueId,
         key: &str,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<Option<Index>> {
         self.field(object, key, ctx)?
             .map(|id| self.id(id, ctx))
@@ -291,7 +324,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         &self,
         object: ValueId,
         key: &'static str,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<Index> {
         self.id(self.required(object, key, ctx)?, ctx)
     }
@@ -299,7 +332,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     fn number<'session: 'scope>(
         &self,
         id: ValueId,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<f64> {
         self.kind(
             id,
@@ -308,9 +341,13 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
             ctx,
         )?;
         let text = self.raw_str(id, ctx)?;
-        ctx.charge_work(text.len() as u64)?;
-        let value = text
-            .parse::<f64>()
+        let layout = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+        let value = ctx
+            .child(&layout, [text.len() as u64], |child| {
+                child.run([text.len() as u64], || {
+                    Ok::<_, baozi_import::ParseFailure>(text.parse::<f64>())
+                })
+            })?
             .map_err(|_| self.invalid("glTF number is invalid", ctx))?;
         if !value.is_finite() {
             return Err(self.invalid("glTF number exceeds the JSON number domain", ctx));
@@ -321,7 +358,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     fn float<'session: 'scope>(
         &self,
         id: ValueId,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<f32> {
         Ok(self.number(id, ctx)? as f32)
     }
@@ -331,7 +368,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         object: ValueId,
         key: &str,
         default: f32,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<f32> {
         self.field(object, key, ctx)?
             .map_or(Ok(default), |id| self.float(id, ctx))
@@ -342,7 +379,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         object: ValueId,
         key: &str,
         default: bool,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<bool> {
         let Some(id) = self.field(object, key, ctx)? else {
             return Ok(default);
@@ -359,7 +396,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     fn fixed<'session: 'scope, const N: usize>(
         &self,
         id: ValueId,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<[f32; N]> {
         self.kind(
             id,
@@ -382,7 +419,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         object: ValueId,
         key: &str,
         default: [f32; N],
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<[f32; N]> {
         self.field(object, key, ctx)?
             .map_or(Ok(default), |id| self.fixed(id, ctx))
@@ -391,10 +428,12 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     fn list<'session: 'scope, T>(
         &self,
         id: Option<ValueId>,
-        decode: impl Fn(ValueId, &mut ParseExecution<'_, 'session>) -> ParseResult<T>,
-        ctx: &mut ParseExecution<'_, 'session>,
+        decode: impl Fn(ValueId, &mut ParseRoot<'_, '_, 'session>) -> ParseResult<T>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<List<'scope, T>> {
-        let mut list = ctx.metered_vec(ImportStorageClass::BackendDecode, "gltf-document-table");
+        let mut list = ctx
+            .services()?
+            .metered_vec(ImportStorageClass::BackendDecode, "gltf-document-table");
         if let Some(id) = id {
             self.kind(
                 id,
@@ -405,14 +444,15 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
             let count = self.value(id).child_count;
             u32::try_from(count)
                 .map_err(|_| self.invalid("glTF table exceeds the U32 domain", ctx))?;
-            list.try_reserve(ctx, count)?;
-            let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
-            for id in self.children(id) {
-                ctx.with_work(
-                    &work_group,
-                    [1],
-                    |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-                )?;
+            list.try_reserve(&mut ctx.services()?, count)?;
+            let work_group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+            let mut children = self.children(id);
+            for _ordinal in 0..count {
+                let id = ctx
+                    .child(&work_group, [1], |child| {
+                        child.run([1], || Ok::<_, baozi_import::ParseFailure>(children.next()))
+                    })?
+                    .ok_or_else(|| self.invalid("glTF table child count is inconsistent", ctx))?;
                 list.try_push_reserved(decode(id, ctx)?)?;
             }
         }
@@ -422,7 +462,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     fn weights<'session: 'scope>(
         &self,
         id: ValueId,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<Option<List<'scope, f32>>> {
         self.field(id, "weights", ctx)?
             .map(|id| self.list(Some(id), |id, ctx| self.float(id, ctx), ctx))
@@ -433,7 +473,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         &self,
         id: ValueId,
         choices: &[(&str, T)],
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<T>
     where
         T: Copy,
@@ -450,7 +490,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         &self,
         id: ValueId,
         choices: &[(u64, T)],
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<T> {
         let number = self.uint(id, ctx)?;
         choices
@@ -463,7 +503,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     fn component<'session: 'scope>(
         &self,
         id: ValueId,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<accessor::ComponentType> {
         use accessor::ComponentType::*;
         self.enum_uint(
@@ -484,7 +524,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         &self,
         object: ValueId,
         key: &str,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<Option<accessor::Bounds>> {
         let Some(id) = self.field(object, key, ctx)? else {
             return Ok(None);
@@ -515,7 +555,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     fn accessor<'session: 'scope>(
         &self,
         id: ValueId,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<accessor::Accessor> {
         use accessor::Type::*;
         self.object(id, ctx)?;
@@ -554,7 +594,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     fn sparse<'session: 'scope>(
         &self,
         id: ValueId,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<accessor::Sparse> {
         let indices = self.required(id, "indices", ctx)?;
         let values = self.required(id, "values", ctx)?;
@@ -592,7 +632,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         &self,
         child: ValueId,
         ordinal: usize,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<mesh::Semantic> {
         use mesh::Semantic::*;
         let value = self.value(child);
@@ -626,52 +666,54 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     fn primitive<'session: 'scope>(
         &self,
         id: ValueId,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<mesh::Primitive<'scope>> {
         use mesh::Mode::*;
         let attributes_id = self.required(id, "attributes", ctx)?;
         self.object(attributes_id, ctx)?;
-        let mut attributes = ctx.metered_vec(
+        let mut attributes = ctx.services()?.metered_vec(
             ImportStorageClass::BackendDecode,
             "gltf-document-attributes",
         );
-        attributes.try_reserve(ctx, self.value(attributes_id).child_count)?;
-        let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
+        attributes.try_reserve(&mut ctx.services()?, self.value(attributes_id).child_count)?;
+        let work_group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
         for (ordinal, child) in self.children(attributes_id).enumerate() {
             let semantic = self.semantic(child, ordinal, ctx)?;
             let accessor = self.id(child, ctx)?;
-            ctx.with_work(&work_group, [1], |_exec, work| -> ParseResult<()> {
-                attributes.try_push_reserved((semantic, accessor))?;
-                work.complete_all()
+            ctx.child(&work_group, [1], |child| -> ParseResult<()> {
+                child.run([1], || attributes.try_push_reserved((semantic, accessor)))
             })?;
         }
-        ctx.with_work(&work_group, [0], |ctx, work| -> ParseResult<()> {
+        ctx.child(&work_group, [0], |child| -> ParseResult<()> {
             let mut comparisons = 0usize;
             attributes.try_sort_unstable_by(|a, b| -> ParseResult<_> {
                 if comparisons.is_multiple_of(baozi_import::MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS) {
-                    ctx.poll()?;
+                    child.poll()?;
                 }
-                work.replenish(1)?;
-                let ordering = a.0.cmp(&b.0);
-                work.complete([1])?;
+                child.replenish(1)?;
+                let ordering =
+                    child.run([1], || Ok::<_, baozi_import::ParseFailure>(a.0.cmp(&b.0)))?;
                 comparisons += 1;
                 Ok(ordering)
             })
         })?;
-        ctx.with_work(
+        ctx.child(
             &work_group,
             [attributes.len().saturating_sub(1) as u64],
-            |ctx, work| -> ParseResult<()> {
+            |child| -> ParseResult<()> {
                 for (ordinal, pair) in attributes.as_slice().windows(2).enumerate() {
                     if ordinal.is_multiple_of(baozi_import::MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS) {
-                        ctx.poll()?;
+                        child.poll()?;
                     }
-                    let duplicate = pair[0].0 == pair[1].0;
-                    work.complete([1])?;
+                    let duplicate = child.run([1], || {
+                        Ok::<_, baozi_import::ParseFailure>(pair[0].0 == pair[1].0)
+                    })?;
                     #[cfg(test)]
                     crate::control_tests::semantic_pair_completed(ordinal + 1);
                     if duplicate {
-                        return Err(self.invalid("duplicate glTF attribute semantic", ctx));
+                        return Err(child.services()?.format_failure(
+                            GltfFailure::invalid_document("duplicate glTF attribute semantic"),
+                        ));
                     }
                 }
                 Ok(())
@@ -706,10 +748,10 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     fn morph_target<'session: 'scope>(
         &self,
         id: ValueId,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<mesh::MorphTarget<'scope>> {
         self.object(id, ctx)?;
-        let mut unknown = ctx.metered_vec(
+        let mut unknown = ctx.services()?.metered_vec(
             ImportStorageClass::BackendDecode,
             "gltf-document-morph-semantics",
         );
@@ -726,7 +768,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
                 _ => {
                     {
                         let value = (key, self.id(child, ctx)?);
-                        unknown.try_push(ctx, value)
+                        unknown.try_push(&mut ctx.services()?, value)
                     }?;
                     continue;
                 }
@@ -745,7 +787,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         &self,
         id: ValueId,
         strength_key: Option<&str>,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<texture::Info> {
         let transform = self
             .field(id, "extensions", ctx)?
@@ -765,7 +807,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     fn pbr<'session: 'scope>(
         &self,
         id: Option<ValueId>,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<Pbr> {
         let Some(id) = id else {
             return Ok(Pbr {
@@ -794,7 +836,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     fn material<'session: 'scope>(
         &self,
         id: ValueId,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<Material<'scope>> {
         Ok(Material {
             name: self.name(id, ctx)?,
@@ -856,7 +898,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     fn camera<'session: 'scope>(
         &self,
         id: ValueId,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<Camera<'scope>> {
         let orthographic = self
             .field(id, "orthographic", ctx)?
@@ -907,7 +949,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     pub(super) fn emissive_strength<'session: 'scope>(
         &self,
         id: ValueId,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<f32> {
         self.object(id, ctx)?;
         let Some(id) = self.field(id, "emissiveStrength", ctx)? else {
@@ -927,12 +969,17 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         // A nonzero JSON mantissa may already have underflowed while parsing f64.
         if value == 0.0 {
             let text = self.raw_str(id, ctx)?;
-            ctx.charge_work(text.len() as u64)?;
-            if text
-                .bytes()
-                .take_while(|&byte| !matches!(byte, b'e' | b'E'))
-                .any(|byte| matches!(byte, b'1'..=b'9'))
-            {
+            let layout = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+            let underflows = ctx.child(&layout, [text.len() as u64], |child| {
+                child.run([text.len() as u64], || {
+                    Ok::<_, baozi_import::ParseFailure>(
+                        text.bytes()
+                            .take_while(|&byte| !matches!(byte, b'e' | b'E'))
+                            .any(|byte| matches!(byte, b'1'..=b'9')),
+                    )
+                })
+            })?;
+            if underflows {
                 return Err(self.invalid(
                     "glTF emissiveStrength underflows the canonical F32 domain",
                     ctx,
@@ -946,7 +993,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         &self,
         id: ValueId,
         unit: bool,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<f32> {
         let value = self.number(id, ctx)?;
         if unit && !(0.0..=1.0).contains(&value) {
@@ -962,21 +1009,22 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         if value == 0.0 {
             let token = self.value(id);
             let mut mantissa = true;
-            let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
+            let work_group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
             for chunk in
                 self.bytes[token.start..token.end].chunks(crate::parser::BYTE_POLL_INTERVAL)
             {
-                ctx.with_work(&work_group, [chunk.len() as u64], |ctx, work| -> ParseResult<()> {
+                ctx.child(&work_group, [chunk.len() as u64], |child| -> ParseResult<()> {
                     for &byte in chunk {
+                        let underflows = child.run([1], || {
                         if matches!(byte, b'e' | b'E') {
                             mantissa = false;
                         }
-                        let underflows = mantissa && matches!(byte, b'1'..=b'9');
-                        work.complete([1])?;
+                        Ok::<_, baozi_import::ParseFailure>(mantissa && matches!(byte, b'1'..=b'9'))
+                        })?;
                         if underflows {
-                            return Err(self.invalid(
-                                "glTF material extension number underflows the canonical F32 domain", ctx,
-                            ));
+                            return Err(child.services()?.format_failure(GltfFailure::invalid_document(
+                                "glTF material extension number underflows the canonical F32 domain",
+                            )));
                         }
                     }
                     Ok(())
@@ -991,7 +1039,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         object: ValueId,
         key: &str,
         default: f32,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<f32> {
         self.field(object, key, ctx)?.map_or(Ok(default), |id| {
             self.material_extension_float(id, true, ctx)
@@ -1003,7 +1051,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         object: ValueId,
         key: &str,
         normal: bool,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<Option<texture::Info>> {
         self.field(object, key, ctx)?
             .map(|id| {
@@ -1021,7 +1069,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     pub(super) fn clearcoat<'session: 'scope>(
         &self,
         id: ValueId,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<Clearcoat> {
         self.object(id, ctx)?;
         Ok(Clearcoat {
@@ -1046,7 +1094,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     pub(super) fn sheen<'session: 'scope>(
         &self,
         id: ValueId,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<Sheen> {
         self.object(id, ctx)?;
         let mut color = [0.0; 3];
@@ -1080,7 +1128,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     pub(super) fn transform<'session: 'scope>(
         &self,
         id: ValueId,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<extensions::texture::TextureTransform> {
         self.object(id, ctx)?;
         Ok(extensions::texture::TextureTransform {
@@ -1094,7 +1142,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     pub(super) fn punctual_light_reference<'session: 'scope>(
         &self,
         id: ValueId,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<Index> {
         self.required_id(id, "light", ctx)
     }
@@ -1102,18 +1150,23 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     fn light_number<'session: 'scope>(
         &self,
         id: ValueId,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<f64> {
         let value = self.number(id, ctx)?;
         if value == 0.0 {
             let text = self.raw_str(id, ctx)?;
-            ctx.charge_work(text.len() as u64)?;
+            let layout = ctx.bind_group([ImportWorkClass::WorkUnits])?;
             // Source signs and nonzero values must not disappear during binary64 parsing.
-            if text
-                .bytes()
-                .take_while(|&byte| !matches!(byte, b'e' | b'E'))
-                .any(|byte| matches!(byte, b'1'..=b'9'))
-            {
+            let underflows = ctx.child(&layout, [text.len() as u64], |child| {
+                child.run([text.len() as u64], || {
+                    Ok::<_, baozi_import::ParseFailure>(
+                        text.bytes()
+                            .take_while(|&byte| !matches!(byte, b'e' | b'E'))
+                            .any(|byte| matches!(byte, b'1'..=b'9')),
+                    )
+                })
+            })?;
+            if underflows {
                 return Err(self.invalid(
                     "glTF light number underflows the binary64 source domain",
                     ctx,
@@ -1126,7 +1179,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
     pub(super) fn light<'session: 'scope>(
         &self,
         id: ValueId,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<Light<'scope>> {
         self.object(id, ctx)?;
         let mut color = [1.0; 3];
@@ -1180,7 +1233,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
 
     fn lights<'session: 'scope>(
         &self,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<List<'scope, ValueId>> {
         let payload = self
             .field(0, "extensions", ctx)?
@@ -1207,7 +1260,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
 
     pub(super) fn root<'session: 'scope>(
         &self,
-        ctx: &mut ParseExecution<'_, 'session>,
+        ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<Tables<'scope>> {
         self.object(0, ctx)?;
         self.version(ctx)?;
@@ -1247,9 +1300,15 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
                         let columns = std::array::from_fn(|column| {
                             std::array::from_fn(|row| cells[column * 4 + row])
                         });
-                        ctx.charge_work(22)?;
-                        super::transforms::node_matrix(&columns)
-                            .map_err(|reason| self.invalid(reason, ctx))?;
+                        let layout = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+                        ctx.child(&layout, [22], |child| {
+                            child.run([22], || {
+                                Ok::<_, baozi_import::ParseFailure>(super::transforms::node_matrix(
+                                    &columns,
+                                ))
+                            })
+                        })?
+                        .map_err(|reason| self.invalid(reason, ctx))?;
                     }
                     Ok(Node {
                         name: self.name(id, ctx)?,
@@ -1536,7 +1595,7 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         })
     }
 
-    fn version<'session: 'scope>(&self, ctx: &mut ParseExecution<'_, 'session>) -> ParseResult<()> {
+    fn version<'session: 'scope>(&self, ctx: &mut ParseRoot<'_, '_, 'session>) -> ParseResult<()> {
         let asset = self.required(0, "asset", ctx)?;
         self.object(asset, ctx)?;
         let version_id = self.required(asset, "version", ctx)?;

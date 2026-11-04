@@ -2,7 +2,7 @@ use super::*;
 
 use crate::concrete_store::{
     PreparedStoreSuccessOutcome, RetainedStoreOperation, RetainedStorePublicationPlan,
-    RetainedStoreSharePlan, RetainedStoreStartPlan, RetainedStoreWriterPlan,
+    RetainedStoreSharePlan, RetainedStoreStartPlan, RetainedStoreWriterPlan, StoreInvocationRoot,
 };
 use crate::ledger::{LedgerCause, LedgerLimits};
 use crate::retained::test_panic_final_owner_drop_after;
@@ -59,7 +59,8 @@ struct BatchKeys {
     failure_terminal_dimension: StoreDimensionKey,
 }
 
-type BatchOperation = RetainedStoreOperation<BatchTestOwner, BatchProgress, BatchUnit>;
+type BatchInvocationRoot = StoreInvocationRoot<BatchTestOwner, BatchProgress, BatchUnit>;
+type BatchOperation<'inv> = RetainedStoreOperation<'inv, BatchTestOwner, BatchProgress, BatchUnit>;
 
 const fn test_catalog() -> StoreSemanticCatalogId {
     StoreSemanticCatalogId::new(
@@ -129,22 +130,27 @@ fn writer_plan(
     )
 }
 
-fn test_operation(account: &PhysicalStorageAccount) -> (BatchOperation, BatchKeys) {
-    test_operation_with_limits(account, u64::MAX, u64::MAX)
+fn test_operation<'inv>(
+    root: &'inv mut BatchInvocationRoot,
+    account: &PhysicalStorageAccount,
+) -> (BatchOperation<'inv>, BatchKeys) {
+    test_operation_with_limits(root, account, u64::MAX, u64::MAX)
 }
 
-fn test_operation_with_live_limit(
+fn test_operation_with_live_limit<'inv>(
+    root: &'inv mut BatchInvocationRoot,
     account: &PhysicalStorageAccount,
     operation_live_byte_limit: u64,
-) -> (BatchOperation, BatchKeys) {
-    test_operation_with_limits(account, operation_live_byte_limit, u64::MAX)
+) -> (BatchOperation<'inv>, BatchKeys) {
+    test_operation_with_limits(root, account, operation_live_byte_limit, u64::MAX)
 }
 
-fn test_operation_with_limits(
+fn test_operation_with_limits<'inv>(
+    root: &'inv mut BatchInvocationRoot,
     account: &PhysicalStorageAccount,
     operation_live_byte_limit: u64,
     work_limit: u64,
-) -> (BatchOperation, BatchKeys) {
+) -> (BatchOperation<'inv>, BatchKeys) {
     let (domain, keys) = test_domain();
     let failure_terminal_requirement =
         RetainedStoreFailureTerminalWorkPlan::requirement_for_evidence_members(1)
@@ -197,7 +203,7 @@ fn test_operation_with_limits(
         failure_terminal_work,
     );
     (
-        BatchOperation::try_start(OperationControl::default(), ledger, account, start)
+        BatchOperation::try_start(root, OperationControl::default(), ledger, account, start)
             .expect("batch operation"),
         keys,
     )
@@ -268,7 +274,8 @@ fn batch_plans_reject_empty_inputs_without_operation_side_effects() {
 fn sequence_bytes_and_utf8_batches_publish_opaque_ranges() {
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation(&account);
+    let mut invocation_root = BatchInvocationRoot::new();
+    let (operation, keys) = test_operation(&mut invocation_root, &account);
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 6))
         .expect("batch publication assembly");
@@ -412,7 +419,9 @@ fn foreign_range_references_are_rejected_and_lookup_depth_is_batch_size_independ
     let factory = test_factory();
     let account = test_account(&factory);
 
-    let (first_operation, first_keys) = test_operation(&account);
+    let mut invocation_root = BatchInvocationRoot::new();
+    let mut invocation_root_2 = BatchInvocationRoot::new();
+    let (first_operation, first_keys) = test_operation(&mut invocation_root, &account);
     let mut first = first_operation
         .try_publication_assembly(publication_plan(first_keys, 3))
         .expect("first batch assembly");
@@ -462,7 +471,7 @@ fn foreign_range_references_are_rejected_and_lookup_depth_is_batch_size_independ
     };
     let first_published = first_prepared.handoff();
 
-    let (second_operation, second_keys) = test_operation(&account);
+    let (second_operation, second_keys) = test_operation(&mut invocation_root_2, &account);
     let mut second = second_operation
         .try_publication_assembly(publication_plan(second_keys, 1))
         .expect("second batch assembly");
@@ -524,7 +533,8 @@ fn foreign_range_references_are_rejected_and_lookup_depth_is_batch_size_independ
 fn batch_preflight_rejection_is_zero_mutation_and_the_assembly_remains_retryable() {
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation(&account);
+    let mut invocation_root = BatchInvocationRoot::new();
+    let (operation, keys) = test_operation(&mut invocation_root, &account);
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 1))
         .expect("preflight batch assembly");
@@ -581,7 +591,9 @@ fn aggregate_operation_headroom_rejection_is_zero_mutation_and_retryable() {
 
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation_with_live_limit(&account, OPERATION_LIVE_LIMIT);
+    let mut invocation_root = BatchInvocationRoot::new();
+    let (operation, keys) =
+        test_operation_with_live_limit(&mut invocation_root, &account, OPERATION_LIVE_LIMIT);
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 2))
         .expect("aggregate-headroom batch assembly");
@@ -648,7 +660,9 @@ fn aggregate_share_work_rejection_is_zero_mutation_and_retryable() {
 
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation_with_limits(&account, u64::MAX, WORK_LIMIT);
+    let mut invocation_root = BatchInvocationRoot::new();
+    let (operation, keys) =
+        test_operation_with_limits(&mut invocation_root, &account, u64::MAX, WORK_LIMIT);
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 2))
         .expect("work-headroom batch assembly");
@@ -732,7 +746,9 @@ fn aggregate_share_work_exact_fit_charges_only_executed_items() {
 
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation_with_limits(&account, u64::MAX, WORK_LIMIT);
+    let mut invocation_root = BatchInvocationRoot::new();
+    let (operation, keys) =
+        test_operation_with_limits(&mut invocation_root, &account, u64::MAX, WORK_LIMIT);
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 2))
         .expect("exact-fit batch assembly");
@@ -779,7 +795,8 @@ fn aggregate_share_work_exact_fit_charges_only_executed_items() {
 fn mid_batch_failure_rolls_back_the_prefix_and_leaves_the_assembly_writable() {
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation(&account);
+    let mut invocation_root = BatchInvocationRoot::new();
+    let (operation, keys) = test_operation(&mut invocation_root, &account);
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 3))
         .expect("failing batch assembly");
@@ -890,7 +907,8 @@ fn mid_batch_failure_rolls_back_the_prefix_and_leaves_the_assembly_writable() {
 fn unverified_prefix_rollback_enters_containment_and_preserves_live_attribution() {
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation(&account);
+    let mut invocation_root = BatchInvocationRoot::new();
+    let (operation, keys) = test_operation(&mut invocation_root, &account);
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 3))
         .expect("rollback-containment batch assembly");
@@ -937,7 +955,8 @@ fn unverified_prefix_rollback_enters_containment_and_preserves_live_attribution(
 fn mid_batch_panic_uses_single_block_containment_and_never_returns_a_range() {
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation(&account);
+    let mut invocation_root = BatchInvocationRoot::new();
+    let (operation, keys) = test_operation(&mut invocation_root, &account);
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 3))
         .expect("panicking batch assembly");
@@ -984,7 +1003,8 @@ fn mid_batch_panic_uses_single_block_containment_and_never_returns_a_range() {
 fn transcript_batch_failure_preserves_the_ticket_for_exact_retry() {
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation(&account);
+    let mut invocation_root = BatchInvocationRoot::new();
+    let (operation, keys) = test_operation(&mut invocation_root, &account);
     let values = [[1_u8], [2_u8], [3_u8]];
     let items = [
         SequenceBatchItem::new(&values[0]).expect("first transcript batch item"),
@@ -1037,7 +1057,8 @@ fn transcript_batch_failure_preserves_the_ticket_for_exact_retry() {
 fn transcript_batch_containment_abandons_the_executor() {
     let factory = test_factory();
     let account = test_account(&factory);
-    let (operation, keys) = test_operation(&account);
+    let mut invocation_root = BatchInvocationRoot::new();
+    let (operation, keys) = test_operation(&mut invocation_root, &account);
     let values = [[1_u8], [2_u8], [3_u8]];
     let items = [
         SequenceBatchItem::new(&values[0]).expect("first transcript panic item"),

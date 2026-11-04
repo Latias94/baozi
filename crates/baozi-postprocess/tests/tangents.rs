@@ -682,16 +682,23 @@ fn tight_selected_work_budget_rejects_indexed_generation_before_output_allocatio
     else {
         panic!("expected typed selected work admission failure")
     };
-    assert!(
-        matches!(
-            preparation.cause(),
-            baozi_postprocess::PreparationCause::Runtime(
-                baozi_operation::StoreRuntimeError::Ledger(_)
-            )
-        ),
-        "expected a work admission failure, found {preparation:?}"
-    );
+    let baozi_postprocess::PreparationCause::Tangent(TangentCause::Runtime {
+        source:
+            baozi_operation::StoreRuntimeError::Ledger(baozi_operation::LedgerCause::LimitExceeded {
+                class: baozi_operation::CounterClass::Attempted,
+                value,
+                limit,
+                ..
+            }),
+    }) = preparation.cause()
+    else {
+        panic!("expected the actual tangent work admission failure, found {preparation:?}")
+    };
+    assert_eq!(*value, limit + 1);
+    assert!(*limit <= 150);
     let resources = preparation.resources().unwrap();
+    assert_eq!(resources.attempted_work_actions(), *value);
+    assert!(resources.consumed_work_actions() <= *limit);
     assert!(resources.consumed_work_actions() <= 150);
     assert!(resources.attempted_work_actions() >= resources.consumed_work_actions());
     assert!(resources.peak_staging_bytes() < 909_093 * std::mem::size_of::<[f32; 4]>() as u64);
@@ -815,12 +822,16 @@ impl Format for FieldImporter {
         &self,
         _: &baozi_import::Probe<'_>,
         _: &ReadHint,
-        _: &DetectionScope<'_>,
+        _: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         let (normal, uv) = match self.0 {
             Fixture::Domains { normal, uv } => (normal, uv),
             _ => (AttributeDomain::Vertex, AttributeDomain::Vertex),

@@ -4,10 +4,10 @@ use super::*;
 
 struct FixtureFormat;
 
-pub(crate) fn storage_observation<'region>(
-    exec: &ParseExecution<'region, '_>,
+pub(crate) fn storage_observation<'op>(
+    exec: &ParseRoot<'_, 'op, '_>,
     dimension: ImportDimension,
-) -> baozi_operation::__retained_store_integration::authority::StoreStorageObservation<'region> {
+) -> baozi_operation::__retained_store_integration::authority::StoreStorageObservation<'op> {
     exec.store.storage_observation(dimension)
 }
 
@@ -31,14 +31,14 @@ impl crate::Format for FixtureFormat {
         crate::NoFormatOptions::compile_defaults(scope)
     }
 
-    fn parse(&self, _: &Self::Options, _: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(&self, _: &Self::Options, _: &mut ParseContext<'_, '_>) -> ParseResult<()> {
         unreachable!("storage tests invoke the real execution region directly")
     }
 }
 
 pub(crate) fn with_context<R>(
-    owner: &mut ImportStoreSessionOwner,
-    action: impl FnOnce(&mut ParseContext<'_>) -> R,
+    owner: &mut ImportStoreSessionOwner<'_>,
+    action: impl FnOnce(&mut ParseContext<'_, '_>) -> R,
 ) -> R {
     let mut registry = crate::RegistryBuilder::new();
     registry.register(FixtureFormat).unwrap();

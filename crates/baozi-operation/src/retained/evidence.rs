@@ -7,7 +7,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
-pub(super) const TERMINAL_LEDGER_EVIDENCE_SCHEMA_REVISION: u32 = 1;
+pub(crate) const TERMINAL_LEDGER_EVIDENCE_SCHEMA_REVISION: u32 = 1;
 
 pub(crate) trait TerminalEvidenceKeySeal {}
 

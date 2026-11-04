@@ -1,4 +1,4 @@
-//! Ordinary vector/string growth shared by legacy and exclusive parser roles.
+//! Ordinary vector/string growth shared by actual root, parent, child and service loans.
 use super::*;
 use crate::store::ImportOrdinaryStorage;
 
@@ -7,14 +7,14 @@ use crate::store::ImportOrdinaryStorage;
 /// A session-owned container can leave a region and grow through the same session later:
 /// ```
 /// use baozi_import::{ParseContext, ParseFailure, ParseResult, MeteredVec, ImportStorageClass};
-/// fn owned<'s>(c: &mut ParseContext<'s>) -> ParseResult<MeteredVec<'s, u32>> {
+/// fn owned<'s>(c: &mut ParseContext<'s, '_>) -> ParseResult<MeteredVec<'s, u32>> {
 ///     let mut values = c.with_parser_execution::<_, ParseFailure>(|root| {
 ///         let mut loan = root.storage()?;
 ///         let mut values = loan.metered_vec(ImportStorageClass::SceneConstruction, "owned-proof");
 ///         loan.reserve_vec(&mut values, 1)?;
 ///         Ok(values)
 ///     })?;
-///     c.with_execution(|exec| values.try_push(exec, 7))?;
+///     c.with_execution(|root| values.try_push(&mut root.services()?, 7))?;
 ///     Ok(values)
 /// }
 /// ```
@@ -29,29 +29,29 @@ use crate::store::ImportOrdinaryStorage;
 /// }
 /// ```
 ///
-/// A legacy storage loan ends before reporting progress through the same control owner:
+/// A root storage loan ends before reporting progress through the same control owner:
 /// ```
-/// use baozi_import::{ImportProgressPhase, ImportProgressUnit, ParseExecution, ParseResult};
-/// fn sequential(exec: &mut ParseExecution<'_, '_>) -> ParseResult<()> {
+/// use baozi_import::{ImportProgressPhase, ImportProgressUnit, ParseRoot, ParseResult};
+/// fn sequential(exec: &mut ParseRoot<'_, '_, '_>) -> ParseResult<()> {
 ///     { let mut loan = exec.storage()?; loan.poll()?; }
 ///     exec.report_progress(ImportProgressPhase::Decode, ImportProgressUnit::Bytes, 1, None)
 /// }
 /// ```
 ///
-/// A live legacy loan excludes that progress call until its last use:
+/// A live root loan excludes that progress call until its last use:
 /// ```compile_fail
-/// use baozi_import::{ImportProgressPhase, ImportProgressUnit, ParseExecution, ParseResult};
-/// fn overlap(exec: &mut ParseExecution<'_, '_>) -> ParseResult<()> {
+/// use baozi_import::{ImportProgressPhase, ImportProgressUnit, ParseRoot, ParseResult};
+/// fn overlap(exec: &mut ParseRoot<'_, '_, '_>) -> ParseResult<()> {
 ///     let mut loan = exec.storage()?;
 ///     exec.report_progress(ImportProgressPhase::Decode, ImportProgressUnit::Bytes, 1, None)?;
 ///     loan.poll()
 /// }
 /// ```
 ///
-/// A loan cannot leave its legacy execution region, although its owned container can:
+/// A loan cannot leave its execution region, although its owned container can:
 /// ```compile_fail
 /// use baozi_import::{ParseContext, ParseFailure};
-/// fn escape(context: &mut ParseContext<'_>) {
+/// fn escape(context: &mut ParseContext<'_, '_>) {
 ///     let _loan = context.with_execution::<_, ParseFailure>(|exec| exec.storage());
 /// }
 /// ```
@@ -59,7 +59,7 @@ use crate::store::ImportOrdinaryStorage;
 /// The temporary storage borrow cannot escape its region:
 /// ```compile_fail
 /// use baozi_import::{ParseContext, ParseFailure};
-/// fn escape(c: &mut ParseContext<'_>) {
+/// fn escape(c: &mut ParseContext<'_, '_>) {
 ///     let _loan = c.with_parser_execution::<_, ParseFailure>(|root| root.storage());
 /// }
 /// ```
@@ -269,6 +269,29 @@ impl<'b, 'op: 'b, 'session: 'b> ParseStorage<'b, 'op, 'session> {
         self.reserve_vec(values, 1)?;
         values.try_push_reserved(value)
     }
+
+    /// Grows through the same reservation owner, then fills bounded physical prefixes.
+    pub fn resize_vec<T: Copy>(
+        &mut self,
+        values: &mut MeteredVec<'session, T>,
+        len: usize,
+        value: T,
+    ) -> ParseResult<()> {
+        let additional = len.saturating_sub(values.values.len());
+        self.reserve_vec(values, additional)?;
+        while values.values.len() < len {
+            self.check_identity(values.identity)?;
+            self.poll()?;
+            let chunk_end = values
+                .values
+                .len()
+                .saturating_add(metered_copy_chunk_len::<T>())
+                .min(len);
+            values.values.resize(chunk_end, value);
+        }
+        values.values.truncate(len);
+        Ok(())
+    }
     /// Qualifies replacement capacity and copies old contents at the established frontiers.
     pub fn reserve_string(
         &mut self,
@@ -333,6 +356,51 @@ impl<'b, 'op: 'b, 'session: 'b> ParseStorage<'b, 'op, 'session> {
     ) -> ParseResult<()> {
         self.reserve_string(value, text.len())?;
         append_metered_string(self, &mut value.value, text)
+    }
+
+    /// Formats through the existing bounded append path, retaining its first failure.
+    pub fn write_string_fmt(
+        &mut self,
+        value: &mut MeteredString<'session>,
+        arguments: fmt::Arguments<'_>,
+    ) -> ParseResult<()> {
+        self.check_identity(value.identity)?;
+        let mut writer = MeteredStringWriter {
+            value,
+            storage: self,
+            failure: None,
+        };
+        let result = fmt::write(&mut writer, arguments);
+        match (result, writer.failure) {
+            (_, Some(failure)) => Err(failure),
+            (Ok(()), None) => Ok(()),
+            (Err(fmt::Error), None) => {
+                Err(writer
+                    .value
+                    .identity
+                    .abort(ScopeAbortCause::DescriptorContract {
+                        code: "metered-string-format-failed",
+                    }))
+            }
+        }
+    }
+}
+
+struct MeteredStringWriter<'a, 'borrow, 'op, 'session> {
+    value: &'a mut MeteredString<'session>,
+    storage: &'a mut ParseStorage<'borrow, 'op, 'session>,
+    failure: Option<ParseFailure>,
+}
+
+impl fmt::Write for MeteredStringWriter<'_, '_, '_, '_> {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        match self.storage.append_string(self.value, value) {
+            Ok(()) => Ok(()),
+            Err(failure) => {
+                self.failure = Some(failure);
+                Err(fmt::Error)
+            }
+        }
     }
 }
 

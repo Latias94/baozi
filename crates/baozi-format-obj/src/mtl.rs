@@ -5,9 +5,9 @@ use baozi_import::authoring::{
 };
 use baozi_import::{
     ConformedTextInput, DependencyOrigin, DependencySnapshot, DiagnosticCode, DiagnosticSeverity,
-    ImportProgressPhase, ImportStorageClass, ImportWorkClass, ImportWorkScope, MeteredOrderedMap,
-    MeteredString, MeteredVec, ParseExecution, ParseFailure, ParseResult, SourceScopeEntityKind,
-    TextInputLine,
+    ImportProgressPhase, ImportStorageClass, ImportWorkClass, MeteredOrderedMap, MeteredString,
+    MeteredVec, ParseChildren, ParseFailure, ParseParser, ParseResult, ParseRoot, ParseServices,
+    SourceScopeEntityKind, TextInputLine,
 };
 use std::cmp::Ordering;
 use std::fmt;
@@ -17,59 +17,50 @@ use parser::usize_amount;
 const INTERRUPTIBLE_WORK_CHUNK: u64 = 64;
 const MAX_NUMERIC_LITERAL_BYTES: usize = 128;
 
-pub(crate) struct ComparisonWork<'meter, 'region> {
-    work: &'meter mut ImportWorkScope<'region, 1>,
+pub(crate) struct ComparisonWork<'meter, 'parser, 'frame, 'ctx, 'op, 'session> {
+    work: &'meter mut ParseParser<'parser, 'frame, 'ctx, 'op, 'session, 1, true>,
     leaves_until_poll: u64,
 }
 
-impl<'meter, 'region> ComparisonWork<'meter, 'region> {
-    fn new(work: &'meter mut ImportWorkScope<'region, 1>) -> Self {
+impl<'meter, 'parser, 'frame, 'ctx, 'op, 'session>
+    ComparisonWork<'meter, 'parser, 'frame, 'ctx, 'op, 'session>
+{
+    fn new(work: &'meter mut ParseParser<'parser, 'frame, 'ctx, 'op, 'session, 1, true>) -> Self {
         Self {
             work,
             leaves_until_poll: INTERRUPTIBLE_WORK_CHUNK,
         }
     }
 
-    pub(crate) fn run_leaf<T>(
-        &mut self,
-        exec: &mut ParseExecution<'region, '_>,
-        compare: impl FnOnce() -> T,
-    ) -> ParseResult<T> {
+    pub(crate) fn run_leaf<T>(&mut self, compare: impl FnOnce() -> T) -> ParseResult<T> {
         // Admit only the next bounded comparison, then publish its actual completion.
         // Polling is batched independently so a short tail never consumes unused work.
         self.work.replenish(1)?;
-        let value = compare();
-        self.work.complete([1])?;
+        let value = self.work.run([1], || Ok::<_, ParseFailure>(compare()))?;
         self.leaves_until_poll -= 1;
         if self.leaves_until_poll == 0 {
-            exec.poll()?;
+            self.work.poll()?;
             self.leaves_until_poll = INTERRUPTIBLE_WORK_CHUNK;
         }
         Ok(value)
     }
 
-    pub(crate) fn compare_str(
-        &mut self,
-        exec: &mut ParseExecution<'region, '_>,
-        left: &str,
-        right: &str,
-    ) -> ParseResult<Ordering> {
+    pub(crate) fn compare_str(&mut self, left: &str, right: &str) -> ParseResult<Ordering> {
         for (left, right) in left.as_bytes().iter().zip(right.as_bytes()) {
-            match self.run_leaf(exec, || left.cmp(right))? {
+            match self.run_leaf(|| left.cmp(right))? {
                 Ordering::Equal => {}
                 ordering => return Ok(ordering),
             }
         }
-        self.run_leaf(exec, || left.len().cmp(&right.len()))
+        self.run_leaf(|| left.len().cmp(&right.len()))
     }
 }
 
-pub(crate) fn interruptible_sort_by<'region, 'session, T>(
-    exec: &mut ParseExecution<'region, 'session>,
+pub(crate) fn interruptible_sort_by<'op, 'session, T>(
+    children: &mut ParseChildren<'_, 'op, 'session>,
     values: &mut MeteredVec<'_, T>,
     mut compare: impl FnMut(
-        &mut ParseExecution<'region, 'session>,
-        &mut ComparisonWork<'_, 'region>,
+        &mut ComparisonWork<'_, '_, '_, '_, 'op, 'session>,
         &T,
         &T,
     ) -> ParseResult<Ordering>,
@@ -77,19 +68,18 @@ pub(crate) fn interruptible_sort_by<'region, 'session, T>(
     if values.len() <= 1 {
         return Ok(());
     }
-    let comparison_work = exec.bind_work_group([ImportWorkClass::WorkUnits])?;
-    exec.with_work(&comparison_work, [0], |exec, ledger_work| {
+    let comparison_work = children.bind_group([ImportWorkClass::WorkUnits])?;
+    children.child(&comparison_work, [0], |ledger_work| {
         let mut work = ComparisonWork::new(ledger_work);
-        values.try_sort_unstable_by(|left, right| compare(exec, &mut work, left, right))
+        values.try_sort_unstable_by(|left, right| compare(&mut work, left, right))
     })
 }
 
-pub(crate) fn interruptible_dedup_by<'region, 'session, T>(
-    exec: &mut ParseExecution<'region, 'session>,
+pub(crate) fn interruptible_dedup_by<'op, 'session, T>(
+    children: &mut ParseChildren<'_, 'op, 'session>,
     values: &mut MeteredVec<'_, T>,
     mut equivalent: impl FnMut(
-        &mut ParseExecution<'region, 'session>,
-        &mut ComparisonWork<'_, 'region>,
+        &mut ComparisonWork<'_, '_, '_, '_, 'op, 'session>,
         &T,
         &T,
     ) -> ParseResult<bool>,
@@ -98,46 +88,46 @@ pub(crate) fn interruptible_dedup_by<'region, 'session, T>(
         return Ok(());
     }
     let previous_len = values.len();
-    let comparison_work = exec.bind_work_group([ImportWorkClass::WorkUnits])?;
-    let retained_len = exec.with_work(&comparison_work, [0], |exec, ledger_work| {
+    let comparison_work = children.bind_group([ImportWorkClass::WorkUnits])?;
+    let retained_len = children.child(&comparison_work, [0], |ledger_work| {
         let mut work = ComparisonWork::new(ledger_work);
-        let retained_len = values.try_partition_dedup_by(|previous, current| {
-            equivalent(exec, &mut work, previous, current)
-        })?;
+        let retained_len = values
+            .try_partition_dedup_by(|previous, current| equivalent(&mut work, previous, current))?;
         Ok::<_, ParseFailure>(retained_len)
     })?;
     for_work_chunks(
-        exec,
+        children,
         previous_len - retained_len,
         "obj-dedup-drop-work",
-        |_exec, work, range| {
-            values.truncate(values.len() - range.len());
-            work.complete_all()
+        |work, range| {
+            work.run([range.len() as u64], || {
+                values.truncate(values.len() - range.len());
+                Ok::<_, ParseFailure>(())
+            })
         },
     )
 }
 
-pub(crate) fn interruptible_binary_search_by<'region, 'session, T>(
-    exec: &mut ParseExecution<'region, 'session>,
+pub(crate) fn interruptible_binary_search_by<'op, 'session, T>(
+    children: &mut ParseChildren<'_, 'op, 'session>,
     values: &[T],
     mut compare: impl FnMut(
-        &mut ParseExecution<'region, 'session>,
-        &mut ComparisonWork<'_, 'region>,
+        &mut ComparisonWork<'_, '_, '_, '_, 'op, 'session>,
         &T,
     ) -> ParseResult<Ordering>,
 ) -> ParseResult<Option<usize>> {
     if values.is_empty() {
         return Ok(None);
     }
-    let comparison_work = exec.bind_work_group([ImportWorkClass::WorkUnits])?;
-    exec.with_work(&comparison_work, [0], |exec, ledger_work| {
+    let comparison_work = children.bind_group([ImportWorkClass::WorkUnits])?;
+    children.child(&comparison_work, [0], |ledger_work| {
         let mut work = ComparisonWork::new(ledger_work);
         let mut left = 0usize;
         let mut right = values.len();
         let mut found = None;
         while left < right {
             let middle = left + (right - left) / 2;
-            match compare(exec, &mut work, &values[middle])? {
+            match compare(&mut work, &values[middle])? {
                 Ordering::Less => left = middle + 1,
                 Ordering::Greater => right = middle,
                 Ordering::Equal => {
@@ -151,34 +141,30 @@ pub(crate) fn interruptible_binary_search_by<'region, 'session, T>(
 }
 
 // Visitors publish completed items or atomic ranges before any later fallible work.
-pub(crate) fn for_work_chunks<'region, 'session>(
-    exec: &mut ParseExecution<'region, 'session>,
+pub(crate) fn for_work_chunks<'op, 'session>(
+    children: &mut ParseChildren<'_, 'op, 'session>,
     len: usize,
     resource: &'static str,
     mut visit: impl FnMut(
-        &mut ParseExecution<'region, 'session>,
-        &mut ImportWorkScope<'region, 1>,
+        &mut ParseParser<'_, '_, '_, 'op, 'session, 1, true>,
         std::ops::Range<usize>,
     ) -> ParseResult<()>,
 ) -> ParseResult<()> {
-    let work_group = exec.bind_work_group([ImportWorkClass::WorkUnits])?;
+    let work_group = children.bind_group([ImportWorkClass::WorkUnits])?;
     let mut start = 0usize;
     while start < len {
         let end = start
             .checked_add(INTERRUPTIBLE_WORK_CHUNK as usize)
             .map_or(len, |end| end.min(len));
-        exec.with_work(
-            &work_group,
-            [usize_amount(exec, end - start, resource)?],
-            |exec, work| visit(exec, work, start..end),
-        )?;
+        let amount = usize_amount(&children.services()?, end - start, resource)?;
+        children.child(&work_group, [amount], |work| visit(work, start..end))?;
         start = end;
     }
     Ok(())
 }
 
 pub(crate) fn interruptible_str_eq(
-    exec: &mut ParseExecution<'_, '_>,
+    children: &mut ParseChildren<'_, '_, '_>,
     left: &str,
     right: &str,
     resource: &'static str,
@@ -189,11 +175,13 @@ pub(crate) fn interruptible_str_eq(
     let left = left.as_bytes();
     let right = right.as_bytes();
     let mut equal = true;
-    for_work_chunks(exec, left.len(), resource, |_exec, work, range| {
-        if left[range.clone()] != right[range] {
-            equal = false;
-        }
-        work.complete_all()
+    for_work_chunks(children, left.len(), resource, |work, range| {
+        work.run([range.len() as u64], || {
+            if left[range.clone()] != right[range] {
+                equal = false;
+            }
+            Ok::<_, ParseFailure>(())
+        })
     })?;
     Ok(equal)
 }
@@ -260,7 +248,7 @@ impl Ord for ParsedString<'_> {
 
 impl<'session> ParsedMaterial<'session> {
     fn new(
-        exec: &mut ParseExecution<'_, 'session>,
+        exec: &mut ParseServices<'_, '_, 'session>,
         name: MeteredString<'session>,
         order: usize,
     ) -> Self {
@@ -291,11 +279,12 @@ impl ParsedMetadata<'_> {
 }
 
 pub(crate) fn load_libraries<'session>(
-    exec: &mut ParseExecution<'_, 'session>,
+    root: &mut ParseRoot<'_, '_, 'session>,
     options: &ObjImportOptions,
     mtllibs: &[MeteredString<'session>],
 ) -> ParseResult<MaterialLibrary<'session>> {
     let role = material_library_role();
+    let exec = &mut root.services()?;
     let mut library = MaterialLibrary {
         materials: exec.metered_vec(ImportStorageClass::FormatNormalization, "obj-mtl-materials"),
         origins: exec.metered_vec(
@@ -305,16 +294,16 @@ pub(crate) fn load_libraries<'session>(
         next_order: 0,
     };
     library.origins.try_reserve(exec, mtllibs.len())?;
-    let root = exec.root_origin();
+    let origin_root = exec.root_origin();
     for mtllib in mtllibs {
-        let outcome = exec.dependency(&root, &role, mtllib.as_str())?;
+        let outcome = root.dependency(&origin_root, &role, mtllib.as_str())?;
         match outcome.into_result() {
             Ok(snapshot) => {
                 let origin = library.origins.len();
                 let dependency_origin = snapshot.origin();
-                let raw_limit = exec.limits().max_dependency_asset_bytes;
+                let raw_limit = root.services()?.limits().max_dependency_asset_bytes;
                 parser::with_obj_dependency_text_limit(
-                    exec,
+                    &mut root.children()?,
                     options,
                     snapshot.diagnostic_source(),
                     "obj-mtl-text",
@@ -327,7 +316,7 @@ pub(crate) fn load_libraries<'session>(
                 library.origins.try_push_reserved(dependency_origin)?;
             }
             Err(evidence) => push_warning(
-                exec,
+                &mut root.services()?,
                 None,
                 "obj.mtl_unavailable",
                 format_args!(
@@ -339,20 +328,20 @@ pub(crate) fn load_libraries<'session>(
             )?,
         }
     }
-    finalize_materials(exec, &mut library)?;
+    finalize_materials(&mut root.children()?, &mut library)?;
     Ok(library)
 }
 
 impl<'session> MaterialLibrary<'session> {
     pub(crate) fn find<'library>(
         &'library self,
-        exec: &mut ParseExecution<'_, '_>,
+        children: &mut ParseChildren<'_, '_, '_>,
         name: &str,
     ) -> ParseResult<Option<&'library ParsedMaterial<'session>>> {
         let index = interruptible_binary_search_by(
-            exec,
+            children,
             self.materials.as_slice(),
-            |exec, work, material| work.compare_str(exec, material.name.as_str(), name),
+            |work, material| work.compare_str(material.name.as_str(), name),
         )?;
         Ok(index.map(|index| &self.materials.as_slice()[index]))
     }
@@ -363,7 +352,7 @@ impl<'session> MaterialLibrary<'session> {
 }
 
 fn parse_mtl<'session>(
-    exec: &mut ParseExecution<'_, 'session>,
+    children: &mut ParseChildren<'_, '_, 'session>,
     snapshot: &DependencySnapshot<'_>,
     text: &ConformedTextInput<'_>,
     recoveries: &mut baozi_import::TextInputRecoveryTracker<'_, 'session>,
@@ -373,18 +362,20 @@ fn parse_mtl<'session>(
     let mut current = None;
     let mut scan_scratch = parser::TokenScanScratch::new();
 
-    let record_work = exec.bind_work_group([ImportWorkClass::Records])?;
+    let record_work = children.bind_group([ImportWorkClass::Records])?;
     for decoded_line in text.lines() {
-        let line_number = u32::try_from(decoded_line.number())
-            .map_err(|_| exec.resource_limit_exceeded("line-count", u64::from(u32::MAX)))?;
+        let line_number = u32::try_from(decoded_line.number()).map_err(|_| {
+            children
+                .error_view()
+                .resource_limit_exceeded("line-count", u64::from(u32::MAX))
+        })?;
         // A decoded line becomes a consumed record as soon as this parser admits it for
         // processing. Child token, string, and resolution work starts only after that admission.
-        let raw_line = exec.with_work(&record_work, [1], |_exec, work| {
-            let raw_line = decoded_line.text();
-            work.complete_all()?;
-            Ok::<_, ParseFailure>(raw_line)
+        let raw_line = children.child(&record_work, [1], |work| {
+            work.run([1], || Ok::<_, ParseFailure>(decoded_line.text()))
         })?;
-        let tokens = tokenize_mtl(exec, &mut scan_scratch, &decoded_line)?;
+        let tokens = tokenize_mtl(children, &mut scan_scratch, &decoded_line)?;
+        let exec = &mut children.services()?;
         let keyword = tokens.first().map(|token| token.text);
         let allowed_value = match keyword {
             Some("newmtl") => trailing_mtl_token_range(&tokens),
@@ -428,8 +419,8 @@ fn parse_mtl<'session>(
                         .next_order
                         .checked_add(1)
                         .ok_or_else(|| exec.allocation_failure("obj-mtl-material-order"))?;
-                    let name = owned_string(exec, name, "obj-mtl-material-name")?;
-                    current = Some(ParsedMaterial::new(exec, name, order));
+                    let name = owned_string(children, name, "obj-mtl-material-name")?;
+                    current = Some(ParsedMaterial::new(&mut children.services()?, name, order));
                 }
             }
             "Kd" => {
@@ -470,7 +461,7 @@ fn parse_mtl<'session>(
                 {
                     let metadata_key = if keyword == "Ns" { "obj:ns" } else { "obj:ni" };
                     insert_metadata(
-                        exec,
+                        children,
                         material,
                         metadata_key,
                         ParsedMetadataValue::F64(value as f64),
@@ -481,7 +472,12 @@ fn parse_mtl<'session>(
                 if let Some(material) = current.as_mut()
                     && let Some(value) = parse_i64(exec, snapshot, &tokens, line_number, "illum")?
                 {
-                    insert_metadata(exec, material, "obj:illum", ParsedMetadataValue::I64(value))?;
+                    insert_metadata(
+                        children,
+                        material,
+                        "obj:illum",
+                        ParsedMetadataValue::I64(value),
+                    )?;
                 }
             }
             "Ka" | "Ks" => {
@@ -489,12 +485,12 @@ fn parse_mtl<'session>(
                     let color = parse_legacy_color(exec, &tokens, line_number)?;
                     let metadata_key = if keyword == "Ka" { "obj:ka" } else { "obj:ks" };
                     let value = owned_string(
-                        exec,
+                        children,
                         trailing_text_after_keyword(raw_line, &tokens).unwrap_or_default(),
                         "obj-mtl-color-source",
                     )?;
                     insert_metadata(
-                        exec,
+                        children,
                         material,
                         metadata_key,
                         ParsedMetadataValue::String(value),
@@ -502,7 +498,7 @@ fn parse_mtl<'session>(
                     let mut factor = Vec3::new(color.r, color.g, color.b);
                     if color.r < 0.0 || color.g < 0.0 || color.b < 0.0 {
                         record_material_loss(
-                            exec,
+                            children,
                             snapshot,
                             line_number,
                             tokens[0],
@@ -526,18 +522,23 @@ fn parse_mtl<'session>(
                 // Validate the complete option prefix before consulting omission authority.
                 let arguments = parse_map_arguments(exec, &tokens[1..], line_number)?;
                 if let Some(material) = current.as_mut() {
-                    let (transform, sampler) =
-                        map_texture_options(exec, snapshot, &tokens[1..], &arguments, line_number)?;
+                    let (transform, sampler) = map_texture_options(
+                        children,
+                        snapshot,
+                        &tokens[1..],
+                        &arguments,
+                        line_number,
+                    )?;
                     let path = &tokens[1 + arguments.path_index..];
-                    match texture_path_from_tokens(exec, raw_line, path)? {
+                    match texture_path_from_tokens(children, raw_line, path)? {
                         TexturePathOutcome::Value(texture_path) => {
                             let source = owned_string(
-                                exec,
+                                children,
                                 trailing_text_after_keyword(raw_line, &tokens).unwrap_or_default(),
                                 "obj-mtl-map-source",
                             )?;
                             insert_metadata(
-                                exec,
+                                children,
                                 material,
                                 "obj:map_kd",
                                 ParsedMetadataValue::String(source),
@@ -550,7 +551,7 @@ fn parse_mtl<'session>(
                             });
                         }
                         TexturePathOutcome::TooLong => push_dependency_warning(
-                            exec,
+                            &mut children.services()?,
                             snapshot,
                             Some((line_number, 1)),
                             "obj.mtl_texture_path_limit",
@@ -569,11 +570,11 @@ fn parse_mtl<'session>(
         }
     }
 
-    flush_material(exec, library, current)
+    flush_material(&mut children.services()?, library, current)
 }
 
 fn flush_material<'session>(
-    exec: &mut ParseExecution<'_, 'session>,
+    exec: &mut ParseServices<'_, '_, 'session>,
     library: &mut MaterialLibrary<'session>,
     material: Option<ParsedMaterial<'session>>,
 ) -> ParseResult<()> {
@@ -584,7 +585,7 @@ fn flush_material<'session>(
 }
 
 fn finalize_materials(
-    exec: &mut ParseExecution<'_, '_>,
+    children: &mut ParseChildren<'_, '_, '_>,
     library: &mut MaterialLibrary<'_>,
 ) -> ParseResult<()> {
     if library.materials.len() <= 1 {
@@ -592,27 +593,22 @@ fn finalize_materials(
     }
 
     interruptible_sort_by(
-        exec,
+        children,
         &mut library.materials,
-        |exec, work, left, right| match work.compare_str(
-            exec,
-            left.name.as_str(),
-            right.name.as_str(),
-        )? {
-            Ordering::Equal => work.run_leaf(exec, || right.order.cmp(&left.order)),
+        |work, left, right| match work.compare_str(left.name.as_str(), right.name.as_str())? {
+            Ordering::Equal => work.run_leaf(|| right.order.cmp(&left.order)),
             ordering => Ok(ordering),
         },
     )?;
     interruptible_dedup_by(
-        exec,
+        children,
         &mut library.materials,
-        |exec, work, previous, current| {
+        |work, previous, current| {
             let duplicate =
-                work.compare_str(exec, previous.name.as_str(), current.name.as_str())?
-                    == Ordering::Equal;
+                work.compare_str(previous.name.as_str(), current.name.as_str())? == Ordering::Equal;
             if duplicate {
                 push_warning(
-                    exec,
+                    &mut work.work.services()?,
                     None,
                     "obj.mtl_duplicate_material",
                     format_args!(
@@ -627,13 +623,18 @@ fn finalize_materials(
 }
 
 fn insert_metadata<'session>(
-    exec: &mut ParseExecution<'_, 'session>,
+    children: &mut ParseChildren<'_, '_, 'session>,
     material: &mut ParsedMaterial<'session>,
     key: &'static str,
     value: ParsedMetadataValue<'session>,
 ) -> ParseResult<()> {
-    let key = ParsedString(owned_string(exec, key, "obj-mtl-metadata-key")?);
-    drop(material.metadata.entries.try_insert(exec, key, value)?);
+    let key = ParsedString(owned_string(children, key, "obj-mtl-metadata-key")?);
+    drop(
+        material
+            .metadata
+            .entries
+            .try_insert(&mut children.services()?, key, value)?,
+    );
     Ok(())
 }
 
@@ -659,34 +660,38 @@ impl<'line> std::ops::Deref for MtlTokenBuffer<'_, 'line> {
 }
 
 fn tokenize_mtl<'session, 'line>(
-    exec: &mut ParseExecution<'_, 'session>,
+    children: &mut ParseChildren<'_, '_, 'session>,
     scan_scratch: &mut parser::TokenScanScratch,
     decoded_line: &'line TextInputLine<'_, '_>,
 ) -> ParseResult<MtlTokenBuffer<'session, 'line>> {
     let line = decoded_line.text();
-    let token_work =
-        exec.bind_work_group([ImportWorkClass::Tokens, ImportWorkClass::TokenBytes])?;
+    let token_work = children.bind_group([ImportWorkClass::Tokens, ImportWorkClass::TokenBytes])?;
     let mut tokens = MtlTokenBuffer {
-        values: exec.metered_vec(ImportStorageClass::FormatNormalization, "obj-mtl-tokens"),
+        values: children
+            .services()?
+            .metered_vec(ImportStorageClass::FormatNormalization, "obj-mtl-tokens"),
         comment_start: None,
     };
     tokens.comment_start = parser::scan_token_ranges(
-        exec,
+        children,
         scan_scratch,
         line,
         "obj-mtl-token-scan-work",
         |_, _, _| Ok(()),
-        |exec, start, end| {
-            exec.with_work(
-                &token_work,
-                [1, usize_amount(exec, end - start, "obj-mtl-token-bytes")?],
-                |exec, work| {
+        |children, start, end| {
+            let amounts = [
+                1,
+                usize_amount(&children.services()?, end - start, "obj-mtl-token-bytes")?,
+            ];
+            let errors = children.error_view();
+            children.child(&token_work, amounts, |work| {
+                work.run_returned_with_storage::<_, crate::ObjFailure>(|mut storage| {
                     let column = start
                         .checked_add(1)
                         .and_then(|column| u32::try_from(column).ok())
-                        .ok_or_else(|| exec.resource_limit_exceeded("line-columns", u64::MAX))?;
-                    tokens.values.try_push(
-                        exec,
+                        .ok_or_else(|| errors.resource_limit_exceeded("line-columns", u64::MAX))?;
+                    storage.push_vec(
+                        &mut tokens.values,
                         MtlToken {
                             text: &line[start..end],
                             start,
@@ -694,16 +699,16 @@ fn tokenize_mtl<'session, 'line>(
                             column,
                         },
                     )?;
-                    work.complete_all()
-                },
-            )
+                    Ok(((), amounts))
+                })
+            })
         },
     )?;
     Ok(tokens)
 }
 
 fn parse_color(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     snapshot: &DependencySnapshot<'_>,
     tokens: &[MtlToken<'_>],
     line_number: u32,
@@ -734,7 +739,7 @@ fn parse_color(
 }
 
 fn parse_scalar(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     snapshot: &DependencySnapshot<'_>,
     tokens: &[MtlToken<'_>],
     line_number: u32,
@@ -754,7 +759,7 @@ fn parse_scalar(
 }
 
 fn parse_i64(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     snapshot: &DependencySnapshot<'_>,
     tokens: &[MtlToken<'_>],
     line_number: u32,
@@ -796,7 +801,7 @@ fn parse_i64(
 }
 
 fn parse_legacy_color(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     tokens: &[MtlToken<'_>],
     line_number: u32,
 ) -> ParseResult<Color> {
@@ -821,7 +826,7 @@ fn parse_legacy_color(
 }
 
 fn parse_f32_warning(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     snapshot: &DependencySnapshot<'_>,
     text: &str,
     line_number: u32,
@@ -870,7 +875,7 @@ struct MapArguments {
 }
 
 fn parse_map_arguments(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     tokens: &[MtlToken<'_>],
     line_number: u32,
 ) -> ParseResult<MapArguments> {
@@ -1007,7 +1012,7 @@ fn parse_map_arguments(
     )))
 }
 
-fn enforce_map_numeric_limit(exec: &mut ParseExecution<'_, '_>, text: &str) -> ParseResult<()> {
+fn enforce_map_numeric_limit(exec: &mut ParseServices<'_, '_, '_>, text: &str) -> ParseResult<()> {
     exec.enforce_resource_limit(
         "obj-mtl-number-bytes",
         usize_amount(exec, text.len(), "obj-mtl-number-bytes")?,
@@ -1016,7 +1021,7 @@ fn enforce_map_numeric_limit(exec: &mut ParseExecution<'_, '_>, text: &str) -> P
 }
 
 fn parse_required_map_number(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     token: MtlToken<'_>,
     line_number: u32,
 ) -> ParseResult<f32> {
@@ -1037,7 +1042,7 @@ fn parse_required_map_number(
 }
 
 fn map_syntax_failure(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     token: MtlToken<'_>,
     line_number: u32,
     reason: &'static str,
@@ -1051,7 +1056,7 @@ fn map_syntax_failure(
 }
 
 fn map_texture_options(
-    exec: &mut ParseExecution<'_, '_>,
+    children: &mut ParseChildren<'_, '_, '_>,
     snapshot: &DependencySnapshot<'_>,
     tokens: &[MtlToken<'_>],
     arguments: &MapArguments,
@@ -1059,6 +1064,7 @@ fn map_texture_options(
 ) -> ParseResult<(TextureTransform, SamplerState)> {
     let mut index = 0;
     while index < arguments.path_index {
+        let exec = &mut children.services()?;
         exec.poll()?;
         let option = tokens[index];
         let code = match option.text {
@@ -1072,7 +1078,7 @@ fn map_texture_options(
         };
         if let Some(code) = code {
             record_material_loss(
-                exec,
+                children,
                 snapshot,
                 line_number,
                 option,
@@ -1081,7 +1087,7 @@ fn map_texture_options(
             )?;
         } else if !is_known_map_option(option.text) {
             push_dependency_warning(
-                exec,
+                &mut children.services()?,
                 snapshot,
                 Some((line_number, option.column)),
                 "obj.mtl_unsupported_texture_option",
@@ -1105,7 +1111,7 @@ fn map_texture_options(
     ] {
         if nonneutral && let Some(index) = option_index {
             record_material_loss(
-                exec,
+                children,
                 snapshot,
                 line_number,
                 tokens[index],
@@ -1119,9 +1125,13 @@ fn map_texture_options(
     // components directly; the original manual does not uniquely specify this equation.
     let scale = Vec2::new(arguments.scale[0], arguments.scale[1]);
     let offset = Vec2::new(arguments.offset[0], arguments.offset[1]);
-    let transform = TextureTransform::try_new(offset, 0.0, scale).map_err(|_| {
-        exec.format_failure(crate::ObjFailure::internal("invalid-texture-transform"))
-    })?;
+    let transform =
+        TextureTransform::try_new(offset, 0.0, scale).map_err(|_| match children.services() {
+            Ok(mut exec) => {
+                exec.format_failure(crate::ObjFailure::internal("invalid-texture-transform"))
+            }
+            Err(cause) => cause,
+        })?;
     let default = SamplerState::CANONICAL_DEFAULT;
     let address = if arguments.clamp {
         // The manual leaves the underlying material unchanged outside the single map copy.
@@ -1141,7 +1151,7 @@ fn map_texture_options(
 }
 
 fn record_material_loss(
-    exec: &mut ParseExecution<'_, '_>,
+    children: &mut ParseChildren<'_, '_, '_>,
     snapshot: &DependencySnapshot<'_>,
     line_number: u32,
     token: MtlToken<'_>,
@@ -1150,7 +1160,7 @@ fn record_material_loss(
 ) -> ParseResult<()> {
     let source = snapshot.diagnostic_source();
     let path = owned_format(
-        exec,
+        children,
         format_args!(
             "/dependencies/{}/records/{line_number}/{}",
             source.path().as_str(),
@@ -1158,7 +1168,7 @@ fn record_material_loss(
         ),
     )?;
     let code = DiagnosticCode::new(code).expect("static OBJ diagnostic code must be valid");
-    exec.record_source_semantic_loss(
+    children.services()?.record_source_semantic_loss(
         code,
         SourceScopeEntityKind::Material,
         path.as_str(),
@@ -1177,10 +1187,11 @@ fn record_material_loss(
 }
 
 fn texture_path_from_tokens<'session>(
-    exec: &mut ParseExecution<'_, 'session>,
+    children: &mut ParseChildren<'_, '_, 'session>,
     raw_line: &str,
     tokens: &[MtlToken<'_>],
 ) -> ParseResult<TexturePathOutcome<'session>> {
+    let exec = &mut children.services()?;
     let first = tokens.first().ok_or_else(|| {
         exec.format_failure(crate::ObjFailure::internal("missing-map-path-token"))
     })?;
@@ -1191,7 +1202,7 @@ fn texture_path_from_tokens<'session>(
     if path.len() > parser::max_text_value_bytes(exec) {
         return Ok(TexturePathOutcome::TooLong);
     }
-    owned_string(exec, path, "obj-mtl-texture-path").map(TexturePathOutcome::Value)
+    owned_string(children, path, "obj-mtl-texture-path").map(TexturePathOutcome::Value)
 }
 
 #[allow(
@@ -1204,54 +1215,57 @@ enum TexturePathOutcome<'session> {
 }
 
 fn owned_string<'session>(
-    exec: &mut ParseExecution<'_, 'session>,
+    children: &mut ParseChildren<'_, '_, 'session>,
     value: &str,
     resource: &'static str,
 ) -> ParseResult<MeteredString<'session>> {
-    parser::enforce_text_value_limit(exec, value.len(), resource)?;
-    let string_work = exec.bind_work_group([ImportWorkClass::StringBytes])?;
-    exec.with_work(
-        &string_work,
-        [usize_amount(exec, value.len(), resource)?],
-        |exec, work| {
-            let mut output = exec.metered_string(ImportStorageClass::FormatNormalization, resource);
-            output.try_push_str(exec, value)?;
-            work.complete_all()?;
-            Ok(output)
-        },
-    )
+    parser::enforce_text_value_limit(&children.services()?, value.len(), resource)?;
+    let string_work = children.bind_group([ImportWorkClass::StringBytes])?;
+    let amount = usize_amount(&children.services()?, value.len(), resource)?;
+    children.child(&string_work, [amount], |work| {
+        work.run_returned_with_storage::<_, crate::ObjFailure>(|mut storage| {
+            let mut output =
+                storage.metered_string(ImportStorageClass::FormatNormalization, resource);
+            storage.append_string(&mut output, value)?;
+            Ok((output, [amount]))
+        })
+    })
 }
 
 fn owned_format<'session>(
-    exec: &mut ParseExecution<'_, 'session>,
+    children: &mut ParseChildren<'_, '_, 'session>,
     arguments: fmt::Arguments<'_>,
 ) -> ParseResult<MeteredString<'session>> {
     use fmt::Write as _;
 
     let mut counter = FormatByteCounter::default();
-    counter
-        .write_fmt(arguments)
-        .map_err(|_| exec.allocation_failure("obj-mtl-formatted-string-length"))?;
-    parser::enforce_text_value_limit(exec, counter.bytes, "obj-mtl-formatted-string-bytes")?;
-    let string_work = exec.bind_work_group([ImportWorkClass::StringBytes])?;
-    exec.with_work(
-        &string_work,
-        [usize_amount(
-            exec,
-            counter.bytes,
-            "obj-mtl-formatted-string-bytes",
-        )?],
-        |exec, work| {
-            let mut output = exec.metered_string(
+    counter.write_fmt(arguments).map_err(|_| {
+        children
+            .error_view()
+            .allocation_failure("obj-mtl-formatted-string-length")
+    })?;
+    parser::enforce_text_value_limit(
+        &children.services()?,
+        counter.bytes,
+        "obj-mtl-formatted-string-bytes",
+    )?;
+    let string_work = children.bind_group([ImportWorkClass::StringBytes])?;
+    let amount = usize_amount(
+        &children.services()?,
+        counter.bytes,
+        "obj-mtl-formatted-string-bytes",
+    )?;
+    children.child(&string_work, [amount], |work| {
+        work.run_returned_with_storage::<_, crate::ObjFailure>(|mut storage| {
+            let mut output = storage.metered_string(
                 ImportStorageClass::FormatNormalization,
                 "obj-mtl-formatted-string",
             );
-            output.try_reserve(exec, counter.bytes)?;
-            output.try_write_fmt(exec, arguments)?;
-            work.complete_all()?;
-            Ok(output)
-        },
-    )
+            storage.reserve_string(&mut output, counter.bytes)?;
+            storage.write_string_fmt(&mut output, arguments)?;
+            Ok((output, [amount]))
+        })
+    })
 }
 
 #[derive(Default)]
@@ -1308,7 +1322,7 @@ fn trailing_mtl_token_range(tokens: &[MtlToken<'_>]) -> Option<std::ops::Range<u
 }
 
 fn recovery_map_path_range(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     tokens: &[MtlToken<'_>],
 ) -> ParseResult<Option<std::ops::Range<usize>>> {
     let mut index = 0usize;
@@ -1373,7 +1387,7 @@ fn map_option_recovery_arity(option: &str) -> MapOptionRecoveryArity {
 }
 
 pub(crate) fn push_warning(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     location: Option<(u32, u32)>,
     code: &'static str,
     message: fmt::Arguments<'_>,
@@ -1390,7 +1404,7 @@ pub(crate) fn push_warning(
 }
 
 fn push_dependency_warning(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     snapshot: &DependencySnapshot<'_>,
     location: Option<(u32, u32)>,
     code: &'static str,

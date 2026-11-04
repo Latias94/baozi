@@ -127,8 +127,8 @@ pub use resource_graph::{
     ManifestUnavailableReplay, ResourceManifestCounts, SuccessfulInputManifest,
 };
 pub use scope::{
-    ImportStorageClass, ImportWorkClass, ImportWorkGroup, ImportWorkScope, ParseContext,
-    ParseErrorView, ParseExecution, ParseFailure, ParseParser, ParseResult, ParseRoot,
+    ImportStorageClass, ImportWorkClass, ParseChildren, ParseContext, ParseErrorView, ParseFailure,
+    ParseParser, ParsePieceError, ParseResult, ParseRoot, ParseScanReturn, ParseServices,
     ParseStorage, ParseWorkLayout,
 };
 pub use session::ReadHint;

@@ -2,17 +2,18 @@ use super::{
     AccessorContract, AccessorOwner, AccessorSources, BufferData, ContentError,
     GEOMETRY_POLL_INTERVAL, MeshInstanceStorage, Result, accessor_provenance, authoring_u32,
     gltf_parse_error, to_u64, try_extend_provenance_unique, try_vec_capacity, try_vec_filled,
-    validate_accessor, with_poll,
+    validate_accessor,
 };
 use crate::document::schema as json;
+use baozi_import::ParseServices;
 use baozi_import::authoring::{
     AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationClipAuthoring,
     AnimationExtrapolation, AnimationInterpolation, AnimationTargetAuthoring, AnimationTimeDomain,
     AuthoringRange, NodeLocalId, Presence, Quat,
 };
 use baozi_import::{
-    DiagnosticCode, ImportStorageClass, ImportWorkClass, ImportWorkScope, MeteredString,
-    MeteredVec, ParseExecution, SourceScopeEntityKind,
+    DiagnosticCode, ImportStorageClass, ImportWorkClass, MeteredString, MeteredVec, ParseParser,
+    ParseRoot, SourceScopeEntityKind,
 };
 
 const MAX_CHANNEL_PROVENANCE_SOURCES: usize = 2 * AccessorSources::MAX_SOURCES;
@@ -134,32 +135,39 @@ pub(super) struct AnimationStorage<'scope> {
 }
 
 pub(super) fn preflight<'scope, 'document>(
-    ctx: &mut ParseExecution<'_, 'scope>,
+    ctx: &mut ParseRoot<'_, '_, 'scope>,
     gltf: &'document crate::document::Document<'_>,
     selected_nodes: &[bool],
 ) -> Result<AnimationContracts<'scope, 'document>> {
-    with_poll(ctx, |ctx| preflight_inner(ctx, gltf, selected_nodes))?
+    {
+        ctx.poll()?;
+        let value = preflight_inner(ctx, gltf, selected_nodes);
+        ctx.poll_result(value)
+    }
 }
 
 fn preflight_inner<'scope, 'document>(
-    ctx: &mut ParseExecution<'_, 'scope>,
+    ctx: &mut ParseRoot<'_, '_, 'scope>,
     gltf: &'document crate::document::Document<'_>,
     selected_nodes: &[bool],
 ) -> Result<AnimationContracts<'scope, 'document>> {
     let source_animations = &gltf.tables().animations;
     let mut source_channel_count = 0usize;
     for (index, animation) in source_animations.iter().enumerate() {
-        super::poll_parser_loop(ctx, index)?;
+        super::poll_parser_loop(&mut ctx.services()?, index)?;
         source_channel_count = source_channel_count
             .checked_add(animation.channels.len())
-            .ok_or_else(|| ctx.allocation_failure("gltf-animation-channel-count"))?;
+            .ok_or_else(|| {
+                ctx.error_view()
+                    .allocation_failure("gltf-animation-channel-count")
+            })?;
     }
-    let node_target_count = selected_nodes
-        .len()
-        .checked_mul(4)
-        .ok_or_else(|| ctx.allocation_failure("gltf-animation-target-count"))?;
+    let node_target_count = selected_nodes.len().checked_mul(4).ok_or_else(|| {
+        ctx.error_view()
+            .allocation_failure("gltf-animation-target-count")
+    })?;
     let mut seen_targets = try_vec_filled(
-        ctx,
+        &mut ctx.services()?,
         ImportStorageClass::FormatNormalization,
         node_target_count,
         usize::MAX,
@@ -167,32 +175,32 @@ fn preflight_inner<'scope, 'document>(
     )?;
 
     let mut morph_widths = try_vec_filled(
-        ctx,
+        &mut ctx.services()?,
         ImportStorageClass::FormatNormalization,
         gltf.tables().meshes.len(),
         None,
         "gltf-animation-morph-widths",
     )?;
     let mut clips = try_vec_capacity(
-        ctx,
+        &mut ctx.services()?,
         ImportStorageClass::FormatNormalization,
         source_animations.len(),
         "gltf-animation-contract-clips",
     )?;
     let mut materialization_channels = try_vec_capacity(
-        ctx,
+        &mut ctx.services()?,
         ImportStorageClass::FormatNormalization,
         source_channel_count,
         "gltf-animation-materialization-channels",
     )?;
     let mut selected_animations = try_vec_capacity(
-        ctx,
+        &mut ctx.services()?,
         ImportStorageClass::FormatNormalization,
         source_animations.len(),
         "gltf-animation-selection",
     )?;
     let mut source_channels = try_vec_capacity(
-        ctx,
+        &mut ctx.services()?,
         ImportStorageClass::FormatNormalization,
         source_channel_count,
         "gltf-animation-channel-selection",
@@ -202,7 +210,7 @@ fn preflight_inner<'scope, 'document>(
     let mut retained_channel_count = 0usize;
     let mut visited_channels = 0usize;
 
-    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
+    let work_group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
     for animation in gltf.animations() {
         let animation_index = animation.index();
         let source_animation = source_animations.get(animation_index).ok_or_else(|| {
@@ -218,20 +226,20 @@ fn preflight_inner<'scope, 'document>(
         let mut animation_cells = 0usize;
 
         for (channel_index, runtime_channel) in animation.channels().enumerate() {
-            ctx.with_work(
-                &work_group,
-                [1],
-                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-            )?;
+            let runtime_channel = ctx.child(&work_group, [1], |child| {
+                child.run([1], || Ok::<_, baozi_import::ParseFailure>(runtime_channel))
+            })?;
             if visited_channels.is_multiple_of(GEOMETRY_POLL_INTERVAL) {
                 ctx.poll()?;
             }
-            visited_channels = visited_channels
-                .checked_add(1)
-                .ok_or_else(|| ctx.allocation_failure("gltf-animation-channel-progress"))?;
-            runtime_channel_count = runtime_channel_count
-                .checked_add(1)
-                .ok_or_else(|| ctx.allocation_failure("gltf-animation-runtime-channel-count"))?;
+            visited_channels = visited_channels.checked_add(1).ok_or_else(|| {
+                ctx.error_view()
+                    .allocation_failure("gltf-animation-channel-progress")
+            })?;
+            runtime_channel_count = runtime_channel_count.checked_add(1).ok_or_else(|| {
+                ctx.error_view()
+                    .allocation_failure("gltf-animation-runtime-channel-count")
+            })?;
             let source_channel = source_animation
                 .channels
                 .get(channel_index)
@@ -268,7 +276,7 @@ fn preflight_inner<'scope, 'document>(
                 channel_index,
             };
             let input = validate_accessor(
-                ctx,
+                &mut ctx.services()?,
                 gltf,
                 sampler.input.value(),
                 owner,
@@ -285,9 +293,10 @@ fn preflight_inner<'scope, 'document>(
             }
             if !selected {
                 source_channels.try_push_reserved(SourceChannelDisposition::ScopeOmitted)?;
-                animation_cells = animation_cells
-                    .checked_add(input.count)
-                    .ok_or_else(|| ctx.allocation_failure("gltf-animation-duration-cells"))?;
+                animation_cells = animation_cells.checked_add(input.count).ok_or_else(|| {
+                    ctx.error_view()
+                        .allocation_failure("gltf-animation-duration-cells")
+                })?;
                 materialization_channels.try_push_reserved(
                     AnimationMaterializationContract::DurationOnly(AnimationDurationContract {
                         source: runtime_channel,
@@ -302,7 +311,10 @@ fn preflight_inner<'scope, 'document>(
             let seen_index = source_node_index
                 .checked_mul(4)
                 .and_then(|base| base.checked_add(property.target_slot()))
-                .ok_or_else(|| ctx.allocation_failure("gltf-animation-target-index"))?;
+                .ok_or_else(|| {
+                    ctx.error_view()
+                        .allocation_failure("gltf-animation-target-index")
+                })?;
             let seen = seen_targets
                 .as_mut_slice()
                 .get_mut(seen_index)
@@ -328,7 +340,6 @@ fn preflight_inner<'scope, 'document>(
                     .mesh
                     .ok_or_else(|| {
                         channel_error_at(
-                            ctx,
                             animation_index,
                             channel_index,
                             "morph weights target a meshless node",
@@ -337,7 +348,6 @@ fn preflight_inner<'scope, 'document>(
                     .value();
                 let mesh = gltf.tables().meshes.get(mesh_index).ok_or_else(|| {
                     channel_error_at(
-                        ctx,
                         animation_index,
                         channel_index,
                         "targets morph weights on a missing mesh",
@@ -361,7 +371,6 @@ fn preflight_inner<'scope, 'document>(
                 };
                 if width == 0 {
                     return Err(channel_error_at(
-                        ctx,
                         animation_index,
                         channel_index,
                         "targets morph weights on a mesh without morph targets",
@@ -379,7 +388,7 @@ fn preflight_inner<'scope, 'document>(
                 )));
             }
             let output = validate_accessor(
-                ctx,
+                &mut ctx.services()?,
                 gltf,
                 sampler.output.value(),
                 owner,
@@ -401,7 +410,10 @@ fn preflight_inner<'scope, 'document>(
                         1
                     })
                 })
-                .ok_or_else(|| ctx.allocation_failure("gltf-animation-output-count"))?;
+                .ok_or_else(|| {
+                    ctx.error_view()
+                        .allocation_failure("gltf-animation-output-count")
+                })?;
             if output.count != expected_output_count {
                 return Err(gltf_parse_error(format_args!(
                     "glTF animation {animation_index} channel {channel_index} output accessor count {} does not match expected {expected_output_count}",
@@ -411,14 +423,18 @@ fn preflight_inner<'scope, 'document>(
             let output_cells = output
                 .count
                 .checked_mul(property.accessor_width())
-                .ok_or_else(|| ctx.allocation_failure("gltf-animation-output-cells"))?;
-            let cell_count = input
-                .count
-                .checked_add(output_cells)
-                .ok_or_else(|| ctx.allocation_failure("gltf-animation-channel-cells"))?;
-            animation_cells = animation_cells
-                .checked_add(cell_count)
-                .ok_or_else(|| ctx.allocation_failure("gltf-animation-total-cells"))?;
+                .ok_or_else(|| {
+                    ctx.error_view()
+                        .allocation_failure("gltf-animation-output-cells")
+                })?;
+            let cell_count = input.count.checked_add(output_cells).ok_or_else(|| {
+                ctx.error_view()
+                    .allocation_failure("gltf-animation-channel-cells")
+            })?;
+            animation_cells = animation_cells.checked_add(cell_count).ok_or_else(|| {
+                ctx.error_view()
+                    .allocation_failure("gltf-animation-total-cells")
+            })?;
             materialization_channels.try_push_reserved(
                 AnimationMaterializationContract::Retained(AnimationChannelContract {
                     source: runtime_channel,
@@ -437,7 +453,10 @@ fn preflight_inner<'scope, 'document>(
             animation_selected = true;
             animation_retained_channel_count = animation_retained_channel_count
                 .checked_add(1)
-                .ok_or_else(|| ctx.allocation_failure("gltf-animation-retained-channel-count"))?;
+                .ok_or_else(|| {
+                    ctx.error_view()
+                        .allocation_failure("gltf-animation-retained-channel-count")
+                })?;
         }
 
         if runtime_channel_count != source_animation.channels.len() {
@@ -449,17 +468,27 @@ fn preflight_inner<'scope, 'document>(
         let materialization_count = materialization_channels
             .len()
             .checked_sub(materialization_offset)
-            .ok_or_else(|| ctx.allocation_failure("gltf-animation-materialization-range"))?;
+            .ok_or_else(|| {
+                ctx.error_view()
+                    .allocation_failure("gltf-animation-materialization-range")
+            })?;
         if animation_selected {
             total_name_bytes = total_name_bytes
                 .checked_add(animation.name().map_or(0, str::len))
-                .ok_or_else(|| ctx.allocation_failure("gltf-animation-name-bytes"))?;
-            total_cells = total_cells
-                .checked_add(animation_cells)
-                .ok_or_else(|| ctx.allocation_failure("gltf-animation-total-cells"))?;
+                .ok_or_else(|| {
+                    ctx.error_view()
+                        .allocation_failure("gltf-animation-name-bytes")
+                })?;
+            total_cells = total_cells.checked_add(animation_cells).ok_or_else(|| {
+                ctx.error_view()
+                    .allocation_failure("gltf-animation-total-cells")
+            })?;
             retained_channel_count = retained_channel_count
                 .checked_add(animation_retained_channel_count)
-                .ok_or_else(|| ctx.allocation_failure("gltf-animation-retained-channel-count"))?;
+                .ok_or_else(|| {
+                    ctx.error_view()
+                        .allocation_failure("gltf-animation-retained-channel-count")
+                })?;
             clips.try_push_reserved(AnimationClipContract {
                 source_index: animation_index,
                 name: animation.name(),
@@ -472,9 +501,12 @@ fn preflight_inner<'scope, 'document>(
         }
         let source_channel_end = source_channel_offset
             .checked_add(runtime_channel_count)
-            .ok_or_else(|| ctx.allocation_failure("gltf-animation-channel-range"))?;
+            .ok_or_else(|| {
+                ctx.error_view()
+                    .allocation_failure("gltf-animation-channel-range")
+            })?;
         record_channel_losses(
-            ctx,
+            &mut ctx.services()?,
             animation_index,
             source_channels
                 .as_slice()
@@ -505,7 +537,7 @@ fn preflight_inner<'scope, 'document>(
 }
 
 fn record_channel_losses(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseServices<'_, '_, '_>,
     animation_index: usize,
     dispositions: &[SourceChannelDisposition],
     animation_selected: bool,
@@ -599,29 +631,29 @@ fn output_contract(property: AnimationProperty) -> AccessorContract {
 }
 
 pub(super) fn build_storage<'scope>(
-    ctx: &mut ParseExecution<'_, 'scope>,
+    ctx: &mut ParseRoot<'_, '_, 'scope>,
     buffers: &[Option<BufferData<'_>>],
     node_ids: &[Option<NodeLocalId>],
     mesh_instances: &[MeshInstanceStorage],
     contracts: &AnimationContracts<'_, '_>,
 ) -> Result<AnimationStorage<'scope>> {
     let mut instance_ids = try_vec_filled(
-        ctx,
+        &mut ctx.services()?,
         ImportStorageClass::FormatNormalization,
         node_ids.len(),
         None,
         "gltf-animation-mesh-instance-map",
     )?;
-    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
+    let work_group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
     for (ordinal, instance) in mesh_instances.iter().enumerate() {
-        ctx.with_work(
-            &work_group,
-            [1],
-            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-        )?;
+        let source_node_index = ctx.child(&work_group, [1], |child| {
+            child.run([1], || {
+                Ok::<_, baozi_import::ParseFailure>(instance.source_node_index)
+            })
+        })?;
         let slot = instance_ids
             .as_mut_slice()
-            .get_mut(instance.source_node_index)
+            .get_mut(source_node_index)
             .ok_or_else(|| {
                 ContentError::from(super::GltfFailure::internal(
                     "animation mesh instance source node is out of range",
@@ -633,7 +665,7 @@ pub(super) fn build_storage<'scope>(
             )));
         }
         *slot = Some(authoring_u32(
-            ctx,
+            &mut ctx.services()?,
             ordinal,
             "gltf-animation-mesh-instance-index",
         )?);
@@ -643,201 +675,234 @@ pub(super) fn build_storage<'scope>(
         .materialization_channels
         .len()
         .checked_add(contracts.retained_channel_count)
-        .ok_or_else(|| ctx.allocation_failure("gltf-animation-provenance-count"))?;
+        .ok_or_else(|| {
+            ctx.error_view()
+                .allocation_failure("gltf-animation-provenance-count")
+        })?;
     let provenance_work = to_u64(accessor_count)
         .checked_mul(AccessorSources::COLLECTION_WORK_BOUND)
-        .ok_or_else(|| ctx.allocation_failure("gltf-animation-provenance-work"))?;
-    let available_provenance_count = ctx.with_work_group(
-        [(ImportWorkClass::WorkUnits, to_u64(buffers.len()))],
-        |ctx, work| -> Result<_> {
+        .ok_or_else(|| {
+            ctx.error_view()
+                .allocation_failure("gltf-animation-provenance-work")
+        })?;
+    let available_provenance_count = {
+        let layout = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+        ctx.child(&layout, [to_u64(buffers.len())], |child| -> Result<_> {
             let mut count = 0usize;
             for (index, buffer) in buffers.iter().enumerate() {
-                super::poll_parser_loop(ctx, index)?;
-                count += usize::from(buffer.is_some());
-                work.complete([1])?;
+                super::poll_parser_loop(&mut child.services()?, index)?;
+                child.run([1], || {
+                    count += usize::from(buffer.is_some());
+                    Ok::<_, baozi_import::ParseFailure>(())
+                })?;
             }
             Ok(count.max(1))
-        },
-    )?;
+        })
+    }?;
     let maximum_channel_provenance = contracts
         .retained_channel_count
         .checked_mul(available_provenance_count.min(MAX_CHANNEL_PROVENANCE_SOURCES))
-        .ok_or_else(|| ctx.allocation_failure("gltf-animation-channel-provenance-count"))?;
+        .ok_or_else(|| {
+            ctx.error_view()
+                .allocation_failure("gltf-animation-channel-provenance-count")
+        })?;
     let mut maximum_pending_provenance = 0;
     let mut maximum_clip_provenance = 0usize;
     for clip in contracts.clips.as_slice() {
-        ctx.with_work(
-            &work_group,
-            [1],
-            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-        )?;
-        let references = clip
-            .materialization_count
-            .checked_add(clip.retained_channel_count)
+        let counts = ctx.child(&work_group, [1], |child| {
+            child.run([1], || {
+                Ok::<_, baozi_import::ParseFailure>((
+                    clip.materialization_count,
+                    clip.retained_channel_count,
+                ))
+            })
+        })?;
+        let references = counts
+            .0
+            .checked_add(counts.1)
             .and_then(|count| count.checked_mul(AccessorSources::MAX_SOURCES))
-            .ok_or_else(|| ctx.allocation_failure("gltf-animation-clip-provenance-count"))?;
+            .ok_or_else(|| {
+                ctx.error_view()
+                    .allocation_failure("gltf-animation-clip-provenance-count")
+            })?;
         maximum_pending_provenance = maximum_pending_provenance.max(references);
         maximum_clip_provenance = maximum_clip_provenance
             .checked_add(references.min(available_provenance_count))
-            .ok_or_else(|| ctx.allocation_failure("gltf-animation-clip-provenance-count"))?;
+            .ok_or_else(|| {
+                ctx.error_view()
+                    .allocation_failure("gltf-animation-clip-provenance-count")
+            })?;
     }
-    ctx.charge_work(provenance_work)?;
+    let provenance_layout = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+    let provenance_clips = ctx.child(&provenance_layout, [provenance_work], |child| {
+        child.run([provenance_work], || {
+            Ok::<_, ContentError>(contracts.clips.as_slice())
+        })
+    })?;
     let mut clip_provenance = try_vec_capacity(
-        ctx,
+        &mut ctx.services()?,
         ImportStorageClass::FormatNormalization,
         maximum_clip_provenance,
         "gltf-animation-clip-provenance",
     )?;
     let mut clip_ranges = try_vec_capacity(
-        ctx,
+        &mut ctx.services()?,
         ImportStorageClass::FormatNormalization,
         contracts.clips.len(),
         "gltf-animation-clip-source-ranges",
     )?;
     let mut pending = try_vec_capacity(
-        ctx,
+        &mut ctx.services()?,
         ImportStorageClass::FormatNormalization,
         maximum_pending_provenance,
         "gltf-animation-pending-provenance",
     )?;
-    for contract in contracts.clips.as_slice() {
+    for contract in provenance_clips {
         ctx.poll()?;
         let start = clip_provenance.len();
-        for channel in checked_contract_range(ctx, contracts, *contract)? {
+        for channel in checked_contract_range(&mut ctx.services()?, contracts, *contract)? {
             ctx.poll()?;
             let sampler = match channel {
                 AnimationMaterializationContract::Retained(channel) => channel.source.sampler(),
                 AnimationMaterializationContract::DurationOnly(channel) => channel.source.sampler(),
             };
-            let input = accessor_provenance(ctx, buffers, sampler.input())?;
+            let input = accessor_provenance(&mut ctx.services()?, buffers, sampler.input())?;
             pending.try_extend_from_slice_reserved(input.as_slice())?;
             if matches!(channel, AnimationMaterializationContract::Retained(_)) {
-                let output = accessor_provenance(ctx, buffers, sampler.output())?;
+                let output = accessor_provenance(&mut ctx.services()?, buffers, sampler.output())?;
                 pending.try_extend_from_slice_reserved(output.as_slice())?;
             }
         }
-        try_extend_provenance_unique(ctx, &mut clip_provenance, &mut pending)?;
+        try_extend_provenance_unique(&mut ctx.children()?, &mut clip_provenance, &mut pending)?;
         clip_ranges.try_push_reserved((start, clip_provenance.len() - start))?;
     }
     drop(pending);
-    let storage = ctx.with_work_group(
-        [
-            (ImportWorkClass::WorkUnits, to_u64(contracts.total_cells)),
-            (
-                ImportWorkClass::AnimationCells,
+    let storage = {
+        let layout = ctx.bind_group([
+            ImportWorkClass::WorkUnits,
+            ImportWorkClass::AnimationCells,
+            ImportWorkClass::CanonicalStringBytes,
+        ])?;
+        ctx.child(
+            &layout,
+            [
                 to_u64(contracts.total_cells),
-            ),
-            (
-                ImportWorkClass::CanonicalStringBytes,
+                to_u64(contracts.total_cells),
                 to_u64(contracts.total_name_bytes),
-            ),
-        ],
-        |ctx, work| -> Result<_> {
-            let mut clips = try_vec_capacity(
-                ctx,
-                ImportStorageClass::SceneConstruction,
-                contracts.clips.len(),
-                "gltf-animation-storage-clips",
-            )?;
-            let mut channels = try_vec_capacity(
-                ctx,
-                ImportStorageClass::SceneConstruction,
-                contracts.retained_channel_count,
-                "gltf-animation-storage-channels",
-            )?;
-            let mut channel_provenance = try_vec_capacity(
-                ctx,
-                ImportStorageClass::FormatNormalization,
-                maximum_channel_provenance,
-                "gltf-animation-channel-provenance",
-            )?;
+            ],
+            |child| -> Result<_> {
+                let mut clips = try_vec_capacity(
+                    &mut child.services()?,
+                    ImportStorageClass::SceneConstruction,
+                    contracts.clips.len(),
+                    "gltf-animation-storage-clips",
+                )?;
+                let mut channels = try_vec_capacity(
+                    &mut child.services()?,
+                    ImportStorageClass::SceneConstruction,
+                    contracts.retained_channel_count,
+                    "gltf-animation-storage-channels",
+                )?;
+                let mut channel_provenance = try_vec_capacity(
+                    &mut child.services()?,
+                    ImportStorageClass::FormatNormalization,
+                    maximum_channel_provenance,
+                    "gltf-animation-channel-provenance",
+                )?;
 
-            for (clip_index, clip) in contracts.clips.as_slice().iter().enumerate() {
-                ctx.poll()?;
-                let materialization_channels = checked_contract_range(ctx, contracts, *clip)?;
-                let channel_offset = channels.len();
-                let (provenance_offset, provenance_count) = clip_ranges.as_slice()[clip_index];
-                let mut duration = 0.0_f64;
-                for contract in materialization_channels {
-                    match contract {
-                        AnimationMaterializationContract::Retained(contract) => {
-                            let (channel, channel_duration) = read_channel(
-                                ctx,
-                                buffers,
-                                node_ids,
-                                instance_ids.as_slice(),
-                                contract,
-                                work,
-                                &mut channel_provenance,
-                            )?;
-                            duration = duration.max(channel_duration);
-                            channels.try_push_reserved(channel)?;
-                        }
-                        AnimationMaterializationContract::DurationOnly(contract) => {
-                            let (channel_duration, _sources) =
-                                read_duration_channel(ctx, buffers, contract, work)?;
-                            duration = duration.max(channel_duration);
+                for (clip_index, clip) in contracts.clips.as_slice().iter().enumerate() {
+                    child.poll()?;
+                    let materialization_channels =
+                        checked_contract_range(&mut child.services()?, contracts, *clip)?;
+                    let channel_offset = channels.len();
+                    let (provenance_offset, provenance_count) = clip_ranges.as_slice()[clip_index];
+                    let mut duration = 0.0_f64;
+                    for contract in materialization_channels {
+                        match contract {
+                            AnimationMaterializationContract::Retained(contract) => {
+                                let (channel, channel_duration) = read_channel(
+                                    child,
+                                    buffers,
+                                    node_ids,
+                                    instance_ids.as_slice(),
+                                    contract,
+                                    &mut channel_provenance,
+                                )?;
+                                duration = duration.max(channel_duration);
+                                channels.try_push_reserved(channel)?;
+                            }
+                            AnimationMaterializationContract::DurationOnly(contract) => {
+                                let (channel_duration, _sources) =
+                                    read_duration_channel(child, buffers, contract)?;
+                                duration = duration.max(channel_duration);
+                            }
                         }
                     }
-                }
-                let name = clip
-                    .name
-                    .map(|name| -> Result<_> {
-                        let mut owned = ctx.metered_string(
-                            ImportStorageClass::FormatNormalization,
-                            "gltf-normalized-clip-name",
-                        );
-                        owned.try_reserve(ctx, name.len())?;
-                        let mut rest = name;
-                        while !rest.is_empty() {
-                            ctx.poll()?;
-                            let mut end = rest.len().min(super::BYTE_POLL_INTERVAL);
-                            while !rest.is_char_boundary(end) {
-                                end -= 1;
+                    let name = clip
+                        .name
+                        .map(|name| -> Result<_> {
+                            let mut owned = child.services()?.metered_string(
+                                ImportStorageClass::FormatNormalization,
+                                "gltf-normalized-clip-name",
+                            );
+                            owned.try_reserve(&mut child.services()?, name.len())?;
+                            let mut rest = name;
+                            while !rest.is_empty() {
+                                child.poll()?;
+                                let mut end = rest.len().min(super::BYTE_POLL_INTERVAL);
+                                while !rest.is_char_boundary(end) {
+                                    end -= 1;
+                                }
+                                let (chunk, tail) = rest.split_at(end);
+                                child.append_string(
+                                    [0, 0, to_u64(chunk.len())],
+                                    &mut owned,
+                                    chunk,
+                                )?;
+                                rest = tail;
                             }
-                            let (chunk, tail) = rest.split_at(end);
-                            owned.try_push_str(ctx, chunk)?;
-                            work.complete([0, 0, to_u64(chunk.len())])?;
-                            rest = tail;
-                        }
-                        Ok(owned)
-                    })
-                    .transpose()?;
-                clips.try_push_reserved(AnimationClipStorage {
-                    source_index: clip.source_index,
-                    name,
-                    duration,
-                    channel_offset,
-                    channel_count: clip.retained_channel_count,
-                    provenance_offset,
-                    provenance_count,
-                })?;
-            }
-            if channels.len() != contracts.retained_channel_count {
-                return Err(ContentError::from(super::GltfFailure::internal(
-                    "animation storage did not materialize every admitted channel",
-                )));
-            }
-            Ok(AnimationStorage {
-                clips,
-                channels,
-                clip_provenance,
-                channel_provenance,
-            })
-        },
-    )?;
+                            Ok(owned)
+                        })
+                        .transpose()?;
+                    clips.try_push_reserved(AnimationClipStorage {
+                        source_index: clip.source_index,
+                        name,
+                        duration,
+                        channel_offset,
+                        channel_count: clip.retained_channel_count,
+                        provenance_offset,
+                        provenance_count,
+                    })?;
+                }
+                if channels.len() != contracts.retained_channel_count {
+                    return Err(ContentError::from(super::GltfFailure::internal(
+                        "animation storage did not materialize every admitted channel",
+                    )));
+                }
+                Ok(AnimationStorage {
+                    clips,
+                    channels,
+                    clip_provenance,
+                    channel_provenance,
+                })
+            },
+        )
+    }?;
     Ok(storage)
 }
 
 fn checked_contract_range<'a>(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseServices<'_, '_, '_>,
     contracts: &'a AnimationContracts<'_, '_>,
     clip: AnimationClipContract<'_>,
 ) -> Result<&'a [AnimationMaterializationContract<'a>]> {
     let end = clip
         .materialization_offset
         .checked_add(clip.materialization_count)
-        .ok_or_else(|| ctx.allocation_failure("gltf-animation-contract-range"))?;
+        .ok_or_else(|| {
+            ctx.error_view()
+                .allocation_failure("gltf-animation-contract-range")
+        })?;
     contracts
         .materialization_channels
         .as_slice()
@@ -850,18 +915,20 @@ fn checked_contract_range<'a>(
 }
 
 fn read_duration_channel(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseParser<'_, '_, '_, '_, '_, 3, true>,
     buffers: &[Option<BufferData<'_>>],
     contract: &AnimationDurationContract<'_>,
-    work: &mut ImportWorkScope<'_, 3>,
 ) -> Result<(f64, AccessorSources)> {
-    let source = accessor_provenance(ctx, buffers, contract.source.sampler().input())?;
+    let source = accessor_provenance(
+        &mut ctx.services()?,
+        buffers,
+        contract.source.sampler().input(),
+    )?;
     let source_accessor = contract.source.sampler().input();
-    let mut input = super::accessor::bind(ctx, source_accessor, buffers)?
+    let mut input = super::accessor::bind(&mut ctx.services()?, source_accessor, buffers)?
         .scalars()
         .ok_or_else(|| {
             channel_error_at(
-                ctx,
                 contract.animation_index,
                 contract.channel_index,
                 "input accessor could not be read",
@@ -872,28 +939,27 @@ fn read_duration_channel(
         if key.is_multiple_of(GEOMETRY_POLL_INTERVAL) {
             ctx.poll()?;
         }
-        let time = next_gltf_value("glTF animation duration input iteration", &mut input)?
-            .ok_or_else(|| {
-                channel_error_at(
-                    ctx,
-                    contract.animation_index,
-                    contract.channel_index,
-                    "input accessor ended early",
-                )
-            })?;
-        let time = validate_animation_time(
-            ctx,
-            contract.animation_index,
-            contract.channel_index,
-            time,
-            previous,
-        )?;
-        previous = Some(time);
-        work.complete([1, 1, 0])?;
+        ctx.run([1, 1, 0], || -> Result<()> {
+            let time = next_gltf_value("glTF animation duration input iteration", &mut input)?
+                .ok_or_else(|| {
+                    channel_error_at(
+                        contract.animation_index,
+                        contract.channel_index,
+                        "input accessor ended early",
+                    )
+                })?;
+            let time = validate_animation_time(
+                contract.animation_index,
+                contract.channel_index,
+                time,
+                previous,
+            )?;
+            previous = Some(time);
+            Ok(())
+        })?;
     }
     if next_gltf_value("glTF animation duration input iteration", &mut input)?.is_some() {
         return Err(channel_error_at(
-            ctx,
             contract.animation_index,
             contract.channel_index,
             "input accessor produced too many values",
@@ -903,12 +969,11 @@ fn read_duration_channel(
 }
 
 fn read_channel<'scope>(
-    ctx: &mut ParseExecution<'_, 'scope>,
+    ctx: &mut ParseParser<'_, '_, '_, '_, 'scope, 3, true>,
     buffers: &[Option<BufferData<'_>>],
     node_ids: &[Option<NodeLocalId>],
     instance_ids: &[Option<u32>],
     contract: &AnimationChannelContract<'_>,
-    work: &mut ImportWorkScope<'_, 3>,
     provenance: &mut MeteredVec<'_, u32>,
 ) -> Result<(AnimationChannelStorage<'scope>, f64)> {
     let node = || {
@@ -941,8 +1006,8 @@ fn read_channel<'scope>(
     };
     let provenance_offset = provenance.len();
     let sampler = contract.source.sampler();
-    let input_sources = accessor_provenance(ctx, buffers, sampler.input())?;
-    let output_sources = accessor_provenance(ctx, buffers, sampler.output())?;
+    let input_sources = accessor_provenance(&mut ctx.services()?, buffers, sampler.input())?;
+    let output_sources = accessor_provenance(&mut ctx.services()?, buffers, sampler.output())?;
     let input_sources = input_sources.as_slice();
     let output_sources = output_sources.as_slice();
     let source_count = input_sources.len() + output_sources.len();
@@ -958,17 +1023,20 @@ fn read_channel<'scope>(
             previous = Some(source);
         }
     }
-    let input = super::accessor::bind(ctx, sampler.input(), buffers)?
+    let input = super::accessor::bind(&mut ctx.services()?, sampler.input(), buffers)?
         .scalars()
-        .ok_or_else(|| channel_error(ctx, contract, "input accessor could not be read"))?;
-    let (times, duration) = read_times(ctx, contract, input, work)?;
+        .ok_or_else(|| channel_error(contract, "input accessor could not be read"))?;
+    let (times, duration) = read_times(ctx, contract, input)?;
 
     let scalar_count = contract
         .key_count
         .checked_mul(contract.value_width)
-        .ok_or_else(|| ctx.allocation_failure("gltf-animation-value-count"))?;
+        .ok_or_else(|| {
+            ctx.error_view()
+                .allocation_failure("gltf-animation-value-count")
+        })?;
     let mut values = try_vec_capacity(
-        ctx,
+        &mut ctx.services()?,
         ImportStorageClass::SceneConstruction,
         scalar_count,
         "gltf-animation-values",
@@ -979,24 +1047,24 @@ fn read_channel<'scope>(
         0
     };
     let mut in_tangents = try_vec_capacity(
-        ctx,
+        &mut ctx.services()?,
         ImportStorageClass::SceneConstruction,
         tangent_count,
         "gltf-animation-in-tangents",
     )?;
     let mut out_tangents = try_vec_capacity(
-        ctx,
+        &mut ctx.services()?,
         ImportStorageClass::SceneConstruction,
         tangent_count,
         "gltf-animation-out-tangents",
     )?;
 
-    let output = super::accessor::bind(ctx, sampler.output(), buffers)?;
+    let output = super::accessor::bind(&mut ctx.services()?, sampler.output(), buffers)?;
     match contract.property {
         AnimationProperty::Translation | AnimationProperty::Scale => {
             let output = output
                 .vectors::<3>()
-                .ok_or_else(|| channel_error(ctx, contract, "output accessor shape is invalid"))?;
+                .ok_or_else(|| channel_error(contract, "output accessor shape is invalid"))?;
             read_output_vectors(
                 ctx,
                 contract,
@@ -1004,13 +1072,12 @@ fn read_channel<'scope>(
                 &mut values,
                 &mut in_tangents,
                 &mut out_tangents,
-                work,
             )?;
         }
         AnimationProperty::Rotation => {
-            let output = output.vectors::<4>().ok_or_else(|| {
-                channel_error(ctx, contract, "rotation accessor shape is invalid")
-            })?;
+            let output = output
+                .vectors::<4>()
+                .ok_or_else(|| channel_error(contract, "rotation accessor shape is invalid"))?;
             read_output_vectors(
                 ctx,
                 contract,
@@ -1018,13 +1085,12 @@ fn read_channel<'scope>(
                 &mut values,
                 &mut in_tangents,
                 &mut out_tangents,
-                work,
             )?;
         }
         AnimationProperty::MorphWeights => {
             let output = output
                 .scalars()
-                .ok_or_else(|| channel_error(ctx, contract, "weight accessor shape is invalid"))?;
+                .ok_or_else(|| channel_error(contract, "weight accessor shape is invalid"))?;
             read_output_weights(
                 ctx,
                 contract,
@@ -1032,7 +1098,6 @@ fn read_channel<'scope>(
                 &mut values,
                 &mut in_tangents,
                 &mut out_tangents,
-                work,
             )?;
         }
     }
@@ -1062,13 +1127,12 @@ fn read_channel<'scope>(
 }
 
 fn read_times<'scope>(
-    ctx: &mut ParseExecution<'_, 'scope>,
+    ctx: &mut ParseParser<'_, '_, '_, '_, 'scope, 3, true>,
     contract: &AnimationChannelContract<'_>,
     mut input: impl Iterator<Item = f32>,
-    work: &mut ImportWorkScope<'_, 3>,
 ) -> Result<(MeteredVec<'scope, f64>, f64)> {
     let mut times = try_vec_capacity(
-        ctx,
+        &mut ctx.services()?,
         ImportStorageClass::SceneConstruction,
         contract.key_count,
         "gltf-animation-times",
@@ -1078,22 +1142,22 @@ fn read_times<'scope>(
         if key.is_multiple_of(GEOMETRY_POLL_INTERVAL) {
             ctx.poll()?;
         }
-        let time = next_gltf_value("glTF animation input iteration", &mut input)?
-            .ok_or_else(|| channel_error(ctx, contract, "input accessor ended early"))?;
-        let time = validate_animation_time(
-            ctx,
-            contract.animation_index,
-            contract.channel_index,
-            time,
-            previous,
-        )?;
-        previous = Some(time);
-        times.try_push_reserved(time)?;
-        work.complete([1, 1, 0])?;
+        ctx.run([1, 1, 0], || -> Result<()> {
+            let time = next_gltf_value("glTF animation input iteration", &mut input)?
+                .ok_or_else(|| channel_error(contract, "input accessor ended early"))?;
+            let time = validate_animation_time(
+                contract.animation_index,
+                contract.channel_index,
+                time,
+                previous,
+            )?;
+            previous = Some(time);
+            times.try_push_reserved(time)?;
+            Ok(())
+        })?;
     }
     if next_gltf_value("glTF animation input iteration", &mut input)?.is_some() {
         return Err(channel_error(
-            ctx,
             contract,
             "input accessor produced too many values",
         ));
@@ -1131,35 +1195,35 @@ impl CubicPart {
 }
 
 fn read_output_weights(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseParser<'_, '_, '_, '_, '_, 3, true>,
     contract: &AnimationChannelContract<'_>,
     mut output: impl Iterator<Item = f32>,
     values: &mut MeteredVec<'_, f32>,
     in_tangents: &mut MeteredVec<'_, f32>,
     out_tangents: &mut MeteredVec<'_, f32>,
-    work: &mut ImportWorkScope<'_, 3>,
 ) -> Result<()> {
     for ordinal in 0..contract.output_count {
         if ordinal.is_multiple_of(GEOMETRY_POLL_INTERVAL) {
             ctx.poll()?;
         }
-        let weight = next_gltf_value("glTF animation weight output iteration", &mut output)?
-            .ok_or_else(|| channel_error(ctx, contract, "output accessor ended early"))?;
-        // Each cubic part contains one whole weight vector, not one scalar.
-        let part = CubicPart::at(contract.interpolation, ordinal / contract.value_width);
-        if !weight.is_finite() {
-            return Err(channel_error(ctx, contract, part.non_finite_reason()));
-        }
-        match part {
-            CubicPart::InTangent => in_tangents.try_push_reserved(weight)?,
-            CubicPart::Value => values.try_push_reserved(weight)?,
-            CubicPart::OutTangent => out_tangents.try_push_reserved(weight)?,
-        }
-        work.complete([1, 1, 0])?;
+        ctx.run([1, 1, 0], || -> Result<()> {
+            let weight = next_gltf_value("glTF animation weight output iteration", &mut output)?
+                .ok_or_else(|| channel_error(contract, "output accessor ended early"))?;
+            // Each cubic part contains one whole weight vector, not one scalar.
+            let part = CubicPart::at(contract.interpolation, ordinal / contract.value_width);
+            if !weight.is_finite() {
+                return Err(channel_error(contract, part.non_finite_reason()));
+            }
+            match part {
+                CubicPart::InTangent => in_tangents.try_push_reserved(weight)?,
+                CubicPart::Value => values.try_push_reserved(weight)?,
+                CubicPart::OutTangent => out_tangents.try_push_reserved(weight)?,
+            }
+            Ok(())
+        })?;
     }
     if next_gltf_value("glTF animation weight output iteration", &mut output)?.is_some() {
         return Err(channel_error(
-            ctx,
             contract,
             "output accessor produced too many values",
         ));
@@ -1168,13 +1232,12 @@ fn read_output_weights(
 }
 
 fn read_output_vectors<const N: usize>(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseParser<'_, '_, '_, '_, '_, 3, true>,
     contract: &AnimationChannelContract<'_>,
     mut output: impl Iterator<Item = [f32; N]>,
     values: &mut MeteredVec<'_, f32>,
     in_tangents: &mut MeteredVec<'_, f32>,
     out_tangents: &mut MeteredVec<'_, f32>,
-    work: &mut ImportWorkScope<'_, 3>,
 ) -> Result<()> {
     if N != contract.value_width {
         return Err(ContentError::from(super::GltfFailure::internal(
@@ -1185,33 +1248,33 @@ fn read_output_vectors<const N: usize>(
         if ordinal.is_multiple_of(GEOMETRY_POLL_INTERVAL) {
             ctx.poll()?;
         }
-        let sample = next_gltf_value("glTF animation output iteration", &mut output)?
-            .ok_or_else(|| channel_error(ctx, contract, "output accessor ended early"))?;
-        let part = CubicPart::at(contract.interpolation, ordinal);
-        if sample.iter().any(|value| !value.is_finite()) {
-            return Err(channel_error(ctx, contract, part.non_finite_reason()));
-        }
-        if part == CubicPart::Value && contract.property == AnimationProperty::Rotation {
-            let rotation = Quat::from_xyzw(sample[0], sample[1], sample[2], sample[3]);
-            if !rotation.is_unit() {
-                return Err(channel_error(
-                    ctx,
-                    contract,
-                    "contains a non-unit animation rotation value",
-                ));
-            }
-        }
-        match part {
-            CubicPart::InTangent => in_tangents.try_extend_from_slice_reserved(&sample)?,
-            CubicPart::Value => values.try_extend_from_slice_reserved(&sample)?,
-            CubicPart::OutTangent => out_tangents.try_extend_from_slice_reserved(&sample)?,
-        }
         let cells = to_u64(N);
-        work.complete([cells, cells, 0])?;
+        ctx.run([cells, cells, 0], || -> Result<()> {
+            let sample = next_gltf_value("glTF animation output iteration", &mut output)?
+                .ok_or_else(|| channel_error(contract, "output accessor ended early"))?;
+            let part = CubicPart::at(contract.interpolation, ordinal);
+            if sample.iter().any(|value| !value.is_finite()) {
+                return Err(channel_error(contract, part.non_finite_reason()));
+            }
+            if part == CubicPart::Value && contract.property == AnimationProperty::Rotation {
+                let rotation = Quat::from_xyzw(sample[0], sample[1], sample[2], sample[3]);
+                if !rotation.is_unit() {
+                    return Err(channel_error(
+                        contract,
+                        "contains a non-unit animation rotation value",
+                    ));
+                }
+            }
+            match part {
+                CubicPart::InTangent => in_tangents.try_extend_from_slice_reserved(&sample)?,
+                CubicPart::Value => values.try_extend_from_slice_reserved(&sample)?,
+                CubicPart::OutTangent => out_tangents.try_extend_from_slice_reserved(&sample)?,
+            }
+            Ok(())
+        })?;
     }
     if next_gltf_value("glTF animation output iteration", &mut output)?.is_some() {
         return Err(channel_error(
-            ctx,
             contract,
             "output accessor produced too many values",
         ));
@@ -1226,21 +1289,11 @@ fn next_gltf_value<T>(
     Ok(values.next())
 }
 
-fn channel_error(
-    ctx: &mut ParseExecution<'_, '_>,
-    contract: &AnimationChannelContract<'_>,
-    reason: &'static str,
-) -> ContentError {
-    channel_error_at(
-        ctx,
-        contract.animation_index,
-        contract.channel_index,
-        reason,
-    )
+fn channel_error(contract: &AnimationChannelContract<'_>, reason: &'static str) -> ContentError {
+    channel_error_at(contract.animation_index, contract.channel_index, reason)
 }
 
 fn validate_animation_time(
-    ctx: &mut ParseExecution<'_, '_>,
     animation_index: usize,
     channel_index: usize,
     time: f32,
@@ -1248,7 +1301,6 @@ fn validate_animation_time(
 ) -> Result<f64> {
     if !time.is_finite() {
         return Err(channel_error_at(
-            ctx,
             animation_index,
             channel_index,
             "contains a non-finite animation time",
@@ -1257,7 +1309,6 @@ fn validate_animation_time(
     let time = f64::from(time);
     if time < 0.0 {
         return Err(channel_error_at(
-            ctx,
             animation_index,
             channel_index,
             "contains a negative animation time",
@@ -1265,7 +1316,6 @@ fn validate_animation_time(
     }
     if previous.is_some_and(|previous| previous >= time) {
         return Err(channel_error_at(
-            ctx,
             animation_index,
             channel_index,
             "animation times are not strictly increasing",
@@ -1275,7 +1325,6 @@ fn validate_animation_time(
 }
 
 fn channel_error_at(
-    _ctx: &mut ParseExecution<'_, '_>,
     animation_index: usize,
     channel_index: usize,
     reason: &'static str,
@@ -1287,7 +1336,7 @@ fn channel_error_at(
 
 impl<'scope> AnimationStorage<'scope> {
     #[cfg(test)]
-    pub(super) fn empty(ctx: &mut ParseExecution<'_, 'scope>) -> Self {
+    pub(super) fn empty(ctx: &mut ParseServices<'_, '_, 'scope>) -> Self {
         let class = ImportStorageClass::FormatNormalization;
         Self {
             clips: ctx.metered_vec(class, "gltf-empty-animation-clips"),
@@ -1307,24 +1356,28 @@ impl<'scope> AnimationStorage<'scope> {
 
     pub(super) fn non_primary_provenance_count(
         &self,
-        ctx: &mut ParseExecution<'_, '_>,
+        ctx: &mut ParseRoot<'_, '_, '_>,
     ) -> Result<usize> {
         let mut count = 0usize;
-        let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
+        let work_group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
         for sources in [
             self.clip_provenance.as_slice(),
             self.channel_provenance.as_slice(),
         ] {
-            ctx.with_work(
+            ctx.child(
                 &work_group,
                 [to_u64(sources.len())],
-                |ctx, work| -> Result<()> {
+                |child| -> Result<()> {
                     for (index, &source) in sources.iter().enumerate() {
-                        super::poll_parser_loop(ctx, index)?;
-                        count = count.checked_add(usize::from(source != 0)).ok_or_else(|| {
-                            ctx.allocation_failure("gltf-animation-provenance-count")
+                        super::poll_parser_loop(&mut child.services()?, index)?;
+                        let errors = child.error_view();
+                        child.run([1], || -> Result<()> {
+                            count =
+                                count.checked_add(usize::from(source != 0)).ok_or_else(|| {
+                                    errors.allocation_failure("gltf-animation-provenance-count")
+                                })?;
+                            Ok(())
                         })?;
-                        work.complete([1])?;
                     }
                     Ok(())
                 },
@@ -1353,7 +1406,7 @@ impl<'scope> AnimationStorage<'scope> {
 
     pub(super) fn authoring_tables<'model>(
         &'model self,
-        ctx: &mut ParseExecution<'_, 'scope>,
+        ctx: &mut ParseServices<'_, '_, 'scope>,
     ) -> Result<AnimationAuthoringTables<'scope, 'model>> {
         let mut clips = try_vec_capacity(
             ctx,
@@ -1371,7 +1424,10 @@ impl<'scope> AnimationStorage<'scope> {
             let end = clip
                 .channel_offset
                 .checked_add(clip.channel_count)
-                .ok_or_else(|| ctx.allocation_failure("gltf-animation-storage-range"))?;
+                .ok_or_else(|| {
+                    ctx.error_view()
+                        .allocation_failure("gltf-animation-storage-range")
+                })?;
             let source_channels = self
                 .channels
                 .as_slice()

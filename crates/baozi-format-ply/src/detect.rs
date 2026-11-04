@@ -9,7 +9,7 @@ const CRLF_MAGIC: &[u8] = b"ply\r\n";
 pub(crate) fn detect(
     probe: &Probe<'_>,
     hint: &ReadHint,
-    scope: &DetectionScope<'_>,
+    scope: &mut DetectionScope<'_, '_>,
 ) -> DetectionResult<DetectionOutcome> {
     if starts_with_accounted(scope, probe.bytes(), LF_MAGIC)?
         || starts_with_accounted(scope, probe.bytes(), CRLF_MAGIC)?
@@ -34,7 +34,7 @@ pub(crate) fn detect(
 }
 
 fn starts_with_accounted(
-    scope: &DetectionScope<'_>,
+    scope: &mut DetectionScope<'_, '_>,
     bytes: &[u8],
     prefix: &[u8],
 ) -> DetectionResult<bool> {

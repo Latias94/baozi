@@ -218,7 +218,7 @@ trait ErasedRegistration: Send + Sync + RefUnwindSafe {
         &self,
         probe: &Probe<'_>,
         hint: &ReadHint,
-        scope: &DetectionScope<'_>,
+        scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome>;
 }
 
@@ -238,7 +238,7 @@ impl<F: Format> ErasedRegistration for Registration<F> {
         &self,
         probe: &Probe<'_>,
         hint: &ReadHint,
-        scope: &DetectionScope<'_>,
+        scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         self.format.detect(probe, hint, scope)
     }
@@ -256,7 +256,7 @@ trait ErasedInvocation: Send + Sync + RefUnwindSafe {
         layers: FormatOptionLayers<'_>,
     ) -> Result<Arc<dyn ErasedInvocation>, OptionCompileError>;
 
-    fn parse(&self, context: &mut ParseContext<'_>) -> ParseResult<()>;
+    fn parse(&self, context: &mut ParseContext<'_, '_>) -> ParseResult<()>;
 }
 
 impl<F: Format> ErasedInvocation for PreparedFormat<F> {
@@ -275,7 +275,7 @@ impl<F: Format> ErasedInvocation for PreparedFormat<F> {
         }))
     }
 
-    fn parse(&self, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(&self, context: &mut ParseContext<'_, '_>) -> ParseResult<()> {
         self.registration
             .format
             .parse(self.options.value(), context)
@@ -431,7 +431,7 @@ pub(crate) struct PreparedInvocation {
 impl PreparedInvocation {
     pub(crate) fn parse(
         &self,
-        context: &mut ParseContext<'_>,
+        context: &mut ParseContext<'_, '_>,
     ) -> Result<ParseResult<()>, ParseInvocationError> {
         let Some(permit) = self.health.begin_invocation() else {
             context.finish_importer_boundary(Some(ParseInvocationError::ExtensionPoisoned));
@@ -503,7 +503,7 @@ impl RegistryEntry {
         &self,
         probe: &Probe<'_>,
         hint: &ReadHint,
-        scope: &DetectionScope<'_>,
+        scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         let registration = self.registration();
         let Some(permit) = registration.health.begin_invocation() else {
@@ -808,8 +808,10 @@ mod tests {
         OptionCompileLimits,
     };
     use crate::store::{
-        ImportStoreBootstrapRequirements, ImportStoreSessionOwner, try_import_store_bootstrap,
+        ImportStoreBodyParts, ImportStoreBootstrapRequirements, ImportStoreHostError,
+        ImportStoreInvocationRoot, ImportStoreSessionOwner, try_import_store_bootstrap,
     };
+    use baozi_core::__scene_integration::integration::SceneParseOutcome;
     use baozi_io::AssetPath;
     use baozi_operation::{
         LedgerCause, PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryLimits,
@@ -881,7 +883,7 @@ mod tests {
             &self,
             _probe: &Probe<'_>,
             hint: &ReadHint,
-            _scope: &DetectionScope<'_>,
+            _scope: &mut DetectionScope<'_, '_>,
         ) -> DetectionResult<DetectionOutcome> {
             if self.detector_calls.fetch_add(1, Ordering::AcqRel) < 2 {
                 self.detector_gate.wait();
@@ -896,7 +898,7 @@ mod tests {
         fn parse(
             &self,
             _options: &Self::Options,
-            _context: &mut ParseContext<'_>,
+            _context: &mut ParseContext<'_, '_>,
         ) -> ParseResult<()> {
             unreachable!("registry reentrancy test does not parse")
         }
@@ -926,7 +928,7 @@ mod tests {
             &self,
             _probe: &Probe<'_>,
             hint: &ReadHint,
-            scope: &DetectionScope<'_>,
+            scope: &mut DetectionScope<'_, '_>,
         ) -> DetectionResult<DetectionOutcome> {
             self.calls.fetch_add(1, Ordering::AcqRel);
             self.entered.wait();
@@ -946,7 +948,7 @@ mod tests {
         fn parse(
             &self,
             _options: &Self::Options,
-            _context: &mut ParseContext<'_>,
+            _context: &mut ParseContext<'_, '_>,
         ) -> ParseResult<()> {
             unreachable!("detector poison race test does not parse")
         }
@@ -993,7 +995,7 @@ mod tests {
             &self,
             _probe: &Probe<'_>,
             _hint: &ReadHint,
-            _scope: &DetectionScope<'_>,
+            _scope: &mut DetectionScope<'_, '_>,
         ) -> DetectionResult<DetectionOutcome> {
             self.detector_calls.fetch_add(1, Ordering::AcqRel);
             Ok(DetectionOutcome::NoMatch)
@@ -1002,7 +1004,7 @@ mod tests {
         fn parse(
             &self,
             _options: &Self::Options,
-            _context: &mut ParseContext<'_>,
+            _context: &mut ParseContext<'_, '_>,
         ) -> ParseResult<()> {
             unreachable!("default codec poison test does not parse")
         }
@@ -1056,7 +1058,9 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
-    fn detection_store_owner() -> ImportStoreSessionOwner {
+    fn detection_store_owner<'inv>(
+        parts: ImportStoreBodyParts<'inv>,
+    ) -> ImportStoreSessionOwner<'inv> {
         let limits = ResourceLimits::default();
         let requirements = ImportStoreBootstrapRequirements::for_node_scene(&limits)
             .expect("the detection test retained-store requirements must be valid");
@@ -1073,8 +1077,13 @@ mod tests {
                     .expect("the detection test account limits must be valid"),
             )
             .expect("the detection test account must allocate");
-        ImportStoreSessionOwner::try_start(ImportOperationControl::default(), &account, bootstrap)
-            .expect("the detection test retained-store owner must start")
+        ImportStoreSessionOwner::try_start_in_body(
+            parts,
+            ImportOperationControl::default(),
+            &account,
+            bootstrap,
+        )
+        .expect("the detection test retained-store owner must start")
     }
 
     impl Format for PanickingDetector {
@@ -1103,7 +1112,7 @@ mod tests {
             &self,
             _probe: &Probe<'_>,
             _hint: &ReadHint,
-            scope: &DetectionScope<'_>,
+            scope: &mut DetectionScope<'_, '_>,
         ) -> DetectionResult<DetectionOutcome> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             scope.with_work(1, || panic!("detector panic"))
@@ -1112,7 +1121,7 @@ mod tests {
         fn parse(
             &self,
             _options: &Self::Options,
-            _context: &mut ParseContext<'_>,
+            _context: &mut ParseContext<'_, '_>,
         ) -> ParseResult<()> {
             unreachable!("detector poison test does not parse")
         }
@@ -1123,14 +1132,30 @@ mod tests {
         probe: &Probe<'_>,
         hint: &ReadHint,
     ) -> Result<DetectionOutcome, LedgerCause<ImportDimension>> {
-        let mut owner = detection_store_owner();
-        let terminal = RefCell::new(None);
-        let scope = DetectionScope::new(owner.execution().unwrap(), &terminal).unwrap();
-        let outcome = entry
-            .detect(probe, hint, &scope)
-            .expect("uncontrolled registry detector must not abort");
-        assert!(scope.into_terminal_abort().is_none());
-        Ok(outcome)
+        let mut invocation_root = ImportStoreInvocationRoot::new();
+        let mut result = None;
+        let finish = invocation_root
+            .run_body(|parts, disposition| {
+                let mut owner = detection_store_owner(parts);
+                let outcome = owner
+                    .with_root_execution(|exec| {
+                        let terminal = RefCell::new(None);
+                        let mut scope = DetectionScope::new(exec, &terminal)?;
+                        let outcome = entry
+                            .detect(probe, hint, &mut scope)
+                            .expect("uncontrolled registry detector must not abort");
+                        assert!(scope.into_terminal_abort().is_none());
+                        Ok::<_, ImportStoreHostError>(outcome)
+                    })
+                    .unwrap();
+                result = Some(outcome);
+                owner
+                    .request_finish(disposition, SceneParseOutcome::Rejected)
+                    .unwrap();
+            })
+            .unwrap();
+        let _finish = finish;
+        Ok(result.unwrap())
     }
 
     fn detect_entry_abort_code(
@@ -1138,18 +1163,34 @@ mod tests {
         probe: &Probe<'_>,
         hint: &ReadHint,
     ) -> Result<&'static str, LedgerCause<ImportDimension>> {
-        let mut owner = detection_store_owner();
-        let terminal = RefCell::new(None);
-        let scope = DetectionScope::new(owner.execution().unwrap(), &terminal).unwrap();
-        assert!(entry.detect(probe, hint, &scope).is_err());
-        let abort = scope
-            .into_terminal_abort()
-            .expect("detector abort must latch a terminal cause");
-        let code = match abort.cause() {
-            ScopeAbortCause::DescriptorContract { code } => code,
-            cause => panic!("expected descriptor contract abort, got {cause:?}"),
-        };
-        Ok(code)
+        let mut invocation_root = ImportStoreInvocationRoot::new();
+        let mut result = None;
+        let finish = invocation_root
+            .run_body(|parts, disposition| {
+                let mut owner = detection_store_owner(parts);
+                let code = owner
+                    .with_root_execution(|exec| {
+                        let terminal = RefCell::new(None);
+                        let mut scope = DetectionScope::new(exec, &terminal)?;
+                        assert!(entry.detect(probe, hint, &mut scope).is_err());
+                        let abort = scope
+                            .into_terminal_abort()
+                            .expect("detector abort must latch a terminal cause");
+                        let code = match abort.cause() {
+                            ScopeAbortCause::DescriptorContract { code } => code,
+                            cause => panic!("expected descriptor contract abort, got {cause:?}"),
+                        };
+                        Ok::<_, ImportStoreHostError>(*code)
+                    })
+                    .unwrap();
+                result = Some(code);
+                owner
+                    .request_finish(disposition, SceneParseOutcome::Rejected)
+                    .unwrap();
+            })
+            .unwrap();
+        let _finish = finish;
+        Ok(result.unwrap())
     }
 
     #[test]

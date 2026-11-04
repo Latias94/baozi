@@ -135,7 +135,7 @@ impl Format for GltfImporter {
         &self,
         probe: &Probe<'_>,
         hint: &ReadHint,
-        scope: &DetectionScope<'_>,
+        scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         detect::can_read(probe, hint, scope)
     }
@@ -143,7 +143,7 @@ impl Format for GltfImporter {
     fn parse(
         &self,
         options: &GltfImportOptions,
-        context: &mut ParseContext<'_>,
+        context: &mut ParseContext<'_, '_>,
     ) -> ParseResult<()> {
         parser::read_gltf(options, context)
     }

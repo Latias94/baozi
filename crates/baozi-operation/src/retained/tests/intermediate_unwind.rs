@@ -120,10 +120,10 @@ fn healthy_detached_part_releases_during_unrelated_host_unwind() {
         .unwrap();
     let part = attribute_observed_allocation(&ledger, &account, allocation);
     let owner = startup_owner_with_observed_fallback(&ledger, &account, part);
-    let baseline = owner
+    let mut baseline = owner
         .try_into_baseline()
         .unwrap_or_else(|_| panic!("complete startup owner must detach"));
-    let (detached, evidence, batches) = baseline.into_parts();
+    let (detached, evidence, batches) = baseline.take_parts();
     let (canonical_assembly, evidence_assembly, fallback_batch, evidence_batch) =
         batches.into_parts();
     // Keep the detached payload's real attribution alive through its destructor.
@@ -329,58 +329,72 @@ fn healthy_unprepared_publication_assembly_releases_during_unrelated_host_unwind
     static EVIDENCE_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 
     let factory = account_factory(1);
-    let operation = test_operation(&factory, 64);
-    let account = operation.account().share_after_test_admission().unwrap();
-    let canonical_charge = account
-        .checked_retained_charge::<LiveDropObservation>(empty_plan())
-        .unwrap();
-    let canonical_table_charge = account
-        .test_checked_retained_table_charge::<LiveDropObservation>(1)
-        .unwrap();
-    let mut assembly: TestPublication<LiveDropObservation, LiveDropObservation> = operation
-        .try_publication_assembly(publication_plan(1, 1))
-        .unwrap_or_else(|_| panic!("host-unwind publication must open"));
-    let probe = assembly.test_ledger_probe();
-    let canonical = LiveDropObservation {
-        ledger: assembly.test_ledger_probe(),
-        account: account.share_after_test_admission().unwrap(),
-        observed_active: &CANONICAL_ACTIVE,
-        observed_operation_live: &CANONICAL_LIVE,
-        observed_physical_bytes: &CANONICAL_BYTES,
-        observed_physical_allocations: &CANONICAL_ALLOCATIONS,
-    };
-    let _canonical = assembly
-        .try_retain_canonical(empty_plan(), |emplacer| {
-            Ok(emplacer.place(canonical, CanonicalRootTag))
-        })
-        .unwrap_or_else(|_| panic!("unprepared canonical root must retain"));
-    let evidence = LiveDropObservation {
-        ledger: assembly.test_ledger_probe(),
-        account: account.share_after_test_admission().unwrap(),
-        observed_active: &EVIDENCE_ACTIVE,
-        observed_operation_live: &EVIDENCE_LIVE,
-        observed_physical_bytes: &EVIDENCE_BYTES,
-        observed_physical_allocations: &EVIDENCE_ALLOCATIONS,
-    };
-    let _evidence = assembly
-        .try_retain_outcome_evidence(empty_plan(), |emplacer| {
-            Ok(emplacer.place(evidence, EvidenceRootTag))
-        })
-        .unwrap_or_else(|_| panic!("unprepared evidence root must retain"));
-    assert_eq!(assembly.canonical_len(), 1);
-    assert_eq!(assembly.outcome_evidence_len(), 1);
-    let charged = account.snapshot();
-    let active = probe.active_reservations();
-    let live = probe.current_live_bytes();
-    assert!(active > 0);
-    assert!(live >= charged.live_retained_bytes());
+    let mut invocation_observation = None;
+    let payload = catch_unwind(AssertUnwindSafe(|| {
+        let mut invocation_root: TestInvocationRoot<LiveDropObservation, LiveDropObservation> =
+            InvocationRoot::new();
+        let operation = test_operation(&mut invocation_root, &factory, 64);
+        let account = operation.account().share_after_test_admission().unwrap();
+        let canonical_charge = account
+            .checked_retained_charge::<LiveDropObservation>(empty_plan())
+            .unwrap();
+        let canonical_table_charge = account
+            .test_checked_retained_table_charge::<LiveDropObservation>(1)
+            .unwrap();
+        let mut assembly: TestPublication<'_, LiveDropObservation, LiveDropObservation> = operation
+            .try_publication_assembly(publication_plan(1, 1))
+            .unwrap_or_else(|_| panic!("host-unwind publication must open"));
+        let probe = assembly.test_ledger_probe();
+        let canonical = LiveDropObservation {
+            ledger: assembly.test_ledger_probe(),
+            account: account.share_after_test_admission().unwrap(),
+            observed_active: &CANONICAL_ACTIVE,
+            observed_operation_live: &CANONICAL_LIVE,
+            observed_physical_bytes: &CANONICAL_BYTES,
+            observed_physical_allocations: &CANONICAL_ALLOCATIONS,
+        };
+        let _canonical = assembly
+            .try_retain_canonical(empty_plan(), |emplacer| {
+                Ok(emplacer.place(canonical, CanonicalRootTag))
+            })
+            .unwrap_or_else(|_| panic!("unprepared canonical root must retain"));
+        let evidence = LiveDropObservation {
+            ledger: assembly.test_ledger_probe(),
+            account: account.share_after_test_admission().unwrap(),
+            observed_active: &EVIDENCE_ACTIVE,
+            observed_operation_live: &EVIDENCE_LIVE,
+            observed_physical_bytes: &EVIDENCE_BYTES,
+            observed_physical_allocations: &EVIDENCE_ALLOCATIONS,
+        };
+        let _evidence = assembly
+            .try_retain_outcome_evidence(empty_plan(), |emplacer| {
+                Ok(emplacer.place(evidence, EvidenceRootTag))
+            })
+            .unwrap_or_else(|_| panic!("unprepared evidence root must retain"));
+        assert_eq!(assembly.canonical_len(), 1);
+        assert_eq!(assembly.outcome_evidence_len(), 1);
+        let charged = account.snapshot();
+        let active = probe.active_reservations();
+        let live = probe.current_live_bytes();
+        assert!(active > 0);
+        assert!(live >= charged.live_retained_bytes());
 
-    // The owning assembly remains unvalidated and unprepared when the host unwinds.
-    let payload = catch_unwind(AssertUnwindSafe(move || {
+        invocation_observation = Some((
+            account,
+            canonical_charge,
+            canonical_table_charge,
+            probe,
+            charged,
+            active,
+            live,
+        ));
+        // The caller owns the actual root while its unprepared permission unwinds.
         let _assembly = assembly;
         panic!("unrelated host panic");
     }))
     .unwrap_err();
+    let (account, canonical_charge, canonical_table_charge, probe, charged, active, live) =
+        invocation_observation.expect("unprepared fixture must reach the host unwind");
     assert_eq!(
         payload.downcast_ref::<&str>(),
         Some(&"unrelated host panic")

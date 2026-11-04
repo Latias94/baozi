@@ -128,13 +128,14 @@ impl<'input> StaticSceneBuilder<'input> {
 }
 
 pub(crate) fn submit(
-    scope: &mut ParseContext<'_>,
+    scope: &mut ParseContext<'_, '_>,
     input: StaticSceneBuilder<'_>,
     format: &FormatId,
     content_digest: ManifestDigest,
 ) -> ParseResult<()> {
     scope.check_execution_running()?;
-    let document = scope.with_execution(|exec| document_resource(exec, content_digest))?;
+    let document =
+        scope.with_execution(|root| document_resource(&mut root.services()?, content_digest))?;
     let locator = SourceObjectLocator::indexed(SourceObjectKind::Document, 0);
     let resources = [ObservedResourceAuthoring::session_opaque(
         &document.identity,
@@ -150,31 +151,32 @@ pub(crate) fn submit(
     let source_provenance = [ProvenanceLocalId::new(0)];
 
     let (logical_morphs, primitive_deformations, instance_deformations, owners) = scope
-        .with_execution(|exec| -> ParseResult<_> {
-            let mut logical_morphs = exec.metered_vec(
+        .with_execution(|root| -> ParseResult<_> {
+            let mut services = root.services()?;
+            let mut logical_morphs = services.metered_vec(
                 ImportStorageClass::FormatNormalization,
                 "static-scene-logical-morphs",
             );
             logical_morphs.try_resize(
-                exec,
+                &mut services,
                 input.logical_meshes.len(),
                 LogicalMorphAuthoring::new(AuthoringRange::new(0, 0), &[]),
             )?;
-            let mut primitive_deformations = exec.metered_vec(
+            let mut primitive_deformations = services.metered_vec(
                 ImportStorageClass::FormatNormalization,
                 "static-scene-primitive-deformations",
             );
             primitive_deformations.try_resize(
-                exec,
+                &mut services,
                 input.primitives.len(),
                 PrimitiveDeformationAuthoring::new(Presence::Absent, &[]),
             )?;
-            let mut instance_deformations = exec.metered_vec(
+            let mut instance_deformations = services.metered_vec(
                 ImportStorageClass::FormatNormalization,
                 "static-scene-instance-deformations",
             );
             instance_deformations.try_resize(
-                exec,
+                &mut services,
                 input.mesh_instances.len(),
                 MeshInstanceDeformationAuthoring::new(Presence::Absent, Presence::Absent),
             )?;
@@ -200,30 +202,30 @@ pub(crate) fn submit(
                 .iter()
                 .try_fold(2_usize, |total, (count, _)| {
                     total.checked_add(*count).ok_or_else(|| {
-                        exec.resource_limit_exceeded("static-scene-owner-count", u64::MAX)
+                        services.resource_limit_exceeded("static-scene-owner-count", u64::MAX)
                     })
                 })?;
-            let mut owners = exec.metered_vec(
+            let mut owners = services.metered_vec(
                 ImportStorageClass::FormatNormalization,
                 "static-scene-owner-provenance",
             );
-            owners.try_reserve(exec, owner_count)?;
+            owners.try_reserve(&mut services, owner_count)?;
             for owner in [ProfileOwner::Scene, ProfileOwner::SyntheticRoot] {
                 owners.try_push(
-                    exec,
+                    &mut services,
                     OwnerProvenanceAuthoring::new(owner, &source_provenance),
                 )?;
             }
             for (count, owner) in owner_domains {
                 for index in 0..count {
                     let index = u32::try_from(index).map_err(|_| {
-                        exec.resource_limit_exceeded(
+                        services.resource_limit_exceeded(
                             "static-scene-owner-index",
                             u64::from(u32::MAX),
                         )
                     })?;
                     owners.try_push(
-                        exec,
+                        &mut services,
                         OwnerProvenanceAuthoring::new(owner(index), &source_provenance),
                     )?;
                 }
@@ -280,7 +282,7 @@ struct DocumentResource<'scope> {
 }
 
 fn document_resource<'session>(
-    scope: &mut crate::ParseExecution<'_, 'session>,
+    scope: &mut crate::ParseServices<'_, '_, 'session>,
     digest: ManifestDigest,
 ) -> ParseResult<DocumentResource<'session>> {
     // A logical AssetPath can exceed ResourceIdentity's bound or contain '#'. Use the actual

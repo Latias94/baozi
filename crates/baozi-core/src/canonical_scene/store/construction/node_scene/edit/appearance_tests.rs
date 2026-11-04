@@ -112,8 +112,11 @@ fn source_appearance(account: &PhysicalStorageAccount, nonzero: bool) -> NodeSce
             MetadataAuthoringBatch::empty(),
         ),
     );
-    successful_parts(
+    let mut construction_root_1 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    let parts = successful_parts(
         NodeSceneTestTransaction::with_account(
+            &mut construction_root_1,
             account,
             test_limits(),
             input,
@@ -124,7 +127,9 @@ fn source_appearance(account: &PhysicalStorageAccount, nonzero: bool) -> NodeSce
         .unwrap()
         .publish_for_test()
         .unwrap(),
-    )
+    );
+    drop(construction_root_1);
+    parts
 }
 
 fn double_lengths() -> SpaceConversion {
@@ -176,7 +181,9 @@ fn changed_lengths_retain_only_rows_and_rebind_exact_owners_to_own_and_scene_par
         3,
         "Scene, one Material, one TextureBinding"
     );
-    let output = retain_edit(pending);
+    let mut invocation_root_1 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    let output = retain_edit(&mut invocation_root_1, pending);
     let tables = output.output();
     let before = &source.scene.tables.appearance;
     let after = &tables.appearance;
@@ -251,6 +258,7 @@ fn changed_lengths_retain_only_rows_and_rebind_exact_owners_to_own_and_scene_par
         [0xde, 0xad, 0xbe, 0xef]
     );
     drop(output);
+    drop(invocation_root_1);
     assert!(!account.snapshot().poisoned());
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
@@ -305,7 +313,9 @@ fn unchanged_lengths_share_both_owners_and_equal_bytes_cannot_substitute_payload
     )
     .unwrap();
     assert_eq!(pending.counts.profile.target_count.as_u32(), 1);
-    let output = retain_edit(pending);
+    let mut invocation_root_2 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    let output = retain_edit(&mut invocation_root_2, pending);
     assert!(std::ptr::eq(
         source.scene.tables.appearance.rows.as_ref(),
         output.output().appearance.rows.as_ref()
@@ -317,6 +327,7 @@ fn unchanged_lengths_share_both_owners_and_equal_bytes_cannot_substitute_payload
     drop(source);
     drop(sibling);
     drop(output);
+    drop(invocation_root_2);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
 }
@@ -359,7 +370,10 @@ fn interrupted_appearance_retention_releases_new_rows_and_preserves_both_source_
         .unwrap();
         let polls = Arc::new(AtomicUsize::new(0));
         let armed = Arc::new(AtomicBool::new(false));
+        let mut invocation_root_3 =
+            crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
         let result = retain_controlled_edit(
+            &mut invocation_root_3,
             pending,
             OperationControl::default().with_cancellation(Stop {
                 armed: armed.clone(),
@@ -381,7 +395,9 @@ fn interrupted_appearance_retention_releases_new_rows_and_preserves_both_source_
             drop(output);
         } else {
             assert!(result.is_none(), "retention poll {at} must interrupt");
+            drop(result);
         }
+        drop(invocation_root_3);
         assert!(!account.snapshot().poisoned());
         assert_eq!(
             account.snapshot().live_retained_bytes(),

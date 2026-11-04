@@ -1,8 +1,8 @@
 use crate::options::{ObjImportOptions, ObjTextDecodingMode};
 use crate::{ObjFailure, mesh_builder, mtl, obj};
 use baozi_import::{
-    ConformedTextInput, DiagnosticCode, DiagnosticSource, ImportWorkClass, ParseContext,
-    ParseExecution, ParseFailure, ParseResult, TextConformanceViolation,
+    ConformedTextInput, DiagnosticCode, DiagnosticSource, ImportWorkClass, ParseChildren,
+    ParseContext, ParseFailure, ParseResult, ParseServices, TextConformanceViolation,
     TextConformanceViolationKind, TextDecodingMode, TextInputLine, TextInputOptions,
     TextInputRecoveryTracker,
 };
@@ -26,20 +26,20 @@ impl TokenScanScratch {
 }
 
 pub(crate) fn usize_amount(
-    exec: &ParseExecution<'_, '_>,
+    exec: &ParseServices<'_, '_, '_>,
     value: usize,
     resource: &'static str,
 ) -> ParseResult<u64> {
     u64::try_from(value).map_err(|_| exec.allocation_failure(resource))
 }
 
-pub(crate) fn with_obj_text<'region, 'session, 'source, T>(
-    exec: &mut ParseExecution<'region, 'session>,
+pub(crate) fn with_obj_text<'region, 'op, 'session, 'source, T>(
+    exec: &mut ParseChildren<'region, 'op, 'session>,
     options: &ObjImportOptions,
     source: DiagnosticSource<'source>,
     resource: &'static str,
     action: impl for<'input> FnOnce(
-        &mut ParseExecution<'region, 'session>,
+        &mut ParseChildren<'region, 'op, 'session>,
         &'input ConformedTextInput<'session>,
         &mut TextInputRecoveryTracker<'input, 'session>,
     ) -> ParseResult<T>,
@@ -47,14 +47,14 @@ pub(crate) fn with_obj_text<'region, 'session, 'source, T>(
     with_obj_text_options(exec, source, obj_text_options(options, resource), action)
 }
 
-pub(crate) fn with_obj_dependency_text_limit<'region, 'session, 'source, T>(
-    exec: &mut ParseExecution<'region, 'session>,
+pub(crate) fn with_obj_dependency_text_limit<'region, 'op, 'session, 'source, T>(
+    exec: &mut ParseChildren<'region, 'op, 'session>,
     options: &ObjImportOptions,
     source: DiagnosticSource<'source>,
     resource: &'static str,
     effective_raw_limit: u64,
     action: impl for<'input> FnOnce(
-        &mut ParseExecution<'region, 'session>,
+        &mut ParseChildren<'region, 'op, 'session>,
         &'input ConformedTextInput<'session>,
         &mut TextInputRecoveryTracker<'input, 'session>,
     ) -> ParseResult<T>,
@@ -75,22 +75,24 @@ fn obj_text_options(options: &ObjImportOptions, resource: &'static str) -> TextI
         .with_line_index_resource("obj-line-index-bytes")
 }
 
-fn with_obj_text_options<'region, 'session, 'source, T>(
-    exec: &mut ParseExecution<'region, 'session>,
+fn with_obj_text_options<'region, 'op, 'session, 'source, T>(
+    exec: &mut ParseChildren<'region, 'op, 'session>,
     source: DiagnosticSource<'source>,
     options: TextInputOptions,
     action: impl for<'input> FnOnce(
-        &mut ParseExecution<'region, 'session>,
+        &mut ParseChildren<'region, 'op, 'session>,
         &'input ConformedTextInput<'session>,
         &mut TextInputRecoveryTracker<'input, 'session>,
     ) -> ParseResult<T>,
 ) -> ParseResult<T> {
-    exec.with_conformed_text_input(source, options, action)?
-        .map_err(|violation| text_conformance_failure(exec, violation))
+    match exec.with_conformed_text_input(source, options, action)? {
+        Ok(value) => Ok(value),
+        Err(violation) => Err(text_conformance_failure(&mut exec.services()?, violation)),
+    }
 }
 
 pub(crate) fn authorize_line_recoveries<'session>(
-    exec: &mut ParseExecution<'_, 'session>,
+    exec: &mut ParseServices<'_, '_, 'session>,
     recoveries: &mut TextInputRecoveryTracker<'_, 'session>,
     line: &TextInputLine<'_, '_>,
     allowed_value: Option<Range<usize>>,
@@ -149,7 +151,7 @@ pub(crate) fn authorize_line_recoveries<'session>(
 }
 
 fn text_conformance_failure(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     violation: TextConformanceViolation,
 ) -> ParseFailure {
     let raw_offset = violation.raw_range().map(|range| range.start());
@@ -189,7 +191,7 @@ fn text_conformance_failure(
 }
 
 fn document_byte_failure(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     raw_offset: Option<u64>,
     reason: &'static str,
     missing_range_reason: &'static str,
@@ -200,45 +202,45 @@ fn document_byte_failure(
     }
 }
 
-pub(crate) fn scan_token_ranges<'region, 'session>(
-    exec: &mut ParseExecution<'region, 'session>,
+pub(crate) fn scan_token_ranges<'region, 'op, 'session>(
+    exec: &mut ParseChildren<'region, 'op, 'session>,
     scratch: &mut TokenScanScratch,
     line: &str,
     resource: &'static str,
-    mut inspect: impl FnMut(&mut ParseExecution<'region, 'session>, usize, char) -> ParseResult<()>,
-    mut visit: impl FnMut(&mut ParseExecution<'region, 'session>, usize, usize) -> ParseResult<()>,
+    mut inspect: impl FnMut(&mut ParseServices<'_, 'op, 'session>, usize, char) -> ParseResult<()>,
+    mut visit: impl FnMut(&mut ParseChildren<'region, 'op, 'session>, usize, usize) -> ParseResult<()>,
 ) -> ParseResult<Option<usize>> {
     let mut token_start = None;
     let mut chunk_start = 0usize;
-    let scan_work = exec.bind_work_group([ImportWorkClass::DecodeWork])?;
+    let scan_work = exec.bind_group([ImportWorkClass::DecodeWork])?;
 
     while chunk_start < line.len() {
         let chunk_end = str_chunk_end(line, chunk_start);
         let mut scanned_len = 0usize;
-        exec.with_work(
-            &scan_work,
-            [usize_amount(exec, chunk_end - chunk_start, resource)?],
-            |exec, work| -> ParseResult<()> {
+        let amount = usize_amount(&exec.services()?, chunk_end - chunk_start, resource)?;
+        let errors = exec.error_view();
+        exec.child(&scan_work, [amount], |work| {
+            work.run([amount], || -> ParseResult<()> {
                 for (relative, character) in line[chunk_start..chunk_end].char_indices() {
                     let offset =
-                        u16::try_from(relative).map_err(|_| exec.allocation_failure(resource))?;
+                        u16::try_from(relative).map_err(|_| errors.allocation_failure(resource))?;
                     let stored_offset = scratch
                         .offsets
                         .get_mut(scanned_len)
-                        .ok_or_else(|| exec.allocation_failure(resource))?;
+                        .ok_or_else(|| errors.allocation_failure(resource))?;
                     let stored_character = scratch
                         .characters
                         .get_mut(scanned_len)
-                        .ok_or_else(|| exec.allocation_failure(resource))?;
+                        .ok_or_else(|| errors.allocation_failure(resource))?;
                     *stored_offset = offset;
                     *stored_character = character;
                     scanned_len = scanned_len
                         .checked_add(1)
-                        .ok_or_else(|| exec.allocation_failure(resource))?;
+                        .ok_or_else(|| errors.allocation_failure(resource))?;
                 }
-                work.complete_all()
-            },
-        )?;
+                Ok(())
+            })
+        })?;
 
         // Token visitors can meter their own work, so semantic callbacks run only after the
         // bounded scan capability has closed. The fixed buffer avoids an unmetered allocation or
@@ -249,14 +251,14 @@ pub(crate) fn scan_token_ranges<'region, 'session>(
         {
             let index = chunk_start
                 .checked_add(usize::from(relative))
-                .ok_or_else(|| exec.allocation_failure(resource))?;
+                .ok_or_else(|| exec.error_view().allocation_failure(resource))?;
             if character == '#' {
                 if let Some(start) = token_start.take() {
                     visit(exec, start, index)?;
                 }
                 return Ok(Some(index));
             }
-            inspect(exec, index, character)?;
+            inspect(&mut exec.services()?, index, character)?;
             if character.is_whitespace() {
                 if let Some(start) = token_start.take() {
                     visit(exec, start, index)?;
@@ -276,12 +278,12 @@ pub(crate) fn scan_token_ranges<'region, 'session>(
 
 pub(crate) fn read_obj(
     options: &ObjImportOptions,
-    context: &mut ParseContext<'_>,
+    context: &mut ParseContext<'_, '_>,
 ) -> ParseResult<()> {
-    let parsed = context.with_execution(|exec| {
-        let source = exec.diagnostic_source();
+    let parsed = context.with_execution(|root| {
+        let source = root.services()?.diagnostic_source();
         with_obj_text(
-            exec,
+            &mut root.children()?,
             options,
             source,
             "obj-primary-text",
@@ -294,16 +296,16 @@ pub(crate) fn read_obj(
     mesh_builder::scene_from_parsed(context, parsed, &materials)
 }
 
-fn invalid_utf8_failure(exec: &mut ParseExecution<'_, '_>, raw_offset: u64) -> ParseFailure {
+fn invalid_utf8_failure(exec: &mut ParseServices<'_, '_, '_>, raw_offset: u64) -> ParseFailure {
     exec.format_failure(ObjFailure::invalid_utf8_at(raw_offset))
 }
 
-pub(crate) fn max_text_value_bytes(exec: &ParseExecution<'_, '_>) -> usize {
+pub(crate) fn max_text_value_bytes(exec: &ParseServices<'_, '_, '_>) -> usize {
     exec.limits().max_string_bytes
 }
 
 pub(crate) fn enforce_text_value_limit(
-    exec: &ParseExecution<'_, '_>,
+    exec: &ParseServices<'_, '_, '_>,
     bytes: usize,
     _resource: &'static str,
 ) -> ParseResult<()> {

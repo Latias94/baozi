@@ -2,11 +2,14 @@ use std::hash::{Hash, Hasher};
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::{Arc, OnceLock};
 
+use baozi_operation::__retained_store_integration::activation::{
+    CanonicalBodyOperation, CanonicalBodyStart,
+};
 use baozi_operation::__retained_store_integration::authority::{
     CanonicalInheritanceSource, DerivedRetainedStoreOperation, PreparedStoreFailureOutcome,
     PreparedStoreSuccessOutcome, RetainedStoreOperation, RetainedStorePublicationPlan,
     RetainedStoreSharePlan, RetainedStoreStartError, RetainedStoreStartPlan,
-    RetainedStoreWriterPlan,
+    RetainedStoreWriterPlan, StoreInvocationRoot, StoreInvocationStart,
 };
 use baozi_operation::StoreBuildError;
 use baozi_operation::{
@@ -152,7 +155,6 @@ fn store_failure_cause(evidence: &StoreLedgerEvidence) -> StorePreparationFailur
     match evidence.header().terminal_cause() {
         StoreTerminalCause::Failure(cause) => cause,
         StoreTerminalCause::Success => panic!("published failure must not report success"),
-        _ => panic!("published failure reported an unsupported terminal cause"),
     }
 }
 
@@ -291,7 +293,70 @@ struct WrongTag;
 #[derive(Clone, Copy)]
 struct ScalarTag<const INDEX: u8>;
 
-type TestOperation = RetainedStoreOperation<TestOwner, TestProgress, TestUnit>;
+type TestInvocationRoot = StoreInvocationRoot<TestOwner, TestProgress, TestUnit>;
+type TestInvocationStart<'inv> = StoreInvocationStart<'inv, TestOwner, TestProgress, TestUnit>;
+type TestOperation<'inv> = RetainedStoreOperation<'inv, TestOwner, TestProgress, TestUnit>;
+type TestBodyOperation<'inv> = CanonicalBodyOperation<'inv, TestOwner, TestProgress, TestUnit>;
+
+trait TestOperationStart<'inv> {
+    type Operation;
+
+    #[allow(
+        clippy::result_large_err,
+        reason = "the startup fixture preserves the actual bounded physical error without boxing it"
+    )]
+    fn start(
+        self,
+        control: OperationControl<TestProgress, TestUnit>,
+        ledger: StoreLedgerPlan,
+        account: &PhysicalStorageAccount,
+        plan: RetainedStoreStartPlan,
+    ) -> Result<Self::Operation, RetainedStoreStartError>;
+}
+
+impl<'inv> TestOperationStart<'inv> for TestInvocationStart<'inv> {
+    type Operation = TestOperation<'inv>;
+
+    fn start(
+        self,
+        control: OperationControl<TestProgress, TestUnit>,
+        ledger: StoreLedgerPlan,
+        account: &PhysicalStorageAccount,
+        plan: RetainedStoreStartPlan,
+    ) -> Result<Self::Operation, RetainedStoreStartError> {
+        TestOperation::try_start(self, control, ledger, account, plan)
+    }
+}
+
+impl<'inv> TestOperationStart<'inv> for &'inv mut TestInvocationRoot {
+    type Operation = TestOperation<'inv>;
+
+    fn start(
+        self,
+        control: OperationControl<TestProgress, TestUnit>,
+        ledger: StoreLedgerPlan,
+        account: &PhysicalStorageAccount,
+        plan: RetainedStoreStartPlan,
+    ) -> Result<Self::Operation, RetainedStoreStartError> {
+        TestOperation::try_start(self, control, ledger, account, plan)
+    }
+}
+
+impl<'inv> TestOperationStart<'inv>
+    for CanonicalBodyStart<'inv, TestOwner, TestProgress, TestUnit>
+{
+    type Operation = TestBodyOperation<'inv>;
+
+    fn start(
+        self,
+        control: OperationControl<TestProgress, TestUnit>,
+        ledger: StoreLedgerPlan,
+        account: &PhysicalStorageAccount,
+        plan: RetainedStoreStartPlan,
+    ) -> Result<Self::Operation, RetainedStoreStartError> {
+        TestBodyOperation::try_start(self, control, ledger, account, plan)
+    }
+}
 type SourceCanonical =
     baozi_operation::PublishedCanonicalStore<baozi_operation::RecordBlock, CanonicalRootTag>;
 type SourceEvidence =
@@ -340,29 +405,41 @@ fn unbounded_failure_terminal_work(keys: TestKeys) -> RetainedStoreFailureTermin
     .unwrap()
 }
 
-fn operation(account: &PhysicalStorageAccount) -> (TestOperation, TestKeys) {
-    operation_with_control(account, OperationControl::default())
+fn operation<'inv, S: TestOperationStart<'inv>>(
+    root: S,
+    account: &PhysicalStorageAccount,
+) -> (S::Operation, TestKeys) {
+    operation_with_control(root, account, OperationControl::default())
 }
 
-fn operation_with_control(
+fn operation_with_control<'inv, S: TestOperationStart<'inv>>(
+    root: S,
     account: &PhysicalStorageAccount,
     control: OperationControl<TestProgress, TestUnit>,
-) -> (TestOperation, TestKeys) {
-    operation_with_control_and_evidence_limit(account, control, u64::MAX)
+) -> (S::Operation, TestKeys) {
+    operation_with_control_and_evidence_limit(root, account, control, u64::MAX)
 }
 
-fn operation_with_evidence_limit(
+fn operation_with_evidence_limit<'inv, S: TestOperationStart<'inv>>(
+    root: S,
     account: &PhysicalStorageAccount,
     evidence_limit: u64,
-) -> (TestOperation, TestKeys) {
-    operation_with_control_and_evidence_limit(account, OperationControl::default(), evidence_limit)
+) -> (S::Operation, TestKeys) {
+    operation_with_control_and_evidence_limit(
+        root,
+        account,
+        OperationControl::default(),
+        evidence_limit,
+    )
 }
 
-fn operation_with_commit_limit(
+fn operation_with_commit_limit<'inv, S: TestOperationStart<'inv>>(
+    root: S,
     account: &PhysicalStorageAccount,
     committed_limit: u64,
-) -> (TestOperation, TestKeys) {
+) -> (S::Operation, TestKeys) {
     operation_with_catalog_and_limits(
+        root,
         account,
         OperationControl::default(),
         test_catalog(),
@@ -371,67 +448,82 @@ fn operation_with_commit_limit(
     )
 }
 
-fn operation_with_control_and_evidence_limit(
+fn operation_with_control_and_evidence_limit<'inv, S: TestOperationStart<'inv>>(
+    root: S,
     account: &PhysicalStorageAccount,
     control: OperationControl<TestProgress, TestUnit>,
     evidence_limit: u64,
-) -> (TestOperation, TestKeys) {
-    operation_with_catalog_and_evidence_limit(account, control, test_catalog(), evidence_limit)
+) -> (S::Operation, TestKeys) {
+    operation_with_catalog_and_evidence_limit(
+        root,
+        account,
+        control,
+        test_catalog(),
+        evidence_limit,
+    )
 }
 
-fn operation_with_catalog_and_evidence_limit(
+fn operation_with_catalog_and_evidence_limit<'inv, S: TestOperationStart<'inv>>(
+    root: S,
     account: &PhysicalStorageAccount,
     control: OperationControl<TestProgress, TestUnit>,
     catalog: StoreSemanticCatalogId,
     evidence_limit: u64,
-) -> (TestOperation, TestKeys) {
-    operation_with_catalog_and_limits(account, control, catalog, evidence_limit, u64::MAX)
+) -> (S::Operation, TestKeys) {
+    operation_with_catalog_and_limits(root, account, control, catalog, evidence_limit, u64::MAX)
 }
 
-fn operation_with_catalog_and_limits(
+fn operation_with_catalog_and_limits<'inv, S: TestOperationStart<'inv>>(
+    root: S,
     account: &PhysicalStorageAccount,
     control: OperationControl<TestProgress, TestUnit>,
     catalog: StoreSemanticCatalogId,
     evidence_limit: u64,
     committed_limit: u64,
-) -> (TestOperation, TestKeys) {
+) -> (S::Operation, TestKeys) {
     operation_with_catalog_limits_and_failure_work(
+        root,
         account,
         control,
         catalog,
         evidence_limit,
         committed_limit,
-        TEST_FAILURE_EVIDENCE_CONSTRUCTION_WORK_LIMIT,
-        TEST_FAILURE_EVIDENCE_VALIDATION_WORK_LIMIT,
+        (
+            TEST_FAILURE_EVIDENCE_CONSTRUCTION_WORK_LIMIT,
+            TEST_FAILURE_EVIDENCE_VALIDATION_WORK_LIMIT,
+        ),
     )
 }
 
-fn operation_with_failure_work_limits(
+fn operation_with_failure_work_limits<'inv, S: TestOperationStart<'inv>>(
+    root: S,
     account: &PhysicalStorageAccount,
     construction_work_limit: u64,
     validation_work_limit: u64,
-) -> (TestOperation, TestKeys) {
+) -> (S::Operation, TestKeys) {
     operation_with_catalog_limits_and_failure_work(
+        root,
         account,
         OperationControl::default(),
         test_catalog(),
         u64::MAX,
         u64::MAX,
-        construction_work_limit,
-        validation_work_limit,
+        (construction_work_limit, validation_work_limit),
     )
 }
 
-fn operation_with_catalog_limits_and_failure_work(
+fn operation_with_catalog_limits_and_failure_work<'inv, S: TestOperationStart<'inv>>(
+    root: S,
     account: &PhysicalStorageAccount,
     control: OperationControl<TestProgress, TestUnit>,
     catalog: StoreSemanticCatalogId,
     evidence_limit: u64,
     committed_limit: u64,
-    construction_work_limit: u64,
-    validation_work_limit: u64,
-) -> (TestOperation, TestKeys) {
+    failure_work_limits: (u64, u64),
+) -> (S::Operation, TestKeys) {
+    let (construction_work_limit, validation_work_limit) = failure_work_limits;
     operation_with_catalog_limits_failure_work_and_terminal_attributions(
+        root,
         account,
         control,
         catalog,
@@ -443,11 +535,13 @@ fn operation_with_catalog_limits_and_failure_work(
     )
 }
 
-fn operation_with_terminal_attribution_slots(
+fn operation_with_terminal_attribution_slots<'inv, S: TestOperationStart<'inv>>(
+    root: S,
     account: &PhysicalStorageAccount,
     terminal_attribution_slots: usize,
-) -> (TestOperation, TestKeys) {
+) -> (S::Operation, TestKeys) {
     operation_with_catalog_limits_failure_work_and_terminal_attributions(
+        root,
         account,
         OperationControl::default(),
         test_catalog(),
@@ -460,7 +554,11 @@ fn operation_with_terminal_attribution_slots(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn operation_with_catalog_limits_failure_work_and_terminal_attributions(
+fn operation_with_catalog_limits_failure_work_and_terminal_attributions<
+    'inv,
+    S: TestOperationStart<'inv>,
+>(
+    root: S,
     account: &PhysicalStorageAccount,
     control: OperationControl<TestProgress, TestUnit>,
     catalog: StoreSemanticCatalogId,
@@ -469,7 +567,7 @@ fn operation_with_catalog_limits_failure_work_and_terminal_attributions(
     construction_work_limit: u64,
     validation_work_limit: u64,
     terminal_attribution_slots: usize,
-) -> (TestOperation, TestKeys) {
+) -> (S::Operation, TestKeys) {
     let TestVocabulary { domain, keys } = test_vocabulary_for(catalog);
     let failure_terminal_work = RetainedStoreFailureTerminalWorkPlan::with_evidence_work(
         keys.failure_terminal_dimension,
@@ -510,7 +608,7 @@ fn operation_with_catalog_limits_failure_work_and_terminal_attributions(
         failure_terminal_work,
     );
     (
-        TestOperation::try_start(control, ledger_plan, account, start).unwrap(),
+        root.start(control, ledger_plan, account, start).unwrap(),
         keys,
     )
 }
@@ -560,7 +658,8 @@ fn reject_publication_plan_without_side_effects<F>(
 where
     F: FnOnce(TestKeys) -> RetainedStorePublicationPlan,
 {
-    let (operation, keys) = operation(account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation(&mut invocation_root, account);
     let plan = build_plan(keys);
     let before = account.snapshot();
     let error = match operation.try_publication_assembly(plan) {
@@ -602,7 +701,8 @@ fn physical_delta(
 }
 
 fn publish_sequence_source(account: &PhysicalStorageAccount) -> PublishedSource {
-    let (operation, keys) = operation(account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation(&mut invocation_root, account);
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 3, 3))
         .unwrap();
@@ -705,6 +805,10 @@ fn publish_sequence_source(account: &PhysicalStorageAccount) -> PublishedSource 
 
 #[path = "concrete_store/activation.rs"]
 mod activation;
+#[path = "concrete_store/binding.rs"]
+mod binding;
+#[path = "concrete_store/binding_derived.rs"]
+mod binding_derived;
 #[path = "concrete_store/construction.rs"]
 mod construction;
 #[path = "concrete_store/domain.rs"]

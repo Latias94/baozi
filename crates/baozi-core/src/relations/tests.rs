@@ -2,13 +2,12 @@ use std::num::NonZeroU64;
 
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalActivationOutcome, CanonicalActivationSeal, CanonicalActivationSessionPolicy,
-    CanonicalCentralValidationOutcome, CanonicalFreezePermitIssue, CanonicalMaterializationRole,
-    CanonicalValidationProgress, CanonicalValidationRole, RetainedStoreSessionOutcomeOwner,
-    RetainedStoreWriterRole,
+    CanonicalBodyOperation, CanonicalBodyStart, CanonicalFreezePermitIssue,
+    CanonicalInvocationOutcome, CanonicalMaterializationRole, CanonicalValidationProgress,
+    CanonicalValidationRole, RetainedStoreSessionOutcomeOwner, RetainedStoreWriterRole,
 };
 use baozi_operation::__retained_store_integration::authority::{
-    PreparedStoreSuccessOutcome, RetainedStoreOperation, RetainedStoreSharePlan,
-    RetainedStoreStartPlan, RetainedStoreWriterPlan,
+    RetainedStoreSharePlan, RetainedStoreStartPlan, RetainedStoreWriterPlan,
 };
 use baozi_operation::{
     DimensionPolicy, FinalProgress, LedgerLimits, OperationControl, OperationOwner,
@@ -34,9 +33,9 @@ use crate::__scene_integration::authoring::{
     SpatialAuthoringBatch,
 };
 use crate::__scene_integration::integration::{
-    SceneConstruction, SceneOutcomeEvidenceTag, SceneParseOutcome, SceneSessionActivationBootstrap,
-    consume_scene_freeze_permit, scene_failure_evidence_field_work,
-    scene_failure_evidence_member_count,
+    PreparedScenePublication, SceneConstruction, SceneOutcomeEvidenceTag, SceneParseOutcome,
+    SceneSessionActivationBootstrap, consume_scene_freeze_permit,
+    scene_failure_evidence_field_work, scene_failure_evidence_member_count,
 };
 use crate::SceneValidationLimits;
 
@@ -82,9 +81,10 @@ impl ProgressUnit for Unit {
 
 // Store-local test helpers are private to that module. Use the existing integration rail here
 // so these fixtures still undergo central validation and retain real accounting owners.
-fn test_owner(
+fn test_owner<'inv>(
+    root: CanonicalBodyStart<'inv, TestOwner, Phase, Unit>,
     account: &PhysicalStorageAccount,
-) -> RetainedStoreSessionOutcomeOwner<TestOwner, Phase, Unit> {
+) -> RetainedStoreSessionOutcomeOwner<'inv, TestOwner, Phase, Unit> {
     let catalog = StoreSemanticCatalogId::new(*b"baozi-relations!", NonZeroU32::MIN);
     let domain = StoreKeyDomain::try_new(catalog).unwrap();
     let phase = domain
@@ -142,7 +142,8 @@ fn test_owner(
         1,
         failure_work,
     );
-    let operation = RetainedStoreOperation::<TestOwner, Phase, Unit>::try_start(
+    let operation = CanonicalBodyOperation::<TestOwner, Phase, Unit>::try_start(
+        root,
         OperationControl::default(),
         ledger,
         account,
@@ -166,6 +167,10 @@ fn test_owner(
         .unwrap()
 }
 
+#[allow(
+    clippy::result_large_err,
+    reason = "the semantic fixture preserves its exact inline domain rejection without allocating another failure owner"
+)]
 fn publish_scene(
     nodes: NodeAuthoringBatch<'_>,
     node_count: usize,
@@ -276,62 +281,92 @@ fn publish_scene(
         AnimationAuthoringBatch::empty(),
         profile,
     );
-    let mut transaction = SceneConstruction::try_new(batch, SceneValidationLimits::default())
+    let transaction = SceneConstruction::try_new(batch, SceneValidationLimits::default())
         .unwrap()
         .into_transaction();
-    let activation = test_owner(&account)
-        .plan_and_activate_scoped(|mut planning| {
-            let mut semantic = planning.begin_semantic_work().unwrap();
-            let plan = transaction.preflight(&mut semantic).unwrap();
-            let completion = semantic.finish_exact().unwrap();
-            match planning.seal_activation(plan, completion) {
-                CanonicalActivationSeal::Sealed(permit) => {
-                    permit.activate(|lane, plan| plan.materialize(lane))
-                }
-                CanonicalActivationSeal::Unsealed(failure) => failure.finish(),
-            }
+    let mut transaction = Some(transaction);
+    let mut host =
+        baozi_operation::__retained_store_integration::activation::CanonicalInvocationHost::<
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            baozi_operation::RecordBlock,
+            crate::__scene_integration::integration::SceneCanonicalRootTag,
+            baozi_operation::RecordBlock,
+            SceneOutcomeEvidenceTag,
+        >::new();
+    let mut recipe = None;
+    let finish = host
+        .run_body(|parts, disposition| {
+            let mut transaction = transaction.take().unwrap();
+            let activation = test_owner(parts.startup, &account)
+                .plan_and_activate_scoped(parts.output, parts.activation, |mut planning| {
+                    let (plan, completion) = planning
+                        .with_semantic_work(|semantic| transaction.preflight(semantic))
+                        .unwrap();
+                    match planning.seal_activation(plan, completion) {
+                        CanonicalActivationSeal::Sealed(permit) => {
+                            permit.activate(|lane, plan| plan.materialize(lane))
+                        }
+                        CanonicalActivationSeal::Unsealed(failure) => failure.finish(),
+                    }
+                })
+                .unwrap();
+            let CanonicalActivationOutcome::Activated(activated) = activation else {
+                panic!("relations fixture activation failed");
+            };
+            let postflight = transaction.finish();
+            let evidence = postflight.candidate_evidence(activated.output());
+            let central = activated
+                .validate_centrally(
+                    parts.proof,
+                    parts.validation,
+                    CanonicalValidationProgress::new(Phase::Validate, Unit::Work),
+                    |lane, _| match lane.try_retain_records(
+                        evidence.record_plan(),
+                        SceneOutcomeEvidenceTag,
+                        |writer| writer.write_row(|row| evidence.write_row(row)),
+                    ) {
+                        Ok(root) => lane.complete(root),
+                        Err(_) => lane.abort(),
+                    },
+                    |planning, output| postflight.validate_candidate(planning, output),
+                )
+                .unwrap();
+            recipe = Some(evidence);
+            central.request_finish(disposition).unwrap();
         })
         .unwrap();
-    let CanonicalActivationOutcome::Activated(activated) = activation else {
-        panic!("relations fixture activation failed");
-    };
-    let postflight = transaction.finish();
-    let evidence = postflight.candidate_evidence(activated.output());
-    let central = activated
-        .validate_centrally(
-            CanonicalValidationProgress::new(Phase::Validate, Unit::Work),
-            |lane, _| match lane.try_retain_records(
-                evidence.record_plan(),
-                SceneOutcomeEvidenceTag,
-                |writer| writer.write_row(|row| evidence.write_row(row)),
-            ) {
-                Ok(root) => lane.complete(root),
-                Err(_) => lane.abort(),
-            },
-            |planning, output| postflight.validate_candidate(planning, output),
-        )
-        .unwrap();
-    let CanonicalCentralValidationOutcome::Candidate(candidate) = central else {
+    let completion = finish.resume();
+    let CanonicalInvocationOutcome::Candidate(candidate) = completion.outcome else {
         panic!("relations fixture central validation failed");
     };
     let CanonicalFreezePermitIssue::Ready(permit) = candidate
-        .try_issue_freeze_permit(FinalProgress::new(Phase::Publish, Unit::Scene, 1))
+        .try_issue_freeze_permit(
+            completion.generation.interruption,
+            FinalProgress::new(Phase::Publish, Unit::Scene, 1),
+        )
         .unwrap()
     else {
         panic!("relations fixture freeze failed");
     };
-    let (scene, evidence, ledger) = consume_scene_freeze_permit(
+    let publication = consume_scene_freeze_permit(
         permit,
+        completion.generation.rejection,
+        completion.failure_fallback,
+        recipe.unwrap(),
         SceneParseOutcome::Accepted,
-        |_| panic!("relations fixture generation rejected"),
-        |token, joint, seal| {
-            let PreparedStoreSuccessOutcome::Success(store) = joint.prepare(seal).unwrap() else {
-                panic!("relations fixture publication failed");
-            };
-            token.handoff(store).unwrap().into_parts()
-        },
     )
     .unwrap();
+    let PreparedScenePublication::Success(prepared) = publication else {
+        panic!("relations fixture publication failed")
+    };
+    let (scene, evidence, ledger) = prepared.handoff().into_parts();
     drop(evidence);
     drop(ledger);
     (scene, account)

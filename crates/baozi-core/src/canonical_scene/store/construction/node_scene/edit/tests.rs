@@ -91,7 +91,10 @@ pub(super) fn try_build_single_trs_scene(
         animations,
         profile.batch(),
     );
+    let mut invocation_root_1 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let build = NodeSceneTestTransaction::with_account(
+        &mut invocation_root_1,
         account,
         test_limits(),
         input,
@@ -156,7 +159,10 @@ fn build_spatial_scene(
         animations,
         profile.batch(),
     );
+    let mut invocation_root_2 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let build = NodeSceneTestTransaction::with_account(
+        &mut invocation_root_2,
         account,
         test_limits(),
         input,
@@ -507,8 +513,10 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
     let expected_attachment_count = pending.counts.profile.output_attachment_count.as_u32();
     let physical_before = account.snapshot();
 
+    let mut edit_root_1 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let prepared = pending
-        .prepare_with_generation_source(source, test_limits(), || {
+        .prepare_with_generation_source(&mut edit_root_1, source, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("valid exact-input transform edit must prepare");
@@ -658,6 +666,7 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
     );
     assert!(account.snapshot().live_retained_bytes() > 0);
     drop(output);
+    drop(edit_root_1);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
     assert!(!account.snapshot().poisoned());
@@ -685,10 +694,15 @@ fn host_unwind_releases_edited_tables_and_preserves_shared_source_domains() {
         .expect("unwind edit plan") else {
             panic!("the unwind fixture must change the transform");
         };
+        let mut edit_root_2 =
+            crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
         let prepared = pending
-            .prepare_with_generation_source(&original.scene, test_limits(), || {
-                SceneGenerationId::reserve_from(&generation_source)
-            })
+            .prepare_with_generation_source(
+                &mut edit_root_2,
+                &original.scene,
+                test_limits(),
+                || SceneGenerationId::reserve_from(&generation_source),
+            )
             .expect("unwind edit preparation");
         let super::NodeSceneEditTerminal::Success(edited) = prepared.handoff() else {
             panic!("the unwind fixture must publish the edit");
@@ -733,6 +747,7 @@ fn host_unwind_releases_edited_tables_and_preserves_shared_source_domains() {
             assert_populated_spatial_scene(&original.scene);
         }
         drop(original);
+        drop(edit_root_2);
         assert_eq!(account.snapshot().live_retained_bytes(), 0);
         assert_eq!(account.snapshot().live_retained_allocations(), 0);
     }
@@ -760,8 +775,10 @@ fn chained_transform_edits_parent_each_new_segment_to_the_previous_attachment() 
         .expect("owner layout")
         .ordinal(crate::canonical_scene::store::production::CanonicalProfileOwner::Node(1))
         .expect("node owner") as usize;
+    let mut edit_root_3 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let first_prepared = first_pending
-        .prepare_with_generation_source(&original.scene, test_limits(), || {
+        .prepare_with_generation_source(&mut edit_root_3, &original.scene, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("first chained transform edit preparation");
@@ -786,8 +803,10 @@ fn chained_transform_edits_parent_each_new_segment_to_the_previous_attachment() 
         .expect("owner layout")
         .ordinal(crate::canonical_scene::store::production::CanonicalProfileOwner::Node(1))
         .expect("node owner") as usize;
+    let mut edit_root_4 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let second_prepared = second_pending
-        .prepare_with_generation_source(&first.scene, test_limits(), || {
+        .prepare_with_generation_source(&mut edit_root_4, &first.scene, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("second chained transform edit preparation");
@@ -799,6 +818,8 @@ fn chained_transform_edits_parent_each_new_segment_to_the_previous_attachment() 
     drop(second);
     drop(first);
     drop(original);
+    drop(edit_root_4);
+    drop(edit_root_3);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
@@ -820,8 +841,10 @@ fn sibling_transform_edits_preserve_the_ancestor_nonce_and_mint_distinct_branch_
     .expect("left sibling edit plan") else {
         panic!("left sibling transform must be changed");
     };
+    let mut edit_root_5 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let left_prepared = left_pending
-        .prepare_with_generation_source(&original.scene, test_limits(), || {
+        .prepare_with_generation_source(&mut edit_root_5, &original.scene, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("left sibling edit preparation");
@@ -838,8 +861,10 @@ fn sibling_transform_edits_preserve_the_ancestor_nonce_and_mint_distinct_branch_
     .expect("right sibling edit plan") else {
         panic!("right sibling transform must be changed");
     };
+    let mut edit_root_6 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let right_prepared = right_pending
-        .prepare_with_generation_source(&original.scene, test_limits(), || {
+        .prepare_with_generation_source(&mut edit_root_6, &original.scene, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("right sibling edit preparation");
@@ -874,8 +899,10 @@ fn sibling_transform_edits_preserve_the_ancestor_nonce_and_mint_distinct_branch_
         panic!("substituted sibling transform must be changed");
     };
     corrupt_profile_reference_for_test(0, 1, left_nonce);
+    let mut edit_root_7 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let substituted_prepared = substituted_pending
-        .prepare_with_generation_source(&original.scene, test_limits(), || {
+        .prepare_with_generation_source(&mut edit_root_7, &original.scene, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("substituted sibling address must prepare rich failure");
@@ -894,6 +921,9 @@ fn sibling_transform_edits_preserve_the_ancestor_nonce_and_mint_distinct_branch_
     drop(right);
     drop(left);
     drop(original);
+    drop(edit_root_7);
+    drop(edit_root_6);
+    drop(edit_root_5);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
@@ -919,10 +949,15 @@ fn central_validation_rejects_each_corrupted_parent_address_component() {
         };
         corrupt_profile_reference_for_test(0, component, replacement);
 
+        let mut edit_root_8 =
+            crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
         let prepared = pending
-            .prepare_with_generation_source(&original.scene, test_limits(), || {
-                SceneGenerationId::reserve_from(&generation_source)
-            })
+            .prepare_with_generation_source(
+                &mut edit_root_8,
+                &original.scene,
+                test_limits(),
+                || SceneGenerationId::reserve_from(&generation_source),
+            )
             .expect("corrupted parent address must prepare rich failure");
         let super::NodeSceneEditTerminal::RichFailure(failure) = prepared.handoff() else {
             panic!("corrupted parent address must fail central validation");
@@ -957,8 +992,10 @@ fn trs_to_matrix_preserves_typed_node_layout_before_publication() {
         panic!("TRS-to-matrix replacement cannot classify as unchanged");
     };
 
+    let mut edit_root_9 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let prepared = pending
-        .prepare_with_generation_source(source, test_limits(), || {
+        .prepare_with_generation_source(&mut edit_root_9, source, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("shape-changing exact-input transform edit must prepare");
@@ -1005,8 +1042,10 @@ fn shape_changing_edit_preserves_spatial_values_and_attachment_closure() {
         panic!("shape-changing spatial edit must not classify as unchanged");
     };
 
+    let mut edit_root_10 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let prepared = pending
-        .prepare_with_generation_source(source, test_limits(), || {
+        .prepare_with_generation_source(&mut edit_root_10, source, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("shape-changing spatial edit preparation");
@@ -1127,9 +1166,14 @@ fn sealed_plan_rejects_same_generation_sibling_before_operation_or_allocation() 
     let account_before = account.snapshot();
     let nonce_count_before = issued_profile_segment_nonce_count_for_test();
 
-    let rejected = pending.prepare_with_generation_source(&second.scene, test_limits(), || {
-        panic!("source binding must fail before generation reservation")
-    });
+    let mut edit_root_11 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    let rejected = pending.prepare_with_generation_source(
+        &mut edit_root_11,
+        &second.scene,
+        test_limits(),
+        || panic!("source binding must fail before generation reservation"),
+    );
 
     assert!(matches!(
         rejected,
@@ -1146,6 +1190,7 @@ fn sealed_plan_rejects_same_generation_sibling_before_operation_or_allocation() 
 
     drop(second);
     drop(first);
+    drop(edit_root_11);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
@@ -1172,9 +1217,12 @@ fn operation_start_rejection_does_not_consume_a_profile_segment_nonce() {
         ..test_limits()
     };
 
-    let rejected = pending.prepare_with_generation_source(source, rejecting_limits, || {
-        SceneGenerationId::reserve_from(&generation_source)
-    });
+    let mut edit_root_12 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    let rejected =
+        pending.prepare_with_generation_source(&mut edit_root_12, source, rejecting_limits, || {
+            SceneGenerationId::reserve_from(&generation_source)
+        });
 
     assert!(matches!(rejected, Err(NodeSceneEditPrepareError::Start(_))));
     assert_eq!(
@@ -1189,6 +1237,7 @@ fn operation_start_rejection_does_not_consume_a_profile_segment_nonce() {
     );
 
     drop(parts);
+    drop(edit_root_12);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
@@ -1257,8 +1306,11 @@ fn cancellation_after_evidence_commit_preserves_rich_failure_and_the_input() {
     let cancellation = CancellationToken::new();
     cancellation.cancel();
 
+    let mut edit_root_13 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let prepared = pending
         .prepare_with_control_and_generation_source_for_test(
+            &mut edit_root_13,
             source,
             test_limits(),
             OperationControl::default().with_cancellation(cancellation),
@@ -1281,6 +1333,7 @@ fn cancellation_after_evidence_commit_preserves_rich_failure_and_the_input() {
     );
     drop(failure);
     drop(parts);
+    drop(edit_root_13);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
@@ -1301,10 +1354,17 @@ fn edit_generation_source_panic_burns_the_id_and_contains_the_operation() {
         panic!("changed transform must enter edit planning");
     };
     let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = pending.prepare_with_generation_source(source, test_limits(), || {
-            let _generation = SceneGenerationId::reserve_from(&generation_source).unwrap();
-            panic!("injected edit generation source panic after reservation")
-        });
+        let mut edit_root_14 =
+            crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+        let _ = pending.prepare_with_generation_source(
+            &mut edit_root_14,
+            source,
+            test_limits(),
+            || {
+                let _generation = SceneGenerationId::reserve_from(&generation_source).unwrap();
+                panic!("injected edit generation source panic after reservation")
+            },
+        );
     }))
     .unwrap_err();
     assert_eq!(
@@ -1348,8 +1408,10 @@ fn generation_exhaustion_after_admission_leaves_one_invisible_nonce_gap() {
         "pure edit preflight must not issue a provenance segment nonce",
     );
 
+    let mut edit_root_15 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let prepared = pending
-        .prepare_with_generation_source(source, test_limits(), || {
+        .prepare_with_generation_source(&mut edit_root_15, source, test_limits(), || {
             Err(SceneGenerationError::Exhausted)
         })
         .expect("generation exhaustion must prepare rich failure");
@@ -1374,6 +1436,7 @@ fn generation_exhaustion_after_admission_leaves_one_invisible_nonce_gap() {
     );
     drop(failure);
     drop(parts);
+    drop(edit_root_15);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
@@ -1399,8 +1462,10 @@ fn central_validation_rejection_preserves_rich_evidence_and_the_input() {
         .checked_add(1)
         .expect("test evidence count remains representable");
 
+    let mut edit_root_16 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let prepared = pending
-        .prepare_with_generation_source(source, test_limits(), || {
+        .prepare_with_generation_source(&mut edit_root_16, source, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("central validation rejection must prepare rich failure");
@@ -1424,6 +1489,7 @@ fn central_validation_rejection_preserves_rich_evidence_and_the_input() {
     );
     drop(failure);
     drop(parts);
+    drop(edit_root_16);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
@@ -1445,8 +1511,10 @@ fn dropping_prepared_success_burns_one_gap_and_releases_only_unpublished_output(
     };
     let nonce_count_before = issued_profile_segment_nonce_count_for_test();
 
+    let mut edit_root_17 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let prepared = pending
-        .prepare_with_generation_source(source, test_limits(), || {
+        .prepare_with_generation_source(&mut edit_root_17, source, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("valid transform edit must prepare success");
@@ -1478,6 +1546,7 @@ fn dropping_prepared_success_burns_one_gap_and_releases_only_unpublished_output(
     assert_eq!(generation_source.load(Ordering::Relaxed), 3);
 
     drop(parts);
+    drop(edit_root_17);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
@@ -1496,8 +1565,10 @@ fn dropping_input_first_keeps_the_derived_scene_and_report_readable() {
     else {
         panic!("changed transform must enter edit planning");
     };
+    let mut edit_root_18 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let prepared = pending
-        .prepare_with_generation_source(&parts.scene, test_limits(), || {
+        .prepare_with_generation_source(&mut edit_root_18, &parts.scene, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("input-first release transform edit must prepare");
@@ -1524,6 +1595,7 @@ fn dropping_input_first_keeps_the_derived_scene_and_report_readable() {
             .has_same_authored_bits(replacement),
     );
     drop(scene);
+    drop(edit_root_18);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
     assert!(!account.snapshot().poisoned());
@@ -1545,8 +1617,10 @@ fn dropping_derived_scene_first_keeps_the_input_and_report_readable() {
     .expect("output-first release transform edit plan") else {
         panic!("changed transform must enter edit planning");
     };
+    let mut edit_root_19 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let prepared = pending
-        .prepare_with_generation_source(&parts.scene, test_limits(), || {
+        .prepare_with_generation_source(&mut edit_root_19, &parts.scene, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("output-first release transform edit must prepare");
@@ -1577,6 +1651,7 @@ fn dropping_derived_scene_first_keeps_the_input_and_report_readable() {
     drop(parts);
     assert!(account.snapshot().live_retained_bytes() > 0);
     drop(report);
+    drop(edit_root_19);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
     assert!(!account.snapshot().poisoned());
@@ -1609,9 +1684,14 @@ fn post_materialization_product_graph_rejection_preserves_rich_failure_evidence(
         };
         let nonce_count_before = issued_profile_segment_nonce_count_for_test();
 
-        if let Ok(prepared) = pending.prepare_with_generation_source(source, test_limits(), || {
-            SceneGenerationId::reserve_from(&generation_source)
-        }) {
+        let mut recovery_root =
+            crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+        if let Ok(prepared) = pending.prepare_with_generation_source(
+            &mut recovery_root,
+            source,
+            test_limits(),
+            || SceneGenerationId::reserve_from(&generation_source),
+        ) {
             match prepared.handoff() {
                 super::NodeSceneEditTerminal::RichFailure(failure)
                     if terminal_failure_class(failure.ledger_evidence())
@@ -1635,6 +1715,7 @@ fn post_materialization_product_graph_rejection_preserves_rich_failure_evidence(
             }
         }
 
+        drop(recovery_root);
         drop(parts);
         assert_eq!(account.snapshot().live_retained_bytes(), 0);
         assert_eq!(account.snapshot().live_retained_allocations(), 0);
@@ -1661,7 +1742,6 @@ fn terminal_failure_code(evidence: &baozi_operation::StoreLedgerEvidence) -> u32
         StoreTerminalCause::Success => {
             panic!("a rejected node transform edit must freeze a failure cause")
         }
-        _ => panic!("an unknown terminal cause cannot prove a node transform edit failure"),
     }
 }
 
@@ -1673,7 +1753,6 @@ fn terminal_failure_class(
         StoreTerminalCause::Success => {
             panic!("a rejected node transform edit must freeze a failure cause")
         }
-        _ => panic!("an unknown terminal cause cannot prove a node transform edit failure"),
     }
 }
 

@@ -1,4 +1,5 @@
 use super::super::validation::{StoreEvidenceMemberCompletion, StoreEvidenceMemberVisit};
+use super::final_state::CanonicalFinal;
 use super::work_batch::CompletionPrefixBatch;
 use super::*;
 
@@ -944,14 +945,14 @@ where
     }
 }
 
-impl<O, PP, U, E> RejectedCanonicalStoreSession<O, PP, U, E>
+impl<'inv, O, PP, U, E> RejectedCanonicalStoreSession<'inv, O, PP, U, E>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     pub const fn cause(&self) -> &StoreCanonicalRejection<E> {
-        self.owner.owner.value()
+        self.owner.owner.value().value()
     }
 
     pub const fn canonical_len(&self) -> usize {
@@ -961,26 +962,45 @@ where
     pub fn outcome_evidence_len(&self) -> usize {
         self.owner.owner.storage().outcome_evidence_len()
     }
+}
+
+impl<'inv, O, PP, U, E> CanonicalFinal<RejectedCanonicalStoreSession<'inv, O, PP, U, E>>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    pub const fn cause(&self) -> &StoreCanonicalRejection<E> {
+        self.state.cause()
+    }
+
+    pub const fn canonical_len(&self) -> usize {
+        self.state.canonical_len()
+    }
+
+    pub fn outcome_evidence_len(&self) -> usize {
+        self.state.outcome_evidence_len()
+    }
 
     pub fn build_failure_evidence<EvidenceKind, EvidenceTag>(
         self,
         build: impl for<'lane> FnMut(
-            &mut FailureEvidenceLane<'lane, O, PP, U>,
+            &mut FailureEvidenceLane<'inv, 'lane, O, PP, U>,
         ) -> FailureEvidenceDecision<EvidenceKind, EvidenceTag>,
     ) -> Result<
-        CanonicalRejectionEvidenceOutcome<O, PP, U, E, EvidenceKind, EvidenceTag>,
+        CanonicalRejectionEvidenceOutcome<'inv, O, PP, U, E, EvidenceKind, EvidenceTag>,
         StoreActivationContainment,
     >
     where
         EvidenceTag: Copy + Send + Sync + 'static,
     {
-        self.owner.build(build)
+        self.state.owner.build(build)
     }
 
     pub fn prepare_minimal_fallback(
         self,
     ) -> Result<VerifiedMinimalFallback<StoreCanonicalRejection<E>>, StorePrepareError> {
-        self.owner.prepare_minimal_fallback()
+        self.state.owner.prepare_minimal_fallback()
     }
 }
 
@@ -1008,7 +1028,7 @@ fn recover_failure_member_build<T>(
     }
 }
 
-impl<O, PP, U> FailureEvidenceLane<'_, O, PP, U>
+impl<'inv, 'lane, O, PP, U> FailureEvidenceLane<'inv, 'lane, O, PP, U>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1384,8 +1404,8 @@ where
     private_bounds,
     reason = "public failure typestates are sealed by the crate-private lifecycle contract"
 )]
-impl<O, PP, U, Cause, EvidenceKind, EvidenceTag, State>
-    RootedFailureEvidence<O, PP, U, Cause, EvidenceKind, EvidenceTag, State>
+impl<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag, State>
+    RootedFailureEvidence<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag, State>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1393,7 +1413,7 @@ where
     State: FailureLifecycleState,
 {
     pub const fn cause(&self) -> &Cause {
-        self.owner.value()
+        self.owner.value().value()
     }
 
     pub fn outcome_evidence_len(&self) -> usize {
@@ -1406,12 +1426,13 @@ where
     )]
     pub fn validate_rich_failure(
         self,
+        fallback_slot: CanonicalCauseSlot<'inv, StoreRuntimeError>,
         validate: impl for<'session, 'storage, 'control> FnMut(
             &mut FailureEvidenceValidationSession<'session, 'storage, 'control, O, PP, U>,
             FailureEvidenceMember<'session, EvidenceKind, EvidenceTag>,
         ) -> bool,
     ) -> Result<
-        RootedFailureValidation<O, PP, U, Cause, EvidenceKind, EvidenceTag, State>,
+        RootedFailureValidation<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag, State>,
         StoreActivationContainment,
     >
     where
@@ -1425,6 +1446,13 @@ where
             _lifecycle: _,
         } = self;
         let (cause, failure) = owner.into_parts();
+        if !fallback_slot.is_vacant_for(cause.identity()) {
+            let _ = drop_optional_callback(validate);
+            let _ = drop_scoped_value(cause);
+            return Err(StoreActivationContainment {
+                cause: failure.contain_activation_fault(),
+            });
+        }
         let cause = ManuallyDrop::new(cause);
         let evidence_root = failure.evidence_root();
         let mut controlled_failure = None;
@@ -1503,6 +1531,24 @@ where
                 };
                 return Err(StoreActivationContainment { cause });
             }
+            let runtime_cause = match fallback_slot.place(runtime_cause) {
+                Ok(cause) => ManuallyDrop::new(cause),
+                Err(runtime_cause) => {
+                    let _ = drop_scoped_value(runtime_cause);
+                    let cause = match validation {
+                        StoreFailureValidation::Valid(validated) => {
+                            validated.contain_activation_fault()
+                        }
+                        StoreFailureValidation::Rejected(failure) => {
+                            failure.contain_activation_fault()
+                        }
+                        StoreFailureValidation::FallbackOnly(fallback) => {
+                            fallback.contain_activation_fault()
+                        }
+                    };
+                    return Err(StoreActivationContainment { cause });
+                }
+            };
             let prepared = match validation {
                 StoreFailureValidation::Valid(validated) => validated.prepare_minimal_fallback(),
                 StoreFailureValidation::Rejected(failure) => failure.prepare_minimal_fallback(),
@@ -1512,9 +1558,13 @@ where
             };
             return match prepared {
                 Ok(prepared) => Ok(RootedFailureValidation::Fallback(
-                    VerifiedMinimalFallback::new(prepared, runtime_cause),
+                    VerifiedMinimalFallback::new(
+                        prepared,
+                        ManuallyDrop::into_inner(runtime_cause).into_owned(),
+                    ),
                 )),
                 Err(StorePrepareError::FinalizationContainment(cause)) => {
+                    let _ = drop_scoped_value(ManuallyDrop::into_inner(runtime_cause));
                     Err(StoreActivationContainment { cause })
                 }
             };
@@ -1544,11 +1594,24 @@ where
                                 cause: validated.contain_activation_fault(),
                             });
                         }
+                        let runtime_cause = match fallback_slot.place(runtime_cause) {
+                            Ok(cause) => ManuallyDrop::new(cause),
+                            Err(runtime_cause) => {
+                                let _ = drop_scoped_value(runtime_cause);
+                                return Err(StoreActivationContainment {
+                                    cause: validated.contain_activation_fault(),
+                                });
+                            }
+                        };
                         match validated.prepare_minimal_fallback() {
                             Ok(prepared) => Ok(RootedFailureValidation::Fallback(
-                                VerifiedMinimalFallback::new(prepared, runtime_cause),
+                                VerifiedMinimalFallback::new(
+                                    prepared,
+                                    ManuallyDrop::into_inner(runtime_cause).into_owned(),
+                                ),
                             )),
                             Err(StorePrepareError::FinalizationContainment(cause)) => {
+                                let _ = drop_scoped_value(ManuallyDrop::into_inner(runtime_cause));
                                 Err(StoreActivationContainment { cause })
                             }
                         }
@@ -1572,7 +1635,16 @@ where
                         cause: fallback.contain_activation_fault(),
                     });
                 }
-                prepare_product_graph_fallback(fallback).map(RootedFailureValidation::Fallback)
+                PendingMinimalFallback::new(
+                    fallback,
+                    fallback_slot,
+                    activation_product_graph_cause(),
+                )?
+                .prepare_minimal_fallback()
+                .map(RootedFailureValidation::Fallback)
+                .map_err(|StorePrepareError::FinalizationContainment(cause)| {
+                    StoreActivationContainment { cause }
+                })
             }
         }
     }
@@ -1592,7 +1664,7 @@ where
         match prepared {
             Ok(prepared) => Ok(VerifiedMinimalFallback::new(
                 prepared,
-                ManuallyDrop::into_inner(cause),
+                ManuallyDrop::into_inner(cause).into_owned(),
             )),
             Err(error) => {
                 let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
@@ -1602,8 +1674,8 @@ where
     }
 }
 
-impl<O, PP, U, Cause, EvidenceKind, EvidenceTag>
-    ValidatedFailureEvidence<O, PP, U, Cause, EvidenceKind, EvidenceTag, OrdinaryFailureState>
+impl<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag>
+    ValidatedFailureEvidence<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag, OrdinaryFailureState>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1623,7 +1695,7 @@ where
         match prepared {
             Ok((prepared, final_control_cause)) => Ok(PreparedFailureEvidence::new(
                 prepared,
-                ManuallyDrop::into_inner(cause),
+                ManuallyDrop::into_inner(cause).into_owned(),
                 final_control_cause,
             )),
             Err(error) => {
@@ -1634,8 +1706,8 @@ where
     }
 }
 
-impl<O, PP, U, Cause, EvidenceKind, EvidenceTag>
-    ValidatedFailureEvidence<O, PP, U, Cause, EvidenceKind, EvidenceTag, FrozenFailureState>
+impl<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag>
+    ValidatedFailureEvidence<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag, FrozenFailureState>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1654,7 +1726,7 @@ where
         match prepared {
             Ok(prepared) => Ok(PreparedFailureEvidence::new(
                 prepared,
-                ManuallyDrop::into_inner(cause),
+                ManuallyDrop::into_inner(cause).into_owned(),
                 None,
             )),
             Err(error) => {
@@ -1665,15 +1737,15 @@ where
     }
 }
 
-impl<O, PP, U, Cause, EvidenceKind, EvidenceTag, State>
-    ValidatedFailureEvidence<O, PP, U, Cause, EvidenceKind, EvidenceTag, State>
+impl<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag, State>
+    ValidatedFailureEvidence<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag, State>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     pub const fn cause(&self) -> &Cause {
-        self.owner.value()
+        self.owner.value().value()
     }
 
     pub fn prepare_minimal_fallback(
@@ -1689,7 +1761,7 @@ where
         match prepared {
             Ok(prepared) => Ok(VerifiedMinimalFallback::new(
                 prepared,
-                ManuallyDrop::into_inner(cause),
+                ManuallyDrop::into_inner(cause).into_owned(),
             )),
             Err(error) => {
                 let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
@@ -1768,15 +1840,15 @@ impl<Cause, EvidenceKind, EvidenceTag> Drop
     }
 }
 
-impl<O, PP, U, Cause, EvidenceKind, EvidenceTag>
-    RejectedFailureEvidence<O, PP, U, Cause, EvidenceKind, EvidenceTag>
+impl<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag>
+    RejectedFailureEvidence<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     pub const fn cause(&self) -> &Cause {
-        self.owner.value()
+        self.owner.value().value()
     }
 
     pub fn prepare_minimal_fallback(
@@ -1788,7 +1860,7 @@ where
         match failure.prepare_minimal_fallback() {
             Ok(prepared) => Ok(VerifiedMinimalFallback::new(
                 prepared,
-                ManuallyDrop::into_inner(cause),
+                ManuallyDrop::into_inner(cause).into_owned(),
             )),
             Err(error) => {
                 let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
@@ -1844,7 +1916,7 @@ impl<Cause> Drop for VerifiedMinimalFallback<Cause> {
     }
 }
 
-impl<O, PP, U, Cause> UnrootedFailureEvidence<O, PP, U, Cause>
+impl<'inv, O, PP, U, Cause> UnrootedFailureEvidence<'inv, O, PP, U, Cause>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1867,7 +1939,7 @@ where
         {
             Ok(prepared) => Ok(VerifiedMinimalFallback::new(
                 prepared,
-                ManuallyDrop::into_inner(cause),
+                ManuallyDrop::into_inner(cause).into_owned(),
             )),
             Err(error) => {
                 let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
@@ -1880,10 +1952,10 @@ where
     pub fn build<EvidenceKind, EvidenceTag>(
         self,
         build: impl for<'lane> FnMut(
-            &mut FailureEvidenceLane<'lane, O, PP, U>,
+            &mut FailureEvidenceLane<'inv, 'lane, O, PP, U>,
         ) -> FailureEvidenceDecision<EvidenceKind, EvidenceTag>,
     ) -> Result<
-        FailureEvidenceOutcome<O, PP, U, Cause, EvidenceKind, EvidenceTag>,
+        FailureEvidenceOutcome<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag>,
         StoreActivationContainment,
     >
     where
@@ -1945,7 +2017,10 @@ where
                         .map(|prepared| classify_prepared_fallback(prepared, domain));
                     return match prepared {
                         Ok(prepared) => Ok(FailureEvidenceOutcome::MinimalFallback(
-                            VerifiedMinimalFallback::new(prepared, ManuallyDrop::into_inner(cause)),
+                            VerifiedMinimalFallback::new(
+                                prepared,
+                                ManuallyDrop::into_inner(cause).into_owned(),
+                            ),
                         )),
                         Err(error) => {
                             let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));

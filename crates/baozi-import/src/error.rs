@@ -5,7 +5,7 @@ use crate::diagnostic::{
 };
 use crate::ledger::{ImportDimension, ImportLedgerPhase, ImportTerminalFailure};
 use crate::metered_storage::{AccountedVec, capacity_plan_cause};
-use crate::store::{ImportStoreExecution, ImportStoreReservation};
+use crate::store::{ImportRootExecution, ImportStoreReservation};
 use baozi_core::FormatId;
 use baozi_io::{AssetOpenError, AssetReadError, PathError};
 use baozi_operation::{CapacityPlan, CapacityPlanError, ControlCause, LedgerCause};
@@ -47,7 +47,7 @@ struct OwnedDetectionCandidates {
 impl DetectionCandidates {
     pub(crate) fn try_new(
         candidates: AccountedVec<FormatId>,
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
     ) -> Result<Self, ScopeAbortCause> {
         const RESOURCE: &str = "ambiguous-format-candidate-owner";
         let capacity_error = |cause| capacity_plan_cause(RESOURCE, cause);

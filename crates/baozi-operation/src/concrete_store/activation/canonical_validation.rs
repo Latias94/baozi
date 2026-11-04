@@ -238,6 +238,14 @@ impl<'session, Kind, Tag> OutcomeEvidenceValidationMember<'session, Kind, Tag> {
     pub fn identifies(&self, slot: OutcomeEvidenceStoreRef<Kind, Tag>) -> bool {
         self.raw == slot
     }
+
+    /// Copies this member's non-owning identity for a centrally accepted proof.
+    ///
+    /// The reference grants no live lookup authority or storage ownership. Inspecting the
+    /// member still requires this session's metered visitors.
+    pub const fn reference(&self) -> OutcomeEvidenceStoreRef<Kind, Tag> {
+        self.raw
+    }
 }
 
 fn preserve_planning_fault<T>(

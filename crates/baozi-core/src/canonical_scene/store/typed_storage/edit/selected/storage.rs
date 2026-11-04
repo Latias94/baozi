@@ -1,8 +1,9 @@
 //! Unique metered storage for one selection's immutable mapping rows.
 
 use super::{EditResult, LocalMapping, TypedStorageBuildControl, TypedStorageBuildError};
+use baozi_operation::__retained_store_integration::activation::CanonicalBodyOperation;
 use baozi_operation::__retained_store_integration::authority::{
-    CanonicalInheritanceSource, RetainedStoreOperation, RetainedStoreReservation,
+    CanonicalInheritanceSource, RetainedStoreReservation,
 };
 use baozi_operation::{
     CapacityPlan, OperationOwner, ProgressPhase, ProgressUnit, StoreDimensionKey, StorePhaseKey,
@@ -66,7 +67,7 @@ impl<O: OperationOwner> SceneGeometryPlanStorage<O> {
         reason = "rejection retains the existing inline operation failure"
     )]
     pub fn try_new<PP: ProgressPhase, U: ProgressUnit>(
-        operation: &mut RetainedStoreOperation<O, PP, U, CanonicalInheritanceSource>,
+        operation: &mut CanonicalBodyOperation<'_, O, PP, U, CanonicalInheritanceSource>,
         phase: StorePhaseKey,
         scratch_dimension: StoreDimensionKey,
         count: usize,

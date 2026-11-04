@@ -2,7 +2,8 @@ use super::*;
 
 use crate::ledger::LedgerLimits;
 
-type TestDerivedOperation = DerivedRetainedStoreOperation<TestOwner, TestProgress, TestUnit>;
+type TestDerivedOperation<'inv> =
+    DerivedRetainedStoreOperation<'inv, TestOwner, TestProgress, TestUnit>;
 
 struct MappedPrefixSource {
     canonical: PublishedCanonicalStore<RecordBlock, TestRootTag>,
@@ -10,11 +11,12 @@ struct MappedPrefixSource {
     bytes: CanonicalBytesRef<TestTag>,
 }
 
-fn test_derived_operation_with_work_limits(
+fn test_derived_operation_with_work_limits<'inv>(
+    root: &'inv mut TestInvocationRoot,
     source: &PublishedCanonicalStore<RecordBlock, TestRootTag>,
     attempted_limit: u64,
     consumed_limit: u64,
-) -> (TestDerivedOperation, TestKeys) {
+) -> (TestDerivedOperation<'inv>, TestKeys) {
     let (domain, keys) = test_vocabulary();
     let failure_terminal_work = RetainedStoreFailureTerminalWorkPlan::new(
         keys.failure_terminal_dimension,
@@ -66,14 +68,21 @@ fn test_derived_operation_with_work_limits(
         failure_terminal_work,
     );
     (
-        TestOperation::try_start_derived(OperationControl::default(), ledger_plan, source, start)
-            .expect("test derived operation"),
+        TestOperation::try_start_derived(
+            root,
+            OperationControl::default(),
+            ledger_plan,
+            source,
+            start,
+        )
+        .expect("test derived operation"),
         keys,
     )
 }
 
 fn publish_mapped_prefix_source(account: &PhysicalStorageAccount) -> MappedPrefixSource {
-    let (operation, keys) = test_operation(account, u64::MAX);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = test_operation(&mut invocation_root, account, u64::MAX);
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 3, 1))
         .expect("source publication assembly");
@@ -166,8 +175,13 @@ fn mapped_prefix_retargets_historical_references_and_appends_exact_row() {
     let factory = test_factory();
     let account = test_account(&factory);
     let source = publish_mapped_prefix_source(&account);
-    let (operation, keys) =
-        test_derived_operation_with_work_limits(&source.canonical, u64::MAX, u64::MAX);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = test_derived_operation_with_work_limits(
+        &mut invocation_root,
+        &source.canonical,
+        u64::MAX,
+        u64::MAX,
+    );
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 3, 1))
         .expect("mapped-prefix assembly");
@@ -249,8 +263,13 @@ fn mapped_prefix_rejects_source_shape_and_destination_shape_before_mutation() {
     let factory = test_factory();
     let account = test_account(&factory);
     let source = publish_mapped_prefix_source(&account);
-    let (operation, keys) =
-        test_derived_operation_with_work_limits(&source.canonical, u64::MAX, u64::MAX);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = test_derived_operation_with_work_limits(
+        &mut invocation_root,
+        &source.canonical,
+        u64::MAX,
+        u64::MAX,
+    );
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 3, 1))
         .expect("shape-rejection assembly");
@@ -332,8 +351,13 @@ fn mapped_prefix_build_failure_rolls_back_and_leaves_source_rewritable() {
     let factory = test_factory();
     let account = test_account(&factory);
     let source = publish_mapped_prefix_source(&account);
-    let (operation, keys) =
-        test_derived_operation_with_work_limits(&source.canonical, u64::MAX, u64::MAX);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = test_derived_operation_with_work_limits(
+        &mut invocation_root,
+        &source.canonical,
+        u64::MAX,
+        u64::MAX,
+    );
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 3, 1))
         .expect("build-failure assembly");
@@ -431,7 +455,9 @@ fn mapped_prefix_ignored_control_failure_is_sticky_and_fails_closed() {
     let factory = test_factory();
     let account = test_account(&factory);
     let source = publish_mapped_prefix_source(&account);
-    let (operation, keys) = test_derived_operation_with_work_limits(&source.canonical, 4, 4);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) =
+        test_derived_operation_with_work_limits(&mut invocation_root, &source.canonical, 4, 4);
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 3, 1))
         .expect("sticky-control assembly");
@@ -493,7 +519,9 @@ fn mapped_prefix_work_failure_during_copy_rolls_back_and_fails_closed() {
     let factory = test_factory();
     let account = test_account(&factory);
     let source = publish_mapped_prefix_source(&account);
-    let (operation, keys) = test_derived_operation_with_work_limits(&source.canonical, 3, 3);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) =
+        test_derived_operation_with_work_limits(&mut invocation_root, &source.canonical, 3, 3);
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 3, 1))
         .expect("mid-prefix failure assembly");
@@ -547,8 +575,13 @@ fn mapped_prefix_missing_mapping_and_incomplete_append_roll_back_before_retry() 
     let factory = test_factory();
     let account = test_account(&factory);
     let source = publish_mapped_prefix_source(&account);
-    let (operation, keys) =
-        test_derived_operation_with_work_limits(&source.canonical, u64::MAX, u64::MAX);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = test_derived_operation_with_work_limits(
+        &mut invocation_root,
+        &source.canonical,
+        u64::MAX,
+        u64::MAX,
+    );
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 3, 1))
         .expect("recoverable mapped-prefix assembly");

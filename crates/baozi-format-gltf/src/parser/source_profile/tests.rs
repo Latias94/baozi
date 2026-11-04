@@ -93,7 +93,7 @@ pub(super) fn comparison_completed() {
 }
 
 type ComparisonAction = for<'region, 'session> fn(
-    &mut ParseExecution<'region, 'session>,
+    &mut ParseRoot<'region, '_, 'session>,
     &AtomicUsize,
     &CancellationToken,
 ) -> Result<()>;
@@ -124,12 +124,12 @@ impl Format for ComparisonProbe {
         &self,
         _: &Probe<'_>,
         _: &ReadHint,
-        _: &DetectionScope<'_>,
+        _: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(&self, _: &Self::Options, context: &mut ParseContext<'_, '_>) -> ParseResult<()> {
         context.with_execution(
             |ctx| match (self.action)(ctx, &self.physical, &self.token) {
                 Ok(()) => Err(ctx.format_failure(GltfFailure::internal(PROBE_STOP))),
@@ -275,19 +275,19 @@ fn panic_baseline() -> u64 {
 }
 
 fn profile<'session>(
-    ctx: &mut ParseExecution<'_, 'session>,
+    ctx: &mut ParseRoot<'_, '_, 'session>,
     pairs: &[(ProfileOwner, SourceEntityId)],
 ) -> ParseResult<SelectedSourceProfile<'session>> {
     let mut profile = SelectedSourceProfile {
-        entries: ctx.metered_vec(
+        entries: ctx.services()?.metered_vec(
             ImportStorageClass::FormatNormalization,
             "gltf-selected-source-identities",
         ),
-        links: ctx.metered_vec(
+        links: ctx.services()?.metered_vec(
             ImportStorageClass::FormatNormalization,
             "gltf-selected-source-owner-links",
         ),
-        extras: ctx.metered_vec(
+        extras: ctx.services()?.metered_vec(
             ImportStorageClass::FormatNormalization,
             "gltf-selected-source-extras",
         ),
@@ -295,7 +295,7 @@ fn profile<'session>(
     for &(owner, source) in pairs {
         profile
             .links
-            .try_push(ctx, OwnerSourceLink { owner, source })?;
+            .try_push(&mut ctx.services()?, OwnerSourceLink { owner, source })?;
     }
     Ok(profile)
 }
@@ -305,16 +305,16 @@ fn pairs(links: &[OwnerSourceLink]) -> Vec<(ProfileOwner, SourceEntityId)> {
 }
 
 fn numeric_comparisons(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseRoot<'_, '_, '_>,
     physical: &AtomicUsize,
     _: &CancellationToken,
 ) -> Result<()> {
     let _storage = profile(ctx, &[(ProfileOwner::Scene, DOCUMENT); 16])?;
-    let group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
-    ctx.with_work(&group, [0], |ctx, ledger_work| {
+    let group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+    ctx.child(&group, [0], |ledger_work| {
         let mut work = ProfileComparisonWork::new(ledger_work);
         for value in 0..8 {
-            work.run(ctx, || {
+            work.run(|| {
                 physical.fetch_add(1, AtomicOrdering::Relaxed);
                 value.cmp(&3)
             })?;
@@ -350,11 +350,11 @@ fn known_error_closes_idle_scope_and_unwind_does_not_complete_the_interrupted_co
     let ordinary = run(
         |ctx, physical, _| {
             let _storage = profile(ctx, &[(ProfileOwner::Scene, DOCUMENT); 16])?;
-            let group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
-            ctx.with_work(&group, [0], |ctx, ledger_work| {
+            let group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+            ctx.child(&group, [0], |ledger_work| {
                 let mut work = ProfileComparisonWork::new(ledger_work);
                 for _ in 0..3 {
-                    work.run(ctx, || physical.fetch_add(1, AtomicOrdering::Relaxed))?;
+                    work.run(|| physical.fetch_add(1, AtomicOrdering::Relaxed))?;
                 }
                 assert_eq!(work.work.remaining(), [0]);
                 Err(ContentError::Format(GltfFailure::internal(PROBE_STOP)))
@@ -375,13 +375,13 @@ fn known_error_closes_idle_scope_and_unwind_does_not_complete_the_interrupted_co
     let interrupted = run(
         |ctx, physical, _| {
             let _storage = profile(ctx, &[(ProfileOwner::Scene, DOCUMENT); 16])?;
-            let group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
-            ctx.with_work(&group, [0], |ctx, ledger_work| {
+            let group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+            ctx.child(&group, [0], |ledger_work| {
                 let mut work = ProfileComparisonWork::new(ledger_work);
                 for _ in 0..3 {
-                    work.run(ctx, || physical.fetch_add(1, AtomicOrdering::Relaxed))?;
+                    work.run(|| physical.fetch_add(1, AtomicOrdering::Relaxed))?;
                 }
-                work.run::<()>(ctx, || {
+                work.run::<()>(|| {
                     physical.fetch_add(1, AtomicOrdering::Relaxed);
                     panic!("interrupt a comparison after admission but before normal return");
                 })?;
@@ -494,7 +494,7 @@ fn link_order_dedup_capacity_and_comparison_counts_match_the_original_metered_al
 }
 
 fn finish_long_links(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseRoot<'_, '_, '_>,
     _: &AtomicUsize,
     _: &CancellationToken,
 ) -> Result<()> {
@@ -512,7 +512,7 @@ fn finish_long_links(
 }
 
 fn finish_short_links(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseRoot<'_, '_, '_>,
     _: &AtomicUsize,
     _: &CancellationToken,
 ) -> Result<()> {
@@ -575,7 +575,7 @@ fn empty_singleton_finish_has_no_comparison_work_and_still_observes_entry_cancel
     assert_eq!(counts(&observation.failure), (before, before));
 
     fn cancel_empty(
-        ctx: &mut ParseExecution<'_, '_>,
+        ctx: &mut ParseRoot<'_, '_, '_>,
         _: &AtomicUsize,
         token: &CancellationToken,
     ) -> Result<()> {
@@ -584,7 +584,7 @@ fn empty_singleton_finish_has_no_comparison_work_and_still_observes_entry_cancel
         selected.finish(ctx)
     }
     fn cancel_singleton(
-        ctx: &mut ParseExecution<'_, '_>,
+        ctx: &mut ParseRoot<'_, '_, '_>,
         _: &AtomicUsize,
         token: &CancellationToken,
     ) -> Result<()> {
@@ -646,7 +646,7 @@ fn absent_and_single_null_extras_skip_comparisons_without_losing_presence() {
     for primary in [ABSENT, NULL] {
         let observation = run(
             |ctx, _, _| {
-                let absent = ctx.primary_bytes() == ABSENT;
+                let absent = ctx.services()?.primary_bytes() == ABSENT;
                 let map = GltfSourceMap::from_primary_for_test(ctx)?;
                 let selected = SelectedSourceProfile::from_source_map(ctx, &map, |_| true)?;
                 if absent {
@@ -655,7 +655,7 @@ fn absent_and_single_null_extras_skip_comparisons_without_losing_presence() {
                     assert_eq!(selected.extras().len(), 1);
                     assert_eq!(selected.extras()[0].source, DOCUMENT);
                     assert_eq!(selected.extras()[0].key.as_str(), "org.baozi.gltf:extras");
-                    assert_eq!(selected.extras()[0].bytes(ctx)?, b"null");
+                    assert_eq!(selected.extras()[0].bytes(&mut ctx.services()?)?, b"null");
                 }
                 Ok(())
             },
@@ -679,7 +679,7 @@ fn actual_extras_sort_retains_literal_source_keys_ranges_bytes_and_resource_indi
     ] {
         let observation = run(
             |ctx, _, _| {
-                let base = json_base(ctx.primary_bytes());
+                let base = json_base(ctx.services()?.primary_bytes());
                 let map = GltfSourceMap::from_primary_for_test(ctx)?;
                 let selected = SelectedSourceProfile::from_source_map(ctx, &map, |id| {
                     id != entity(SourceEntityKind::Node, None, 1)
@@ -728,7 +728,7 @@ fn actual_extras_sort_retains_literal_source_keys_ranges_bytes_and_resource_indi
                         (base + PROFILE_JSON.find(raw).unwrap()) as u64
                     );
                     assert_eq!(extra.range.byte_length, raw.len() as u64);
-                    assert_eq!(extra.bytes(ctx)?, raw.as_bytes());
+                    assert_eq!(extra.bytes(&mut ctx.services()?)?, raw.as_bytes());
                 }
                 Ok(())
             },

@@ -2,7 +2,8 @@ use super::*;
 use std::any::TypeId;
 use std::num::NonZeroU64;
 
-type ValidatedScalarSuccess = ValidatedRetainedSuccess<
+type ValidatedScalarSuccess<'inv> = ValidatedRetainedSuccess<
+    'inv,
     TestOwner,
     TestPhase,
     TestProgress,
@@ -13,8 +14,12 @@ type ValidatedScalarSuccess = ValidatedRetainedSuccess<
     u64,
 >;
 
-fn validated_scalar_success_on_account(account: &PhysicalStorageAccount) -> ValidatedScalarSuccess {
+fn validated_scalar_success_on_account<'inv>(
+    root: &'inv mut TestInvocationRoot<u64, u64>,
+    account: &PhysicalStorageAccount,
+) -> ValidatedScalarSuccess<'inv> {
     let operation = test_operation_on_account_with_control(
+        root,
         account,
         64,
         RetainedBatchLimits::new(2, 2),
@@ -23,7 +28,7 @@ fn validated_scalar_success_on_account(account: &PhysicalStorageAccount) -> Vali
     operation
         .try_complete_phase(TestPhase::Build)
         .unwrap_or_else(|_| panic!("joint-commit build phase must complete"));
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("joint-commit publication must open"));
     let (canonical, evidence) = retain_scalar_success(&mut assembly);
@@ -41,12 +46,13 @@ fn validated_scalar_success_on_account(account: &PhysicalStorageAccount) -> Vali
     }
 }
 
-fn validated_freeze_success_with_limits(
+fn validated_freeze_success_with_limits<'inv>(
+    root: &'inv mut TestInvocationRoot<u64, u64>,
     account: &PhysicalStorageAccount,
     committed_limit: u64,
     evidence_limit: u64,
     evidence_members: usize,
-) -> ValidatedScalarSuccess {
+) -> ValidatedScalarSuccess<'inv> {
     let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, committed_limit, u64::MAX)
         .with_published_outcome_evidence_limit(evidence_limit);
     let limits = LedgerLimits::new(u64::MAX, [(TestDimension::Bytes, policy)])
@@ -58,15 +64,19 @@ fn validated_freeze_success_with_limits(
         OutputCommitment::new(TestDimension::Bytes, 1),
         OutputCommitment::new(TestDimension::Bytes, 1),
     );
-    let operation =
-        TestOperation::try_start(OperationControl::default(), limits, account, plan, || {
-            Ok(7_u32)
-        })
-        .unwrap_or_else(|_| panic!("freeze qualification operation must start"));
+    let operation = RetainedOperation::try_start(
+        root,
+        OperationControl::default(),
+        limits,
+        account,
+        plan,
+        || Ok(7_u32),
+    )
+    .unwrap_or_else(|_| panic!("freeze qualification operation must start"));
     operation
         .try_complete_phase(TestPhase::Build)
         .unwrap_or_else(|_| panic!("freeze qualification build phase must complete"));
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, evidence_members))
         .unwrap_or_else(|_| panic!("freeze qualification publication must open"));
     let canonical = assembly
@@ -123,10 +133,10 @@ fn scalar_success_signature(
     }
 }
 
-fn expect_retry_operation(
-    error: RetainedPublicationOpenError<TestOperation, TestDimension>,
+fn expect_retry_operation<'inv>(
+    error: RetainedPublicationOpenError<TestOperation<'inv, u64, u64>, TestDimension>,
     context: &str,
-) -> TestOperation {
+) -> TestOperation<'inv, u64, u64> {
     match error.into_recovery() {
         Ok(RetainedPublicationOpenRecovery::Retry(operation)) => operation,
         Ok(RetainedPublicationOpenRecovery::FallbackOnly(_)) => {
@@ -136,10 +146,10 @@ fn expect_retry_operation(
     }
 }
 
-fn expect_fallback_only_operation(
-    error: RetainedPublicationOpenError<TestOperation, TestDimension>,
+fn expect_fallback_only_operation<'inv>(
+    error: RetainedPublicationOpenError<TestOperation<'inv, u64, u64>, TestDimension>,
     context: &str,
-) -> TestOperation {
+) -> TestOperation<'inv, u64, u64> {
     match error.into_recovery() {
         Ok(RetainedPublicationOpenRecovery::FallbackOnly(operation)) => operation,
         Ok(RetainedPublicationOpenRecovery::Retry(_)) => {
@@ -149,12 +159,12 @@ fn expect_fallback_only_operation(
     }
 }
 
-fn reject_invalid_publication_plan(
-    operation: TestOperation,
+fn reject_invalid_publication_plan<'inv>(
+    operation: TestOperation<'inv, u64, u64>,
     plan: RetainedPublicationPlan<TestPhase, TestDimension>,
     context: &str,
-) -> TestOperation {
-    let error = match operation.try_publication_assembly::<u64, u64>(plan) {
+) -> TestOperation<'inv, u64, u64> {
+    let error = match operation.try_publication_assembly(plan) {
         Ok(_) => panic!("{context}: invalid publication plan unexpectedly opened"),
         Err(error) => error,
     };
@@ -166,17 +176,19 @@ fn reject_invalid_publication_plan(
     expect_retry_operation(error, context)
 }
 
-fn failure_terminal_operation(
+fn failure_terminal_operation<'inv>(
+    root: &'inv mut TestInvocationRoot<u64, u64>,
     account: &PhysicalStorageAccount,
     ordinary_work_limit: u64,
     max_evidence_members: usize,
-) -> TestOperation {
+) -> TestOperation<'inv, u64, u64> {
     let failure_actions = max_evidence_members
         .checked_add(2)
         .and_then(|actions| u64::try_from(actions).ok())
         .and_then(|actions| actions.checked_mul(2))
         .unwrap_or_else(|| panic!("failure-terminal test bound must fit"));
     failure_terminal_operation_with_limit(
+        root,
         account,
         ordinary_work_limit,
         max_evidence_members,
@@ -184,12 +196,13 @@ fn failure_terminal_operation(
     )
 }
 
-fn failure_terminal_operation_with_limit(
+fn failure_terminal_operation_with_limit<'inv>(
+    root: &'inv mut TestInvocationRoot<u64, u64>,
     account: &PhysicalStorageAccount,
     ordinary_work_limit: u64,
     max_evidence_members: usize,
     failure_work_limit: u64,
-) -> TestOperation {
+) -> TestOperation<'inv, u64, u64> {
     let ordinary_policy = DimensionPolicy::reservable_bytes(
         ordinary_work_limit,
         ordinary_work_limit,
@@ -220,18 +233,25 @@ fn failure_terminal_operation_with_limit(
         TestDimension::FailureTerminalWork,
         max_evidence_members,
     ));
-    TestOperation::try_start(OperationControl::default(), limits, account, plan, || {
-        Ok(7_u32)
-    })
+    RetainedOperation::try_start(
+        root,
+        OperationControl::default(),
+        limits,
+        account,
+        plan,
+        || Ok(7_u32),
+    )
     .unwrap_or_else(|_| panic!("failure-terminal test operation must start"))
 }
 
-fn ordinary_linear_work_operation(
+fn ordinary_linear_work_operation<'inv>(
+    root: &'inv mut TestInvocationRoot<u64, u64>,
     account: &PhysicalStorageAccount,
     attempted_limit: u64,
     consumed_limit: u64,
-) -> TestOperation {
+) -> TestOperation<'inv, u64, u64> {
     ordinary_linear_work_operation_with_control(
+        root,
         account,
         attempted_limit,
         consumed_limit,
@@ -239,12 +259,13 @@ fn ordinary_linear_work_operation(
     )
 }
 
-fn ordinary_linear_work_operation_with_control(
+fn ordinary_linear_work_operation_with_control<'inv>(
+    root: &'inv mut TestInvocationRoot<u64, u64>,
     account: &PhysicalStorageAccount,
     attempted_limit: u64,
     consumed_limit: u64,
     control: OperationControl<TestProgress, TestUnit>,
-) -> TestOperation {
+) -> TestOperation<'inv, u64, u64> {
     let storage_policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
         .with_published_outcome_evidence_limit(64);
     let work_policy = DimensionPolicy::counter(attempted_limit, consumed_limit, 0);
@@ -263,11 +284,13 @@ fn ordinary_linear_work_operation_with_control(
         OutputCommitment::new(TestDimension::Bytes, 1),
         OutputCommitment::new(TestDimension::Bytes, 1),
     );
-    TestOperation::try_start(control, limits, account, plan, || Ok(7_u32))
+    RetainedOperation::try_start(root, control, limits, account, plan, || Ok(7_u32))
         .unwrap_or_else(|_| panic!("ordinary linear work operation must start"))
 }
 
-fn finish_ordinary_linear_work_test(assembly: TestPublication<u64, u64>) -> PreparationFailureCode {
+fn finish_ordinary_linear_work_test(
+    assembly: TestPublication<'_, u64, u64>,
+) -> PreparationFailureCode {
     let published = handoff_for_test(
         assembly
             .prepare_minimal_fallback()
@@ -290,8 +313,9 @@ fn finish_ordinary_linear_work_test(assembly: TestPublication<u64, u64>) -> Prep
 fn ordinary_work_permit_records_exact_attempted_and_completed_work() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
-    let operation = ordinary_linear_work_operation(&account, 8, 8);
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = ordinary_linear_work_operation(&mut invocation_root, &account, 8, 8);
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("ordinary work publication must open"));
 
@@ -351,8 +375,9 @@ fn ordinary_work_permit_records_exact_attempted_and_completed_work() {
 fn ordinary_work_permit_preserves_completed_prefix_when_dropped_incomplete() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
-    let operation = ordinary_linear_work_operation(&account, 8, 8);
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = ordinary_linear_work_operation(&mut invocation_root, &account, 8, 8);
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("incomplete-work publication must open"));
 
@@ -397,8 +422,9 @@ fn ordinary_work_permit_preserves_completed_prefix_when_dropped_incomplete() {
 fn borrowed_work_permit_resolves_verified_partial_work_without_abandonment() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
-    let operation = ordinary_linear_work_operation(&account, 8, 8);
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = ordinary_linear_work_operation(&mut invocation_root, &account, 8, 8);
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("partial-work publication must open"));
 
@@ -442,8 +468,9 @@ fn borrowed_work_permit_resolves_verified_partial_work_without_abandonment() {
 fn dropped_borrowed_work_permit_preserves_prefix_and_latches_abandonment() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
-    let operation = ordinary_linear_work_operation(&account, 8, 8);
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = ordinary_linear_work_operation(&mut invocation_root, &account, 8, 8);
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("abandoned borrowed-work publication must open"));
 
@@ -486,8 +513,9 @@ fn dropped_borrowed_work_permit_preserves_prefix_and_latches_abandonment() {
 fn assert_unresolved_validation_permit_cannot_validate_success(forget: bool) {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
-    let operation = ordinary_linear_work_operation(&account, 8, 8);
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = ordinary_linear_work_operation(&mut invocation_root, &account, 8, 8);
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("abandoned-validation publication must open"));
     let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
@@ -584,8 +612,9 @@ fn forgotten_validation_permit_forces_finalization_containment() {
 fn partially_resolved_validation_work_cannot_validate_success() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
-    let operation = ordinary_linear_work_operation(&account, 8, 8);
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = ordinary_linear_work_operation(&mut invocation_root, &account, 8, 8);
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("partial-validation publication must open"));
     let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
@@ -644,13 +673,15 @@ fn ignored_validation_control_failure_cannot_validate_success() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
     let cancellation = crate::CancellationToken::new();
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     let operation = ordinary_linear_work_operation_with_control(
+        &mut invocation_root,
         &account,
         8,
         8,
         OperationControl::default().with_cancellation(cancellation.clone()),
     );
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("control-failure publication must open"));
     let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
@@ -697,8 +728,9 @@ fn ignored_validation_control_failure_cannot_validate_success() {
 fn ignored_validation_ledger_failure_cannot_validate_success() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
-    let operation = ordinary_linear_work_operation(&account, 0, 0);
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = ordinary_linear_work_operation(&mut invocation_root, &account, 0, 0);
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("ledger-failure publication must open"));
     let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
@@ -746,8 +778,10 @@ fn borrowed_work_permit_preserves_prefix_before_mid_action_cancellation() {
     let account = account(&factory, u64::MAX, 128);
     let cancellation = crate::CancellationToken::new();
     let control = OperationControl::default().with_cancellation(cancellation.clone());
-    let operation = ordinary_linear_work_operation_with_control(&account, 8, 8, control);
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation =
+        ordinary_linear_work_operation_with_control(&mut invocation_root, &account, 8, 8, control);
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("cancellable borrowed-work publication must open"));
 
@@ -793,8 +827,9 @@ fn borrowed_work_permit_preserves_prefix_before_mid_action_cancellation() {
 fn ordinary_work_permit_rejects_consumed_overrun_without_fabricating_completion() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
-    let operation = ordinary_linear_work_operation(&account, 8, 8);
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = ordinary_linear_work_operation(&mut invocation_root, &account, 8, 8);
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("overrun publication must open"));
 
@@ -839,8 +874,9 @@ fn ordinary_work_permit_rejects_consumed_overrun_without_fabricating_completion(
 fn ordinary_work_admission_rejects_short_consumed_capacity_before_action() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
-    let operation = ordinary_linear_work_operation(&account, 8, 2);
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = ordinary_linear_work_operation(&mut invocation_root, &account, 8, 2);
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("short-capacity publication must open"));
     let mut builder_ran = false;
@@ -893,8 +929,10 @@ fn ordinary_work_admission_observes_preexisting_cancellation_before_attempting_w
     let account = account(&factory, u64::MAX, 128);
     let cancellation = crate::CancellationToken::new();
     let control = OperationControl::default().with_cancellation(cancellation.clone());
-    let operation = ordinary_linear_work_operation_with_control(&account, 8, 8, control);
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation =
+        ordinary_linear_work_operation_with_control(&mut invocation_root, &account, 8, 8, control);
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|error| panic!("cancellation publication must open: {error:?}"));
     cancellation.cancel();
@@ -938,8 +976,9 @@ fn ordinary_work_admission_observes_preexisting_cancellation_before_attempting_w
 fn ordinary_work_permit_cannot_address_the_protected_failure_dimension() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
-    let operation = failure_terminal_operation(&account, 64, 1);
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = failure_terminal_operation(&mut invocation_root, &account, 64, 1);
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("protected-dimension publication must open"));
 
@@ -1001,10 +1040,16 @@ fn rejected_failure_terminal_preflight_rolls_back_started_storage() {
         1,
     ));
 
+    let mut invocation_root: TestInvocationRoot = InvocationRoot::new();
     assert!(
-        TestOperation::try_start(OperationControl::default(), limits, &account, plan, || Ok(
-            7_u32
-        ),)
+        RetainedOperation::try_start(
+            &mut invocation_root,
+            OperationControl::default(),
+            limits,
+            &account,
+            plan,
+            || Ok(7_u32),
+        )
         .is_err()
     );
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
@@ -1017,7 +1062,8 @@ fn rejected_failure_terminal_preflight_rolls_back_started_storage() {
 fn publication_key_membership_preflight_preserves_terminal_capability() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
-    let operation = failure_terminal_operation(&account, 64, 1);
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = failure_terminal_operation(&mut invocation_root, &account, 64, 1);
     let invalid_phase = RetainedPublicationPlan::rich_failure(RetainedBlockTablePlan::new(
         RetainedWriterPlan::new(
             TestPhase::Unregistered,
@@ -1028,7 +1074,7 @@ fn publication_key_membership_preflight_preserves_terminal_capability() {
         1,
         1,
     ));
-    let phase_error = match operation.try_publication_assembly::<u64, u64>(invalid_phase) {
+    let phase_error = match operation.try_publication_assembly(invalid_phase) {
         Ok(_) => panic!("an unregistered writer phase must fail pure preflight"),
         Err(error) => error,
     };
@@ -1048,7 +1094,7 @@ fn publication_key_membership_preflight_preserves_terminal_capability() {
         1,
         1,
     ));
-    let dimension_error = match operation.try_publication_assembly::<u64, u64>(invalid_dimension) {
+    let dimension_error = match operation.try_publication_assembly(invalid_dimension) {
         Ok(_) => panic!("an unregistered writer dimension must fail pure preflight"),
         Err(error) => error,
     };
@@ -1133,7 +1179,7 @@ fn publication_key_membership_preflight_preserves_terminal_capability() {
         operation = reject_invalid_publication_plan(operation, plan, context);
     }
 
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(RetainedPublicationPlan::rich_failure(
             RetainedBlockTablePlan::new(writer_plan(2, 2), 1, 1),
         ))
@@ -1187,14 +1233,20 @@ fn startup_qualified_failure_terminal_work_survives_exhausted_ordinary_work() {
         TestDimension::FailureTerminalWork,
         1,
     ));
-    let operation =
-        TestOperation::try_start(OperationControl::default(), limits, &account, plan, || {
-            Ok(7_u32)
-        })
-        .unwrap_or_else(|_| panic!("failure-terminal operation must start"));
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = RetainedOperation::try_start(
+        &mut invocation_root,
+        OperationControl::default(),
+        limits,
+        &account,
+        plan,
+        || Ok(7_u32),
+    )
+    .unwrap_or_else(|_| panic!("failure-terminal operation must start"));
 
     assert!(
         operation
+            .common
             .coordinator
             .retained_ledger()
             .charge_observed_batch(&[(TestDimension::Bytes, 1)])
@@ -1202,13 +1254,14 @@ fn startup_qualified_failure_terminal_work_survives_exhausted_ordinary_work() {
         "ordinary work must retain its non-refundable failing attempt"
     );
     let ordinary = operation
+        .common
         .coordinator
         .dimension_evidence(TestDimension::Bytes)
         .unwrap_or_else(|_| panic!("ordinary dimension evidence"));
     assert_eq!(ordinary.attempted(), 9);
     assert_eq!(ordinary.consumed(), 8);
 
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(RetainedPublicationPlan::rich_failure(
             RetainedBlockTablePlan::new(writer_plan(2, 2), 1, 1),
         ))
@@ -1256,11 +1309,12 @@ fn startup_qualified_failure_terminal_work_survives_exhausted_ordinary_work() {
 fn recoverable_failure_terminal_preflight_preserves_capability_for_retry() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
-    let operation = failure_terminal_operation(&account, 64, 1);
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = failure_terminal_operation(&mut invocation_root, &account, 64, 1);
     let invalid_plan =
         RetainedPublicationPlan::rich_failure(RetainedBlockTablePlan::new(writer_plan(2, 2), 2, 2));
 
-    let error = match operation.try_publication_assembly::<u64, u64>(invalid_plan) {
+    let error = match operation.try_publication_assembly(invalid_plan) {
         Ok(_) => panic!("oversized failure evidence plan must be rejected"),
         Err(error) => error,
     };
@@ -1270,7 +1324,7 @@ fn recoverable_failure_terminal_preflight_preserves_capability_for_retry() {
     ));
     let operation = expect_retry_operation(error, "failure-terminal plan preflight");
 
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(RetainedPublicationPlan::rich_failure(
             RetainedBlockTablePlan::new(writer_plan(2, 2), 1, 1),
         ))
@@ -1314,12 +1368,13 @@ fn recoverable_failure_terminal_preflight_preserves_capability_for_retry() {
 fn post_preflight_open_failure_burns_failure_terminal_capability() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
-    let operation = failure_terminal_operation(&account, 64, 1);
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = failure_terminal_operation(&mut invocation_root, &account, 64, 1);
     let plan =
         RetainedPublicationPlan::rich_failure(RetainedBlockTablePlan::new(writer_plan(2, 2), 1, 1));
 
     fail_next_final_owner_allocation();
-    let error = match operation.try_publication_assembly::<u64, u64>(plan) {
+    let error = match operation.try_publication_assembly(plan) {
         Ok(_) => panic!("injected post-preflight allocation must fail"),
         Err(error) => error,
     };
@@ -1329,6 +1384,7 @@ fn post_preflight_open_failure_burns_failure_terminal_capability() {
     ));
     let operation = expect_fallback_only_operation(error, "post-preflight allocation failure");
     let terminal = operation
+        .common
         .coordinator
         .dimension_evidence(TestDimension::FailureTerminalWork)
         .unwrap_or_else(|_| panic!("failure-terminal evidence after attempted open"));
@@ -1336,7 +1392,7 @@ fn post_preflight_open_failure_burns_failure_terminal_capability() {
 
     let published = handoff_for_test(
         operation
-            .prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(704))
+            .prepare_minimal_fallback(PreparationFailureCode::domain(704))
             .unwrap_or_else(|_| panic!("burned operation must retain minimal fallback")),
     );
     let PublishedRetainedPublicationParts::MinimalFallback {
@@ -1361,8 +1417,10 @@ fn validated_success_can_downgrade_after_ordinary_work_is_exhausted() {
 
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
-    let operation = failure_terminal_operation(&account, ORDINARY_WORK_LIMIT, 2);
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation =
+        failure_terminal_operation(&mut invocation_root, &account, ORDINARY_WORK_LIMIT, 2);
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 2))
         .unwrap_or_else(|_| panic!("success-capable publication must open"));
     let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
@@ -1444,8 +1502,9 @@ fn validated_success_can_downgrade_after_ordinary_work_is_exhausted() {
 fn successful_publication_leaves_failure_terminal_work_unused() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
-    let operation = failure_terminal_operation(&account, 64, 2);
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = failure_terminal_operation(&mut invocation_root, &account, 64, 2);
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("success publication must open"));
     let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
@@ -1490,8 +1549,9 @@ fn successful_publication_leaves_failure_terminal_work_unused() {
 fn direct_rich_validation_of_a_success_plan_activates_protected_work() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
-    let operation = failure_terminal_operation(&account, 64, 2);
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = failure_terminal_operation(&mut invocation_root, &account, 64, 2);
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 2))
         .unwrap_or_else(|_| panic!("success-capable publication must open"));
     let (_canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
@@ -1544,8 +1604,10 @@ fn direct_rich_validation_of_a_success_plan_activates_protected_work() {
 fn failed_protected_evidence_action_seals_the_terminal_rail() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
-    let operation = failure_terminal_operation_with_limit(&account, 64, 2, 64);
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation =
+        failure_terminal_operation_with_limit(&mut invocation_root, &account, 64, 2, 64);
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(RetainedPublicationPlan::rich_failure(
             RetainedBlockTablePlan::new(writer_plan(3, 2), 2, 2),
         ))
@@ -1614,8 +1676,10 @@ fn active_and_failed_terminal_states_seal_canonical_and_success_paths() {
 
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
-    let operation = failure_terminal_operation(&account, ORDINARY_WORK_LIMIT, 3);
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation =
+        failure_terminal_operation(&mut invocation_root, &account, ORDINARY_WORK_LIMIT, 3);
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(2, 3))
         .unwrap_or_else(|_| panic!("success-capable publication must open"));
     let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
@@ -1763,10 +1827,12 @@ fn run_failure_guard_case(case: FailureGuardCase, fault: FailureFault) {
         | FailureGuardCase::RichBoth
         | FailureGuardCase::MinimalNone => 64,
     };
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     let operation = match case {
         FailureGuardCase::RichEvidence
         | FailureGuardCase::RichBoth
         | FailureGuardCase::MinimalEvidence => test_operation_on_account_with_failure_work(
+            &mut invocation_root,
             &account,
             evidence_limit,
             RetainedBatchLimits::new(2, 2),
@@ -1776,6 +1842,7 @@ fn run_failure_guard_case(case: FailureGuardCase, fault: FailureFault) {
         ),
         FailureGuardCase::MinimalNone | FailureGuardCase::MinimalBoth => {
             test_operation_on_account_with_control(
+                &mut invocation_root,
                 &account,
                 evidence_limit,
                 RetainedBatchLimits::new(2, 2),
@@ -1783,7 +1850,7 @@ fn run_failure_guard_case(case: FailureGuardCase, fault: FailureFault) {
             )
         }
     };
-    let ledger = operation.coordinator.retained_ledger().test_probe();
+    let ledger = operation.common.coordinator.retained_ledger().test_probe();
 
     macro_rules! run_prepare {
         ($prepare:expr) => {{
@@ -1808,7 +1875,7 @@ fn run_failure_guard_case(case: FailureGuardCase, fault: FailureFault) {
                 1,
                 1,
             ));
-            let mut assembly: TestPublication<u64, u64> = operation
+            let mut assembly: TestPublication<'_, u64, u64> = operation
                 .try_publication_assembly(plan)
                 .unwrap_or_else(|_| panic!("rich-evidence fixture must open"));
             let evidence = assembly
@@ -1827,7 +1894,7 @@ fn run_failure_guard_case(case: FailureGuardCase, fault: FailureFault) {
             )
         }
         FailureGuardCase::RichBoth => {
-            let mut assembly: TestPublication<u64, u64> = operation
+            let mut assembly: TestPublication<'_, u64, u64> = operation
                 .try_publication_assembly(publication_plan(1, 1))
                 .unwrap_or_else(|_| panic!("rich-both fixture must open"));
             let (canonical, evidence) = retain_scalar_success(&mut assembly);
@@ -1849,16 +1916,16 @@ fn run_failure_guard_case(case: FailureGuardCase, fault: FailureFault) {
                 validated.try_prepare(PreparationFailureCode::domain(202), final_progress())
             )
         }
-        FailureGuardCase::MinimalNone => run_prepare!(
-            operation.prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(203))
-        ),
+        FailureGuardCase::MinimalNone => {
+            run_prepare!(operation.prepare_minimal_fallback(PreparationFailureCode::domain(203)))
+        }
         FailureGuardCase::MinimalEvidence => {
             let plan = RetainedPublicationPlan::rich_failure(RetainedBlockTablePlan::new(
                 writer_plan(2, 2),
                 1,
                 1,
             ));
-            let mut assembly: TestPublication<u64, u64> = operation
+            let mut assembly: TestPublication<'_, u64, u64> = operation
                 .try_publication_assembly(plan)
                 .unwrap_or_else(|_| panic!("minimal-evidence fixture must open"));
             let evidence = assembly
@@ -1880,7 +1947,7 @@ fn run_failure_guard_case(case: FailureGuardCase, fault: FailureFault) {
             )
         }
         FailureGuardCase::MinimalBoth => {
-            let mut assembly: TestPublication<u64, u64> = operation
+            let mut assembly: TestPublication<'_, u64, u64> = operation
                 .try_publication_assembly(publication_plan(1, 1))
                 .unwrap_or_else(|_| panic!("minimal-both fixture must open"));
             let (canonical, evidence) = retain_scalar_success(&mut assembly);
@@ -2029,11 +2096,17 @@ fn failure_rails_contain_both_sides_of_the_ledger_sealed_evidence_write_window()
 #[test]
 fn block_table_success_freezes_dual_batches_and_splits_owners() {
     let factory = account_factory(1);
-    let operation = test_operation_with_writer_limits(&factory, 64, RetainedBatchLimits::new(3, 2));
+    let mut invocation_root: TestInvocationRoot = InvocationRoot::new();
+    let operation = test_operation_with_writer_limits(
+        &mut invocation_root,
+        &factory,
+        64,
+        RetainedBatchLimits::new(3, 2),
+    );
     operation
         .try_complete_phase(TestPhase::Build)
         .unwrap_or_else(|_| panic!("semantic phase completion must fit the frozen catalog"));
-    let mut assembly: TestPublication<TestCanonicalBlock, TestEvidenceBlock> = operation
+    let mut assembly: TestPublication<'_, TestCanonicalBlock, TestEvidenceBlock> = operation
         .try_publication_assembly(publication_plan(2, 2))
         .unwrap_or_else(|_| panic!("publication assembly must open"));
     let leaf = assembly
@@ -2129,7 +2202,8 @@ fn block_table_success_freezes_dual_batches_and_splits_owners() {
 fn success_joint_commit_intent_keeps_publication_uncommitted_until_qualification() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
-    let validated = validated_scalar_success_on_account(&account);
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let validated = validated_scalar_success_on_account(&mut invocation_root, &account);
 
     let intent = match validated
         .try_form_joint_commit_intent(final_progress())
@@ -2171,6 +2245,80 @@ fn success_joint_commit_intent_keeps_publication_uncommitted_until_qualification
     assert_eq!(factory.snapshot().live_accounts(), 0);
 }
 
+#[test]
+fn frozen_success_classification_defers_qualification_and_freeze_until_finish() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let validated = validated_freeze_success_with_limits(&mut invocation_root, &account, 64, 64, 1);
+    let ledger = validated
+        .assembly
+        .operation
+        .as_ref()
+        .expect("validated success must retain its operation")
+        .common
+        .coordinator
+        .retained_ledger()
+        .test_probe();
+    let permit = match validated
+        .try_issue_freeze_permit(TestDimension::Bytes, TestDimension::Bytes, final_progress())
+        .unwrap_or_else(|_| panic!("the exact destinations must issue a permit"))
+    {
+        RetainedSuccessFreezePermitIssue::Ready(permit) => permit,
+        _ => panic!("the healthy candidate must retain a ready permit"),
+    };
+    let physical_before = account.snapshot();
+    let classification = permit
+        .into_contribution()
+        .try_classify_pre_freeze()
+        .unwrap_or_else(|_| panic!("the frozen contribution must classify before preparation"));
+
+    assert!(classification.is_success());
+    assert_eq!(classification.control_cause(), None);
+    assert!(!classification.state.test_evidence_is_frozen());
+    assert!(ledger.is_available());
+    assert!(!ledger.is_terminal_qualified());
+    let dimension = ledger
+        .dimension_evidence(TestDimension::Bytes)
+        .expect("the original ledger must remain observable");
+    assert_eq!(dimension.committed(), 0);
+    assert_eq!(dimension.committed_canonical_output(), 0);
+    assert_eq!(dimension.published_outcome_evidence(), 0);
+    assert_eq!(
+        account.snapshot().live_retained_bytes(),
+        physical_before.live_retained_bytes()
+    );
+    assert_eq!(
+        account.snapshot().live_retained_allocations(),
+        physical_before.live_retained_allocations()
+    );
+
+    let classification = classification
+        .check_payload_cleanup()
+        .unwrap_or_else(|_| panic!("a healthy preflight must retain the same classification"));
+    assert!(!classification.state.test_evidence_is_frozen());
+    assert!(!ledger.is_terminal_qualified());
+    let intent = classification
+        .finish_success()
+        .unwrap_or_else(|_| panic!("the healthy classification must form an intent"));
+    assert!(!ledger.is_available());
+    let published = intent
+        .qualify_and_commit_frozen_exact()
+        .unwrap_or_else(|_| panic!("the exact original account must commit"))
+        .handoff();
+    assert_eq!(*published.canonical.root(), 11);
+    assert_eq!(*published.outcome_evidence.root(), 7);
+    let dimension = published
+        .ledger_evidence
+        .dimension(TestDimension::Bytes)
+        .expect("the frozen ledger must preserve its dimension");
+    assert_eq!(dimension.committed_canonical_output(), 1);
+    assert_eq!(dimension.published_outcome_evidence(), 2);
+    drop(published);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
 fn assert_freeze_destination_rejected(
     account: &PhysicalStorageAccount,
     committed_limit: u64,
@@ -2180,7 +2328,9 @@ fn assert_freeze_destination_rejected(
     expected_value: u64,
     expected_limit: u64,
 ) {
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     match validated_freeze_success_with_limits(
+        &mut invocation_root,
         account,
         committed_limit,
         evidence_limit,
@@ -2219,29 +2369,36 @@ fn assert_freeze_destination_rejected(
         }
     }
 
-    let issue = validated_freeze_success_with_limits(
-        account,
-        committed_limit,
-        evidence_limit,
-        evidence_members,
-    )
-    .try_issue_freeze_permit(TestDimension::Bytes, TestDimension::Bytes, final_progress())
-    .unwrap_or_else(|_| panic!("destination rejection must retain the ordinary failure owner"));
-    assert!(!account.snapshot().poisoned());
-    match issue {
-        RetainedSuccessFreezePermitIssue::DestinationRejected { failure, cause } => {
-            assert_eq!(cause.class(), PreparationFailureClass::Ledger);
-            assert!(failure.canonical_ownership_is_absent());
-            assert_eq!(failure.outcome_evidence_commitment_len(), 0);
-            drop(failure);
-        }
-        RetainedSuccessFreezePermitIssue::Ready(_) => {
-            panic!("destination-ineligible exact pair must not issue a ready permit")
-        }
-        RetainedSuccessFreezePermitIssue::RichFailure { .. } => {
-            panic!("zero-commit destination rejection must not masquerade as frozen failure")
+    drop(invocation_root);
+
+    let mut invocation_root_2: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    {
+        let issue = validated_freeze_success_with_limits(
+            &mut invocation_root_2,
+            account,
+            committed_limit,
+            evidence_limit,
+            evidence_members,
+        )
+        .try_issue_freeze_permit(TestDimension::Bytes, TestDimension::Bytes, final_progress())
+        .unwrap_or_else(|_| panic!("destination rejection must retain the ordinary failure owner"));
+        assert!(!account.snapshot().poisoned());
+        match issue {
+            RetainedSuccessFreezePermitIssue::DestinationRejected { failure, cause } => {
+                assert_eq!(cause.class(), PreparationFailureClass::Ledger);
+                assert!(failure.canonical_ownership_is_absent());
+                assert_eq!(failure.outcome_evidence_commitment_len(), 0);
+                drop(failure);
+            }
+            RetainedSuccessFreezePermitIssue::Ready(_) => {
+                panic!("destination-ineligible exact pair must not issue a ready permit")
+            }
+            RetainedSuccessFreezePermitIssue::RichFailure { .. } => {
+                panic!("zero-commit destination rejection must not masquerade as frozen failure")
+            }
         }
     }
+    drop(invocation_root_2);
     assert!(!account.snapshot().poisoned());
 }
 
@@ -2277,7 +2434,8 @@ fn freeze_pair_prequalification_rejects_insufficient_evidence_limit_without_muta
 fn freeze_permit_issues_ready_for_the_exact_qualified_pair() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
-    let validated = validated_freeze_success_with_limits(&account, 1, 2, 1);
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let validated = validated_freeze_success_with_limits(&mut invocation_root, &account, 1, 2, 1);
 
     let permit = match validated
         .try_issue_freeze_permit(TestDimension::Bytes, TestDimension::Bytes, final_progress())
@@ -2305,6 +2463,7 @@ fn freeze_permit_issues_ready_for_the_exact_qualified_pair() {
     );
 
     drop(permit);
+    drop(invocation_root);
     drop(account);
     assert_eq!(factory.snapshot().live_accounts(), 0);
 }
@@ -2313,14 +2472,16 @@ fn freeze_permit_issues_ready_for_the_exact_qualified_pair() {
 fn success_joint_commit_intent_matches_the_composed_prepare_result_exactly() {
     let old_factory = account_factory(1);
     let old_account = account(&old_factory, u64::MAX, 128);
-    let old = validated_scalar_success_on_account(&old_account)
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let old = validated_scalar_success_on_account(&mut invocation_root, &old_account)
         .try_prepare(final_progress())
         .unwrap_or_else(|_| panic!("legacy preparation must succeed"));
     let old_signature = scalar_success_signature(old);
 
     let intent_factory = account_factory(1);
     let intent_account = account(&intent_factory, u64::MAX, 128);
-    let intent = match validated_scalar_success_on_account(&intent_account)
+    let mut invocation_root_2: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let intent = match validated_scalar_success_on_account(&mut invocation_root_2, &intent_account)
         .try_form_joint_commit_intent(final_progress())
         .unwrap_or_else(|_| panic!("success must form a joint-commit intent"))
     {
@@ -2349,13 +2510,15 @@ fn success_intent_formation_preserves_a_control_downgrade_as_prepared_failure() 
     let control = OperationControl::default().with_progress_observer(
         |_event: crate::ProgressEvent<TestProgress, TestUnit>| crate::ProgressDecision::Cancel,
     );
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     let operation = test_operation_on_account_with_control(
+        &mut invocation_root,
         &account,
         64,
         RetainedBatchLimits::new(2, 2),
         control,
     );
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("control-downgrade publication must open"));
     let (canonical, evidence) = retain_scalar_success(&mut assembly);
@@ -2395,10 +2558,286 @@ fn success_intent_formation_preserves_a_control_downgrade_as_prepared_failure() 
 }
 
 #[test]
+fn control_failure_classification_defers_rich_and_minimal_freeze_until_cleanup() {
+    for minimal in [false, true] {
+        for (cleanup_poison, require_success) in [(false, false), (true, false), (false, true)] {
+            let factory = account_factory(1);
+            let account = account(&factory, u64::MAX, 128);
+            let control = OperationControl::default().with_progress_observer(
+                |_event: crate::ProgressEvent<TestProgress, TestUnit>| {
+                    crate::ProgressDecision::Cancel
+                },
+            );
+            let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+            let operation = test_operation_on_account_with_control(
+                &mut invocation_root,
+                &account,
+                if minimal { 4 } else { 64 },
+                RetainedBatchLimits::new(2, 2),
+                control,
+            );
+            let ledger = operation.common.coordinator.retained_ledger().test_probe();
+            let mut assembly: TestPublication<'_, u64, u64> = operation
+                .try_publication_assembly(publication_plan(1, 1))
+                .unwrap_or_else(|_| panic!("control failure publication must open"));
+            let (canonical, evidence) = retain_scalar_success(&mut assembly);
+            if minimal {
+                assembly
+                    .try_commit_outcome_evidence(TestDimension::Bytes, 4)
+                    .unwrap_or_else(|_| panic!("the existing evidence-limit trigger must fit"));
+            }
+            let validated = match assembly.validate_success(
+                canonical,
+                evidence,
+                |session, canonical, evidence| {
+                    session.canonical(canonical) == Some(&11)
+                        && session.outcome_evidence(evidence) == Some(&7)
+                },
+            ) {
+                RetainedSuccessValidation::Valid(validated) => validated,
+                _ => panic!("the control failure fixture must validate its actual roots"),
+            };
+            let physical_before = account.snapshot();
+            let classification = validated
+                .try_classify_pre_freeze(final_progress())
+                .unwrap_or_else(|_| {
+                    panic!("control rejection must retain a pending failure owner")
+                });
+            let expected_control = classification
+                .control_cause()
+                .cloned()
+                .expect("the actual final control rejection must survive classification");
+            assert!(matches!(expected_control, ControlCause::Cancelled { .. }));
+            let expected_cause = PreparationFailureCode::from_control(&expected_control);
+            assert!(!classification.is_success());
+            assert_eq!(
+                matches!(
+                    &classification.state,
+                    TerminalPreFreezeTransition::Fallback { .. }
+                ),
+                minimal
+            );
+            assert!(!classification.state.test_evidence_is_frozen());
+            assert!(ledger.is_available());
+            assert!(!ledger.is_terminal_qualified());
+            let dimension = ledger
+                .dimension_evidence(TestDimension::Bytes)
+                .expect("the original failure ledger must still be present");
+            assert_eq!(dimension.committed_canonical_output(), 0);
+            assert_eq!(dimension.published_outcome_evidence(), 0);
+            assert_eq!(
+                account.snapshot().live_retained_bytes(),
+                physical_before.live_retained_bytes()
+            );
+            assert_eq!(
+                account.snapshot().live_retained_allocations(),
+                physical_before.live_retained_allocations()
+            );
+
+            if require_success {
+                let cause = match classification.finish_success() {
+                    Err(RetainedPublicationPrepareError::FinalizationContainment(cause)) => cause,
+                    Ok(_) => panic!("the success-only finish cannot publish a classified failure"),
+                };
+                assert_eq!(
+                    cause.reason(),
+                    AccountPoisonReason::OwnershipGraphUnverified
+                );
+                assert!(ledger.is_available());
+                assert!(!ledger.is_terminal_qualified());
+                assert_eq!(
+                    account.snapshot().live_retained_bytes(),
+                    physical_before.live_retained_bytes()
+                );
+                assert_eq!(
+                    account.snapshot().live_retained_allocations(),
+                    physical_before.live_retained_allocations()
+                );
+                let dimension = ledger.dimension_evidence(TestDimension::Bytes).unwrap();
+                assert_eq!(dimension.committed_canonical_output(), 0);
+                assert_eq!(dimension.published_outcome_evidence(), 0);
+                drop(account);
+                assert_eq!(factory.snapshot().live_accounts(), 1);
+                continue;
+            }
+
+            if cleanup_poison {
+                let first_poison = account
+                    .test_record_poison(AccountPoisonReason::RetainedStorageReleaseUnverified);
+                let poison_events = account.snapshot().poison_event_count();
+                let cause = match classification.check_payload_cleanup() {
+                    Err(cause) => cause,
+                    Ok(_) => panic!("payload release poison must prevent failure preparation"),
+                };
+                assert_eq!(
+                    cause.reason(),
+                    AccountPoisonReason::RetainedStorageReleaseUnverified
+                );
+                assert_eq!(
+                    cause.account_poisoned().snapshot().first_poison_evidence(),
+                    first_poison.snapshot().first_poison_evidence()
+                );
+                // Each of the two one-member tables records its table and member edge;
+                // the fallback and ledger-evidence allocations add one edge each.
+                // The existing first fault is preserved without another root fault.
+                assert_eq!(account.snapshot().poison_event_count(), poison_events + 6);
+                assert!(ledger.is_available());
+                assert!(!ledger.is_terminal_qualified());
+                assert_eq!(
+                    account.snapshot().live_retained_bytes(),
+                    physical_before.live_retained_bytes()
+                );
+                assert_eq!(
+                    account.snapshot().live_retained_allocations(),
+                    physical_before.live_retained_allocations()
+                );
+                drop(account);
+                assert_eq!(factory.snapshot().live_accounts(), 1);
+                continue;
+            }
+
+            let classification = classification
+                .check_payload_cleanup()
+                .unwrap_or_else(|_| panic!("clean payload disposal must retain the failure owner"));
+            assert!(!classification.state.test_evidence_is_frozen());
+            assert!(!ledger.is_terminal_qualified());
+            let (formation, control_cause) = classification
+                .finish()
+                .unwrap_or_else(|_| panic!("the selected failure rail must finish after cleanup"));
+            assert_eq!(control_cause, Some(expected_control));
+            let prepared = match formation {
+                RetainedSuccessJointCommitFormation::PreparedFailure(prepared) => prepared,
+                RetainedSuccessJointCommitFormation::Intent(_) => {
+                    panic!("a classified control failure cannot become success")
+                }
+            };
+            match (minimal, handoff_for_test(prepared)) {
+                (
+                    false,
+                    PublishedRetainedPublicationParts::RichFailure {
+                        outcome_evidence,
+                        ledger_evidence,
+                    },
+                ) => {
+                    assert_eq!(*outcome_evidence.outcome_evidence().root(), 7);
+                    assert_eq!(published_failure_cause(&ledger_evidence), expected_cause);
+                }
+                (
+                    true,
+                    PublishedRetainedPublicationParts::MinimalFallback {
+                        fallback,
+                        ledger_evidence,
+                    },
+                ) => {
+                    assert_eq!(*fallback.value(), 7);
+                    assert_eq!(published_failure_cause(&ledger_evidence), expected_cause);
+                }
+                _ => panic!("finishing must preserve the actual rich or minimal decision"),
+            }
+            assert!(!ledger.is_available());
+            drop(account);
+            assert_eq!(factory.snapshot().live_accounts(), 0);
+        }
+    }
+}
+
+#[test]
+fn requested_minimal_classification_preserves_cause_without_freezing() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let validated = validated_scalar_success_on_account(&mut invocation_root, &account);
+    let requested_cause = PreparationFailureCode::domain(91);
+    let classification = validated
+        .assembly
+        .try_classify_terminal_preparation(RetainedTerminalRequest::MinimalFallback {
+            requested_cause,
+        })
+        .unwrap_or_else(|_| panic!("an explicit minimal request must retain its pending owner"));
+
+    assert!(!classification.is_success());
+    assert_eq!(classification.control_cause(), None);
+    assert!(!classification.state.test_evidence_is_frozen());
+    let (formation, control_cause) = classification
+        .check_payload_cleanup()
+        .unwrap_or_else(|_| panic!("the original fallback account must remain healthy"))
+        .finish()
+        .unwrap_or_else(|_| panic!("the explicit minimal request must finish"));
+    assert_eq!(control_cause, None);
+    let prepared = match formation {
+        RetainedSuccessJointCommitFormation::PreparedFailure(prepared) => prepared,
+        RetainedSuccessJointCommitFormation::Intent(_) => {
+            panic!("an explicit minimal request must not form a success intent")
+        }
+    };
+    match handoff_for_test(prepared) {
+        PublishedRetainedPublicationParts::MinimalFallback {
+            fallback,
+            ledger_evidence,
+        } => {
+            assert_eq!(*fallback.value(), 7);
+            assert_eq!(published_failure_cause(&ledger_evidence), requested_cause);
+        }
+        _ => panic!("the explicit minimal request must keep its selected terminal owner"),
+    }
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn containing_pre_freeze_classification_retains_unqualified_original_graph() {
+    for poisoned in [false, true] {
+        let factory = account_factory(1);
+        let account = account(&factory, u64::MAX, 128);
+        let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+        let validated = validated_scalar_success_on_account(&mut invocation_root, &account);
+        let ledger = validated
+            .assembly
+            .operation
+            .as_ref()
+            .expect("the actual candidate must retain its ledger")
+            .common
+            .coordinator
+            .retained_ledger()
+            .test_probe();
+        let classification = validated
+            .try_classify_pre_freeze(final_progress())
+            .unwrap_or_else(|_| panic!("the healthy candidate must classify before containment"));
+        assert!(classification.is_success());
+        assert!(!classification.state.test_evidence_is_frozen());
+        let physical_before = account.snapshot();
+        let expected_reason = if poisoned {
+            account.test_record_poison(AccountPoisonReason::RetainedStorageReleaseUnverified);
+            AccountPoisonReason::RetainedStorageReleaseUnverified
+        } else {
+            AccountPoisonReason::OwnershipGraphUnverified
+        };
+        let cause = classification.contain_activation_fault();
+
+        assert_eq!(cause.reason(), expected_reason);
+        assert!(ledger.is_available());
+        assert!(!ledger.is_terminal_qualified());
+        // One root fault plus the six actual table/member/baseline edges above.
+        assert_eq!(account.snapshot().poison_event_count(), 7);
+        assert_eq!(
+            account.snapshot().live_retained_bytes(),
+            physical_before.live_retained_bytes()
+        );
+        assert_eq!(
+            account.snapshot().live_retained_allocations(),
+            physical_before.live_retained_allocations()
+        );
+        drop(account);
+        assert_eq!(factory.snapshot().live_accounts(), 1);
+    }
+}
+
+#[test]
 fn dropping_success_joint_commit_intent_fails_closed_before_eligibility() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
-    let intent = match validated_scalar_success_on_account(&account)
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let intent = match validated_scalar_success_on_account(&mut invocation_root, &account)
         .try_form_joint_commit_intent(final_progress())
         .unwrap_or_else(|_| panic!("success must form a joint-commit intent"))
     {
@@ -2434,7 +2873,8 @@ fn dropping_success_joint_commit_intent_fails_closed_before_eligibility() {
 fn poisoned_account_rejects_success_joint_commit_intent_without_prepared_owner() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
-    let intent = match validated_scalar_success_on_account(&account)
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let intent = match validated_scalar_success_on_account(&mut invocation_root, &account)
         .try_form_joint_commit_intent(final_progress())
         .unwrap_or_else(|_| panic!("success must form a joint-commit intent"))
     {
@@ -2468,14 +2908,16 @@ fn poisoned_account_rejects_success_joint_commit_intent_without_prepared_owner()
 fn terminal_evidence_qualification_error_contains_the_complete_success_graph() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     let operation = test_operation_on_account_with_control(
+        &mut invocation_root,
         &account,
         64,
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
-    let ledger = operation.coordinator.retained_ledger().test_probe();
-    let mut assembly: TestPublication<u64, u64> = operation
+    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("freeze-error publication must open"));
     let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
@@ -2534,14 +2976,16 @@ fn success_guard_direct_drop_contains_physical_before_retaining_ledger_proof() {
     ] {
         let factory = account_factory(1);
         let account = account(&factory, u64::MAX, 128);
+        let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
         let operation = test_operation_on_account_with_control(
+            &mut invocation_root,
             &account,
             64,
             RetainedBatchLimits::new(2, 2),
             OperationControl::default(),
         );
-        let ledger = operation.coordinator.retained_ledger().test_probe();
-        let mut assembly: TestPublication<u64, u64> = operation
+        let ledger = operation.common.coordinator.retained_ledger().test_probe();
+        let mut assembly: TestPublication<'_, u64, u64> = operation
             .try_publication_assembly(publication_plan(1, 1))
             .unwrap_or_else(|_| panic!("direct-drop publication must open"));
         let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
@@ -2637,14 +3081,16 @@ fn success_guard_direct_drop_contains_physical_before_retaining_ledger_proof() {
 fn success_acknowledgement_panic_does_not_retry_or_release_unacknowledged_ledger_state() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     let operation = test_operation_on_account_with_control(
+        &mut invocation_root,
         &account,
         64,
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
-    let ledger = operation.coordinator.retained_ledger().test_probe();
-    let mut assembly: TestPublication<u64, u64> = operation
+    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("acknowledgement-panic publication must open"));
     let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
@@ -2693,14 +3139,16 @@ fn success_acknowledgement_panic_does_not_retry_or_release_unacknowledged_ledger
 fn success_ledger_detach_panic_before_evidence_freeze_uses_scopeguard_containment() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     let operation = test_operation_on_account_with_control(
+        &mut invocation_root,
         &account,
         64,
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
-    let ledger = operation.coordinator.retained_ledger().test_probe();
-    let mut assembly: TestPublication<u64, u64> = operation
+    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("ledger-detached publication must open"));
     let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
@@ -2743,22 +3191,23 @@ fn success_ledger_detach_panic_before_evidence_freeze_uses_scopeguard_containmen
 fn terminal_evidence_qualification_panic_contains_the_complete_fallback_graph() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     let operation = test_operation_on_account_with_control(
+        &mut invocation_root,
         &account,
         64,
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
-    let ledger = operation.coordinator.retained_ledger().test_probe();
+    let ledger = operation.common.coordinator.retained_ledger().test_probe();
     let physical_before = account.snapshot();
     let ledger_before = (ledger.active_reservations(), ledger.current_live_bytes());
 
     panic_next_terminal_evidence_qualification();
-    let cause =
-        match operation.prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(93)) {
-            Err(RetainedPublicationPrepareError::FinalizationContainment(cause)) => cause,
-            Ok(_) => panic!("a panicked terminal evidence freeze must never publish fallback"),
-        };
+    let cause = match operation.prepare_minimal_fallback(PreparationFailureCode::domain(93)) {
+        Err(RetainedPublicationPrepareError::FinalizationContainment(cause)) => cause,
+        Ok(_) => panic!("a panicked terminal evidence freeze must never publish fallback"),
+    };
     assert_eq!(
         cause.reason(),
         AccountPoisonReason::TerminalEvidenceFreezeUnverified
@@ -2802,7 +3251,9 @@ fn inherited_blocks_deduplicate_source_slots_without_new_attribution_or_physical
         .test_member_share_call_count(source_evidence_slot.identity())
         .expect("evidence source slot must resolve");
 
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     let operation = test_derived_operation_on_account_with_control(
+        &mut invocation_root,
         &account,
         &source_canonical,
         64,
@@ -2814,7 +3265,7 @@ fn inherited_blocks_deduplicate_source_slots_without_new_attribution_or_physical
             .with_canonical_source_mapping_capacity(source_canonical.aggregate().len()),
         RetainedBlockTablePlan::new(writer_plan(1, 2), 3, 0),
     );
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(plan)
         .unwrap_or_else(|_| panic!("inherited publication must open"));
     assembly
@@ -2863,6 +3314,7 @@ fn inherited_blocks_deduplicate_source_slots_without_new_attribution_or_physical
     );
     assert_eq!(
         assembly
+            .fields
             .canonical_batch
             .as_ref()
             .expect("canonical attribution batch")
@@ -2871,6 +3323,7 @@ fn inherited_blocks_deduplicate_source_slots_without_new_attribution_or_physical
     );
     assert_eq!(
         assembly
+            .fields
             .evidence_batch
             .as_ref()
             .expect("evidence attribution batch")
@@ -2904,6 +3357,7 @@ fn inherited_blocks_deduplicate_source_slots_without_new_attribution_or_physical
     assert_eq!(assembly.canonical_len(), 2);
     assert_eq!(
         assembly
+            .fields
             .canonical_batch
             .as_ref()
             .expect("canonical attribution batch")
@@ -2978,13 +3432,15 @@ fn dense_canonical_source_lookup_is_constant_and_physically_accounted() {
 
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 512);
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     let source_operation = test_operation_on_account_with_control(
+        &mut invocation_root,
         &account,
         64,
         RetainedBatchLimits::new(SOURCE_BLOCKS + 1, 2),
         OperationControl::default(),
     );
-    let mut source: TestPublication<u64, u64> = source_operation
+    let mut source: TestPublication<'_, u64, u64> = source_operation
         .try_publication_assembly(publication_plan(SOURCE_BLOCKS, 1))
         .unwrap_or_else(|_| panic!("dense source publication must open"));
     let mut source_slots = Vec::with_capacity(SOURCE_BLOCKS);
@@ -3029,7 +3485,9 @@ fn dense_canonical_source_lookup_is_constant_and_physically_accounted() {
         _ => panic!("dense source publication must succeed"),
     };
 
+    let mut invocation_root_2: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     let undersized_operation = test_operation_on_account_with_control(
+        &mut invocation_root_2,
         &account,
         64,
         RetainedBatchLimits::new(1, 2),
@@ -3040,7 +3498,7 @@ fn dense_canonical_source_lookup_is_constant_and_physically_accounted() {
             .with_canonical_source_mapping_capacity(SOURCE_BLOCKS - 1),
         RetainedBlockTablePlan::new(writer_plan(1, 2), 1, 0),
     );
-    let mut undersized: TestPublication<u64, u64> = undersized_operation
+    let mut undersized: TestPublication<'_, u64, u64> = undersized_operation
         .try_publication_assembly(undersized_plan)
         .unwrap_or_else(|_| panic!("undersized dense-map target must open"));
     assert!(matches!(
@@ -3055,8 +3513,11 @@ fn dense_canonical_source_lookup_is_constant_and_physically_accounted() {
     );
     assert_eq!(undersized.canonical_len(), 0);
     drop(undersized);
+    drop(invocation_root_2);
 
+    let mut invocation_root_3: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     let target_operation = test_derived_operation_on_account_with_control(
+        &mut invocation_root_3,
         &account,
         &source_canonical,
         64,
@@ -3069,7 +3530,7 @@ fn dense_canonical_source_lookup_is_constant_and_physically_accounted() {
         RetainedBlockTablePlan::new(writer_plan(1, 2), 1, 0),
     );
     let before_target = account.snapshot();
-    let mut target: TestPublication<u64, u64> = target_operation
+    let mut target: TestPublication<'_, u64, u64> = target_operation
         .try_publication_assembly(target_plan)
         .unwrap_or_else(|_| panic!("dense-map target publication must open"));
     let after_target = account.snapshot();
@@ -3107,6 +3568,7 @@ fn dense_canonical_source_lookup_is_constant_and_physically_accounted() {
     assert_eq!(target.canonical_len(), 1);
 
     drop(target);
+    drop(invocation_root_3);
     assert!(account.snapshot().live_retained_bytes() < before_target.live_retained_bytes());
     assert!(
         account.snapshot().live_retained_allocations() < before_target.live_retained_allocations()
@@ -3123,14 +3585,16 @@ fn canonical_source_binding_checks_account_health_before_mapping_work() {
     let account = account(&factory, u64::MAX, 128);
     let (source_canonical, _, source_evidence, _) = publish_scalar_source(&account);
     let (wrong_canonical, _, wrong_evidence, _) = publish_scalar_source(&account);
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     let operation = test_derived_operation_on_account_with_control(
+        &mut invocation_root,
         &account,
         &source_canonical,
         64,
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan_with_canonical_source_mapping(1, 1, 1))
         .unwrap_or_else(|_| panic!("poison-first binding target must open"));
     let first_poison = account.test_record_poison(AccountPoisonReason::OwnershipGraphUnverified);
@@ -3145,6 +3609,7 @@ fn canonical_source_binding_checks_account_health_before_mapping_work() {
     assert_eq!(assembly.canonical_len(), 0);
 
     drop(assembly);
+    drop(invocation_root);
     drop(source_canonical);
     drop(source_evidence);
     drop(wrong_canonical);
@@ -3171,17 +3636,11 @@ fn poisoned_derived_start_precedes_foreign_source_validation() {
     let fallback_observer = StdArc::clone(&fallback_called);
     let (limits, plan) = startup_limits_and_plan();
 
-    let result = RetainedOperation::<
-        TestOwner,
-        TestPhase,
-        TestProgress,
-        TestUnit,
-        TestDimension,
-        u32,
-    >::try_start_derived_with_phase_catalog(
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let result = RetainedOperation::try_start_derived_with_phase_catalog(
+        &mut invocation_root,
         OperationControl::default(),
-        limits,
-        &[TestPhase::Build],
+        (limits, &[TestPhase::Build]),
         &target_account,
         foreign_canonical.aggregate(),
         plan,
@@ -3265,14 +3724,16 @@ fn non_authoritative_same_account_aggregate_is_rejected_before_member_access_or_
         .expect("source slot must resolve");
     let _ = take_test_member_lookups();
 
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     let operation = test_derived_operation_on_account_with_control(
+        &mut invocation_root,
         &account,
         &bound_canonical,
         64,
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("exact-source target must open"));
     let result = assembly.try_share_canonical(source_canonical.aggregate(), source_slot);
@@ -3332,17 +3793,18 @@ fn share_work_rejection_does_not_clone_or_mutate_the_target_table() {
         OutputCommitment::new(TestDimension::Bytes, 1),
         OutputCommitment::new(TestDimension::Bytes, 1),
     );
-    let operation = TestOperation::try_start_derived_with_phase_catalog(
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = RetainedOperation::try_start_derived_with_phase_catalog(
+        &mut invocation_root,
         OperationControl::default(),
-        limits,
-        &[TestPhase::Build],
+        (limits, &[TestPhase::Build]),
         &account,
         source_canonical.aggregate(),
         start,
         || Ok(7_u32),
     )
     .unwrap_or_else(|_| panic!("exact share-work operation must start"));
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan_with_canonical_source_mapping(1, 1, 1))
         .unwrap_or_else(|_| panic!("exact share-work tables must open"));
     assembly
@@ -3449,9 +3911,16 @@ fn invalid_publication_capacity_is_rejected_before_every_open_side_effect() {
     for (index, (case, invalid_plan, expects_batch_capacity)) in
         invalid_plans.into_iter().enumerate()
     {
-        let operation =
-            test_operation_with_failure_work(&factory, 64, RetainedBatchLimits::new(2, 2), 1);
+        let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+        let operation = test_operation_with_failure_work(
+            &mut invocation_root,
+            &factory,
+            64,
+            RetainedBatchLimits::new(2, 2),
+            1,
+        );
         let dimension_before = operation
+            .common
             .coordinator
             .dimension_evidence(TestDimension::Bytes)
             .unwrap_or_else(|_| panic!("{case}: dimension evidence before open"));
@@ -3460,7 +3929,7 @@ fn invalid_publication_capacity_is_rejected_before_every_open_side_effect() {
         let set_ids_before = test_retained_set_id_requests();
         let batch_allocations_before = crate::ledger::test_attribution_batch_allocation_entries();
 
-        let error = match operation.try_publication_assembly::<u64, u64>(invalid_plan) {
+        let error = match operation.try_publication_assembly(invalid_plan) {
             Ok(_) => panic!("{case}: invalid plan unexpectedly opened"),
             Err(error) => error,
         };
@@ -3489,6 +3958,7 @@ fn invalid_publication_capacity_is_rejected_before_every_open_side_effect() {
         assert_eq!(operation.account().snapshot(), physical_before, "{case}");
         assert_eq!(
             operation
+                .common
                 .coordinator
                 .dimension_evidence(TestDimension::Bytes)
                 .unwrap_or_else(|_| panic!("{case}: dimension evidence after rejection")),
@@ -3497,7 +3967,7 @@ fn invalid_publication_capacity_is_rejected_before_every_open_side_effect() {
         );
 
         if index == 2 {
-            let assembly: TestPublication<u64, u64> = operation
+            let assembly: TestPublication<'_, u64, u64> = operation
                 .try_publication_assembly(RetainedPublicationPlan::rich_failure(
                     RetainedBlockTablePlan::new(writer_plan(1, 1), 1, 0),
                 ))
@@ -3510,7 +3980,7 @@ fn invalid_publication_capacity_is_rejected_before_every_open_side_effect() {
         } else {
             drop(handoff_for_test(
                 operation
-                    .prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(70))
+                    .prepare_minimal_fallback(PreparationFailureCode::domain(70))
                     .unwrap_or_else(|_| panic!("direct fallback must prepare")),
             ));
         }
@@ -3521,12 +3991,13 @@ fn invalid_publication_capacity_is_rejected_before_every_open_side_effect() {
 #[test]
 fn recoverable_open_failures_prepare_the_baseline_without_tables_or_roots() {
     let factory = account_factory(1);
-    let operation = test_operation(&factory, 64);
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = test_operation(&mut invocation_root, &factory, 64);
     let invalid_plan = RetainedPublicationPlan::success(
         RetainedBlockTablePlan::new(writer_plan(2, 2), 1, 2),
         RetainedBlockTablePlan::new(writer_plan(2, 2), 1, 1),
     );
-    let error = match operation.try_publication_assembly::<u64, u64>(invalid_plan) {
+    let error = match operation.try_publication_assembly(invalid_plan) {
         Ok(_) => panic!("invalid total/new relation must be rejected"),
         Err(error) => error,
     };
@@ -3537,7 +4008,7 @@ fn recoverable_open_failures_prepare_the_baseline_without_tables_or_roots() {
     let operation = expect_retry_operation(error, "invalid total/new relation");
     let published = handoff_for_test(
         operation
-            .prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(71))
+            .prepare_minimal_fallback(PreparationFailureCode::domain(71))
             .unwrap_or_else(|_| panic!("direct fallback must prepare")),
     );
     match published {
@@ -3561,9 +4032,10 @@ fn recoverable_open_failures_prepare_the_baseline_without_tables_or_roots() {
         _ => panic!("invalid plan must publish minimal fallback"),
     }
 
-    let operation = test_operation(&factory, 64);
+    let mut invocation_root_2: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = test_operation(&mut invocation_root_2, &factory, 64);
     fail_next_final_owner_allocation();
-    let error = match operation.try_publication_assembly::<u64, u64>(publication_plan(1, 1)) {
+    let error = match operation.try_publication_assembly(publication_plan(1, 1)) {
         Ok(_) => panic!("injected table allocation failure must reject open"),
         Err(error) => error,
     };
@@ -3574,7 +4046,7 @@ fn recoverable_open_failures_prepare_the_baseline_without_tables_or_roots() {
     let operation = expect_retry_operation(error, "verified allocation failure");
     let published = handoff_for_test(
         operation
-            .prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(72))
+            .prepare_minimal_fallback(PreparationFailureCode::domain(72))
             .unwrap_or_else(|_| panic!("direct fallback must prepare")),
     );
     assert!(matches!(
@@ -3589,10 +4061,11 @@ fn recoverable_open_failures_prepare_the_baseline_without_tables_or_roots() {
 #[test]
 fn second_table_allocation_failure_releases_canonical_and_returns_operation() {
     let factory = account_factory(1);
-    let operation = test_operation(&factory, 64);
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = test_operation(&mut invocation_root, &factory, 64);
     fail_final_owner_allocation_after(1);
 
-    let error = match operation.try_publication_assembly::<u64, u64>(publication_plan(1, 1)) {
+    let error = match operation.try_publication_assembly(publication_plan(1, 1)) {
         Ok(_) => panic!("evidence table allocation failure must reject open"),
         Err(error) => error,
     };
@@ -3603,7 +4076,7 @@ fn second_table_allocation_failure_releases_canonical_and_returns_operation() {
     let operation = expect_retry_operation(error, "clean canonical rollback");
     let published = handoff_for_test(
         operation
-            .prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(73))
+            .prepare_minimal_fallback(PreparationFailureCode::domain(73))
             .unwrap_or_else(|_| panic!("recovered operation must prepare fallback")),
     );
     drop(published);
@@ -3613,11 +4086,12 @@ fn second_table_allocation_failure_releases_canonical_and_returns_operation() {
 #[test]
 fn second_table_allocation_failure_reports_canonical_storage_cleanup_failure() {
     let factory = account_factory(1);
-    let operation = test_operation(&factory, 64);
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = test_operation(&mut invocation_root, &factory, 64);
     fail_final_owner_allocation_after(1);
     test_panic_final_owner_drop_after(0);
 
-    let error = match operation.try_publication_assembly::<u64, u64>(publication_plan(1, 1)) {
+    let error = match operation.try_publication_assembly(publication_plan(1, 1)) {
         Ok(_) => panic!("combined evidence allocation and canonical drop failure must reject"),
         Err(error) => error,
     };
@@ -3635,9 +4109,15 @@ fn second_table_allocation_failure_reports_canonical_storage_cleanup_failure() {
 #[test]
 fn semantic_rejection_can_append_evidence_and_prepare_a_rich_failure() {
     let factory = account_factory(1);
-    let operation =
-        test_operation_with_failure_work(&factory, 64, RetainedBatchLimits::new(3, 2), 2);
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = test_operation_with_failure_work(
+        &mut invocation_root,
+        &factory,
+        64,
+        RetainedBatchLimits::new(3, 2),
+        2,
+    );
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 2))
         .unwrap_or_else(|_| panic!("semantic rejection publication must open"));
     let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
@@ -3703,8 +4183,9 @@ fn semantic_rejection_can_append_evidence_and_prepare_a_rich_failure() {
 #[test]
 fn validation_panic_transitions_to_fallback_only() {
     let factory = account_factory(1);
-    let operation = test_operation(&factory, 64);
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = test_operation(&mut invocation_root, &factory, 64);
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("validation-panic publication must open"));
     let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
@@ -3739,9 +4220,15 @@ fn validation_panic_transitions_to_fallback_only() {
 #[test]
 fn repeated_semantic_rejection_preserves_the_product_graph_fallback_cause() {
     let factory = account_factory(1);
-    let operation =
-        test_operation_with_failure_work(&factory, 64, RetainedBatchLimits::new(2, 2), 1);
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = test_operation_with_failure_work(
+        &mut invocation_root,
+        &factory,
+        64,
+        RetainedBatchLimits::new(2, 2),
+        1,
+    );
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("repeated-rejection publication must open"));
     let (canonical, evidence) = retain_scalar_success(&mut assembly);
@@ -3851,8 +4338,14 @@ fn published_lookup_checks_actual_member_tags_for_retagged_typed_slots() {
 #[test]
 fn consuming_closure_validation_rejects_orphans_and_retagged_slots() {
     let factory = account_factory(1);
-    let operation = test_operation_with_writer_limits(&factory, 64, RetainedBatchLimits::new(3, 2));
-    let mut assembly: TestPublication<TestCanonicalBlock, TestEvidenceBlock> = operation
+    let mut invocation_root: TestInvocationRoot = InvocationRoot::new();
+    let operation = test_operation_with_writer_limits(
+        &mut invocation_root,
+        &factory,
+        64,
+        RetainedBatchLimits::new(3, 2),
+    );
+    let mut assembly: TestPublication<'_, TestCanonicalBlock, TestEvidenceBlock> = operation
         .try_publication_assembly(publication_plan(2, 1))
         .unwrap_or_else(|_| panic!("publication assembly must open"));
     let orphan = assembly
@@ -3892,8 +4385,14 @@ fn consuming_closure_validation_rejects_orphans_and_retagged_slots() {
     }
     assert_eq!(factory.snapshot().live_accounts(), 0);
 
-    let operation = test_operation_with_writer_limits(&factory, 64, RetainedBatchLimits::new(3, 2));
-    let mut assembly: TestPublication<TestCanonicalBlock, TestEvidenceBlock> = operation
+    let mut invocation_root_2: TestInvocationRoot = InvocationRoot::new();
+    let operation = test_operation_with_writer_limits(
+        &mut invocation_root_2,
+        &factory,
+        64,
+        RetainedBatchLimits::new(3, 2),
+    );
+    let mut assembly: TestPublication<'_, TestCanonicalBlock, TestEvidenceBlock> = operation
         .try_publication_assembly(publication_plan(2, 1))
         .unwrap_or_else(|_| panic!("publication assembly must reopen"));
     let orphan = assembly
@@ -3946,8 +4445,14 @@ fn block_limits_reject_before_running_the_builder_and_minimal_fallback_stays_ava
     static BUILDER_RAN: AtomicBool = AtomicBool::new(false);
 
     let factory = account_factory(1);
-    let operation = test_operation_with_writer_limits(&factory, 64, RetainedBatchLimits::new(2, 2));
-    let mut assembly: TestPublication<TestCanonicalBlock, TestEvidenceBlock> = operation
+    let mut invocation_root: TestInvocationRoot = InvocationRoot::new();
+    let operation = test_operation_with_writer_limits(
+        &mut invocation_root,
+        &factory,
+        64,
+        RetainedBatchLimits::new(2, 2),
+    );
+    let mut assembly: TestPublication<'_, TestCanonicalBlock, TestEvidenceBlock> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("publication assembly must open"));
     let _ = assembly
@@ -3989,20 +4494,28 @@ fn partial_canonical_downgrades_to_rich_failure_after_storage_drops_first() {
     static OBSERVED_PHYSICAL_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 
     let factory = account_factory(1);
-    let operation =
-        test_operation_with_failure_work(&factory, 64, RetainedBatchLimits::new(2, 2), 1);
-    let mut assembly: TestPublication<LiveDropObservation, u64> = operation
+    let mut invocation_root: TestInvocationRoot<LiveDropObservation, u64> = InvocationRoot::new();
+    let operation = test_operation_with_failure_work(
+        &mut invocation_root,
+        &factory,
+        64,
+        RetainedBatchLimits::new(2, 2),
+        1,
+    );
+    let mut assembly: TestPublication<'_, LiveDropObservation, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("publication assembly must open"));
     let ledger = assembly
         .operation
         .as_ref()
         .expect("assembly retains operation")
+        .common
         .coordinator
         .retained_ledger();
     let observation = LiveDropObservation {
         ledger: ledger.test_probe(),
         account: assembly
+            .fields
             .account
             .as_ref()
             .expect("assembly retains account")
@@ -4060,11 +4573,17 @@ fn partial_canonical_downgrades_to_rich_failure_after_storage_drops_first() {
 #[test]
 fn failure_only_plan_rejects_canonical_construction_and_publishes_evidence() {
     let factory = account_factory(1);
-    let operation =
-        test_operation_with_failure_work(&factory, 64, RetainedBatchLimits::new(2, 2), 1);
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = test_operation_with_failure_work(
+        &mut invocation_root,
+        &factory,
+        64,
+        RetainedBatchLimits::new(2, 2),
+        1,
+    );
     let plan =
         RetainedPublicationPlan::rich_failure(RetainedBlockTablePlan::new(writer_plan(2, 2), 1, 1));
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(plan)
         .unwrap_or_else(|_| panic!("failure-only assembly must open"));
     assert!(matches!(
@@ -4108,14 +4627,16 @@ fn success_control_rejection_atomically_downgrades_to_rich_failure() {
     let control = OperationControl::default().with_progress_observer(
         |_event: crate::ProgressEvent<TestProgress, TestUnit>| crate::ProgressDecision::Cancel,
     );
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     let operation = test_operation_on_account_with_control(
+        &mut invocation_root,
         &account,
         64,
         RetainedBatchLimits::new(2, 2),
         control,
     );
     drop(account);
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("publication assembly must open"));
     let (canonical, evidence) = retain_scalar_success(&mut assembly);
@@ -4171,14 +4692,16 @@ fn primary_binding_failure_preserves_the_earlier_control_cause() {
     let control = OperationControl::default().with_progress_observer(
         |_event: crate::ProgressEvent<TestProgress, TestUnit>| crate::ProgressDecision::Cancel,
     );
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     let operation = test_operation_on_account_with_control(
+        &mut invocation_root,
         &account,
         4,
         RetainedBatchLimits::new(2, 2),
         control,
     );
     drop(account);
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("control rejection publication must open"));
     let (canonical, evidence) = retain_scalar_success(&mut assembly);
@@ -4217,11 +4740,17 @@ fn primary_binding_failure_preserves_the_earlier_control_cause() {
 #[test]
 fn evidence_primary_rejection_uses_minimal_fallback_without_retry() {
     let factory = account_factory(1);
-    let operation =
-        test_operation_with_failure_work(&factory, 4, RetainedBatchLimits::new(2, 2), 1);
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = test_operation_with_failure_work(
+        &mut invocation_root,
+        &factory,
+        4,
+        RetainedBatchLimits::new(2, 2),
+        1,
+    );
     let plan =
         RetainedPublicationPlan::rich_failure(RetainedBlockTablePlan::new(writer_plan(2, 2), 1, 1));
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(plan)
         .unwrap_or_else(|_| panic!("failure-only assembly must open"));
     let evidence = assembly
@@ -4277,13 +4806,18 @@ fn success_canonical_primary_rejection_downgrades_to_retained_rich_failure() {
         OutputCommitment::new(TestDimension::Bytes, 1),
         OutputCommitment::new(TestDimension::Bytes, 1),
     );
-    let operation =
-        TestOperation::try_start(OperationControl::default(), limits, &account, start, || {
-            Ok(7_u32)
-        })
-        .unwrap_or_else(|_| panic!("canonical rejection operation must start"));
+    let mut invocation_root: TestInvocationRoot<DropCounter, DropCounter> = InvocationRoot::new();
+    let operation = RetainedOperation::try_start(
+        &mut invocation_root,
+        OperationControl::default(),
+        limits,
+        &account,
+        start,
+        || Ok(7_u32),
+    )
+    .unwrap_or_else(|_| panic!("canonical rejection operation must start"));
     drop(account);
-    let mut assembly: TestPublication<DropCounter, DropCounter> = operation
+    let mut assembly: TestPublication<'_, DropCounter, DropCounter> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("canonical rejection assembly must open"));
     let canonical = assembly
@@ -4349,13 +4883,18 @@ fn evidence_only_retry_panic_retains_storage_and_attribution_fail_closed() {
         OutputCommitment::new(TestDimension::Bytes, 1),
         OutputCommitment::new(TestDimension::Bytes, 1),
     );
-    let operation =
-        TestOperation::try_start(OperationControl::default(), limits, &account, start, || {
-            Ok(7_u32)
-        })
-        .unwrap_or_else(|_| panic!("retry-panic operation must start"));
-    let ledger = operation.coordinator.retained_ledger().test_probe();
-    let mut assembly: TestPublication<DropCounter, DropCounter> = operation
+    let mut invocation_root: TestInvocationRoot<DropCounter, DropCounter> = InvocationRoot::new();
+    let operation = RetainedOperation::try_start(
+        &mut invocation_root,
+        OperationControl::default(),
+        limits,
+        &account,
+        start,
+        || Ok(7_u32),
+    )
+    .unwrap_or_else(|_| panic!("retry-panic operation must start"));
+    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let mut assembly: TestPublication<'_, DropCounter, DropCounter> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("retry-panic publication must open"));
     let canonical = assembly
@@ -4427,8 +4966,9 @@ fn success_double_primary_rejection_drops_both_tables_before_minimal_fallback() 
     CANONICAL_DROPS.store(0, Ordering::SeqCst);
     EVIDENCE_DROPS.store(0, Ordering::SeqCst);
     let factory = account_factory(1);
-    let operation = test_operation(&factory, 4);
-    let mut assembly: TestPublication<DropCounter, DropCounter> = operation
+    let mut invocation_root: TestInvocationRoot<DropCounter, DropCounter> = InvocationRoot::new();
+    let operation = test_operation(&mut invocation_root, &factory, 4);
+    let mut assembly: TestPublication<'_, DropCounter, DropCounter> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("double rejection assembly must open"));
     let canonical = assembly
@@ -4486,15 +5026,19 @@ fn terminal_prepare_never_calls_dimension_ordering() {
     OBSERVED_ACTIVE.store(0, Ordering::SeqCst);
     OBSERVED_LIVE.store(0, Ordering::SeqCst);
 
-    type OrderingOperation = RetainedOperation<
+    type OrderingOperation<'inv> = RetainedOperation<
+        'inv,
         TestOwner,
         TestPhase,
         TestProgress,
         TestUnit,
         TerminalOrderingDimension,
         u32,
+        PrimaryBindDropObservation,
+        u64,
     >;
-    type OrderingPublication = RetainedPublicationAssembly<
+    type OrderingPublication<'inv> = RetainedPublicationAssembly<
+        'inv,
         TestOwner,
         TestPhase,
         TestProgress,
@@ -4525,12 +5069,17 @@ fn terminal_prepare_never_calls_dimension_ordering() {
         OutputCommitment::new(dimension, 1),
         OutputCommitment::new(dimension, 1),
     );
-    let operation =
-        OrderingOperation::try_start(OperationControl::default(), limits, &account, start, || {
-            Ok(7_u32)
-        })
-        .unwrap_or_else(|_| panic!("terminal-order operation must start"));
-    let ledger = operation.coordinator.retained_ledger().test_probe();
+    let mut invocation_root = InvocationRoot::new();
+    let operation = OrderingOperation::try_start(
+        &mut invocation_root,
+        OperationControl::default(),
+        limits,
+        &account,
+        start,
+        || Ok(7_u32),
+    )
+    .unwrap_or_else(|_| panic!("terminal-order operation must start"));
+    let ledger = operation.common.coordinator.retained_ledger().test_probe();
     let deferred_ledger = StdArc::new(StdMutex::new(Some(ledger)));
     let table_writer = RetainedWriterPlan::new(
         TestPhase::Build,
@@ -4542,7 +5091,7 @@ fn terminal_prepare_never_calls_dimension_ordering() {
         RetainedBlockTablePlan::new(table_writer, 1, 1),
         RetainedBlockTablePlan::new(table_writer, 1, 1),
     );
-    let mut assembly: OrderingPublication = operation
+    let mut assembly: OrderingPublication<'_> = operation
         .try_publication_assembly(publication_plan)
         .unwrap_or_else(|_| panic!("terminal-order publication must open"));
     let canonical = assembly
@@ -4687,15 +5236,19 @@ fn evidence_only_binding_panic_stops_before_later_storage_cleanup() {
     let _reset = TerminalDimensionOrdReset;
     FORBID_TERMINAL_DIMENSION_ORD.store(false, Ordering::SeqCst);
 
-    type PanicOperation = RetainedOperation<
+    type PanicOperation<'inv> = RetainedOperation<
+        'inv,
         TestOwner,
         TestPhase,
         TestProgress,
         TestUnit,
         TerminalOrderingDimension,
         u32,
+        u64,
+        u64,
     >;
-    type PanicPublication = RetainedPublicationAssembly<
+    type PanicPublication<'inv> = RetainedPublicationAssembly<
+        'inv,
         TestOwner,
         TestPhase,
         TestProgress,
@@ -4726,22 +5279,28 @@ fn evidence_only_binding_panic_stops_before_later_storage_cleanup() {
         OutputCommitment::new(dimension, 1),
         OutputCommitment::new(dimension, 1),
     );
-    let operation =
-        PanicOperation::try_start(OperationControl::default(), limits, &account, start, || {
-            Ok(7_u32)
-        })
-        .unwrap_or_else(|_| panic!("combined-fault operation must start"));
+    let mut invocation_root = InvocationRoot::new();
+    let operation = PanicOperation::try_start(
+        &mut invocation_root,
+        OperationControl::default(),
+        limits,
+        &account,
+        start,
+        || Ok(7_u32),
+    )
+    .unwrap_or_else(|_| panic!("combined-fault operation must start"));
     let publication_plan = RetainedPublicationPlan::success(
         RetainedBlockTablePlan::new(writer, 1, 1),
         RetainedBlockTablePlan::new(writer, 1, 1),
     );
-    let mut assembly: PanicPublication = operation
+    let mut assembly: PanicPublication<'_> = operation
         .try_publication_assembly(publication_plan)
         .unwrap_or_else(|_| panic!("combined-fault publication must open"));
     let ledger = assembly
         .operation
         .as_ref()
         .expect("combined-fault operation")
+        .common
         .coordinator
         .retained_ledger()
         .test_probe();
@@ -4815,8 +5374,10 @@ fn second_table_drop_panic_keeps_success_rejection_accounting_fail_closed() {
     CANONICAL_DROPS.store(0, Ordering::SeqCst);
     EVIDENCE_DROPS.store(0, Ordering::SeqCst);
     let factory = account_factory(1);
-    let operation = test_operation(&factory, 4);
-    let mut assembly: TestPublication<DropCounter, PanickingDropProbe> = operation
+    let mut invocation_root: TestInvocationRoot<DropCounter, PanickingDropProbe> =
+        InvocationRoot::new();
+    let operation = test_operation(&mut invocation_root, &factory, 4);
+    let mut assembly: TestPublication<'_, DropCounter, PanickingDropProbe> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("success rejection assembly must open"));
     let canonical = assembly
@@ -4836,6 +5397,7 @@ fn second_table_drop_panic_keeps_success_rejection_accounting_fail_closed() {
         .operation
         .as_ref()
         .expect("assembly retains operation")
+        .common
         .coordinator
         .retained_ledger()
         .test_probe();
@@ -4873,13 +5435,16 @@ fn first_table_drop_panic_stops_before_evidence_cleanup_or_attribution_ack() {
     EVIDENCE_DROPS.store(0, Ordering::SeqCst);
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
+    let mut invocation_root: TestInvocationRoot<PanickingDropProbe, DropCounter> =
+        InvocationRoot::new();
     let operation = test_operation_on_account_with_control(
+        &mut invocation_root,
         &account,
         4,
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
-    let mut assembly: TestPublication<PanickingDropProbe, DropCounter> = operation
+    let mut assembly: TestPublication<'_, PanickingDropProbe, DropCounter> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("success rejection assembly must open"));
     let canonical = assembly
@@ -4899,6 +5464,7 @@ fn first_table_drop_panic_stops_before_evidence_cleanup_or_attribution_ack() {
         .operation
         .as_ref()
         .expect("assembly retains operation")
+        .common
         .coordinator
         .retained_ledger()
         .test_probe();
@@ -4956,14 +5522,21 @@ fn table_payload_drop_panic_fails_closed_before_attribution_release() {
     static EVIDENCE_DROPS: AtomicU64 = AtomicU64::new(0);
 
     let factory = account_factory(1);
-    let operation =
-        test_operation_with_failure_work(&factory, 64, RetainedBatchLimits::new(2, 2), 1);
+    let mut invocation_root: TestInvocationRoot<PanickingDropProbe, DropCounter> =
+        InvocationRoot::new();
+    let operation = test_operation_with_failure_work(
+        &mut invocation_root,
+        &factory,
+        64,
+        RetainedBatchLimits::new(2, 2),
+        1,
+    );
     let account = operation
         .account()
         .share_after_test_admission()
         .unwrap_or_else(|_| panic!("rich-both account share must be admitted"));
-    let ledger = operation.coordinator.retained_ledger().test_probe();
-    let mut assembly: TestPublication<PanickingDropProbe, DropCounter> = operation
+    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let mut assembly: TestPublication<'_, PanickingDropProbe, DropCounter> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("publication assembly must open"));
     DROP_COUNT.store(0, Ordering::SeqCst);
@@ -5042,18 +5615,27 @@ fn baseline_drop_payload_before_releasing_live_ownership() {
         OutputCommitment::new(TestDimension::Bytes, 1),
         OutputCommitment::new(TestDimension::Bytes, 1),
     );
+    let mut invocation_root = InvocationRoot::new();
     let operation: RetainedOperation<
+        '_,
         TestOwner,
         TestPhase,
         TestProgress,
         TestUnit,
         TestDimension,
         DeferredLiveDropObservation,
-    > = RetainedOperation::try_start(OperationControl::default(), limits, &account, plan, || {
-        Ok(fallback)
-    })
+        u64,
+        u64,
+    > = RetainedOperation::try_start(
+        &mut invocation_root,
+        OperationControl::default(),
+        limits,
+        &account,
+        plan,
+        || Ok(fallback),
+    )
     .unwrap_or_else(|_| panic!("baseline observation operation must start"));
-    let ledger = operation.coordinator.retained_ledger().test_probe();
+    let ledger = operation.common.coordinator.retained_ledger().test_probe();
     EXPECTED_ACTIVE.store(ledger.active_reservations(), Ordering::SeqCst);
     EXPECTED_OPERATION_LIVE.store(ledger.current_live_bytes(), Ordering::SeqCst);
     let physical = operation.account().snapshot();
@@ -5062,6 +5644,7 @@ fn baseline_drop_payload_before_releasing_live_ownership() {
     *lock_recovering_poison(&deferred_ledger) = Some(ledger);
 
     drop(operation);
+    drop(invocation_root);
     assert_eq!(
         OBSERVED_ACTIVE.load(Ordering::SeqCst),
         EXPECTED_ACTIVE.load(Ordering::SeqCst)
@@ -5090,8 +5673,9 @@ fn prepared_published_and_baseline_owners_contain_payload_drop_panics() {
 
     let factory = account_factory(1);
     PREPARED_DROPS.store(0, Ordering::SeqCst);
-    let operation = test_operation(&factory, 64);
-    let mut assembly: TestPublication<PanickingDropProbe, u64> = operation
+    let mut invocation_root: TestInvocationRoot<PanickingDropProbe, u64> = InvocationRoot::new();
+    let operation = test_operation(&mut invocation_root, &factory, 64);
+    let mut assembly: TestPublication<'_, PanickingDropProbe, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("prepared drop assembly must open"));
     let canonical = assembly
@@ -5120,8 +5704,9 @@ fn prepared_published_and_baseline_owners_contain_payload_drop_panics() {
 
     let factory = account_factory(1);
     PUBLISHED_DROPS.store(0, Ordering::SeqCst);
-    let operation = test_operation(&factory, 64);
-    let mut assembly: TestPublication<PanickingDropProbe, u64> = operation
+    let mut invocation_root_2: TestInvocationRoot<PanickingDropProbe, u64> = InvocationRoot::new();
+    let operation = test_operation(&mut invocation_root_2, &factory, 64);
+    let mut assembly: TestPublication<'_, PanickingDropProbe, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("published drop assembly must open"));
     let canonical = assembly
@@ -5152,8 +5737,18 @@ fn prepared_published_and_baseline_owners_contain_payload_drop_panics() {
 
     let factory = account_factory(1);
     BASELINE_DROPS.store(0, Ordering::SeqCst);
-    let operation = test_operation_with_fallback(&factory, PanickingDropProbe(&BASELINE_DROPS));
-    assert!(catch_unwind(AssertUnwindSafe(|| drop(operation))).is_ok());
+    let mut invocation_root_3: TestInvocationRoot<
+        TestCanonicalBlock,
+        TestEvidenceBlock,
+        PanickingDropProbe,
+    > = InvocationRoot::new();
+    let operation = test_operation_with_fallback(
+        &mut invocation_root_3,
+        &factory,
+        PanickingDropProbe(&BASELINE_DROPS),
+    );
+    drop(operation);
+    assert!(catch_unwind(AssertUnwindSafe(|| drop(invocation_root_3))).is_ok());
     assert_eq!(BASELINE_DROPS.load(Ordering::SeqCst), 1);
     assert_eq!(factory.snapshot().live_accounts(), 1);
 }
@@ -5179,7 +5774,11 @@ fn healthy_prepared_and_published_owners_release_during_unrelated_host_unwind() 
             counter.store(0, Ordering::SeqCst);
         }
         let factory = account_factory(1);
-        let operation = test_operation(&factory, 64);
+        let mut invocation_root: TestInvocationRoot<
+            PhysicalDropObservation,
+            PhysicalDropObservation,
+        > = InvocationRoot::new();
+        let operation = test_operation(&mut invocation_root, &factory, 64);
         let account = operation.account().share_after_test_admission().unwrap();
         let canonical_charge = account
             .checked_retained_charge::<PhysicalDropObservation>(empty_plan())
@@ -5187,7 +5786,7 @@ fn healthy_prepared_and_published_owners_release_during_unrelated_host_unwind() 
         let canonical_table_charge = account
             .test_checked_retained_table_charge::<PhysicalDropObservation>(1)
             .unwrap();
-        let mut assembly: TestPublication<PhysicalDropObservation, PhysicalDropObservation> =
+        let mut assembly: TestPublication<'_, PhysicalDropObservation, PhysicalDropObservation> =
             operation
                 .try_publication_assembly(publication_plan(1, 1))
                 .unwrap_or_else(|_| panic!("host-unwind publication must open"));
@@ -5294,12 +5893,14 @@ fn prepared_and_published_drop_keep_physical_charge_and_handoff_is_a_pure_move()
     OBSERVED_BYTES.store(0, Ordering::SeqCst);
     OBSERVED_ALLOCATIONS.store(0, Ordering::SeqCst);
     let factory = account_factory(1);
-    let operation = test_operation(&factory, 64);
+    let mut invocation_root: TestInvocationRoot<PhysicalDropObservation, u64> =
+        InvocationRoot::new();
+    let operation = test_operation(&mut invocation_root, &factory, 64);
     let observed_account = operation
         .account()
         .share_after_test_admission()
         .unwrap_or_else(|_| panic!("test account share must be admitted"));
-    let mut assembly: TestPublication<PhysicalDropObservation, u64> = operation
+    let mut assembly: TestPublication<'_, PhysicalDropObservation, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("prepared observation assembly must open"));
     let canonical = assembly
@@ -5340,12 +5941,14 @@ fn prepared_and_published_drop_keep_physical_charge_and_handoff_is_a_pure_move()
     OBSERVED_BYTES.store(0, Ordering::SeqCst);
     OBSERVED_ALLOCATIONS.store(0, Ordering::SeqCst);
     let factory = account_factory(1);
-    let operation = test_operation(&factory, 64);
+    let mut invocation_root_2: TestInvocationRoot<PhysicalDropObservation, u64> =
+        InvocationRoot::new();
+    let operation = test_operation(&mut invocation_root_2, &factory, 64);
     let observed_account = operation
         .account()
         .share_after_test_admission()
         .unwrap_or_else(|_| panic!("test account share must be admitted"));
-    let mut assembly: TestPublication<PhysicalDropObservation, u64> = operation
+    let mut assembly: TestPublication<'_, PhysicalDropObservation, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("handoff observation assembly must open"));
     let canonical = assembly
@@ -5459,9 +6062,12 @@ fn rich_failure_fallback_drop_panic_preserves_every_unacknowledged_attribution()
     for includes_canonical_discard in [false, true] {
         DROP_COUNT.store(0, Ordering::SeqCst);
         let factory = account_factory(1);
+        let mut invocation_root: TestInvocationRoot<u64, u64, PanickingRichFallback> =
+            InvocationRoot::new();
         let operation = {
             let account = account(&factory, u64::MAX, 128);
             test_operation_on_account_with_failure_work(
+                &mut invocation_root,
                 &account,
                 64,
                 RetainedBatchLimits::new(2, 2),
@@ -5474,7 +6080,7 @@ fn rich_failure_fallback_drop_panic_preserves_every_unacknowledged_attribution()
             .account()
             .share_after_test_admission()
             .unwrap_or_else(|_| panic!("rich fallback account share must be admitted"));
-        let ledger = operation.coordinator.retained_ledger().test_probe();
+        let ledger = operation.common.coordinator.retained_ledger().test_probe();
         let validated = if includes_canonical_discard {
             let mut assembly = operation
                 .try_publication_assembly(publication_plan(1, 1))
@@ -5579,15 +6185,19 @@ fn success_preparation_contains_fallback_drop_panic() {
         }
     }
 
-    type PanicFallbackOperation = RetainedOperation<
+    type PanicFallbackOperation<'inv> = RetainedOperation<
+        'inv,
         TestOwner,
         TestPhase,
         TestProgress,
         TestUnit,
         TestDimension,
         PanickingFallback,
+        u64,
+        u64,
     >;
-    type PanicFallbackPublication = RetainedPublicationAssembly<
+    type PanicFallbackPublication<'inv> = RetainedPublicationAssembly<
+        'inv,
         TestOwner,
         TestPhase,
         TestProgress,
@@ -5611,7 +6221,9 @@ fn success_preparation_contains_fallback_drop_panic() {
         OutputCommitment::new(TestDimension::Bytes, 1),
     );
     DROP_COUNT.store(0, Ordering::SeqCst);
+    let mut invocation_root = InvocationRoot::new();
     let operation = PanicFallbackOperation::try_start(
+        &mut invocation_root,
         OperationControl::default(),
         limits,
         &account,
@@ -5619,7 +6231,7 @@ fn success_preparation_contains_fallback_drop_panic() {
         || Ok(PanickingFallback),
     )
     .unwrap_or_else(|_| panic!("panic fallback operation must start"));
-    let mut assembly: PanicFallbackPublication = operation
+    let mut assembly: PanicFallbackPublication<'_> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("panic fallback assembly must open"));
     let canonical = assembly
@@ -5636,6 +6248,7 @@ fn success_preparation_contains_fallback_drop_panic() {
         .operation
         .as_ref()
         .expect("assembly retains operation")
+        .common
         .coordinator
         .retained_ledger()
         .test_probe();
@@ -5681,16 +6294,22 @@ fn rejected_primary_payload_drop_panic_fails_closed_before_token_release() {
     }
 
     let factory = account_factory(1);
-    let operation =
-        test_operation_with_failure_work(&factory, 4, RetainedBatchLimits::new(2, 2), 1);
+    let mut invocation_root: TestInvocationRoot<u64, PanickingEvidence> = InvocationRoot::new();
+    let operation = test_operation_with_failure_work(
+        &mut invocation_root,
+        &factory,
+        4,
+        RetainedBatchLimits::new(2, 2),
+        1,
+    );
     let account = operation
         .account()
         .share_after_test_admission()
         .unwrap_or_else(|_| panic!("minimal-evidence account share must be admitted"));
-    let ledger = operation.coordinator.retained_ledger().test_probe();
+    let ledger = operation.common.coordinator.retained_ledger().test_probe();
     let plan =
         RetainedPublicationPlan::rich_failure(RetainedBlockTablePlan::new(writer_plan(2, 2), 1, 1));
-    let mut assembly: TestPublication<u64, PanickingEvidence> = operation
+    let mut assembly: TestPublication<'_, u64, PanickingEvidence> = operation
         .try_publication_assembly(plan)
         .unwrap_or_else(|_| panic!("rejected primary assembly must open"));
     DROP_COUNT.store(0, Ordering::SeqCst);
@@ -5738,9 +6357,10 @@ fn rejected_primary_payload_drop_panic_fails_closed_before_token_release() {
 #[test]
 fn invalid_and_allocation_failed_open_preserve_operation_for_retry() {
     let factory = account_factory(1);
-    let operation = test_operation(&factory, 64);
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = test_operation(&mut invocation_root, &factory, 64);
     let invalid_plan = publication_plan(0, 1);
-    let invalid = match operation.try_publication_assembly::<u64, u64>(invalid_plan) {
+    let invalid = match operation.try_publication_assembly(invalid_plan) {
         Ok(_) => panic!("zero-slot table must be rejected"),
         Err(error) => error,
     };
@@ -5751,7 +6371,7 @@ fn invalid_and_allocation_failed_open_preserve_operation_for_retry() {
     let operation = expect_retry_operation(invalid, "invalid plan");
 
     fail_next_final_owner_allocation();
-    let allocation = match operation.try_publication_assembly::<u64, u64>(publication_plan(1, 1)) {
+    let allocation = match operation.try_publication_assembly(publication_plan(1, 1)) {
         Ok(_) => panic!("injected table allocation must fail"),
         Err(error) => error,
     };
@@ -5760,7 +6380,7 @@ fn invalid_and_allocation_failed_open_preserve_operation_for_retry() {
         RetainedWriterError::Physical(RetainedAllocationError::AllocationFailed)
     ));
     let operation = expect_retry_operation(allocation, "verified allocation failure");
-    let assembly: TestPublication<u64, u64> = operation
+    let assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("retry must open a valid assembly"));
     drop(handoff_for_test(
@@ -5774,20 +6394,23 @@ fn invalid_and_allocation_failed_open_preserve_operation_for_retry() {
 #[test]
 fn recoverable_block_allocation_failure_preserves_assembly_for_retry() {
     let factory = account_factory(1);
-    let operation = test_operation(&factory, 64);
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = test_operation(&mut invocation_root, &factory, 64);
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("retry assembly must open"));
     let probe = assembly
         .operation
         .as_ref()
         .expect("assembly retains operation")
+        .common
         .coordinator
         .retained_ledger()
         .test_probe();
     let before_active = probe.active_reservations();
     let before_live = probe.current_live_bytes();
     let before_physical = assembly
+        .fields
         .account
         .as_ref()
         .expect("assembly retains account")
@@ -5803,6 +6426,7 @@ fn recoverable_block_allocation_failure_preserves_assembly_for_retry() {
         ))
     ));
     let after_physical = assembly
+        .fields
         .account
         .as_ref()
         .expect("assembly retains account after recoverable failure")
@@ -5848,8 +6472,9 @@ fn recoverable_block_allocation_failure_preserves_assembly_for_retry() {
 #[test]
 fn closure_validation_panic_publishes_minimal_fallback() {
     let factory = account_factory(1);
-    let operation = test_operation(&factory, 64);
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = test_operation(&mut invocation_root, &factory, 64);
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("publication assembly must open"));
     let canonical = assembly

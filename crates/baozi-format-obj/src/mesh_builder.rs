@@ -24,8 +24,9 @@ use baozi_import::authoring::{
     TextureStrength, TextureTransform, Vec3,
 };
 use baozi_import::{
-    DependencySnapshot, DiagnosticCode, ImportStorageClass, ImportWorkClass, ImportWorkGroup,
-    MeteredVec, ParseContext, ParseExecution, ParseResult, SourceScopeEntityKind,
+    DependencySnapshot, DiagnosticCode, ImportStorageClass, ImportWorkClass, MeteredVec,
+    ParseChildren, ParseContext, ParseFailure, ParsePieceError, ParseResult, ParseRoot,
+    ParseServices, ParseWorkLayout, SourceScopeEntityKind,
 };
 
 mod dense;
@@ -98,7 +99,7 @@ impl CornerChannelSelection {
         usize::from(self.texcoords) + usize::from(self.normals)
     }
 
-    fn retained_amount(self, exec: &ParseExecution<'_, '_>) -> ParseResult<u64> {
+    fn retained_amount(self, exec: &ParseServices<'_, '_, '_>) -> ParseResult<u64> {
         usize_amount(
             exec,
             self.retained_count(),
@@ -127,13 +128,14 @@ struct BuiltCornerProjection<'session, T> {
 
 impl<'session, T> BuiltCornerProjection<'session, T> {
     fn new(
-        exec: &mut ParseExecution<'_, 'session>,
+        children: &mut ParseChildren<'_, '_, 'session>,
         corner_count: usize,
         source_value_count: usize,
         values_resource: &'static str,
         indices_resource: &'static str,
         indices_work_resource: &'static str,
     ) -> ParseResult<Self> {
+        let exec = &mut children.services()?;
         let mut source_values =
             exec.metered_vec(ImportStorageClass::FormatNormalization, values_resource);
         let mut source_indices =
@@ -141,12 +143,14 @@ impl<'session, T> BuiltCornerProjection<'session, T> {
         source_values.try_reserve(exec, source_value_count)?;
         source_indices.try_reserve(exec, corner_count)?;
         mtl::for_work_chunks(
-            exec,
+            children,
             corner_count,
             indices_work_resource,
-            |exec, work, range| {
-                source_indices.try_resize(exec, range.end, 0)?;
-                work.complete_all()
+            |work, range| {
+                work.run_returned_with_storage::<_, ObjFailure>(|mut storage| {
+                    storage.resize_vec(&mut source_indices, range.end, 0)?;
+                    Ok(((), [range.len() as u64]))
+                })
             },
         )?;
         Ok(Self {
@@ -167,36 +171,36 @@ struct SegmentBuilder<'session> {
     has_polygon: bool,
 }
 
-struct MeshWorkGroups<'region> {
-    streams: ImportWorkGroup<'region, 1>,
-    face_cells: ImportWorkGroup<'region, 3>,
-    corner_attributes: ImportWorkGroup<'region, 2>,
-    materialization: ImportWorkGroup<'region, 2>,
-    meshes: ImportWorkGroup<'region, 1>,
+struct MeshWorkGroups<'op> {
+    streams: ParseWorkLayout<'op, 1>,
+    face_cells: ParseWorkLayout<'op, 3>,
+    corner_attributes: ParseWorkLayout<'op, 2>,
+    materialization: ParseWorkLayout<'op, 2>,
+    meshes: ParseWorkLayout<'op, 1>,
 }
 
-impl<'region> MeshWorkGroups<'region> {
-    fn bind(exec: &mut ParseExecution<'region, '_>) -> ParseResult<Self> {
+impl<'op> MeshWorkGroups<'op> {
+    fn bind(children: &mut ParseChildren<'_, 'op, '_>) -> ParseResult<Self> {
         Ok(Self {
-            streams: exec.bind_work_group([ImportWorkClass::AttributeStreams])?,
-            face_cells: exec.bind_work_group([
+            streams: children.bind_group([ImportWorkClass::AttributeStreams])?,
+            face_cells: children.bind_group([
                 ImportWorkClass::AttributeStreams,
                 ImportWorkClass::AttributeCells,
                 ImportWorkClass::TopologyCells,
             ])?,
-            corner_attributes: exec.bind_work_group([
+            corner_attributes: children.bind_group([
                 ImportWorkClass::AttributeStreams,
                 ImportWorkClass::AttributeCells,
             ])?,
-            materialization: exec
-                .bind_work_group([ImportWorkClass::WorkUnits, ImportWorkClass::Vertices])?,
-            meshes: exec.bind_work_group([ImportWorkClass::Meshes])?,
+            materialization: children
+                .bind_group([ImportWorkClass::WorkUnits, ImportWorkClass::Vertices])?,
+            meshes: children.bind_group([ImportWorkClass::Meshes])?,
         })
     }
 }
 
 fn state_name<'parsed>(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     parsed: &'parsed ParsedObj<'_>,
     id: StateNameId,
 ) -> ParseResult<&'parsed str> {
@@ -206,7 +210,7 @@ fn state_name<'parsed>(
 }
 
 fn record_partial_attribute_losses(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     segment_index: usize,
     partial_texcoords: bool,
     partial_normals: bool,
@@ -255,7 +259,7 @@ fn record_partial_attribute_losses(
 }
 
 fn checked_attribute_stream_count(
-    exec: &ParseExecution<'_, '_>,
+    exec: &ParseServices<'_, '_, '_>,
     current: usize,
     additional: usize,
 ) -> ParseResult<usize> {
@@ -275,15 +279,16 @@ fn checked_attribute_stream_count(
 }
 
 impl<'session> SegmentBuilder<'session> {
-    fn new<'region>(
-        exec: &mut ParseExecution<'region, 'session>,
-        groups: &MeshWorkGroups<'region>,
+    fn new<'op>(
+        children: &mut ParseChildren<'_, 'op, 'session>,
+        groups: &MeshWorkGroups<'op>,
         key: SegmentKey,
     ) -> ParseResult<Self> {
-        let attribute_stream_count = checked_attribute_stream_count(exec, 0, 1)?;
-        exec.with_work(&groups.streams, [1], |_exec, work| -> ParseResult<()> {
-            work.complete_all()
+        let attribute_stream_count = checked_attribute_stream_count(&children.services()?, 0, 1)?;
+        let attribute_stream_count = children.child(&groups.streams, [1], |work| {
+            work.run([1], || Ok::<_, ParseFailure>(attribute_stream_count))
         })?;
+        let exec = &mut children.services()?;
         Ok(Self {
             key,
             corner_references: exec.metered_vec(
@@ -302,12 +307,13 @@ impl<'session> SegmentBuilder<'session> {
         })
     }
 
-    fn push_face<'region>(
+    fn push_face<'op>(
         &mut self,
-        exec: &mut ParseExecution<'region, 'session>,
-        groups: &MeshWorkGroups<'region>,
+        children: &mut ParseChildren<'_, 'op, 'session>,
+        groups: &MeshWorkGroups<'op>,
         face: &Face<'_>,
     ) -> ParseResult<()> {
+        let exec = &mut children.services()?;
         let face_vertex_count = face.vertices.len();
         if face_vertex_count < 3 {
             return Err(
@@ -360,27 +366,31 @@ impl<'session> SegmentBuilder<'session> {
         let smoothing_cells =
             usize_amount(exec, smoothing_cells, "obj-canonical-smoothing-group-cells")?;
 
-        exec.with_work(
+        children.child(
             &groups.face_cells,
             [
                 additional_attribute_streams,
                 smoothing_cells,
                 canonical_topology_cells,
             ],
-            |exec, work| -> ParseResult<()> {
+            |work| -> ParseResult<()> {
                 if face_vertex_count > 3 {
                     self.has_polygon = true;
                 }
+                let exec = &mut work.services()?;
                 let face_vertex_count = u32::try_from(face_vertex_count)
                     .map_err(|_| exec.allocation_failure("obj-face-vertex-count"))?;
-                work.run([0, 0, face_count_cells], || {
-                    self.face_vertex_counts.try_push(exec, face_vertex_count)
-                })?;
+                work.push_growing(
+                    [0, 0, face_count_cells],
+                    &mut self.face_vertex_counts,
+                    face_vertex_count,
+                )?;
 
                 if let Some(smoothing_groups) = self.smoothing_groups.as_mut() {
                     let value = smoothing_value.unwrap_or(0);
-                    work.run([0, 1, 0], || smoothing_groups.try_push(exec, value))?;
+                    work.push_growing([0, 1, 0], smoothing_groups, value)?;
                 } else if let Some(value) = smoothing_value {
+                    let exec = &mut work.services()?;
                     let smoothing_count = prior_face_count
                         .checked_add(1)
                         .ok_or_else(|| exec.allocation_failure("obj-smoothing-group-cell-count"))?;
@@ -391,15 +401,18 @@ impl<'session> SegmentBuilder<'session> {
                     smoothing_groups.try_reserve(exec, smoothing_count)?;
                     let mut remaining = prior_face_count;
                     while remaining != 0 {
-                        exec.poll()?;
+                        work.poll()?;
                         let chunk_len = remaining.min(64);
-                        let chunk_amount =
-                            usize_amount(exec, chunk_len, "obj-smoothing-group-backfill-cells")?;
+                        let chunk_amount = usize_amount(
+                            &work.services()?,
+                            chunk_len,
+                            "obj-smoothing-group-backfill-cells",
+                        )?;
                         work.run([0, chunk_amount, 0], || {
                             for _ in 0..chunk_len {
                                 smoothing_groups.try_push_reserved(0)?;
                             }
-                            Ok(())
+                            Ok::<_, ParseFailure>(())
                         })?;
                         remaining -= chunk_len;
                     }
@@ -407,16 +420,16 @@ impl<'session> SegmentBuilder<'session> {
                     self.smoothing_groups = Some(smoothing_groups);
                 }
                 self.corner_references
-                    .try_reserve(exec, face.vertices.len())?;
+                    .try_reserve(&mut work.services()?, face.vertices.len())?;
 
                 for chunk in face.vertices.as_slice().chunks(64) {
-                    exec.poll()?;
+                    work.poll()?;
                     for vertex in chunk {
                         work.run([0, 0, 1], || {
                             self.corner_references.try_push_reserved(*vertex)?;
                             self.texcoord_channel.observe(vertex.texcoord.is_some());
                             self.normal_channel.observe(vertex.normal.is_some());
-                            Ok(())
+                            Ok::<_, ParseFailure>(())
                         })?;
                     }
                 }
@@ -427,12 +440,13 @@ impl<'session> SegmentBuilder<'session> {
         Ok(())
     }
 
-    fn materialize_geometry<'region>(
+    fn materialize_geometry<'op>(
         &self,
-        exec: &mut ParseExecution<'region, 'session>,
-        groups: &MeshWorkGroups<'region>,
+        root: &mut ParseRoot<'_, 'op, 'session>,
+        groups: &MeshWorkGroups<'op>,
         parsed: &ParsedObj<'_>,
     ) -> ParseResult<BuiltGeometryStreams<'session>> {
+        let exec = &mut root.services()?;
         if self.corner_references.is_empty() {
             return Err(
                 exec.format_failure(ObjFailure::internal("segment-has-no-vertex-references"))
@@ -459,12 +473,12 @@ impl<'session> SegmentBuilder<'session> {
             corner_attribute_cell_count,
             "obj-canonical-attribute-cells",
         )?;
-        exec.with_parent_work(
+        root.parent(
             &groups.corner_attributes,
             [retained_amount, corner_attribute_cell_amount],
-            |exec, _parent| {
+            |parent| {
                 self.materialize_admitted_geometry(
-                    exec,
+                    &mut parent.children()?,
                     groups,
                     parsed,
                     channels,
@@ -474,10 +488,10 @@ impl<'session> SegmentBuilder<'session> {
         )
     }
 
-    fn materialize_admitted_geometry<'region>(
+    fn materialize_admitted_geometry<'op>(
         &self,
-        exec: &mut ParseExecution<'region, 'session>,
-        groups: &MeshWorkGroups<'region>,
+        children: &mut ParseChildren<'_, 'op, 'session>,
+        groups: &MeshWorkGroups<'op>,
         parsed: &ParsedObj<'_>,
         channels: CornerChannelSelection,
         total_attribute_stream_count: usize,
@@ -493,7 +507,7 @@ impl<'session> SegmentBuilder<'session> {
             channels,
         ) {
             return dense::materialize(
-                exec,
+                children,
                 groups,
                 parsed,
                 self.corner_references.as_slice(),
@@ -507,7 +521,7 @@ impl<'session> SegmentBuilder<'session> {
         let mut texcoord_lanes = 2_u8;
         let mut normals = if channels.normals {
             Some(BuiltCornerProjection::new(
-                exec,
+                children,
                 corner_count,
                 corner_count,
                 "obj-segment-normal-source-values",
@@ -517,6 +531,7 @@ impl<'session> SegmentBuilder<'session> {
         } else {
             None
         };
+        let exec = &mut children.services()?;
         let retained_channel_count = channels.retained_count();
         let mut sorted_positions = exec.metered_vec(
             ImportStorageClass::FormatNormalization,
@@ -532,61 +547,64 @@ impl<'session> SegmentBuilder<'session> {
         );
         sorted_channels.try_reserve(exec, channel_reference_count)?;
         mtl::for_work_chunks(
-            exec,
+            children,
             corner_count,
             "obj-corner-reference-copy-work",
-            |exec, work, range| {
+            |work, range| {
                 for occurrence in range {
-                    let corner = self.corner_references.as_slice()[occurrence];
-                    sorted_positions.try_push_reserved(IndexedPosition {
-                        source_index: corner.position,
-                        occurrence,
-                    })?;
-                    if channels.texcoords {
-                        let source_index = corner.texcoord.ok_or_else(|| {
-                            exec.format_failure(ObjFailure::internal(
-                                "complete-texcoord-channel-has-missing-index",
-                            ))
+                    work.run_returned_with_storage::<_, ObjFailure>(|_storage| {
+                        let corner = self.corner_references.as_slice()[occurrence];
+                        sorted_positions.try_push_reserved(IndexedPosition {
+                            source_index: corner.position,
+                            occurrence,
                         })?;
-                        let source_value = parsed
-                            .texcoords
-                            .as_slice()
-                            .get(source_index)
-                            .ok_or_else(|| {
-                                exec.format_failure(ObjFailure::internal(
-                                    "obj-texcoord-source-index-out-of-range",
+                        if channels.texcoords {
+                            let source_index = corner.texcoord.ok_or_else(|| {
+                                ParsePieceError::Format(ObjFailure::internal(
+                                    "complete-texcoord-channel-has-missing-index",
                                 ))
                             })?;
-                        texcoord_lanes = texcoord_lanes.max(source_value.lanes);
-                        sorted_channels.try_push_reserved(IndexedCornerChannel {
-                            channel: CornerChannel::Texcoord,
-                            source_index,
-                            occurrence,
-                        })?;
-                    }
-                    if channels.normals {
-                        let source_index = corner.normal.ok_or_else(|| {
-                            exec.format_failure(ObjFailure::internal(
-                                "complete-normal-channel-has-missing-index",
-                            ))
-                        })?;
-                        sorted_channels.try_push_reserved(IndexedCornerChannel {
-                            channel: CornerChannel::Normal,
-                            source_index,
-                            occurrence,
-                        })?;
-                    }
-                    work.complete([1])?;
+                            let source_value = parsed
+                                .texcoords
+                                .as_slice()
+                                .get(source_index)
+                                .ok_or_else(|| {
+                                    ParsePieceError::Format(ObjFailure::internal(
+                                        "obj-texcoord-source-index-out-of-range",
+                                    ))
+                                })?;
+                            texcoord_lanes = texcoord_lanes.max(source_value.lanes);
+                            sorted_channels.try_push_reserved(IndexedCornerChannel {
+                                channel: CornerChannel::Texcoord,
+                                source_index,
+                                occurrence,
+                            })?;
+                        }
+                        if channels.normals {
+                            let source_index = corner.normal.ok_or_else(|| {
+                                ParsePieceError::Format(ObjFailure::internal(
+                                    "complete-normal-channel-has-missing-index",
+                                ))
+                            })?;
+                            sorted_channels.try_push_reserved(IndexedCornerChannel {
+                                channel: CornerChannel::Normal,
+                                source_index,
+                                occurrence,
+                            })?;
+                        }
+                        Ok(((), [1]))
+                    })?;
                 }
                 Ok(())
             },
         )?;
         let mut texcoords = if channels.texcoords {
+            let exec = &mut children.services()?;
             let scalar_count = corner_count
                 .checked_mul(usize::from(texcoord_lanes))
                 .ok_or_else(|| exec.allocation_failure("obj-texcoord-source-scalar-count"))?;
             Some(BuiltCornerProjection::new(
-                exec,
+                children,
                 corner_count,
                 scalar_count,
                 "obj-segment-texcoord-source-values",
@@ -596,53 +614,61 @@ impl<'session> SegmentBuilder<'session> {
         } else {
             None
         };
-        mtl::interruptible_sort_by(exec, &mut sorted_positions, |exec, work, left, right| {
-            work.run_leaf(exec, || {
+        mtl::interruptible_sort_by(children, &mut sorted_positions, |work, left, right| {
+            work.run_leaf(|| {
                 (left.source_index, left.occurrence).cmp(&(right.source_index, right.occurrence))
             })
         })?;
-        mtl::interruptible_sort_by(exec, &mut sorted_channels, |exec, work, left, right| {
-            work.run_leaf(exec, || left.cmp(right))
+        mtl::interruptible_sort_by(children, &mut sorted_channels, |work, left, right| {
+            work.run_leaf(|| left.cmp(right))
         })?;
 
+        let exec = &mut children.services()?;
         let mut first_position_occurrences = exec.metered_vec(
             ImportStorageClass::FormatNormalization,
             "obj-first-position-occurrences",
         );
         first_position_occurrences.try_reserve(exec, corner_count)?;
         mtl::for_work_chunks(
-            exec,
+            children,
             corner_count,
             "obj-first-position-occurrence-init-work",
-            |exec, work, range| {
-                first_position_occurrences.try_resize(exec, range.end, false)?;
-                work.complete_all()
+            |work, range| {
+                work.run_returned_with_storage::<_, ObjFailure>(|mut storage| {
+                    storage.resize_vec(&mut first_position_occurrences, range.end, false)?;
+                    Ok(((), [range.len() as u64]))
+                })
             },
         )?;
 
         let mut unique_position_count = 0usize;
         let mut previous_position = None;
         mtl::for_work_chunks(
-            exec,
+            children,
             sorted_positions.len(),
             "obj-position-grouping-work",
-            |exec, work, range| {
+            |work, range| {
+                let errors = work.error_view();
                 for cursor in range {
-                    let indexed = sorted_positions.as_slice()[cursor];
-                    if previous_position != Some(indexed.source_index) {
-                        let next_count = unique_position_count
-                            .checked_add(1)
-                            .ok_or_else(|| exec.allocation_failure("obj-unique-position-count"))?;
-                        previous_position = Some(indexed.source_index);
-                        first_position_occurrences.as_mut_slice()[indexed.occurrence] = true;
-                        unique_position_count = next_count;
-                    }
-                    work.complete([1])?;
+                    work.run([1], || {
+                        let indexed = sorted_positions.as_slice()[cursor];
+                        if previous_position != Some(indexed.source_index) {
+                            let next_count =
+                                unique_position_count.checked_add(1).ok_or_else(|| {
+                                    errors.allocation_failure("obj-unique-position-count")
+                                })?;
+                            previous_position = Some(indexed.source_index);
+                            first_position_occurrences.as_mut_slice()[indexed.occurrence] = true;
+                            unique_position_count = next_count;
+                        }
+                        Ok::<_, ParseFailure>(())
+                    })?;
                 }
                 Ok(())
             },
         )?;
 
+        let exec = &mut children.services()?;
         let mut positions = exec.metered_vec(
             ImportStorageClass::FormatNormalization,
             "obj-segment-position-scalars",
@@ -657,12 +683,14 @@ impl<'session> SegmentBuilder<'session> {
         positions.try_reserve(exec, position_scalar_count)?;
         indices.try_reserve(exec, corner_count)?;
         mtl::for_work_chunks(
-            exec,
+            children,
             corner_count,
             "obj-position-index-init-work",
-            |exec, work, range| {
-                indices.try_resize(exec, range.end, 0)?;
-                work.complete_all()
+            |work, range| {
+                work.run_returned_with_storage::<_, ObjFailure>(|mut storage| {
+                    storage.resize_vec(&mut indices, range.end, 0)?;
+                    Ok(((), [range.len() as u64]))
+                })
             },
         )?;
 
@@ -670,91 +698,96 @@ impl<'session> SegmentBuilder<'session> {
         let mut previous_source_index = None;
         let mut local_index = 0_u32;
         mtl::for_work_chunks(
-            exec,
+            children,
             sorted_channels.len(),
             "obj-corner-source-projection-work",
-            |exec, work, range| {
+            |work, range| {
+                let errors = work.error_view();
                 for cursor in range {
-                    let reference = sorted_channels.as_slice()[cursor];
-                    let is_new_source = previous_channel != Some(reference.channel)
-                        || previous_source_index != Some(reference.source_index);
-                    match reference.channel {
-                        CornerChannel::Texcoord => {
-                            let projection = texcoords.as_mut().ok_or_else(|| {
-                                exec.format_failure(ObjFailure::internal(
-                                    "texcoord-channel-projection-not-retained",
-                                ))
-                            })?;
-                            if is_new_source {
-                                let source_value = parsed
-                                    .texcoords
-                                    .as_slice()
-                                    .get(reference.source_index)
-                                    .copied()
-                                    .ok_or_else(|| {
-                                        exec.format_failure(ObjFailure::internal(
-                                            "obj-texcoord-source-index-out-of-range",
-                                        ))
-                                    })?;
-                                local_index = canonical_u32(
-                                    exec,
-                                    projection.source_values.len() / usize::from(texcoord_lanes),
-                                    "obj-texcoord-source-index-space",
-                                )?;
-                                projection.source_values.try_extend_from_slice_reserved(
-                                    &source_value.values[..usize::from(texcoord_lanes)],
-                                )?;
-                            }
-                            let destination = projection
-                                .source_indices
-                                .as_mut_slice()
-                                .get_mut(reference.occurrence)
-                                .ok_or_else(|| {
-                                    exec.format_failure(ObjFailure::internal(
-                                        "obj-texcoord-corner-index-out-of-range",
+                    work.run_returned_with_storage::<_, ObjFailure>(|_storage| {
+                        let reference = sorted_channels.as_slice()[cursor];
+                        let is_new_source = previous_channel != Some(reference.channel)
+                            || previous_source_index != Some(reference.source_index);
+                        match reference.channel {
+                            CornerChannel::Texcoord => {
+                                let projection = texcoords.as_mut().ok_or_else(|| {
+                                    ParsePieceError::Format(ObjFailure::internal(
+                                        "texcoord-channel-projection-not-retained",
                                     ))
                                 })?;
-                            *destination = local_index;
-                        }
-                        CornerChannel::Normal => {
-                            let projection = normals.as_mut().ok_or_else(|| {
-                                exec.format_failure(ObjFailure::internal(
-                                    "normal-channel-projection-not-retained",
-                                ))
-                            })?;
-                            if is_new_source {
-                                let source_value = parsed
-                                    .normals
-                                    .as_slice()
-                                    .get(reference.source_index)
-                                    .copied()
+                                if is_new_source {
+                                    let source_value = parsed
+                                        .texcoords
+                                        .as_slice()
+                                        .get(reference.source_index)
+                                        .copied()
+                                        .ok_or_else(|| {
+                                            ParsePieceError::Format(ObjFailure::internal(
+                                                "obj-texcoord-source-index-out-of-range",
+                                            ))
+                                        })?;
+                                    local_index = u32::try_from(
+                                        projection.source_values.len()
+                                            / usize::from(texcoord_lanes),
+                                    )
+                                    .map_err(|_| {
+                                        errors.allocation_failure("obj-texcoord-source-index-space")
+                                    })?;
+                                    projection.source_values.try_extend_from_slice_reserved(
+                                        &source_value.values[..usize::from(texcoord_lanes)],
+                                    )?;
+                                }
+                                let destination = projection
+                                    .source_indices
+                                    .as_mut_slice()
+                                    .get_mut(reference.occurrence)
                                     .ok_or_else(|| {
-                                        exec.format_failure(ObjFailure::internal(
-                                            "obj-normal-source-index-out-of-range",
+                                        ParsePieceError::Format(ObjFailure::internal(
+                                            "obj-texcoord-corner-index-out-of-range",
                                         ))
                                     })?;
-                                local_index = canonical_u32(
-                                    exec,
-                                    projection.source_values.len(),
-                                    "obj-normal-source-index-space",
-                                )?;
-                                projection.source_values.try_push_reserved(source_value)?;
+                                *destination = local_index;
                             }
-                            let destination = projection
-                                .source_indices
-                                .as_mut_slice()
-                                .get_mut(reference.occurrence)
-                                .ok_or_else(|| {
-                                    exec.format_failure(ObjFailure::internal(
-                                        "obj-normal-corner-index-out-of-range",
+                            CornerChannel::Normal => {
+                                let projection = normals.as_mut().ok_or_else(|| {
+                                    ParsePieceError::Format(ObjFailure::internal(
+                                        "normal-channel-projection-not-retained",
                                     ))
                                 })?;
-                            *destination = local_index;
+                                if is_new_source {
+                                    let source_value = parsed
+                                        .normals
+                                        .as_slice()
+                                        .get(reference.source_index)
+                                        .copied()
+                                        .ok_or_else(|| {
+                                            ParsePieceError::Format(ObjFailure::internal(
+                                                "obj-normal-source-index-out-of-range",
+                                            ))
+                                        })?;
+                                    local_index = u32::try_from(projection.source_values.len())
+                                        .map_err(|_| {
+                                            errors
+                                                .allocation_failure("obj-normal-source-index-space")
+                                        })?;
+                                    projection.source_values.try_push_reserved(source_value)?;
+                                }
+                                let destination = projection
+                                    .source_indices
+                                    .as_mut_slice()
+                                    .get_mut(reference.occurrence)
+                                    .ok_or_else(|| {
+                                        ParsePieceError::Format(ObjFailure::internal(
+                                            "obj-normal-corner-index-out-of-range",
+                                        ))
+                                    })?;
+                                *destination = local_index;
+                            }
                         }
-                    }
-                    previous_channel = Some(reference.channel);
-                    previous_source_index = Some(reference.source_index);
-                    work.complete([1])?;
+                        previous_channel = Some(reference.channel);
+                        previous_source_index = Some(reference.source_index);
+                        Ok(((), [1]))
+                    })?;
                 }
                 Ok(())
             },
@@ -764,6 +797,7 @@ impl<'session> SegmentBuilder<'session> {
         for (chunk_index, first_flags) in
             first_position_occurrences.as_slice().chunks(64).enumerate()
         {
+            let exec = &mut children.services()?;
             let start = chunk_index
                 .checked_mul(64)
                 .ok_or_else(|| exec.allocation_failure("obj-geometry-materialization-offset"))?;
@@ -771,13 +805,15 @@ impl<'session> SegmentBuilder<'session> {
                 .checked_add(first_flags.len())
                 .ok_or_else(|| exec.allocation_failure("obj-geometry-materialization-offset"))?;
             let chunk_positions = first_flags.iter().filter(|is_first| **is_first).count();
-            exec.with_work(
+            let amounts = [
+                usize_amount(exec, first_flags.len(), "obj-geometry-materialization-work")?,
+                usize_amount(exec, chunk_positions, "obj-canonical-vertices")?,
+            ];
+            children.child(
                 &groups.materialization,
-                [
-                    usize_amount(exec, first_flags.len(), "obj-geometry-materialization-work")?,
-                    usize_amount(exec, chunk_positions, "obj-canonical-vertices")?,
-                ],
-                |exec, work| -> ParseResult<()> {
+                amounts,
+                |work| -> ParseResult<()> {
+                    let errors = work.error_view();
                     for occurrence in start..end {
                         let corner = self.corner_references.as_slice()[occurrence];
                         let is_first_position = first_position_occurrences.as_slice()[occurrence];
@@ -786,17 +822,16 @@ impl<'session> SegmentBuilder<'session> {
                         let vertex_amount = u64::from(is_first_position);
                         work.run([1, vertex_amount], || {
                             if let Some(position) = position {
-                                let canonical_index = canonical_u32(
-                                    exec,
-                                    positions.len() / 3,
-                                    "obj-vertex-index-space",
-                                )?;
+                                let canonical_index =
+                                    u32::try_from(positions.len() / 3).map_err(|_| {
+                                        errors.allocation_failure("obj-vertex-index-space")
+                                    })?;
                                 indices.as_mut_slice()[occurrence] = canonical_index;
                                 positions.try_extend_from_slice_reserved(&[
                                     position.x, position.y, position.z,
                                 ])?;
                             }
-                            Ok(())
+                            Ok::<_, ParseFailure>(())
                         })?;
                     }
                     Ok(())
@@ -807,19 +842,21 @@ impl<'session> SegmentBuilder<'session> {
         let mut current_position = None;
         let mut canonical_index = 0u32;
         mtl::for_work_chunks(
-            exec,
+            children,
             sorted_positions.len(),
             "obj-position-remap-work",
-            |_exec, work, range| {
+            |work, range| {
                 for cursor in range {
-                    let indexed = sorted_positions.as_slice()[cursor];
-                    if current_position != Some(indexed.source_index) {
-                        current_position = Some(indexed.source_index);
-                        canonical_index = indices.as_slice()[indexed.occurrence];
-                    } else {
-                        indices.as_mut_slice()[indexed.occurrence] = canonical_index;
-                    }
-                    work.complete([1])?;
+                    work.run([1], || {
+                        let indexed = sorted_positions.as_slice()[cursor];
+                        if current_position != Some(indexed.source_index) {
+                            current_position = Some(indexed.source_index);
+                            canonical_index = indices.as_slice()[indexed.occurrence];
+                        } else {
+                            indices.as_mut_slice()[indexed.occurrence] = canonical_index;
+                        }
+                        Ok::<_, ParseFailure>(())
+                    })?;
                 }
                 Ok(())
             },
@@ -837,14 +874,14 @@ impl<'session> SegmentBuilder<'session> {
         })
     }
 
-    fn finish<'region>(
+    fn finish<'op>(
         self,
-        exec: &mut ParseExecution<'region, 'session>,
-        groups: &MeshWorkGroups<'region>,
+        root: &mut ParseRoot<'_, 'op, 'session>,
+        groups: &MeshWorkGroups<'op>,
         parsed: &ParsedObj<'_>,
         material: Option<MaterialLocalId>,
     ) -> ParseResult<BuiltSegment<'session>> {
-        let streams = self.materialize_geometry(exec, groups, parsed)?;
+        let streams = self.materialize_geometry(root, groups, parsed)?;
         let SegmentBuilder {
             key,
             corner_references,
@@ -868,7 +905,7 @@ impl<'session> SegmentBuilder<'session> {
             face_vertex_counts
         } else {
             drop(face_vertex_counts);
-            exec.metered_vec(
+            root.services()?.metered_vec(
                 ImportStorageClass::FormatNormalization,
                 "obj-face-vertex-counts",
             )
@@ -913,20 +950,21 @@ struct BuiltSegment<'session> {
 }
 
 pub(crate) fn scene_from_parsed<'session>(
-    context: &mut ParseContext<'session>,
+    context: &mut ParseContext<'session, '_>,
     parsed: ParsedObj<'session>,
     library: &MaterialLibrary<'session>,
 ) -> ParseResult<()> {
-    let (materials, segments) = context.with_execution(|exec| {
+    let (materials, segments) = context.with_execution(|root| {
+        let exec = &mut root.services()?;
         if parsed.faces.is_empty() {
             return Err(exec.format_failure(ObjFailure::empty_geometry()));
         }
 
-        let material_projection = prepare_material_bindings(exec, library, &parsed)?;
-        let groups = MeshWorkGroups::bind(exec)?;
+        let material_projection = prepare_material_bindings(root, library, &parsed)?;
+        let groups = MeshWorkGroups::bind(&mut root.children()?)?;
         // The complete batch is borrowed authoring scratch. Core alone owns canonical-output
         // reservations when activation materializes and jointly publishes the retained Scene.
-        let mut segments = exec.metered_vec(
+        let mut segments = root.services()?.metered_vec(
             ImportStorageClass::FormatNormalization,
             "obj-complete-batch-segments",
         );
@@ -937,7 +975,7 @@ pub(crate) fn scene_from_parsed<'session>(
             let should_flush = current.as_ref().is_some_and(|segment| segment.key != key);
             if should_flush && let Some(segment) = current.take() {
                 flush_segment(
-                    exec,
+                    root,
                     &groups,
                     &mut segments,
                     &material_projection.bindings,
@@ -946,19 +984,19 @@ pub(crate) fn scene_from_parsed<'session>(
                 )?;
             }
             if current.is_none() {
-                current = Some(SegmentBuilder::new(exec, &groups, key)?);
+                current = Some(SegmentBuilder::new(&mut root.children()?, &groups, key)?);
             }
             let Some(segment) = current.as_mut() else {
-                return Err(exec.format_failure(ObjFailure::internal(
+                return Err(root.format_failure(ObjFailure::internal(
                     "mesh-segment-missing-after-initialization",
                 )));
             };
-            segment.push_face(exec, &groups, face)?;
+            segment.push_face(&mut root.children()?, &groups, face)?;
         }
 
         if let Some(segment) = current {
             flush_segment(
-                exec,
+                root,
                 &groups,
                 &mut segments,
                 &material_projection.bindings,
@@ -972,33 +1010,37 @@ pub(crate) fn scene_from_parsed<'session>(
     submit_complete_batch(context, &parsed, &materials, &segments)
 }
 
-fn flush_segment<'region, 'session>(
-    exec: &mut ParseExecution<'region, 'session>,
-    groups: &MeshWorkGroups<'region>,
+fn flush_segment<'op, 'session>(
+    root: &mut ParseRoot<'_, 'op, 'session>,
+    groups: &MeshWorkGroups<'op>,
     segments: &mut MeteredVec<'session, BuiltSegment<'session>>,
     material_bindings: &MaterialBindings<'session, '_>,
     parsed: &ParsedObj<'_>,
     segment: SegmentBuilder<'session>,
 ) -> ParseResult<()> {
     record_partial_attribute_losses(
-        exec,
+        &mut root.services()?,
         segments.len(),
         segment.texcoord_channel.is_partial(),
         segment.normal_channel.is_partial(),
     )?;
     let material = if let Some(id) = segment.key.material {
-        let name = state_name(exec, parsed, id)?;
-        Some(material_bindings.find(exec, name)?.ok_or_else(|| {
-            exec.format_failure(ObjFailure::internal(
-                "segment-material-missing-from-prepared-bindings",
-            ))
-        })?)
+        let name = state_name(&mut root.services()?, parsed, id)?;
+        Some(
+            material_bindings
+                .find(&mut root.children()?, name)?
+                .ok_or_else(|| {
+                    root.format_failure(ObjFailure::internal(
+                        "segment-material-missing-from-prepared-bindings",
+                    ))
+                })?,
+        )
     } else {
         None
     };
-    let built = segment.finish(exec, groups, parsed, material)?;
-    exec.with_work(&groups.meshes, [1], |exec, work| {
-        work.run_all(|| segments.try_push(exec, built))
+    let built = segment.finish(root, groups, parsed, material)?;
+    root.child(&groups.meshes, [1], |work| {
+        work.push_growing([1], segments, built)
     })
 }
 
@@ -1016,13 +1058,13 @@ struct MaterialBindings<'session, 'parsed> {
 impl MaterialBindings<'_, '_> {
     fn find(
         &self,
-        exec: &mut ParseExecution<'_, '_>,
+        children: &mut ParseChildren<'_, '_, '_>,
         name: &str,
     ) -> ParseResult<Option<MaterialLocalId>> {
         let index = mtl::interruptible_binary_search_by(
-            exec,
+            children,
             self.values.as_slice(),
-            |exec, work, binding| work.compare_str(exec, binding.name, name),
+            |work, binding| work.compare_str(binding.name, name),
         )?;
         Ok(index.and_then(|index| self.values.as_slice()[index].id))
     }
@@ -1050,96 +1092,107 @@ struct MaterialProjection<'session, 'input> {
 }
 
 fn prepare_material_bindings<'session, 'input>(
-    exec: &mut ParseExecution<'_, 'session>,
+    root: &mut ParseRoot<'_, '_, 'session>,
     library: &'input MaterialLibrary<'session>,
     parsed: &'input ParsedObj<'session>,
 ) -> ParseResult<MaterialProjection<'session, 'input>> {
     let faces = parsed.faces.as_slice();
-    let mut values = exec.metered_vec(
+    let mut values = root.services()?.metered_vec(
         ImportStorageClass::FormatNormalization,
         "obj-material-bindings",
     );
     mtl::for_work_chunks(
-        exec,
+        &mut root.children()?,
         faces.len(),
         "obj-material-binding-scan-work",
-        |exec, work, range| {
+        |work, range| {
             for first_use in range {
-                if let Some(id) = faces[first_use].material {
-                    let name = state_name(exec, parsed, id)?;
-                    values.try_push(
-                        exec,
-                        MaterialBinding {
-                            name,
-                            first_use,
-                            id: None,
-                        },
-                    )?;
-                }
-                work.complete([1])?;
+                work.run_returned_with_storage::<_, ObjFailure>(|mut storage| {
+                    if let Some(id) = faces[first_use].material {
+                        let name = parsed.state_name(id).ok_or_else(|| {
+                            ParsePieceError::Format(ObjFailure::internal(
+                                "segment-state-name-id-out-of-range",
+                            ))
+                        })?;
+                        storage.push_vec(
+                            &mut values,
+                            MaterialBinding {
+                                name,
+                                first_use,
+                                id: None,
+                            },
+                        )?;
+                    }
+                    Ok(((), [1]))
+                })?;
             }
             Ok(())
         },
     )?;
 
-    mtl::interruptible_sort_by(exec, &mut values, |exec, work, left, right| {
-        match work.compare_str(exec, left.name, right.name)? {
-            std::cmp::Ordering::Equal => {
-                work.run_leaf(exec, || left.first_use.cmp(&right.first_use))
-            }
+    mtl::interruptible_sort_by(
+        &mut root.children()?,
+        &mut values,
+        |work, left, right| match work.compare_str(left.name, right.name)? {
+            std::cmp::Ordering::Equal => work.run_leaf(|| left.first_use.cmp(&right.first_use)),
             ordering => Ok(ordering),
-        }
-    })?;
-    mtl::interruptible_dedup_by(exec, &mut values, |exec, work, previous, current| {
-        Ok(work.compare_str(exec, previous.name, current.name)? == std::cmp::Ordering::Equal)
-    })?;
-    mtl::interruptible_sort_by(exec, &mut values, |exec, work, left, right| {
-        work.run_leaf(exec, || left.first_use.cmp(&right.first_use))
+        },
+    )?;
+    mtl::interruptible_dedup_by(
+        &mut root.children()?,
+        &mut values,
+        |work, previous, current| {
+            Ok(work.compare_str(previous.name, current.name)? == std::cmp::Ordering::Equal)
+        },
+    )?;
+    mtl::interruptible_sort_by(&mut root.children()?, &mut values, |work, left, right| {
+        work.run_leaf(|| left.first_use.cmp(&right.first_use))
     })?;
 
+    let exec = &mut root.services()?;
     let mut materials = exec.metered_vec(
         ImportStorageClass::FormatNormalization,
         "obj-complete-batch-materials",
     );
     materials.try_reserve(exec, values.len())?;
-    let binding_work = exec.bind_work_group([ImportWorkClass::WorkUnits])?;
+    let binding_work = root.bind_group([ImportWorkClass::WorkUnits])?;
     let mut start = 0usize;
     while start < values.len() {
         let end = start.saturating_add(64).min(values.len());
         let mut built_ids: [Option<MaterialLocalId>; 64] = std::array::from_fn(|_| None);
         for (offset, index) in (start..end).enumerate() {
             let name = values.as_slice()[index].name;
-            let material = build_material(exec, library, name)?;
-            let id = canonical_u32(exec, materials.len(), "obj-material-local-id")?;
+            let material = build_material(root, library, name)?;
+            let id = canonical_u32(&root.services()?, materials.len(), "obj-material-local-id")?;
             materials.try_push_reserved(material)?;
             built_ids[offset] = Some(MaterialLocalId::new(id));
         }
-        exec.with_work(
-            &binding_work,
-            [usize_amount(
-                exec,
-                end - start,
-                "obj-material-binding-build-work",
-            )?],
-            |exec, work| -> ParseResult<()> {
-                for (offset, index) in (start..end).enumerate() {
-                    let id = built_ids[offset].take().ok_or_else(|| {
-                        exec.format_failure(ObjFailure::internal(
-                            "material-binding-build-result-missing",
-                        ))
-                    })?;
-                    work.run([1], || {
-                        values.as_mut_slice()[index].id = Some(id);
-                        Ok(())
-                    })?;
-                }
-                Ok(())
-            },
+        let amount = usize_amount(
+            &root.services()?,
+            end - start,
+            "obj-material-binding-build-work",
         )?;
+        root.child(&binding_work, [amount], |work| -> ParseResult<()> {
+            for (offset, index) in (start..end).enumerate() {
+                let id = built_ids[offset]
+                    .take()
+                    .ok_or_else(|| match work.services() {
+                        Ok(mut exec) => exec.format_failure(ObjFailure::internal(
+                            "material-binding-build-result-missing",
+                        )),
+                        Err(cause) => cause,
+                    })?;
+                work.run([1], || {
+                    values.as_mut_slice()[index].id = Some(id);
+                    Ok::<_, ParseFailure>(())
+                })?;
+            }
+            Ok(())
+        })?;
         start = end;
     }
-    mtl::interruptible_sort_by(exec, &mut values, |exec, work, left, right| {
-        work.compare_str(exec, left.name, right.name)
+    mtl::interruptible_sort_by(&mut root.children()?, &mut values, |work, left, right| {
+        work.compare_str(left.name, right.name)
     })?;
     Ok(MaterialProjection {
         bindings: MaterialBindings { values },
@@ -1148,13 +1201,14 @@ fn prepare_material_bindings<'session, 'input>(
 }
 
 fn build_material<'input, 'session>(
-    exec: &mut ParseExecution<'_, 'session>,
+    root: &mut ParseRoot<'_, '_, 'session>,
     library: &'input MaterialLibrary<'session>,
     name: &'input str,
 ) -> ParseResult<BuiltMaterial<'input, 'session>> {
-    if let Some(parsed) = library.find(exec, name)? {
-        material_from_parsed(exec, library, parsed)
+    if let Some(parsed) = library.find(&mut root.children()?, name)? {
+        material_from_parsed(root, library, parsed)
     } else {
+        let exec = &mut root.services()?;
         mtl::push_warning(
             exec,
             None,
@@ -1177,19 +1231,19 @@ fn build_material<'input, 'session>(
 }
 
 fn material_from_parsed<'input, 'session>(
-    exec: &mut ParseExecution<'_, 'session>,
+    root: &mut ParseRoot<'_, '_, 'session>,
     library: &'input MaterialLibrary<'session>,
     parsed: &'input ParsedMaterial<'session>,
 ) -> ParseResult<BuiltMaterial<'input, 'session>> {
     let diffuse_texture = parsed
         .diffuse_texture
         .as_ref()
-        .map(|texture| load_diffuse_texture(exec, library, texture))
+        .map(|texture| load_diffuse_texture(root, library, texture))
         .transpose()?
         .flatten();
 
     material_from_factors(
-        exec,
+        &mut root.services()?,
         parsed.name.as_str(),
         CanonicalShadingModel::Phong,
         parsed.ambient,
@@ -1203,14 +1257,15 @@ fn material_from_parsed<'input, 'session>(
 }
 
 fn load_diffuse_texture<'session>(
-    exec: &mut ParseExecution<'_, 'session>,
+    root: &mut ParseRoot<'_, '_, 'session>,
     library: &MaterialLibrary<'session>,
     texture: &ParsedTexture<'_>,
 ) -> ParseResult<Option<BuiltTexture<'session>>> {
     let origin = library
         .origin(texture.origin)
-        .ok_or_else(|| exec.format_failure(ObjFailure::internal("texture-origin-missing")))?;
-    let outcome = exec.dependency(origin, &diffuse_texture_role(), texture.reference.as_str())?;
+        .ok_or_else(|| root.format_failure(ObjFailure::internal("texture-origin-missing")))?;
+    let outcome = root.dependency(origin, &diffuse_texture_role(), texture.reference.as_str())?;
+    let exec = &mut root.services()?;
     let snapshot = match outcome.into_result() {
         Ok(snapshot) => snapshot,
         Err(evidence) => {
@@ -1240,7 +1295,7 @@ fn load_diffuse_texture<'session>(
 
 #[allow(clippy::too_many_arguments)]
 fn material_from_factors<'input, 'session>(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseServices<'_, '_, '_>,
     name: &'input str,
     shading_model: CanonicalShadingModel,
     ambient: Vec3,
@@ -1317,7 +1372,7 @@ struct PendingMetadata<'input> {
 }
 
 fn submit_complete_batch<'session>(
-    context: &mut ParseContext<'session>,
+    context: &mut ParseContext<'session, '_>,
     parsed: &ParsedObj<'session>,
     materials: &MeteredVec<'session, BuiltMaterial<'_, 'session>>,
     segments: &MeteredVec<'session, BuiltSegment<'session>>,
@@ -1333,7 +1388,8 @@ fn submit_complete_batch<'session>(
         logical_morphs,
         primitive_deformations,
         mesh_instance_deformations,
-    ) = context.with_execution(|exec| {
+    ) = context.with_execution(|root| {
+        let exec = &mut root.services()?;
         let mut roots = exec.metered_vec(
             ImportStorageClass::FormatNormalization,
             "obj-complete-batch-roots",
@@ -1512,12 +1568,14 @@ fn submit_complete_batch<'session>(
         .iter()
         .filter(|material| material.diffuse_texture.is_some())
         .count();
-    let source_key = context.with_execution(|exec| {
+    let source_key = context.with_execution(|root| {
+        let exec = &mut root.services()?;
         TextureSourceKey::try_new("map_Kd")
             .map_err(|_| exec.format_failure(ObjFailure::internal("invalid-texture-source-key")))
     })?;
     let (images, samplers, textures, material_bindings, material_authoring) = context
-        .with_execution(|exec| {
+        .with_execution(|root| {
+            let exec = &mut root.services()?;
             let mut images = exec.metered_vec(
                 ImportStorageClass::FormatNormalization,
                 "obj-complete-batch-images",
@@ -1613,7 +1671,8 @@ fn submit_complete_batch<'session>(
             ))
         })?;
 
-    let pending_metadata = context.with_execution(|exec| {
+    let pending_metadata = context.with_execution(|root| {
+        let exec = &mut root.services()?;
         let mut pending_metadata = exec.metered_vec(
             ImportStorageClass::FormatNormalization,
             "obj-complete-batch-pending-metadata",
@@ -1628,7 +1687,8 @@ fn submit_complete_batch<'session>(
         }
         Ok::<_, baozi_import::ParseFailure>(pending_metadata)
     })?;
-    let metadata_entries = context.with_execution(|exec| {
+    let metadata_entries = context.with_execution(|root| {
+        let exec = &mut root.services()?;
         let mut metadata_entries = exec.metered_vec(
             ImportStorageClass::FormatNormalization,
             "obj-complete-batch-metadata-authoring",
@@ -1646,13 +1706,15 @@ fn submit_complete_batch<'session>(
     })?;
 
     let source_provenance = [ProvenanceLocalId::new(0)];
-    let (resource_identity, resource_stability, format) = context.with_execution(|exec| {
+    let (resource_identity, resource_stability, format) = context.with_execution(|root| {
+        let exec = &mut root.services()?;
         let (identity, stability) = profile_resource_identity(exec)?;
         let format = FormatId::new(FORMAT_ID)
             .map_err(|_| exec.allocation_failure("obj-profile-format-id"))?;
         Ok::<_, baozi_import::ParseFailure>((identity, stability, format))
     })?;
-    let (resources, resource_snapshots, source_locators) = context.with_execution(|exec| {
+    let (resources, resource_snapshots, source_locators) = context.with_execution(|root| {
+        let exec = &mut root.services()?;
         let resource_count = texture_count
             .checked_add(1)
             .ok_or_else(|| exec.allocation_failure("obj-profile-resource-count"))?;
@@ -1701,7 +1763,8 @@ fn submit_complete_batch<'session>(
         Ok::<_, baozi_import::ParseFailure>((resources, resource_snapshots, source_locators))
     })?;
 
-    let (source_identities, provenance_nodes) = context.with_execution(|exec| {
+    let (source_identities, provenance_nodes) = context.with_execution(|root| {
+        let exec = &mut root.services()?;
         let resource_count = source_locators.len();
         let mut source_identities = exec.metered_vec(
             ImportStorageClass::FormatNormalization,
@@ -1728,7 +1791,8 @@ fn submit_complete_batch<'session>(
         Ok::<_, baozi_import::ParseFailure>((source_identities, provenance_nodes))
     })?;
 
-    let appearance_provenance = context.with_execution(|exec| {
+    let appearance_provenance = context.with_execution(|root| {
+        let exec = &mut root.services()?;
         let mut appearance_provenance = exec.metered_vec(
             ImportStorageClass::FormatNormalization,
             "obj-complete-batch-appearance-provenance",
@@ -1747,7 +1811,8 @@ fn submit_complete_batch<'session>(
         Ok::<_, baozi_import::ParseFailure>(appearance_provenance)
     })?;
 
-    let owner_provenance = context.with_execution(|exec| {
+    let owner_provenance = context.with_execution(|root| {
+        let exec = &mut root.services()?;
         let appearance_owner_count = texture_count
             .checked_mul(4)
             .ok_or_else(|| exec.allocation_failure("obj-profile-appearance-owner-count"))?;
@@ -1886,7 +1951,7 @@ fn submit_complete_batch<'session>(
 }
 
 fn append_material_metadata<'session, 'input>(
-    exec: &mut ParseExecution<'_, 'session>,
+    exec: &mut ParseServices<'_, '_, 'session>,
     output: &mut MeteredVec<'session, PendingMetadata<'input>>,
     material: usize,
     metadata: &'input ParsedMetadata<'session>,
@@ -1908,7 +1973,7 @@ fn append_material_metadata<'session, 'input>(
 }
 
 fn append_segment_metadata<'session, 'input>(
-    exec: &mut ParseExecution<'_, 'session>,
+    exec: &mut ParseServices<'_, '_, 'session>,
     output: &mut MeteredVec<'session, PendingMetadata<'input>>,
     parsed: &'input ParsedObj<'session>,
     mesh: usize,
@@ -1939,7 +2004,7 @@ fn append_segment_metadata<'session, 'input>(
 }
 
 fn push_metadata<'session, 'input>(
-    exec: &mut ParseExecution<'_, 'session>,
+    exec: &mut ParseServices<'_, '_, 'session>,
     output: &mut MeteredVec<'session, PendingMetadata<'input>>,
     owner: ProfileOwner,
     key: &str,
@@ -1951,7 +2016,7 @@ fn push_metadata<'session, 'input>(
 }
 
 fn push_indexed_owners<'session, 'input>(
-    exec: &mut ParseExecution<'_, 'session>,
+    exec: &mut ParseServices<'_, '_, 'session>,
     output: &mut MeteredVec<'session, OwnerProvenanceAuthoring<'input>>,
     count: usize,
     resource: &'static str,
@@ -1968,7 +2033,7 @@ fn push_indexed_owners<'session, 'input>(
 }
 
 fn canonical_u32(
-    exec: &ParseExecution<'_, '_>,
+    exec: &ParseServices<'_, '_, '_>,
     value: usize,
     resource: &'static str,
 ) -> ParseResult<u32> {
@@ -1976,7 +2041,7 @@ fn canonical_u32(
 }
 
 fn profile_resource_identity(
-    exec: &ParseExecution<'_, '_>,
+    exec: &ParseServices<'_, '_, '_>,
 ) -> ParseResult<(ResourceIdentity, SessionOpaqueReason)> {
     match ResourceIdentity::new(exec.source().as_str()) {
         Ok(identity) => Ok((identity, SessionOpaqueReason::CallerLabel)),

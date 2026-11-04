@@ -239,9 +239,38 @@ enum TestEvidenceBlock {
     Detail(u64),
 }
 
-type TestOperation =
-    RetainedOperation<TestOwner, TestPhase, TestProgress, TestUnit, TestDimension, u32>;
-type TestPublication<CanonicalBlock, EvidenceBlock> = RetainedPublicationAssembly<
+type TestInvocationRoot<
+    CanonicalBlock = TestCanonicalBlock,
+    EvidenceBlock = TestEvidenceBlock,
+    F = u32,
+> = InvocationRoot<
+    TestOwner,
+    TestPhase,
+    TestProgress,
+    TestUnit,
+    TestDimension,
+    F,
+    CanonicalBlock,
+    EvidenceBlock,
+>;
+type TestOperation<
+    'inv,
+    CanonicalBlock = TestCanonicalBlock,
+    EvidenceBlock = TestEvidenceBlock,
+    F = u32,
+> = RetainedOperation<
+    'inv,
+    TestOwner,
+    TestPhase,
+    TestProgress,
+    TestUnit,
+    TestDimension,
+    F,
+    CanonicalBlock,
+    EvidenceBlock,
+>;
+type TestPublication<'inv, CanonicalBlock, EvidenceBlock> = RetainedPublicationAssembly<
+    'inv,
     TestOwner,
     TestPhase,
     TestProgress,
@@ -369,17 +398,36 @@ fn publication_plan_with_canonical_source_mapping(
     )
 }
 
-fn test_operation(factory: &PhysicalStorageAccountFactory, evidence_limit: u64) -> TestOperation {
-    test_operation_with_writer_limits(factory, evidence_limit, RetainedBatchLimits::new(2, 2))
+fn test_operation<'inv, CanonicalBlock, EvidenceBlock>(
+    root: &'inv mut TestInvocationRoot<CanonicalBlock, EvidenceBlock>,
+    factory: &PhysicalStorageAccountFactory,
+    evidence_limit: u64,
+) -> TestOperation<'inv, CanonicalBlock, EvidenceBlock>
+where
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
+    test_operation_with_writer_limits(
+        root,
+        factory,
+        evidence_limit,
+        RetainedBatchLimits::new(2, 2),
+    )
 }
 
-fn test_operation_with_writer_limits(
+fn test_operation_with_writer_limits<'inv, CanonicalBlock, EvidenceBlock>(
+    root: &'inv mut TestInvocationRoot<CanonicalBlock, EvidenceBlock>,
     factory: &PhysicalStorageAccountFactory,
     evidence_limit: u64,
     writer_limits: RetainedBatchLimits,
-) -> TestOperation {
+) -> TestOperation<'inv, CanonicalBlock, EvidenceBlock>
+where
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
     let account = account(factory, u64::MAX, 128);
     test_operation_on_account_with_control(
+        root,
         &account,
         evidence_limit,
         writer_limits,
@@ -387,12 +435,17 @@ fn test_operation_with_writer_limits(
     )
 }
 
-fn test_operation_on_account_with_control(
+fn test_operation_on_account_with_control<'inv, CanonicalBlock, EvidenceBlock>(
+    root: &'inv mut TestInvocationRoot<CanonicalBlock, EvidenceBlock>,
     account: &PhysicalStorageAccount,
     evidence_limit: u64,
     writer_limits: RetainedBatchLimits,
     control: OperationControl<TestProgress, TestUnit>,
-) -> TestOperation {
+) -> TestOperation<'inv, CanonicalBlock, EvidenceBlock>
+where
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
     let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
         .with_published_outcome_evidence_limit(evidence_limit);
     let limits = LedgerLimits::new(u64::MAX, [(TestDimension::Bytes, policy)]).unwrap();
@@ -406,20 +459,26 @@ fn test_operation_on_account_with_control(
         OutputCommitment::new(TestDimension::Bytes, 1),
         OutputCommitment::new(TestDimension::Bytes, 1),
     );
-    match TestOperation::try_start(control, limits, account, plan, || Ok(7_u32)) {
+    match RetainedOperation::try_start(root, control, limits, account, plan, || Ok(7_u32)) {
         Ok(operation) => operation,
         Err(_) => panic!("test operation bootstrap must succeed"),
     }
 }
 
-fn test_operation_with_failure_work(
+fn test_operation_with_failure_work<'inv, CanonicalBlock, EvidenceBlock>(
+    root: &'inv mut TestInvocationRoot<CanonicalBlock, EvidenceBlock>,
     factory: &PhysicalStorageAccountFactory,
     evidence_limit: u64,
     writer_limits: RetainedBatchLimits,
     max_evidence_members: usize,
-) -> TestOperation {
+) -> TestOperation<'inv, CanonicalBlock, EvidenceBlock>
+where
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
     let account = account(factory, u64::MAX, 128);
     test_operation_on_account_with_failure_work(
+        root,
         &account,
         evidence_limit,
         writer_limits,
@@ -429,15 +488,18 @@ fn test_operation_with_failure_work(
     )
 }
 
-fn test_operation_on_account_with_failure_work<F>(
+fn test_operation_on_account_with_failure_work<'inv, CanonicalBlock, EvidenceBlock, F>(
+    root: &'inv mut TestInvocationRoot<CanonicalBlock, EvidenceBlock, F>,
     account: &PhysicalStorageAccount,
     evidence_limit: u64,
     writer_limits: RetainedBatchLimits,
     control: OperationControl<TestProgress, TestUnit>,
     max_evidence_members: usize,
     fallback: F,
-) -> RetainedOperation<TestOwner, TestPhase, TestProgress, TestUnit, TestDimension, F>
+) -> TestOperation<'inv, CanonicalBlock, EvidenceBlock, F>
 where
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
     F: Send + Sync + 'static,
 {
     let failure_work = RetainedFailureTerminalWorkPlan::new(
@@ -472,17 +534,27 @@ where
         OutputCommitment::new(TestDimension::Bytes, 1),
     )
     .with_failure_terminal_work(failure_work);
-    RetainedOperation::try_start(control, limits, account, plan, || Ok(fallback))
+    RetainedOperation::try_start(root, control, limits, account, plan, || Ok(fallback))
         .unwrap_or_else(|_| panic!("finite failure-work fixture must start"))
 }
 
-fn test_derived_operation_on_account_with_control<CanonicalBlock>(
+fn test_derived_operation_on_account_with_control<
+    'inv,
+    CanonicalBlock,
+    EvidenceBlock,
+    SourceBlock,
+>(
+    root: &'inv mut TestInvocationRoot<CanonicalBlock, EvidenceBlock>,
     account: &PhysicalStorageAccount,
-    source: &PublishedCanonicalOutput<CanonicalBlock>,
+    source: &PublishedCanonicalOutput<SourceBlock>,
     evidence_limit: u64,
     writer_limits: RetainedBatchLimits,
     control: OperationControl<TestProgress, TestUnit>,
-) -> TestOperation {
+) -> TestOperation<'inv, CanonicalBlock, EvidenceBlock>
+where
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
     let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
         .with_published_outcome_evidence_limit(evidence_limit);
     let limits = LedgerLimits::new(u64::MAX, [(TestDimension::Bytes, policy)]).unwrap();
@@ -497,9 +569,9 @@ fn test_derived_operation_on_account_with_control<CanonicalBlock>(
         OutputCommitment::new(TestDimension::Bytes, 1),
     );
     RetainedOperation::try_start_derived_with_phase_catalog(
+        root,
         control,
-        limits,
-        &[TestPhase::Build],
+        (limits, &[TestPhase::Build]),
         account,
         source.aggregate(),
         plan,
@@ -508,11 +580,14 @@ fn test_derived_operation_on_account_with_control<CanonicalBlock>(
     .unwrap_or_else(|_| panic!("derived test operation bootstrap must succeed"))
 }
 
-fn test_operation_with_fallback<F>(
+fn test_operation_with_fallback<'inv, CanonicalBlock, EvidenceBlock, F>(
+    root: &'inv mut TestInvocationRoot<CanonicalBlock, EvidenceBlock, F>,
     factory: &PhysicalStorageAccountFactory,
     fallback: F,
-) -> RetainedOperation<TestOwner, TestPhase, TestProgress, TestUnit, TestDimension, F>
+) -> TestOperation<'inv, CanonicalBlock, EvidenceBlock, F>
 where
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
     F: Send + Sync + 'static,
 {
     let account = account(factory, u64::MAX, 128);
@@ -526,9 +601,14 @@ where
         OutputCommitment::new(TestDimension::Bytes, 1),
         OutputCommitment::new(TestDimension::Bytes, 1),
     );
-    RetainedOperation::try_start(OperationControl::default(), limits, &account, plan, || {
-        Ok(fallback)
-    })
+    RetainedOperation::try_start(
+        root,
+        OperationControl::default(),
+        limits,
+        &account,
+        plan,
+        || Ok(fallback),
+    )
     .unwrap_or_else(|_| panic!("test operation bootstrap must succeed"))
 }
 
@@ -588,7 +668,7 @@ fn empty_plan() -> RetainedAllocationPlan {
 }
 
 fn retain_scalar_success(
-    assembly: &mut TestPublication<u64, u64>,
+    assembly: &mut TestPublication<'_, u64, u64>,
 ) -> (
     CanonicalRetainedSlot<u64, CanonicalRootTag>,
     OutcomeEvidenceRetainedSlot<u64, EvidenceRootTag>,
@@ -614,13 +694,15 @@ type PublishedScalarSource = (
 );
 
 fn publish_scalar_source(account: &PhysicalStorageAccount) -> PublishedScalarSource {
+    let mut root = TestInvocationRoot::<u64, u64>::new();
     let operation = test_operation_on_account_with_control(
+        &mut root,
         account,
         64,
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("source publication must open"));
     let (canonical_slot, evidence_slot) = retain_scalar_success(&mut assembly);

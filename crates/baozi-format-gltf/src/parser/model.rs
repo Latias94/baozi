@@ -170,16 +170,22 @@ pub(super) struct ExternalImageResources<'scope> {
 impl ExternalImageResources<'_> {
     pub(super) fn get(
         &self,
-        ctx: &mut baozi_import::ParseExecution<'_, '_>,
+        ctx: &mut baozi_import::ParseRoot<'_, '_, '_>,
         image_index: usize,
     ) -> super::Result<Option<(u32, &DependencySnapshot<'_>)>> {
         let values = self.values.as_slice();
         // Collection follows source image order, including gaps for unselected/embedded images.
         // Prepay the binary-search comparison bound; one search takes at most usize::BITS + 1.
         let comparisons = u64::from(usize::BITS - values.len().leading_zeros()) + 1;
-        ctx.charge_work(comparisons)?;
-        let Ok(index) = values.binary_search_by_key(&image_index, |resource| resource.image_index)
-        else {
+        let layout = ctx.bind_group([baozi_import::ImportWorkClass::WorkUnits])?;
+        let found = ctx.child(&layout, [comparisons], |child| {
+            child.run([comparisons], || {
+                Ok::<_, baozi_import::ParseFailure>(
+                    values.binary_search_by_key(&image_index, |resource| resource.image_index),
+                )
+            })
+        })?;
+        let Ok(index) = found else {
             return Ok(None);
         };
         let resource = &values[index];

@@ -6,7 +6,9 @@ fn sequence_bytes_utf8_and_records_round_trip_through_typed_roots() {
     let account = account(&factory);
     let producer = fake_producer();
     let producer_unloaded = Arc::downgrade(&producer);
+    let mut invocation_root = TestInvocationRoot::new();
     let (operation, keys) = operation_with_catalog_and_evidence_limit(
+        &mut invocation_root,
         &account,
         OperationControl::default(),
         producer.catalog,
@@ -184,7 +186,8 @@ fn sequence_bytes_and_utf8_roots_round_trip_through_every_terminal_owner() {
     let account = account(&factory);
 
     {
-        let (operation, keys) = operation(&account);
+        let mut invocation_root = TestInvocationRoot::new();
+        let (operation, keys) = operation(&mut invocation_root, &account);
         let mut assembly = operation
             .try_publication_assembly(publication_plan(keys, 1, 1))
             .unwrap();
@@ -220,7 +223,8 @@ fn sequence_bytes_and_utf8_roots_round_trip_through_every_terminal_owner() {
     }
 
     {
-        let (operation, keys) = operation(&account);
+        let mut invocation_root_2 = TestInvocationRoot::new();
+        let (operation, keys) = operation(&mut invocation_root_2, &account);
         let mut assembly = operation
             .try_publication_assembly(publication_plan(keys, 1, 1))
             .unwrap();
@@ -253,7 +257,8 @@ fn sequence_bytes_and_utf8_roots_round_trip_through_every_terminal_owner() {
     }
 
     {
-        let (operation, keys) = operation(&account);
+        let mut invocation_root_3 = TestInvocationRoot::new();
+        let (operation, keys) = operation(&mut invocation_root_3, &account);
         let mut assembly = operation
             .try_publication_assembly(publication_plan(keys, 1, 1))
             .unwrap();
@@ -286,7 +291,8 @@ fn sequence_bytes_and_utf8_roots_round_trip_through_every_terminal_owner() {
     }
 
     {
-        let (operation, keys) = operation(&account);
+        let mut invocation_root_4 = TestInvocationRoot::new();
+        let (operation, keys) = operation(&mut invocation_root_4, &account);
         let mut assembly = operation
             .try_publication_assembly(rich_failure_plan(keys, 1))
             .unwrap();
@@ -322,7 +328,8 @@ fn sequence_bytes_and_utf8_roots_round_trip_through_every_terminal_owner() {
     }
 
     {
-        let (operation, keys) = operation(&account);
+        let mut invocation_root_5 = TestInvocationRoot::new();
+        let (operation, keys) = operation(&mut invocation_root_5, &account);
         let mut assembly = operation
             .try_publication_assembly(rich_failure_plan(keys, 1))
             .unwrap();
@@ -354,7 +361,8 @@ fn sequence_bytes_and_utf8_roots_round_trip_through_every_terminal_owner() {
     }
 
     {
-        let (operation, keys) = operation(&account);
+        let mut invocation_root_6 = TestInvocationRoot::new();
+        let (operation, keys) = operation(&mut invocation_root_6, &account);
         let mut assembly = operation
             .try_publication_assembly(rich_failure_plan(keys, 1))
             .unwrap();
@@ -393,7 +401,8 @@ fn sequence_bytes_and_utf8_roots_round_trip_through_every_terminal_owner() {
 fn record_reference_projection_requires_exact_block_kind_and_tag() {
     let factory = factory(1);
     let account = account(&factory);
-    let (operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation(&mut invocation_root, &account);
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 5, 5))
         .unwrap();
@@ -669,7 +678,8 @@ fn record_reference_projection_requires_exact_block_kind_and_tag() {
 fn every_supported_scalar_kind_round_trips_without_cross_kind_projection() {
     let factory = factory(1);
     let account = account(&factory);
-    let (operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation(&mut invocation_root, &account);
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 11, 1))
         .unwrap();
@@ -818,7 +828,8 @@ fn exact_plans_reject_empty_excess_and_wrong_record_kinds() {
 
     let factory = factory(1);
     let account = account(&factory);
-    let (operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation(&mut invocation_root, &account);
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 2, 1))
         .unwrap();
@@ -872,7 +883,8 @@ fn exact_plans_reject_empty_excess_and_wrong_record_kinds() {
 fn physical_snapshots_follow_capacity_envelopes_for_sequence_bytes_and_utf8() {
     let factory = factory(1);
     let account = account(&factory);
-    let (operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation(&mut invocation_root, &account);
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 3, 1))
         .unwrap();

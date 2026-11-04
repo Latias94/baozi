@@ -1,31 +1,33 @@
 use baozi_core::__scene_integration::integration::{
-    SceneActivationOutput, SceneActivationPostflight, SceneActivationRejection,
-    SceneCanonicalRootTag, SceneConstruction, SceneEvidenceRecipe, SceneHandoffToken,
-    SceneOutcomeEvidenceTag, SceneParseOutcome, SceneValidationProof, consume_scene_freeze_permit,
+    PreparedScenePublication, PreparedSceneSuccess, SceneActivationOutput,
+    SceneActivationPostflight, SceneActivationRejection, SceneCanonicalRootTag, SceneConstruction,
+    SceneEvidenceRecipe, SceneGenerationRejection, SceneOutcomeEvidenceTag, SceneParseOutcome,
+    ScenePublicationError, SceneValidationProof, consume_scene_freeze_permit,
 };
 use baozi_operation::__retained_store_integration::activation::{
     ActivatedCanonicalStoreSession, CanonicalActivationOutcome, CanonicalActivationSeal,
-    CanonicalCandidateStoreSession, CanonicalCentralValidationOutcome, CanonicalFreezePermitIssue,
-    CanonicalValidationProgress, CentrallyRejectedCanonicalStoreSession, FailureEvidenceOutcome,
-    FrozenFailureState, InterruptedCanonicalStoreSession, NeverActivatedStoreSession,
-    PendingMinimalFallback, RejectedCanonicalStoreSession, RootedFailureValidation,
-    StoreActivationContainmentAnchor, StoreCanonicalRejection, StoreNeverActivatedCause,
-    VerifiedMinimalFallback,
+    CanonicalActivationSlots, CanonicalCandidateStoreSession, CanonicalCauseSlot,
+    CanonicalCentralValidationOutcome, CanonicalFinal, CanonicalFreezePermitIssue,
+    CanonicalGenerationSlots, CanonicalInvocationOutcome, CanonicalOutputSlot, CanonicalProofSlot,
+    CanonicalSemanticWorkError, CanonicalValidationProgress, CanonicalValidationSlots,
+    CentrallyRejectedCanonicalStoreSession, FailureEvidenceOutcome, FrozenFailureState,
+    InterruptedCanonicalStoreSession, NeverActivatedStoreSession, PendingMinimalFallback,
+    RejectedCanonicalStoreSession, RootedFailureValidation, StoreActivationContainmentAnchor,
+    StoreCanonicalRejection, StoreNeverActivatedCause,
 };
 use baozi_operation::__retained_store_integration::authority::{
-    PreparedStoreFailure, PreparedStoreFailureOutcome, PreparedStoreFallback, PreparedStoreSuccess,
-    PreparedStoreSuccessOutcome,
+    FreshStoreLineage, PreparedStoreFailure, PreparedStoreFailureOutcome, PreparedStoreFallback,
 };
 use baozi_operation::{ControlCause, FinalProgress, RecordBlock, StoreRuntimeError};
 
 use crate::ledger::{ImportOperationOwner, ImportProgressPhase, ImportProgressUnit};
 
 use super::{
-    ImportStoreActivationError, ImportStoreFailureCauseAuthority, ImportStoreFinalizationError,
-    ImportStoreHostError, ImportStoreMinimalFallback, ImportStoreOutcomeOwner,
-    ImportStoreRichFailure, ImportStoreSessionOwner, ImportStoreSessionState,
-    ImportStoreSuccessReport, ImportStoreTerminalCause, ImportStoreTerminalEvidence,
-    ImportStoreTerminalOutcome, ImportStoreTerminalProjectionError,
+    ImportStoreActivationError, ImportStoreDisposition, ImportStoreFailureCauseAuthority,
+    ImportStoreFinish, ImportStoreHostError, ImportStoreMinimalFallback, ImportStoreOutcomeOwner,
+    ImportStoreRichFailure, ImportStoreSessionData, ImportStoreSessionOwner,
+    ImportStoreSessionState, ImportStoreSuccessReport, ImportStoreTerminalEvidence,
+    ImportStoreTerminalOutcome,
 };
 
 #[cfg(test)]
@@ -36,7 +38,15 @@ mod transition_tests;
 
 pub(super) const IMPORT_SCENE_NOT_SUBMITTED_CODE: u32 = 0x494d_0002;
 
-type ImportSceneActivationOutcome = CanonicalActivationOutcome<
+pub(super) struct ImportSceneActivationSlots<'inv> {
+    pub(super) output: CanonicalOutputSlot<'inv, SceneActivationOutput>,
+    pub(super) proof: CanonicalProofSlot<'inv, SceneValidationProof>,
+    pub(super) activation: CanonicalActivationSlots<'inv, SceneActivationRejection>,
+    pub(super) validation: CanonicalValidationSlots<'inv, SceneActivationRejection>,
+}
+
+type ImportSceneActivationOutcome<'inv> = CanonicalActivationOutcome<
+    'inv,
     ImportOperationOwner,
     ImportProgressPhase,
     ImportProgressUnit,
@@ -46,7 +56,8 @@ type ImportSceneActivationOutcome = CanonicalActivationOutcome<
     SceneCanonicalRootTag,
 >;
 
-type ImportSceneActivated = ActivatedCanonicalStoreSession<
+type ImportSceneActivated<'inv> = ActivatedCanonicalStoreSession<
+    'inv,
     ImportOperationOwner,
     ImportProgressPhase,
     ImportProgressUnit,
@@ -55,7 +66,8 @@ type ImportSceneActivated = ActivatedCanonicalStoreSession<
     SceneCanonicalRootTag,
 >;
 
-type ImportSceneCentralOutcome = CanonicalCentralValidationOutcome<
+type ImportSceneCentralOutcome<'inv> = CanonicalCentralValidationOutcome<
+    'inv,
     ImportOperationOwner,
     ImportProgressPhase,
     ImportProgressUnit,
@@ -68,7 +80,8 @@ type ImportSceneCentralOutcome = CanonicalCentralValidationOutcome<
     SceneOutcomeEvidenceTag,
 >;
 
-pub(super) type ImportSceneCandidate = CanonicalCandidateStoreSession<
+pub(super) type ImportSceneCandidate<'inv> = CanonicalCandidateStoreSession<
+    'inv,
     ImportOperationOwner,
     ImportProgressPhase,
     ImportProgressUnit,
@@ -79,19 +92,23 @@ pub(super) type ImportSceneCandidate = CanonicalCandidateStoreSession<
     RecordBlock,
     SceneOutcomeEvidenceTag,
 >;
-pub(super) type ImportSceneActivationRejected = RejectedCanonicalStoreSession<
+pub(super) type ImportSceneActivationRejected<'inv> = RejectedCanonicalStoreSession<
+    'inv,
     ImportOperationOwner,
     ImportProgressPhase,
     ImportProgressUnit,
     SceneActivationRejection,
 >;
-pub(super) type ImportSceneNeverActivated = NeverActivatedStoreSession<
+pub(super) type ImportSceneNeverActivated<'inv, L = FreshStoreLineage> = NeverActivatedStoreSession<
+    'inv,
     ImportOperationOwner,
     ImportProgressPhase,
     ImportProgressUnit,
     SceneActivationRejection,
+    L,
 >;
-pub(super) type ImportSceneCentralRejected = CentrallyRejectedCanonicalStoreSession<
+pub(super) type ImportSceneCentralRejected<'inv> = CentrallyRejectedCanonicalStoreSession<
+    'inv,
     ImportOperationOwner,
     ImportProgressPhase,
     ImportProgressUnit,
@@ -99,15 +116,14 @@ pub(super) type ImportSceneCentralRejected = CentrallyRejectedCanonicalStoreSess
     RecordBlock,
     SceneOutcomeEvidenceTag,
 >;
-pub(super) type ImportSceneCentralInterrupted = InterruptedCanonicalStoreSession<
+pub(super) type ImportSceneCentralInterrupted<'inv> = InterruptedCanonicalStoreSession<
+    'inv,
     ImportOperationOwner,
     ImportProgressPhase,
     ImportProgressUnit,
     RecordBlock,
     SceneOutcomeEvidenceTag,
 >;
-pub(super) type ImportScenePreparedSuccess =
-    PreparedStoreSuccess<RecordBlock, SceneCanonicalRootTag, RecordBlock, SceneOutcomeEvidenceTag>;
 pub(super) type ImportScenePreparedFailure =
     PreparedStoreFailure<RecordBlock, SceneOutcomeEvidenceTag>;
 
@@ -115,36 +131,46 @@ pub(super) type ImportScenePreparedFailure =
     clippy::large_enum_variant,
     reason = "pending retained owners stay inline so descriptor rejection remains allocation-free"
 )]
-pub(super) enum ImportPendingScene {
+pub(super) enum ImportPendingScene<'inv> {
     Candidate {
-        owner: ImportSceneCandidate,
+        owner: ImportSceneCandidate<'inv>,
         evidence: SceneEvidenceRecipe,
     },
     ActivationRejected {
-        owner: ImportSceneActivationRejected,
+        owner: ImportSceneActivationRejected<'inv>,
         evidence: SceneEvidenceRecipe,
     },
     NeverActivated {
-        owner: ImportSceneNeverActivated,
+        owner: ImportSceneNeverActivated<'inv>,
         evidence: SceneEvidenceRecipe,
     },
     CentralRejected {
-        owner: ImportSceneCentralRejected,
+        owner: ImportSceneCentralRejected<'inv>,
         evidence: SceneEvidenceRecipe,
     },
     CentralInterrupted {
-        owner: ImportSceneCentralInterrupted,
+        owner: ImportSceneCentralInterrupted<'inv>,
         evidence: SceneEvidenceRecipe,
     },
-    PreparedFallback {
-        owner: VerifiedMinimalFallback<StoreRuntimeError>,
-        completed_boundary: Option<ImportStoreSceneBoundary>,
-    },
     DeferredFallback {
-        owner:
-            PendingMinimalFallback<ImportOperationOwner, ImportProgressPhase, ImportProgressUnit>,
+        owner: PendingMinimalFallback<
+            'inv,
+            ImportOperationOwner,
+            ImportProgressPhase,
+            ImportProgressUnit,
+        >,
         completed_boundary: Option<ImportStoreSceneBoundary>,
     },
+}
+
+pub(crate) struct ImportStoreFinishRequest {
+    evidence: SceneEvidenceRecipe,
+    outcome: SceneParseOutcome,
+    unsubmitted: bool,
+    _vocabulary: super::ImportStoreVocabulary,
+    _completed_boundary: Option<ImportStoreSceneBoundary>,
+    _importer_boundary:
+        baozi_operation::__retained_store_integration::activation::StoreImporterBoundary,
 }
 
 #[allow(
@@ -153,8 +179,7 @@ pub(super) enum ImportPendingScene {
 )]
 pub(super) enum ImportStorePreparedScene {
     Success {
-        token: SceneHandoffToken,
-        store: ImportScenePreparedSuccess,
+        publication: PreparedSceneSuccess,
     },
     RichFailure {
         store: ImportScenePreparedFailure,
@@ -294,6 +319,7 @@ fn map_prepared_failure(
 )]
 fn prepare_ordinary_failure<Cause>(
     validation: RootedFailureValidation<
+        '_,
         ImportOperationOwner,
         ImportProgressPhase,
         ImportProgressUnit,
@@ -346,6 +372,7 @@ fn prepare_ordinary_failure<Cause>(
 )]
 fn prepare_frozen_failure<Cause>(
     validation: RootedFailureValidation<
+        '_,
         ImportOperationOwner,
         ImportProgressPhase,
         ImportProgressUnit,
@@ -396,8 +423,9 @@ fn prepare_frozen_failure<Cause>(
     clippy::result_large_err,
     reason = "failure outcomes preserve exact retained evidence and containment owners without boxing"
 )]
-fn prepare_failure_outcome<Cause>(
+fn prepare_failure_outcome<'inv, Cause>(
     outcome: FailureEvidenceOutcome<
+        'inv,
         ImportOperationOwner,
         ImportProgressPhase,
         ImportProgressUnit,
@@ -405,6 +433,7 @@ fn prepare_failure_outcome<Cause>(
         RecordBlock,
         SceneOutcomeEvidenceTag,
     >,
+    failure_fallback_slot: CanonicalCauseSlot<'inv, StoreRuntimeError>,
     evidence: SceneEvidenceRecipe,
     final_progress: FinalProgress<ImportProgressPhase, ImportProgressUnit>,
     control_cause: Option<ControlCause>,
@@ -413,7 +442,9 @@ fn prepare_failure_outcome<Cause>(
     match outcome {
         FailureEvidenceOutcome::Rooted(rooted) => {
             let validation = rooted
-                .validate_rich_failure(|session, root| evidence.validate_failure(session, root))
+                .validate_rich_failure(failure_fallback_slot, |session, root| {
+                    evidence.validate_failure(session, root)
+                })
                 .map_err(ImportStoreActivationError::Containment)?;
             prepare_ordinary_failure(validation, final_progress, control_cause, cause_authority)
         }
@@ -429,26 +460,19 @@ fn prepare_failure_outcome<Cause>(
 }
 
 impl ImportStorePreparedScene {
-    pub(super) fn handoff(
-        self,
-    ) -> Result<ImportStoreTerminalOutcome, ImportStoreTerminalProjectionError> {
+    pub(super) fn handoff(self) -> ImportStoreTerminalOutcome {
         match self {
-            Self::Success { token, store } => {
-                let published = token
-                    .handoff(store)
-                    .map_err(|_| ImportStoreTerminalProjectionError::TerminalOwnerCauseMismatch)?;
+            Self::Success { publication } => {
+                let published = publication.handoff();
                 let (scene, outcome_evidence, ledger_evidence) = published.into_parts();
-                let evidence = ImportStoreTerminalEvidence::try_from_ledger(ledger_evidence)?;
-                if evidence.cause() != ImportStoreTerminalCause::Success {
-                    return Err(ImportStoreTerminalProjectionError::TerminalOwnerCauseMismatch);
-                }
-                Ok(ImportStoreTerminalOutcome::Success {
+                let evidence = ImportStoreTerminalEvidence::from_admitted_ledger(ledger_evidence);
+                ImportStoreTerminalOutcome::Success {
                     scene,
                     report: ImportStoreSuccessReport {
                         _outcome_evidence: outcome_evidence,
                     },
                     evidence,
-                })
+                }
             }
             Self::RichFailure {
                 store,
@@ -457,20 +481,17 @@ impl ImportStorePreparedScene {
             } => {
                 let published = store.handoff();
                 let evidence =
-                    ImportStoreTerminalEvidence::try_from_ledger(published.ledger_evidence)?;
+                    ImportStoreTerminalEvidence::from_admitted_ledger(published.ledger_evidence);
                 // A terminal checkpoint may observe control after the sole operation owner
                 // already selected a ledger failure. That observation is supplemental evidence.
-                if evidence.cause() == ImportStoreTerminalCause::Success {
-                    return Err(ImportStoreTerminalProjectionError::TerminalOwnerCauseMismatch);
-                }
-                Ok(ImportStoreTerminalOutcome::RichFailure {
+                ImportStoreTerminalOutcome::RichFailure {
                     failure: ImportStoreRichFailure {
                         _outcome_evidence: published.outcome_evidence,
                     },
                     evidence,
                     control_cause,
                     cause_authority,
-                })
+                }
             }
             Self::MinimalFallback {
                 store,
@@ -479,18 +500,15 @@ impl ImportStorePreparedScene {
             } => {
                 let published = store.handoff();
                 let evidence =
-                    ImportStoreTerminalEvidence::try_from_ledger(published.ledger_evidence)?;
-                if evidence.cause() == ImportStoreTerminalCause::Success {
-                    return Err(ImportStoreTerminalProjectionError::TerminalOwnerCauseMismatch);
-                }
-                Ok(ImportStoreTerminalOutcome::MinimalFallback {
+                    ImportStoreTerminalEvidence::from_admitted_ledger(published.ledger_evidence);
+                ImportStoreTerminalOutcome::MinimalFallback {
                     fallback: ImportStoreMinimalFallback {
                         _fallback: published.fallback,
                     },
                     evidence,
                     control_cause,
                     cause_authority,
-                })
+                }
             }
         }
     }
@@ -503,8 +521,8 @@ pub(crate) enum ImportStoreSceneBoundary {
 }
 
 #[must_use = "the Scene activation transition must install a pending owner or become contained"]
-pub(super) struct ImportStoreActivationTransition<'session> {
-    state: &'session mut ImportStoreSessionState,
+pub(super) struct ImportStoreActivationTransition<'session, 'inv> {
+    state: &'session mut ImportStoreSessionState<'inv>,
     containment: StoreActivationContainmentAnchor,
     armed: bool,
 }
@@ -513,10 +531,10 @@ pub(super) struct ImportStoreActivationTransition<'session> {
     clippy::result_large_err,
     reason = "installation failures retain the complete inline pending owner in containment"
 )]
-impl<'session> ImportStoreActivationTransition<'session> {
+impl<'session, 'inv> ImportStoreActivationTransition<'session, 'inv> {
     pub(super) fn begin(
-        state: &'session mut ImportStoreSessionState,
-    ) -> Result<(ImportStoreOutcomeOwner, Self), ImportStoreHostError> {
+        state: &'session mut ImportStoreSessionState<'inv>,
+    ) -> Result<(ImportStoreOutcomeOwner<'inv>, Self), ImportStoreHostError> {
         let containment = match state {
             ImportStoreSessionState::Dormant(owner) => owner.activation_containment_anchor(),
             ImportStoreSessionState::Contained => {
@@ -541,7 +559,10 @@ impl<'session> ImportStoreActivationTransition<'session> {
         }
     }
 
-    fn install(mut self, pending: ImportPendingScene) -> Result<(), ImportStoreActivationError> {
+    fn install(
+        mut self,
+        pending: ImportPendingScene<'inv>,
+    ) -> Result<(), ImportStoreActivationError> {
         if let Some(cause) = self.containment.existing_containment() {
             let _ = self.containment.retain(pending);
             self.contain();
@@ -570,7 +591,7 @@ impl<'session> ImportStoreActivationTransition<'session> {
     }
 }
 
-impl Drop for ImportStoreActivationTransition<'_> {
+impl Drop for ImportStoreActivationTransition<'_, '_> {
     fn drop(&mut self) {
         if self.armed {
             self.contain_in_place();
@@ -579,12 +600,18 @@ impl Drop for ImportStoreActivationTransition<'_> {
 }
 
 #[allow(clippy::result_large_err)]
-fn prepare_activation_rejection(
-    owner: ImportSceneActivationRejected,
+fn prepare_activation_rejection<'inv>(
+    owner: CanonicalFinal<ImportSceneActivationRejected<'inv>>,
+    failure_fallback_slot: CanonicalCauseSlot<'inv, StoreRuntimeError>,
     evidence: SceneEvidenceRecipe,
+    unsubmitted: bool,
 ) -> Result<ImportStorePreparedScene, ImportStoreActivationError> {
     let mut control_cause = scene_rejection_control(owner.cause());
-    let cause_authority = validation_cause_authority(canonical_rejection_validation(owner.cause()));
+    let cause_authority = if unsubmitted {
+        ImportStoreFailureCauseAuthority::OriginalImport
+    } else {
+        validation_cause_authority(canonical_rejection_validation(owner.cause()))
+    };
     let outcome = owner
         .build_failure_evidence(|lane| {
             match lane.try_retain_records(
@@ -602,6 +629,7 @@ fn prepare_activation_rejection(
         .map_err(ImportStoreActivationError::Containment)?;
     prepare_failure_outcome(
         outcome,
+        failure_fallback_slot,
         evidence,
         scene_final_progress(),
         control_cause,
@@ -613,12 +641,18 @@ fn prepare_activation_rejection(
     clippy::result_large_err,
     reason = "terminal rejection preserves the linear failure owner without allocating"
 )]
-fn prepare_never_activated_rejection(
-    owner: ImportSceneNeverActivated,
+fn prepare_never_activated_rejection<'inv, L>(
+    owner: CanonicalFinal<ImportSceneNeverActivated<'inv, L>>,
+    failure_fallback_slot: CanonicalCauseSlot<'inv, StoreRuntimeError>,
     evidence: SceneEvidenceRecipe,
+    unsubmitted: bool,
 ) -> Result<ImportStorePreparedScene, ImportStoreActivationError> {
     let mut control_cause = never_activated_control(owner.cause());
-    let cause_authority = validation_cause_authority(never_activated_validation(owner.cause()));
+    let cause_authority = if unsubmitted {
+        ImportStoreFailureCauseAuthority::OriginalImport
+    } else {
+        validation_cause_authority(never_activated_validation(owner.cause()))
+    };
     let outcome = owner
         .build_failure_evidence(|lane| {
             match lane.try_retain_records(
@@ -636,6 +670,7 @@ fn prepare_never_activated_rejection(
         .map_err(ImportStoreActivationError::Containment)?;
     prepare_failure_outcome(
         outcome,
+        failure_fallback_slot,
         evidence,
         scene_final_progress(),
         control_cause,
@@ -647,67 +682,63 @@ fn prepare_never_activated_rejection(
     clippy::result_large_err,
     reason = "terminal preparation preserves the linear failure owner without allocating"
 )]
-fn prepare_candidate(
-    owner: ImportSceneCandidate,
+fn prepare_candidate<'inv>(
+    owner: CanonicalFinal<ImportSceneCandidate<'inv>>,
+    generation_slots: CanonicalGenerationSlots<'inv, SceneGenerationRejection>,
+    failure_fallback_slot: CanonicalCauseSlot<'inv, StoreRuntimeError>,
     evidence: SceneEvidenceRecipe,
     outcome: SceneParseOutcome,
 ) -> Result<ImportStorePreparedScene, ImportStoreActivationError> {
     match owner
-        .try_issue_freeze_permit(scene_final_progress())
+        .try_issue_freeze_permit(generation_slots.interruption, scene_final_progress())
         .map_err(ImportStoreActivationError::Containment)?
     {
         CanonicalFreezePermitIssue::Ready(permit) => {
-            // A rejected parser closes its candidate without replacing the original import
-            // cause. An accepted parser delegates generation/freeze failures to this Scene
-            // transaction's existing operation authority.
-            let rejection_authority = if matches!(outcome, SceneParseOutcome::Rejected) {
-                ImportStoreFailureCauseAuthority::OriginalImport
-            } else {
-                ImportStoreFailureCauseAuthority::OperationTerminal
-            };
-            consume_scene_freeze_permit(
+            let publication = consume_scene_freeze_permit(
                 permit,
+                generation_slots.rejection,
+                failure_fallback_slot,
+                evidence,
                 outcome,
-                |rejected| {
-                    let control_cause = canonical_rejection_control(rejected.cause());
-                    let validation = rejected
-                        .validate_rich_failure(|session, root| {
-                            evidence.validate_failure(session, root)
-                        })
-                        .map_err(ImportStoreActivationError::Containment)?;
-                    prepare_frozen_failure(validation, control_cause, rejection_authority)
-                },
-                |token, joint, seal| match joint
-                    .prepare(seal)
-                    .map_err(ImportStoreActivationError::Containment)?
-                {
-                    PreparedStoreSuccessOutcome::Success(store) => {
-                        Ok(ImportStorePreparedScene::Success { token, store })
-                    }
-                    PreparedStoreSuccessOutcome::RichFailure(store) => {
-                        drop(token);
-                        Ok(ImportStorePreparedScene::RichFailure {
-                            store,
-                            control_cause: None,
-                            cause_authority: ImportStoreFailureCauseAuthority::OperationTerminal,
-                        })
-                    }
-                    PreparedStoreSuccessOutcome::MinimalFallback(store) => {
-                        drop(token);
-                        Ok(ImportStorePreparedScene::MinimalFallback {
-                            store,
-                            control_cause: None,
-                            cause_authority: ImportStoreFailureCauseAuthority::OperationTerminal,
-                        })
-                    }
-                },
             )
-            .map_err(ImportStoreActivationError::Containment)?
+            .map_err(|cause| match cause {
+                ScenePublicationError::Containment(cause) => {
+                    ImportStoreActivationError::Containment(cause)
+                }
+                ScenePublicationError::Preparation(cause) => {
+                    ImportStoreActivationError::Preparation(cause)
+                }
+            })?;
+            Ok(match publication {
+                PreparedScenePublication::Success(publication) => {
+                    ImportStorePreparedScene::Success { publication }
+                }
+                PreparedScenePublication::RichFailure {
+                    store,
+                    control_cause,
+                    rejection,
+                } => ImportStorePreparedScene::RichFailure {
+                    store,
+                    control_cause,
+                    cause_authority: generation_cause_authority(rejection),
+                },
+                PreparedScenePublication::MinimalFallback {
+                    store,
+                    control_cause,
+                    rejection,
+                } => ImportStorePreparedScene::MinimalFallback {
+                    store,
+                    control_cause,
+                    cause_authority: generation_cause_authority(rejection),
+                },
+            })
         }
         CanonicalFreezePermitIssue::Interrupted(rooted) => {
             let control_cause = rooted.cause().control_cause().cloned();
             let validation = rooted
-                .validate_rich_failure(|session, root| evidence.validate_failure(session, root))
+                .validate_rich_failure(failure_fallback_slot, |session, root| {
+                    evidence.validate_failure(session, root)
+                })
                 .map_err(ImportStoreActivationError::Containment)?;
             prepare_frozen_failure(
                 validation,
@@ -718,7 +749,9 @@ fn prepare_candidate(
         CanonicalFreezePermitIssue::DestinationRejected(rooted) => {
             let control_cause = rooted.cause().control_cause().cloned();
             let validation = rooted
-                .validate_rich_failure(|session, root| evidence.validate_failure(session, root))
+                .validate_rich_failure(failure_fallback_slot, |session, root| {
+                    evidence.validate_failure(session, root)
+                })
                 .map_err(ImportStoreActivationError::Containment)?;
             prepare_ordinary_failure(
                 validation,
@@ -730,19 +763,32 @@ fn prepare_candidate(
     }
 }
 
+fn generation_cause_authority(
+    rejection: Option<SceneGenerationRejection>,
+) -> ImportStoreFailureCauseAuthority {
+    if rejection.is_some_and(|cause| cause.is_parse_rejected()) {
+        ImportStoreFailureCauseAuthority::OriginalImport
+    } else {
+        ImportStoreFailureCauseAuthority::OperationTerminal
+    }
+}
+
 // These terminal dispositions are mutually exclusive with successful publication. Keeping each
 // rejection's validation/preparation temporaries in its own frame leaves the successful caller
 // with only its live owner, rather than storage for every possible failure continuation.
 #[inline(never)]
 #[allow(clippy::result_large_err)]
-fn prepare_central_rejection(
-    owner: ImportSceneCentralRejected,
+fn prepare_central_rejection<'inv>(
+    owner: CanonicalFinal<ImportSceneCentralRejected<'inv>>,
+    failure_fallback_slot: CanonicalCauseSlot<'inv, StoreRuntimeError>,
     evidence: SceneEvidenceRecipe,
 ) -> Result<ImportStorePreparedScene, ImportStoreActivationError> {
     let control_cause = scene_rejection_control(owner.cause());
     let cause_authority = validation_cause_authority(canonical_rejection_validation(owner.cause()));
     let validation = owner
-        .validate_rich_failure(|session, root| evidence.validate_failure(session, root))
+        .validate_rich_failure(failure_fallback_slot, |session, root| {
+            evidence.validate_failure(session, root)
+        })
         .map_err(ImportStoreActivationError::Containment)?;
     prepare_ordinary_failure(
         validation,
@@ -754,13 +800,16 @@ fn prepare_central_rejection(
 
 #[inline(never)]
 #[allow(clippy::result_large_err)]
-fn prepare_central_interruption(
-    owner: ImportSceneCentralInterrupted,
+fn prepare_central_interruption<'inv>(
+    owner: CanonicalFinal<ImportSceneCentralInterrupted<'inv>>,
+    failure_fallback_slot: CanonicalCauseSlot<'inv, StoreRuntimeError>,
     evidence: SceneEvidenceRecipe,
 ) -> Result<ImportStorePreparedScene, ImportStoreActivationError> {
     let control_cause = owner.cause().control_cause().cloned();
     let validation = owner
-        .validate_rich_failure(|session, root| evidence.validate_failure(session, root))
+        .validate_rich_failure(failure_fallback_slot, |session, root| {
+            evidence.validate_failure(session, root)
+        })
         .map_err(ImportStoreActivationError::Containment)?;
     prepare_ordinary_failure(
         validation,
@@ -773,7 +822,9 @@ fn prepare_central_interruption(
 #[inline(never)]
 #[allow(clippy::result_large_err)]
 fn prepare_deferred_fallback(
-    owner: PendingMinimalFallback<ImportOperationOwner, ImportProgressPhase, ImportProgressUnit>,
+    owner: CanonicalFinal<
+        PendingMinimalFallback<'_, ImportOperationOwner, ImportProgressPhase, ImportProgressUnit>,
+    >,
 ) -> Result<ImportStorePreparedScene, ImportStoreActivationError> {
     let control_cause = runtime_control(owner.cause());
     let (store, _cause) = owner
@@ -788,129 +839,51 @@ fn prepare_deferred_fallback(
 }
 
 #[allow(clippy::result_large_err)]
-fn prepare_unsubmitted(
-    owner: ImportStoreOutcomeOwner,
-    unsubmitted_evidence: SceneEvidenceRecipe,
-) -> Result<ImportStorePreparedScene, ImportStoreActivationError> {
-    let outcome = owner
-        .reject_without_activation::<
-            SceneActivationOutput,
-            SceneActivationRejection,
-            RecordBlock,
-            SceneCanonicalRootTag,
-        >(
-            SceneActivationRejection::construction_invariant(),
-            IMPORT_SCENE_NOT_SUBMITTED_CODE,
-        )
-        .map_err(ImportStoreActivationError::Containment)?;
-    match outcome {
-        CanonicalActivationOutcome::NeverActivated(owner) => {
-            let control_cause = never_activated_control(owner.cause());
-            let outcome = owner
-                .build_failure_evidence(|lane| {
-                    match lane.try_retain_records(
-                        unsubmitted_evidence.record_plan(),
-                        SceneOutcomeEvidenceTag,
-                        |writer| writer.write_row(|row| unsubmitted_evidence.write_row(row)),
-                    ) {
-                        Ok(root) => lane.complete(root),
-                        Err(_) => lane.abort(),
-                    }
-                })
-                .map_err(ImportStoreActivationError::Containment)?;
-            prepare_failure_outcome(
-                outcome,
-                unsubmitted_evidence,
-                scene_final_progress(),
-                control_cause,
-                ImportStoreFailureCauseAuthority::OriginalImport,
-            )
-        }
-        CanonicalActivationOutcome::Fallback(owner) => {
-            let control_cause = runtime_control(owner.cause());
-            let (store, _cause) = owner.into_parts();
-            Ok(ImportStorePreparedScene::MinimalFallback {
-                store,
-                control_cause,
-                cause_authority: ImportStoreFailureCauseAuthority::OriginalImport,
-            })
-        }
-        CanonicalActivationOutcome::Rejected(owner) => {
-            let control_cause = canonical_rejection_control(owner.cause());
-            let outcome = owner
-                .build_failure_evidence(|lane| {
-                    match lane.try_retain_records(
-                        unsubmitted_evidence.record_plan(),
-                        SceneOutcomeEvidenceTag,
-                        |writer| writer.write_row(|row| unsubmitted_evidence.write_row(row)),
-                    ) {
-                        Ok(root) => lane.complete(root),
-                        Err(_) => lane.abort(),
-                    }
-                })
-                .map_err(ImportStoreActivationError::Containment)?;
-            prepare_failure_outcome(
-                outcome,
-                unsubmitted_evidence,
-                scene_final_progress(),
-                control_cause,
-                ImportStoreFailureCauseAuthority::OriginalImport,
-            )
-        }
-        CanonicalActivationOutcome::Activated(owner) => {
-            drop(owner);
-            Err(ImportStoreActivationError::StoreUnavailable(
-                ImportStoreHostError::OperationContained,
-            ))
-        }
-    }
-}
-
-#[allow(clippy::result_large_err)]
-fn activate_scene(
-    owner: ImportStoreOutcomeOwner,
+fn activate_scene<'inv>(
+    owner: ImportStoreOutcomeOwner<'inv>,
+    output_slot: CanonicalOutputSlot<'inv, SceneActivationOutput>,
+    activation_slots: CanonicalActivationSlots<'inv, SceneActivationRejection>,
     construction: SceneConstruction<'_>,
-) -> Result<(ImportSceneActivationOutcome, SceneActivationPostflight), ImportStoreActivationError> {
+) -> Result<
+    (
+        ImportSceneActivationOutcome<'inv>,
+        SceneActivationPostflight,
+    ),
+    ImportStoreActivationError,
+> {
     let mut transaction = Some(construction.into_transaction());
-    let outcome = match owner.plan_and_activate_scoped(|mut planning| {
-        let transaction = transaction
-            .as_mut()
-            .expect("the scoped Scene transaction executes at most once");
-        let preflight = match planning.begin_semantic_work() {
-            Ok(mut semantic) => match transaction.preflight(&mut semantic) {
-                Ok(plan) => match semantic.finish_exact() {
-                    Ok(completion) => Ok((plan, completion)),
-                    Err(_cause) => {
-                        drop(plan);
-                        Err(SceneActivationRejection::construction_invariant())
+    let outcome =
+        match owner.plan_and_activate_scoped(output_slot, activation_slots, |mut planning| {
+            let transaction = transaction
+                .as_mut()
+                .expect("the scoped Scene transaction executes at most once");
+            let preflight = planning
+                .with_semantic_work(|semantic| transaction.preflight(semantic))
+                .map_err(|error| match error {
+                    CanonicalSemanticWorkError::Runtime(_cause) => {
+                        SceneActivationRejection::construction_invariant()
                     }
-                },
+                    CanonicalSemanticWorkError::Rejected(rejection) => rejection,
+                });
+            let (plan, completion) = match preflight {
+                Ok(ready) => ready,
                 Err(rejection) => {
-                    let _ = semantic.finish_rejected();
-                    Err(rejection)
+                    let stable_code = rejection.stable_code();
+                    return planning.reject(rejection, stable_code);
                 }
-            },
-            Err(_cause) => Err(SceneActivationRejection::construction_invariant()),
-        };
-        let (plan, completion) = match preflight {
-            Ok(ready) => ready,
-            Err(rejection) => {
-                let stable_code = rejection.stable_code();
-                return planning.reject(rejection, stable_code);
+            };
+            match planning.seal_activation(plan, completion) {
+                CanonicalActivationSeal::Sealed(permit) => {
+                    permit.activate(|lane, plan| plan.materialize(lane))
+                }
+                CanonicalActivationSeal::Unsealed(failure) => failure.finish(),
+            }
+        }) {
+            Ok(outcome) => outcome,
+            Err(cause) => {
+                return Err(ImportStoreActivationError::Containment(cause));
             }
         };
-        match planning.seal_activation(plan, completion) {
-            CanonicalActivationSeal::Sealed(permit) => {
-                permit.activate(|lane, plan| plan.materialize(lane))
-            }
-            CanonicalActivationSeal::Unsealed(failure) => failure.finish(),
-        }
-    }) {
-        Ok(outcome) => outcome,
-        Err(cause) => {
-            return Err(ImportStoreActivationError::Containment(cause));
-        }
-    };
     let postflight = transaction
         .take()
         .expect("the scoped Scene transaction retains its postflight recipe")
@@ -921,14 +894,18 @@ fn activate_scene(
 // Central validation and terminal installation use disjoint sets of large linear owners.
 // Keep the terminal variants out of the validator's active stack frame.
 #[allow(clippy::result_large_err)]
-fn validate_activated_scene(
-    transition: ImportStoreActivationTransition<'_>,
-    activated: ImportSceneActivated,
+fn validate_activated_scene<'inv>(
+    transition: ImportStoreActivationTransition<'_, 'inv>,
+    activated: ImportSceneActivated<'inv>,
+    proof_slot: CanonicalProofSlot<'inv, SceneValidationProof>,
+    validation_slots: CanonicalValidationSlots<'inv, SceneActivationRejection>,
     postflight: SceneActivationPostflight,
 ) -> Result<(), ImportStoreActivationError> {
     let evidence = postflight.candidate_evidence(activated.output());
     let central = activated
         .validate_centrally(
+            proof_slot,
+            validation_slots,
             CanonicalValidationProgress::new(
                 ImportProgressPhase::Validate,
                 ImportProgressUnit::WorkUnits,
@@ -948,9 +925,9 @@ fn validate_activated_scene(
 }
 
 #[allow(clippy::result_large_err)]
-fn install_central_scene(
-    transition: ImportStoreActivationTransition<'_>,
-    central: ImportSceneCentralOutcome,
+fn install_central_scene<'inv>(
+    transition: ImportStoreActivationTransition<'_, 'inv>,
+    central: ImportSceneCentralOutcome<'inv>,
     evidence: SceneEvidenceRecipe,
 ) -> Result<(), ImportStoreActivationError> {
     match central {
@@ -981,15 +958,21 @@ fn install_central_scene(
 }
 
 #[allow(clippy::result_large_err)]
-fn validate_scene_activation(
-    transition: ImportStoreActivationTransition<'_>,
-    outcome: ImportSceneActivationOutcome,
+fn validate_scene_activation<'inv>(
+    transition: ImportStoreActivationTransition<'_, 'inv>,
+    outcome: ImportSceneActivationOutcome<'inv>,
+    proof_slot: CanonicalProofSlot<'inv, SceneValidationProof>,
+    validation_slots: CanonicalValidationSlots<'inv, SceneActivationRejection>,
     postflight: SceneActivationPostflight,
 ) -> Result<(), ImportStoreActivationError> {
     match outcome {
-        CanonicalActivationOutcome::Activated(activated) => {
-            validate_activated_scene(transition, activated, postflight)
-        }
+        CanonicalActivationOutcome::Activated(activated) => validate_activated_scene(
+            transition,
+            activated,
+            proof_slot,
+            validation_slots,
+            postflight,
+        ),
         CanonicalActivationOutcome::Rejected(owner) => {
             let authoring_rejected = canonical_rejection_is_authoring(owner.cause());
             let detail = canonical_rejection_validation(owner.cause());
@@ -1010,14 +993,6 @@ fn validate_scene_activation(
             })?;
             activation_failure_result(authoring_rejected, detail, control_cause)
         }
-        CanonicalActivationOutcome::Fallback(owner) => {
-            let control_cause = runtime_control(owner.cause());
-            transition.install(ImportPendingScene::PreparedFallback {
-                owner,
-                completed_boundary: None,
-            })?;
-            activation_failure_result(false, None, control_cause)
-        }
     }
 }
 
@@ -1025,7 +1000,7 @@ fn validate_scene_activation(
     clippy::result_large_err,
     reason = "Scene activation and finalization errors preserve exact linear retained-store owners without boxing"
 )]
-impl ImportStoreSessionOwner {
+impl<'inv> ImportStoreSessionOwner<'inv> {
     pub(crate) fn completed_scene_boundary(
         &self,
     ) -> Result<Option<ImportStoreSceneBoundary>, ImportStoreHostError> {
@@ -1037,14 +1012,10 @@ impl ImportStoreSessionOwner {
                 ImportPendingScene::CentralRejected { .. }
                 | ImportPendingScene::CentralInterrupted { .. },
             ) => Some(ImportStoreSceneBoundary::DraftBuilt),
-            ImportStoreSessionState::Pending(
-                ImportPendingScene::PreparedFallback {
-                    completed_boundary, ..
-                }
-                | ImportPendingScene::DeferredFallback {
-                    completed_boundary, ..
-                },
-            ) => *completed_boundary,
+            ImportStoreSessionState::Pending(ImportPendingScene::DeferredFallback {
+                completed_boundary,
+                ..
+            }) => *completed_boundary,
             ImportStoreSessionState::Dormant(_)
             | ImportStoreSessionState::Transitioning
             | ImportStoreSessionState::Pending(
@@ -1059,80 +1030,202 @@ impl ImportStoreSessionOwner {
         &mut self,
         construction: SceneConstruction<'input>,
     ) -> Result<(), ImportStoreActivationError> {
-        let (owner, transition) =
-            ImportStoreActivationTransition::begin(&mut self.storage[0].state)
-                .map_err(ImportStoreActivationError::StoreUnavailable)?;
-        let (outcome, postflight) = match activate_scene(owner, construction) {
-            Ok(activated) => activated,
-            Err(cause) => {
-                transition.contain();
-                return Err(cause);
-            }
+        let data = &mut self.storage[0];
+        let (owner, transition) = ImportStoreActivationTransition::begin(&mut data.state)
+            .map_err(ImportStoreActivationError::StoreUnavailable)?;
+        let Some(slots) = data.canonical_slots.take() else {
+            transition.contain();
+            return Err(ImportStoreActivationError::StoreUnavailable(
+                ImportStoreHostError::OperationContained,
+            ));
         };
-        validate_scene_activation(transition, outcome, postflight)
+        let (outcome, postflight) =
+            match activate_scene(owner, slots.output, slots.activation, construction) {
+                Ok(activated) => activated,
+                Err(cause) => {
+                    transition.contain();
+                    return Err(cause);
+                }
+            };
+        validate_scene_activation(
+            transition,
+            outcome,
+            slots.proof,
+            slots.validation,
+            postflight,
+        )
     }
 
-    pub(super) fn prepare_scene(
+    pub(crate) fn request_finish(
         self,
+        disposition: ImportStoreDisposition<'inv>,
         outcome: SceneParseOutcome,
-    ) -> Result<ImportStorePreparedScene, ImportStoreActivationError> {
-        let (state, unsubmitted_evidence) = self.into_terminal_state();
-        match state {
+    ) -> Result<ImportStoreFinishRequest, ImportStoreActivationError> {
+        let completed_boundary = self
+            .completed_scene_boundary()
+            .map_err(ImportStoreActivationError::StoreUnavailable)?;
+        let ImportStoreSessionData {
+            state,
+            canonical_slots,
+            vocabulary,
+            unsubmitted_evidence,
+            importer_boundary,
+        } = self
+            .into_body_state()
+            .map_err(ImportStoreActivationError::StoreUnavailable)?;
+        let (evidence, unsubmitted) = match state {
             ImportStoreSessionState::Pending(ImportPendingScene::Candidate { owner, evidence }) => {
-                prepare_candidate(owner, evidence, outcome)
+                owner
+                    .request_finish(disposition)
+                    .map_err(ImportStoreActivationError::Containment)?;
+                (evidence, false)
             }
             ImportStoreSessionState::Pending(ImportPendingScene::ActivationRejected {
                 owner,
                 evidence,
-            }) => prepare_activation_rejection(owner, evidence),
+            }) => {
+                owner
+                    .request_finish(disposition)
+                    .map_err(ImportStoreActivationError::Containment)?;
+                (evidence, false)
+            }
             ImportStoreSessionState::Pending(ImportPendingScene::NeverActivated {
                 owner,
                 evidence,
-            }) => prepare_never_activated_rejection(owner, evidence),
+            }) => {
+                owner
+                    .request_finish(disposition)
+                    .map_err(ImportStoreActivationError::Containment)?;
+                (evidence, false)
+            }
             ImportStoreSessionState::Pending(ImportPendingScene::CentralRejected {
                 owner,
                 evidence,
-            }) => prepare_central_rejection(owner, evidence),
+            }) => {
+                owner
+                    .request_finish(disposition)
+                    .map_err(ImportStoreActivationError::Containment)?;
+                (evidence, false)
+            }
             ImportStoreSessionState::Pending(ImportPendingScene::CentralInterrupted {
                 owner,
                 evidence,
-            }) => prepare_central_interruption(owner, evidence),
+            }) => {
+                owner
+                    .request_finish(disposition)
+                    .map_err(ImportStoreActivationError::Containment)?;
+                (evidence, false)
+            }
             ImportStoreSessionState::Pending(ImportPendingScene::DeferredFallback {
                 owner,
                 completed_boundary: _,
-            }) => prepare_deferred_fallback(owner),
-            ImportStoreSessionState::Pending(ImportPendingScene::PreparedFallback {
-                owner,
-                completed_boundary: _,
             }) => {
-                let control_cause = runtime_control(owner.cause());
-                let (store, _cause) = owner.into_parts();
-                Ok(ImportStorePreparedScene::MinimalFallback {
-                    store,
-                    control_cause,
-                    cause_authority: ImportStoreFailureCauseAuthority::OperationTerminal,
-                })
+                owner
+                    .request_finish(disposition)
+                    .map_err(ImportStoreActivationError::Containment)?;
+                (unsubmitted_evidence, false)
             }
             ImportStoreSessionState::Dormant(owner) => {
-                prepare_unsubmitted(owner, unsubmitted_evidence)
+                let Some(slots) = canonical_slots else {
+                    let cause = owner.activation_containment_anchor().retain(owner);
+                    return Err(ImportStoreActivationError::Containment(cause));
+                };
+                let rejected = owner
+                    .reject_without_activation::<
+                        SceneActivationOutput,
+                        SceneActivationRejection,
+                        RecordBlock,
+                        SceneCanonicalRootTag,
+                    >(
+                        slots.activation,
+                        SceneActivationRejection::construction_invariant(),
+                        IMPORT_SCENE_NOT_SUBMITTED_CODE,
+                    )
+                    .map_err(ImportStoreActivationError::Containment)?;
+                match rejected {
+                    CanonicalActivationOutcome::NeverActivated(owner) => owner
+                        .request_finish(disposition)
+                        .map_err(ImportStoreActivationError::Containment)?,
+                    CanonicalActivationOutcome::Rejected(owner) => owner
+                        .request_finish(disposition)
+                        .map_err(ImportStoreActivationError::Containment)?,
+                    CanonicalActivationOutcome::Activated(owner) => {
+                        drop(owner);
+                        return Err(ImportStoreActivationError::StoreUnavailable(
+                            ImportStoreHostError::OperationContained,
+                        ));
+                    }
+                }
+                (unsubmitted_evidence, true)
             }
             ImportStoreSessionState::Transitioning | ImportStoreSessionState::Contained => {
-                Err(ImportStoreActivationError::StoreUnavailable(
+                return Err(ImportStoreActivationError::StoreUnavailable(
                     ImportStoreHostError::OperationContained,
-                ))
+                ));
             }
-        }
+        };
+        Ok(ImportStoreFinishRequest {
+            evidence,
+            outcome,
+            unsubmitted,
+            _vocabulary: vocabulary,
+            _completed_boundary: completed_boundary,
+            _importer_boundary: importer_boundary,
+        })
     }
+}
 
-    pub(crate) fn finish_scene(
-        self,
-        outcome: SceneParseOutcome,
-    ) -> Result<ImportStoreTerminalOutcome, ImportStoreFinalizationError> {
-        let prepared = self
-            .prepare_scene(outcome)
-            .map_err(ImportStoreFinalizationError::Activation)?;
-        prepared
-            .handoff()
-            .map_err(ImportStoreFinalizationError::Projection)
+#[allow(clippy::result_large_err)]
+pub(super) fn prepare_scene(
+    finish: ImportStoreFinish<'_>,
+    request: ImportStoreFinishRequest,
+) -> Result<ImportStorePreparedScene, ImportStoreActivationError> {
+    let finish = finish
+        .admit_terminal_catalog(
+            &super::import_terminal_phases(),
+            &super::import_terminal_dimensions(),
+        )
+        .map_err(|_| {
+            ImportStoreActivationError::StoreUnavailable(ImportStoreHostError::OperationContained)
+        })?;
+    let completion = finish.resume();
+    match completion.outcome {
+        CanonicalInvocationOutcome::Candidate(owner) => prepare_candidate(
+            owner,
+            completion.generation,
+            completion.failure_fallback,
+            request.evidence,
+            request.outcome,
+        ),
+        CanonicalInvocationOutcome::Rejected(owner) => prepare_activation_rejection(
+            owner,
+            completion.failure_fallback,
+            request.evidence,
+            request.unsubmitted,
+        ),
+        CanonicalInvocationOutcome::NeverActivated(owner) => prepare_never_activated_rejection(
+            owner,
+            completion.failure_fallback,
+            request.evidence,
+            request.unsubmitted,
+        ),
+        CanonicalInvocationOutcome::CentralRejected(owner) => {
+            prepare_central_rejection(owner, completion.failure_fallback, request.evidence)
+        }
+        CanonicalInvocationOutcome::Interrupted(owner) => {
+            prepare_central_interruption(owner, completion.failure_fallback, request.evidence)
+        }
+        CanonicalInvocationOutcome::Fallback(owner) => prepare_deferred_fallback(owner),
+        CanonicalInvocationOutcome::Operation(_) => Err(
+            ImportStoreActivationError::StoreUnavailable(ImportStoreHostError::OperationContained),
+        ),
     }
+}
+
+#[allow(clippy::result_large_err)]
+pub(crate) fn finish_scene(
+    finish: ImportStoreFinish<'_>,
+    request: ImportStoreFinishRequest,
+) -> Result<ImportStoreTerminalOutcome, ImportStoreActivationError> {
+    prepare_scene(finish, request).map(ImportStorePreparedScene::handoff)
 }

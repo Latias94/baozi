@@ -86,7 +86,7 @@ impl Format for ObservingImporter {
         &self,
         probe: &Probe<'_>,
         hint: &ReadHint,
-        scope: &DetectionScope<'_>,
+        scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         GltfImporter.detect(probe, hint, scope)
     }
@@ -94,7 +94,7 @@ impl Format for ObservingImporter {
     fn parse(
         &self,
         options: &GltfImportOptions,
-        context: &mut ParseContext<'_>,
+        context: &mut ParseContext<'_, '_>,
     ) -> ParseResult<()> {
         let selection = options.scene_selection();
         self.0

@@ -127,12 +127,16 @@ impl Format for TestImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::NoMatch)
     }
 
-    fn parse(&self, _options: &Self::Options, _scope: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        _scope: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         unreachable!("registry option tests never create a parse session")
     }
 }
@@ -156,7 +160,11 @@ impl Format for NoOptionsImporter {
         self.descriptor.clone()
     }
 
-    fn parse(&self, _options: &Self::Options, _scope: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        _scope: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         unreachable!("registry option tests never create a parse session")
     }
 }
@@ -185,7 +193,11 @@ impl Format for PanickingDuplicateHooksImporter {
         panic!("duplicate codec hook must not run")
     }
 
-    fn parse(&self, _options: &Self::Options, _scope: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        _scope: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         unreachable!("duplicate registration test never parses")
     }
 }

@@ -1,6 +1,6 @@
 //! Descriptive source extras, preserved as exact JSON values without a second JSON model.
 
-use baozi_import::ParseExecution;
+use baozi_import::ParseServices;
 use baozi_import::authoring::NamespacedName;
 
 use super::{Result, checked_add_with_limit, enforce_usize_limit, gltf_parse_error};
@@ -15,7 +15,7 @@ pub(super) struct SourceExtras {
 }
 
 impl SourceExtras {
-    pub(super) fn new(_ctx: &mut ParseExecution<'_, '_>, payload: &SourcePayload) -> Result<Self> {
+    pub(super) fn new(payload: &SourcePayload) -> Result<Self> {
         Ok(Self {
             source: payload.owner,
             key: NamespacedName::new(key(payload.site))
@@ -24,7 +24,7 @@ impl SourceExtras {
         })
     }
 
-    pub(super) fn bytes<'a>(&self, ctx: &mut ParseExecution<'_, 'a>) -> Result<&'a [u8]> {
+    pub(super) fn bytes<'a>(&self, ctx: &mut ParseServices<'_, '_, 'a>) -> Result<&'a [u8]> {
         let start = usize::try_from(self.range.byte_offset).ok();
         let length = usize::try_from(self.range.byte_length).ok();
         start
@@ -46,7 +46,7 @@ pub(super) struct ExtrasPreflight {
 impl ExtrasPreflight {
     pub(super) fn add(
         &mut self,
-        ctx: &mut ParseExecution<'_, '_>,
+        ctx: &mut ParseServices<'_, '_, '_>,
         payload: &SourcePayload,
     ) -> Result<()> {
         let name = key(payload.site);

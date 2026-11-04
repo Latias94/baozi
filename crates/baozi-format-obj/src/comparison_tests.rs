@@ -14,8 +14,8 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering as AtomicOrdering},
 };
 
-type ComparisonAction = for<'region, 'session> fn(
-    &mut ParseExecution<'region, 'session>,
+type ComparisonAction = for<'region, 'op, 'session> fn(
+    &mut ParseChildren<'region, 'op, 'session>,
     &AtomicUsize,
     &CancellationToken,
 ) -> ParseResult<()>;
@@ -45,16 +45,20 @@ impl Format for ComparisonProbe {
         &self,
         _probe: &Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
-        context.with_execution(|exec| {
-            (self.action)(exec, &self.physical, &self.token)?;
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
+        context.with_execution(|root| {
+            (self.action)(&mut root.children()?, &self.physical, &self.token)?;
             // Stop before scene submission so the ledger isolates the comparison work.
-            Err(exec.format_failure(crate::ObjFailure::internal("comparison-test-stop")))
+            Err(root.format_failure(crate::ObjFailure::internal("comparison-test-stop")))
         })
     }
 }
@@ -116,7 +120,7 @@ fn non_format_baseline() -> u64 {
     let (failure, _) = run(
         |exec, _, token| {
             token.cancel();
-            exec.poll()
+            exec.services()?.poll()
         },
         None,
     );
@@ -136,21 +140,21 @@ fn small_numeric_sort_and_search_consume_only_physical_comparisons() {
     let before = baseline();
     let (failure, physical) = run(
         |exec, physical, _| {
-            let mut values = exec.metered_vec(
+            let mut values = exec.services()?.metered_vec(
                 ImportStorageClass::FormatNormalization,
                 "comparison-test-numbers",
             );
-            values.try_extend_from_slice(exec, &[3, 1, 2])?;
-            interruptible_sort_by(exec, &mut values, |exec, work, left, right| {
-                work.run_leaf(exec, || {
+            values.try_extend_from_slice(&mut exec.services()?, &[3, 1, 2])?;
+            interruptible_sort_by(exec, &mut values, |work, left, right| {
+                work.run_leaf(|| {
                     let ordering = left.cmp(right);
                     physical.fetch_add(1, AtomicOrdering::Relaxed);
                     ordering
                 })
             })?;
             assert_eq!(values.as_slice(), &[1, 2, 3]);
-            let found = interruptible_binary_search_by(exec, &[2], |exec, work, value| {
-                work.run_leaf(exec, || {
+            let found = interruptible_binary_search_by(exec, &[2], |work, value| {
+                work.run_leaf(|| {
                     let ordering = value.cmp(&2);
                     physical.fetch_add(1, AtomicOrdering::Relaxed);
                     ordering
@@ -179,8 +183,8 @@ fn short_string_searches_count_bytes_and_length_without_outer_charges() {
                 ("cat", "catalog", Ordering::Less),
                 ("\u{e9}", "\u{e9}", Ordering::Equal),
             ] {
-                let found = interruptible_binary_search_by(exec, &[left], |exec, work, value| {
-                    let actual = work.compare_str(exec, value, right)?;
+                let found = interruptible_binary_search_by(exec, &[left], |work, value| {
+                    let actual = work.compare_str(value, right)?;
                     assert_eq!(actual, ordering);
                     Ok(actual)
                 })?;
@@ -201,19 +205,19 @@ fn tie_break_and_dedup_charge_each_actual_leaf_and_duplicate_drop() {
     let before = baseline();
     let (failure, _) = run(
         |exec, _, _| {
-            let mut values = exec.metered_vec(
+            let mut values = exec.services()?.metered_vec(
                 ImportStorageClass::FormatNormalization,
                 "comparison-test-ties",
             );
-            values.try_extend_from_slice(exec, &[("cat", 2), ("cat", 1)])?;
-            interruptible_sort_by(exec, &mut values, |exec, work, left, right| {
-                match work.compare_str(exec, left.0, right.0)? {
-                    Ordering::Equal => work.run_leaf(exec, || left.1.cmp(&right.1)),
+            values.try_extend_from_slice(&mut exec.services()?, &[("cat", 2), ("cat", 1)])?;
+            interruptible_sort_by(exec, &mut values, |work, left, right| {
+                match work.compare_str(left.0, right.0)? {
+                    Ordering::Equal => work.run_leaf(|| left.1.cmp(&right.1)),
                     ordering => Ok(ordering),
                 }
             })?;
-            interruptible_dedup_by(exec, &mut values, |exec, work, previous, current| {
-                Ok(work.compare_str(exec, previous.0, current.0)? == Ordering::Equal)
+            interruptible_dedup_by(exec, &mut values, |work, previous, current| {
+                Ok(work.compare_str(previous.0, current.0)? == Ordering::Equal)
             })?;
             assert_eq!(values.as_slice(), &[("cat", 1)]);
             Ok(())
@@ -230,10 +234,13 @@ fn comparator_failure_keeps_the_already_completed_string_prefix() {
     let before = baseline();
     let (failure, _) = run(
         |exec, _, _| {
-            interruptible_binary_search_by(exec, &["cat"], |exec, work, value| {
-                assert_eq!(work.compare_str(exec, value, "cat")?, Ordering::Equal);
+            interruptible_binary_search_by(exec, &["cat"], |work, value| {
+                assert_eq!(work.compare_str(value, "cat")?, Ordering::Equal);
                 assert_eq!(work.work.remaining(), [0]);
-                Err(exec.format_failure(crate::ObjFailure::internal("comparison-test-failure")))
+                Err(work
+                    .work
+                    .services()?
+                    .format_failure(crate::ObjFailure::internal("comparison-test-failure")))
             })?;
             unreachable!("the comparator must fail")
         },
@@ -244,15 +251,15 @@ fn comparator_failure_keeps_the_already_completed_string_prefix() {
 }
 
 fn numeric_leaves(
-    exec: &mut ParseExecution<'_, '_>,
+    exec: &mut ParseChildren<'_, '_, '_>,
     physical: &AtomicUsize,
     token: &CancellationToken,
 ) -> ParseResult<()> {
-    let group = exec.bind_work_group([ImportWorkClass::WorkUnits])?;
-    exec.with_work(&group, [0], |exec, ledger_work| {
+    let group = exec.bind_group([ImportWorkClass::WorkUnits])?;
+    exec.child(&group, [0], |ledger_work| {
         let mut work = ComparisonWork::new(ledger_work);
         for value in 0..130 {
-            work.run_leaf(exec, || {
+            work.run_leaf(|| {
                 let ordering = value.cmp(&7);
                 let completed = physical.fetch_add(1, AtomicOrdering::Relaxed) + 1;
                 if completed == 7 {
@@ -269,14 +276,14 @@ fn numeric_leaves(
 fn denied_admission_never_executes_or_consumes_the_next_numeric_or_byte_leaf() {
     let before = non_format_baseline();
     let string_leaves: ComparisonAction = |exec, _, _| {
-        interruptible_binary_search_by(exec, &["abcdefgh"], |exec, work, value| {
-            work.compare_str(exec, value, "abcdefgh")
+        interruptible_binary_search_by(exec, &["abcdefgh"], |work, value| {
+            work.compare_str(value, "abcdefgh")
         })?;
         Ok(())
     };
     let length_leaf: ComparisonAction = |exec, _, _| {
-        interruptible_binary_search_by(exec, &["cat"], |exec, work, value| {
-            work.compare_str(exec, value, "cat")
+        interruptible_binary_search_by(exec, &["cat"], |work, value| {
+            work.compare_str(value, "cat")
         })?;
         Ok(())
     };
@@ -318,10 +325,10 @@ fn nested_string_cancellation_completes_bytes_without_an_unfinished_outer_leaf()
     let before = non_format_baseline();
     let (failure, physical) = run(
         |exec, physical, token| {
-            let group = exec.bind_work_group([ImportWorkClass::WorkUnits])?;
-            exec.with_work(&group, [0], |exec, ledger_work| {
+            let group = exec.bind_group([ImportWorkClass::WorkUnits])?;
+            exec.child(&group, [0], |ledger_work| {
                 let mut work = ComparisonWork::new(ledger_work);
-                work.run_leaf(exec, || {
+                work.run_leaf(|| {
                     let ordering = 1.cmp(&1);
                     physical.fetch_add(1, AtomicOrdering::Relaxed);
                     token.cancel();
@@ -330,7 +337,7 @@ fn nested_string_cancellation_completes_bytes_without_an_unfinished_outer_leaf()
                 assert_eq!(work.work.remaining(), [0]);
                 let bytes = [b'x'; 128];
                 let text = std::str::from_utf8(&bytes).unwrap();
-                work.compare_str(exec, text, text)?;
+                work.compare_str(text, text)?;
                 Ok(())
             })
         },
@@ -351,20 +358,24 @@ fn chunk_cancellation_preserves_completed_items_before_a_later_push_fails() {
     let before = non_format_baseline();
     let (failure, physical) = run(
         |exec, physical, token| {
-            let mut rows = exec.metered_vec(
+            let mut rows = exec.services()?.metered_vec(
                 ImportStorageClass::FormatNormalization,
                 "comparison-test-source-rows",
             );
-            rows.try_reserve(exec, 64)?;
+            rows.try_reserve(&mut exec.services()?, 64)?;
             for_work_chunks(
                 exec,
                 130,
                 "comparison-test-source-row-work",
-                |exec, work, range| {
+                |work, range| {
                     for row in range {
-                        rows.try_push(exec, row)?;
-                        let completed = physical.fetch_add(1, AtomicOrdering::Relaxed) + 1;
-                        work.complete([1])?;
+                        let completed = work.run_returned_with_storage::<_, crate::ObjFailure>(
+                            |mut storage| {
+                                storage.push_vec(&mut rows, row)?;
+                                let completed = physical.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+                                Ok((completed, [1]))
+                            },
+                        )?;
                         if completed == 3 {
                             token.cancel();
                         }

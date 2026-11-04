@@ -1,12 +1,10 @@
 use std::fmt;
 
-use baozi_core::__scene_integration::integration::SceneEditEvidenceTag;
 use baozi_core::{SceneLookupError, TopologyKind};
 use baozi_operation::__retained_store_integration::activation::StoreActivationContainment;
 use baozi_operation::__retained_store_integration::authority::RetainedStoreStartError;
 use baozi_operation::{
-    ControlCause, PublishedRichFailureStore, PublishedStoreFallbackOutput, RecordBlock,
-    StorePrepareError, StoreRuntimeError,
+    ControlCause, PublishedStoreFallbackOutput, StorePrepareError, StoreRuntimeError,
 };
 use thiserror::Error;
 
@@ -89,9 +87,6 @@ pub(crate) enum FailureOwner {
     None,
     Fallback {
         _owner: PublishedStoreFallbackOutput,
-    },
-    Rich {
-        _owner: PublishedRichFailureStore<RecordBlock, SceneEditEvidenceTag>,
     },
 }
 

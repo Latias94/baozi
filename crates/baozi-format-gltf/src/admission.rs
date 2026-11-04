@@ -1,7 +1,7 @@
 use crate::GltfFailure;
 use crate::json_syntax;
 use crate::source_map::GltfSourceMap;
-use baozi_import::{ImportWorkClass, ParseExecution, ParseResult};
+use baozi_import::{ImportWorkClass, ParsePieceError, ParseResult, ParseRoot};
 
 const GLB_MAGIC: &[u8; 4] = b"glTF";
 const GLB_VERSION: u32 = 2;
@@ -35,7 +35,7 @@ impl<'scope> AdmittedSurfaces<'scope> {
 }
 
 pub(crate) fn admit<'scope>(
-    ctx: &mut ParseExecution<'_, 'scope>,
+    ctx: &mut ParseRoot<'_, '_, 'scope>,
 ) -> ParseResult<AdmittedSurfaces<'scope>> {
     let document_bytes = ctx.primary_bytes();
     let (surface, is_glb) = if document_bytes.starts_with(GLB_MAGIC) {
@@ -67,7 +67,7 @@ struct LocatedSurfaces<'bytes> {
 }
 
 fn locate_glb_surfaces<'bytes>(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseRoot<'_, '_, '_>,
     document_bytes: &'bytes [u8],
 ) -> ParseResult<LocatedSurfaces<'bytes>> {
     if document_bytes.len() < GLB_HEADER_BYTES || !document_bytes.len().is_multiple_of(4) {
@@ -101,38 +101,46 @@ fn locate_glb_surfaces<'bytes>(
     let mut chunk_index = 0usize;
     let mut json_range = None;
     let mut bin_range = None;
-    ctx.with_work_group(
-        [(ImportWorkClass::WorkUnits, 1)],
-        |ctx, work| -> ParseResult<()> {
-            while cursor < declared_length {
-                let chunk = read_glb_chunk(ctx, document_bytes, cursor, declared_length)?;
+    let layout = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+    ctx.child(&layout, [1], |child| -> ParseResult<()> {
+        let errors = child.error_view();
+        while cursor < declared_length {
+            child.run_returned_with_storage(|_storage| {
+                let chunk = read_glb_chunk(document_bytes, cursor, declared_length)
+                    .map_err(ParsePieceError::Format)?;
                 // Unknown chunk types are extension points. JSON stays first and BIN, when
                 // present, stays second; every remaining header is still range-checked.
                 if chunk_index == 0 {
                     if chunk.chunk_type != GLB_JSON_CHUNK {
-                        return Err(invalid_glb(ctx, "the first GLB chunk is not JSON"));
+                        return Err(ParsePieceError::Format(GltfFailure::invalid_document(
+                            "the first GLB chunk is not JSON",
+                        )));
                     }
                     json_range = Some((chunk.data_start, chunk.end));
                 } else if chunk_index == 1 && chunk.chunk_type == GLB_BIN_CHUNK {
                     bin_range = Some((chunk.data_start, chunk.end));
                 } else if chunk.chunk_type == GLB_JSON_CHUNK {
-                    return Err(invalid_glb(ctx, "GLB contains more than one JSON chunk"));
+                    return Err(ParsePieceError::Format(GltfFailure::invalid_document(
+                        "GLB contains more than one JSON chunk",
+                    )));
                 } else if chunk.chunk_type == GLB_BIN_CHUNK && chunk_index != 1 {
-                    return Err(invalid_glb(ctx, "the GLB BIN chunk is not second"));
+                    return Err(ParsePieceError::Format(GltfFailure::invalid_document(
+                        "the GLB BIN chunk is not second",
+                    )));
                 }
 
                 cursor = chunk.end;
                 chunk_index = chunk_index
                     .checked_add(1)
-                    .ok_or_else(|| ctx.allocation_failure("gltf-glb-chunk-count"))?;
-                work.complete([1])?;
-                if cursor < declared_length {
-                    work.replenish(1)?;
-                }
+                    .ok_or_else(|| errors.allocation_failure("gltf-glb-chunk-count"))?;
+                Ok(((), [1]))
+            })?;
+            if cursor < declared_length {
+                child.replenish(1)?;
             }
-            Ok(())
-        },
-    )?;
+        }
+        Ok(())
+    })?;
 
     let (json_start, json_end) =
         json_range.ok_or_else(|| invalid_glb(ctx, "GLB does not contain a JSON chunk"))?;
@@ -162,43 +170,44 @@ struct GlbChunk<'bytes> {
 }
 
 fn read_glb_chunk<'bytes>(
-    ctx: &mut ParseExecution<'_, '_>,
     document_bytes: &'bytes [u8],
     cursor: usize,
     declared_length: usize,
-) -> ParseResult<GlbChunk<'bytes>> {
+) -> Result<GlbChunk<'bytes>, GltfFailure> {
     let chunk_header_end = cursor
         .checked_add(GLB_CHUNK_HEADER_BYTES)
-        .ok_or_else(|| invalid_glb(ctx, "GLB chunk header offset overflowed"))?;
+        .ok_or_else(|| GltfFailure::invalid_document("GLB chunk header offset overflowed"))?;
     if chunk_header_end > declared_length {
-        return Err(invalid_glb(ctx, "GLB chunk header is truncated"));
+        return Err(GltfFailure::invalid_document(
+            "GLB chunk header is truncated",
+        ));
     }
     let chunk_length = usize::try_from(
         read_u32(document_bytes, cursor)
-            .ok_or_else(|| invalid_glb(ctx, "GLB chunk length field is truncated"))?,
+            .ok_or_else(|| GltfFailure::invalid_document("GLB chunk length field is truncated"))?,
     )
-    .map_err(|_| invalid_glb(ctx, "GLB chunk length does not fit the host index type"))?;
+    .map_err(|_| {
+        GltfFailure::invalid_document("GLB chunk length does not fit the host index type")
+    })?;
     if !chunk_length.is_multiple_of(4) {
-        return Err(invalid_glb(
-            ctx,
+        return Err(GltfFailure::invalid_document(
             "GLB chunk length is not four-byte aligned",
         ));
     }
     let chunk_end = chunk_header_end
         .checked_add(chunk_length)
-        .ok_or_else(|| invalid_glb(ctx, "GLB chunk end offset overflowed"))?;
+        .ok_or_else(|| GltfFailure::invalid_document("GLB chunk end offset overflowed"))?;
     if chunk_end > declared_length {
-        return Err(invalid_glb(
-            ctx,
+        return Err(GltfFailure::invalid_document(
             "GLB chunk extends beyond the declared input",
         ));
     }
     let chunk_type_start = cursor
         .checked_add(4)
-        .ok_or_else(|| invalid_glb(ctx, "GLB chunk type offset overflowed"))?;
+        .ok_or_else(|| GltfFailure::invalid_document("GLB chunk type offset overflowed"))?;
     let chunk_type = document_bytes
         .get(chunk_type_start..chunk_header_end)
-        .ok_or_else(|| invalid_glb(ctx, "GLB chunk type field is truncated"))?;
+        .ok_or_else(|| GltfFailure::invalid_document("GLB chunk type field is truncated"))?;
     Ok(GlbChunk {
         chunk_type,
         data_start: chunk_header_end,
@@ -207,7 +216,7 @@ fn read_glb_chunk<'bytes>(
 }
 
 fn invalid_glb(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseRoot<'_, '_, '_>,
     reason: &'static str,
 ) -> baozi_import::ParseFailure {
     ctx.format_failure(GltfFailure::invalid_document(reason))

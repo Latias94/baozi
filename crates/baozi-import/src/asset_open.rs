@@ -12,7 +12,7 @@ use baozi_io::{AssetIo, AssetOpenWorkError, AssetPath, OpenedAsset};
 use crate::error::{ScopeAbortCause, TrustedExtensionBoundary};
 use crate::format::discard_untrusted_panic_payload;
 use crate::ledger::ImportDimension;
-use crate::store::{ImportObservedWorkFailure, ImportStoreExecution};
+use crate::store::ImportRootExecution;
 
 #[derive(Clone, Copy)]
 pub(crate) enum AssetOpenContext {
@@ -102,7 +102,7 @@ impl Drop for OpenedAssetOwner {
 /// Only a cache miss enters this function. The bound and open use the same borrowed backend/path;
 /// no admission authority, lifetime token, or completion callback escapes into the backend.
 pub(crate) fn open_asset(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut ImportRootExecution<'_, '_>,
     io: &dyn AssetIo,
     path: &AssetPath,
     context: AssetOpenContext,
@@ -116,8 +116,11 @@ pub(crate) fn open_asset(
         .get();
 
     // Admission polls control again after the pure bound query, before any opaque backend IO.
+    let layout = exec
+        .bind_group([ImportDimension::WorkUnits])
+        .map_err(|cause| cause.into_scope_abort_cause())?;
     let opened = exec
-        .with_observed_work([(ImportDimension::WorkUnits, bound)], |_exec, work| {
+        .run_fallible_action(&layout, [bound], || {
             // Install cleanup ownership before work completion or any later fallible check.
             let opened = catch_unwind(AssertUnwindSafe(|| {
                 io.open(path).map(OpenedAssetOwner::new)
@@ -127,14 +130,9 @@ pub(crate) fn open_asset(
                 extension_failure(context.open_panic_code())
             })?;
             // Returned errors complete an opaque call too. Panic leaves only attempted work.
-            work.complete([bound])
-                .map_err(|cause| cause.into_scope_abort_cause())?;
-            Ok(opened)
+            Ok::<_, ScopeAbortCause>(opened)
         })
-        .map_err(|cause| match cause {
-            ImportObservedWorkFailure::Store(cause) => cause.into_scope_abort_cause(),
-            ImportObservedWorkFailure::Action(cause) => cause,
-        })?;
+        .map_err(|cause| cause.into_scope_abort_cause())??;
     opened.map_err(ScopeAbortCause::AssetOpen)
 }
 

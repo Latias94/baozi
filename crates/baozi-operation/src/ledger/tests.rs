@@ -2513,6 +2513,82 @@ fn typed_commitment_resolves_its_dimension_before_entering_the_batch() {
 }
 
 #[test]
+fn sealed_exact_destinations_do_not_reopen_work_or_allow_early_primary_binding() {
+    let ledger = test_ledger(typed_limits());
+    let probe = ledger.test_probe();
+    let canonical_assembly = ledger
+        .try_attribution_batch::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 0, 1)
+        .unwrap();
+    let evidence_assembly = ledger
+        .try_attribution_batch::<OutcomeEvidenceDestination>(Phase::Build, Dimension::Bytes, 0, 1)
+        .unwrap();
+    let fallback = ledger
+        .try_attribution_batch::<OutcomeEvidenceDestination>(Phase::Build, Dimension::Bytes, 0, 0)
+        .unwrap();
+    let evidence = ledger
+        .try_attribution_batch::<OutcomeEvidenceDestination>(Phase::Build, Dimension::Bytes, 0, 0)
+        .unwrap();
+    let mut baseline = ledger
+        .try_fallback_baseline(canonical_assembly, evidence_assembly, fallback, evidence)
+        .unwrap_or_else(|_| panic!("the original baseline must bind"));
+    let mut canonical = ledger
+        .try_attribution_batch::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 0, 1)
+        .unwrap();
+    let mut outcome_evidence = ledger
+        .try_attribution_batch::<OutcomeEvidenceDestination>(Phase::Build, Dimension::Bytes, 0, 1)
+        .unwrap();
+    ledger.seal_ordinary_work().unwrap();
+    let before = ledger.try_snapshot().unwrap();
+    ledger
+        .try_qualify_and_push_exact_primary_commitment_pair(
+            &baseline,
+            &mut canonical,
+            OutputCommitment::new(Dimension::Bytes, 1),
+            &mut outcome_evidence,
+            OutputCommitment::new(Dimension::Bytes, 1),
+        )
+        .unwrap_or_else(|_| panic!("sealed work must admit the exact destination pair"));
+    assert_eq!(ledger.try_snapshot().unwrap(), before);
+    assert_eq!(canonical.commitment_len(), 1);
+    assert_eq!(outcome_evidence.commitment_len(), 1);
+    assert_eq!(
+        ledger.charge_attempted(Dimension::Bytes, 1),
+        Err(LedgerCause::PublicationAlreadyPending)
+    );
+    assert!(matches!(
+        ledger.reserve(Phase::Build, Dimension::Bytes, 1),
+        Err(LedgerCause::PublicationAlreadyPending)
+    ));
+    assert_eq!(
+        ledger.try_bind_primary(
+            &mut baseline,
+            Some(&mut canonical),
+            Some(&mut outcome_evidence),
+            true,
+        ),
+        Err(LedgerCause::PublicationAlreadyPending)
+    );
+    assert_eq!(ledger.try_snapshot().unwrap(), before);
+    ledger.close_work().unwrap();
+    ledger
+        .try_bind_primary(
+            &mut baseline,
+            Some(&mut canonical),
+            Some(&mut outcome_evidence),
+            true,
+        )
+        .unwrap();
+    let (canonical_assembly, evidence_assembly, fallback, evidence) = baseline.into_parts();
+    drop(canonical_assembly);
+    drop(evidence_assembly);
+    drop(fallback);
+    drop(evidence);
+    drop(canonical);
+    drop(outcome_evidence);
+    assert_eq!(probe_values(&probe), (0, 0));
+}
+
+#[test]
 fn exact_pair_prequalification_matches_the_complete_future_batch_overflow() {
     let ledger = test_ledger(typed_limits());
     let probe = ledger.test_probe();

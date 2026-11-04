@@ -18,23 +18,28 @@ struct PublishedSequenceGeneration {
     _evidence: SourceEvidence,
 }
 
-type DerivedTestOperation = DerivedRetainedStoreOperation<TestOwner, TestProgress, TestUnit>;
+type DerivedTestOperation<'inv> =
+    DerivedRetainedStoreOperation<'inv, TestOwner, TestProgress, TestUnit>;
 
-struct OwnedDerivedOperation {
+struct OwnedDerivedOperation<'inv> {
     source: PublishedSource,
-    operation: DerivedTestOperation,
+    operation: DerivedTestOperation<'inv>,
 }
 
 const DERIVED_MAX_FAILURE_EVIDENCE_MEMBERS: usize = 3;
 
-fn derived_operation(source: &SourceCanonical) -> (DerivedTestOperation, TestKeys) {
-    derived_operation_with_control(source, OperationControl::default())
+fn derived_operation<'inv>(
+    root: &'inv mut TestInvocationRoot,
+    source: &SourceCanonical,
+) -> (DerivedTestOperation<'inv>, TestKeys) {
+    derived_operation_with_control(root, source, OperationControl::default())
 }
 
-fn derived_operation_with_control(
+fn derived_operation_with_control<'inv>(
+    root: &'inv mut TestInvocationRoot,
     source: &SourceCanonical,
     control: OperationControl<TestProgress, TestUnit>,
-) -> (DerivedTestOperation, TestKeys) {
+) -> (DerivedTestOperation<'inv>, TestKeys) {
     let TestVocabulary { domain, keys } = test_vocabulary();
     let failure_terminal_work = RetainedStoreFailureTerminalWorkPlan::new(
         keys.failure_terminal_dimension,
@@ -73,7 +78,7 @@ fn derived_operation_with_control(
         failure_terminal_work,
     );
     (
-        TestOperation::try_start_derived(control, ledger_plan, source, start).unwrap(),
+        TestOperation::try_start_derived(root, control, ledger_plan, source, start).unwrap(),
         keys,
     )
 }
@@ -83,7 +88,8 @@ fn derived_operation_can_be_owned_beside_its_source_without_self_reference() {
     let factory = factory(1);
     let account = account(&factory);
     let source = publish_sequence_source(&account);
-    let (operation, keys) = derived_operation(&source.canonical);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = derived_operation(&mut invocation_root, &source.canonical);
     let OwnedDerivedOperation { source, operation } = OwnedDerivedOperation { source, operation };
 
     let mut assembly = operation
@@ -132,7 +138,8 @@ impl baozi_operation::CancellationSignal for MidInheritanceCancellation {
 }
 
 fn publish_record_graph_source(account: &PhysicalStorageAccount) -> PublishedRecordGraph {
-    let (operation, keys) = operation(account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = operation(&mut invocation_root, account);
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 4, 1))
         .unwrap();
@@ -223,7 +230,8 @@ fn publish_rewritten_record_graph(
     account: &PhysicalStorageAccount,
     source: &PublishedRecordGraph,
 ) -> PublishedRecordGraph {
-    let (operation, keys) = derived_operation(&source.canonical);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = derived_operation(&mut invocation_root, &source.canonical);
     let before_tables = account.snapshot();
     let plan = RetainedStorePublicationPlan::success(
         RetainedStoreBlockTablePlan::new(writer_plan(keys, 3, 2), 4, 2).unwrap(),
@@ -327,7 +335,8 @@ fn publish_rewritten_record_graph(
 }
 
 fn publish_rewritten_sequence_generation(source: &PublishedSource) -> PublishedSequenceGeneration {
-    let (operation, keys) = derived_operation(&source.canonical);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = derived_operation(&mut invocation_root, &source.canonical);
     let plan = RetainedStorePublicationPlan::success(
         RetainedStoreBlockTablePlan::new(writer_plan(keys, 3, 2), 3, 2).unwrap(),
         RetainedStoreBlockTablePlan::new(writer_plan(keys, 2, 2), 1, 1).unwrap(),
@@ -493,7 +502,8 @@ fn canonical_sequence_rewrite_is_typed_accounted_and_retargets_records() {
     let source_b = publish_record_graph_source(&account);
     let foreign_source = publish_record_graph_source(&foreign_account);
 
-    let (operation, keys) = derived_operation(&source_a.canonical);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = derived_operation(&mut invocation_root, &source_a.canonical);
     let plan = RetainedStorePublicationPlan::success(
         RetainedStoreBlockTablePlan::new(writer_plan(keys, 4, 2), 4, 3).unwrap(),
         RetainedStoreBlockTablePlan::new(writer_plan(keys, 2, 2), 1, 1).unwrap(),
@@ -683,7 +693,8 @@ fn controlled_sequence_rewrite_preserves_typed_source_lineage() {
     let factory = factory(1);
     let account = account(&factory);
     let source = publish_sequence_source(&account);
-    let (operation, keys) = derived_operation(&source.canonical);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = derived_operation(&mut invocation_root, &source.canonical);
     let plan = RetainedStorePublicationPlan::success(
         RetainedStoreBlockTablePlan::new(writer_plan(keys, 3, 2), 2, 2).unwrap(),
         RetainedStoreBlockTablePlan::new(writer_plan(keys, 2, 2), 1, 1).unwrap(),
@@ -786,7 +797,8 @@ fn bulk_leaf_inheritance_carries_rewritten_leaves_across_generations() {
     let generation_one = publish_sequence_source(&account);
     let generation_two = publish_rewritten_sequence_generation(&generation_one);
 
-    let (operation, keys) = derived_operation(&generation_two.canonical);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = derived_operation(&mut invocation_root, &generation_two.canonical);
     let plan = RetainedStorePublicationPlan::success(
         RetainedStoreBlockTablePlan::new(writer_plan(keys, 2, 2), 3, 1).unwrap(),
         RetainedStoreBlockTablePlan::new(writer_plan(keys, 2, 2), 1, 1).unwrap(),
@@ -881,7 +893,9 @@ fn bulk_leaf_inheritance_rolls_back_a_cancelled_prefix() {
     let source = publish_sequence_source(&account);
     let cancellation = MidInheritanceCancellation::default();
     let control = OperationControl::default().with_cancellation(cancellation.clone());
-    let (operation, keys) = derived_operation_with_control(&source.canonical, control);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) =
+        derived_operation_with_control(&mut invocation_root, &source.canonical, control);
     let plan = RetainedStorePublicationPlan::success(
         RetainedStoreBlockTablePlan::new(writer_plan(keys, 1, 2), 2, 0).unwrap(),
         RetainedStoreBlockTablePlan::new(writer_plan(keys, 1, 2), 1, 0).unwrap(),
@@ -905,6 +919,7 @@ fn bulk_leaf_inheritance_rolls_back_a_cancelled_prefix() {
     assert_eq!(account.snapshot(), before_inheritance);
 
     drop(assembly);
+    drop(invocation_root);
     drop(source);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
@@ -917,7 +932,9 @@ fn canonical_source_binding_clears_a_cancelled_partial_fill() {
     let source = publish_sequence_source(&account);
     let cancellation = MidInheritanceCancellation::default();
     let control = OperationControl::default().with_cancellation(cancellation.clone());
-    let (operation, keys) = derived_operation_with_control(&source.canonical, control);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) =
+        derived_operation_with_control(&mut invocation_root, &source.canonical, control);
     let plan = RetainedStorePublicationPlan::success(
         RetainedStoreBlockTablePlan::new(writer_plan(keys, 1, 2), 1, 0).unwrap(),
         RetainedStoreBlockTablePlan::new(writer_plan(keys, 1, 2), 1, 0).unwrap(),
@@ -934,6 +951,7 @@ fn canonical_source_binding_clears_a_cancelled_partial_fill() {
     assert_eq!(account.snapshot(), before_binding);
 
     drop(assembly);
+    drop(invocation_root);
     drop(source);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
@@ -944,7 +962,8 @@ fn bulk_leaf_inheritance_rolls_back_slot_limit_and_remains_writable() {
     let factory = factory(1);
     let account = account(&factory);
     let source = publish_sequence_source(&account);
-    let (operation, keys) = derived_operation(&source.canonical);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = derived_operation(&mut invocation_root, &source.canonical);
     let plan = RetainedStorePublicationPlan::success(
         RetainedStoreBlockTablePlan::new(writer_plan(keys, 1, 2), 1, 0).unwrap(),
         RetainedStoreBlockTablePlan::new(writer_plan(keys, 1, 2), 1, 0).unwrap(),
@@ -972,6 +991,7 @@ fn bulk_leaf_inheritance_rolls_back_slot_limit_and_remains_writable() {
     assert_eq!(account.snapshot(), before_inheritance);
 
     drop(assembly);
+    drop(invocation_root);
     drop(source);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
@@ -983,7 +1003,8 @@ fn same_account_share_is_zero_physical_growth_and_stale_refs_fail() {
     let source_account = account(&factory);
     let source = publish_sequence_source(&source_account);
 
-    let (share_operation, keys) = derived_operation(&source.canonical);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (share_operation, keys) = derived_operation(&mut invocation_root, &source.canonical);
     let share_plan = RetainedStorePublicationPlan::success(
         RetainedStoreBlockTablePlan::new(writer_plan(keys, 2, 2), 3, 1).unwrap(),
         RetainedStoreBlockTablePlan::new(writer_plan(keys, 2, 2), 3, 1).unwrap(),
@@ -1120,7 +1141,8 @@ fn same_account_share_is_zero_physical_growth_and_stale_refs_fail() {
     );
     assert_eq!(shared_evidence.utf8(evidence_text), Some("ok"));
 
-    let (stale_operation, keys) = operation(&source_account);
+    let mut invocation_root_2 = TestInvocationRoot::new();
+    let (stale_operation, keys) = operation(&mut invocation_root_2, &source_account);
     let mut stale_root = stale_operation
         .try_publication_assembly(publication_plan(keys, 1, 1))
         .unwrap();
@@ -1160,7 +1182,8 @@ fn recoverable_open_failure_preserves_exact_canonical_source_authority() {
     let account = account(&factory);
     let source_a = publish_sequence_source(&account);
     let source_b = publish_sequence_source(&account);
-    let (operation, keys) = derived_operation(&source_a.canonical);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = derived_operation(&mut invocation_root, &source_a.canonical);
     let invalid_writer = RetainedStoreWriterPlan::new(
         foreign_phase(),
         keys.dimension,
@@ -1220,7 +1243,8 @@ fn canonical_source_binding_rejects_same_shape_sibling_and_foreign_account_befor
     assert_eq!(source.canonical.len(), sibling.canonical.len());
     assert_eq!(source.canonical.len(), foreign.canonical.len());
 
-    let (operation, keys) = derived_operation(&source.canonical);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (operation, keys) = derived_operation(&mut invocation_root, &source.canonical);
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 1, 1))
         .unwrap();
@@ -1264,7 +1288,9 @@ fn same_account_owner_ref_mismatch_rejects_before_mutation_or_work_charge() {
             RetainedStoreBlockTablePlan::new(writer_plan(keys, 1, 2), 1, 0).unwrap(),
         )
     };
-    let (challenged_operation, challenged_keys) = derived_operation(&source_a.canonical);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (challenged_operation, challenged_keys) =
+        derived_operation(&mut invocation_root, &source_a.canonical);
     let mut challenged = challenged_operation
         .try_publication_assembly(target_plan(challenged_keys))
         .unwrap();
@@ -1323,7 +1349,9 @@ fn same_account_owner_ref_mismatch_rejects_before_mutation_or_work_charge() {
         .expect("challenged work snapshot");
     drop(ledger_evidence);
 
-    let (control_operation, control_keys) = derived_operation(&source_a.canonical);
+    let mut invocation_root_2 = TestInvocationRoot::new();
+    let (control_operation, control_keys) =
+        derived_operation(&mut invocation_root_2, &source_a.canonical);
     let mut control = control_operation
         .try_publication_assembly(target_plan(control_keys))
         .unwrap();
@@ -1386,7 +1414,9 @@ fn record_rewrite_rejects_invalid_sources_mappings_and_plans_before_mutation() {
             RetainedStoreBlockTablePlan::new(writer_plan(keys, 2, 2), 1, 1).unwrap(),
         )
     };
-    let (challenged_operation, challenged_keys) = derived_operation(&source_a.canonical);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (challenged_operation, challenged_keys) =
+        derived_operation(&mut invocation_root, &source_a.canonical);
     let mut challenged = challenged_operation
         .try_publication_assembly(target_plan(challenged_keys))
         .unwrap();
@@ -1568,7 +1598,9 @@ fn record_rewrite_rejects_invalid_sources_mappings_and_plans_before_mutation() {
         .expect("challenged rewrite work evidence");
     drop(ledger_evidence);
 
-    let (control_operation, control_keys) = derived_operation(&source_a.canonical);
+    let mut invocation_root_2 = TestInvocationRoot::new();
+    let (control_operation, control_keys) =
+        derived_operation(&mut invocation_root_2, &source_a.canonical);
     let mut control = control_operation
         .try_publication_assembly(target_plan(control_keys))
         .unwrap();
@@ -1638,7 +1670,9 @@ fn record_rewrite_rejects_invalid_sources_mappings_and_plans_before_mutation() {
     assert!(challenged_work.consumed() > control_work.consumed());
     drop(ledger_evidence);
 
-    let (capacity_operation, capacity_keys) = derived_operation(&source_a.canonical);
+    let mut invocation_root_3 = TestInvocationRoot::new();
+    let (capacity_operation, capacity_keys) =
+        derived_operation(&mut invocation_root_3, &source_a.canonical);
     let capacity_plan = RetainedStorePublicationPlan::success(
         RetainedStoreBlockTablePlan::new(writer_plan(capacity_keys, 1, 2), 3, 0).unwrap(),
         RetainedStoreBlockTablePlan::new(writer_plan(capacity_keys, 1, 2), 1, 0).unwrap(),

@@ -6,25 +6,31 @@
 )]
 
 use crate::direct_error::FailureOwner;
-use crate::operation::runtime::{REJECTION_CODE, final_progress};
+use crate::operation::runtime::{
+    EditBoundFinish, EditDisposition, EditFinish, REJECTION_CODE, final_progress,
+};
 use crate::operation::{PostProcessOwner, PostProcessProgressPhase, PostProcessProgressUnit};
+#[cfg(test)]
+use crate::prepare::cleanup_tests::{self, Branch, Event};
 use crate::{PostProcessControlCause, PostProcessResourceEvidence};
 use baozi_core::__scene_integration::integration::{
     ResolvedSceneSpaceConversion, SceneCanonicalRootTag, SceneEditAdmission, SceneEditEvidence,
-    SceneEditEvidenceTag, SceneEditOutput, SceneEditPostflight, SceneEditRejection,
-    SceneEditTransaction, SceneEditValidationProof, SceneSpaceConversionIssue,
-    consume_scene_edit_freeze_permit,
+    SceneEditEvidenceTag, SceneEditGenerationRejection, SceneEditOutput, SceneEditPostflight,
+    SceneEditPublication, SceneEditPublicationError, SceneEditRejection, SceneEditTransaction,
+    SceneEditValidationProof, SceneSpaceConversionIssue, consume_scene_edit_freeze_permit,
 };
 use baozi_core::{SceneValidationLimits, ValidatedScene};
 use baozi_operation::__retained_store_integration::activation::{
     ActivatedCanonicalStoreSession, CanonicalActivationOutcome, CanonicalActivationSeal,
-    CanonicalCandidateStoreSession, CanonicalCentralValidationOutcome, CanonicalFreezePermitIssue,
-    CanonicalValidationProgress, RetainedStoreSessionOutcomeOwner, StoreCanonicalRejection,
-    StoreNeverActivatedCause,
+    CanonicalActivationSlots, CanonicalCandidateStoreSession, CanonicalCentralValidationOutcome,
+    CanonicalFinal, CanonicalFreezePermitIssue, CanonicalGenerationSlots,
+    CanonicalInvocationOutcome, CanonicalOperationPublication, CanonicalOutputSlot,
+    CanonicalProofSlot, CanonicalSemanticWorkError, CanonicalValidationProgress,
+    CanonicalValidationSlots, RetainedStoreSessionOutcomeOwner, StoreActivationContainment,
+    StoreCanonicalRejection, StoreNeverActivatedCause,
 };
 use baozi_operation::__retained_store_integration::authority::{
-    CanonicalInheritanceSource, PreparedStoreFailure, PreparedStoreFallback,
-    PreparedStoreSuccessOutcome,
+    CanonicalInheritanceSource, PreparedStoreEvidenceOnlyOutcome, PreparedStoreFallback,
 };
 use baozi_operation::{
     PublishedStoreFallbackParts, RecordBlock, StorePreparationFailureClass, StoreRuntimeError,
@@ -128,7 +134,7 @@ pub(crate) struct EditFailure {
     pub(crate) owner: FailureOwner,
 }
 impl EditFailure {
-    fn new(cause: EditCause) -> Self {
+    pub(crate) fn new(cause: EditCause) -> Self {
         Self {
             cause,
             resources: None,
@@ -148,21 +154,31 @@ impl EditFailure {
     }
 }
 
-type EditResult = Result<
-    (
-        ValidatedScene,
-        SceneEditEvidence,
-        PostProcessResourceEvidence,
-    ),
-    EditFailure,
->;
-type EditOwner = RetainedStoreSessionOutcomeOwner<
+#[allow(
+    clippy::large_enum_variant,
+    reason = "terminal alternatives transfer their exact Scene and evidence owners without allocation"
+)]
+pub(crate) enum EditTerminal {
+    Unchanged {
+        resources: PostProcessResourceEvidence,
+    },
+    Changed {
+        scene: ValidatedScene,
+        evidence: SceneEditEvidence,
+        resources: PostProcessResourceEvidence,
+    },
+}
+
+type EditResult = Result<EditTerminal, EditFailure>;
+type EditOwner<'inv> = RetainedStoreSessionOutcomeOwner<
+    'inv,
     PostProcessOwner,
     PostProcessProgressPhase,
     PostProcessProgressUnit,
     CanonicalInheritanceSource,
 >;
-type EditActivation = CanonicalActivationOutcome<
+type EditActivation<'inv> = CanonicalActivationOutcome<
+    'inv,
     PostProcessOwner,
     PostProcessProgressPhase,
     PostProcessProgressUnit,
@@ -172,7 +188,8 @@ type EditActivation = CanonicalActivationOutcome<
     SceneCanonicalRootTag,
     CanonicalInheritanceSource,
 >;
-type ActivatedEdit = ActivatedCanonicalStoreSession<
+type ActivatedEdit<'inv> = ActivatedCanonicalStoreSession<
+    'inv,
     PostProcessOwner,
     PostProcessProgressPhase,
     PostProcessProgressUnit,
@@ -181,7 +198,8 @@ type ActivatedEdit = ActivatedCanonicalStoreSession<
     SceneCanonicalRootTag,
     CanonicalInheritanceSource,
 >;
-type CentralEdit = CanonicalCentralValidationOutcome<
+type CentralEdit<'inv> = CanonicalCentralValidationOutcome<
+    'inv,
     PostProcessOwner,
     PostProcessProgressPhase,
     PostProcessProgressUnit,
@@ -193,7 +211,8 @@ type CentralEdit = CanonicalCentralValidationOutcome<
     RecordBlock,
     SceneEditEvidenceTag,
 >;
-type EditCandidate = CanonicalCandidateStoreSession<
+type EditCandidate<'inv> = CanonicalCandidateStoreSession<
+    'inv,
     PostProcessOwner,
     PostProcessProgressPhase,
     PostProcessProgressUnit,
@@ -205,132 +224,207 @@ type EditCandidate = CanonicalCandidateStoreSession<
     SceneEditEvidenceTag,
 >;
 
-// Each phase consumes the preceding linear owner. Keeping activation, central validation, and
-// publication in separate frames prevents debug builds from reserving all mutually exclusive
-// typestate temporaries in every caller. Scratch stays alive through central correspondence and
-// is dropped before any terminal preparation; these are boundaries of the same transaction.
-pub(crate) fn execute_changed(
+pub(crate) struct EditCanonicalSlots<'inv> {
+    pub(crate) output: CanonicalOutputSlot<'inv, SceneEditOutput>,
+    pub(crate) proof: CanonicalProofSlot<'inv, SceneEditValidationProof>,
+    pub(crate) activation: CanonicalActivationSlots<'inv, SceneEditRejection>,
+    pub(crate) validation: CanonicalValidationSlots<'inv, SceneEditRejection>,
+}
+
+pub(crate) fn validate_changed<'inv>(
     input: &ValidatedScene,
-    owner: EditOwner,
+    owner: EditOwner<'inv>,
+    slots: EditCanonicalSlots<'inv>,
     admission: SceneEditAdmission,
     mut data: PreparedEdit<'_>,
-) -> EditResult {
+    disposition: EditDisposition<'inv>,
+) -> Result<(), StoreActivationContainment> {
     let mut transaction = data.transaction(input, admission);
-    let activated = activate_edit(owner, &mut transaction)?;
+    let activated = activate_edit(owner, slots.output, slots.activation, &mut transaction)?;
     let postflight = transaction.finish();
     let activated = match activated {
         CanonicalActivationOutcome::Activated(activated) => activated,
         CanonicalActivationOutcome::Rejected(rejected) => {
-            let cause = core_rejection(rejected.cause());
             drop(data);
-            return Err(resolve_fallback(rejected.prepare_minimal_fallback(), cause));
+            #[cfg(test)]
+            cleanup_tests::record(Event::PreparedEditDropped);
+            return rejected.request_finish(disposition);
         }
         CanonicalActivationOutcome::NeverActivated(rejected) => {
+            drop(data);
+            #[cfg(test)]
+            cleanup_tests::record(Event::PreparedEditDropped);
+            return rejected.request_finish(disposition);
+        }
+    };
+    let central = validate_edit(activated, slots.proof, slots.validation, postflight)?;
+    drop(data);
+    #[cfg(test)]
+    cleanup_tests::record(Event::PreparedEditDropped);
+    central.request_finish(disposition)
+}
+
+pub(crate) fn finish_bound_edit(finish: EditBoundFinish<'_, '_>) -> EditResult {
+    match finish.into_attached() {
+        Ok(finish) => finish_edit(finish),
+        Err(finish) => {
+            let evidence = finish
+                .finish_unattached(final_progress())
+                .map_err(|source| EditFailure::new(EditCause::Runtime { source }))?;
+            let cause = evidence.header().terminal_cause();
+            let resources = PostProcessResourceEvidence::from_store(evidence);
+            match cause {
+                StoreTerminalCause::Success => Ok(EditTerminal::Unchanged { resources }),
+                StoreTerminalCause::Failure(cause) => Err(EditFailure::terminal(
+                    if cause.class() == StorePreparationFailureClass::Control {
+                        EditCause::FinalControl
+                    } else {
+                        EditCause::Publication
+                    },
+                    resources,
+                    FailureOwner::None,
+                )),
+            }
+        }
+    }
+}
+
+pub(crate) fn finish_edit(finish: EditFinish<'_>) -> EditResult {
+    let completion = finish.resume();
+    match completion.outcome {
+        CanonicalInvocationOutcome::Operation(operation) => {
+            let publication = operation
+                .finish(final_progress())
+                .map_err(|source| EditFailure::new(EditCause::Preparation { source }))?;
+            match publication {
+                CanonicalOperationPublication::Unchanged(
+                    PreparedStoreEvidenceOnlyOutcome::Success(prepared),
+                ) => Ok(EditTerminal::Unchanged {
+                    resources: PostProcessResourceEvidence::from_store(
+                        prepared.handoff().ledger_evidence,
+                    ),
+                }),
+                CanonicalOperationPublication::Unchanged(
+                    PreparedStoreEvidenceOnlyOutcome::MinimalFallback(prepared),
+                )
+                | CanonicalOperationPublication::MinimalFallback(prepared) => {
+                    Err(publish_fallback(prepared, EditCause::Publication))
+                }
+            }
+        }
+        CanonicalInvocationOutcome::Candidate(candidate) => {
+            #[cfg(test)]
+            cleanup_tests::record(Event::Preparing(Branch::Candidate));
+            publish_candidate(candidate, completion.generation)
+        }
+        CanonicalInvocationOutcome::Rejected(rejected) => {
+            let cause = core_rejection(rejected.cause());
+            #[cfg(test)]
+            cleanup_tests::record(Event::Preparing(Branch::Rejected));
+            Err(resolve_fallback(rejected.prepare_minimal_fallback(), cause))
+        }
+        CanonicalInvocationOutcome::NeverActivated(rejected) => {
             let cause = match rejected.cause() {
                 StoreNeverActivatedCause::Runtime(cause) => cause.clone().into(),
                 StoreNeverActivatedCause::Requested(cause) => core_requested(cause),
             };
-            drop(data);
-            return Err(resolve_fallback(rejected.prepare_minimal_fallback(), cause));
+            #[cfg(test)]
+            cleanup_tests::record(Event::Preparing(Branch::NeverActivated));
+            Err(resolve_fallback(rejected.prepare_minimal_fallback(), cause))
         }
-        CanonicalActivationOutcome::Fallback(fallback) => {
-            let cause = fallback.cause().clone().into();
-            let (prepared, _) = fallback.into_parts();
-            drop(data);
-            return Err(publish_fallback(prepared, cause));
-        }
-    };
-    let central = validate_edit(activated, postflight)?;
-    // Retained evidence owns the complete relation. End caller scratch leases before preparation.
-    drop(data);
-    finish_validation(central)
-}
-
-#[inline(never)]
-fn activate_edit(
-    owner: EditOwner,
-    transaction: &mut SceneEditTransaction<'_>,
-) -> Result<EditActivation, EditFailure> {
-    owner
-        .plan_and_activate_scoped(|mut planning| {
-            let ready = match planning.begin_semantic_work() {
-                Ok(mut semantic) => match transaction.preflight(&mut semantic) {
-                    Ok(plan) => match semantic.finish_exact() {
-                        Ok(completion) => Ok((plan, completion)),
-                        Err(cause) => {
-                            drop(plan);
-                            Err(SceneEditRejection::Runtime(cause))
-                        }
-                    },
-                    Err(cause) => {
-                        let _ = semantic.finish_rejected();
-                        Err(cause)
-                    }
-                },
-                Err(cause) => Err(SceneEditRejection::Runtime(cause)),
-            };
-            let (plan, completion) = match ready {
-                Ok(ready) => ready,
-                Err(cause) => return planning.reject(cause, REJECTION_CODE),
-            };
-            match planning.seal_activation(plan, completion) {
-                CanonicalActivationSeal::Sealed(permit) => {
-                    permit.activate(|lane, plan| plan.materialize(lane))
-                }
-                CanonicalActivationSeal::Unsealed(failure) => failure.finish(),
-            }
-        })
-        .map_err(|source| EditFailure::new(EditCause::Containment { source }))
-}
-
-#[inline(never)]
-fn validate_edit(
-    activated: ActivatedEdit,
-    postflight: SceneEditPostflight<'_>,
-) -> Result<CentralEdit, EditFailure> {
-    activated
-        .validate_centrally(
-            CanonicalValidationProgress::new(
-                PostProcessProgressPhase::Validation,
-                PostProcessProgressUnit::WorkItems,
-            ),
-            |lane, output| postflight.build_evidence(lane, output),
-            |planning, output| postflight.validate_candidate(planning, output),
-        )
-        .map_err(|source| EditFailure::new(EditCause::Containment { source }))
-}
-
-#[inline(never)]
-fn finish_validation(central: CentralEdit) -> EditResult {
-    let candidate = match central {
-        CanonicalCentralValidationOutcome::Candidate(candidate) => candidate,
-        CanonicalCentralValidationOutcome::Rejected(rejected) => {
+        CanonicalInvocationOutcome::CentralRejected(rejected) => {
             let cause = core_rejection(rejected.cause());
-            return Err(resolve_fallback(rejected.prepare_minimal_fallback(), cause));
+            #[cfg(test)]
+            cleanup_tests::record(Event::Preparing(Branch::CentralRejected));
+            Err(resolve_fallback(rejected.prepare_minimal_fallback(), cause))
         }
-        CanonicalCentralValidationOutcome::Interrupted(interrupted) => {
+        CanonicalInvocationOutcome::Interrupted(interrupted) => {
             let cause = interrupted
                 .cause()
                 .control_cause()
                 .cloned()
                 .map_or(EditCause::CentralValidation, EditCause::control);
-            return Err(resolve_fallback(
+            #[cfg(test)]
+            cleanup_tests::record(Event::Preparing(Branch::Interrupted));
+            Err(resolve_fallback(
                 interrupted.prepare_minimal_fallback(),
                 cause,
-            ));
+            ))
         }
-        CanonicalCentralValidationOutcome::Fallback(fallback) => {
+        CanonicalInvocationOutcome::Fallback(fallback) => {
             let cause = fallback.cause().clone().into();
-            return Err(resolve_fallback(fallback.prepare_minimal_fallback(), cause));
+            #[cfg(test)]
+            cleanup_tests::record(Event::Preparing(Branch::MinimalFallback));
+            Err(resolve_fallback(fallback.prepare_minimal_fallback(), cause))
         }
-    };
-    publish_candidate(candidate)
+    }
 }
 
 #[inline(never)]
-fn publish_candidate(candidate: EditCandidate) -> EditResult {
+fn activate_edit<'inv>(
+    owner: EditOwner<'inv>,
+    output_slot: CanonicalOutputSlot<'inv, SceneEditOutput>,
+    activation_slots: CanonicalActivationSlots<'inv, SceneEditRejection>,
+    transaction: &mut SceneEditTransaction<'_>,
+) -> Result<EditActivation<'inv>, StoreActivationContainment> {
+    owner.plan_and_activate_scoped(output_slot, activation_slots, |mut planning| {
+        let ready = planning
+            .with_semantic_work(|semantic| transaction.preflight(semantic))
+            .map_err(|cause| match cause {
+                CanonicalSemanticWorkError::Runtime(cause) => SceneEditRejection::Runtime(cause),
+                CanonicalSemanticWorkError::Rejected(cause) => cause,
+            });
+        let (plan, completion) = match ready {
+            Ok(ready) => ready,
+            Err(cause) => return planning.reject(cause, REJECTION_CODE),
+        };
+        #[cfg(test)]
+        cleanup_tests::record(Event::Planned);
+        match planning.seal_activation(plan, completion) {
+            CanonicalActivationSeal::Sealed(permit) => permit.activate(|lane, plan| {
+                #[cfg(test)]
+                cleanup_tests::record(Event::Materializing);
+                plan.materialize(lane)
+            }),
+            CanonicalActivationSeal::Unsealed(failure) => failure.finish(),
+        }
+    })
+}
+
+#[inline(never)]
+fn validate_edit<'inv>(
+    activated: ActivatedEdit<'inv>,
+    proof_slot: CanonicalProofSlot<'inv, SceneEditValidationProof>,
+    validation_slots: CanonicalValidationSlots<'inv, SceneEditRejection>,
+    postflight: SceneEditPostflight<'_>,
+) -> Result<CentralEdit<'inv>, StoreActivationContainment> {
+    activated.validate_centrally(
+        proof_slot,
+        validation_slots,
+        CanonicalValidationProgress::new(
+            PostProcessProgressPhase::Validation,
+            PostProcessProgressUnit::WorkItems,
+        ),
+        |lane, output| {
+            #[cfg(test)]
+            cleanup_tests::record(Event::BuildingEvidence);
+            postflight.build_evidence(lane, output)
+        },
+        |planning, output| {
+            #[cfg(test)]
+            cleanup_tests::record(Event::Validating);
+            postflight.validate_candidate(planning, output)
+        },
+    )
+}
+
+#[inline(never)]
+fn publish_candidate<'inv>(
+    candidate: CanonicalFinal<EditCandidate<'inv>>,
+    generation_slots: CanonicalGenerationSlots<'inv, SceneEditGenerationRejection>,
+) -> EditResult {
     let freeze = candidate
-        .try_issue_freeze_permit(final_progress())
+        .try_issue_freeze_permit(generation_slots.interruption, final_progress())
         .map_err(|source| EditFailure::new(EditCause::Containment { source }))?;
     let permit = match freeze {
         CanonicalFreezePermitIssue::Ready(permit) => permit,
@@ -351,37 +445,29 @@ fn publish_candidate(candidate: EditCandidate) -> EditResult {
             return Err(resolve_fallback(rooted.prepare_minimal_fallback(), cause));
         }
     };
-    consume_scene_edit_freeze_permit(
-        permit,
-        |rejected| {
-            Err(resolve_fallback(
-                rejected.prepare_minimal_fallback(),
-                EditCause::Publication,
-            ))
-        },
-        |token, joint, seal| match joint
-            .prepare(seal)
-            .map_err(|source| EditFailure::new(EditCause::Containment { source }))?
-        {
-            PreparedStoreSuccessOutcome::Success(store) => {
-                let published = token
-                    .handoff(store)
-                    .map_err(|_| EditFailure::new(EditCause::Publication))?;
-                let (scene, evidence, ledger) = published.into_parts();
-                let resources = PostProcessResourceEvidence::from_store(ledger);
-                Ok((scene, evidence, resources))
-            }
-            PreparedStoreSuccessOutcome::RichFailure(store) => {
-                drop(token);
-                Err(publish_rich_failure(store, EditCause::Publication))
-            }
-            PreparedStoreSuccessOutcome::MinimalFallback(store) => {
-                drop(token);
-                Err(publish_fallback(store, EditCause::Publication))
-            }
-        },
-    )
-    .map_err(|source| EditFailure::new(EditCause::Containment { source }))?
+    let published =
+        consume_scene_edit_freeze_permit(permit, generation_slots.rejection).map_err(|error| {
+            EditFailure::new(match error {
+                SceneEditPublicationError::Containment(source) => EditCause::Containment { source },
+                SceneEditPublicationError::Preparation(source) => EditCause::Preparation { source },
+            })
+        })?;
+    match published {
+        SceneEditPublication::Success(published) => {
+            let (scene, evidence, ledger) = published.into_parts();
+            #[cfg(test)]
+            cleanup_tests::record(Event::Frozen(ledger.header().terminal_cause()));
+            let resources = PostProcessResourceEvidence::from_store(ledger);
+            Ok(EditTerminal::Changed {
+                scene,
+                evidence,
+                resources,
+            })
+        }
+        SceneEditPublication::MinimalFallback { published } => {
+            Err(published_fallback(published, EditCause::Publication))
+        }
+    }
 }
 
 fn core_requested(cause: &SceneEditRejection) -> EditCause {
@@ -436,32 +522,20 @@ fn terminal_cause(cause: EditCause, terminal: StoreTerminalCause) -> EditCause {
 }
 
 fn publish_fallback(prepared: PreparedStoreFallback, cause: EditCause) -> EditFailure {
+    published_fallback(prepared.handoff(), cause)
+}
+
+fn published_fallback(published: PublishedStoreFallbackParts, cause: EditCause) -> EditFailure {
     let PublishedStoreFallbackParts {
         fallback,
         ledger_evidence,
-    } = prepared.handoff();
+    } = published;
+    #[cfg(test)]
+    cleanup_tests::record(Event::Frozen(ledger_evidence.header().terminal_cause()));
     let cause = terminal_cause(cause, ledger_evidence.header().terminal_cause());
     EditFailure::terminal(
         cause,
         PostProcessResourceEvidence::from_store(ledger_evidence),
         FailureOwner::Fallback { _owner: fallback },
-    )
-}
-
-fn publish_rich_failure(
-    prepared: PreparedStoreFailure<
-        RecordBlock,
-        baozi_core::__scene_integration::integration::SceneEditEvidenceTag,
-    >,
-    cause: EditCause,
-) -> EditFailure {
-    let published = prepared.handoff();
-    let cause = terminal_cause(cause, published.ledger_evidence.header().terminal_cause());
-    EditFailure::terminal(
-        cause,
-        PostProcessResourceEvidence::from_store(published.ledger_evidence),
-        FailureOwner::Rich {
-            _owner: published.outcome_evidence,
-        },
     )
 }

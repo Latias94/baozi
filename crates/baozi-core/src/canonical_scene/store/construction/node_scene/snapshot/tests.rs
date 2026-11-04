@@ -543,7 +543,10 @@ fn publish_scene_input(
     account: &PhysicalStorageAccount,
     input: SceneAuthoringBatch<'_>,
 ) -> NodeSceneSuccessParts {
+    let mut invocation_root_1 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let build = NodeSceneTestTransaction::with_account(
+        &mut invocation_root_1,
         account,
         operation_limits(),
         input,
@@ -1768,8 +1771,15 @@ pub(in crate::canonical_scene::store) fn collect_segment_partition_snapshot_obse
     else {
         panic!("different authored transform must require a SceneEdit");
     };
+    let mut edit_root_1 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let prepared = pending
-        .prepare(&base.scene, operation_limits(), OperationControl::default())
+        .prepare(
+            &mut edit_root_1,
+            &base.scene,
+            operation_limits(),
+            OperationControl::default(),
+        )
         .expect("segment-partitioning transform edit must prepare");
     let NodeSceneEditTerminal::Success(edited) = prepared.handoff() else {
         panic!("segment-partitioning transform edit must publish");
@@ -1844,6 +1854,7 @@ pub(in crate::canonical_scene::store) fn collect_segment_partition_snapshot_obse
     drop(direct);
     drop(edited);
     drop(base);
+    drop(edit_root_1);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 
@@ -2079,8 +2090,15 @@ fn profile_steps_bound_empty_segments_without_replaying_prior_domains() {
         .expect("bounded profile edit start") else {
             panic!("each transform edit must append one profile segment");
         };
+        let mut edit_root_2 =
+            crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
         let prepared = pending
-            .prepare(&scene, operation_limits(), OperationControl::default())
+            .prepare(
+                &mut edit_root_2,
+                &scene,
+                operation_limits(),
+                OperationControl::default(),
+            )
             .expect("bounded profile edit preparation");
         let NodeSceneEditTerminal::Success(edited) = prepared.handoff() else {
             panic!("bounded profile edit must publish");
@@ -2279,8 +2297,11 @@ fn changed_scene_edit_appends_snapshot_visible_profile_lineage() {
     .expect("changed transform profile edit") else {
         panic!("changed transform must append profile lineage");
     };
+    let mut edit_root_3 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let prepared = pending
         .prepare(
+            &mut edit_root_3,
             &source.scene,
             operation_limits(),
             OperationControl::default(),
@@ -2311,6 +2332,7 @@ fn changed_scene_edit_appends_snapshot_visible_profile_lineage() {
 
     drop(edited);
     drop(source);
+    drop(edit_root_3);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }

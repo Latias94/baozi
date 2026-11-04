@@ -6,7 +6,7 @@ use baozi_import::{
 pub(crate) fn can_read(
     probe: &Probe<'_>,
     hint: &ReadHint,
-    scope: &DetectionScope<'_>,
+    scope: &mut DetectionScope<'_, '_>,
 ) -> DetectionResult<DetectionOutcome> {
     let bytes = probe.bytes();
     let extension_match = hint.extension().is_some_and(|extension| {
@@ -28,7 +28,7 @@ pub(crate) fn can_read(
     }
 }
 
-fn looks_like_gltf_json(bytes: &[u8], scope: &DetectionScope<'_>) -> DetectionResult<bool> {
+fn looks_like_gltf_json(bytes: &[u8], scope: &mut DetectionScope<'_, '_>) -> DetectionResult<bool> {
     let Some(text) = valid_utf8_prefix(bytes, scope)? else {
         return Ok(false);
     };
@@ -48,7 +48,7 @@ fn looks_like_gltf_json(bytes: &[u8], scope: &DetectionScope<'_>) -> DetectionRe
 
 fn valid_utf8_prefix<'bytes>(
     bytes: &'bytes [u8],
-    scope: &DetectionScope<'_>,
+    scope: &mut DetectionScope<'_, '_>,
 ) -> DetectionResult<Option<&'bytes str>> {
     let decoded = account_detection_work(scope, bytes.len(), || std::str::from_utf8(bytes))?;
     Ok(match decoded {
@@ -63,7 +63,7 @@ fn valid_utf8_prefix<'bytes>(
 
 fn strip_bom_accounted<'text>(
     text: &'text str,
-    scope: &DetectionScope<'_>,
+    scope: &mut DetectionScope<'_, '_>,
 ) -> DetectionResult<&'text str> {
     const UTF8_BOM: &str = "\u{feff}";
     let inspected = if text.len() >= UTF8_BOM.len() {
@@ -77,7 +77,7 @@ fn strip_bom_accounted<'text>(
 }
 
 fn starts_with_accounted(
-    scope: &DetectionScope<'_>,
+    scope: &mut DetectionScope<'_, '_>,
     bytes: &[u8],
     prefix: &[u8],
 ) -> DetectionResult<bool> {
@@ -90,7 +90,7 @@ fn starts_with_accounted(
 }
 
 fn account_detection_work<T>(
-    scope: &DetectionScope<'_>,
+    scope: &mut DetectionScope<'_, '_>,
     byte_count: usize,
     work: impl FnOnce() -> T,
 ) -> DetectionResult<T> {

@@ -89,12 +89,12 @@ impl Format for CustomImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_, '_>) -> ParseResult<()> {
         if matches!(self.input, Input::EmptyPresent | Input::EmptyAbsent) {
             let roots = if matches!(self.input, Input::EmptyPresent) {
                 Presence::Present(&[][..])
@@ -261,7 +261,7 @@ impl Format for CustomImporter {
 // This deliberately spells out the existing full authoring contract only as a semantic oracle.
 // Expected identity allocation and hashing happen in the test harness before the session starts.
 fn submit_explicit_triangle(
-    scope: &mut ParseContext<'_>,
+    scope: &mut ParseContext<'_, '_>,
     expected: &ExpectedDocument,
     nodes: NodeAuthoringBatch<'_>,
     geometry: GeometryAuthoringBatch<'_>,

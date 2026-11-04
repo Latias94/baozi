@@ -363,6 +363,9 @@ impl<D: fmt::Debug + 'static> std::error::Error for RetainedWriterError<D> {
 #[derive(Debug)]
 #[non_exhaustive]
 pub(crate) enum RetainedOperationStartError<D> {
+    InvocationAlreadyStarted,
+    /// The already-bound invocation recorded an interruption before attachment.
+    Control(crate::ControlCause),
     /// Terminal writer limits cannot contain the mandatory fallback and evidence owners.
     InvalidTerminalLimits,
     /// The coordinator did not reproduce the prequalified terminal evidence catalog.
@@ -374,6 +377,10 @@ pub(crate) enum RetainedOperationStartError<D> {
 impl<D: fmt::Debug> fmt::Display for RetainedOperationStartError<D> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvocationAlreadyStarted => {
+                formatter.write_str("the invocation root has already entered")
+            }
+            Self::Control(cause) => cause.fmt(formatter),
             Self::InvalidTerminalLimits => {
                 formatter.write_str("retained terminal limits cannot contain mandatory owners")
             }
@@ -388,7 +395,10 @@ impl<D: fmt::Debug> fmt::Display for RetainedOperationStartError<D> {
 impl<D: fmt::Debug + 'static> std::error::Error for RetainedOperationStartError<D> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::InvalidTerminalLimits | Self::TerminalEvidenceCatalogInvariant => None,
+            Self::Control(cause) => Some(cause),
+            Self::InvocationAlreadyStarted
+            | Self::InvalidTerminalLimits
+            | Self::TerminalEvidenceCatalogInvariant => None,
             Self::Writer(cause) => Some(cause),
         }
     }

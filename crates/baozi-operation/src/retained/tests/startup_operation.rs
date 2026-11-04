@@ -6,8 +6,8 @@ use crate::ledger::{
 
 #[test]
 fn publication_evidence_precharges_the_capacity_envelope() {
-    type EvidenceOperation =
-        RetainedOperation<TestOwner, TestPhase, TestProgress, TestUnit, u8, u32>;
+    type EvidenceOperation<'inv> =
+        RetainedOperation<'inv, TestOwner, TestPhase, TestProgress, TestUnit, u8, u32, u64, u64>;
 
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
@@ -28,13 +28,18 @@ fn publication_evidence_precharges_the_capacity_envelope() {
         OutputCommitment::new(0, 1),
         OutputCommitment::new(0, 1),
     );
-    let operation =
-        EvidenceOperation::try_start(OperationControl::default(), limits, &account, plan, || {
-            Ok(7_u32)
-        })
-        .unwrap_or_else(|error| panic!("evidence operation must start: {error:?}"));
+    let mut invocation_root = InvocationRoot::new();
+    let operation = EvidenceOperation::try_start(
+        &mut invocation_root,
+        OperationControl::default(),
+        limits,
+        &account,
+        plan,
+        || Ok(7_u32),
+    )
+    .unwrap_or_else(|error| panic!("evidence operation must start: {error:?}"));
     assert_eq!(account.share_call_count(), 4);
-    let allocation = operation.baseline.test_evidence_allocation();
+    let allocation = operation.retained.baseline.test_evidence_allocation();
     let outer_bytes = FinalOwnerAllocation::<
         RetainedFinalOwnerInner<
             RetainedPayload<TerminalLedgerEvidence<TestPhase, u8>>,
@@ -50,6 +55,7 @@ fn publication_evidence_precharges_the_capacity_envelope() {
         1 + footprint.allocations()
     );
     drop(operation);
+    drop(invocation_root);
     drop(account);
     assert_eq!(factory.snapshot().live_accounts(), 0);
 }
@@ -69,11 +75,18 @@ fn startup_share_qualification_rejection_preserves_the_borrowed_host_account() {
         OutputCommitment::new(TestDimension::Bytes, 1),
     );
     let builder_called = AtomicBool::new(false);
-    let result =
-        TestOperation::try_start(OperationControl::default(), limits, &account, plan, || {
+    let mut invocation_root: TestInvocationRoot = InvocationRoot::new();
+    let result = RetainedOperation::try_start(
+        &mut invocation_root,
+        OperationControl::default(),
+        limits,
+        &account,
+        plan,
+        || {
             builder_called.store(true, Ordering::SeqCst);
             Ok(7_u32)
-        });
+        },
+    );
 
     assert!(matches!(
         result,
@@ -101,11 +114,18 @@ fn startup_fallback_footprint_mismatch_rejects_before_allocator_entry() {
     let builder_called = AtomicBool::new(false);
     let (limits, plan) = startup_limits_and_plan();
 
-    let result =
-        TestOperation::try_start(OperationControl::default(), limits, &account, plan, || {
+    let mut invocation_root: TestInvocationRoot = InvocationRoot::new();
+    let result = RetainedOperation::try_start(
+        &mut invocation_root,
+        OperationControl::default(),
+        limits,
+        &account,
+        plan,
+        || {
             builder_called.store(true, Ordering::SeqCst);
             Ok(7_u32)
-        });
+        },
+    );
 
     let error = match result {
         Err(error) => error,
@@ -155,11 +175,18 @@ fn startup_evidence_footprint_mismatch_rejects_before_allocator_entry() {
     let builder_called = AtomicBool::new(false);
     let (limits, plan) = startup_limits_and_plan();
 
-    let result =
-        TestOperation::try_start(OperationControl::default(), limits, &account, plan, || {
+    let mut invocation_root: TestInvocationRoot = InvocationRoot::new();
+    let result = RetainedOperation::try_start(
+        &mut invocation_root,
+        OperationControl::default(),
+        limits,
+        &account,
+        plan,
+        || {
             builder_called.store(true, Ordering::SeqCst);
             Ok(7_u32)
-        });
+        },
+    );
 
     let error = match result {
         Err(error) => error,
@@ -213,12 +240,17 @@ fn block_handle_clone_is_charged_before_builder_or_account_share() {
         OutputCommitment::new(TestDimension::Bytes, 1),
         OutputCommitment::new(TestDimension::Bytes, 1),
     );
-    let operation =
-        TestOperation::try_start(OperationControl::default(), limits, &account, plan, || {
-            Ok(7_u32)
-        })
-        .unwrap_or_else(|error| panic!("exact pre-block handle budget must start: {error:?}"));
-    let mut assembly: TestPublication<u64, u64> = operation
+    let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
+    let operation = RetainedOperation::try_start(
+        &mut invocation_root,
+        OperationControl::default(),
+        limits,
+        &account,
+        plan,
+        || Ok(7_u32),
+    )
+    .unwrap_or_else(|error| panic!("exact pre-block handle budget must start: {error:?}"));
+    let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("exact pre-block handle budget must open tables"));
     let shares_before = account.share_call_count();
@@ -253,7 +285,9 @@ fn startup_fallback_builder_error_returns_original_cause_and_restores_baseline()
     let builder_called = AtomicBool::new(false);
     let (limits, plan) = startup_limits_and_plan();
 
-    let result = TestOperation::try_start(
+    let mut invocation_root: TestInvocationRoot = InvocationRoot::new();
+    let result = RetainedOperation::try_start(
+        &mut invocation_root,
         OperationControl::default(),
         limits,
         &account,
@@ -297,13 +331,27 @@ fn startup_evidence_builder_error_drops_fallback_once_and_restores_baseline() {
     let account = account(&factory, u64::MAX, 128);
     let before = account.snapshot();
     let (limits, plan) = startup_limits_and_plan();
-    type DropOperation =
-        RetainedOperation<TestOwner, TestPhase, TestProgress, TestUnit, TestDimension, DropCounter>;
+    type DropOperation<'inv> = RetainedOperation<
+        'inv,
+        TestOwner,
+        TestPhase,
+        TestProgress,
+        TestUnit,
+        TestDimension,
+        DropCounter,
+        TestCanonicalBlock,
+        TestEvidenceBlock,
+    >;
 
-    let result =
-        DropOperation::try_start(OperationControl::default(), limits, &account, plan, || {
-            Ok::<DropCounter, RetainedBuildFailureCode>(DropCounter(&FALLBACK_DROPS))
-        });
+    let mut invocation_root = InvocationRoot::new();
+    let result = DropOperation::try_start(
+        &mut invocation_root,
+        OperationControl::default(),
+        limits,
+        &account,
+        plan,
+        || Ok::<DropCounter, RetainedBuildFailureCode>(DropCounter(&FALLBACK_DROPS)),
+    );
 
     assert!(matches!(
         result,
@@ -336,11 +384,18 @@ fn existing_poison_does_not_suppress_a_later_startup_ownership_fault() {
     let account = account(&factory, u64::MAX, 128);
     let (limits, plan) = startup_limits_and_plan();
 
-    let result =
-        TestOperation::try_start(OperationControl::default(), limits, &account, plan, || {
+    let mut invocation_root: TestInvocationRoot = InvocationRoot::new();
+    let result = RetainedOperation::try_start(
+        &mut invocation_root,
+        OperationControl::default(),
+        limits,
+        &account,
+        plan,
+        || {
             let _ = account.record_poison(AccountPoisonReason::RetainedStorageReleaseUnverified);
             Ok::<u32, RetainedBuildFailureCode>(7)
-        });
+        },
+    );
 
     assert!(matches!(
         result,
@@ -376,11 +431,18 @@ fn terminal_evidence_catalog_rejection_precedes_attribution_and_physical_commit(
     let graph_storage_releases = test_startup_graph_storage_releases();
     let graph_ledger_release_locks = test_startup_graph_ledger_release_locks();
 
-    let result =
-        TestOperation::try_start(OperationControl::default(), limits, &account, plan, || {
+    let mut invocation_root: TestInvocationRoot = InvocationRoot::new();
+    let result = RetainedOperation::try_start(
+        &mut invocation_root,
+        OperationControl::default(),
+        limits,
+        &account,
+        plan,
+        || {
             builder_called.store(true, Ordering::SeqCst);
             Ok(7_u32)
-        });
+        },
+    );
 
     assert!(matches!(
         result,
@@ -425,13 +487,27 @@ fn startup_evidence_structural_failure_is_contained_as_an_internal_invariant() {
         .checked_retained_charge::<TerminalLedgerEvidence<TestPhase, TestDimension>>(evidence_plan)
         .unwrap_or_else(|_| panic!("evidence structural charge must qualify"));
     let (limits, plan) = startup_limits_and_plan();
-    type DropOperation =
-        RetainedOperation<TestOwner, TestPhase, TestProgress, TestUnit, TestDimension, DropCounter>;
+    type DropOperation<'inv> = RetainedOperation<
+        'inv,
+        TestOwner,
+        TestPhase,
+        TestProgress,
+        TestUnit,
+        TestDimension,
+        DropCounter,
+        TestCanonicalBlock,
+        TestEvidenceBlock,
+    >;
 
-    let result =
-        DropOperation::try_start(OperationControl::default(), limits, &account, plan, || {
-            Ok::<DropCounter, RetainedBuildFailureCode>(DropCounter(&FALLBACK_DROPS))
-        });
+    let mut invocation_root = InvocationRoot::new();
+    let result = DropOperation::try_start(
+        &mut invocation_root,
+        OperationControl::default(),
+        limits,
+        &account,
+        plan,
+        || Ok::<DropCounter, RetainedBuildFailureCode>(DropCounter(&FALLBACK_DROPS)),
+    );
 
     assert!(matches!(
         result,
@@ -485,13 +561,27 @@ fn startup_evidence_builder_panic_releases_the_clean_fallback_sibling() {
         .checked_retained_charge::<TerminalLedgerEvidence<TestPhase, TestDimension>>(evidence_plan)
         .unwrap_or_else(|_| panic!("evidence panic charge must qualify"));
     let (limits, plan) = startup_limits_and_plan();
-    type DropOperation =
-        RetainedOperation<TestOwner, TestPhase, TestProgress, TestUnit, TestDimension, DropCounter>;
+    type DropOperation<'inv> = RetainedOperation<
+        'inv,
+        TestOwner,
+        TestPhase,
+        TestProgress,
+        TestUnit,
+        TestDimension,
+        DropCounter,
+        TestCanonicalBlock,
+        TestEvidenceBlock,
+    >;
 
-    let result =
-        DropOperation::try_start(OperationControl::default(), limits, &account, plan, || {
-            Ok::<DropCounter, RetainedBuildFailureCode>(DropCounter(&FALLBACK_DROPS))
-        });
+    let mut invocation_root = InvocationRoot::new();
+    let result = DropOperation::try_start(
+        &mut invocation_root,
+        OperationControl::default(),
+        limits,
+        &account,
+        plan,
+        || Ok::<DropCounter, RetainedBuildFailureCode>(DropCounter(&FALLBACK_DROPS)),
+    );
 
     assert!(matches!(
         result,
@@ -536,19 +626,27 @@ fn startup_evidence_builder_panic_keeps_storage_release_as_r_and_records_builder
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
     let (limits, plan) = startup_limits_and_plan();
-    type PanicDropOperation = RetainedOperation<
+    type PanicDropOperation<'inv> = RetainedOperation<
+        'inv,
         TestOwner,
         TestPhase,
         TestProgress,
         TestUnit,
         TestDimension,
         PanickingDropProbe,
+        TestCanonicalBlock,
+        TestEvidenceBlock,
     >;
 
-    let result =
-        PanicDropOperation::try_start(OperationControl::default(), limits, &account, plan, || {
-            Ok::<PanickingDropProbe, RetainedBuildFailureCode>(PanickingDropProbe(&FALLBACK_DROPS))
-        });
+    let mut invocation_root = InvocationRoot::new();
+    let result = PanicDropOperation::try_start(
+        &mut invocation_root,
+        OperationControl::default(),
+        limits,
+        &account,
+        plan,
+        || Ok::<PanickingDropProbe, RetainedBuildFailureCode>(PanickingDropProbe(&FALLBACK_DROPS)),
+    );
 
     assert!(matches!(
         result,
@@ -587,17 +685,33 @@ fn startup_evidence_builder_panic_prefers_sibling_counter_f_without_builder_f() 
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
     let (limits, plan) = startup_limits_and_plan();
-    type DropOperation =
-        RetainedOperation<TestOwner, TestPhase, TestProgress, TestUnit, TestDimension, DropCounter>;
+    type DropOperation<'inv> = RetainedOperation<
+        'inv,
+        TestOwner,
+        TestPhase,
+        TestProgress,
+        TestUnit,
+        TestDimension,
+        DropCounter,
+        TestCanonicalBlock,
+        TestEvidenceBlock,
+    >;
 
-    let result =
-        DropOperation::try_start(OperationControl::default(), limits, &account, plan, || {
+    let mut invocation_root = InvocationRoot::new();
+    let result = DropOperation::try_start(
+        &mut invocation_root,
+        OperationControl::default(),
+        limits,
+        &account,
+        plan,
+        || {
             let mut state = lock_recovering_poison(&account.inner.value().linear);
             state.counters.live_bytes = 0;
             state.counters.live_allocations = 0;
             drop(state);
             Ok::<DropCounter, RetainedBuildFailureCode>(DropCounter(&FALLBACK_DROPS))
-        });
+        },
+    );
 
     assert!(matches!(
         result,
@@ -630,7 +744,9 @@ fn startup_fallback_panic_contains_fallback_and_cleans_evidence() {
         .unwrap_or_else(|_| panic!("fallback charge must qualify"));
     let (limits, plan) = startup_limits_and_plan();
 
-    let result = TestOperation::try_start(
+    let mut invocation_root: TestInvocationRoot = InvocationRoot::new();
+    let result = RetainedOperation::try_start(
+        &mut invocation_root,
         OperationControl::default(),
         limits,
         &account,
@@ -676,7 +792,9 @@ fn startup_fallback_panic_with_sibling_underflow_records_only_counter_fault() {
     let account = account(&factory, u64::MAX, 128);
     let (limits, plan) = startup_limits_and_plan();
 
-    let result = TestOperation::try_start(
+    let mut invocation_root: TestInvocationRoot = InvocationRoot::new();
+    let result = RetainedOperation::try_start(
+        &mut invocation_root,
         OperationControl::default(),
         limits,
         &account,

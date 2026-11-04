@@ -3,7 +3,7 @@ use super::*;
 const INDICES: [u32; 6] = [3, 1, 1, 0, 2, 3];
 
 pub(super) fn submit(
-    context: &mut ParseContext<'_>,
+    context: &mut ParseContext<'_, '_>,
     topology: GeometryTopologyAuthoring<'static>,
     corners: u8,
     indexed: bool,

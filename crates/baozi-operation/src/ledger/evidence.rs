@@ -2,7 +2,39 @@ use super::{
     LedgerEvidenceError, LedgerEvidencePurpose, LedgerState, capacity_bytes, lock, release_evidence,
 };
 use crate::{CapacityPlan, CapacityPlanError, ReplacementCapacityPlan};
+use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
+
+/// A borrowed progress-capacity view of storage, without access to numeric work.
+/// The coordinator retains the backing Vec and its evidence-byte release obligation.
+pub(crate) struct ProgressEvidenceStorage<'a, O, P, D> {
+    storage: &'a Arc<Mutex<LedgerState<P, D>>>,
+    owner: PhantomData<fn() -> O>,
+}
+
+impl<'a, O, P, D> ProgressEvidenceStorage<'a, O, P, D> {
+    pub(super) fn new(storage: &'a Arc<Mutex<LedgerState<P, D>>>) -> Self {
+        Self {
+            storage,
+            owner: PhantomData,
+        }
+    }
+
+    pub(crate) fn try_grow<T>(
+        &self,
+        values: &mut Vec<T>,
+        desired_capacity: usize,
+        retained_bytes: &mut u64,
+    ) -> Result<(), LedgerEvidenceError> {
+        try_grow_shared_evidence_vec(
+            self.storage,
+            values,
+            desired_capacity,
+            retained_bytes,
+            LedgerEvidencePurpose::Progress,
+        )
+    }
+}
 
 struct SharedEvidenceAdmission<'a, P, D> {
     storage: &'a Arc<Mutex<LedgerState<P, D>>>,

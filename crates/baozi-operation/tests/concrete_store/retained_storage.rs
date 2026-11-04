@@ -3,8 +3,8 @@ use baozi_operation::__retained_store_integration::authority::RetainedStorage;
 use baozi_operation::CapacityPlan;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-fn payloads(
-    operation: &mut TestOperation,
+fn payloads<'inv>(
+    operation: &mut TestOperation<'inv>,
     keys: TestKeys,
     count: usize,
 ) -> (Vec<RetainedStorage<Vec<u8>>>, u64) {
@@ -34,7 +34,8 @@ fn payloads(
 fn many_retained_outputs_do_not_consume_per_allocation_terminal_slots() {
     let factory = factory(1);
     let account = account(&factory);
-    let (mut operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (mut operation, keys) = operation(&mut invocation_root, &account);
     let count = TEST_TERMINAL_ATTRIBUTION_SLOTS * 4;
     let (outputs, bytes) = payloads(&mut operation, keys, count);
     let mut assembly = operation
@@ -78,7 +79,8 @@ fn many_retained_outputs_do_not_consume_per_allocation_terminal_slots() {
 fn rich_failure_keeps_real_output_storage_charged_until_its_owner_drops() {
     let factory = factory(1);
     let account = account(&factory);
-    let (mut operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (mut operation, keys) = operation(&mut invocation_root, &account);
     let (outputs, bytes) = payloads(&mut operation, keys, 4);
     let mut assembly = operation
         .try_publication_assembly(rich_failure_plan(keys, 1))
@@ -110,7 +112,8 @@ fn rich_failure_keeps_real_output_storage_charged_until_its_owner_drops() {
 fn minimal_fallback_and_host_unwind_preserve_storage_first_release() {
     let factory = factory(1);
     let account = account(&factory);
-    let (mut operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (mut operation, keys) = operation(&mut invocation_root, &account);
     let (outputs, bytes) = payloads(&mut operation, keys, 4);
     let published = operation.prepare_minimal_fallback(73).unwrap().handoff();
     assert_eq!(published.ledger_evidence.header().current_live_bytes(), 0);
@@ -131,7 +134,8 @@ fn minimal_fallback_and_host_unwind_preserve_storage_first_release() {
 fn dropping_a_candidate_before_publication_removes_only_its_own_attribution() {
     let factory = factory(1);
     let account = account(&factory);
-    let (mut operation, keys) = operation(&account);
+    let mut invocation_root = TestInvocationRoot::new();
+    let (mut operation, keys) = operation(&mut invocation_root, &account);
     let baseline = account.snapshot();
     let (outputs, _) = payloads(&mut operation, keys, 4);
     drop(outputs);

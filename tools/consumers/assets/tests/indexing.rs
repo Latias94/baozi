@@ -395,7 +395,7 @@ mod color_domains {
             &self,
             probe: &Probe<'_>,
             _hint: &ReadHint,
-            _scope: &DetectionScope<'_>,
+            _scope: &mut DetectionScope<'_, '_>,
         ) -> DetectionResult<DetectionOutcome> {
             Ok(if probe.is_complete() && probe.bytes() == b"color" {
                 DetectionOutcome::Match(ReadConfidence::Certain)
@@ -404,7 +404,11 @@ mod color_domains {
             })
         }
 
-        fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
+        fn parse(
+            &self,
+            _options: &Self::Options,
+            scope: &mut ParseContext<'_, '_>,
+        ) -> ParseResult<()> {
             let positions = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
             let indices = [2, 0, 1, 1, 0, 3];
             let normals = [0.0, 0.0, 1.0].repeat(4);

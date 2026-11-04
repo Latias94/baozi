@@ -481,7 +481,7 @@ pub type CanonicalBytesRange<Tag> = CanonicalStoreRange<ByteBlock, Tag>;
 /// Canonical range of UTF-8 blocks.
 pub type CanonicalUtf8Range<Tag> = CanonicalStoreRange<Utf8Block, Tag>;
 
-impl<O, PP, U, L> RetainedStorePublicationAssembly<O, PP, U, L>
+impl<'inv, O, PP, U, L> RetainedStorePublicationAssembly<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,

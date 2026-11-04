@@ -845,7 +845,7 @@ impl<'scene> NodeSceneEditProfilePlan<'scene> {
 }
 
 pub(super) fn retain_edited_profile<O, PP, U>(
-    lane: &mut CanonicalLane<'_, O, PP, U, CanonicalInheritanceSource>,
+    lane: &mut CanonicalLane<'_, '_, O, PP, U, CanonicalInheritanceSource>,
     input: &SceneStorage,
     plan: NodeSceneEditProfilePlan<'_>,
     operation: &OperationIdentity,

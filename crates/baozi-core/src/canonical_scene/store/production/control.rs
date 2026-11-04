@@ -46,10 +46,11 @@ pub(in crate::canonical_scene::store) trait CanonicalAuthoringControl {
 ///
 /// Explicit validator polls delegate to the operation-owned checkpoint cadence. Validators retain
 /// their scheduling shape without introducing a second work counter or permitting scratch work to
-/// cross a pending cancellation checkpoint.
+/// cross a pending cancellation checkpoint. The session borrow stays inside the host-owned
+/// semantic callback while reservations retain the outer planning scope.
 pub(in crate::canonical_scene::store) struct ScopedAuthoringControl<
     'session,
-    'borrow,
+    'work,
     'scope,
     O,
     PP,
@@ -60,25 +61,25 @@ pub(in crate::canonical_scene::store) struct ScopedAuthoringControl<
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    session: &'session mut CanonicalSemanticWorkSession<'borrow, 'scope, O, PP, U, L>,
+    session: &'session mut CanonicalSemanticWorkSession<'work, 'scope, O, PP, U, L>,
 }
 
-impl<'session, 'borrow, 'scope, O, PP, U, L>
-    ScopedAuthoringControl<'session, 'borrow, 'scope, O, PP, U, L>
+impl<'session, 'work, 'scope, O, PP, U, L>
+    ScopedAuthoringControl<'session, 'work, 'scope, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     pub(in crate::canonical_scene::store) const fn new(
-        session: &'session mut CanonicalSemanticWorkSession<'borrow, 'scope, O, PP, U, L>,
+        session: &'session mut CanonicalSemanticWorkSession<'work, 'scope, O, PP, U, L>,
     ) -> Self {
         Self { session }
     }
 }
 
-impl<'session, 'borrow, 'scope, O, PP, U, L> CanonicalAuthoringControl
-    for ScopedAuthoringControl<'session, 'borrow, 'scope, O, PP, U, L>
+impl<'session, 'work, 'scope, O, PP, U, L> CanonicalAuthoringControl
+    for ScopedAuthoringControl<'session, 'work, 'scope, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,

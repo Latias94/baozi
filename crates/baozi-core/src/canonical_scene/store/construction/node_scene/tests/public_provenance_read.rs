@@ -76,8 +76,11 @@ fn provenance_scene(account: &PhysicalStorageAccount) -> ValidatedScene {
             payload: JSON,
         },
     )];
+    let mut construction_root_1 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let parts = successful_parts(
         NodeSceneTestTransaction::with_account(
+            &mut construction_root_1,
             account,
             test_limits(),
             SceneAuthoringBatch::new(

@@ -4,8 +4,10 @@ use std::num::NonZeroU64;
 #[cfg(test)]
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalActivationOutcome, CanonicalActivationSeal, CanonicalActivationSessionPolicy,
-    CanonicalCentralValidationOutcome, CanonicalMaterializationRole, CanonicalValidationProgress,
-    CanonicalValidationRole, RetainedStoreSessionOutcomeOwner, RetainedStoreWriterRole,
+    CanonicalActivationSlots, CanonicalDispositionSlot, CanonicalMaterializationRole,
+    CanonicalOutputSlot, CanonicalProofSlot, CanonicalSemanticWorkError,
+    CanonicalValidationProgress, CanonicalValidationRole, CanonicalValidationSlots,
+    RetainedStoreSessionOutcomeOwner, RetainedStoreWriterRole,
 };
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalFailureRequirements, CanonicalLane, CanonicalMaterialization, CanonicalReservation,
@@ -15,12 +17,10 @@ use baozi_operation::__retained_store_integration::producer::{
     CanonicalActivationDescription, CanonicalActivationPlanSealer, CanonicalActivationRequest,
     CanonicalSealedActivationPlan, CanonicalSuccessRequirements, CanonicalTableShape,
 };
-#[cfg(test)]
-use baozi_operation::FinalProgress;
 use baozi_operation::{
-    CapacityPlan, OperationOwner, OutcomeEvidenceRecordRowWriter, ProgressPhase, ProgressUnit,
-    RecordBlock, RecordPlan, RetainedStoreBatchLimits, StoreBuildError, StorePlanError,
-    StoreRuntimeError, StoreWorkError,
+    CapacityPlan, OperationOwner, OutcomeEvidenceRecordRowWriter, OutcomeEvidenceStoreRef,
+    ProgressPhase, ProgressUnit, RecordBlock, RecordPlan, RetainedStoreBatchLimits,
+    StoreBuildError, StorePlanError, StoreRuntimeError, StoreWorkError,
 };
 #[cfg(test)]
 use baozi_operation::{StoreDimensionKey, StorePhaseKey};
@@ -72,8 +72,6 @@ mod validation;
 #[cfg(test)]
 use super::NodeSceneBuildFaults;
 use super::{NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneConstructionRejection, SceneEvidenceCounts};
-#[cfg(test)]
-use super::{NodeSceneDraftBuild, PendingNodeSceneDraft, PendingNodeSceneFailure};
 use crate::canonical_scene::store::typed_storage::animation::{
     build::AnimationStoragePlan, validation::AnimationMeteredCounts,
 };
@@ -345,13 +343,16 @@ pub struct NodeSceneLaneOutput(NodeSceneActivationOutput);
 
 /// Opaque proof minted only by exact central validation of a lane output.
 #[derive(Clone, Copy)]
-pub struct NodeSceneLaneValidationProof(super::NodeSceneValidationProof);
+pub struct NodeSceneLaneValidationProof {
+    pub(super) scene: super::NodeSceneValidationProof,
+    pub(super) evidence_root: OutcomeEvidenceStoreRef<RecordBlock, NodeSceneOutcomeEvidenceSchema>,
+}
 
 impl NodeSceneLaneValidationProof {
     pub(in crate::canonical_scene::store) const fn into_inner(
         self,
     ) -> super::NodeSceneValidationProof {
-        self.0
+        self.scene
     }
 }
 
@@ -487,37 +488,17 @@ impl<'input> NodeSceneActivationRequest<'input> {
             sealed_counts: SceneEvidenceCounts::authoring_rejection(),
         }
     }
-
-    #[cfg(test)]
-    pub(in crate::canonical_scene::store) fn activate<O, PP, U>(
-        self,
-        owner: RetainedStoreSessionOutcomeOwner<O, PP, U>,
-        validation_progress: CanonicalValidationProgress<PP, U>,
-        final_progress: FinalProgress<PP, U>,
-    ) -> Result<NodeSceneDraftBuild<O, PP, U>, SceneConstructionError>
-    where
-        O: OperationOwner,
-        PP: ProgressPhase,
-        U: ProgressUnit,
-    {
-        drive_node_scene_test_activation(
-            owner,
-            self.into_transaction(),
-            validation_progress,
-            final_progress,
-            NodeSceneBuildFaults::none(),
-        )
-    }
 }
 
 impl<'input> NodeSceneActivationTransaction<'input> {
     /// Runs semantic validation and physical planning without receiving operation ownership.
     ///
-    /// The caller remains responsible for resolving the semantic session with `finish_exact` or
-    /// `finish_rejected`, and for sealing or rejecting its own planning transaction.
-    pub fn preflight<'scope, O, PP, U, L>(
+    /// Run this inside `CanonicalPlanning::with_semantic_work`, whose host resolves semantic work.
+    /// The caller seals or rejects its planning transaction after the callback returns, retaining
+    /// the plan's input lifetime and outer planning scope independently of the semantic borrow.
+    pub fn preflight<'work, 'scope, O, PP, U, L>(
         &mut self,
-        semantic: &mut CanonicalSemanticWorkSession<'_, 'scope, O, PP, U, L>,
+        semantic: &mut CanonicalSemanticWorkSession<'work, 'scope, O, PP, U, L>,
     ) -> Result<NodeSceneLanePlan<'input, 'scope, O>, NodeSceneLaneRejection>
     where
         O: OperationOwner,
@@ -657,7 +638,7 @@ where
     /// Materializes the sealed plan through the only authority accepted by this core seam.
     pub fn materialize<'lane, PP, U, L>(
         &self,
-        lane: CanonicalLane<'lane, O, PP, U, L>,
+        lane: CanonicalLane<'_, 'lane, O, PP, U, L>,
     ) -> CanonicalMaterialization<
         'lane,
         NodeSceneLaneOutput,
@@ -678,7 +659,7 @@ where
 
     fn materialize_mapped<'lane, PP, U, L>(
         &self,
-        lane: CanonicalLane<'lane, O, PP, U, L>,
+        lane: CanonicalLane<'_, 'lane, O, PP, U, L>,
         #[cfg(test)] faults: NodeSceneBuildFaults,
     ) -> CanonicalMaterialization<
         'lane,
@@ -705,7 +686,7 @@ where
     #[cfg(test)]
     fn materialize_with_faults<'lane, PP, U, L>(
         &self,
-        lane: CanonicalLane<'lane, O, PP, U, L>,
+        lane: CanonicalLane<'_, 'lane, O, PP, U, L>,
         faults: NodeSceneBuildFaults,
     ) -> CanonicalMaterialization<
         'lane,
@@ -844,7 +825,10 @@ impl NodeSceneActivationPostflight {
                 };
                 Ok(match proof {
                     Some(proof) => {
-                        CanonicalValidationDecision::accept(NodeSceneLaneValidationProof(proof))
+                        CanonicalValidationDecision::accept(NodeSceneLaneValidationProof {
+                            scene: proof,
+                            evidence_root: evidence.reference(),
+                        })
                     }
                     None => CanonicalValidationDecision::reject(
                         NodeSceneLaneRejection::from(
@@ -1325,7 +1309,7 @@ pub(super) fn node_scene_activation_roles(keys: SceneStoreKeys) -> NodeSceneActi
 
 #[allow(clippy::too_many_arguments)]
 fn materialize_node_scene_mapped<'lane, R, O, PP, U, L, T, E>(
-    mut lane: CanonicalLane<'lane, O, PP, U, L>,
+    mut lane: CanonicalLane<'_, 'lane, O, PP, U, L>,
     plan: &NodeSceneExecutionPlan<'_, R>,
     brand: super::super::ConstructionBrand,
     #[cfg(test)] mut faults: NodeSceneBuildFaults,
@@ -1546,13 +1530,28 @@ where
 }
 
 #[cfg(test)]
-pub(super) fn activate_node_scene_with_faults_for_test<'input, O, PP, U>(
+pub(in crate::canonical_scene::store) struct NodeSceneTestSlots<'inv> {
+    pub(super) output_slot: CanonicalOutputSlot<'inv, NodeSceneLaneOutput>,
+    pub(super) proof_slot: CanonicalProofSlot<'inv, NodeSceneLaneValidationProof>,
+    pub(super) activation_slots: CanonicalActivationSlots<'inv, NodeSceneLaneRejection>,
+    pub(super) validation_slots: CanonicalValidationSlots<'inv, NodeSceneLaneRejection>,
+}
+
+#[cfg(test)]
+pub(super) fn activate_node_scene_with_faults_for_test<'input, 'inv, O, PP, U>(
     request: NodeSceneActivationRequest<'input>,
-    owner: RetainedStoreSessionOutcomeOwner<O, PP, U>,
+    owner: RetainedStoreSessionOutcomeOwner<'inv, O, PP, U>,
+    slots: NodeSceneTestSlots<'inv>,
     validation_progress: CanonicalValidationProgress<PP, U>,
-    final_progress: FinalProgress<PP, U>,
+    disposition: CanonicalDispositionSlot<
+        'inv,
+        RecordBlock,
+        SceneDirectorySchema,
+        RecordBlock,
+        NodeSceneOutcomeEvidenceSchema,
+    >,
     faults: NodeSceneBuildFaults,
-) -> Result<NodeSceneDraftBuild<O, PP, U>, SceneConstructionError>
+) -> Result<NodeSceneEvidenceRecipe, SceneConstructionError>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1560,113 +1559,105 @@ where
 {
     drive_node_scene_test_activation(
         owner,
+        slots,
         request.into_transaction(),
         validation_progress,
-        final_progress,
+        disposition,
         faults,
     )
 }
 
 #[cfg(test)]
-fn drive_node_scene_test_activation<'input, O, PP, U, L>(
-    owner: RetainedStoreSessionOutcomeOwner<O, PP, U, L>,
+fn drive_node_scene_test_activation<'input, 'inv, O, PP, U, L>(
+    owner: RetainedStoreSessionOutcomeOwner<'inv, O, PP, U, L>,
+    slots: NodeSceneTestSlots<'inv>,
     mut transaction: NodeSceneActivationTransaction<'input>,
     validation_progress: CanonicalValidationProgress<PP, U>,
-    final_progress: FinalProgress<PP, U>,
+    disposition: CanonicalDispositionSlot<
+        'inv,
+        RecordBlock,
+        SceneDirectorySchema,
+        RecordBlock,
+        NodeSceneOutcomeEvidenceSchema,
+    >,
     faults: NodeSceneBuildFaults,
-) -> Result<NodeSceneDraftBuild<O, PP, U>, SceneConstructionError>
+) -> Result<NodeSceneEvidenceRecipe, SceneConstructionError>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    let NodeSceneTestSlots {
+        output_slot,
+        proof_slot,
+        activation_slots,
+        validation_slots,
+    } = slots;
     let panic_central_validator = faults.panic_central_validator;
-    let outcome = owner.plan_and_activate_scoped(|mut planning| {
-        let preflight = match planning.begin_semantic_work() {
-            Ok(mut semantic) => match transaction.preflight(&mut semantic) {
-                Ok(plan) => match semantic.finish_exact() {
-                    Ok(completion) => Ok((plan, completion)),
-                    Err(_cause) => {
-                        drop(plan);
-                        Err(NodeSceneLaneRejection::construction_invariant())
+    let outcome =
+        owner.plan_and_activate_scoped(output_slot, activation_slots, |mut planning| {
+            let preflight = planning
+                .with_semantic_work(|semantic| transaction.preflight(semantic))
+                .map_err(|error| match error {
+                    CanonicalSemanticWorkError::Runtime(_cause) => {
+                        NodeSceneLaneRejection::construction_invariant()
                     }
-                },
+                    CanonicalSemanticWorkError::Rejected(rejection) => rejection,
+                });
+            let (plan, completion) = match preflight {
+                Ok(ready) => ready,
                 Err(rejection) => {
-                    let _ = semantic.finish_rejected();
-                    Err(rejection)
+                    let stable_code = rejection.stable_code();
+                    return planning.reject(rejection, stable_code);
                 }
-            },
-            Err(_cause) => Err(NodeSceneLaneRejection::construction_invariant()),
-        };
-        let (plan, completion) = match preflight {
-            Ok(ready) => ready,
-            Err(rejection) => {
+            };
+            #[cfg(test)]
+            if matches!(faults.planning, Some(NodeScenePlanningFault::SealedPlan)) {
+                drop(plan);
+                let rejection = NodeSceneLaneRejection::from(NodeSceneConstructionRejection::<
+                    StoreRuntimeError,
+                >::Planning(
+                    StorePlanError::InvalidBlockTable
+                ));
                 let stable_code = rejection.stable_code();
                 return planning.reject(rejection, stable_code);
             }
-        };
-        #[cfg(test)]
-        if matches!(faults.planning, Some(NodeScenePlanningFault::SealedPlan)) {
-            drop(plan);
-            let rejection = NodeSceneLaneRejection::from(NodeSceneConstructionRejection::<
-                StoreRuntimeError,
-            >::Planning(
-                StorePlanError::InvalidBlockTable
-            ));
-            let stable_code = rejection.stable_code();
-            return planning.reject(rejection, stable_code);
-        }
-        if matches!(faults.planning, Some(NodeScenePlanningFault::Publication)) {
-            drop(plan);
-            let rejection = NodeSceneLaneRejection::from(NodeSceneConstructionRejection::<
-                StoreRuntimeError,
-            >::Planning(
-                StorePlanError::InvalidBlockTable
-            ));
-            let stable_code = rejection.stable_code();
-            return planning.reject(rejection, stable_code);
-        }
-        let permit = match planning.seal_activation(plan, completion) {
-            CanonicalActivationSeal::Sealed(permit) => permit,
-            CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
-        };
-        permit.activate(move |lane, execution| execution.materialize_with_faults(lane, faults))
-    })?;
+            if matches!(faults.planning, Some(NodeScenePlanningFault::Publication)) {
+                drop(plan);
+                let rejection = NodeSceneLaneRejection::from(NodeSceneConstructionRejection::<
+                    StoreRuntimeError,
+                >::Planning(
+                    StorePlanError::InvalidBlockTable
+                ));
+                let stable_code = rejection.stable_code();
+                return planning.reject(rejection, stable_code);
+            }
+            let permit = match planning.seal_activation(plan, completion) {
+                CanonicalActivationSeal::Sealed(permit) => permit,
+                CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
+            };
+            permit.activate(move |lane, execution| execution.materialize_with_faults(lane, faults))
+        })?;
     let postflight = transaction.finish();
     let failure_evidence = postflight.failure_evidence();
 
     let activated = match outcome {
         CanonicalActivationOutcome::Activated(activated) => activated,
         CanonicalActivationOutcome::Rejected(rejected) => {
-            return prepare_node_scene_test_failure::<O, PP, U, L>(
-                PendingNodeSceneFailure::ActivationRejected {
-                    owner: rejected,
-                    evidence_plan: failure_evidence.record_plan(),
-                    evidence_counts: failure_evidence.counts(),
-                    final_progress,
-                },
-            );
+            rejected.request_finish(disposition)?;
+            return Ok(failure_evidence);
         }
         CanonicalActivationOutcome::NeverActivated(never_activated) => {
-            return prepare_node_scene_test_failure::<O, PP, U, L>(
-                PendingNodeSceneFailure::NeverActivated {
-                    owner: never_activated,
-                    evidence_plan: failure_evidence.record_plan(),
-                    evidence_counts: failure_evidence.counts(),
-                    final_progress,
-                },
-            );
-        }
-        CanonicalActivationOutcome::Fallback(fallback) => {
-            return prepare_node_scene_test_failure::<O, PP, U, L>(
-                PendingNodeSceneFailure::PreparedFallback(fallback),
-            );
+            never_activated.request_finish(disposition)?;
+            return Ok(failure_evidence);
         }
     };
 
     let candidate_evidence = postflight.candidate_evidence(activated.output());
     let central_counts = candidate_evidence.counts();
     let outcome = activated.validate_centrally(
+        proof_slot,
+        validation_slots,
         validation_progress,
         |lane, _output| match lane.try_retain_records(
             candidate_evidence.record_plan(),
@@ -1688,53 +1679,8 @@ where
             postflight.validate_candidate(planning, output)
         },
     )?;
-    match outcome {
-        CanonicalCentralValidationOutcome::Candidate(candidate) => Ok(NodeSceneDraftBuild::Draft {
-            owner: PendingNodeSceneDraft {
-                candidate,
-                final_progress,
-            },
-        }),
-        CanonicalCentralValidationOutcome::Rejected(rejected) => {
-            prepare_node_scene_test_failure::<O, PP, U, L>(
-                PendingNodeSceneFailure::CentralRejected {
-                    owner: rejected,
-                    evidence_counts: central_counts,
-                    final_progress,
-                },
-            )
-        }
-        CanonicalCentralValidationOutcome::Interrupted(interrupted) => {
-            prepare_node_scene_test_failure::<O, PP, U, L>(
-                PendingNodeSceneFailure::CentralInterrupted {
-                    owner: interrupted,
-                    evidence_counts: central_counts,
-                    final_progress,
-                },
-            )
-        }
-        CanonicalCentralValidationOutcome::Fallback(fallback) => {
-            prepare_node_scene_test_failure::<O, PP, U, L>(
-                PendingNodeSceneFailure::DeferredFallback(fallback),
-            )
-        }
-    }
-}
-
-#[cfg(test)]
-fn prepare_node_scene_test_failure<O, PP, U, L>(
-    pending: PendingNodeSceneFailure<O, PP, U, L>,
-) -> Result<NodeSceneDraftBuild<O, PP, U>, SceneConstructionError>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    let (prepared, authoring_rejection, _control_cause) = pending.prepare()?;
-    Ok(NodeSceneDraftBuild::Failure {
-        authoring_rejection,
-        prepared,
-    })
+    outcome.request_finish(disposition)?;
+    Ok(candidate_evidence)
 }
 
 pub(super) fn write_node_scene_evidence_row(
@@ -1785,7 +1731,7 @@ fn write_node_scene_evidence_counts(
 }
 
 fn retain_node_scene_directory<'lane, O, PP, U, L>(
-    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
+    lane: &mut CanonicalLane<'_, 'lane, O, PP, U, L>,
     plan: RecordPlan,
     plans: &NodeSceneMaterializationPlans,
     #[cfg(test)] revision_override: Option<u32>,

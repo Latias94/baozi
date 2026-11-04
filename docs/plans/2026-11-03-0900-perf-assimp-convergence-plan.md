@@ -459,3 +459,16 @@ negative case only for a genuinely new boundary, not for incidental private layo
   late preparation, original-account unattached finalization, backing/promotion, owning
   path deletion, main integration and full ordinary time/memory/heap acceptance remain
   separate advancing work, without a new performance keep.
+- The [actual preparation-before-attachment checkpoint](../reviews/2026-11-05-preparation-before-attachment.md)
+  connects direct original-account completion and actual Postprocess prework before
+  retained write attachment. Source3 passes 3,565 workspace tests (six existing skips),
+  183 doctests, 138 asset-consumer tests (one existing skip), strict lints, formats,
+  standalone Scene configurations and fuzz compilation/library regressions. Fresh
+  retained compiler and default-stack artifacts close the bounded source/evidence cut.
+  A demonstrated tangent preallocation breach is repaired by removing dead zero writes
+  and allocating after the first computed face; original budget/memory/source assertions
+  remain. Native convergence, allocation-free empty/single calls, backing/promotion,
+  remaining owning-path deletion and indexing remain open. The exact reviewed 260-input
+  overlay is applied to main after standalone checks and a pinned Linux registry ASan
+  smoke; main-root strict compilation and formatting pass. A fresh exact-current control
+  worker is retained; integrated-candidate native performance acceptance is still open.

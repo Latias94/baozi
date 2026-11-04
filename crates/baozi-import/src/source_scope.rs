@@ -3,7 +3,7 @@ use crate::error::ScopeAbortCause;
 use crate::ledger::ImportDimension;
 use crate::metered_storage::AccountedVec;
 use crate::scope::{
-    ImportStorageClass, METERED_COPY_POLL_INTERVAL, ParseExecution, ParseFailure, ParseResult,
+    ImportStorageClass, METERED_COPY_POLL_INTERVAL, ParseFailure, ParseResult, ParseServices,
 };
 use baozi_io::AssetPath;
 use sha2::{Digest, Sha256};
@@ -327,6 +327,32 @@ impl fmt::Debug for SourceScopeRecord {
 }
 
 /// Incremental, session-metered construction of one source-scope record.
+///
+/// Finalized evidence can be submitted through a fresh short service borrow:
+/// ```
+/// use baozi_import::{ParseResult, ParseRoot, SourceScopeRecordBuilder};
+/// fn submit<'session>(
+///     root: &mut ParseRoot<'_, '_, 'session>,
+///     builder: SourceScopeRecordBuilder<'session>,
+/// ) -> ParseResult<()> {
+///     let finalized = builder.finish(&mut root.services()?)?;
+///     root.services()?.record_source_scope(finalized)
+/// }
+/// ```
+///
+/// A live service borrow excludes another service borrow from the same root:
+/// ```compile_fail,E0499
+/// use baozi_import::{ParseResult, ParseRoot, SourceScopeRecordBuilder};
+/// fn submit<'session>(
+///     root: &mut ParseRoot<'_, '_, 'session>,
+///     builder: SourceScopeRecordBuilder<'session>,
+/// ) -> ParseResult<()> {
+///     let mut services = root.services()?;
+///     let finalized = builder.finish(&mut services)?;
+///     root.services()?.record_source_scope(finalized)?;
+///     services.poll()
+/// }
+/// ```
 #[must_use = "finish and submit source-scope evidence or drop the builder"]
 pub struct SourceScopeRecordBuilder<'session> {
     issuer: &'session DependencyOriginIssuer,
@@ -344,7 +370,7 @@ pub struct SourceScopeRecordBuilder<'session> {
 
 impl<'session> SourceScopeRecordBuilder<'session> {
     pub(crate) fn new(
-        scope: &mut ParseExecution<'_, 'session>,
+        scope: &mut ParseServices<'_, '_, 'session>,
         selection_request: SourceScopeSelectionRequest,
         selection_outcome: SourceScopeSelectionOutcome,
     ) -> ParseResult<Self> {
@@ -402,7 +428,7 @@ impl<'session> SourceScopeRecordBuilder<'session> {
 
     pub fn observe(
         &mut self,
-        scope: &mut ParseExecution<'_, 'session>,
+        scope: &mut ParseServices<'_, '_, 'session>,
         kind: SourceScopeEntityKind,
         disposition: SourceScopeDisposition,
         identity: &str,
@@ -529,7 +555,7 @@ impl<'session> SourceScopeRecordBuilder<'session> {
 
     pub fn finish(
         self,
-        scope: &mut ParseExecution<'_, 'session>,
+        scope: &mut ParseServices<'_, '_, 'session>,
     ) -> ParseResult<FinalizedSourceScopeRecord<'session>> {
         scope.check_session(self.issuer)?;
         let digest = SourceScopeDigest(self.digest.finalize().into());
@@ -628,7 +654,7 @@ impl fmt::Debug for FinalizedSourceScopeRecord<'_> {
     }
 }
 
-impl ParseExecution<'_, '_> {
+impl ParseServices<'_, '_, '_> {
     pub(crate) fn source_scope_descriptor_failure(&self, code: &'static str) -> ParseFailure {
         self.source_scope_abort(ScopeAbortCause::DescriptorContract { code })
     }
@@ -676,7 +702,7 @@ mod tests {
             &self,
             _probe: &crate::Probe<'_>,
             _hint: &ReadHint,
-            _scope: &DetectionScope<'_>,
+            _scope: &mut DetectionScope<'_, '_>,
         ) -> DetectionResult<DetectionOutcome> {
             Ok(DetectionOutcome::Match(ReadConfidence::Certain))
         }
@@ -684,9 +710,10 @@ mod tests {
         fn parse(
             &self,
             _options: &Self::Options,
-            context: &mut crate::ParseContext<'_>,
+            context: &mut crate::ParseContext<'_, '_>,
         ) -> ParseResult<()> {
-            context.with_execution(|scope| -> ParseResult<()> {
+            context.with_execution(|root| -> ParseResult<()> {
+                let mut scope = root.services()?;
                 let document = scope
                     .source()
                     .try_clone()
@@ -696,12 +723,12 @@ mod tests {
                     SourceScopeSelectionOutcome::parentless_node_projection(document),
                 )?;
                 builder.observe(
-                    scope,
+                    &mut scope,
                     SourceScopeEntityKind::Scene,
                     SourceScopeDisposition::Selected,
                     "scene",
                 )?;
-                let finalized = builder.finish(scope)?;
+                let finalized = builder.finish(&mut scope)?;
                 inject_next_accounted_allocation_failure();
                 scope.record_source_scope(finalized)?;
                 unreachable!("the injected loss-evidence allocation must fail")

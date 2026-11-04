@@ -1,8 +1,8 @@
 //! Session-owned external-resource graph and successful input manifest.
 //!
 //! This module owns both the authority-qualified physical dependency cache and the logical graph.
-//! `ParseExecution` receives only opaque origin handles and dependency results; format crates cannot
-//! inspect graph IDs, physical cache keys, or manifest construction state.
+//! Parser-facing services receive only opaque origin handles and dependency results; format crates
+//! cannot inspect graph IDs, physical cache keys, or manifest construction state.
 
 mod depth;
 mod manifest;
@@ -29,7 +29,7 @@ use crate::ledger::{ImportDimension, ImportLedgerPhase};
 use crate::limits::ResourceLimits;
 use crate::metered_storage::{AccountedVec, capacity_plan_cause};
 use crate::resource_hash::chunked_sha256;
-use crate::store::{ImportBoundWorkGroup, ImportStoreExecution, ImportStoreReservation};
+use crate::store::{ImportRootExecution, ImportRootWorkLayout, ImportStoreReservation};
 use baozi_io::__semantic_identity::StableResourceIdentitySchema;
 use baozi_io::{AssetPath, AuthorityDomain};
 use baozi_operation::{CapacityPlan, CapacityPlanError};
@@ -338,7 +338,7 @@ impl ResourceGraph {
 
     pub(crate) fn acquisition_state(
         &self,
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
         identity: &DependencyIdentity,
     ) -> Result<Option<ResourceAcquisitionState>, ResourceGraphError> {
         Ok(self
@@ -361,7 +361,7 @@ impl ResourceGraph {
 
     pub(crate) fn reserve_acquisition_capacity(
         &mut self,
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
     ) -> Result<(), ResourceGraphError> {
         let plan = self.cache.capacity_plan().map_err(dependency_cache_error)?;
         if !plan.requires_apply() {
@@ -464,7 +464,7 @@ impl ResourceGraph {
 
     pub(crate) fn begin_acquisition(
         &mut self,
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
         identity: DependencyIdentity,
         identity_path_reservation: ImportStoreReservation,
     ) -> Result<bool, ResourceGraphError> {
@@ -475,7 +475,7 @@ impl ResourceGraph {
 
     pub(crate) fn complete_acquisition(
         &mut self,
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
         identity: &DependencyIdentity,
         bytes: Arc<SharedDependencySnapshot>,
         stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
@@ -488,7 +488,7 @@ impl ResourceGraph {
 
     pub(crate) fn abandon_acquisition(
         &mut self,
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
         identity: &DependencyIdentity,
     ) -> Result<(), ResourceGraphError> {
         self.cache
@@ -500,7 +500,7 @@ impl ResourceGraph {
 
     pub(crate) fn complete_failed_acquisition(
         &mut self,
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
         identity: &DependencyIdentity,
         cause: ScopeAbortCause,
         stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
@@ -521,7 +521,7 @@ impl ResourceGraph {
 
     pub(crate) fn bind_primary(
         &mut self,
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
         authority: &AuthorityDomain,
         path: &AssetPath,
         bytes: &[u8],
@@ -588,7 +588,7 @@ impl ResourceGraph {
 
     pub(crate) fn begin_relation(
         &mut self,
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
         source: usize,
         role: &DependencyRoleId,
         requirement: DependencyRequirement,
@@ -641,7 +641,7 @@ impl ResourceGraph {
 
     pub(crate) fn prepare_target(
         &mut self,
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
         pending: &mut PendingResourceRelation,
         identity: &DependencyIdentity,
     ) -> Result<(), ResourceGraphError> {
@@ -684,7 +684,7 @@ impl ResourceGraph {
 
     pub(crate) fn complete_available(
         &mut self,
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
         mut pending: PendingResourceRelation,
         cache_index: usize,
         bytes: &[u8],
@@ -815,7 +815,7 @@ impl ResourceGraph {
 
     pub(crate) fn complete_unavailable(
         &mut self,
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
         pending: PendingResourceRelation,
         normalized: Option<&AssetPath>,
         identity: Option<&DependencyIdentity>,
@@ -878,7 +878,7 @@ impl ResourceGraph {
 
     pub(crate) fn seal(
         &mut self,
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
     ) -> Result<(), ResourceGraphError> {
         if self.sealed_manifest.is_some() {
             return Err(ResourceGraphError::AlreadySealed);
@@ -898,14 +898,14 @@ impl ResourceGraph {
             .bind_group([ImportDimension::InputManifestWork])
             .map_err(|cause| ResourceGraphError::Scope(cause.into_scope_abort_cause()))?;
         for _ in 0..self.nodes.len() {
-            charge_bound_work(&group, 1)?;
+            charge_bound_work(exec, &group, 1)?;
             digests.push_reserved_infallible(None);
         }
         let mut physical =
             manifest_scratch_vec(exec, postorder.len(), "resource-manifest-node-classes")?;
 
         for &index in postorder.iter() {
-            charge_bound_work(&group, 1)?;
+            charge_bound_work(exec, &group, 1)?;
             let node = self
                 .nodes
                 .get(index)
@@ -917,7 +917,7 @@ impl ResourceGraph {
             )?;
             for relation in self.outgoing_relations(index)? {
                 let relation = relation?;
-                charge_bound_work(&group, 1)?;
+                charge_bound_work(exec, &group, 1)?;
                 let relation = project_relation(exec, relation, &digests)?;
                 let canonical_len = relation_key_len(
                     relation.role(),
@@ -1016,7 +1016,7 @@ impl ResourceGraph {
 
     fn push_relation(
         &mut self,
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
         pending: PendingResourceRelation,
         reference: (ManifestReference, Option<ImportStoreReservation>),
         outcome: (GraphRelationOutcome, Option<ImportStoreReservation>),
@@ -1112,7 +1112,7 @@ impl ResourceGraph {
 
     fn prepare_cache_binding(
         &mut self,
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
         cache_index: usize,
         node_index: usize,
     ) -> Result<(), ResourceGraphError> {
@@ -1143,7 +1143,7 @@ impl ResourceGraph {
 
     fn find_node(
         &self,
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
         identity: &DependencyIdentity,
     ) -> Result<Option<usize>, ResourceGraphError> {
         if let Some(primary) = self.primary {
@@ -1212,7 +1212,7 @@ impl ResourceGraph {
 
     fn postorder(
         &self,
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
         primary: usize,
     ) -> Result<AccountedVec<usize>, ResourceGraphError> {
         let mut states = AccountedVec::new();
@@ -1225,7 +1225,7 @@ impl ResourceGraph {
             .bind_group([ImportDimension::InputManifestWork])
             .map_err(|cause| ResourceGraphError::Scope(cause.into_scope_abort_cause()))?;
         for _ in 0..self.nodes.len() {
-            charge_bound_work(&group, 1)?;
+            charge_bound_work(exec, &group, 1)?;
             states.push_reserved_infallible(0_u8);
         }
         let stack_capacity = self
@@ -1250,7 +1250,7 @@ impl ResourceGraph {
             })
             .map_err(ResourceGraphError::Scope)?;
         while let Some((index, expanded)) = stack.pop() {
-            charge_bound_work(&group, 1)?;
+            charge_bound_work(exec, &group, 1)?;
             self.nodes
                 .get(index)
                 .ok_or(ResourceGraphError::DanglingNode)?;
@@ -1268,7 +1268,7 @@ impl ResourceGraph {
             stack.push_reserved_infallible((index, true));
             for relation in self.outgoing_relations_rev(index)? {
                 let relation = relation?;
-                charge_bound_work(&group, 1)?;
+                charge_bound_work(exec, &group, 1)?;
                 if let GraphRelationOutcome::Available { target } = &relation.outcome {
                     match states.get(*target).copied() {
                         Some(0) => stack.push_reserved_infallible((*target, false)),
@@ -1320,7 +1320,7 @@ impl ResourceGraph {
 
     fn validate_relation_storage(
         &self,
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
     ) -> Result<(), ResourceGraphError> {
         let relation_count =
             usize::try_from(self.relation_count).map_err(|_| ResourceGraphError::Overflow)?;
@@ -1331,7 +1331,7 @@ impl ResourceGraph {
             .bind_group([ImportDimension::InputManifestWork])
             .map_err(|cause| ResourceGraphError::Scope(cause.into_scope_abort_cause()))?;
         let declared = self.nodes.iter().try_fold(0usize, |total, node| {
-            charge_bound_work(&group, 1)?;
+            charge_bound_work(exec, &group, 1)?;
             total
                 .checked_add(node.outgoing_count)
                 .ok_or(ResourceGraphError::Overflow)
@@ -1348,7 +1348,7 @@ impl ResourceGraph {
 }
 
 fn fold_manifest_relations(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut ImportRootExecution<'_, '_>,
     mut digested: AccountedVec<DigestedManifestRelation>,
 ) -> Result<AccountedVec<ManifestRelation>, ResourceGraphError> {
     sort_by_manifest_digest(exec, &mut digested, |entry| entry.digest)?;
@@ -1359,7 +1359,9 @@ fn fold_manifest_relations(
     let mut entries = digested.into_iter().peekable();
     while let Some(first) = entries.next() {
         let mut multiplicity = first.relation.multiplicity();
-        while next_digest_matches(&group, entries.peek(), first.digest, |entry| entry.digest)? {
+        while next_digest_matches(exec, &group, entries.peek(), first.digest, |entry| {
+            entry.digest
+        })? {
             let next = entries
                 .next()
                 .expect("a peeked manifest relation remains available");
@@ -1376,7 +1378,7 @@ fn fold_manifest_relations(
 }
 
 fn fold_manifest_nodes(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut ImportRootExecution<'_, '_>,
     mut digested: AccountedVec<DigestedManifestNode>,
     graph_nodes: &[GraphNode],
 ) -> Result<AccountedVec<ManifestNodeClass>, ResourceGraphError> {
@@ -1394,7 +1396,9 @@ fn fold_manifest_nodes(
         let source = graph_nodes
             .get(first.source_index)
             .ok_or(ResourceGraphError::DanglingNode)?;
-        while next_digest_matches(&group, entries.peek(), first.digest, |entry| entry.digest)? {
+        while next_digest_matches(exec, &group, entries.peek(), first.digest, |entry| {
+            entry.digest
+        })? {
             let next = entries
                 .next()
                 .expect("a peeked manifest node remains available");
@@ -1422,7 +1426,7 @@ fn fold_manifest_nodes(
 }
 
 fn sort_by_manifest_digest<T>(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut ImportRootExecution<'_, '_>,
     values: &mut [T],
     digest: impl Fn(&T) -> ManifestDigest + Copy,
 ) -> Result<(), ResourceGraphError> {
@@ -1433,17 +1437,18 @@ fn sort_by_manifest_digest<T>(
         .bind_group([ImportDimension::InputManifestWork])
         .map_err(|cause| ResourceGraphError::Scope(cause.into_scope_abort_cause()))?;
     for root in (0..values.len() / 2).rev() {
-        sift_manifest_digest_heap(&group, values, root, values.len(), digest)?;
+        sift_manifest_digest_heap(exec, &group, values, root, values.len(), digest)?;
     }
     for end in (1..values.len()).rev() {
         values.swap(0, end);
-        sift_manifest_digest_heap(&group, values, 0, end, digest)?;
+        sift_manifest_digest_heap(exec, &group, values, 0, end, digest)?;
     }
     Ok(())
 }
 
-fn sift_manifest_digest_heap<T>(
-    group: &ImportBoundWorkGroup<'_, 1>,
+fn sift_manifest_digest_heap<'op, T>(
+    exec: &mut ImportRootExecution<'_, 'op>,
+    group: &ImportRootWorkLayout<'op, 1>,
     values: &mut [T],
     mut root: usize,
     end: usize,
@@ -1453,11 +1458,11 @@ fn sift_manifest_digest_heap<T>(
         let child = root * 2 + 1;
         let mut larger = child;
         if child + 1 < end
-            && manifest_digest_less(group, &values[child], &values[child + 1], digest)?
+            && manifest_digest_less(exec, group, &values[child], &values[child + 1], digest)?
         {
             larger = child + 1;
         }
-        if !manifest_digest_less(group, &values[root], &values[larger], digest)? {
+        if !manifest_digest_less(exec, group, &values[root], &values[larger], digest)? {
             break;
         }
         values.swap(root, larger);
@@ -1466,18 +1471,20 @@ fn sift_manifest_digest_heap<T>(
     Ok(())
 }
 
-fn manifest_digest_less<T>(
-    group: &ImportBoundWorkGroup<'_, 1>,
+fn manifest_digest_less<'op, T>(
+    exec: &mut ImportRootExecution<'_, 'op>,
+    group: &ImportRootWorkLayout<'op, 1>,
     left: &T,
     right: &T,
     digest: impl Fn(&T) -> ManifestDigest,
 ) -> Result<bool, ResourceGraphError> {
-    charge_bound_work(group, 1)?;
+    charge_bound_work(exec, group, 1)?;
     Ok(digest(left) < digest(right))
 }
 
-fn next_digest_matches<T>(
-    group: &ImportBoundWorkGroup<'_, 1>,
+fn next_digest_matches<'op, T>(
+    exec: &mut ImportRootExecution<'_, 'op>,
+    group: &ImportRootWorkLayout<'op, 1>,
     next: Option<&T>,
     expected: ManifestDigest,
     digest: impl FnOnce(&T) -> ManifestDigest,
@@ -1485,12 +1492,12 @@ fn next_digest_matches<T>(
     let Some(next) = next else {
         return Ok(false);
     };
-    charge_bound_work(group, 1)?;
+    charge_bound_work(exec, group, 1)?;
     Ok(digest(next) == expected)
 }
 
 fn hash_manifest_bytes(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut ImportRootExecution<'_, '_>,
     bytes: &[u8],
 ) -> Result<ManifestDigest, ResourceGraphError> {
     chunked_sha256(exec, bytes, ImportDimension::InputManifestWork)
@@ -1499,25 +1506,23 @@ fn hash_manifest_bytes(
 }
 
 fn manifest_bytes_equal(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut ImportRootExecution<'_, '_>,
     left: &[u8],
     right: &[u8],
 ) -> Result<bool, ResourceGraphError> {
     let group = exec
         .bind_group([ImportDimension::InputManifestWork])
         .map_err(|cause| ResourceGraphError::Scope(cause.into_scope_abort_cause()))?;
-    charge_bound_work(&group, 1)?;
+    charge_bound_work(exec, &group, 1)?;
     if left.len() != right.len() {
         return Ok(false);
     }
     for (left, right) in left.chunks(256).zip(right.chunks(256)) {
         let work = u64::try_from(left.len()).map_err(|_| ResourceGraphError::Overflow)?;
-        group
-            .charge_attempted([work])
+        exec.charge_attempted_group(&group, [work])
             .map_err(|cause| ResourceGraphError::Scope(cause.into_scope_abort_cause()))?;
         let equal = left == right;
-        group
-            .complete_observed([work])
+        exec.complete_observed_group(&group, [work])
             .map_err(|cause| ResourceGraphError::Scope(cause.into_scope_abort_cause()))?;
         if !equal {
             return Ok(false);
@@ -1527,7 +1532,7 @@ fn manifest_bytes_equal(
 }
 
 fn project_relation(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut ImportRootExecution<'_, '_>,
     relation: &GraphRelation,
     digests: &[Option<ManifestDigest>],
 ) -> Result<ManifestRelation, ResourceGraphError> {
@@ -1592,7 +1597,7 @@ fn project_relation(
 }
 
 fn clone_manifest_identity(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut ImportRootExecution<'_, '_>,
     source: &ManifestResourceIdentity,
     resource: &'static str,
 ) -> Result<(ManifestResourceIdentity, ImportStoreReservation), ResourceGraphError> {
@@ -1604,7 +1609,7 @@ fn clone_manifest_identity(
 }
 
 fn manifest_counts_and_replay_status(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut ImportRootExecution<'_, '_>,
     classes: &[ManifestNodeClass],
     maximum_depth: u64,
 ) -> Result<(ResourceManifestCounts, InputReplayStatus), ResourceGraphError> {
@@ -1618,10 +1623,10 @@ fn manifest_counts_and_replay_status(
     };
     let mut reasons = ManifestObservedOnlyReasons::new();
     for class in classes {
-        charge_bound_work(&group, 1)?;
+        charge_bound_work(exec, &group, 1)?;
         note_unstable_identity(&mut reasons, class.identity());
         for relation in class.outgoing_relations() {
-            charge_bound_work(&group, 1)?;
+            charge_bound_work(exec, &group, 1)?;
             if let ManifestReference::Normalized(identity) = relation.reference() {
                 note_unstable_identity(&mut reasons, identity);
             }
@@ -1695,7 +1700,7 @@ fn note_unstable_identity(
 }
 
 fn manifest_identity(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut ImportRootExecution<'_, '_>,
     path: &AssetPath,
     reason: ManifestSessionOpaqueReason,
     resource: &'static str,
@@ -1711,7 +1716,7 @@ fn manifest_identity(
 }
 
 fn manifest_identity_for_resolution(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut ImportRootExecution<'_, '_>,
     path: &AssetPath,
     stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
     resource: &'static str,
@@ -1739,7 +1744,7 @@ fn manifest_identity_for_resolution(
 }
 
 fn clone_graph_path(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut ImportRootExecution<'_, '_>,
     source: &AssetPath,
     resource: &'static str,
 ) -> Result<(AssetPath, ImportStoreReservation), ResourceGraphError> {
@@ -1747,7 +1752,7 @@ fn clone_graph_path(
 }
 
 fn clone_owned_path(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut ImportRootExecution<'_, '_>,
     source: &AssetPath,
     resource: &'static str,
     retained: bool,
@@ -1907,7 +1912,7 @@ pub(crate) fn cached_unavailable_disposition(
 }
 
 fn charge_attempted(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut ImportRootExecution<'_, '_>,
     dimension: ImportDimension,
     amount: u64,
 ) -> Result<(), ResourceGraphError> {
@@ -1916,7 +1921,7 @@ fn charge_attempted(
 }
 
 fn charge_consumed(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut ImportRootExecution<'_, '_>,
     dimension: ImportDimension,
     amount: u64,
 ) -> Result<(), ResourceGraphError> {
@@ -1925,7 +1930,7 @@ fn charge_consumed(
 }
 
 fn charge_graph_work(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut ImportRootExecution<'_, '_>,
     amount: u64,
 ) -> Result<(), ResourceGraphError> {
     exec.poll()
@@ -1933,33 +1938,32 @@ fn charge_graph_work(
     let group = exec
         .bind_group([ImportDimension::ResourceGraphWork])
         .map_err(|cause| ResourceGraphError::Scope(cause.into_scope_abort_cause()))?;
-    charge_bound_work(&group, amount)
+    charge_bound_work(exec, &group, amount)
 }
 
-fn charge_bound_graph_work(
-    exec: &mut ImportStoreExecution<'_>,
-    group: &ImportBoundWorkGroup<'_, 1>,
+fn charge_bound_graph_work<'op>(
+    exec: &mut ImportRootExecution<'_, 'op>,
+    group: &ImportRootWorkLayout<'op, 1>,
     amount: u64,
 ) -> Result<(), ResourceGraphError> {
     exec.poll()
         .map_err(|cause| ResourceGraphError::Scope(cause.into_scope_abort_cause()))?;
-    charge_bound_work(group, amount)
+    charge_bound_work(exec, group, amount)
 }
 
-fn charge_bound_work(
-    group: &ImportBoundWorkGroup<'_, 1>,
+fn charge_bound_work<'op>(
+    exec: &mut ImportRootExecution<'_, 'op>,
+    group: &ImportRootWorkLayout<'op, 1>,
     amount: u64,
 ) -> Result<(), ResourceGraphError> {
-    group
-        .charge_attempted([amount])
+    exec.charge_attempted_group(group, [amount])
         .map_err(|cause| ResourceGraphError::Scope(cause.into_scope_abort_cause()))?;
-    group
-        .complete_observed([amount])
+    exec.complete_observed_group(group, [amount])
         .map_err(|cause| ResourceGraphError::Scope(cause.into_scope_abort_cause()))
 }
 
 fn reserve_graph_storage(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut ImportRootExecution<'_, '_>,
     bytes: u64,
 ) -> Result<ImportStoreReservation, ScopeAbortCause> {
     exec.reserve(
@@ -1971,7 +1975,7 @@ fn reserve_graph_storage(
 }
 
 fn reserve_manifest_storage(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut ImportRootExecution<'_, '_>,
     bytes: u64,
 ) -> Result<ImportStoreReservation, ScopeAbortCause> {
     exec.reserve(
@@ -1983,7 +1987,7 @@ fn reserve_manifest_storage(
 }
 
 fn reserve_manifest_scratch(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut ImportRootExecution<'_, '_>,
     bytes: u64,
 ) -> Result<ImportStoreReservation, ScopeAbortCause> {
     exec.reserve(
@@ -1995,7 +1999,7 @@ fn reserve_manifest_scratch(
 }
 
 fn manifest_scratch_vec<T>(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut ImportRootExecution<'_, '_>,
     capacity: usize,
     resource: &'static str,
 ) -> Result<AccountedVec<T>, ResourceGraphError> {
@@ -2009,7 +2013,7 @@ fn manifest_scratch_vec<T>(
 }
 
 fn manifest_output_vec<T>(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut ImportRootExecution<'_, '_>,
     capacity: usize,
     resource: &'static str,
 ) -> Result<AccountedVec<T>, ResourceGraphError> {
@@ -2055,7 +2059,7 @@ const fn dependency_cache_storage_resource(storage: DependencyCacheStorage) -> &
 }
 
 fn grow_acquisition_reservation(
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut ImportRootExecution<'_, '_>,
     storage: DependencyCacheStorage,
     temporary_envelope: u64,
     reservation: &mut Option<ImportStoreReservation>,
@@ -2115,7 +2119,7 @@ fn dependency_cache_capacity_plan_cause(
 
 fn restore_acquisition_reservations(
     cache: &mut DependencyCache,
-    exec: &mut ImportStoreExecution<'_>,
+    exec: &mut ImportRootExecution<'_, '_>,
     mut entry_reservation: Option<ImportStoreReservation>,
     entry_prior_bytes: u64,
     mut index_reservation: Option<ImportStoreReservation>,
@@ -2141,8 +2145,10 @@ mod tests {
     use crate::dependency::shared_dependency_snapshot_allocation_bytes;
     use crate::ledger::ImportOperationControl;
     use crate::store::{
-        ImportStoreBootstrapRequirements, ImportStoreSessionOwner, try_import_store_bootstrap,
+        ImportStoreBodyParts, ImportStoreBootstrapRequirements, ImportStoreInvocationRoot,
+        ImportStoreSessionOwner, try_import_store_bootstrap,
     };
+    use baozi_core::__scene_integration::integration::SceneParseOutcome;
     use baozi_operation::{
         DimensionPolicy, PhysicalStorageAccount, PhysicalStorageAccountFactory,
         PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits,
@@ -2154,21 +2160,11 @@ mod tests {
     mod growth;
     mod hashing;
 
-    fn store_owner(limits: &ResourceLimits) -> ImportStoreSessionOwner {
-        store_owner_with_control(limits, ImportOperationControl::default())
-    }
-
-    fn store_owner_with_control(
+    fn store_owner_and_account<'inv>(
+        parts: ImportStoreBodyParts<'inv>,
         limits: &ResourceLimits,
         control: ImportOperationControl,
-    ) -> ImportStoreSessionOwner {
-        store_owner_and_account(limits, control).0
-    }
-
-    fn store_owner_and_account(
-        limits: &ResourceLimits,
-        control: ImportOperationControl,
-    ) -> (ImportStoreSessionOwner, PhysicalStorageAccount) {
+    ) -> (ImportStoreSessionOwner<'inv>, PhysicalStorageAccount) {
         let requirements = ImportStoreBootstrapRequirements::for_node_scene(limits).unwrap();
         let bootstrap = try_import_store_bootstrap(limits, requirements).unwrap();
         let factory = PhysicalStorageAccountFactory::try_new(
@@ -2178,16 +2174,45 @@ mod tests {
         let account = factory
             .try_create_account(PhysicalStorageAccountLimits::new(u64::MAX, u64::MAX).unwrap())
             .unwrap();
-        let owner = ImportStoreSessionOwner::try_start(control, &account, bootstrap).unwrap();
+        let owner = ImportStoreSessionOwner::try_start_in_body(parts, control, &account, bootstrap)
+            .unwrap();
         (owner, account)
     }
 
-    fn assert_store_released(owner: ImportStoreSessionOwner, account: PhysicalStorageAccount) {
-        drop(owner);
+    fn assert_store_released(account: PhysicalStorageAccount) {
         let released = account.snapshot();
         assert_eq!(released.live_retained_bytes(), 0);
         assert_eq!(released.live_retained_allocations(), 0);
         assert!(!released.poisoned());
+    }
+
+    fn with_store_body(
+        limits: ResourceLimits,
+        control: ImportOperationControl,
+        body: impl for<'loan, 'op> FnOnce(&mut ImportRootExecution<'loan, 'op>, &PhysicalStorageAccount),
+    ) {
+        let mut root = ImportStoreInvocationRoot::new();
+        let mut startup = Some((control, body));
+        let mut account = None;
+        let finish = root
+            .run_body(|parts, disposition| {
+                let (control, body) = startup.take().unwrap();
+                let (mut owner, started_account) = store_owner_and_account(parts, &limits, control);
+                owner
+                    .with_root_execution(|exec| {
+                        body(exec, &started_account);
+                        Ok::<_, crate::store::ImportStoreHostError>(())
+                    })
+                    .unwrap();
+                owner
+                    .request_finish(disposition, SceneParseOutcome::Rejected)
+                    .unwrap();
+                account = Some(started_account);
+            })
+            .expect("the inspected import body must record its actual disposition");
+        let _finish = finish;
+        drop(root);
+        assert_store_released(account.unwrap());
     }
 
     fn dependency_identity(authority: &AuthorityDomain, path: &str) -> DependencyIdentity {
@@ -2246,7 +2271,7 @@ mod tests {
     }
 
     fn replay_status_for_relation(
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
         relation: ManifestRelation,
     ) -> InputReplayStatus {
         let class = ManifestNodeClass::new(
@@ -2262,7 +2287,7 @@ mod tests {
     }
 
     fn accounted_manifest_values<T>(
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
         values: Vec<T>,
     ) -> AccountedVec<T> {
         let mut accounted =
@@ -2274,7 +2299,7 @@ mod tests {
     }
 
     fn digested_manifest_relation_for_test(
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
         digest: ManifestDigest,
         reference: &str,
     ) -> DigestedManifestRelation {
@@ -2306,7 +2331,7 @@ mod tests {
     }
 
     fn digested_manifest_node_for_test(
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
         digest: ManifestDigest,
         source_index: usize,
         source: &GraphNode,
@@ -2355,7 +2380,7 @@ mod tests {
 
     fn add_available(
         graph: &mut ResourceGraph,
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
         source: usize,
         role: &DependencyRoleId,
         identity: &DependencyIdentity,
@@ -2374,7 +2399,7 @@ mod tests {
 
     fn add_available_with_requirement(
         graph: &mut ResourceGraph,
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
         source: usize,
         role: &DependencyRoleId,
         requirement: DependencyRequirement,
@@ -2400,7 +2425,7 @@ mod tests {
 
     fn cache_snapshot(
         graph: &mut ResourceGraph,
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
         identity: &DependencyIdentity,
         bytes: &[u8],
     ) -> (usize, Arc<SharedDependencySnapshot>) {
@@ -2466,101 +2491,117 @@ mod tests {
         }
     }
 
-    fn sealed_root_available_manifest(edges: &[AvailableEdgeFixture]) -> SuccessfulInputManifest {
+    fn with_sealed_root_available_manifest(
+        edges: &[AvailableEdgeFixture],
+        inspect: impl FnOnce(SuccessfulInputManifest),
+    ) {
         let limits = ResourceLimits::default();
-        let mut owner = store_owner(&limits);
-        let exec = &mut owner.execution().unwrap();
-        let authority = AuthorityDomain::default();
-        let primary_path = AssetPath::new("main.asset").unwrap();
-        let mut graph = ResourceGraph::new(limits);
-        graph
-            .bind_primary(exec, &authority, &primary_path, b"primary")
-            .unwrap();
-        let primary = graph.source_for_primary().unwrap();
-        for edge in edges {
-            let role = DependencyRoleId::new(edge.role).unwrap();
-            let identity = dependency_identity(&authority, edge.path);
-            add_available_with_requirement(
-                &mut graph,
-                exec,
-                primary,
-                &role,
-                edge.requirement,
-                &identity,
-                edge.bytes,
-            );
-        }
-        graph.seal(exec).unwrap();
-        graph.take_manifest().unwrap()
+        with_store_body(
+            limits.clone(),
+            ImportOperationControl::default(),
+            |exec, _account| {
+                let authority = AuthorityDomain::default();
+                let primary_path = AssetPath::new("main.asset").unwrap();
+                let mut graph = ResourceGraph::new(limits);
+                graph
+                    .bind_primary(exec, &authority, &primary_path, b"primary")
+                    .unwrap();
+                let primary = graph.source_for_primary().unwrap();
+                for edge in edges {
+                    let role = DependencyRoleId::new(edge.role).unwrap();
+                    let identity = dependency_identity(&authority, edge.path);
+                    add_available_with_requirement(
+                        &mut graph,
+                        exec,
+                        primary,
+                        &role,
+                        edge.requirement,
+                        &identity,
+                        edge.bytes,
+                    );
+                }
+                graph.seal(exec).unwrap();
+                inspect(graph.take_manifest().unwrap());
+            },
+        );
     }
 
-    fn sealed_origin_manifest(nested: bool) -> SuccessfulInputManifest {
+    fn with_sealed_origin_manifest(nested: bool, inspect: impl FnOnce(SuccessfulInputManifest)) {
         let limits = ResourceLimits::default();
-        let mut owner = store_owner(&limits);
-        let exec = &mut owner.execution().unwrap();
-        let authority = AuthorityDomain::default();
-        let primary_path = AssetPath::new("main.asset").unwrap();
-        let role = DependencyRoleId::new("test.resource").unwrap();
-        let mut graph = ResourceGraph::new(limits);
-        graph
-            .bind_primary(exec, &authority, &primary_path, b"primary")
-            .unwrap();
-        let primary = graph.source_for_primary().unwrap();
-        let identity_a = dependency_identity(&authority, "a.asset");
-        let node_a = add_available(&mut graph, exec, primary, &role, &identity_a, b"a");
-        let identity_b = dependency_identity(&authority, "b.asset");
-        let source = if nested { node_a } else { primary };
-        add_available(&mut graph, exec, source, &role, &identity_b, b"b");
-        graph.seal(exec).unwrap();
-        graph.take_manifest().unwrap()
+        with_store_body(
+            limits.clone(),
+            ImportOperationControl::default(),
+            |exec, _account| {
+                let authority = AuthorityDomain::default();
+                let primary_path = AssetPath::new("main.asset").unwrap();
+                let role = DependencyRoleId::new("test.resource").unwrap();
+                let mut graph = ResourceGraph::new(limits);
+                graph
+                    .bind_primary(exec, &authority, &primary_path, b"primary")
+                    .unwrap();
+                let primary = graph.source_for_primary().unwrap();
+                let identity_a = dependency_identity(&authority, "a.asset");
+                let node_a = add_available(&mut graph, exec, primary, &role, &identity_a, b"a");
+                let identity_b = dependency_identity(&authority, "b.asset");
+                let source = if nested { node_a } else { primary };
+                add_available(&mut graph, exec, source, &role, &identity_b, b"b");
+                graph.seal(exec).unwrap();
+                inspect(graph.take_manifest().unwrap());
+            },
+        );
     }
 
-    fn sealed_unavailable_manifest(
+    fn with_sealed_unavailable_manifest(
         class: ManifestUnavailableClass,
         code: &'static str,
         replay: ManifestUnavailableReplay,
-    ) -> SuccessfulInputManifest {
+        inspect: impl FnOnce(SuccessfulInputManifest),
+    ) {
         let limits = ResourceLimits::default();
-        let mut owner = store_owner(&limits);
-        let exec = &mut owner.execution().unwrap();
-        let authority = AuthorityDomain::default();
-        let primary_path = AssetPath::new("main.asset").unwrap();
-        let dependency = dependency_identity(&authority, "missing.asset");
-        let role = DependencyRoleId::new("test.resource").unwrap();
-        let mut graph = ResourceGraph::new(limits);
-        graph
-            .bind_primary(exec, &authority, &primary_path, b"primary")
-            .unwrap();
-        let primary = graph.source_for_primary().unwrap();
-        let pending = graph
-            .begin_relation(
-                exec,
-                primary,
-                &role,
-                DependencyRequirement::Optional,
-                dependency.path().as_str(),
-            )
-            .unwrap();
-        graph
-            .complete_unavailable(
-                exec,
-                pending,
-                Some(dependency.path()),
-                Some(&dependency),
-                ResourceUnavailableDisposition {
-                    class,
-                    code: ManifestUnavailableCode::new(code),
-                    replay,
-                    stable_identity_schema: None,
-                },
-            )
-            .unwrap();
-        graph.seal(exec).unwrap();
-        graph.take_manifest().unwrap()
+        with_store_body(
+            limits.clone(),
+            ImportOperationControl::default(),
+            |exec, _account| {
+                let authority = AuthorityDomain::default();
+                let primary_path = AssetPath::new("main.asset").unwrap();
+                let dependency = dependency_identity(&authority, "missing.asset");
+                let role = DependencyRoleId::new("test.resource").unwrap();
+                let mut graph = ResourceGraph::new(limits);
+                graph
+                    .bind_primary(exec, &authority, &primary_path, b"primary")
+                    .unwrap();
+                let primary = graph.source_for_primary().unwrap();
+                let pending = graph
+                    .begin_relation(
+                        exec,
+                        primary,
+                        &role,
+                        DependencyRequirement::Optional,
+                        dependency.path().as_str(),
+                    )
+                    .unwrap();
+                graph
+                    .complete_unavailable(
+                        exec,
+                        pending,
+                        Some(dependency.path()),
+                        Some(&dependency),
+                        ResourceUnavailableDisposition {
+                            class,
+                            code: ManifestUnavailableCode::new(code),
+                            replay,
+                            stable_identity_schema: None,
+                        },
+                    )
+                    .unwrap();
+                graph.seal(exec).unwrap();
+                inspect(graph.take_manifest().unwrap());
+            },
+        );
     }
 
     fn shared_depth_prefix(
-        exec: &mut ImportStoreExecution<'_>,
+        exec: &mut ImportRootExecution<'_, '_>,
         maximum_depth: usize,
     ) -> (ResourceGraph, DependencyRoleId, DependencyIdentity, usize) {
         let mut limits = ResourceLimits {
@@ -2588,59 +2629,67 @@ mod tests {
     #[test]
     fn shared_existing_target_rejects_descendant_depth_overflow() {
         let limits = ResourceLimits::default();
-        let mut owner = store_owner(&limits);
-        let exec = &mut owner.execution().unwrap();
-        let (mut graph, role, identity_a, node_c) = shared_depth_prefix(exec, 2);
-        let mut pending = graph
-            .begin_relation(
-                exec,
-                node_c,
-                &role,
-                DependencyRequirement::Required,
-                identity_a.path().as_str(),
-            )
-            .unwrap();
+        with_store_body(
+            limits.clone(),
+            ImportOperationControl::default(),
+            |exec, _account| {
+                let (mut graph, role, identity_a, node_c) = shared_depth_prefix(exec, 2);
+                let mut pending = graph
+                    .begin_relation(
+                        exec,
+                        node_c,
+                        &role,
+                        DependencyRequirement::Required,
+                        identity_a.path().as_str(),
+                    )
+                    .unwrap();
 
-        assert!(matches!(
-            graph.prepare_target(exec, &mut pending, &identity_a),
-            Err(ResourceGraphError::Limit {
-                resource: "max_resource_graph_depth",
-                limit: 2,
-            })
-        ));
+                assert!(matches!(
+                    graph.prepare_target(exec, &mut pending, &identity_a),
+                    Err(ResourceGraphError::Limit {
+                        resource: "max_resource_graph_depth",
+                        limit: 2,
+                    })
+                ));
+            },
+        );
     }
 
     #[test]
     fn shared_existing_target_updates_manifest_maximum_depth() {
         let limits = ResourceLimits::default();
-        let mut owner = store_owner(&limits);
-        let exec = &mut owner.execution().unwrap();
-        let (mut graph, role, identity_a, node_c) = shared_depth_prefix(exec, 3);
-        let mut pending = graph
-            .begin_relation(
-                exec,
-                node_c,
-                &role,
-                DependencyRequirement::Required,
-                identity_a.path().as_str(),
-            )
-            .unwrap();
-        graph
-            .prepare_target(exec, &mut pending, &identity_a)
-            .unwrap();
-        let (cache_index, snapshot) = cache_snapshot(&mut graph, exec, &identity_a, b"a");
-        graph
-            .complete_available(
-                exec,
-                pending,
-                cache_index,
-                snapshot.bytes(),
-                AvailableResourceIdentity::new(&identity_a, identity_a.path(), None),
-            )
-            .unwrap();
-        graph.seal(exec).unwrap();
+        with_store_body(
+            limits.clone(),
+            ImportOperationControl::default(),
+            |exec, _account| {
+                let (mut graph, role, identity_a, node_c) = shared_depth_prefix(exec, 3);
+                let mut pending = graph
+                    .begin_relation(
+                        exec,
+                        node_c,
+                        &role,
+                        DependencyRequirement::Required,
+                        identity_a.path().as_str(),
+                    )
+                    .unwrap();
+                graph
+                    .prepare_target(exec, &mut pending, &identity_a)
+                    .unwrap();
+                let (cache_index, snapshot) = cache_snapshot(&mut graph, exec, &identity_a, b"a");
+                graph
+                    .complete_available(
+                        exec,
+                        pending,
+                        cache_index,
+                        snapshot.bytes(),
+                        AvailableResourceIdentity::new(&identity_a, identity_a.path(), None),
+                    )
+                    .unwrap();
+                graph.seal(exec).unwrap();
 
-        assert_eq!(graph.take_manifest().unwrap().counts().maximum_depth(), 3);
+                assert_eq!(graph.take_manifest().unwrap().counts().maximum_depth(), 3);
+            },
+        );
     }
 
     #[test]
@@ -2648,617 +2697,703 @@ mod tests {
         let material = available_edge("test.material", "materials/mat.asset", b"material");
         let texture = available_edge("test.texture", "textures/albedo.asset", b"texture");
 
-        let forward = sealed_root_available_manifest(&[material, texture]);
-        let reverse = sealed_root_available_manifest(&[texture, material]);
-
-        assert_eq!(forward, reverse);
-        assert_eq!(forward.digest(), reverse.digest());
-        assert_eq!(forward.counts().node_class_count(), 3);
-        assert_eq!(forward.counts().available_relation_occurrence_count(), 2);
+        with_sealed_root_available_manifest(&[material, texture], |forward| {
+            with_sealed_root_available_manifest(&[texture, material], |reverse| {
+                assert_eq!(forward, reverse);
+                assert_eq!(forward.digest(), reverse.digest());
+                assert_eq!(forward.counts().node_class_count(), 3);
+                assert_eq!(forward.counts().available_relation_occurrence_count(), 2);
+            });
+        });
     }
 
     #[test]
     fn manifest_digest_changes_for_one_field_resource_graph_mutations() {
-        let baseline = sealed_root_available_manifest(&[available_edge(
-            "test.material",
-            "materials/mat.asset",
-            b"material",
-        )]);
+        with_sealed_root_available_manifest(
+            &[available_edge(
+                "test.material",
+                "materials/mat.asset",
+                b"material",
+            )],
+            |baseline| {
+                with_sealed_root_available_manifest(
+                    &[available_edge(
+                        "test.texture",
+                        "materials/mat.asset",
+                        b"material",
+                    )],
+                    |role| {
+                        assert_ne!(baseline.digest(), role.digest(), "role");
+                    },
+                );
 
-        let role = sealed_root_available_manifest(&[available_edge(
-            "test.texture",
-            "materials/mat.asset",
-            b"material",
-        )]);
-        assert_ne!(baseline.digest(), role.digest(), "role");
+                with_sealed_root_available_manifest(
+                    &[AvailableEdgeFixture {
+                        role: "test.material",
+                        requirement: DependencyRequirement::Optional,
+                        path: "materials/mat.asset",
+                        bytes: b"material",
+                    }],
+                    |requirement| {
+                        assert_ne!(baseline.digest(), requirement.digest(), "requirement");
+                    },
+                );
 
-        let requirement = sealed_root_available_manifest(&[AvailableEdgeFixture {
-            role: "test.material",
-            requirement: DependencyRequirement::Optional,
-            path: "materials/mat.asset",
-            bytes: b"material",
-        }]);
-        assert_ne!(baseline.digest(), requirement.digest(), "requirement");
+                with_sealed_root_available_manifest(
+                    &[available_edge(
+                        "test.material",
+                        "materials/renamed.asset",
+                        b"material",
+                    )],
+                    |identity| {
+                        assert_ne!(baseline.digest(), identity.digest(), "resource identity");
+                    },
+                );
 
-        let identity = sealed_root_available_manifest(&[available_edge(
-            "test.material",
-            "materials/renamed.asset",
-            b"material",
-        )]);
-        assert_ne!(baseline.digest(), identity.digest(), "resource identity");
+                with_sealed_root_available_manifest(
+                    &[available_edge(
+                        "test.material",
+                        "materials/mat.asset",
+                        b"material-v2",
+                    )],
+                    |target_bytes| {
+                        assert_ne!(baseline.digest(), target_bytes.digest(), "target bytes");
+                    },
+                );
+            },
+        );
 
-        let target_bytes = sealed_root_available_manifest(&[available_edge(
-            "test.material",
-            "materials/mat.asset",
-            b"material-v2",
-        )]);
-        assert_ne!(baseline.digest(), target_bytes.digest(), "target bytes");
+        with_sealed_origin_manifest(false, |flat_origin| {
+            with_sealed_origin_manifest(true, |nested_origin| {
+                assert_ne!(flat_origin.digest(), nested_origin.digest(), "origin");
+                assert_eq!(flat_origin.counts().maximum_depth(), 1);
+                assert_eq!(nested_origin.counts().maximum_depth(), 2);
+            });
+        });
 
-        let flat_origin = sealed_origin_manifest(false);
-        let nested_origin = sealed_origin_manifest(true);
-        assert_ne!(flat_origin.digest(), nested_origin.digest(), "origin");
-        assert_eq!(flat_origin.counts().maximum_depth(), 1);
-        assert_eq!(nested_origin.counts().maximum_depth(), 2);
-
-        let unproven = sealed_unavailable_manifest(
+        with_sealed_unavailable_manifest(
             ManifestUnavailableClass::Io,
             "missing",
             ManifestUnavailableReplay::UnprovenNegativeInput,
-        );
-        let terminal_outcome = sealed_unavailable_manifest(
-            ManifestUnavailableClass::Resource,
-            "resource-limit",
-            ManifestUnavailableReplay::SessionDependent(
-                ManifestSessionDependentReason::AcquisitionBudget,
-            ),
-        );
-        assert_ne!(
-            unproven.digest(),
-            terminal_outcome.digest(),
-            "terminal outcome"
+            |unproven| {
+                with_sealed_unavailable_manifest(
+                    ManifestUnavailableClass::Resource,
+                    "resource-limit",
+                    ManifestUnavailableReplay::SessionDependent(
+                        ManifestSessionDependentReason::AcquisitionBudget,
+                    ),
+                    |terminal_outcome| {
+                        assert_ne!(
+                            unproven.digest(),
+                            terminal_outcome.digest(),
+                            "terminal outcome"
+                        );
+                    },
+                );
+            },
         );
     }
 
     #[test]
     fn graph_arenas_and_paths_hold_their_complete_capacity_charge() {
         let limits = ResourceLimits::default();
-        let (mut owner, account) =
-            store_owner_and_account(&limits, ImportOperationControl::default());
-        let exec = &mut owner.execution().unwrap();
-        let baseline = exec
-            .dimension_state(ImportDimension::ScratchBytes)
-            .unwrap()
-            .live_bytes();
-        let authority = AuthorityDomain::default();
-        let primary_path = AssetPath::new("main.asset").unwrap();
-        let role = DependencyRoleId::new("test.resource").unwrap();
-        let identity = dependency_identity(&authority, "dependency.asset");
-        let mut graph = ResourceGraph::new(limits);
-        cache_snapshot(&mut graph, exec, &identity, b"dependency");
-        let cache_storage = exec
-            .dimension_state(ImportDimension::ScratchBytes)
-            .unwrap()
-            .live_bytes()
-            - baseline;
+        with_store_body(
+            limits.clone(),
+            ImportOperationControl::default(),
+            |exec, _account| {
+                let baseline = exec
+                    .dimension_state(ImportDimension::ScratchBytes)
+                    .unwrap()
+                    .live_bytes();
+                let authority = AuthorityDomain::default();
+                let primary_path = AssetPath::new("main.asset").unwrap();
+                let role = DependencyRoleId::new("test.resource").unwrap();
+                let identity = dependency_identity(&authority, "dependency.asset");
+                let mut graph = ResourceGraph::new(limits);
+                cache_snapshot(&mut graph, exec, &identity, b"dependency");
+                let cache_storage = exec
+                    .dimension_state(ImportDimension::ScratchBytes)
+                    .unwrap()
+                    .live_bytes()
+                    - baseline;
 
-        graph
-            .bind_primary(exec, &authority, &primary_path, b"primary")
-            .unwrap();
-        let primary = graph.source_for_primary().unwrap();
-        add_available(&mut graph, exec, primary, &role, &identity, b"dependency");
+                graph
+                    .bind_primary(exec, &authority, &primary_path, b"primary")
+                    .unwrap();
+                let primary = graph.source_for_primary().unwrap();
+                add_available(&mut graph, exec, primary, &role, &identity, b"dependency");
 
-        let accounted = graph
-            .nodes
-            .capacity_bytes()
-            .checked_add(graph.relations.capacity_bytes())
-            .and_then(|bytes| bytes.checked_add(graph.cache_to_node.capacity_bytes()))
-            .unwrap();
-        let path_bytes = graph
-            .nodes
-            .iter()
-            .map(|node| {
-                node.exact_identity.path().capacity_bytes()
-                    + node.public_identity.value().capacity_bytes()
-            })
-            .sum::<usize>()
-            + graph
-                .relations
-                .iter()
-                .map(|relation| match &relation.reference {
-                    ManifestReference::Normalized(identity) => identity.value().capacity_bytes(),
-                    ManifestReference::Rejected { .. } => 0,
-                })
-                .sum::<usize>();
-        assert!(graph.nodes.capacity_bytes() > 0);
-        assert!(graph.relations.capacity_bytes() > 0);
-        assert!(graph.cache_to_node.capacity_bytes() > 0);
-        assert_eq!(
-            exec.dimension_state(ImportDimension::ScratchBytes)
-                .unwrap()
-                .live_bytes(),
-            baseline + cache_storage + accounted + path_bytes as u64
+                let accounted = graph
+                    .nodes
+                    .capacity_bytes()
+                    .checked_add(graph.relations.capacity_bytes())
+                    .and_then(|bytes| bytes.checked_add(graph.cache_to_node.capacity_bytes()))
+                    .unwrap();
+                let path_bytes = graph
+                    .nodes
+                    .iter()
+                    .map(|node| {
+                        node.exact_identity.path().capacity_bytes()
+                            + node.public_identity.value().capacity_bytes()
+                    })
+                    .sum::<usize>()
+                    + graph
+                        .relations
+                        .iter()
+                        .map(|relation| match &relation.reference {
+                            ManifestReference::Normalized(identity) => {
+                                identity.value().capacity_bytes()
+                            }
+                            ManifestReference::Rejected { .. } => 0,
+                        })
+                        .sum::<usize>();
+                assert!(graph.nodes.capacity_bytes() > 0);
+                assert!(graph.relations.capacity_bytes() > 0);
+                assert!(graph.cache_to_node.capacity_bytes() > 0);
+                assert_eq!(
+                    exec.dimension_state(ImportDimension::ScratchBytes)
+                        .unwrap()
+                        .live_bytes(),
+                    baseline + cache_storage + accounted + path_bytes as u64
+                );
+
+                drop(graph);
+                assert_eq!(
+                    exec.dimension_state(ImportDimension::ScratchBytes)
+                        .unwrap()
+                        .live_bytes(),
+                    baseline
+                );
+            },
         );
-
-        drop(graph);
-        assert_eq!(
-            exec.dimension_state(ImportDimension::ScratchBytes)
-                .unwrap()
-                .live_bytes(),
-            baseline
-        );
-        assert_store_released(owner, account);
     }
 
     #[test]
     fn manifest_postorder_scratch_is_released_after_seal() {
         let limits = ResourceLimits::default();
-        let mut owner = store_owner(&limits);
-        let exec = &mut owner.execution().unwrap();
-        let authority = AuthorityDomain::default();
-        let primary_path = AssetPath::new("main.asset").unwrap();
-        let mut graph = ResourceGraph::new(limits);
-        graph
-            .bind_primary(exec, &authority, &primary_path, b"primary")
-            .unwrap();
-        let graph_storage = exec
-            .dimension_state(ImportDimension::ScratchBytes)
-            .unwrap()
-            .live_bytes();
+        with_store_body(
+            limits.clone(),
+            ImportOperationControl::default(),
+            |exec, _account| {
+                let authority = AuthorityDomain::default();
+                let primary_path = AssetPath::new("main.asset").unwrap();
+                let mut graph = ResourceGraph::new(limits);
+                graph
+                    .bind_primary(exec, &authority, &primary_path, b"primary")
+                    .unwrap();
+                let graph_storage = exec
+                    .dimension_state(ImportDimension::ScratchBytes)
+                    .unwrap()
+                    .live_bytes();
 
-        graph.seal(exec).unwrap();
+                graph.seal(exec).unwrap();
 
-        let retained_manifest_storage = exec
-            .dimension_state(ImportDimension::ScratchBytes)
-            .unwrap()
-            .live_bytes();
-        assert!(retained_manifest_storage > graph_storage);
-        let manifest = graph.take_manifest().unwrap();
-        assert_eq!(
-            exec.dimension_state(ImportDimension::ScratchBytes)
-                .unwrap()
-                .live_bytes(),
-            retained_manifest_storage,
-            "moving a sealed manifest must retain its actual tables and paths",
-        );
-        drop(manifest);
-        assert_eq!(
-            exec.dimension_state(ImportDimension::ScratchBytes)
-                .unwrap()
-                .live_bytes(),
-            graph_storage,
-            "only the original graph remains after manifest and seal scratch are destroyed",
+                let retained_manifest_storage = exec
+                    .dimension_state(ImportDimension::ScratchBytes)
+                    .unwrap()
+                    .live_bytes();
+                assert!(retained_manifest_storage > graph_storage);
+                let manifest = graph.take_manifest().unwrap();
+                assert_eq!(
+                    exec.dimension_state(ImportDimension::ScratchBytes)
+                        .unwrap()
+                        .live_bytes(),
+                    retained_manifest_storage,
+                    "moving a sealed manifest must retain its actual tables and paths",
+                );
+                drop(manifest);
+                assert_eq!(
+                    exec.dimension_state(ImportDimension::ScratchBytes)
+                        .unwrap()
+                        .live_bytes(),
+                    graph_storage,
+                    "only the original graph remains after manifest and seal scratch are destroyed",
+                );
+            },
         );
     }
 
     #[test]
     fn manifest_postorder_scratch_is_admitted_before_manifest_bytes() {
         let limits = ResourceLimits::default();
-        let mut owner = store_owner(&limits);
-        let exec = &mut owner.execution().unwrap();
-        let authority = AuthorityDomain::default();
-        let primary_path = AssetPath::new("main.asset").unwrap();
-        let mut graph = ResourceGraph::new(limits);
-        graph
-            .bind_primary(exec, &authority, &primary_path, b"primary")
-            .unwrap();
-        let graph_storage = exec
-            .dimension_state(ImportDimension::ScratchBytes)
-            .unwrap()
-            .live_bytes();
-        exec.tighten_dimension_policy(
-            ImportDimension::ScratchBytes,
-            DimensionPolicy::reservable_bytes(0, 0, 0, graph_storage),
-        )
-        .unwrap();
+        with_store_body(
+            limits.clone(),
+            ImportOperationControl::default(),
+            |exec, _account| {
+                let authority = AuthorityDomain::default();
+                let primary_path = AssetPath::new("main.asset").unwrap();
+                let mut graph = ResourceGraph::new(limits);
+                graph
+                    .bind_primary(exec, &authority, &primary_path, b"primary")
+                    .unwrap();
+                let graph_storage = exec
+                    .dimension_state(ImportDimension::ScratchBytes)
+                    .unwrap()
+                    .live_bytes();
+                exec.tighten_dimension_policy(
+                    ImportDimension::ScratchBytes,
+                    DimensionPolicy::reservable_bytes(0, 0, 0, graph_storage),
+                )
+                .unwrap();
 
-        assert!(graph.seal(exec).is_err());
-        let manifest_bytes = exec
-            .dimension_state(ImportDimension::InputManifestBytes)
-            .unwrap();
-        assert_eq!(manifest_bytes.attempted(), 0);
-        assert_eq!(manifest_bytes.consumed(), 0);
-        assert_eq!(manifest_bytes.live_bytes(), 0);
-        assert_eq!(
-            exec.dimension_state(ImportDimension::ScratchBytes)
-                .unwrap()
-                .live_bytes(),
-            graph_storage
+                assert!(graph.seal(exec).is_err());
+                let manifest_bytes = exec
+                    .dimension_state(ImportDimension::InputManifestBytes)
+                    .unwrap();
+                assert_eq!(manifest_bytes.attempted(), 0);
+                assert_eq!(manifest_bytes.consumed(), 0);
+                assert_eq!(manifest_bytes.live_bytes(), 0);
+                assert_eq!(
+                    exec.dimension_state(ImportDimension::ScratchBytes)
+                        .unwrap()
+                        .live_bytes(),
+                    graph_storage
+                );
+                assert!(graph.sealed_manifest.is_none());
+            },
         );
-        assert!(graph.sealed_manifest.is_none());
     }
 
     #[test]
     fn graph_node_storage_is_admitted_before_primary_mutation() {
         let limits = ResourceLimits::default();
-        let mut owner = store_owner(&limits);
-        let exec = &mut owner.execution().unwrap();
-        let existing_live = exec
-            .dimension_state(ImportDimension::ScratchBytes)
-            .unwrap()
-            .live_bytes();
-        exec.tighten_dimension_policy(
-            ImportDimension::ScratchBytes,
-            DimensionPolicy::reservable_bytes(0, 0, 0, existing_live + 1),
-        )
-        .unwrap();
-        let authority = AuthorityDomain::default();
-        let primary_path = AssetPath::new("main.asset").unwrap();
-        let mut graph = ResourceGraph::new(limits);
+        with_store_body(
+            limits.clone(),
+            ImportOperationControl::default(),
+            |exec, _account| {
+                let existing_live = exec
+                    .dimension_state(ImportDimension::ScratchBytes)
+                    .unwrap()
+                    .live_bytes();
+                exec.tighten_dimension_policy(
+                    ImportDimension::ScratchBytes,
+                    DimensionPolicy::reservable_bytes(0, 0, 0, existing_live + 1),
+                )
+                .unwrap();
+                let authority = AuthorityDomain::default();
+                let primary_path = AssetPath::new("main.asset").unwrap();
+                let mut graph = ResourceGraph::new(limits);
 
-        assert!(
-            graph
-                .bind_primary(exec, &authority, &primary_path, b"primary")
-                .is_err()
+                assert!(
+                    graph
+                        .bind_primary(exec, &authority, &primary_path, b"primary")
+                        .is_err()
+                );
+                assert!(graph.nodes.is_empty());
+                assert_eq!(graph.nodes.capacity_bytes(), 0);
+                assert!(graph.primary.is_none());
+            },
         );
-        assert!(graph.nodes.is_empty());
-        assert_eq!(graph.nodes.capacity_bytes(), 0);
-        assert!(graph.primary.is_none());
     }
 
     #[test]
     fn dependency_cache_preallocation_failure_is_bookkeeping_not_structural_graph_limit() {
         let limits = ResourceLimits::default();
-        let (mut owner, account) =
-            store_owner_and_account(&limits, ImportOperationControl::default());
-        let exec = &mut owner.execution().unwrap();
-        let baseline = exec
-            .dimension_state(ImportDimension::ScratchBytes)
-            .unwrap()
-            .live_bytes();
-        exec.tighten_dimension_policy(
-            ImportDimension::ScratchBytes,
-            DimensionPolicy::reservable_bytes(0, 0, 0, baseline),
-        )
-        .unwrap();
-        let mut graph = ResourceGraph::new(limits);
-        let entry_envelope = graph
-            .cache
-            .capacity_plan()
-            .unwrap()
-            .temporary_envelope_bytes(DependencyCacheStorage::Entries)
-            .unwrap();
+        with_store_body(
+            limits.clone(),
+            ImportOperationControl::default(),
+            |exec, _account| {
+                let baseline = exec
+                    .dimension_state(ImportDimension::ScratchBytes)
+                    .unwrap()
+                    .live_bytes();
+                exec.tighten_dimension_policy(
+                    ImportDimension::ScratchBytes,
+                    DimensionPolicy::reservable_bytes(0, 0, 0, baseline),
+                )
+                .unwrap();
+                let mut graph = ResourceGraph::new(limits);
+                let entry_envelope = graph
+                    .cache
+                    .capacity_plan()
+                    .unwrap()
+                    .temporary_envelope_bytes(DependencyCacheStorage::Entries)
+                    .unwrap();
 
-        let failure = graph
-            .reserve_acquisition_capacity(exec)
-            .expect_err("dependency-cache capacity must be admitted before cache mutation");
+                let failure = graph
+                    .reserve_acquisition_capacity(exec)
+                    .expect_err("dependency-cache capacity must be admitted before cache mutation");
 
-        match failure {
-            ResourceGraphError::Scope(ScopeAbortCause::Ledger(
-                baozi_operation::LedgerCause::LimitExceeded {
-                    class: baozi_operation::CounterClass::Live,
-                    dimension: ImportDimension::ScratchBytes,
-                    value,
-                    limit,
-                },
-            )) => {
-                assert_eq!(value, baseline + entry_envelope);
-                assert_eq!(limit, baseline);
-            }
-            ResourceGraphError::Limit {
-                resource:
-                    "max_resource_graph_nodes"
-                    | "max_resource_graph_relations"
-                    | "max_resource_graph_depth",
-                ..
-            } => panic!("cache preallocation failure was relabeled as a structural graph limit"),
-            other => panic!("unexpected dependency-cache preallocation failure: {other:?}"),
-        }
-        assert_eq!(
-            exec.dimension_state(ImportDimension::ScratchBytes)
-                .unwrap()
-                .live_bytes(),
-            baseline
+                match failure {
+                    ResourceGraphError::Scope(ScopeAbortCause::Ledger(
+                        baozi_operation::LedgerCause::LimitExceeded {
+                            class: baozi_operation::CounterClass::Live,
+                            dimension: ImportDimension::ScratchBytes,
+                            value,
+                            limit,
+                        },
+                    )) => {
+                        assert_eq!(value, baseline + entry_envelope);
+                        assert_eq!(limit, baseline);
+                    }
+                    ResourceGraphError::Limit {
+                        resource:
+                            "max_resource_graph_nodes"
+                            | "max_resource_graph_relations"
+                            | "max_resource_graph_depth",
+                        ..
+                    } => panic!(
+                        "cache preallocation failure was relabeled as a structural graph limit"
+                    ),
+                    other => panic!("unexpected dependency-cache preallocation failure: {other:?}"),
+                }
+                assert_eq!(
+                    exec.dimension_state(ImportDimension::ScratchBytes)
+                        .unwrap()
+                        .live_bytes(),
+                    baseline
+                );
+                assert!(
+                    graph.cache.capacity_plan().unwrap().requires_apply(),
+                    "failed preallocation must leave cache growth unapplied"
+                );
+                drop(graph);
+            },
         );
-        assert!(
-            graph.cache.capacity_plan().unwrap().requires_apply(),
-            "failed preallocation must leave cache growth unapplied"
-        );
-        drop(graph);
-        assert_store_released(owner, account);
     }
 
     #[test]
     fn equal_digest_relations_fold_only_when_canonical_bytes_match() {
         let limits = ResourceLimits::default();
-        let mut owner = store_owner(&limits);
-        let exec = &mut owner.execution().unwrap();
-        let forced_digest = ManifestDigest::of(b"forced-relation-digest");
-        let first = digested_manifest_relation_for_test(exec, forced_digest, "shared.asset");
-        let second = digested_manifest_relation_for_test(exec, forced_digest, "shared.asset");
-        let equal_work = 2 + manifest_comparison_work_for_test(&first.canonical, &second.canonical);
-        let relations = accounted_manifest_values(exec, vec![first, second]);
-        let folded = fold_manifest_relations(exec, relations).unwrap();
-        assert_eq!(folded.len(), 1);
-        assert_eq!(folded[0].multiplicity(), 2);
-        let work = exec
-            .dimension_state(ImportDimension::InputManifestWork)
-            .unwrap();
-        assert_eq!(work.attempted(), equal_work);
-        assert_eq!(work.consumed(), equal_work);
+        with_store_body(
+            limits.clone(),
+            ImportOperationControl::default(),
+            |exec, _account| {
+                let forced_digest = ManifestDigest::of(b"forced-relation-digest");
+                let first =
+                    digested_manifest_relation_for_test(exec, forced_digest, "shared.asset");
+                let second =
+                    digested_manifest_relation_for_test(exec, forced_digest, "shared.asset");
+                let equal_work =
+                    2 + manifest_comparison_work_for_test(&first.canonical, &second.canonical);
+                let relations = accounted_manifest_values(exec, vec![first, second]);
+                let folded = fold_manifest_relations(exec, relations).unwrap();
+                assert_eq!(folded.len(), 1);
+                assert_eq!(folded[0].multiplicity(), 2);
+                let work = exec
+                    .dimension_state(ImportDimension::InputManifestWork)
+                    .unwrap();
+                assert_eq!(work.attempted(), equal_work);
+                assert_eq!(work.consumed(), equal_work);
 
-        let first = digested_manifest_relation_for_test(exec, forced_digest, "first.asset");
-        let second = digested_manifest_relation_for_test(exec, forced_digest, "second.asset");
-        let collision_work =
-            2 + manifest_comparison_work_for_test(&first.canonical, &second.canonical);
+                let first = digested_manifest_relation_for_test(exec, forced_digest, "first.asset");
+                let second =
+                    digested_manifest_relation_for_test(exec, forced_digest, "second.asset");
+                let collision_work =
+                    2 + manifest_comparison_work_for_test(&first.canonical, &second.canonical);
 
-        let relations = accounted_manifest_values(exec, vec![first, second]);
-        assert!(matches!(
-            fold_manifest_relations(exec, relations),
-            Err(ResourceGraphError::DigestCollision)
-        ));
-        let work = exec
-            .dimension_state(ImportDimension::InputManifestWork)
-            .unwrap();
-        assert_eq!(work.attempted(), equal_work + collision_work);
-        assert_eq!(work.consumed(), equal_work + collision_work);
+                let relations = accounted_manifest_values(exec, vec![first, second]);
+                assert!(matches!(
+                    fold_manifest_relations(exec, relations),
+                    Err(ResourceGraphError::DigestCollision)
+                ));
+                let work = exec
+                    .dimension_state(ImportDimension::InputManifestWork)
+                    .unwrap();
+                assert_eq!(work.attempted(), equal_work + collision_work);
+                assert_eq!(work.consumed(), equal_work + collision_work);
+            },
+        );
     }
 
     #[test]
     fn equal_digest_nodes_fold_only_when_canonical_bytes_match() {
         let limits = ResourceLimits::default();
-        let mut owner = store_owner(&limits);
-        let exec = &mut owner.execution().unwrap();
-        let first_authority = AuthorityDomain::new();
-        let second_authority = AuthorityDomain::new();
-        let forced_digest = ManifestDigest::of(b"forced-node-digest");
-        let graph_nodes = vec![
-            graph_node_for_test(&first_authority, "first.asset", "shared.asset"),
-            graph_node_for_test(&second_authority, "second.asset", "shared.asset"),
-        ];
-        let first = digested_manifest_node_for_test(exec, forced_digest, 0, &graph_nodes[0]);
-        let second = digested_manifest_node_for_test(exec, forced_digest, 1, &graph_nodes[1]);
-        let equal_work = 2 + manifest_comparison_work_for_test(&first.canonical, &second.canonical);
-        let nodes = accounted_manifest_values(exec, vec![first, second]);
-        let folded = fold_manifest_nodes(exec, nodes, &graph_nodes).unwrap();
-        assert_eq!(folded.len(), 1);
-        let work = exec
-            .dimension_state(ImportDimension::InputManifestWork)
-            .unwrap();
-        assert_eq!(work.attempted(), equal_work);
-        assert_eq!(work.consumed(), equal_work);
+        with_store_body(
+            limits.clone(),
+            ImportOperationControl::default(),
+            |exec, _account| {
+                let first_authority = AuthorityDomain::new();
+                let second_authority = AuthorityDomain::new();
+                let forced_digest = ManifestDigest::of(b"forced-node-digest");
+                let graph_nodes = vec![
+                    graph_node_for_test(&first_authority, "first.asset", "shared.asset"),
+                    graph_node_for_test(&second_authority, "second.asset", "shared.asset"),
+                ];
+                let first =
+                    digested_manifest_node_for_test(exec, forced_digest, 0, &graph_nodes[0]);
+                let second =
+                    digested_manifest_node_for_test(exec, forced_digest, 1, &graph_nodes[1]);
+                let equal_work =
+                    2 + manifest_comparison_work_for_test(&first.canonical, &second.canonical);
+                let nodes = accounted_manifest_values(exec, vec![first, second]);
+                let folded = fold_manifest_nodes(exec, nodes, &graph_nodes).unwrap();
+                assert_eq!(folded.len(), 1);
+                let work = exec
+                    .dimension_state(ImportDimension::InputManifestWork)
+                    .unwrap();
+                assert_eq!(work.attempted(), equal_work);
+                assert_eq!(work.consumed(), equal_work);
 
-        let graph_nodes = vec![
-            graph_node_for_test(&first_authority, "first.asset", "first.asset"),
-            graph_node_for_test(&second_authority, "second.asset", "second.asset"),
-        ];
-        let first = digested_manifest_node_for_test(exec, forced_digest, 0, &graph_nodes[0]);
-        let second = digested_manifest_node_for_test(exec, forced_digest, 1, &graph_nodes[1]);
-        let collision_work =
-            2 + manifest_comparison_work_for_test(&first.canonical, &second.canonical);
-        let nodes = accounted_manifest_values(exec, vec![first, second]);
-        assert!(matches!(
-            fold_manifest_nodes(exec, nodes, &graph_nodes),
-            Err(ResourceGraphError::DigestCollision)
-        ));
-        let work = exec
-            .dimension_state(ImportDimension::InputManifestWork)
-            .unwrap();
-        assert_eq!(work.attempted(), equal_work + collision_work);
-        assert_eq!(work.consumed(), equal_work + collision_work);
+                let graph_nodes = vec![
+                    graph_node_for_test(&first_authority, "first.asset", "first.asset"),
+                    graph_node_for_test(&second_authority, "second.asset", "second.asset"),
+                ];
+                let first =
+                    digested_manifest_node_for_test(exec, forced_digest, 0, &graph_nodes[0]);
+                let second =
+                    digested_manifest_node_for_test(exec, forced_digest, 1, &graph_nodes[1]);
+                let collision_work =
+                    2 + manifest_comparison_work_for_test(&first.canonical, &second.canonical);
+                let nodes = accounted_manifest_values(exec, vec![first, second]);
+                assert!(matches!(
+                    fold_manifest_nodes(exec, nodes, &graph_nodes),
+                    Err(ResourceGraphError::DigestCollision)
+                ));
+                let work = exec
+                    .dimension_state(ImportDimension::InputManifestWork)
+                    .unwrap();
+                assert_eq!(work.attempted(), equal_work + collision_work);
+                assert_eq!(work.consumed(), equal_work + collision_work);
+            },
+        );
     }
 
     #[test]
     fn replay_status_checks_reference_and_unavailable_identity_stability() {
         let limits = ResourceLimits::default();
-        let mut owner = store_owner(&limits);
-        let exec = &mut owner.execution().unwrap();
-        let normalized_unstable = ManifestRelation::new(
-            DependencyRoleId::new("test.resource").unwrap(),
-            DependencyRequirement::Required,
-            ManifestReference::Normalized(manifest_identity_for_test("dependency.bin")),
-            ManifestRelationOutcome::Available {
-                target_node_class_digest: ManifestDigest::of(b"target"),
-            },
-            1,
-        );
-        assert!(matches!(
-            replay_status_for_relation(exec, normalized_unstable),
-            InputReplayStatus::ObservedOnly(reasons)
-                if reasons.as_slice() == [ManifestObservedOnlyReason::UnstableResourceIdentity]
-        ));
+        with_store_body(
+            limits.clone(),
+            ImportOperationControl::default(),
+            |exec, _account| {
+                let normalized_unstable = ManifestRelation::new(
+                    DependencyRoleId::new("test.resource").unwrap(),
+                    DependencyRequirement::Required,
+                    ManifestReference::Normalized(manifest_identity_for_test("dependency.bin")),
+                    ManifestRelationOutcome::Available {
+                        target_node_class_digest: ManifestDigest::of(b"target"),
+                    },
+                    1,
+                );
+                assert!(matches!(
+                    replay_status_for_relation(exec, normalized_unstable),
+                    InputReplayStatus::ObservedOnly(reasons)
+                        if reasons.as_slice() == [ManifestObservedOnlyReason::UnstableResourceIdentity]
+                ));
 
-        let proof = ManifestNamespaceSnapshotProof::new(
-            "dev.baozi.test.absence",
-            1,
-            "dev.baozi.test.membership-v1",
-            ManifestSemanticIdentity::new(
-                "dev.baozi.test",
-                "resolver",
-                1,
-                ManifestDigest::of(b"resolver"),
-            ),
-            ManifestDigest::of(b"namespace"),
-            ManifestRegisteredUnavailableCause::new("baozi.io", "missing"),
-            ManifestDigest::of(b"proof"),
-        );
-        let unavailable_identity_unstable = ManifestRelation::new(
-            DependencyRoleId::new("test.resource").unwrap(),
-            DependencyRequirement::Required,
-            ManifestReference::Normalized(stable_manifest_identity_for_test("dependency.bin")),
-            ManifestRelationOutcome::Unavailable {
-                class: ManifestUnavailableClass::Io,
-                code: ManifestUnavailableCode::new("missing"),
-                identity_evidence: Some(manifest_identity_for_test("dependency.bin")),
-                replay: ManifestUnavailableReplay::NamespaceSnapshotProof(proof),
+                let proof = ManifestNamespaceSnapshotProof::new(
+                    "dev.baozi.test.absence",
+                    1,
+                    "dev.baozi.test.membership-v1",
+                    ManifestSemanticIdentity::new(
+                        "dev.baozi.test",
+                        "resolver",
+                        1,
+                        ManifestDigest::of(b"resolver"),
+                    ),
+                    ManifestDigest::of(b"namespace"),
+                    ManifestRegisteredUnavailableCause::new("baozi.io", "missing"),
+                    ManifestDigest::of(b"proof"),
+                );
+                let unavailable_identity_unstable = ManifestRelation::new(
+                    DependencyRoleId::new("test.resource").unwrap(),
+                    DependencyRequirement::Required,
+                    ManifestReference::Normalized(stable_manifest_identity_for_test(
+                        "dependency.bin",
+                    )),
+                    ManifestRelationOutcome::Unavailable {
+                        class: ManifestUnavailableClass::Io,
+                        code: ManifestUnavailableCode::new("missing"),
+                        identity_evidence: Some(manifest_identity_for_test("dependency.bin")),
+                        replay: ManifestUnavailableReplay::NamespaceSnapshotProof(proof),
+                    },
+                    1,
+                );
+                assert!(matches!(
+                    replay_status_for_relation(exec, unavailable_identity_unstable),
+                    InputReplayStatus::ObservedOnly(reasons)
+                        if reasons.as_slice() == [ManifestObservedOnlyReason::UnstableResourceIdentity]
+                ));
             },
-            1,
         );
-        assert!(matches!(
-            replay_status_for_relation(exec, unavailable_identity_unstable),
-            InputReplayStatus::ObservedOnly(reasons)
-                if reasons.as_slice() == [ManifestObservedOnlyReason::UnstableResourceIdentity]
-        ));
     }
 
     #[test]
     fn digest_sort_records_only_the_first_rejected_comparison_attempt() {
         let limits = ResourceLimits::default();
-        let mut owner = store_owner(&limits);
-        let exec = &mut owner.execution().unwrap();
-        let scratch_baseline = exec
-            .dimension_state(ImportDimension::ScratchBytes)
-            .unwrap()
-            .live_bytes();
-        let forced_digest = ManifestDigest::of(b"forced-relation-digest");
-        let first = digested_manifest_relation_for_test(exec, forced_digest, "first.asset");
-        let second = digested_manifest_relation_for_test(exec, forced_digest, "second.asset");
-        let digested = accounted_manifest_values(exec, vec![first, second]);
-        exec.tighten_dimension_policy(
-            ImportDimension::InputManifestWork,
-            DimensionPolicy::counter(0, 0, 0),
-        )
-        .unwrap();
+        with_store_body(
+            limits.clone(),
+            ImportOperationControl::default(),
+            |exec, _account| {
+                let scratch_baseline = exec
+                    .dimension_state(ImportDimension::ScratchBytes)
+                    .unwrap()
+                    .live_bytes();
+                let forced_digest = ManifestDigest::of(b"forced-relation-digest");
+                let first = digested_manifest_relation_for_test(exec, forced_digest, "first.asset");
+                let second =
+                    digested_manifest_relation_for_test(exec, forced_digest, "second.asset");
+                let digested = accounted_manifest_values(exec, vec![first, second]);
+                exec.tighten_dimension_policy(
+                    ImportDimension::InputManifestWork,
+                    DimensionPolicy::counter(0, 0, 0),
+                )
+                .unwrap();
 
-        assert!(fold_manifest_relations(exec, digested).is_err());
-        let work = exec
-            .dimension_state(ImportDimension::InputManifestWork)
-            .unwrap();
-        assert_eq!(work.attempted(), 1);
-        assert_eq!(work.consumed(), 0);
-        assert_eq!(
-            exec.dimension_state(ImportDimension::ScratchBytes)
-                .unwrap()
-                .live_bytes(),
-            scratch_baseline
+                assert!(fold_manifest_relations(exec, digested).is_err());
+                let work = exec
+                    .dimension_state(ImportDimension::InputManifestWork)
+                    .unwrap();
+                assert_eq!(work.attempted(), 1);
+                assert_eq!(work.consumed(), 0);
+                assert_eq!(
+                    exec.dimension_state(ImportDimension::ScratchBytes)
+                        .unwrap()
+                        .live_bytes(),
+                    scratch_baseline
+                );
+            },
         );
     }
 
     #[test]
     fn primary_only_manifest_is_complete_and_observed_only() {
         let limits = ResourceLimits::default();
-        let mut owner = store_owner(&limits);
-        let exec = &mut owner.execution().unwrap();
-        let authority = AuthorityDomain::default();
-        let path = AssetPath::new("models/main.obj").unwrap();
-        let mut graph = ResourceGraph::new(limits);
-        graph
-            .bind_primary(exec, &authority, &path, b"v 0 0 0")
-            .unwrap();
-        let node = graph.nodes.first().unwrap();
-        let node_hash_work = u64::try_from(
-            node_class_len(
-                &node.public_identity,
-                node.byte_length,
-                node.content_digest,
-                &[],
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        graph.seal(exec).unwrap();
-        let manifest = graph.take_manifest().unwrap();
-        let canonical = manifest.canonical_bytes().unwrap();
-        let expected_digest = [
-            0x69, 0x67, 0x8e, 0x43, 0xf1, 0xde, 0x95, 0xd9, 0x01, 0x3c, 0xf1, 0x6d, 0x22, 0x62,
-            0x0b, 0x14, 0x7a, 0xcd, 0x0b, 0xd7, 0x22, 0xa8, 0x44, 0xfc, 0xcf, 0x32, 0x8e, 0xd5,
-            0x3b, 0x5b, 0xcd, 0x68,
-        ];
-        assert_eq!(canonical.len(), 5_327);
-        assert_eq!(manifest.digest().as_bytes(), expected_digest);
-        assert_eq!(ManifestDigest::of(&canonical).as_bytes(), expected_digest);
-        let manifest_bytes = exec
-            .dimension_state(ImportDimension::InputManifestBytes)
-            .unwrap();
-        assert_eq!(manifest_bytes.attempted(), 5_327);
-        assert_eq!(manifest_bytes.consumed(), 5_327);
-        assert_eq!(manifest_bytes.live_bytes(), 0);
-        let manifest_work = exec
-            .dimension_state(ImportDimension::InputManifestWork)
-            .unwrap();
-        // One relation-count scan, state initialization, two traversal steps, digest initialization,
-        // node projection, and replay/count classification surround the two byte hashes.
-        let expected_work = 7 + node_hash_work + 5_327;
-        assert_eq!(manifest_work.attempted(), expected_work);
-        assert_eq!(manifest_work.consumed(), expected_work);
-        assert_eq!(manifest.schema_version(), 1);
-        assert_eq!(manifest.counts().node_class_count(), 1);
-        assert_eq!(manifest.counts().quotient_relation_record_count(), 0);
-        assert!(matches!(
-            manifest.replay_status(),
-            InputReplayStatus::ObservedOnly(reasons)
-                if reasons.as_slice()
-                    == [ManifestObservedOnlyReason::UnstableResourceIdentity]
-        ));
+        with_store_body(
+            limits.clone(),
+            ImportOperationControl::default(),
+            |exec, _account| {
+                let authority = AuthorityDomain::default();
+                let path = AssetPath::new("models/main.obj").unwrap();
+                let mut graph = ResourceGraph::new(limits);
+                graph
+                    .bind_primary(exec, &authority, &path, b"v 0 0 0")
+                    .unwrap();
+                let node = graph.nodes.first().unwrap();
+                let node_hash_work = u64::try_from(
+                    node_class_len(
+                        &node.public_identity,
+                        node.byte_length,
+                        node.content_digest,
+                        &[],
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+                graph.seal(exec).unwrap();
+                let manifest = graph.take_manifest().unwrap();
+                let canonical = manifest.canonical_bytes().unwrap();
+                let expected_digest = [
+                    0x69, 0x67, 0x8e, 0x43, 0xf1, 0xde, 0x95, 0xd9, 0x01, 0x3c, 0xf1, 0x6d, 0x22,
+                    0x62, 0x0b, 0x14, 0x7a, 0xcd, 0x0b, 0xd7, 0x22, 0xa8, 0x44, 0xfc, 0xcf, 0x32,
+                    0x8e, 0xd5, 0x3b, 0x5b, 0xcd, 0x68,
+                ];
+                assert_eq!(canonical.len(), 5_327);
+                assert_eq!(manifest.digest().as_bytes(), expected_digest);
+                assert_eq!(ManifestDigest::of(&canonical).as_bytes(), expected_digest);
+                let manifest_bytes = exec
+                    .dimension_state(ImportDimension::InputManifestBytes)
+                    .unwrap();
+                assert_eq!(manifest_bytes.attempted(), 5_327);
+                assert_eq!(manifest_bytes.consumed(), 5_327);
+                assert_eq!(manifest_bytes.live_bytes(), 0);
+                let manifest_work = exec
+                    .dimension_state(ImportDimension::InputManifestWork)
+                    .unwrap();
+                // One relation-count scan, state initialization, two traversal steps, digest initialization,
+                // node projection, and replay/count classification surround the two byte hashes.
+                let expected_work = 7 + node_hash_work + 5_327;
+                assert_eq!(manifest_work.attempted(), expected_work);
+                assert_eq!(manifest_work.consumed(), expected_work);
+                assert_eq!(manifest.schema_version(), 1);
+                assert_eq!(manifest.counts().node_class_count(), 1);
+                assert_eq!(manifest.counts().quotient_relation_record_count(), 0);
+                assert!(matches!(
+                    manifest.replay_status(),
+                    InputReplayStatus::ObservedOnly(reasons)
+                        if reasons.as_slice()
+                            == [ManifestObservedOnlyReason::UnstableResourceIdentity]
+                ));
+            },
+        );
     }
 
     #[test]
     fn node_hash_work_is_admitted_before_manifest_bytes() {
         let limits = ResourceLimits::default();
-        let mut owner = store_owner(&limits);
-        let exec = &mut owner.execution().unwrap();
-        let authority = AuthorityDomain::default();
-        let path = AssetPath::new("models/main.obj").unwrap();
-        let mut graph = ResourceGraph::new(limits);
-        graph
-            .bind_primary(exec, &authority, &path, b"v 0 0 0")
-            .unwrap();
-        let node = graph.nodes.first().unwrap();
-        let node_hash_work = u64::try_from(
-            node_class_len(
-                &node.public_identity,
-                node.byte_length,
-                node.content_digest,
-                &[],
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let graph_storage = exec
-            .dimension_state(ImportDimension::ScratchBytes)
-            .unwrap()
-            .live_bytes();
-        const PRE_HASH_WORK: u64 = 6;
-        exec.tighten_dimension_policy(
-            ImportDimension::InputManifestWork,
-            DimensionPolicy::counter(PRE_HASH_WORK, PRE_HASH_WORK, 0),
-        )
-        .unwrap();
+        with_store_body(
+            limits.clone(),
+            ImportOperationControl::default(),
+            |exec, _account| {
+                let authority = AuthorityDomain::default();
+                let path = AssetPath::new("models/main.obj").unwrap();
+                let mut graph = ResourceGraph::new(limits);
+                graph
+                    .bind_primary(exec, &authority, &path, b"v 0 0 0")
+                    .unwrap();
+                let node = graph.nodes.first().unwrap();
+                let node_hash_work = u64::try_from(
+                    node_class_len(
+                        &node.public_identity,
+                        node.byte_length,
+                        node.content_digest,
+                        &[],
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+                let graph_storage = exec
+                    .dimension_state(ImportDimension::ScratchBytes)
+                    .unwrap()
+                    .live_bytes();
+                const PRE_HASH_WORK: u64 = 6;
+                exec.tighten_dimension_policy(
+                    ImportDimension::InputManifestWork,
+                    DimensionPolicy::counter(PRE_HASH_WORK, PRE_HASH_WORK, 0),
+                )
+                .unwrap();
 
-        assert!(graph.seal(exec).is_err());
-        let work = exec
-            .dimension_state(ImportDimension::InputManifestWork)
-            .unwrap();
-        assert_eq!(work.attempted(), PRE_HASH_WORK + node_hash_work);
-        assert_eq!(work.consumed(), PRE_HASH_WORK);
-        assert_eq!(
-            exec.dimension_state(ImportDimension::InputManifestBytes)
-                .unwrap()
-                .attempted(),
-            0
+                assert!(graph.seal(exec).is_err());
+                let work = exec
+                    .dimension_state(ImportDimension::InputManifestWork)
+                    .unwrap();
+                assert_eq!(work.attempted(), PRE_HASH_WORK + node_hash_work);
+                assert_eq!(work.consumed(), PRE_HASH_WORK);
+                assert_eq!(
+                    exec.dimension_state(ImportDimension::InputManifestBytes)
+                        .unwrap()
+                        .attempted(),
+                    0
+                );
+                assert_eq!(
+                    exec.dimension_state(ImportDimension::ScratchBytes)
+                        .unwrap()
+                        .live_bytes(),
+                    graph_storage
+                );
+                assert!(graph.sealed_manifest.is_none());
+            },
         );
-        assert_eq!(
-            exec.dimension_state(ImportDimension::ScratchBytes)
-                .unwrap()
-                .live_bytes(),
-            graph_storage
-        );
-        assert!(graph.sealed_manifest.is_none());
     }
 
     #[test]
     fn canonical_manifest_storage_is_admitted_before_encoding() {
         let limits = ResourceLimits::default();
-        let mut owner = store_owner(&limits);
-        let exec = &mut owner.execution().unwrap();
-        let authority = AuthorityDomain::default();
-        let path = AssetPath::new("models/main.obj").unwrap();
-        let mut graph = ResourceGraph::new(limits);
-        graph
-            .bind_primary(exec, &authority, &path, b"v 0 0 0")
-            .unwrap();
-        exec.tighten_dimension_policy(
-            ImportDimension::InputManifestBytes,
-            DimensionPolicy::reservable_bytes(5_327, 5_327, 0, 5_326),
-        )
-        .unwrap();
+        with_store_body(
+            limits.clone(),
+            ImportOperationControl::default(),
+            |exec, _account| {
+                let authority = AuthorityDomain::default();
+                let path = AssetPath::new("models/main.obj").unwrap();
+                let mut graph = ResourceGraph::new(limits);
+                graph
+                    .bind_primary(exec, &authority, &path, b"v 0 0 0")
+                    .unwrap();
+                exec.tighten_dimension_policy(
+                    ImportDimension::InputManifestBytes,
+                    DimensionPolicy::reservable_bytes(5_327, 5_327, 0, 5_326),
+                )
+                .unwrap();
 
-        assert!(graph.seal(exec).is_err());
-        let manifest_bytes = exec
-            .dimension_state(ImportDimension::InputManifestBytes)
-            .unwrap();
-        assert_eq!(manifest_bytes.attempted(), 5_327);
-        assert_eq!(manifest_bytes.consumed(), 0);
-        assert_eq!(manifest_bytes.live_bytes(), 0);
-        assert!(graph.sealed_manifest.is_none());
+                assert!(graph.seal(exec).is_err());
+                let manifest_bytes = exec
+                    .dimension_state(ImportDimension::InputManifestBytes)
+                    .unwrap();
+                assert_eq!(manifest_bytes.attempted(), 5_327);
+                assert_eq!(manifest_bytes.consumed(), 0);
+                assert_eq!(manifest_bytes.live_bytes(), 0);
+                assert!(graph.sealed_manifest.is_none());
+            },
+        );
     }
 }

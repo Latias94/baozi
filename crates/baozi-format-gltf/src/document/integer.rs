@@ -1,9 +1,9 @@
 use crate::GltfFailure;
-use baozi_import::{ImportWorkClass, ParseExecution, ParseResult};
+use baozi_import::{ImportWorkClass, ParseResult, ParseRoot};
 
 /// Interprets a number whose kind and complete JSON grammar were already admitted.
-pub(super) fn unsigned(ctx: &mut ParseExecution<'_, '_>, bytes: &[u8]) -> ParseResult<u64> {
-    let unsupported_length = |ctx: &mut ParseExecution<'_, '_>| {
+pub(super) fn unsigned(ctx: &mut ParseRoot<'_, '_, '_>, bytes: &[u8]) -> ParseResult<u64> {
+    let unsupported_length = |ctx: &mut ParseRoot<'_, '_, '_>| {
         ctx.format_failure(GltfFailure::invalid_document(
             "glTF integer token exceeds the supported length domain",
         ))
@@ -12,12 +12,12 @@ pub(super) fn unsigned(ctx: &mut ParseExecution<'_, '_>, bytes: &[u8]) -> ParseR
     let exponent_bound = length
         .checked_add(21)
         .ok_or_else(|| unsupported_length(ctx))?;
-    let out_of_range = |ctx: &mut ParseExecution<'_, '_>| {
+    let out_of_range = |ctx: &mut ParseRoot<'_, '_, '_>| {
         ctx.format_failure(GltfFailure::invalid_document(
             "glTF integer exceeds the U64 domain",
         ))
     };
-    let fractional = |ctx: &mut ParseExecution<'_, '_>| {
+    let fractional = |ctx: &mut ParseRoot<'_, '_, '_>| {
         ctx.format_failure(GltfFailure::invalid_document(
             "glTF unsigned integer has a nonzero fractional part",
         ))
@@ -36,52 +36,54 @@ pub(super) fn unsigned(ctx: &mut ParseExecution<'_, '_>, bytes: &[u8]) -> ParseR
     let mut last_nonzero_digit = 0_i128;
     let mut chunk_start = 0;
 
-    let integer_work = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
+    let integer_work = ctx.bind_group([ImportWorkClass::WorkUnits])?;
     for chunk in bytes.chunks(4096) {
         ctx.poll()?;
-        ctx.with_work(&integer_work, [chunk.len() as u64], |ctx, work| {
+        ctx.child(&integer_work, [chunk.len() as u64], |child| {
             for (offset, &byte) in chunk.iter().enumerate() {
-                match byte {
-                    b'-' => {
-                        if exponent {
-                            exponent_negative = true;
-                        } else {
-                            negative = true;
+                child.run_format([1], || -> Result<(), GltfFailure> {
+                    match byte {
+                        b'-' => {
+                            if exponent {
+                                exponent_negative = true;
+                            } else {
+                                negative = true;
+                            }
+                        }
+                        b'+' => {}
+                        b'.' => fraction = true,
+                        b'e' | b'E' => exponent = true,
+                        b'0'..=b'9' => {
+                            if exponent {
+                                if !exponent_over_bound {
+                                    exponent_magnitude = exponent_magnitude
+                                        .saturating_mul(10)
+                                        .saturating_add(i128::from(byte - b'0'))
+                                        .min(exponent_bound);
+                                    // N+21 is a sentinel, never an exact exponent.
+                                    exponent_over_bound = exponent_magnitude == exponent_bound;
+                                }
+                            } else {
+                                if fraction {
+                                    fractional_digits += 1;
+                                }
+                                if byte != b'0' {
+                                    first_nonzero
+                                        .get_or_insert((chunk_start + offset, mantissa_digits));
+                                    last_nonzero_end = chunk_start + offset + 1;
+                                    last_nonzero_digit = mantissa_digits;
+                                }
+                                mantissa_digits += 1;
+                            }
+                        }
+                        _ => {
+                            return Err(GltfFailure::internal(
+                                "unsigned interpreter requires an admitted number",
+                            ));
                         }
                     }
-                    b'+' => {}
-                    b'.' => fraction = true,
-                    b'e' | b'E' => exponent = true,
-                    b'0'..=b'9' => {
-                        if exponent {
-                            if !exponent_over_bound {
-                                exponent_magnitude = exponent_magnitude
-                                    .saturating_mul(10)
-                                    .saturating_add(i128::from(byte - b'0'))
-                                    .min(exponent_bound);
-                                // N+21 is a sentinel, never an exact exponent.
-                                exponent_over_bound = exponent_magnitude == exponent_bound;
-                            }
-                        } else {
-                            if fraction {
-                                fractional_digits += 1;
-                            }
-                            if byte != b'0' {
-                                first_nonzero
-                                    .get_or_insert((chunk_start + offset, mantissa_digits));
-                                last_nonzero_end = chunk_start + offset + 1;
-                                last_nonzero_digit = mantissa_digits;
-                            }
-                            mantissa_digits += 1;
-                        }
-                    }
-                    _ => {
-                        return Err(ctx.format_failure(GltfFailure::internal(
-                            "unsigned interpreter requires an admitted number",
-                        )));
-                    }
-                }
-                work.complete([1])?;
+                    Ok(())
+                })?;
             }
             Ok(())
         })?;
@@ -136,23 +138,31 @@ pub(super) fn unsigned(ctx: &mut ParseExecution<'_, '_>, bytes: &[u8]) -> ParseR
             ))
         })?;
     ctx.poll()?;
-    ctx.with_work(
+    ctx.child(
         &integer_work,
         [accumulation_work],
-        |ctx, work| -> ParseResult<u64> {
+        |child| -> ParseResult<u64> {
             let mut value = 0_u64;
             for &byte in coefficient {
-                if byte != b'.' {
-                    value = value
-                        .checked_mul(10)
-                        .and_then(|value| value.checked_add(u64::from(byte - b'0')))
-                        .ok_or_else(|| out_of_range(ctx))?;
-                }
-                work.complete([1])?;
+                child.run_format([1], || -> Result<(), GltfFailure> {
+                    if byte != b'.' {
+                        value = value
+                            .checked_mul(10)
+                            .and_then(|value| value.checked_add(u64::from(byte - b'0')))
+                            .ok_or_else(|| {
+                                GltfFailure::invalid_document("glTF integer exceeds the U64 domain")
+                            })?;
+                    }
+                    Ok(())
+                })?;
             }
             for _ in 0..shift {
-                value = value.checked_mul(10).ok_or_else(|| out_of_range(ctx))?;
-                work.complete([1])?;
+                child.run_format([1], || -> Result<(), GltfFailure> {
+                    value = value.checked_mul(10).ok_or_else(|| {
+                        GltfFailure::invalid_document("glTF integer exceeds the U64 domain")
+                    })?;
+                    Ok(())
+                })?;
             }
             Ok(value)
         },
@@ -239,7 +249,7 @@ mod tests {
             &self,
             _: &Probe<'_>,
             _: &ReadHint,
-            _: &DetectionScope<'_>,
+            _: &mut DetectionScope<'_, '_>,
         ) -> DetectionResult<DetectionOutcome> {
             Ok(DetectionOutcome::Match(ReadConfidence::Certain))
         }
@@ -247,7 +257,7 @@ mod tests {
         fn parse(
             &self,
             _: &Self::Options,
-            context: &mut baozi_import::ParseContext<'_>,
+            context: &mut baozi_import::ParseContext<'_, '_>,
         ) -> ParseResult<()> {
             context.with_execution(|scope| {
                 let bytes = scope.primary_bytes();
@@ -267,7 +277,9 @@ mod tests {
                     self.inspection.completed.store(true, Ordering::SeqCst);
                 }
                 // Stop without allocating format-failure evidence or charging unrelated work.
-                scope.enforce_resource_limit(INSPECTION_STOP, 1, 0)?;
+                scope
+                    .services()?
+                    .enforce_resource_limit(INSPECTION_STOP, 1, 0)?;
                 unreachable!("the inspection-only resource bound must stop parsing")
             })
         }

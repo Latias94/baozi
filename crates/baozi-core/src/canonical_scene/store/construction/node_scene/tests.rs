@@ -14,7 +14,7 @@ use crate::canonical_scene::store::construction::node_scene::semantic::{
 };
 use crate::canonical_scene::store::construction::{
     FAILURE_TERMINAL_WORK_DIMENSION, GENERATION_EXHAUSTED_CODE, STORE_DIMENSION,
-    SceneConstructionLimits, failure_terminal_work_requirement,
+    SceneCanonicalInvocationHost, SceneConstructionLimits, failure_terminal_work_requirement,
 };
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, DeformationAuthoringBatch,
@@ -43,8 +43,7 @@ use super::{
     NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_NODE_AUTHORING_REJECTION_CODE,
     NODE_SCENE_PLANNING_REJECTION_CODE, NODE_SCENE_STORAGE_REJECTION_CODE, NodeSceneBuildFaults,
     NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraftBuild,
-    NodeSceneRichFailure, NodeSceneTestTransaction, PendingNodeSceneDraft,
-    PreparedNodeSceneConstruction, SceneParseOutcome,
+    NodeSceneRichFailure, NodeSceneTestTransaction, PendingNodeSceneDraft, SceneParseOutcome,
 };
 
 mod gltf_capability;
@@ -330,13 +329,15 @@ pub(super) fn single_trs_batch() -> NodeAuthoringBatch<'static> {
     NodeAuthoringBatch::new(Presence::Present(&SINGLE_TRS_ROOTS), &SINGLE_TRS_NODES)
 }
 
-fn finish_node_batch(
+fn finish_node_batch<'inv>(
+    root: &'inv mut SceneCanonicalInvocationHost,
     account: &baozi_operation::PhysicalStorageAccount,
     limits: SceneConstructionLimits,
     nodes: NodeAuthoringBatch<'_>,
     validation_limits: SceneValidationLimits,
-) -> NodeSceneDraftBuild {
+) -> NodeSceneDraftBuild<'inv> {
     NodeSceneTestTransaction::with_account(
+        root,
         account,
         limits,
         test_scene_authoring_batch(nodes),
@@ -348,8 +349,10 @@ fn finish_node_batch(
 }
 
 fn single_trs_work_baseline(account: &baozi_operation::PhysicalStorageAccount) -> (u64, u64) {
+    let mut root = SceneCanonicalInvocationHost::new();
     let parts = successful_parts(
         finish_node_batch(
+            &mut root,
             account,
             test_limits(),
             single_trs_batch(),
@@ -368,19 +371,22 @@ fn single_trs_work_baseline(account: &baozi_operation::PhysicalStorageAccount) -
     let validation = parts.scene.proof.central_validation_plan().work().get();
     assert!(total > validation);
     drop(parts);
+    drop(root);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
     (total, validation)
 }
 
-fn finish_node_batch_with_faults(
+fn finish_node_batch_with_faults<'inv>(
+    root: &'inv mut SceneCanonicalInvocationHost,
     account: &baozi_operation::PhysicalStorageAccount,
     limits: SceneConstructionLimits,
     nodes: NodeAuthoringBatch<'_>,
     validation_limits: SceneValidationLimits,
     faults: NodeSceneBuildFaults,
-) -> NodeSceneDraftBuild {
+) -> NodeSceneDraftBuild<'inv> {
     NodeSceneTestTransaction::with_account(
+        root,
         account,
         limits,
         test_scene_authoring_batch(nodes),
@@ -391,14 +397,16 @@ fn finish_node_batch_with_faults(
     .expect("node Scene scoped activation must prepare an exact outcome")
 }
 
-fn finish_node_batch_with_cancellation(
+fn finish_node_batch_with_cancellation<'inv>(
+    root: &'inv mut SceneCanonicalInvocationHost,
     account: &baozi_operation::PhysicalStorageAccount,
     limits: SceneConstructionLimits,
     nodes: NodeAuthoringBatch<'_>,
     validation_limits: SceneValidationLimits,
     cancellation: impl CancellationSignal,
-) -> NodeSceneDraftBuild {
+) -> NodeSceneDraftBuild<'inv> {
     NodeSceneTestTransaction::with_account_and_cancellation(
+        root,
         account,
         limits,
         test_scene_authoring_batch(nodes),
@@ -410,12 +418,14 @@ fn finish_node_batch_with_cancellation(
     .expect("cancellable scoped activation must prepare an exact outcome")
 }
 
-fn finish_node_batch_with_planning_fault(
+fn finish_node_batch_with_planning_fault<'inv>(
+    root: &'inv mut SceneCanonicalInvocationHost,
     account: &baozi_operation::PhysicalStorageAccount,
     nodes: NodeAuthoringBatch<'_>,
     planning_fault: NodeScenePlanningFault,
-) -> NodeSceneDraftBuild {
+) -> NodeSceneDraftBuild<'inv> {
     NodeSceneTestTransaction::with_account(
+        root,
         account,
         test_limits(),
         test_scene_authoring_batch(nodes),
@@ -473,7 +483,9 @@ pub(super) fn successful_parts(
 pub(in crate::canonical_scene::store) fn build_minimal_fallback_terminal_for_probe(
     account: &baozi_operation::PhysicalStorageAccount,
 ) -> NodeSceneConstructionTerminal {
-    finish_node_batch_with_faults(
+    let mut root = SceneCanonicalInvocationHost::new();
+    let terminal = finish_node_batch_with_faults(
+        &mut root,
         account,
         test_limits(),
         single_trs_batch(),
@@ -481,7 +493,9 @@ pub(in crate::canonical_scene::store) fn build_minimal_fallback_terminal_for_pro
         NodeSceneBuildFaults::minimal_fallback(),
     )
     .publish_for_test()
-    .expect("aborted outcome evidence must publish fail closed")
+    .expect("aborted outcome evidence must publish fail closed");
+    drop(root);
+    terminal
 }
 
 fn rich_failure(terminal: NodeSceneConstructionTerminal) -> NodeSceneRichFailure {
@@ -517,7 +531,6 @@ fn terminal_failure_code(evidence: &baozi_operation::StoreLedgerEvidence) -> u32
         StoreTerminalCause::Success => {
             panic!("rejected node Scene must freeze a failure cause")
         }
-        _ => panic!("unknown terminal cause cannot prove a node Scene failure"),
     }
 }
 
@@ -529,7 +542,6 @@ fn terminal_failure_class(
         StoreTerminalCause::Success => {
             panic!("rejected node Scene must freeze a failure cause")
         }
-        _ => panic!("unknown terminal cause cannot prove a node Scene failure"),
     }
 }
 
@@ -554,9 +566,10 @@ fn trs_transform(translation_x: f32) -> AuthoredTransform {
     .expect("valid authored TRS")
 }
 
-fn finish_draft_from_local_authoring_vecs(
+fn finish_draft_from_local_authoring_vecs<'inv>(
+    root: &'inv mut SceneCanonicalInvocationHost,
     account: &baozi_operation::PhysicalStorageAccount,
-) -> NodeSceneDraftBuild {
+) -> NodeSceneDraftBuild<'inv> {
     let roots = vec![NodeLocalId::new(0)];
     let nodes = vec![NodeAuthoringNode::new(
         Presence::Absent,
@@ -565,6 +578,7 @@ fn finish_draft_from_local_authoring_vecs(
         Presence::Absent,
     )];
     finish_node_batch(
+        root,
         account,
         test_limits(),
         NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
@@ -572,10 +586,11 @@ fn finish_draft_from_local_authoring_vecs(
     )
 }
 
-fn pending_candidate_from_local_authoring_vecs(
+fn pending_candidate_from_local_authoring_vecs<'inv>(
+    root: &'inv mut SceneCanonicalInvocationHost,
     account: &baozi_operation::PhysicalStorageAccount,
-) -> PendingNodeSceneDraft {
-    match finish_draft_from_local_authoring_vecs(account) {
+) -> PendingNodeSceneDraft<'inv> {
+    match finish_draft_from_local_authoring_vecs(root, account) {
         NodeSceneDraftBuild::Draft { owner } => owner,
         NodeSceneDraftBuild::Failure { .. } => {
             panic!("valid materialization must retain its canonical candidate")
@@ -587,7 +602,10 @@ fn pending_candidate_from_local_authoring_vecs(
 fn dropping_scoped_activation_outcome_releases_all_retained_storage() {
     let factory = test_factory();
     let account = test_account(&factory, 256);
+    let mut invocation_root_1 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let build = finish_node_batch(
+        &mut invocation_root_1,
         &account,
         test_limits(),
         single_trs_batch(),
@@ -597,6 +615,7 @@ fn dropping_scoped_activation_outcome_releases_all_retained_storage() {
     assert!(account.snapshot().live_retained_allocations() > 0);
 
     drop(build);
+    drop(invocation_root_1);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
@@ -609,32 +628,42 @@ fn planning_rejections_preserve_rich_evidence_without_canonical_commitment() {
     ] {
         let factory = test_factory();
         let account = test_account(&factory, 256);
-        let build =
-            finish_node_batch_with_planning_fault(&account, single_trs_batch(), planning_fault);
-        let NodeSceneDraftBuild::Failure {
-            authoring_rejection: Some(rejection),
-            prepared,
-        } = build
-        else {
-            panic!("{planning_fault:?} must retain an exact planning rejection")
-        };
-        assert!(matches!(
-            rejection,
-            NodeSceneConstructionRejection::Planning(StorePlanError::InvalidBlockTable)
-        ));
-        let failure = rich_failure(prepared.handoff_for_test());
-        assert_eq!(
-            terminal_failure_code(failure.ledger_evidence()),
-            NODE_SCENE_PLANNING_REJECTION_CODE
-        );
-        assert_eq!(
+        let mut invocation_root_2 =
+            crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+        let failure = {
+            let build = finish_node_batch_with_planning_fault(
+                &mut invocation_root_2,
+                &account,
+                single_trs_batch(),
+                planning_fault,
+            );
+            let NodeSceneDraftBuild::Failure {
+                authoring_rejection: Some(rejection),
+                prepared,
+            } = build
+            else {
+                panic!("{planning_fault:?} must retain an exact planning rejection")
+            };
+            assert!(matches!(
+                rejection,
+                NodeSceneConstructionRejection::Planning(StorePlanError::InvalidBlockTable)
+            ));
+            let failure = rich_failure(prepared.handoff_for_test());
+            assert_eq!(
+                terminal_failure_code(failure.ledger_evidence()),
+                NODE_SCENE_PLANNING_REJECTION_CODE
+            );
+            assert_eq!(
+                failure
+                    .ledger_evidence()
+                    .dimension_by_semantic(STORE_DIMENSION)
+                    .expect("planning rejection dimension")
+                    .committed_canonical_output(),
+                0
+            );
             failure
-                .ledger_evidence()
-                .dimension_by_semantic(STORE_DIMENSION)
-                .expect("planning rejection dimension")
-                .committed_canonical_output(),
-            0
-        );
+        };
+        drop(invocation_root_2);
         assert_released(failure, &account);
     }
 }
@@ -647,7 +676,9 @@ fn accepted_parse_publishes_actual_root_and_generation_after_source_buffers_drop
     let mut expected_generation = None;
 
     // The helper's Vec-backed authoring storage is gone before generation and joint publication.
-    let owner = pending_candidate_from_local_authoring_vecs(&account);
+    let mut invocation_root_3 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    let owner = pending_candidate_from_local_authoring_vecs(&mut invocation_root_3, &account);
     let expected_root = owner.candidate.output().inner().refs.directory.into_store();
     let prepared = owner
         .prepare_with_generation_source(SceneParseOutcome::Accepted, || {
@@ -669,6 +700,7 @@ fn accepted_parse_publishes_actual_root_and_generation_after_source_buffers_drop
     assert_eq!(semantic.root_count(), 1);
     assert_eq!(generation_source.load(Ordering::Relaxed), 1);
     drop(parts);
+    drop(invocation_root_3);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
@@ -677,7 +709,9 @@ fn accepted_parse_publishes_actual_root_and_generation_after_source_buffers_drop
 fn rejected_parse_discards_pending_candidate_without_reserving_generation() {
     let factory = test_factory();
     let account = test_account(&factory, 256);
-    let owner = pending_candidate_from_local_authoring_vecs(&account);
+    let mut invocation_root_4 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    let owner = pending_candidate_from_local_authoring_vecs(&mut invocation_root_4, &account);
 
     let failure = rich_failure(
         owner
@@ -699,16 +733,22 @@ fn rejected_parse_discards_pending_candidate_without_reserving_generation() {
             .committed_canonical_output(),
         0
     );
+    drop(invocation_root_4);
     assert_released(failure, &account);
 }
 
 #[test]
-fn prepared_handoff_rejects_foreign_canonical_roots_and_proofs() {
+fn prepared_scene_successes_keep_roots_proofs_and_generations_inseparable() {
     let factory = test_factory();
     let account = test_account(&factory, 512);
     let generation_source = AtomicU64::new(0);
-    let local_owner = pending_candidate_from_local_authoring_vecs(&account);
-    let foreign_owner = pending_candidate_from_local_authoring_vecs(&account);
+    let mut invocation_root_5 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    let mut invocation_root_6 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    let local_owner = pending_candidate_from_local_authoring_vecs(&mut invocation_root_5, &account);
+    let foreign_owner =
+        pending_candidate_from_local_authoring_vecs(&mut invocation_root_6, &account);
     let local_root = local_owner
         .candidate
         .output()
@@ -724,33 +764,51 @@ fn prepared_handoff_rejects_foreign_canonical_roots_and_proofs() {
         .directory
         .into_store();
     assert_ne!(local_root, foreign_root);
+    let local_evidence_root = local_owner.candidate.proof().evidence_root;
+    let foreign_evidence_root = foreign_owner.candidate.proof().evidence_root;
+    assert_ne!(local_evidence_root, foreign_evidence_root);
 
-    let PreparedNodeSceneConstruction::Success {
-        token: local_token,
-        store: local_store,
-    } = local_owner
+    let mut local_generation = None;
+    let local = local_owner
         .prepare_with_generation_source(SceneParseOutcome::Accepted, || {
-            SceneGenerationId::reserve_from(&generation_source)
+            let generation = SceneGenerationId::reserve_from(&generation_source)?;
+            local_generation = Some(generation.id());
+            Ok(generation)
         })
-        .expect("local candidate must prepare")
-    else {
-        panic!("local candidate must retain its proven root")
-    };
-    let PreparedNodeSceneConstruction::Success {
-        token: foreign_token,
-        store: foreign_store,
-    } = foreign_owner
+        .expect("local candidate must prepare");
+    let mut foreign_generation = None;
+    let foreign = foreign_owner
         .prepare_with_generation_source(SceneParseOutcome::Accepted, || {
-            SceneGenerationId::reserve_from(&generation_source)
+            let generation = SceneGenerationId::reserve_from(&generation_source)?;
+            foreign_generation = Some(generation.id());
+            Ok(generation)
         })
-        .expect("foreign candidate must prepare")
-    else {
-        panic!("foreign candidate must retain its proven root")
-    };
+        .expect("foreign candidate must prepare");
 
-    assert!(local_token.try_handoff_prepared(foreign_store).is_err());
-    assert!(foreign_token.try_handoff_prepared(local_store).is_err());
+    let foreign = successful_parts(foreign.handoff());
+    let local = successful_parts(local.handoff());
+    for (published, root, evidence_root, generation) in [
+        (&local, local_root, local_evidence_root, local_generation),
+        (
+            &foreign,
+            foreign_root,
+            foreign_evidence_root,
+            foreign_generation,
+        ),
+    ] {
+        assert_eq!(published.scene.canonical.root_ref(), root);
+        assert_eq!(published.scene.proof.directory().into_store(), root);
+        assert_eq!(published.report.outcome_evidence.root_ref(), evidence_root);
+        assert_eq!(Some(published.scene.generation()), generation);
+        assert_eq!(
+            published.report.ledger_evidence().header().terminal_cause(),
+            StoreTerminalCause::Success
+        );
+    }
     assert_eq!(generation_source.load(Ordering::Relaxed), 2);
+    drop((local, foreign));
+    drop(invocation_root_6);
+    drop(invocation_root_5);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
@@ -803,135 +861,141 @@ fn source_ordered_forest_materializes_canonical_graph_and_preserves_authored_bit
         ),
     ];
     let roots = [NodeLocalId::new(3), NodeLocalId::new(1)];
-    let build = finish_node_batch(
-        &account,
-        test_limits(),
-        NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
-        SceneValidationLimits::default(),
-    );
-    let NodeSceneDraftBuild::Draft { owner } = build else {
-        panic!("valid source-ordered forest must retain a draft before publication")
-    };
-    let prepared = owner
-        .prepare_with_generation_source(SceneParseOutcome::Accepted, || {
-            SceneGenerationId::reserve_from(&generation_source)
-        })
-        .expect("valid source-ordered forest must prepare");
-    let before_handoff = account.snapshot();
-    let parts = successful_parts(prepared.handoff());
-    let after_handoff = account.snapshot();
-    let generation_after = SceneGenerationId::reserve_from(&generation_source)
-        .expect("generation after node Scene construction")
-        .into_id();
+    let mut invocation_root_7 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    {
+        let build = finish_node_batch(
+            &mut invocation_root_7,
+            &account,
+            test_limits(),
+            NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
+            SceneValidationLimits::default(),
+        );
+        let NodeSceneDraftBuild::Draft { owner } = build else {
+            panic!("valid source-ordered forest must retain a draft before publication")
+        };
+        let prepared = owner
+            .prepare_with_generation_source(SceneParseOutcome::Accepted, || {
+                SceneGenerationId::reserve_from(&generation_source)
+            })
+            .expect("valid source-ordered forest must prepare");
+        let before_handoff = account.snapshot();
+        let parts = successful_parts(prepared.handoff());
+        let after_handoff = account.snapshot();
+        let generation_after = SceneGenerationId::reserve_from(&generation_source)
+            .expect("generation after node Scene construction")
+            .into_id();
 
-    let canonical_block_count = parts.scene.canonical_block_count();
-    let semantic = parts
-        .scene
-        .semantic_view()
-        .expect("source-ordered forest semantic view");
-    assert_eq!(semantic.node_count(), 5);
-    assert_eq!(semantic.root_count(), 2);
-    assert!(canonical_block_count > 0);
-    let profile = parts.scene.tables.profile.state.as_ref();
-    assert_eq!(profile.segments.len(), 1);
-    assert_eq!(profile.owners.len(), 7);
-    assert_eq!(profile.attachments.len(), 7);
-    assert!(parts.scene.account().is_same_account(&account));
-    assert!(generation_before < parts.scene.generation());
-    assert!(parts.scene.generation() < generation_after);
-    assert_eq!(generation_source.load(Ordering::Relaxed), 3);
-    assert_eq!(before_handoff, after_handoff);
-    let mut cursor = semantic
-        .into_cursor()
-        .expect("source-ordered forest semantic cursor");
-    let mut roots = cursor.take_roots().expect("source-ordered forest roots");
-    assert_eq!(roots.declared_count(), 2);
-    assert_eq!(roots.next().expect("first root"), Some(0));
-    assert_eq!(roots.next().expect("second root"), Some(1));
-    assert_eq!(roots.next().expect("root cursor exhaustion"), None);
+        let canonical_block_count = parts.scene.canonical_block_count();
+        let semantic = parts
+            .scene
+            .semantic_view()
+            .expect("source-ordered forest semantic view");
+        assert_eq!(semantic.node_count(), 5);
+        assert_eq!(semantic.root_count(), 2);
+        assert!(canonical_block_count > 0);
+        let profile = parts.scene.tables.profile.state.as_ref();
+        assert_eq!(profile.segments.len(), 1);
+        assert_eq!(profile.owners.len(), 7);
+        assert_eq!(profile.attachments.len(), 7);
+        assert!(parts.scene.account().is_same_account(&account));
+        assert!(generation_before < parts.scene.generation());
+        assert!(parts.scene.generation() < generation_after);
+        assert_eq!(generation_source.load(Ordering::Relaxed), 3);
+        assert_eq!(before_handoff, after_handoff);
+        let mut cursor = semantic
+            .into_cursor()
+            .expect("source-ordered forest semantic cursor");
+        let mut roots = cursor.take_roots().expect("source-ordered forest roots");
+        assert_eq!(roots.declared_count(), 2);
+        assert_eq!(roots.next().expect("first root"), Some(0));
+        assert_eq!(roots.next().expect("second root"), Some(1));
+        assert_eq!(roots.next().expect("root cursor exhaustion"), None);
 
-    let expected_children: [&[usize]; 5] = [&[2, 3], &[4], &[], &[], &[]];
-    for (expected_source, expected_children) in expected_children.into_iter().enumerate() {
-        let node = cursor
-            .next_node()
-            .expect("source-ordered forest node read")
-            .expect("source-ordered forest node count");
-        assert_eq!(node.source_index(), expected_source);
-        assert_eq!(node.child_count(), expected_children.len());
-        let mut children = node.into_children();
-        for &expected_child in expected_children {
+        let expected_children: [&[usize]; 5] = [&[2, 3], &[4], &[], &[], &[]];
+        for (expected_source, expected_children) in expected_children.into_iter().enumerate() {
+            let node = cursor
+                .next_node()
+                .expect("source-ordered forest node read")
+                .expect("source-ordered forest node count");
+            assert_eq!(node.source_index(), expected_source);
+            assert_eq!(node.child_count(), expected_children.len());
+            let mut children = node.into_children();
+            for &expected_child in expected_children {
+                assert_eq!(
+                    children.next().expect("source-ordered child read"),
+                    Some(expected_child)
+                );
+            }
             assert_eq!(
-                children.next().expect("source-ordered child read"),
-                Some(expected_child)
+                children.next().expect("source-ordered child exhaustion"),
+                None
             );
         }
-        assert_eq!(
-            children.next().expect("source-ordered child exhaustion"),
-            None
+        assert!(
+            cursor
+                .next_node()
+                .expect("source-node cursor exhaustion")
+                .is_none()
         );
-    }
-    assert!(
-        cursor
-            .next_node()
-            .expect("source-node cursor exhaustion")
-            .is_none()
-    );
 
-    let canonical_local_order = [3, 1, 2, 0, 4];
-    for (canonical_source, local) in canonical_local_order.into_iter().enumerate() {
-        let inspected = parts
-            .scene
-            .semantic_authored_transform_at(canonical_source)
-            .expect("canonical authored transform")
-            .authored_transform();
-        assert!(inspected.has_same_authored_bits(transforms[local]));
-    }
-    assert_eq!(parts.report.outcome_evidence_block_count(), 1);
-    let ledger = parts.report.ledger_evidence();
-    let header = ledger.header();
-    assert!(matches!(
-        header.terminal_cause(),
-        StoreTerminalCause::Success
-    ));
-    assert_eq!(header.dimension_count(), 2);
-    assert_eq!(header.phase_count(), 1);
-    assert_eq!(header.current_live_bytes(), 0);
-    assert!(header.peak_live_bytes() > 0);
-    assert_eq!(header.active_reservations(), 0);
-    let dimension = ledger
-        .dimension_by_semantic(STORE_DIMENSION)
-        .expect("node Scene dimension evidence");
-    assert!(dimension.attempted() > 0);
-    assert_eq!(dimension.consumed(), dimension.attempted());
-    assert_eq!(dimension.current_live_bytes(), 0);
-    assert!(dimension.peak_live_bytes() > 0);
-    assert_eq!(dimension.pending_publication(), 0);
-    assert_eq!(
-        dimension.committed(),
-        u64::try_from(canonical_block_count).expect("node Scene canonical block count")
-    );
-    assert_eq!(
-        dimension.committed_canonical_output(),
-        u64::try_from(canonical_block_count).expect("node Scene canonical block count")
-    );
-    assert_eq!(
-        dimension.published_outcome_evidence(),
-        2,
-        "startup fallback and successful outcome evidence are both accounted"
-    );
-    let failure_terminal_work = ledger
-        .dimension_by_semantic(FAILURE_TERMINAL_WORK_DIMENSION)
-        .expect("failure-terminal work dimension evidence");
-    assert_eq!(failure_terminal_work.attempted(), 0);
-    assert_eq!(failure_terminal_work.consumed(), 0);
-    assert_eq!(failure_terminal_work.current_live_bytes(), 0);
-    assert_eq!(failure_terminal_work.peak_live_bytes(), 0);
-    assert_eq!(failure_terminal_work.pending_publication(), 0);
-    assert_eq!(failure_terminal_work.committed(), 0);
-    assert_eq!(failure_terminal_work.committed_canonical_output(), 0);
-    assert_eq!(failure_terminal_work.published_outcome_evidence(), 0);
+        let canonical_local_order = [3, 1, 2, 0, 4];
+        for (canonical_source, local) in canonical_local_order.into_iter().enumerate() {
+            let inspected = parts
+                .scene
+                .semantic_authored_transform_at(canonical_source)
+                .expect("canonical authored transform")
+                .authored_transform();
+            assert!(inspected.has_same_authored_bits(transforms[local]));
+        }
+        assert_eq!(parts.report.outcome_evidence_block_count(), 1);
+        let ledger = parts.report.ledger_evidence();
+        let header = ledger.header();
+        assert!(matches!(
+            header.terminal_cause(),
+            StoreTerminalCause::Success
+        ));
+        assert_eq!(header.dimension_count(), 2);
+        assert_eq!(header.phase_count(), 1);
+        assert_eq!(header.current_live_bytes(), 0);
+        assert!(header.peak_live_bytes() > 0);
+        assert_eq!(header.active_reservations(), 0);
+        let dimension = ledger
+            .dimension_by_semantic(STORE_DIMENSION)
+            .expect("node Scene dimension evidence");
+        assert!(dimension.attempted() > 0);
+        assert_eq!(dimension.consumed(), dimension.attempted());
+        assert_eq!(dimension.current_live_bytes(), 0);
+        assert!(dimension.peak_live_bytes() > 0);
+        assert_eq!(dimension.pending_publication(), 0);
+        assert_eq!(
+            dimension.committed(),
+            u64::try_from(canonical_block_count).expect("node Scene canonical block count")
+        );
+        assert_eq!(
+            dimension.committed_canonical_output(),
+            u64::try_from(canonical_block_count).expect("node Scene canonical block count")
+        );
+        assert_eq!(
+            dimension.published_outcome_evidence(),
+            2,
+            "startup fallback and successful outcome evidence are both accounted"
+        );
+        let failure_terminal_work = ledger
+            .dimension_by_semantic(FAILURE_TERMINAL_WORK_DIMENSION)
+            .expect("failure-terminal work dimension evidence");
+        assert_eq!(failure_terminal_work.attempted(), 0);
+        assert_eq!(failure_terminal_work.consumed(), 0);
+        assert_eq!(failure_terminal_work.current_live_bytes(), 0);
+        assert_eq!(failure_terminal_work.peak_live_bytes(), 0);
+        assert_eq!(failure_terminal_work.pending_publication(), 0);
+        assert_eq!(failure_terminal_work.committed(), 0);
+        assert_eq!(failure_terminal_work.committed_canonical_output(), 0);
+        assert_eq!(failure_terminal_work.published_outcome_evidence(), 0);
 
-    drop(parts);
+        drop(parts);
+    }
+    drop(invocation_root_7);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
     drop(account);
@@ -1011,7 +1075,10 @@ fn many_primitives_materialize_into_one_typed_geometry_owner() {
         profile.batch(),
     );
 
+    let mut invocation_root_8 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let terminal = NodeSceneTestTransaction::with_account(
+        &mut invocation_root_8,
         &account,
         test_limits(),
         input,
@@ -1057,6 +1124,7 @@ fn many_primitives_materialize_into_one_typed_geometry_owner() {
             .expect("remaining raw canonical block count"),
     );
     drop(parts);
+    drop(invocation_root_8);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
@@ -1067,7 +1135,10 @@ fn present_empty_scene_publishes_all_domains() {
     let account = test_account(&factory, 256);
     let roots = [];
     let nodes = [];
+    let mut invocation_root_9 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let terminal = finish_node_batch(
+        &mut invocation_root_9,
         &account,
         test_limits(),
         NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
@@ -1098,6 +1169,7 @@ fn present_empty_scene_publishes_all_domains() {
     assert!(parts.scene.semantic_authored_transform_at(0).is_err());
 
     drop(parts);
+    drop(invocation_root_9);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
@@ -1114,47 +1186,54 @@ fn canonical_byte_rejection_publishes_evidence_only_rich_failure() {
         + 2 * std::mem::size_of::<StoredNode>()
         + std::mem::size_of::<StoredNodeIndex>()) as u64;
     let directory_bytes = crate::canonical_scene::store::schema::SCENE_DIRECTORY_CANONICAL_BYTES;
-    let build = finish_node_batch(
-        &account,
-        test_limits(),
-        single_trs_batch(),
-        SceneValidationLimits::default()
-            .with_max_canonical_bytes(spatial_bytes + directory_bytes + node_bytes - 1),
-    );
-    let NodeSceneDraftBuild::Failure {
-        authoring_rejection: Some(rejection),
-        prepared,
-    } = build
-    else {
-        panic!("one byte below the canonical requirement must reject authoring")
-    };
-    assert!(
-        matches!(
-            &rejection,
-            NodeSceneConstructionRejection::NodeAuthoring(NodeAuthoringFailure::Semantic(
-                NodeAuthoringSemanticError::LimitExceeded {
-                    limit: NodeAuthoringLimit::CanonicalBytes,
-                    actual,
-                    maximum,
-                }
-            ))
-                if *actual == node_bytes && *maximum == node_bytes - 1
-        ),
-        "unexpected canonical-byte rejection: {rejection:#?}"
-    );
-    let failure = rich_failure(prepared.handoff_for_test());
-    assert_eq!(
-        terminal_failure_code(failure.ledger_evidence()),
-        NODE_SCENE_NODE_AUTHORING_REJECTION_CODE
-    );
-    assert_eq!(
+    let mut invocation_root_10 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    let failure = {
+        let build = finish_node_batch(
+            &mut invocation_root_10,
+            &account,
+            test_limits(),
+            single_trs_batch(),
+            SceneValidationLimits::default()
+                .with_max_canonical_bytes(spatial_bytes + directory_bytes + node_bytes - 1),
+        );
+        let NodeSceneDraftBuild::Failure {
+            authoring_rejection: Some(rejection),
+            prepared,
+        } = build
+        else {
+            panic!("one byte below the canonical requirement must reject authoring")
+        };
+        assert!(
+            matches!(
+                &rejection,
+                NodeSceneConstructionRejection::NodeAuthoring(NodeAuthoringFailure::Semantic(
+                    NodeAuthoringSemanticError::LimitExceeded {
+                        limit: NodeAuthoringLimit::CanonicalBytes,
+                        actual,
+                        maximum,
+                    }
+                ))
+                    if *actual == node_bytes && *maximum == node_bytes - 1
+            ),
+            "unexpected canonical-byte rejection: {rejection:#?}"
+        );
+        let failure = rich_failure(prepared.handoff_for_test());
+        assert_eq!(
+            terminal_failure_code(failure.ledger_evidence()),
+            NODE_SCENE_NODE_AUTHORING_REJECTION_CODE
+        );
+        assert_eq!(
+            failure
+                .ledger_evidence()
+                .dimension_by_semantic(STORE_DIMENSION)
+                .expect("authoring rejection dimension")
+                .committed_canonical_output(),
+            0
+        );
         failure
-            .ledger_evidence()
-            .dimension_by_semantic(STORE_DIMENSION)
-            .expect("authoring rejection dimension")
-            .committed_canonical_output(),
-        0
-    );
+    };
+    drop(invocation_root_10);
     assert_released(failure, &account);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
@@ -1166,25 +1245,32 @@ fn cancelled_authoring_preserves_control_as_the_terminal_first_cause() {
     let account = test_account(&factory, 256);
     let cancellation = CancelOnSignalPoll::new();
     cancellation.cancel_after_additional_polls(1);
-    let build = finish_node_batch_with_cancellation(
-        &account,
-        test_limits(),
-        single_trs_batch(),
-        SceneValidationLimits::default(),
-        cancellation.clone(),
-    );
-    let NodeSceneDraftBuild::Failure {
-        authoring_rejection: None,
-        prepared,
-    } = build
-    else {
-        panic!("cancelled authoring must publish its control first cause")
+    let mut invocation_root_11 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    let failure = {
+        let build = finish_node_batch_with_cancellation(
+            &mut invocation_root_11,
+            &account,
+            test_limits(),
+            single_trs_batch(),
+            SceneValidationLimits::default(),
+            cancellation.clone(),
+        );
+        let NodeSceneDraftBuild::Failure {
+            authoring_rejection: None,
+            prepared,
+        } = build
+        else {
+            panic!("cancelled authoring must publish its control first cause")
+        };
+        let failure = rich_failure(prepared.handoff_for_test());
+        assert_eq!(
+            terminal_failure_class(failure.ledger_evidence()),
+            StorePreparationFailureClass::Control
+        );
+        failure
     };
-    let failure = rich_failure(prepared.handoff_for_test());
-    assert_eq!(
-        terminal_failure_class(failure.ledger_evidence()),
-        StorePreparationFailureClass::Control
-    );
+    drop(invocation_root_11);
     assert_released(failure, &account);
 }
 
@@ -1194,44 +1280,51 @@ fn authoring_work_budget_rejection_preserves_exact_ledger_evidence() {
 
     let factory = test_factory();
     let account = test_account(&factory, 256);
-    let build = finish_node_batch(
-        &account,
-        test_limits_with_work(AUTHORING_WORK_LIMIT),
-        single_trs_batch(),
-        SceneValidationLimits::default(),
-    );
-    let NodeSceneDraftBuild::Failure {
-        authoring_rejection: None,
-        prepared,
-    } = build
-    else {
-        panic!("exhausted authoring work budget must publish its ledger first cause")
+    let mut invocation_root_12 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    let failure = {
+        let build = finish_node_batch(
+            &mut invocation_root_12,
+            &account,
+            test_limits_with_work(AUTHORING_WORK_LIMIT),
+            single_trs_batch(),
+            SceneValidationLimits::default(),
+        );
+        let NodeSceneDraftBuild::Failure {
+            authoring_rejection: None,
+            prepared,
+        } = build
+        else {
+            panic!("exhausted authoring work budget must publish its ledger first cause")
+        };
+        let failure = rich_failure(prepared.handoff_for_test());
+        assert_eq!(
+            terminal_failure_class(failure.ledger_evidence()),
+            StorePreparationFailureClass::Ledger
+        );
+        let work = failure
+            .ledger_evidence()
+            .dimension_by_semantic(STORE_DIMENSION)
+            .expect("authoring budget rejection dimension");
+        assert_eq!(work.attempted(), AUTHORING_WORK_LIMIT + 1);
+        assert_eq!(work.consumed(), AUTHORING_WORK_LIMIT);
+        let terminal_work = failure
+            .ledger_evidence()
+            .dimension_by_semantic(FAILURE_TERMINAL_WORK_DIMENSION)
+            .expect("authoring failure-terminal work dimension");
+        let terminal_requirement = failure_terminal_work_requirement()
+            .expect("node Scene failure-terminal work requirement");
+        assert_eq!(
+            terminal_work.attempted(),
+            terminal_requirement.attempted_work_limit()
+        );
+        assert_eq!(
+            terminal_work.consumed(),
+            terminal_requirement.consumed_work_limit()
+        );
+        failure
     };
-    let failure = rich_failure(prepared.handoff_for_test());
-    assert_eq!(
-        terminal_failure_class(failure.ledger_evidence()),
-        StorePreparationFailureClass::Ledger
-    );
-    let work = failure
-        .ledger_evidence()
-        .dimension_by_semantic(STORE_DIMENSION)
-        .expect("authoring budget rejection dimension");
-    assert_eq!(work.attempted(), AUTHORING_WORK_LIMIT + 1);
-    assert_eq!(work.consumed(), AUTHORING_WORK_LIMIT);
-    let terminal_work = failure
-        .ledger_evidence()
-        .dimension_by_semantic(FAILURE_TERMINAL_WORK_DIMENSION)
-        .expect("authoring failure-terminal work dimension");
-    let terminal_requirement =
-        failure_terminal_work_requirement().expect("node Scene failure-terminal work requirement");
-    assert_eq!(
-        terminal_work.attempted(),
-        terminal_requirement.attempted_work_limit()
-    );
-    assert_eq!(
-        terminal_work.consumed(),
-        terminal_requirement.consumed_work_limit()
-    );
+    drop(invocation_root_12);
     assert_released(failure, &account);
 }
 
@@ -1239,7 +1332,10 @@ fn authoring_work_budget_rejection_preserves_exact_ledger_evidence() {
 fn materialization_work_budget_interruption_publishes_rich_failure() {
     let factory = test_factory();
     let account = test_account(&factory, 256);
+    let mut invocation_root_13 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let build = finish_node_batch(
+        &mut invocation_root_13,
         &account,
         test_limits_with_work(SINGLE_TRS_AUTHORING_COMPLETED_PREFIX_WORK),
         single_trs_batch(),
@@ -1261,6 +1357,7 @@ fn materialization_work_budget_interruption_publishes_rich_failure() {
         terminal_failure_class(failure.ledger_evidence()),
         StorePreparationFailureClass::Ledger
     );
+    drop(invocation_root_13);
     assert_released(failure, &account);
 }
 
@@ -1270,7 +1367,10 @@ fn central_validation_work_budget_interruption_publishes_rich_failure() {
     let account = test_account(&factory, 256);
     let (complete_work, validation_work) = single_trs_work_baseline(&account);
     let pre_validation_work = complete_work - validation_work;
+    let mut invocation_root_14 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let build = finish_node_batch(
+        &mut invocation_root_14,
         &account,
         test_limits_with_work(pre_validation_work),
         single_trs_batch(),
@@ -1293,6 +1393,7 @@ fn central_validation_work_budget_interruption_publishes_rich_failure() {
     assert_eq!(work.attempted(), complete_work);
     // The complete construction prefix remains consumed when validation admission fails.
     assert_eq!(work.consumed(), pre_validation_work);
+    drop(invocation_root_14);
     assert_released(failure, &account);
 }
 
@@ -1301,7 +1402,10 @@ fn generation_exhaustion_discards_canonical_storage_and_preserves_evidence() {
     let factory = test_factory();
     let account = test_account(&factory, 256);
     let (complete_work, _) = single_trs_work_baseline(&account);
+    let mut invocation_root_15 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let build = finish_node_batch(
+        &mut invocation_root_15,
         &account,
         test_limits(),
         single_trs_batch(),
@@ -1324,6 +1428,7 @@ fn generation_exhaustion_discards_canonical_storage_and_preserves_evidence() {
     assert_eq!(work.attempted(), complete_work);
     assert_eq!(work.consumed(), complete_work);
     assert_eq!(work.committed_canonical_output(), 0);
+    drop(invocation_root_15);
     assert_released(failure, &account);
 }
 
@@ -1332,8 +1437,11 @@ fn generation_source_panic_after_reservation_burns_the_gap_and_fails_closed() {
     let factory = test_factory();
     let control_account = test_account(&factory, 256);
     let control_generation_source = AtomicU64::new(0);
+    let mut construction_root_1 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let control = successful_parts(
         finish_node_batch(
+            &mut construction_root_1,
             &control_account,
             test_limits(),
             single_trs_batch(),
@@ -1354,6 +1462,7 @@ fn generation_source_panic_after_reservation_burns_the_gap_and_fails_closed() {
     assert!(typed_allocations > 0);
     drop(control.scene.canonical);
     drop(control.report);
+    drop(construction_root_1);
     assert_eq!(control_account.snapshot().live_retained_bytes(), 0);
     assert_eq!(control_account.snapshot().live_retained_allocations(), 0);
     assert!(!control_account.snapshot().poisoned());
@@ -1361,7 +1470,10 @@ fn generation_source_panic_after_reservation_burns_the_gap_and_fails_closed() {
 
     let account = test_account(&factory, 256);
     let generation_source = AtomicU64::new(0);
+    let mut invocation_root_16 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let build = finish_node_batch(
+        &mut invocation_root_16,
         &account,
         test_limits(),
         single_trs_batch(),
@@ -1407,7 +1519,10 @@ fn invalid_authored_transform_fault_is_a_build_invariant_rich_failure() {
     let factory = test_factory();
     let account = test_account(&factory, 256);
     let (complete_work, validation_work) = single_trs_work_baseline(&account);
+    let mut invocation_root_17 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let build = finish_node_batch_with_faults(
+        &mut invocation_root_17,
         &account,
         test_limits(),
         single_trs_batch(),
@@ -1431,6 +1546,7 @@ fn invalid_authored_transform_fault_is_a_build_invariant_rich_failure() {
         terminal_failure_code(failure.ledger_evidence()),
         NODE_SCENE_BUILD_INVARIANT_CODE
     );
+    drop(invocation_root_17);
     assert_released(failure, &account);
 }
 
@@ -1441,7 +1557,10 @@ fn central_validation_rejects_each_corrupted_owner_attachment_component() {
 
     for (component, replacement) in [(0, 1), (1, u64::MAX), (2, 1)] {
         corrupt_profile_reference_for_test(0, component, replacement);
+        let mut invocation_root_18 =
+            crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
         let build = finish_node_batch(
+            &mut invocation_root_18,
             &account,
             test_limits(),
             single_trs_batch(),
@@ -1457,6 +1576,7 @@ fn central_validation_rejects_each_corrupted_owner_attachment_component() {
             terminal_failure_code(failure.ledger_evidence()),
             NODE_SCENE_BUILD_INVARIANT_CODE,
         );
+        drop(invocation_root_18);
         assert_released(failure, &account);
     }
 }
@@ -1497,7 +1617,10 @@ fn central_validation_rejects_each_corrupted_profile_structure() {
             animations,
             profile.batch_with_metadata(MetadataAuthoringBatch::new(&metadata)),
         );
+        let mut invocation_root_19 =
+            crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
         let build = NodeSceneTestTransaction::with_account(
+            &mut invocation_root_19,
             &account,
             test_limits(),
             input,
@@ -1517,6 +1640,7 @@ fn central_validation_rejects_each_corrupted_profile_structure() {
             NODE_SCENE_BUILD_INVARIANT_CODE,
             "{fault:?} must fail at the central canonical boundary",
         );
+        drop(invocation_root_19);
         assert_released(failure, &account);
     }
 }
@@ -1568,7 +1692,10 @@ fn invalid_geometry_payload_fault_is_a_build_invariant_rich_failure() {
         animations,
         profile.batch(),
     );
+    let mut invocation_root_20 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let build = NodeSceneTestTransaction::with_account(
+        &mut invocation_root_20,
         &account,
         test_limits(),
         input,
@@ -1587,6 +1714,7 @@ fn invalid_geometry_payload_fault_is_a_build_invariant_rich_failure() {
         terminal_failure_code(failure.ledger_evidence()),
         NODE_SCENE_BUILD_INVARIANT_CODE,
     );
+    drop(invocation_root_20);
     assert_released(failure, &account);
 }
 
@@ -1616,7 +1744,10 @@ fn canonical_publication_limit_rejection_preserves_evidence_without_reserving_ge
         committed_output: 0,
         ..test_limits()
     };
+    let mut invocation_root_21 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let build = finish_node_batch(
+        &mut invocation_root_21,
         &account,
         limits,
         single_trs_batch(),
@@ -1636,6 +1767,7 @@ fn canonical_publication_limit_rejection_preserves_evidence_without_reserving_ge
         StorePreparationFailureClass::Ledger
     );
     assert_eq!(generation_source.load(Ordering::Relaxed), 0);
+    drop(invocation_root_21);
     assert_released(failure, &account);
 
     let _next_generation = SceneGenerationId::reserve_from(&generation_source)
@@ -1668,31 +1800,38 @@ fn cycle_authoring_rejection_preserves_rich_evidence() {
         ),
     ];
     let cycle_roots = [NodeLocalId::new(0)];
-    let build = finish_node_batch(
-        &account,
-        test_limits(),
-        NodeAuthoringBatch::new(Presence::Present(&cycle_roots), &cycle_nodes),
-        SceneValidationLimits::default(),
-    );
-    let NodeSceneDraftBuild::Failure {
-        authoring_rejection: Some(rejection),
-        prepared,
-    } = build
-    else {
-        panic!("cycle must retain its exact authoring rejection")
+    let mut invocation_root_22 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
+    let prepared = {
+        let build = finish_node_batch(
+            &mut invocation_root_22,
+            &account,
+            test_limits(),
+            NodeAuthoringBatch::new(Presence::Present(&cycle_roots), &cycle_nodes),
+            SceneValidationLimits::default(),
+        );
+        let NodeSceneDraftBuild::Failure {
+            authoring_rejection: Some(rejection),
+            prepared,
+        } = build
+        else {
+            panic!("cycle must retain its exact authoring rejection")
+        };
+        assert!(matches!(
+            &rejection,
+            NodeSceneConstructionRejection::NodeAuthoring(NodeAuthoringFailure::Semantic(
+                NodeAuthoringSemanticError::Cycle { .. }
+            ))
+        ));
+        assert!(matches!(
+            rejection,
+            NodeSceneConstructionRejection::NodeAuthoring(NodeAuthoringFailure::Semantic(
+                NodeAuthoringSemanticError::Cycle { .. }
+            ))
+        ));
+        prepared
     };
-    assert!(matches!(
-        &rejection,
-        NodeSceneConstructionRejection::NodeAuthoring(NodeAuthoringFailure::Semantic(
-            NodeAuthoringSemanticError::Cycle { .. }
-        ))
-    ));
-    assert!(matches!(
-        rejection,
-        NodeSceneConstructionRejection::NodeAuthoring(NodeAuthoringFailure::Semantic(
-            NodeAuthoringSemanticError::Cycle { .. }
-        ))
-    ));
+    drop(invocation_root_22);
     assert_released(rich_failure(prepared.handoff_for_test()), &account);
 
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
@@ -1714,13 +1853,33 @@ fn physical_budget_boundaries_release_storage_for_every_terminal_class() {
             Presence::Absent,
         )];
         let node_batch = NodeAuthoringBatch::new(Presence::Present(&roots), &nodes);
-        let operation = match NodeSceneTestTransaction::with_account(
-            &account,
-            test_limits(),
-            test_scene_authoring_batch(node_batch),
-            SceneValidationLimits::default(),
-        ) {
-            Ok(operation) => operation,
+        let terminal = {
+            let mut root = SceneCanonicalInvocationHost::new();
+            let terminal = NodeSceneTestTransaction::with_account(
+                &mut root,
+                &account,
+                test_limits(),
+                test_scene_authoring_batch(node_batch),
+                SceneValidationLimits::default(),
+            )
+            .map_err(super::super::SceneConstructionError::from)
+            .and_then(|operation| match operation.finish_draft() {
+                Ok(build) => Ok(build),
+                Err(cause @ super::super::SceneConstructionError::Start(_)) => Err(cause),
+                Err(cause) => {
+                    panic!("physical output failure must retain an exact scoped outcome: {cause}")
+                }
+            })
+            .map(|build| {
+                build
+                    .publish_for_test()
+                    .expect("physical output failure must publish a terminal outcome")
+            });
+            drop(root);
+            terminal
+        };
+        let terminal = match terminal {
+            Ok(terminal) => terminal,
             Err(_) => {
                 assert_eq!(account.snapshot().live_retained_bytes(), 0);
                 assert_eq!(account.snapshot().live_retained_allocations(), 0);
@@ -1728,11 +1887,6 @@ fn physical_budget_boundaries_release_storage_for_every_terminal_class() {
                 continue;
             }
         };
-        let terminal = operation
-            .finish_draft()
-            .expect("physical output failure must retain an exact scoped outcome")
-            .publish_for_test()
-            .expect("physical output failure must publish a terminal outcome");
         match terminal {
             NodeSceneConstructionTerminal::Success(parts) => drop(parts),
             NodeSceneConstructionTerminal::RichFailure(failure) => {
@@ -1775,7 +1929,10 @@ fn materialization_failure_never_calls_the_generation_source() {
             Presence::Absent,
         )];
         let node_batch = NodeAuthoringBatch::new(Presence::Present(&roots), &nodes);
+        let mut invocation_root_24 =
+            crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
         let operation = match NodeSceneTestTransaction::with_account(
+            &mut invocation_root_24,
             &account,
             test_limits(),
             test_scene_authoring_batch(node_batch),
@@ -1787,9 +1944,16 @@ fn materialization_failure_never_calls_the_generation_source() {
                 continue;
             }
         };
-        let build = operation
-            .finish_draft()
-            .expect("materialization failure must retain an exact failure owner");
+        let build = match operation.finish_draft() {
+            Ok(build) => build,
+            Err(super::super::SceneConstructionError::Start(_)) => {
+                drop(account);
+                continue;
+            }
+            Err(cause) => {
+                panic!("materialization failure must retain an exact failure owner: {cause}")
+            }
+        };
 
         if matches!(
             &build,
@@ -1808,6 +1972,7 @@ fn materialization_failure_never_calls_the_generation_source() {
                 NodeSceneConstructionTerminal::Success(_)
             ));
             drop(terminal);
+            drop(invocation_root_24);
             assert_eq!(account.snapshot().live_retained_bytes(), 0);
             assert_eq!(account.snapshot().live_retained_allocations(), 0);
             observed_materialization_failure = true;
@@ -1816,6 +1981,7 @@ fn materialization_failure_never_calls_the_generation_source() {
         }
 
         drop(build);
+        drop(invocation_root_24);
         assert_eq!(account.snapshot().live_retained_bytes(), 0);
         assert_eq!(account.snapshot().live_retained_allocations(), 0);
         drop(account);

@@ -189,7 +189,10 @@ fn source_scene(account: &PhysicalStorageAccount, had_tangent: bool) -> NodeScen
         AnimationAuthoringBatch::empty(),
         profile,
     );
+    let mut invocation_root_1 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let draft = NodeSceneTestTransaction::with_account(
+        &mut invocation_root_1,
         account,
         test_limits(),
         input,

@@ -86,19 +86,19 @@ impl Format for TestImporter {
         &self,
         _probe: &Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(&self, _options: &Self::Options, scope: &mut ParseContext<'_, '_>) -> ParseResult<()> {
         scope.with_execution(|exec| {
             if self.fail {
                 return Err(
                     exec.format_failure(TestFormatFailure::new(Arc::clone(&self.failure_drops)))
                 );
             }
-            exec.emit_diagnostic(
+            exec.services()?.emit_diagnostic(
                 DiagnosticSeverity::Warning,
                 DiagnosticCode::new("test.imported").expect("valid diagnostic code"),
                 format_args!("test importer completed"),

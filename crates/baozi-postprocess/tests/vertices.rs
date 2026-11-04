@@ -104,12 +104,16 @@ impl Format for TupleImporter {
         &self,
         _: &baozi_import::Probe<'_>,
         _: &ReadHint,
-        _: &DetectionScope<'_>,
+        _: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         match self.0 {
             Fixture::Rich => submit_rich(context),
             Fixture::Streams => streams::submit(context),
@@ -130,7 +134,7 @@ fn custom(name: &str) -> AttributeSemantic {
     AttributeSemantic::Custom(CustomAttributeSemantic::new(name).unwrap())
 }
 
-fn submit_rich(context: &mut ParseContext<'_>) -> ParseResult<()> {
+fn submit_rich(context: &mut ParseContext<'_, '_>) -> ParseResult<()> {
     let roots = [NodeLocalId::new(0)];
     let nodes = [NodeAuthoringNode::new(
         Presence::Absent,
@@ -243,7 +247,7 @@ fn submit_rich(context: &mut ParseContext<'_>) -> ParseResult<()> {
     )
 }
 
-fn submit_simple(context: &mut ParseContext<'_>, fixture: Fixture) -> ParseResult<()> {
+fn submit_simple(context: &mut ParseContext<'_, '_>, fixture: Fixture) -> ParseResult<()> {
     let positions = [
         0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 3.0, 0.0, 0.0, 2.0, 1.0, 0.0,
     ];
@@ -298,7 +302,7 @@ fn submit_simple(context: &mut ParseContext<'_>, fixture: Fixture) -> ParseResul
 }
 
 fn submit_deformed(
-    context: &mut ParseContext<'_>,
+    context: &mut ParseContext<'_, '_>,
     topology: GeometryTopologyAuthoring<'static>,
 ) -> ParseResult<()> {
     let roots = [

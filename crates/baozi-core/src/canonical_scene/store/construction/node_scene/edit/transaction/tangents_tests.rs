@@ -222,7 +222,10 @@ fn precision_source(
         animation,
         profile.batch(),
     );
+    let mut invocation_root_1 =
+        crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
     let draft = NodeSceneTestTransaction::with_account(
+        &mut invocation_root_1,
         account,
         test_limits(),
         input,

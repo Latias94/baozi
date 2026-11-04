@@ -1,6 +1,8 @@
 //! Hidden cross-crate integration boundary for canonical Scene transactions.
 
-use baozi_operation::__retained_store_integration::authority::PreparedStoreSuccess;
+use baozi_operation::__retained_store_integration::activation::{
+    CanonicalCauseSlot, StoreCanonicalRejection,
+};
 use baozi_operation::{
     OperationOwner, ProgressPhase, ProgressUnit, PublishedOutcomeEvidenceStore, RecordBlock,
     RetainedStoreFailureTerminalWorkRequirement, StoreLedgerEvidence,
@@ -10,12 +12,11 @@ pub use super::super::construction::node_scene::edit::SceneEditCompileError;
 pub use super::super::construction::node_scene::edit::transaction::{
     ResolvedSceneSpaceConversion, SceneEditAdmission, SceneEditBootstrap, SceneEditBootstrapError,
     SceneEditEvidence, SceneEditEvidenceTag, SceneEditFailureEvidence, SceneEditFreezePermit,
-    SceneEditFrozenGenerationRejection, SceneEditGenerationRejection, SceneEditHandoffPairingError,
-    SceneEditHandoffToken, SceneEditJointCommit, SceneEditOutput, SceneEditPlan,
-    SceneEditPostflight, SceneEditPublishedSuccess, SceneEditRejection, SceneEditTarget,
-    SceneEditTransaction, SceneEditValidationProof, SceneGeometryCornerOriginsTag,
+    SceneEditGenerationRejection, SceneEditOutput, SceneEditPlan, SceneEditPostflight,
+    SceneEditPublication, SceneEditPublicationError, SceneEditPublishedSuccess, SceneEditRejection,
+    SceneEditTarget, SceneEditTransaction, SceneEditValidationProof, SceneGeometryCornerOriginsTag,
     SceneGeometryFaceOffsetsTag, SceneSpaceConversionEvidence, SceneSpaceConversionIssue,
-    consume_scene_edit_freeze_permit, resolve_scene_space_conversion,
+    consume_scene_edit_freeze_permit, resolve_scene_space_conversion, run_scene_edit_body,
     try_start_scene_edit_operation,
 };
 pub use super::super::construction::node_scene::edit::transaction::{
@@ -25,16 +26,15 @@ pub use super::super::construction::node_scene::edit::transaction::{
 pub use super::super::construction::node_scene::{
     NodeSceneActivationPostflight as SceneActivationPostflight,
     NodeSceneActivationTransaction as SceneActivationTransaction,
-    NodeSceneEvidenceRecipe as SceneEvidenceRecipe,
-    NodeSceneFrozenGenerationRejection as SceneFrozenGenerationRejection,
-    NodeSceneHandoffPairingError as SceneHandoffPairingError,
-    NodeSceneHandoffToken as SceneHandoffToken, NodeSceneLaneFreezePermit as SceneFreezePermit,
+    NodeSceneEvidenceRecipe as SceneEvidenceRecipe, NodeSceneLaneFreezePermit as SceneFreezePermit,
     NodeSceneLaneGenerationRejection as SceneGenerationRejection,
-    NodeSceneLaneJointCommit as SceneJointCommit, NodeSceneLaneOutput as SceneActivationOutput,
-    NodeSceneLanePlan as SceneSealedActivationPlan,
+    NodeSceneLaneOutput as SceneActivationOutput, NodeSceneLanePlan as SceneSealedActivationPlan,
     NodeSceneLaneRejection as SceneActivationRejection,
     NodeSceneLaneValidationProof as SceneValidationProof,
-    NodeSceneSessionActivationBootstrap as SceneSessionActivationBootstrap, SceneParseOutcome,
+    NodeScenePublicationError as ScenePublicationError,
+    NodeSceneSessionActivationBootstrap as SceneSessionActivationBootstrap,
+    PreparedNodeScenePublication as PreparedScenePublication,
+    PreparedNodeSceneSuccess as PreparedSceneSuccess, SceneParseOutcome,
 };
 use super::super::construction::node_scene::{
     consume_node_scene_freeze_permit, maximum_node_scene_structural_work,
@@ -69,18 +69,10 @@ impl<'input> SceneConstruction<'input> {
     }
 }
 
-impl SceneHandoffToken {
-    /// Verifies and publishes the prepared owner paired with this generation/proof token.
-    pub fn handoff(
-        self,
-        store: PreparedStoreSuccess<
-            RecordBlock,
-            SceneCanonicalRootTag,
-            RecordBlock,
-            SceneOutcomeEvidenceTag,
-        >,
-    ) -> Result<ScenePublishedSuccess, SceneHandoffPairingError> {
-        self.try_handoff_prepared(store).map(ScenePublishedSuccess)
+impl PreparedSceneSuccess {
+    /// Transfers the success owners whose exact roots were admitted before generation.
+    pub fn handoff(self) -> ScenePublishedSuccess {
+        ScenePublishedSuccess(self.handoff_node_scene())
     }
 }
 
@@ -109,29 +101,31 @@ impl ScenePublishedSuccess {
 ///
 /// Rejection downgrades the candidate without reserving a generation. Acceptance admits a
 /// generation for the validated output and proof retained by this permit.
-/// Core immediately forwards the owner-free handoff token and both scoped joint capabilities to
-/// `prepare`; it never stores or prepares the operation contribution.
+/// Core prepares the matching operation contribution and returns fixed, inseparable owners.
 #[allow(
     clippy::result_large_err,
     clippy::type_complexity,
     reason = "the freeze pivot preserves exact containment and scoped joint ownership without boxing"
 )]
-pub fn consume_scene_freeze_permit<O, PP, U, R>(
-    permit: SceneFreezePermit<O, PP, U>,
+pub fn consume_scene_freeze_permit<'inv, O, PP, U>(
+    permit: SceneFreezePermit<'inv, O, PP, U>,
+    rejection_slot: CanonicalCauseSlot<'inv, StoreCanonicalRejection<SceneGenerationRejection>>,
+    failure_fallback: CanonicalCauseSlot<'inv, baozi_operation::StoreRuntimeError>,
+    evidence: SceneEvidenceRecipe,
     parse_outcome: SceneParseOutcome,
-    reject: impl FnOnce(SceneFrozenGenerationRejection<O, PP, U>) -> R,
-    prepare: impl for<'joint> FnOnce(
-        SceneHandoffToken,
-        SceneJointCommit<'joint, O, PP, U>,
-        baozi_operation::__retained_store_integration::activation::CanonicalJointSeal<'joint>,
-    ) -> R,
-) -> Result<R, baozi_operation::__retained_store_integration::activation::StoreActivationContainment>
+) -> Result<PreparedScenePublication, ScenePublicationError>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    consume_node_scene_freeze_permit(permit, parse_outcome, reject, prepare)
+    consume_node_scene_freeze_permit(
+        permit,
+        rejection_slot,
+        failure_fallback,
+        evidence,
+        parse_outcome,
+    )
 }
 
 /// Returns the exact protected terminal-work requirement shared by every NodeScene request.
@@ -160,13 +154,6 @@ pub use super::super::construction::node_scene::edit::transaction::{
 mod tests {
     use super::*;
 
-    type TestPreparedSceneSuccess = PreparedStoreSuccess<
-        RecordBlock,
-        SceneCanonicalRootTag,
-        RecordBlock,
-        SceneOutcomeEvidenceTag,
-    >;
-
     #[test]
     fn scene_integration_exposes_authority_free_core_steps() {
         fn _split_construction<'input>(
@@ -184,9 +171,6 @@ mod tests {
             SceneSessionActivationBootstrap::try_new;
         let _: fn(&SceneActivationRejection) -> u32 = SceneActivationRejection::stable_code;
         let _: fn(&SceneGenerationRejection) -> u32 = SceneGenerationRejection::stable_code;
-        let _: fn(
-            SceneHandoffToken,
-            TestPreparedSceneSuccess,
-        ) -> Result<ScenePublishedSuccess, SceneHandoffPairingError> = SceneHandoffToken::handoff;
+        let _: fn(PreparedSceneSuccess) -> ScenePublishedSuccess = PreparedSceneSuccess::handoff;
     }
 }

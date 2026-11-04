@@ -10,18 +10,18 @@ pub use error::{SpaceConversionCause, SpaceConversionFailure};
 pub use report::SpaceConversionReport;
 
 use baozi_core::__scene_integration::integration::{
-    SceneEditBootstrap, SceneEditEvidence, resolve_scene_space_conversion,
-    try_start_scene_edit_operation,
+    SceneEditBootstrap, SceneEditEvidence, resolve_scene_space_conversion, run_scene_edit_body,
 };
 use baozi_core::{TargetSpace, ValidatedScene};
-use baozi_operation::__retained_store_integration::authority::PreparedStoreEvidenceOnlyOutcome;
+use baozi_operation::__retained_store_integration::activation::CanonicalBoundBodyError;
 
-use crate::operation::PostProcessOwner;
-use crate::operation::runtime::{REJECTION_CODE, final_progress, plan_runtime, run_unit};
-use crate::scene_edit::{PreparedEdit, execute_changed};
+use crate::operation::runtime::{REJECTION_CODE, plan_runtime, run_unit};
+use crate::scene_edit::{
+    EditCanonicalSlots, EditCause, EditFailure, EditTerminal, PreparedEdit, validate_changed,
+};
 use crate::{
-    PostProcessControl, PostProcessReport, PostProcessResourceEvidence, PostProcessRunError,
-    PostProcessRunFailure, PostProcessRunOutcome,
+    PostProcessControl, PostProcessReport, PostProcessRunError, PostProcessRunFailure,
+    PostProcessRunOutcome,
 };
 
 /// Spatial conventions requested for the complete Scene.
@@ -79,75 +79,127 @@ pub fn convert_scene_space(
             PostProcessRunError::ResourcePolicyInitialization,
         ));
     };
-    let mut operation = match try_start_scene_edit_operation::<PostProcessOwner, _, _>(
-        &input,
+    let mut invocation_host = crate::operation::runtime::EditHost::new();
+    let source_generation = input.generation();
+    let mut body_cause = None;
+    let mut body_containment = None;
+    let source = &input;
+    let local_cause = &mut body_cause;
+    let containment = &mut body_containment;
+    let mut activation = Some((admission, failure_requirements));
+    let body = run_scene_edit_body(
+        &mut invocation_host,
+        source,
         control.into_runtime(),
         ledger,
         start,
-    ) {
-        Ok(operation) => operation,
-        Err(source) => {
+        move |parts, disposition| {
+            let mut startup = parts.startup;
+            let resolved = match startup.with_action_execution(keys.work, |runtime| {
+                run_unit(runtime, || {
+                    resolve_scene_space_conversion(
+                        source,
+                        options.target,
+                        options.source_assumptions,
+                    )
+                })
+            }) {
+                Ok(Ok(resolved)) => resolved,
+                Ok(Err(source)) => {
+                    *local_cause = Some(SpaceConversionCause::Source { source });
+                    if let Err(source) = startup.request_failure(disposition, REJECTION_CODE) {
+                        *local_cause = Some(source.into());
+                    }
+                    return;
+                }
+                Err(source) => {
+                    *local_cause = Some(source.into());
+                    if let Err(source) = startup.request_failure(disposition, REJECTION_CODE) {
+                        *local_cause = Some(source.into());
+                    }
+                    return;
+                }
+            };
+            if resolved.is_unchanged() {
+                if let Err(source) = startup.request_unchanged(disposition) {
+                    *local_cause = Some(source.into());
+                }
+                return;
+            }
+            let operation = match startup.attach() {
+                Ok(operation) => operation,
+                Err(source) => {
+                    *local_cause = Some(SpaceConversionCause::Start { source });
+                    return;
+                }
+            };
+            let (admission, failure_requirements) = activation
+                .take()
+                .expect("the retained edit body activates at most once");
+            let owner = match operation.into_session_outcome_owner(
+                keys.session_policy(),
+                writer_limits,
+                failure_requirements,
+            ) {
+                Ok(owner) => owner,
+                Err(source) => {
+                    *containment = Some(source);
+                    return;
+                }
+            };
+            *containment = validate_changed(
+                source,
+                owner,
+                EditCanonicalSlots {
+                    output: parts.output,
+                    proof: parts.proof,
+                    activation: parts.activation,
+                    validation: parts.validation,
+                },
+                admission,
+                PreparedEdit::Space { resolved },
+                disposition,
+            )
+            .err();
+        },
+    );
+    let result = match body {
+        Ok(finish) => crate::scene_edit::finish_bound_edit(finish),
+        Err(CanonicalBoundBodyError::Start(source)) => {
             return Err(failure(
                 input,
                 SpaceConversionFailure::new(SpaceConversionCause::Start { source }),
             ));
         }
-    };
-    let resolved =
-        match crate::operation::runtime::with_execution(&mut operation, keys, |runtime| {
-            run_unit(runtime, || {
-                resolve_scene_space_conversion(&input, options.target, options.source_assumptions)
-            })
-        }) {
-            Ok(Ok(resolved)) => resolved,
-            Ok(Err(source)) => {
+        Err(CanonicalBoundBodyError::Body(error)) => {
+            if let Some(source) = error.containment().copied().or(body_containment) {
+                Err(EditFailure::new(EditCause::Containment { source }))
+            } else {
                 return Err(failure(
                     input,
-                    reject(operation, SpaceConversionCause::Source { source }),
+                    SpaceConversionFailure::new(
+                        body_cause.unwrap_or(SpaceConversionCause::Publication),
+                    ),
                 ));
             }
-            Err(source) => return Err(failure(input, reject(operation, source.into()))),
-        };
-    if resolved.is_unchanged() {
-        return match operation.prepare_evidence_only_success(final_progress()) {
-            Ok(PreparedStoreEvidenceOnlyOutcome::Success(prepared)) => {
-                let resources =
-                    PostProcessResourceEvidence::from_store(prepared.handoff().ledger_evidence);
-                let report = PostProcessReport::space_conversion(
-                    input.generation(),
-                    options,
-                    input.generation(),
-                    resources,
-                    None,
-                );
-                Ok(PostProcessRunOutcome::new(input, report))
-            }
-            Ok(PreparedStoreEvidenceOnlyOutcome::MinimalFallback(prepared)) => Err(failure(
-                input,
-                publish_fallback(prepared, SpaceConversionCause::Publication),
-            )),
-            Err(source) => Err(failure(
-                input,
-                SpaceConversionFailure::new(SpaceConversionCause::Preparation { source }),
-            )),
-        };
-    }
-    let owner = match operation.into_session_outcome_owner(
-        keys.session_policy(),
-        writer_limits,
-        failure_requirements,
-    ) {
-        Ok(owner) => owner,
-        Err(source) => {
-            return Err(failure(
-                input,
-                SpaceConversionFailure::new(SpaceConversionCause::Containment { source }),
-            ));
         }
     };
-    let source_generation = input.generation();
-    match execute_changed(&input, owner, admission, PreparedEdit::Space { resolved }) {
-        Ok((scene, SceneEditEvidence::SpaceConversion(evidence), resources)) => {
+    match result {
+        Ok(EditTerminal::Unchanged { resources }) => {
+            let report = PostProcessReport::space_conversion(
+                source_generation,
+                options,
+                input.generation(),
+                resources,
+                None,
+            );
+            Ok(PostProcessRunOutcome::new(input, report))
+        }
+        Ok(EditTerminal::Changed {
+            scene,
+            evidence: SceneEditEvidence::SpaceConversion(evidence),
+            resources,
+        }) => {
             let effects = SpaceConversionReport::new(evidence);
             let report = PostProcessReport::space_conversion(
                 source_generation,
@@ -162,7 +214,13 @@ pub fn convert_scene_space(
             input,
             SpaceConversionFailure::new(SpaceConversionCause::Publication),
         )),
-        Err(cause) => Err(failure(input, cause.into())),
+        Err(error) => {
+            let error = match body_cause {
+                Some(cause) => local_failure(cause, error),
+                None => error.into(),
+            };
+            Err(failure(input, error))
+        }
     }
 }
 
@@ -170,37 +228,29 @@ fn failure(input: ValidatedScene, failure: SpaceConversionFailure) -> PostProces
     PostProcessRunFailure::new(input, PostProcessRunError::SpaceConversion { failure })
 }
 
-fn reject(
-    operation: crate::operation::runtime::EditOperation,
-    cause: SpaceConversionCause,
-) -> SpaceConversionFailure {
-    match operation.prepare_minimal_fallback(REJECTION_CODE) {
-        Ok(prepared) => publish_fallback(prepared, cause),
-        Err(source) => SpaceConversionFailure::new(SpaceConversionCause::Preparation { source }),
-    }
-}
-
-fn publish_fallback(
-    prepared: baozi_operation::__retained_store_integration::authority::PreparedStoreFallback,
-    cause: SpaceConversionCause,
-) -> SpaceConversionFailure {
-    let published = prepared.handoff();
-    let cause = match published.ledger_evidence.header().terminal_cause() {
-        baozi_operation::StoreTerminalCause::Failure(failure)
-            if failure.class() == baozi_operation::StorePreparationFailureClass::Control =>
-        {
-            match cause {
-                cause @ SpaceConversionCause::Control { .. } => cause,
-                _ => SpaceConversionCause::FinalControl,
-            }
-        }
-        _ => cause,
-    };
-    SpaceConversionFailure::terminal(
-        cause,
-        PostProcessResourceEvidence::from_store(published.ledger_evidence),
-        crate::direct_error::FailureOwner::Fallback {
-            _owner: published.fallback,
+fn local_failure(cause: SpaceConversionCause, error: EditFailure) -> SpaceConversionFailure {
+    let EditFailure {
+        cause: terminal_cause,
+        resources,
+        owner,
+    } = error;
+    let cause = match terminal_cause {
+        EditCause::Publication => cause,
+        EditCause::FinalControl => match cause {
+            cause @ SpaceConversionCause::Control { .. } => cause,
+            _ => SpaceConversionCause::FinalControl,
         },
-    )
+        cause => {
+            return EditFailure {
+                cause,
+                resources,
+                owner,
+            }
+            .into();
+        }
+    };
+    match resources {
+        Some(resources) => SpaceConversionFailure::terminal(cause, resources, owner),
+        None => SpaceConversionFailure::new(cause),
+    }
 }

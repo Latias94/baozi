@@ -196,6 +196,12 @@ fn declaring_unknown_source_facts_is_a_change_and_a_second_conversion_is_unchang
     assert!(unchanged.space_conversion_effects().is_none());
     assert_eq!(unchanged.resources().committed_canonical_bytes(), 0);
     assert_eq!(unchanged.resources().current_live_bytes(), 0);
+    assert_eq!(unchanged.resources().active_reservations(), 0);
+    assert_eq!(unchanged.resources().published_outcome_evidence_bytes(), 0);
+    assert_eq!(
+        unchanged.resources().published_terminal_evidence_records(),
+        0
+    );
     assert_eq!(
         dense_f32(primitive(&scene).positions().unwrap(), 3),
         &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
@@ -265,6 +271,15 @@ fn source_assumptions_cannot_override_known_scene_facts() {
         }
     ));
     assert_eq!(failure.resources().unwrap().committed_canonical_bytes(), 0);
+    assert_eq!(failure.resources().unwrap().current_live_bytes(), 0);
+    assert_eq!(failure.resources().unwrap().active_reservations(), 0);
+    assert_eq!(
+        failure
+            .resources()
+            .unwrap()
+            .published_terminal_evidence_records(),
+        0
+    );
 }
 
 #[test]

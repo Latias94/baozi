@@ -108,12 +108,16 @@ impl Format for EmptyImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         support::submit_minimal_scene(context)
     }
 }
@@ -150,12 +154,16 @@ impl Format for RequiredDependencyImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         context.with_execution(|exec| -> ParseResult<()> {
             let _dependency = support::required_root_dependency(exec, &self.role, "sidecar.bin")?;
             Ok(())
@@ -188,12 +196,16 @@ impl Format for DeepSceneImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        _scope: &DetectionScope<'_>,
+        _scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         support::submit_node_scene(context, VALIDATION_NODE_COUNT)
     }
 }
@@ -226,7 +238,7 @@ impl Format for DetectorScanCancellationImporter {
         &self,
         probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        scope: &DetectionScope<'_>,
+        scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         let mut chunks = probe
             .bytes()
@@ -249,7 +261,11 @@ impl Format for DetectorScanCancellationImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         self.parse_calls.fetch_add(1, Ordering::AcqRel);
         support::submit_minimal_scene(context)
     }
@@ -289,7 +305,7 @@ impl Format for LatchThenPanicDetectorImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        scope: &DetectionScope<'_>,
+        scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         self.detect_calls.fetch_add(1, Ordering::AcqRel);
         self.cancellation.cancel();
@@ -297,18 +313,22 @@ impl Format for LatchThenPanicDetectorImporter {
         panic!("detector panicked after latching cancellation")
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         self.parse_calls.fetch_add(1, Ordering::AcqRel);
         support::submit_minimal_scene(context)
     }
 }
 
+// Same-scope nested work and callback polling are compiler contracts; see the paired valid and
+// compile-fail DetectionScope examples in src/detection.rs.
 #[derive(Clone, Copy)]
 enum DetectorContractViolation {
     ZeroWork,
-    NestedWork,
     CallbackError,
-    PollDuringCallback,
     ReplayAbort,
 }
 
@@ -339,20 +359,10 @@ impl Format for DetectorContractImporter {
                 "Detector zero work",
                 "detector-zero-work",
             ),
-            DetectorContractViolation::NestedWork => (
-                "dev.baozi.test.detector-nested-work",
-                "Detector nested work",
-                "detector-nested-work",
-            ),
             DetectorContractViolation::CallbackError => (
                 "dev.baozi.test.detector-callback-error",
                 "Detector callback error",
                 "detector-callback-error",
-            ),
-            DetectorContractViolation::PollDuringCallback => (
-                "dev.baozi.test.detector-poll-during-callback",
-                "Detector poll during callback",
-                "detector-poll-during-callback",
             ),
             DetectorContractViolation::ReplayAbort => (
                 "dev.baozi.test.detector-replay-abort",
@@ -367,7 +377,7 @@ impl Format for DetectorContractImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        scope: &DetectionScope<'_>,
+        scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         match self.violation {
             DetectorContractViolation::ZeroWork => {
@@ -377,35 +387,22 @@ impl Format for DetectorContractImporter {
                         .is_err()
                 );
             }
-            DetectorContractViolation::NestedWork => {
-                assert!(
-                    scope
-                        .with_work(1, || {
-                            assert!(
-                                scope
-                                    .with_work(1, || Ok(DetectionOutcome::NoMatch))
-                                    .is_err()
-                            );
-                            Ok(DetectionOutcome::NoMatch)
-                        })
-                        .is_err()
-                );
-            }
             DetectorContractViolation::CallbackError => {
-                return scope.with_work(1, || {
-                    scope.poll()?;
-                    Ok(DetectionOutcome::NoMatch)
-                });
-            }
-            DetectorContractViolation::PollDuringCallback => {
-                assert!(
-                    scope
-                        .with_work(1, || {
-                            assert!(scope.poll().is_err());
-                            Ok(DetectionOutcome::NoMatch)
-                        })
-                        .is_err()
-                );
+                if self.detect_calls.fetch_add(1, Ordering::AcqRel) == 0 {
+                    let stale = scope
+                        .with_work(u64::MAX, || Ok(DetectionOutcome::NoMatch))
+                        .expect_err("the originating scope rejects oversized work");
+                    STALE_DETECTION_ABORT.with(|slot| {
+                        *slot.borrow_mut() = Some(stale);
+                    });
+                } else {
+                    let stale = STALE_DETECTION_ABORT.with(|slot| {
+                        slot.borrow_mut()
+                            .take()
+                            .expect("the originating scope supplied a real abort")
+                    });
+                    return scope.with_work(1, || Err(stale));
+                }
             }
             DetectorContractViolation::ReplayAbort => {
                 if self.detect_calls.fetch_add(1, Ordering::AcqRel) == 0 {
@@ -428,7 +425,11 @@ impl Format for DetectorContractImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         self.parse_calls.fetch_add(1, Ordering::AcqRel);
         support::submit_minimal_scene(context)
     }
@@ -456,7 +457,7 @@ impl Format for RecoveringDetectorCancellationImporter {
         &self,
         _probe: &baozi_import::Probe<'_>,
         _hint: &ReadHint,
-        scope: &DetectionScope<'_>,
+        scope: &mut DetectionScope<'_, '_>,
     ) -> DetectionResult<DetectionOutcome> {
         self.cancellation.cancel();
         if scope.poll().is_err() {
@@ -465,7 +466,11 @@ impl Format for RecoveringDetectorCancellationImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, _options: &Self::Options, context: &mut ParseContext<'_>) -> ParseResult<()> {
+    fn parse(
+        &self,
+        _options: &Self::Options,
+        context: &mut ParseContext<'_, '_>,
+    ) -> ParseResult<()> {
         self.parse_calls.fetch_add(1, Ordering::AcqRel);
         support::submit_minimal_scene(context)
     }
@@ -737,27 +742,6 @@ fn detector_panic_cannot_replace_latched_cancellation_and_poisons_registration()
 }
 
 #[test]
-fn detector_cannot_nest_work_callbacks() {
-    let parse_calls = Arc::new(AtomicUsize::new(0));
-    let request = request_for(DetectorContractImporter {
-        violation: DetectorContractViolation::NestedWork,
-        detect_calls: AtomicUsize::new(0),
-        parse_calls: Arc::clone(&parse_calls),
-    });
-
-    let failure = read_bytes(
-        &request,
-        AssetPath::new("asset.detector-nested-work").expect("valid nested work source"),
-        DETECTOR_SCAN_BYTES,
-        ImportOperationControl::default(),
-    )
-    .expect_err("nested detector work must terminate the session");
-
-    assert_detector_contract_failure(&failure, "detection-work-already-in-progress", 1, 1);
-    assert_eq!(parse_calls.load(Ordering::Acquire), 0);
-}
-
-#[test]
 fn detector_cannot_admit_zero_sized_work() {
     let parse_calls = Arc::new(AtomicUsize::new(0));
     let request = request_for(DetectorContractImporter {
@@ -780,6 +764,9 @@ fn detector_cannot_admit_zero_sized_work() {
 
 #[test]
 fn detector_callback_error_preserves_attempted_without_consumed_work() {
+    STALE_DETECTION_ABORT.with(|slot| {
+        let _ = slot.borrow_mut().take();
+    });
     let parse_calls = Arc::new(AtomicUsize::new(0));
     let request = request_for(DetectorContractImporter {
         violation: DetectorContractViolation::CallbackError,
@@ -787,37 +774,26 @@ fn detector_callback_error_preserves_attempted_without_consumed_work() {
         parse_calls: Arc::clone(&parse_calls),
     });
 
+    let source =
+        AssetPath::new("asset.detector-callback-error").expect("valid callback error source");
+    let originating = read_bytes(
+        &request,
+        source.clone(),
+        DETECTOR_SCAN_BYTES,
+        ImportOperationControl::default(),
+    )
+    .expect_err("the first scope must create a real abort before callback replay");
+    assert_detector_contract_failure(&originating, "detector-work-quantum-exceeded", 0, 0);
+
     let failure = read_bytes(
         &request,
-        AssetPath::new("asset.detector-callback-error").expect("valid callback error source"),
+        source,
         DETECTOR_SCAN_BYTES,
         ImportOperationControl::default(),
     )
     .expect_err("a detector callback error must terminate the session");
 
-    assert_detector_contract_failure(&failure, "detection-poll-during-work", 1, 0);
-    assert_eq!(parse_calls.load(Ordering::Acquire), 0);
-}
-
-#[test]
-fn detector_poll_during_callback_latches_contract_after_consumed_work() {
-    let parse_calls = Arc::new(AtomicUsize::new(0));
-    let request = request_for(DetectorContractImporter {
-        violation: DetectorContractViolation::PollDuringCallback,
-        detect_calls: AtomicUsize::new(0),
-        parse_calls: Arc::clone(&parse_calls),
-    });
-
-    let failure = read_bytes(
-        &request,
-        AssetPath::new("asset.detector-poll-during-callback")
-            .expect("valid poll during callback source"),
-        DETECTOR_SCAN_BYTES,
-        ImportOperationControl::default(),
-    )
-    .expect_err("polling while detector work is active must terminate the session");
-
-    assert_detector_contract_failure(&failure, "detection-poll-during-work", 1, 1);
+    assert_detector_contract_failure(&failure, "detection-abort-without-terminal-cause", 1, 0);
     assert_eq!(parse_calls.load(Ordering::Acquire), 0);
 }
 

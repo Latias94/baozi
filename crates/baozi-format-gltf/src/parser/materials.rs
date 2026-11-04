@@ -2,22 +2,20 @@
 
 use super::{
     AppearanceStorage, BindingStorage, ContentError, ExternalImageResources, ImageSource,
-    MaterialStorage, ResolvedTextureUris, ResourceClosure, Result, authoring_u32,
-    complete_canonical_string_work, gltf_parse_error, is_data_uri, owned_name, poll_parser_loop,
-    to_u64,
+    MaterialStorage, ResolvedTextureUris, ResourceClosure, Result, authoring_u32, gltf_parse_error,
+    is_data_uri, owned_name, poll_parser_loop, to_u64,
 };
 use crate::GltfFailure;
 use crate::document::KHR_TEXTURE_TRANSFORM;
 use crate::document::schema as json;
+use baozi_import::ParseServices;
 use baozi_import::authoring::{
     AlphaMode, AuthoringRange, ClearcoatFactors, Color, ColorInterpretation, EmissionFactors,
     MaterialFactors, MaterialLocalId, PbrMetallicRoughnessFactors, ShadingModel, SheenFactors,
     TextureBlendOperation, TextureChannel, TextureChannelSwizzle, TextureRole, TextureSourceKey,
     TextureStrength, TextureTransform, Vec2, Vec3,
 };
-use baozi_import::{
-    ImportStorageClass, ImportWorkClass, MeteredOrderedMap, MeteredVec, ParseExecution,
-};
+use baozi_import::{ImportStorageClass, ImportWorkClass, MeteredOrderedMap, MeteredVec, ParseRoot};
 use std::ops::Range;
 
 #[derive(Debug)]
@@ -53,7 +51,7 @@ impl MaterialContracts<'_> {
 
     pub(super) fn bindings(
         &self,
-        ctx: &mut ParseExecution<'_, '_>,
+        ctx: &mut ParseServices<'_, '_, '_>,
         material_index: usize,
     ) -> Result<&[BindingContract]> {
         let range = self.material(ctx, material_index)?.bindings.clone();
@@ -66,7 +64,7 @@ impl MaterialContracts<'_> {
 
     pub(super) fn material(
         &self,
-        _ctx: &mut ParseExecution<'_, '_>,
+        _ctx: &mut ParseServices<'_, '_, '_>,
         material_index: usize,
     ) -> Result<&MaterialContract> {
         self.materials.get(&material_index).ok_or_else(|| {
@@ -78,38 +76,42 @@ impl MaterialContracts<'_> {
 }
 
 pub(super) fn preflight<'scope>(
-    ctx: &mut ParseExecution<'_, 'scope>,
+    ctx: &mut ParseRoot<'_, '_, 'scope>,
     gltf: &crate::document::Document<'_>,
     closure: &ResourceClosure<'_>,
 ) -> Result<MaterialContracts<'scope>> {
     let root = gltf.tables();
-    ctx.charge_work(to_u64(root.extensions_used.len()))?;
-    let extension_declared = root
-        .extensions_used
-        .iter()
-        .any(|name| name == KHR_TEXTURE_TRANSFORM);
-    let mut materials = ctx.metered_ordered_map(
+    let amount = to_u64(root.extensions_used.len());
+    let layout = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+    let extension_declared = ctx.child(&layout, [amount], |child| {
+        child.run([amount], || {
+            Ok::<_, baozi_import::ParseFailure>(
+                root.extensions_used
+                    .iter()
+                    .any(|name| name == KHR_TEXTURE_TRANSFORM),
+            )
+        })
+    })?;
+    let mut materials = ctx.services()?.metered_ordered_map(
         ImportStorageClass::FormatNormalization,
         "gltf-material-contracts",
     );
-    let mut bindings = ctx.metered_vec(
+    let mut bindings = ctx.services()?.metered_vec(
         ImportStorageClass::FormatNormalization,
         "gltf-material-binding-contracts",
     );
 
-    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
+    let work_group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
     for (material_index, material) in root.materials.iter().enumerate() {
-        poll_parser_loop(ctx, material_index)?;
-        ctx.with_work(
-            &work_group,
-            [1],
-            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-        )?;
-        let selected = closure
-            .materials
-            .as_slice()
-            .get(material_index)
-            .copied()
+        poll_parser_loop(&mut ctx.services()?, material_index)?;
+        let selected = ctx
+            .child(&work_group, [1], |child| {
+                child.run([1], || {
+                    Ok::<_, baozi_import::ParseFailure>(
+                        closure.materials.as_slice().get(material_index).copied(),
+                    )
+                })
+            })?
             .ok_or_else(|| {
                 ContentError::from(GltfFailure::internal(
                     "glTF material closure length changed during material preflight",
@@ -139,7 +141,7 @@ pub(super) fn preflight<'scope>(
         let sheen = material.sheen.map(|id| gltf.sheen(ctx, id)).transpose()?;
         let pbr = &material.pbr_metallic_roughness;
         let factors = compile_factors(
-            ctx,
+            &mut ctx.services()?,
             pbr.base_color_factor,
             pbr.metallic_factor,
             pbr.roughness_factor,
@@ -227,11 +229,9 @@ pub(super) fn preflight<'scope>(
                 TextureRole::SheenRoughness,
             ),
         ] {
-            ctx.with_work(
-                &work_group,
-                [1],
-                |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-            )?;
+            let info = ctx.child(&work_group, [1], |child| {
+                child.run([1], || Ok::<_, baozi_import::ParseFailure>(info.as_ref()))
+            })?;
             if let Some(info) = info {
                 {
                     let value = compile_texture_info_contract(
@@ -243,7 +243,7 @@ pub(super) fn preflight<'scope>(
                         info,
                         extension_declared,
                     )?;
-                    bindings.try_push(ctx, value)
+                    bindings.try_push(&mut ctx.services()?, value)
                 }?;
             }
         }
@@ -253,7 +253,7 @@ pub(super) fn preflight<'scope>(
             } else {
                 ShadingModel::PbrMetallicRoughness
             },
-            alpha_mode: map_alpha_mode(ctx, material)?,
+            alpha_mode: map_alpha_mode(&mut ctx.services()?, material)?,
             factors,
             bindings: binding_start..bindings.len(),
             requires_tangent_space: clearcoat
@@ -262,7 +262,7 @@ pub(super) fn preflight<'scope>(
                 && material.normal_texture.is_none(),
         };
         if materials
-            .try_insert(ctx, material_index, contract)?
+            .try_insert(&mut ctx.services()?, material_index, contract)?
             .is_some()
         {
             return Err(ContentError::from(GltfFailure::internal(
@@ -278,7 +278,7 @@ pub(super) fn preflight<'scope>(
 }
 
 fn compile_factors(
-    _ctx: &mut ParseExecution<'_, '_>,
+    _ctx: &mut ParseServices<'_, '_, '_>,
     base: [f32; 4],
     metallic: f32,
     roughness: f32,
@@ -300,7 +300,7 @@ fn compile_factors(
 }
 
 fn compile_texture_info_contract(
-    ctx: &mut ParseExecution<'_, '_>,
+    ctx: &mut ParseRoot<'_, '_, '_>,
     document: &crate::document::Document<'_>,
     material_index: usize,
     source_key: &'static str,
@@ -308,15 +308,19 @@ fn compile_texture_info_contract(
     info: &json::texture::Info,
     extension_declared: bool,
 ) -> Result<BindingContract> {
-    ctx.charge_work(1)?;
-    let source_texture = info.index.value();
+    let layout = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+    let source_texture = ctx.child(&layout, [1], |child| {
+        child.run([1], || {
+            Ok::<_, baozi_import::ParseFailure>(info.index.value())
+        })
+    })?;
     if document.tables().textures.get(source_texture).is_none() {
         return Err(gltf_parse_error(format_args!(
             "glTF material {material_index} {source_key} texture {source_texture} is out of range"
         )));
     }
     require_texture_transform_declaration(
-        ctx,
+        &mut ctx.services()?,
         material_index,
         source_key,
         info.transform.is_some(),
@@ -420,7 +424,7 @@ fn compile_texture_info_contract(
 }
 
 fn require_texture_transform_declaration(
-    _ctx: &mut ParseExecution<'_, '_>,
+    _ctx: &mut ParseServices<'_, '_, '_>,
     material_index: usize,
     source_key: &'static str,
     has_transform: bool,
@@ -435,7 +439,7 @@ fn require_texture_transform_declaration(
 }
 
 pub(super) fn add_authoring<'scope, 'document>(
-    ctx: &mut ParseExecution<'_, 'scope>,
+    ctx: &mut ParseRoot<'_, '_, 'scope>,
     storage: &mut AppearanceStorage<'scope>,
     gltf: &crate::document::Document<'document>,
     material: crate::document::Material<'document>,
@@ -444,20 +448,39 @@ pub(super) fn add_authoring<'scope, 'document>(
     contracts: &MaterialContracts<'_>,
 ) -> Result<()> {
     let material_index = material.index();
-    let contract = contracts.material(ctx, material_index)?;
-    complete_canonical_string_work(ctx, material.name().map_or(0, str::len))?;
-    let binding_offset =
-        authoring_u32(ctx, storage.bindings.len(), "gltf-material-binding-offset")?;
+    let contract = contracts.material(&mut ctx.services()?, material_index)?;
+    let name_bytes = material.name().map_or(0, str::len);
+    let source_name = if name_bytes == 0 {
+        material.name()
+    } else {
+        let layout = ctx.bind_group([ImportWorkClass::CanonicalStringBytes])?;
+        ctx.child(&layout, [to_u64(name_bytes)], |child| {
+            child.run([to_u64(name_bytes)], || {
+                Ok::<_, baozi_import::ParseFailure>(material.name())
+            })
+        })?
+    };
+    let binding_offset = authoring_u32(
+        &mut ctx.services()?,
+        storage.bindings.len(),
+        "gltf-material-binding-offset",
+    )?;
 
-    let work_group = ctx.bind_work_group([ImportWorkClass::WorkUnits])?;
-    for (ordinal, binding) in contracts.bindings(ctx, material_index)?.iter().enumerate() {
-        poll_parser_loop(ctx, ordinal)?;
-        ctx.with_work(
-            &work_group,
-            [1],
-            |_exec, work| -> baozi_import::ParseResult<()> { work.complete_all() },
-        )?;
-        if gltf.tables().textures.get(binding.source_texture).is_none() {
+    let work_group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+    for (ordinal, binding) in contracts
+        .bindings(&mut ctx.services()?, material_index)?
+        .iter()
+        .enumerate()
+    {
+        poll_parser_loop(&mut ctx.services()?, ordinal)?;
+        let valid = ctx.child(&work_group, [1], |child| {
+            child.run([1], || {
+                Ok::<_, baozi_import::ParseFailure>(
+                    gltf.tables().textures.get(binding.source_texture).is_some(),
+                )
+            })
+        })?;
+        if !valid {
             return Err(ContentError::from(GltfFailure::internal(
                 "glTF compiled binding texture index is invalid",
             )));
@@ -484,10 +507,14 @@ pub(super) fn add_authoring<'scope, 'document>(
         .ok_or_else(|| ctx.allocation_failure("gltf-material-binding-range"))?;
     storage.materials.try_push_reserved(MaterialStorage {
         shading_model: contract.shading_model,
-        name: owned_name(ctx, material.name(), "gltf-normalized-material-name")?,
+        name: owned_name(ctx, source_name, "gltf-normalized-material-name")?,
         bindings: AuthoringRange::new(
             binding_offset,
-            authoring_u32(ctx, binding_count, "gltf-material-binding-count")?,
+            authoring_u32(
+                &mut ctx.services()?,
+                binding_count,
+                "gltf-material-binding-count",
+            )?,
         ),
         alpha_mode: contract.alpha_mode,
         double_sided: material.double_sided(),
@@ -497,22 +524,27 @@ pub(super) fn add_authoring<'scope, 'document>(
 }
 
 pub(super) fn add_default_authoring<'scope>(
-    ctx: &mut ParseExecution<'_, 'scope>,
+    ctx: &mut ParseRoot<'_, '_, 'scope>,
     storage: &mut AppearanceStorage<'scope>,
 ) -> Result<()> {
-    ctx.charge_work(1)?;
+    let layout = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+    let count = ctx.child(&layout, [1], |child| {
+        child.run([1], || {
+            Ok::<_, baozi_import::ParseFailure>(storage.materials.len())
+        })
+    })?;
     let id = MaterialLocalId::new(authoring_u32(
-        ctx,
-        storage.materials.len(),
+        &mut ctx.services()?,
+        count,
         "gltf-authoring-default-material-id",
     )?);
-    let factors = compile_factors(ctx, [1.0; 4], 1.0, 1.0, [0.0; 3], None)?;
+    let factors = compile_factors(&mut ctx.services()?, [1.0; 4], 1.0, 1.0, [0.0; 3], None)?;
     storage.materials.try_push_reserved(MaterialStorage {
         shading_model: ShadingModel::PbrMetallicRoughness,
         name: None,
         bindings: AuthoringRange::new(
             authoring_u32(
-                ctx,
+                &mut ctx.services()?,
                 storage.bindings.len(),
                 "gltf-default-material-bindings",
             )?,
@@ -527,7 +559,7 @@ pub(super) fn add_default_authoring<'scope>(
 }
 
 fn add_texture_binding<'scope, 'document>(
-    ctx: &mut ParseExecution<'_, 'scope>,
+    ctx: &mut ParseRoot<'_, '_, 'scope>,
     storage: &mut AppearanceStorage<'scope>,
     resolved_texture_uris: &ResolvedTextureUris<'_>,
     external_images: &ExternalImageResources<'scope>,
@@ -556,7 +588,16 @@ fn add_texture_binding<'scope, 'document>(
         .checked_add(contract.source_key.len())
         .and_then(|bytes| bytes.checked_add(texture.name().map_or(0, str::len)))
         .ok_or_else(|| ctx.allocation_failure("gltf-texture-canonical-strings"))?;
-    complete_canonical_string_work(ctx, canonical_string_bytes)?;
+    let source_key = if canonical_string_bytes == 0 {
+        TextureSourceKey::try_new(contract.source_key)
+    } else {
+        let layout = ctx.bind_group([ImportWorkClass::CanonicalStringBytes])?;
+        ctx.child(&layout, [to_u64(canonical_string_bytes)], |child| {
+            child.run([to_u64(canonical_string_bytes)], || {
+                Ok::<_, baozi_import::ParseFailure>(TextureSourceKey::try_new(contract.source_key))
+            })
+        })?
+    };
     let texture_id = storage
         .texture_ids
         .as_slice()
@@ -569,10 +610,10 @@ fn add_texture_binding<'scope, 'document>(
                 texture.index()
             ))
         })?;
-    let source_key = TextureSourceKey::try_new(contract.source_key)
-        .map_err(|_| gltf_parse_error("static glTF texture source key is invalid"))?;
+    let source_key =
+        source_key.map_err(|_| gltf_parse_error("static glTF texture source key is invalid"))?;
     storage.bindings.try_push(
-        ctx,
+        &mut ctx.services()?,
         BindingStorage {
             texture: texture_id,
             provenance: 0,
@@ -590,7 +631,7 @@ fn add_texture_binding<'scope, 'document>(
 }
 
 fn map_alpha_mode(
-    _ctx: &mut ParseExecution<'_, '_>,
+    _ctx: &mut ParseServices<'_, '_, '_>,
     material: &json::Material<'_>,
 ) -> Result<AlphaMode> {
     match material.alpha_mode {

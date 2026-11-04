@@ -104,7 +104,7 @@ where
     }
 }
 
-impl<O, PP, U, L> CanonicalLane<'_, O, PP, U, L>
+impl<O, PP, U, L> CanonicalLane<'_, '_, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -297,7 +297,7 @@ where
     }
 }
 
-impl<O, PP, U> CanonicalLane<'_, O, PP, U, CanonicalInheritanceSource>
+impl<O, PP, U> CanonicalLane<'_, '_, O, PP, U, CanonicalInheritanceSource>
 where
     O: OperationOwner,
     PP: ProgressPhase,

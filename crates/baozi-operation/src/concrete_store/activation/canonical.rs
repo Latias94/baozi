@@ -1,4 +1,5 @@
 use super::canonical_validation::{CanonicalValidationAttempt, CanonicalValidationFirstFault};
+use super::final_state::CanonicalFinal;
 use super::*;
 
 fn drop_validation_attempt<Proof, E>(
@@ -17,6 +18,7 @@ fn drop_validation_attempt<Proof, E>(
 }
 
 type CentralValidationResult<
+    'inv,
     O,
     PP,
     U,
@@ -29,6 +31,7 @@ type CentralValidationResult<
     EvidenceTag,
 > = Result<
     CanonicalCentralValidationOutcome<
+        'inv,
         O,
         PP,
         U,
@@ -45,6 +48,7 @@ type CentralValidationResult<
 
 #[inline(never)]
 fn contain_central_validation_callback_drop<
+    'inv,
     O,
     PP,
     U,
@@ -58,6 +62,7 @@ fn contain_central_validation_callback_drop<
     L,
 >(
     validation: StoreControlledSuccessValidation<
+        'inv,
         O,
         PP,
         U,
@@ -68,7 +73,7 @@ fn contain_central_validation_callback_drop<
         L,
     >,
     attempt: Option<CanonicalValidationAttempt<Proof, E>>,
-    output: ManuallyDrop<T>,
+    output: ManuallyDrop<PayloadLoan<'inv, T>>,
 ) -> StoreActivationContainment
 where
     O: OperationOwner,
@@ -99,6 +104,7 @@ where
 #[inline(never)]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn resolve_central_validation<
+    'inv,
     O,
     PP,
     U,
@@ -112,6 +118,7 @@ fn resolve_central_validation<
     L,
 >(
     validation: StoreControlledSuccessValidation<
+        'inv,
         O,
         PP,
         U,
@@ -123,11 +130,15 @@ fn resolve_central_validation<
     >,
     attempt: Option<CanonicalValidationAttempt<Proof, E>>,
     validation_first_fault: Option<CanonicalValidationFirstFault>,
-    output: ManuallyDrop<T>,
+    output: ManuallyDrop<PayloadLoan<'inv, T>>,
+    proof_slot: CanonicalProofSlot<'inv, Proof>,
+    validation_slots: CanonicalValidationSlots<'inv, E>,
+    fallback_slot: CanonicalCauseSlot<'inv, StoreRuntimeError>,
     failure_work: FailureEvidenceWorkBudget,
     canonical_destination_dimension: StoreDimensionKey,
     outcome_evidence_destination_dimension: StoreDimensionKey,
 ) -> CentralValidationResult<
+    'inv,
     O,
     PP,
     U,
@@ -153,12 +164,19 @@ where
             resolve_invalid_central_validation(assembly, attempt, output)
         }
         StoreControlledSuccessValidation::FallbackOnly(fallback) => {
-            resolve_fallback_central_validation(fallback, attempt, validation_first_fault, output)
+            resolve_fallback_central_validation(
+                fallback,
+                attempt,
+                validation_first_fault,
+                output,
+                fallback_slot,
+            )
         }
         StoreControlledSuccessValidation::Valid(validated) => resolve_valid_central_validation(
             validated,
             attempt,
             output,
+            proof_slot,
             failure_work,
             canonical_destination_dimension,
             outcome_evidence_destination_dimension,
@@ -169,6 +187,7 @@ where
                 stable_code,
             })) if !validation_contract_failed_first => resolve_trusted_central_rejection(
                 failure,
+                validation_slots.rejection,
                 StoreCanonicalRejection::Requested(cause),
                 stable_code,
                 output,
@@ -180,6 +199,7 @@ where
             {
                 resolve_trusted_central_rejection(
                     failure,
+                    validation_slots.rejection,
                     StoreCanonicalRejection::Runtime(cause),
                     stable_code,
                     output,
@@ -189,6 +209,7 @@ where
             }
             attempt => resolve_contract_central_rejection(
                 failure,
+                validation_slots.rejection,
                 attempt,
                 output,
                 failure_work,
@@ -199,6 +220,7 @@ where
             if validation_contract_failed_first {
                 resolve_contract_central_interruption(
                     failure,
+                    validation_slots.rejection,
                     cause,
                     attempt,
                     output,
@@ -208,6 +230,7 @@ where
             } else {
                 resolve_trusted_central_interruption(
                     failure,
+                    validation_slots.interruption,
                     cause,
                     attempt,
                     output,
@@ -221,6 +244,7 @@ where
 
 #[inline(never)]
 fn resolve_invalid_central_validation<
+    'inv,
     O,
     PP,
     U,
@@ -233,10 +257,11 @@ fn resolve_invalid_central_validation<
     EvidenceTag,
     L,
 >(
-    assembly: RetainedStorePublicationAssembly<O, PP, U, L>,
+    assembly: RetainedStorePublicationAssembly<'inv, O, PP, U, L>,
     attempt: Option<CanonicalValidationAttempt<Proof, E>>,
-    output: ManuallyDrop<T>,
+    output: ManuallyDrop<PayloadLoan<'inv, T>>,
 ) -> CentralValidationResult<
+    'inv,
     O,
     PP,
     U,
@@ -262,6 +287,7 @@ where
 
 #[inline(never)]
 fn resolve_fallback_central_validation<
+    'inv,
     O,
     PP,
     U,
@@ -273,11 +299,13 @@ fn resolve_fallback_central_validation<
     EvidenceKind,
     EvidenceTag,
 >(
-    fallback: StoreFallbackOnly<O, PP, U>,
+    fallback: StoreFallbackOnly<'inv, O, PP, U>,
     attempt: Option<CanonicalValidationAttempt<Proof, E>>,
     validation_first_fault: Option<CanonicalValidationFirstFault>,
-    output: ManuallyDrop<T>,
+    output: ManuallyDrop<PayloadLoan<'inv, T>>,
+    cause_slot: CanonicalCauseSlot<'inv, StoreRuntimeError>,
 ) -> CentralValidationResult<
+    'inv,
     O,
     PP,
     U,
@@ -309,14 +337,14 @@ where
         Some(CanonicalValidationFirstFault::Runtime(cause)) => cause.into_runtime(),
         None => activation_product_graph_cause(),
     };
-    Ok(CanonicalCentralValidationOutcome::Fallback(
-        PendingMinimalFallback::new(fallback, cause),
-    ))
+    PendingMinimalFallback::new(fallback, cause_slot, cause)
+        .map(CanonicalCentralValidationOutcome::Fallback)
 }
 
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn resolve_valid_central_validation<
+    'inv,
     O,
     PP,
     U,
@@ -329,6 +357,7 @@ fn resolve_valid_central_validation<
     EvidenceTag,
 >(
     validated: ValidatedStoreSuccess<
+        'inv,
         O,
         PP,
         U,
@@ -338,11 +367,13 @@ fn resolve_valid_central_validation<
         EvidenceTag,
     >,
     attempt: Option<CanonicalValidationAttempt<Proof, E>>,
-    output: ManuallyDrop<T>,
+    output: ManuallyDrop<PayloadLoan<'inv, T>>,
+    proof_slot: CanonicalProofSlot<'inv, Proof>,
     failure_work: FailureEvidenceWorkBudget,
     canonical_destination_dimension: StoreDimensionKey,
     outcome_evidence_destination_dimension: StoreDimensionKey,
 ) -> CentralValidationResult<
+    'inv,
     O,
     PP,
     U,
@@ -383,6 +414,16 @@ where
             });
         }
     };
+    let proof = match proof_slot.place(proof) {
+        Ok(proof) => proof,
+        Err(proof) => {
+            let _ = drop_scoped_value(proof);
+            let _ = drop_scoped_value(ManuallyDrop::into_inner(output));
+            return Err(StoreActivationContainment {
+                cause: validated.contain_activation_fault(),
+            });
+        }
+    };
     Ok(CanonicalCentralValidationOutcome::Candidate(
         CanonicalCandidateStoreSession {
             destinations,
@@ -398,6 +439,7 @@ where
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn resolve_trusted_central_rejection<
+    'inv,
     O,
     PP,
     U,
@@ -409,13 +451,15 @@ fn resolve_trusted_central_rejection<
     EvidenceKind,
     EvidenceTag,
 >(
-    failure: StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>,
+    failure: StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
+    cause_slot: CanonicalCauseSlot<'inv, StoreCanonicalRejection<E>>,
     cause: StoreCanonicalRejection<E>,
     stable_code: u32,
-    output: ManuallyDrop<T>,
+    output: ManuallyDrop<PayloadLoan<'inv, T>>,
     failure_work: FailureEvidenceWorkBudget,
     outcome_evidence_destination_dimension: StoreDimensionKey,
 ) -> CentralValidationResult<
+    'inv,
     O,
     PP,
     U,
@@ -441,6 +485,15 @@ where
                     cause: failure.contain_activation_fault(),
                 });
             }
+            let cause = match cause_slot.place(cause) {
+                Ok(cause) => cause,
+                Err(cause) => {
+                    let _ = drop_scoped_value(cause);
+                    return Err(StoreActivationContainment {
+                        cause: failure.contain_activation_fault(),
+                    });
+                }
+            };
             Ok(CanonicalCentralValidationOutcome::Rejected(
                 CentrallyRejectedCanonicalStoreSession {
                     root: RootedFailureEvidence {
@@ -463,6 +516,7 @@ where
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn resolve_contract_central_rejection<
+    'inv,
     O,
     PP,
     U,
@@ -474,12 +528,14 @@ fn resolve_contract_central_rejection<
     EvidenceKind,
     EvidenceTag,
 >(
-    failure: StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>,
+    failure: StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
+    cause_slot: CanonicalCauseSlot<'inv, StoreCanonicalRejection<E>>,
     attempt: Option<CanonicalValidationAttempt<Proof, E>>,
-    output: ManuallyDrop<T>,
+    output: ManuallyDrop<PayloadLoan<'inv, T>>,
     failure_work: FailureEvidenceWorkBudget,
     outcome_evidence_destination_dimension: StoreDimensionKey,
 ) -> CentralValidationResult<
+    'inv,
     O,
     PP,
     U,
@@ -513,15 +569,21 @@ where
             cause: failure.contain_activation_fault(),
         });
     }
+    let cause = match cause_slot.place(StoreCanonicalRejection::Runtime(
+        StoreRuntimeError::CanonicalValidationContractRejected,
+    )) {
+        Ok(cause) => cause,
+        Err(cause) => {
+            let _ = drop_scoped_value(cause);
+            return Err(StoreActivationContainment {
+                cause: failure.contain_activation_fault(),
+            });
+        }
+    };
     Ok(CanonicalCentralValidationOutcome::Rejected(
         CentrallyRejectedCanonicalStoreSession {
             root: RootedFailureEvidence {
-                owner: PayloadOwner::new(
-                    StoreCanonicalRejection::Runtime(
-                        StoreRuntimeError::CanonicalValidationContractRejected,
-                    ),
-                    failure,
-                ),
+                owner: PayloadOwner::new(cause, failure),
                 failure_work,
                 outcome_evidence_destination_dimension,
                 _lifecycle: PhantomData::<OrdinaryFailureState>,
@@ -533,6 +595,7 @@ where
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn resolve_contract_central_interruption<
+    'inv,
     O,
     PP,
     U,
@@ -544,13 +607,15 @@ fn resolve_contract_central_interruption<
     EvidenceKind,
     EvidenceTag,
 >(
-    failure: StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>,
+    failure: StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
+    cause_slot: CanonicalCauseSlot<'inv, StoreCanonicalRejection<E>>,
     cause: StoreWorkError,
     attempt: Option<CanonicalValidationAttempt<Proof, E>>,
-    output: ManuallyDrop<T>,
+    output: ManuallyDrop<PayloadLoan<'inv, T>>,
     failure_work: FailureEvidenceWorkBudget,
     outcome_evidence_destination_dimension: StoreDimensionKey,
 ) -> CentralValidationResult<
+    'inv,
     O,
     PP,
     U,
@@ -590,15 +655,21 @@ where
             cause: failure.contain_activation_fault(),
         });
     }
+    let cause = match cause_slot.place(StoreCanonicalRejection::Runtime(
+        StoreRuntimeError::CanonicalValidationContractRejected,
+    )) {
+        Ok(cause) => cause,
+        Err(cause) => {
+            let _ = drop_scoped_value(cause);
+            return Err(StoreActivationContainment {
+                cause: failure.contain_activation_fault(),
+            });
+        }
+    };
     Ok(CanonicalCentralValidationOutcome::Rejected(
         CentrallyRejectedCanonicalStoreSession {
             root: RootedFailureEvidence {
-                owner: PayloadOwner::new(
-                    StoreCanonicalRejection::Runtime(
-                        StoreRuntimeError::CanonicalValidationContractRejected,
-                    ),
-                    failure,
-                ),
+                owner: PayloadOwner::new(cause, failure),
                 failure_work,
                 outcome_evidence_destination_dimension,
                 _lifecycle: PhantomData::<OrdinaryFailureState>,
@@ -610,6 +681,7 @@ where
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn resolve_trusted_central_interruption<
+    'inv,
     O,
     PP,
     U,
@@ -621,13 +693,15 @@ fn resolve_trusted_central_interruption<
     EvidenceKind,
     EvidenceTag,
 >(
-    failure: StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>,
+    failure: StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
+    cause_slot: CanonicalCauseSlot<'inv, StoreWorkError>,
     cause: StoreWorkError,
     attempt: Option<CanonicalValidationAttempt<Proof, E>>,
-    output: ManuallyDrop<T>,
+    output: ManuallyDrop<PayloadLoan<'inv, T>>,
     failure_work: FailureEvidenceWorkBudget,
     outcome_evidence_destination_dimension: StoreDimensionKey,
 ) -> CentralValidationResult<
+    'inv,
     O,
     PP,
     U,
@@ -657,6 +731,15 @@ where
                     cause: failure.contain_activation_fault(),
                 });
             }
+            let cause = match cause_slot.place(cause) {
+                Ok(cause) => cause,
+                Err(cause) => {
+                    let _ = drop_scoped_value(cause);
+                    return Err(StoreActivationContainment {
+                        cause: failure.contain_activation_fault(),
+                    });
+                }
+            };
             Ok(CanonicalCentralValidationOutcome::Interrupted(
                 InterruptedCanonicalStoreSession {
                     root: RootedFailureEvidence {
@@ -675,15 +758,15 @@ where
     }
 }
 
-impl<O, PP, U, T, CanonicalKind, CanonicalTag, L>
-    ActivatedCanonicalStoreSession<O, PP, U, T, CanonicalKind, CanonicalTag, L>
+impl<'inv, O, PP, U, T, CanonicalKind, CanonicalTag, L>
+    ActivatedCanonicalStoreSession<'inv, O, PP, U, T, CanonicalKind, CanonicalTag, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     pub const fn output(&self) -> &T {
-        self.owner.value()
+        self.owner.value().value()
     }
 
     pub fn canonical_len(&self) -> usize {
@@ -702,9 +785,11 @@ where
     #[allow(clippy::type_complexity, clippy::result_large_err)]
     pub fn validate_centrally<EvidenceKind, EvidenceTag, Proof, E>(
         self,
+        mut proof_slot: CanonicalProofSlot<'inv, Proof>,
+        validation_slots: CanonicalValidationSlots<'inv, E>,
         progress: CanonicalValidationProgress<PP, U>,
         build_evidence: impl for<'lane> FnMut(
-            &mut CanonicalOutcomeEvidenceLane<'lane, O, PP, U, L>,
+            &mut CanonicalOutcomeEvidenceLane<'inv, 'lane, O, PP, U, L>,
             &T,
         )
             -> OutcomeEvidenceDecision<EvidenceKind, EvidenceTag>,
@@ -729,6 +814,7 @@ where
             -> Result<(), StoreWorkError>,
     ) -> Result<
         CanonicalCentralValidationOutcome<
+            'inv,
             O,
             PP,
             U,
@@ -760,6 +846,21 @@ where
             validation_work,
         } = self;
         let (output, assembly) = owner.into_parts();
+        let fallback_slot = if proof_slot.is_vacant_for(output.identity())
+            && validation_slots.is_vacant_for(output.identity())
+        {
+            proof_slot.take_fallback_slot()
+        } else {
+            None
+        };
+        let Some(fallback_slot) = fallback_slot else {
+            let _ = drop_optional_callback(build_evidence);
+            let _ = drop_optional_callback(validate);
+            let _ = drop_scoped_value(output);
+            return Err(StoreActivationContainment {
+                cause: assembly.contain_activation_fault(),
+            });
+        };
         let output = ManuallyDrop::new(output);
         let mut assembly = assembly;
         let mut failure_work = failure_work;
@@ -812,7 +913,7 @@ where
                         cause: assembly.contain_activation_fault(),
                     });
                 };
-                return defer_assembly_minimal(assembly, fault.cause, failure_code)
+                return defer_assembly_minimal(assembly, fallback_slot, fault.cause, failure_code)
                     .map(CanonicalCentralValidationOutcome::Fallback);
             }
             (Some(_), _) | (None, OutcomeEvidenceDecision::Abort) => {
@@ -878,6 +979,9 @@ where
             attempt,
             validation_first_fault,
             output,
+            proof_slot,
+            validation_slots,
+            fallback_slot,
             failure_work,
             canonical_destination_dimension,
             outcome_evidence_destination_dimension,
@@ -895,8 +999,9 @@ impl<Proof, E> CanonicalValidationDecision<Proof, E> {
     }
 }
 
-impl<O, PP, U, T, Proof, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
+impl<'inv, O, PP, U, T, Proof, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
     CanonicalCandidateStoreSession<
+        'inv,
         O,
         PP,
         U,
@@ -913,11 +1018,11 @@ where
     U: ProgressUnit,
 {
     pub const fn output(&self) -> &T {
-        self.owner.storage().value()
+        self.owner.storage().value().value()
     }
 
     pub const fn proof(&self) -> &Proof {
-        self.owner.value()
+        self.owner.value().value()
     }
 
     pub const fn canonical_member_count(&self) -> u64 {
@@ -928,13 +1033,99 @@ where
         self.destinations.outcome_evidence_members.get()
     }
 
+    /// Leaves the actual candidate and proof in their host until the retained body is disposed.
+    pub fn request_finish(
+        self,
+        disposition: CanonicalDispositionSlot<
+            'inv,
+            CanonicalKind,
+            CanonicalTag,
+            EvidenceKind,
+            EvidenceTag,
+        >,
+    ) -> Result<(), StoreActivationContainment> {
+        let Self {
+            destinations,
+            owner,
+            _failure_work: failure_work,
+        } = self;
+        let (proof, output_owner) = owner.into_parts();
+        let (output, store) = output_owner.into_parts();
+        if !disposition.is_vacant_for(output.identity()) {
+            let _ = drop_scoped_value(proof);
+            let _ = drop_scoped_value(output);
+            return Err(StoreActivationContainment {
+                cause: store.contain_activation_fault(),
+            });
+        }
+        let store = match store.defer_until_body_cleanup() {
+            Ok(pending) => pending,
+            Err(store) => {
+                let _ = drop_scoped_value(proof);
+                let _ = drop_scoped_value(output);
+                return Err(StoreActivationContainment {
+                    cause: store.contain_activation_fault(),
+                });
+            }
+        };
+        disposition.install(host::driver::PendingDisposition::Candidate(
+            host::driver::PendingCandidate {
+                store,
+                destinations,
+                failure_work,
+            },
+        ));
+        proof.retain_in_host();
+        output.retain_in_host();
+        Ok(())
+    }
+}
+
+impl<'inv, O, PP, U, T, Proof, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
+    CanonicalFinal<
+        CanonicalCandidateStoreSession<
+            'inv,
+            O,
+            PP,
+            U,
+            T,
+            Proof,
+            CanonicalKind,
+            CanonicalTag,
+            EvidenceKind,
+            EvidenceTag,
+        >,
+    >
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    pub const fn output(&self) -> &T {
+        self.state.output()
+    }
+
+    pub const fn proof(&self) -> &Proof {
+        self.state.proof()
+    }
+
+    pub const fn canonical_member_count(&self) -> u64 {
+        self.state.canonical_member_count()
+    }
+
+    pub const fn outcome_evidence_member_count(&self) -> u64 {
+        self.state.outcome_evidence_member_count()
+    }
+
     /// Seals exact destinations and final operation progress before core reserves a generation.
     #[allow(clippy::type_complexity)]
     pub fn try_issue_freeze_permit(
         self,
+        interruption_slot: CanonicalCauseSlot<'inv, CanonicalFreezeInterruption>,
         final_progress: FinalProgress<PP, U>,
     ) -> Result<
         CanonicalFreezePermitIssue<
+            'inv,
             O,
             PP,
             U,
@@ -947,13 +1138,20 @@ where
         >,
         StoreActivationContainment,
     > {
-        let Self {
+        let CanonicalCandidateStoreSession {
             destinations,
             owner,
             _failure_work: failure_work,
-        } = self;
+        } = self.state;
         let (proof, output_owner) = owner.into_parts();
         let (output, validated) = output_owner.into_parts();
+        if !interruption_slot.is_vacant_for(output.identity()) {
+            let _ = drop_scoped_value(proof);
+            let _ = drop_scoped_value(output);
+            return Err(StoreActivationContainment {
+                cause: validated.contain_activation_fault(),
+            });
+        }
         let ZeroCommitDestinationFacts {
             _canonical_dimension: canonical_dimension,
             canonical_members,
@@ -974,6 +1172,7 @@ where
         };
         match issued {
             StoreSuccessFreezePermitIssue::Ready(store) => {
+                output.freeze_order();
                 Ok(CanonicalFreezePermitIssue::Ready(CanonicalFreezePermit {
                     owner: PayloadOwner::new(output, PayloadOwner::new(proof, store)),
                     failure_work,
@@ -997,12 +1196,20 @@ where
                         cause: failure.contain_activation_fault(),
                     });
                 }
+                let cause = match interruption_slot.place(
+                    CanonicalFreezeInterruption::from_failure_code(cause, control_cause),
+                ) {
+                    Ok(cause) => cause,
+                    Err(cause) => {
+                        let _ = drop_scoped_value(cause);
+                        return Err(StoreActivationContainment {
+                            cause: failure.contain_activation_fault(),
+                        });
+                    }
+                };
                 Ok(CanonicalFreezePermitIssue::Interrupted(
                     RootedFailureEvidence {
-                        owner: PayloadOwner::new(
-                            CanonicalFreezeInterruption::from_failure_code(cause, control_cause),
-                            failure,
-                        ),
+                        owner: PayloadOwner::new(cause, failure),
                         failure_work,
                         outcome_evidence_destination_dimension: outcome_evidence_dimension,
                         _lifecycle: PhantomData::<FrozenFailureState>,
@@ -1017,12 +1224,20 @@ where
                         cause: failure.contain_activation_fault(),
                     });
                 }
+                let cause = match interruption_slot
+                    .place(CanonicalFreezeInterruption::from_failure_code(cause, None))
+                {
+                    Ok(cause) => cause,
+                    Err(cause) => {
+                        let _ = drop_scoped_value(cause);
+                        return Err(StoreActivationContainment {
+                            cause: failure.contain_activation_fault(),
+                        });
+                    }
+                };
                 Ok(CanonicalFreezePermitIssue::DestinationRejected(
                     RootedFailureEvidence {
-                        owner: PayloadOwner::new(
-                            CanonicalFreezeInterruption::from_failure_code(cause, None),
-                            failure,
-                        ),
+                        owner: PayloadOwner::new(cause, failure),
                         failure_work,
                         outcome_evidence_destination_dimension: outcome_evidence_dimension,
                         _lifecycle: PhantomData::<OrdinaryFailureState>,
@@ -1065,8 +1280,9 @@ impl CanonicalFreezeInterruption {
     }
 }
 
-impl<O, PP, U, T, Proof, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
+impl<'inv, O, PP, U, T, Proof, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
     CanonicalFreezePermit<
+        'inv,
         O,
         PP,
         U,
@@ -1087,7 +1303,12 @@ where
     /// Callers can validate descriptor pairing before generation admission without accepting a
     /// second, independently movable copy of the output.
     pub const fn output(&self) -> &T {
-        self.owner.value()
+        self.owner.value().value()
+    }
+
+    /// Borrows the exact centrally accepted proof paired with this frozen output.
+    pub const fn proof(&self) -> &Proof {
+        self.owner.storage().value().value()
     }
 
     /// Contains an unexpected failure of the core-owned generation admission boundary.
@@ -1106,6 +1327,44 @@ where
         let _ = drop_scoped_value(proof);
         StoreActivationContainment {
             cause: store.contain_activation_fault(),
+        }
+    }
+
+    /// Admits recovery before a generation source or result callback can run.
+    ///
+    /// Each denied-entry callback is disposed under its own unwind boundary while canonical
+    /// values and their storage remain live.
+    pub fn admit_generation_rejection<E, Generation, Reject, Prepare>(
+        self,
+        rejection_slot: &CanonicalCauseSlot<'inv, StoreCanonicalRejection<E>>,
+        inputs: (Generation, Reject, Prepare),
+    ) -> Result<(Self, (Generation, Reject, Prepare)), StoreActivationContainment> {
+        if rejection_slot.is_vacant_for(self.owner.value().identity()) {
+            Ok((self, inputs))
+        } else {
+            let (generation, reject, prepare) = inputs;
+            let _ = drop_scoped_value(generation);
+            let _ = drop_scoped_value(reject);
+            let _ = drop_scoped_value(prepare);
+            Err(self.contain_generation_fault())
+        }
+    }
+
+    /// Checks core's proven roots before a generation source can execute.
+    ///
+    /// A denied source is disposed before its canonical output, proof and physical owner.
+    pub fn admit_generation_pairing<Generation>(
+        self,
+        canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
+        evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
+        generation: Generation,
+    ) -> Result<(Self, Generation), StoreActivationContainment> {
+        let store = self.owner.storage().storage();
+        if store.canonical_root == canonical_root && store.evidence_root == evidence_root {
+            Ok((self, generation))
+        } else {
+            let _ = drop_scoped_value(generation);
+            Err(self.contain_generation_fault())
         }
     }
 
@@ -1136,17 +1395,21 @@ where
     )]
     pub fn reject_generation<E>(
         self,
+        rejection_slot: CanonicalCauseSlot<'inv, StoreCanonicalRejection<E>>,
         cause: E,
         stable_code: u32,
     ) -> Result<
-        CentrallyRejectedCanonicalStoreSession<
-            O,
-            PP,
-            U,
-            E,
-            EvidenceKind,
-            EvidenceTag,
-            FrozenFailureState,
+        CanonicalFinal<
+            CentrallyRejectedCanonicalStoreSession<
+                'inv,
+                O,
+                PP,
+                U,
+                E,
+                EvidenceKind,
+                EvidenceTag,
+                FrozenFailureState,
+            >,
         >,
         StoreActivationContainment,
     > {
@@ -1158,6 +1421,14 @@ where
         let (output, proof_owner) = owner.into_parts();
         let (proof, store) = proof_owner.into_parts();
         let cause = ManuallyDrop::new(cause);
+        if !rejection_slot.is_vacant_for(output.identity()) {
+            let _ = drop_scoped_value(proof);
+            let _ = drop_scoped_value(output);
+            let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
+            return Err(StoreActivationContainment {
+                cause: store.contain_activation_fault(),
+            });
+        }
         let proof_drop_failed = drop_scoped_value(proof).is_err();
         let output_drop_failed = drop_scoped_value(output).is_err();
         if proof_drop_failed || output_drop_failed {
@@ -1173,33 +1444,47 @@ where
                 return Err(StoreActivationContainment { cause: containment });
             }
         };
-        let cause = ManuallyDrop::into_inner(cause);
-        Ok(CentrallyRejectedCanonicalStoreSession {
-            root: RootedFailureEvidence {
-                owner: PayloadOwner::new(StoreCanonicalRejection::Requested(cause), failure),
-                failure_work,
-                outcome_evidence_destination_dimension: destinations._outcome_evidence_dimension,
-                _lifecycle: PhantomData::<FrozenFailureState>,
+        let cause = match rejection_slot.place(StoreCanonicalRejection::Requested(
+            ManuallyDrop::into_inner(cause),
+        )) {
+            Ok(cause) => cause,
+            Err(cause) => {
+                let _ = drop_scoped_value(cause);
+                return Err(StoreActivationContainment {
+                    cause: failure.contain_activation_fault(),
+                });
+            }
+        };
+        Ok(CanonicalFinal::new(
+            CentrallyRejectedCanonicalStoreSession {
+                root: RootedFailureEvidence {
+                    owner: PayloadOwner::new(cause, failure),
+                    failure_work,
+                    outcome_evidence_destination_dimension: destinations
+                        ._outcome_evidence_dimension,
+                    _lifecycle: PhantomData::<FrozenFailureState>,
+                },
             },
-        })
+        ))
     }
 
     /// Opens one unforgeable joint-commit scope.
     ///
-    /// The higher-ranked callback prevents either branded capability from escaping. The actual
-    /// typed output moves into the core handoff together with the proof; its retained owners keep
-    /// their physical leases through success, rejection, and ordinary caller unwind.
+    /// The higher-ranked callback prevents either branded capability from escaping. The joint
+    /// retains the actual output and proof through preparation and returns them only with
+    /// committed success. A preparation fault contains the original graph.
     #[allow(clippy::type_complexity)]
     pub fn bind_joint_commit<R>(
         self,
         bind: impl for<'joint> FnOnce(
-            T,
-            Proof,
             CanonicalJointCommit<
+                'inv,
                 'joint,
                 O,
                 PP,
                 U,
+                T,
+                Proof,
                 CanonicalKind,
                 CanonicalTag,
                 EvidenceKind,
@@ -1207,10 +1492,7 @@ where
             >,
             CanonicalJointSeal<'joint>,
         ) -> R,
-    ) -> R
-    where
-        Proof: Copy,
-    {
+    ) -> R {
         let Self {
             owner,
             failure_work,
@@ -1219,21 +1501,34 @@ where
         let (output, proof_owner) = owner.into_parts();
         let (proof, store) = proof_owner.into_parts();
         bind(
-            output,
-            proof,
             CanonicalJointCommit {
                 _failure_work: failure_work,
                 _destinations: destinations,
                 joint: PhantomData,
-                store: store.into_contribution(),
+                owner: PayloadOwner::new(
+                    output,
+                    PayloadOwner::new(proof, store.into_contribution()),
+                ),
             },
             CanonicalJointSeal { joint: PhantomData },
         )
     }
 }
 
-impl<'joint, O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
-    CanonicalJointCommit<'joint, O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
+impl<'inv, 'joint, O, PP, U, T, Proof, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
+    CanonicalJointCommit<
+        'inv,
+        'joint,
+        O,
+        PP,
+        U,
+        T,
+        Proof,
+        CanonicalKind,
+        CanonicalTag,
+        EvidenceKind,
+        EvidenceTag,
+    >
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1241,25 +1536,39 @@ where
 {
     /// Consumes the operation contribution and the seal from the same binder scope.
     ///
-    /// The exact operation preparation outcome is returned without attaching a generation token.
-    /// A defensive late prepared failure remains a first-class outcome.
+    /// Returns the original output and proof only after the exact joint commit. A preparation
+    /// fault contains the original graph and disposes both payloads under separate unwind guards.
+    #[allow(clippy::type_complexity)]
     pub fn prepare(
         self,
         seal: CanonicalJointSeal<'joint>,
     ) -> Result<
-        PreparedStoreSuccessOutcome<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>,
+        CanonicalJointSuccess<T, Proof, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>,
         StoreActivationContainment,
     > {
         let Self {
             _failure_work: _,
             _destinations: _,
             joint: _,
-            store,
+            owner,
         } = self;
         let CanonicalJointSeal { joint: _ } = seal;
-        store
-            .prepare()
-            .map_err(|cause| StoreActivationContainment { cause })
+        let (output, proof_owner) = owner.into_parts();
+        let (proof, store) = proof_owner.into_parts();
+        let payloads = PayloadPair::new(output, proof);
+        let store = match store.try_prepare() {
+            Ok(store) => store,
+            Err(cause) => {
+                let _ = drop_scoped_value(payloads);
+                return Err(StoreActivationContainment { cause });
+            }
+        };
+        let (output, proof) = payloads.into_parts();
+        Ok(CanonicalJointSuccess {
+            output: output.into_owned(),
+            proof: proof.into_owned(),
+            store,
+        })
     }
 }
 
@@ -1267,8 +1576,8 @@ where
     private_bounds,
     reason = "public failure typestates are sealed by the crate-private lifecycle contract"
 )]
-impl<O, PP, U, E, EvidenceKind, EvidenceTag, State>
-    CentrallyRejectedCanonicalStoreSession<O, PP, U, E, EvidenceKind, EvidenceTag, State>
+impl<'inv, O, PP, U, E, EvidenceKind, EvidenceTag, State>
+    CentrallyRejectedCanonicalStoreSession<'inv, O, PP, U, E, EvidenceKind, EvidenceTag, State>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1282,6 +1591,29 @@ where
     pub const fn canonical_len(&self) -> usize {
         0
     }
+}
+
+#[allow(
+    private_bounds,
+    reason = "public failure typestates are sealed by the crate-private lifecycle contract"
+)]
+impl<'inv, O, PP, U, E, EvidenceKind, EvidenceTag, State>
+    CanonicalFinal<
+        CentrallyRejectedCanonicalStoreSession<'inv, O, PP, U, E, EvidenceKind, EvidenceTag, State>,
+    >
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    State: FailureLifecycleState,
+{
+    pub const fn cause(&self) -> &StoreCanonicalRejection<E> {
+        self.state.cause()
+    }
+
+    pub const fn canonical_len(&self) -> usize {
+        self.state.canonical_len()
+    }
 
     #[allow(
         clippy::type_complexity,
@@ -1289,29 +1621,32 @@ where
     )]
     pub fn validate_rich_failure(
         self,
+        fallback_slot: CanonicalCauseSlot<'inv, StoreRuntimeError>,
         validate: impl for<'session, 'storage, 'control> FnMut(
             &mut FailureEvidenceValidationSession<'session, 'storage, 'control, O, PP, U>,
             FailureEvidenceMember<'session, EvidenceKind, EvidenceTag>,
         ) -> bool,
     ) -> Result<
-        CanonicalRejectionFailureValidation<O, PP, U, E, EvidenceKind, EvidenceTag, State>,
+        CanonicalRejectionFailureValidation<'inv, O, PP, U, E, EvidenceKind, EvidenceTag, State>,
         StoreActivationContainment,
     >
     where
         EvidenceTag: Copy + Send + Sync + 'static,
     {
-        self.root.validate_rich_failure(validate)
+        self.state
+            .root
+            .validate_rich_failure(fallback_slot, validate)
     }
 
     pub fn prepare_minimal_fallback(
         self,
     ) -> Result<VerifiedMinimalFallback<StoreCanonicalRejection<E>>, StorePrepareError> {
-        self.root.prepare_minimal_fallback()
+        self.state.root.prepare_minimal_fallback()
     }
 }
 
-impl<O, PP, U, EvidenceKind, EvidenceTag>
-    InterruptedCanonicalStoreSession<O, PP, U, EvidenceKind, EvidenceTag>
+impl<'inv, O, PP, U, EvidenceKind, EvidenceTag>
+    InterruptedCanonicalStoreSession<'inv, O, PP, U, EvidenceKind, EvidenceTag>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1320,27 +1655,42 @@ where
     pub const fn cause(&self) -> &StoreWorkError {
         self.root.cause()
     }
+}
+
+impl<'inv, O, PP, U, EvidenceKind, EvidenceTag>
+    CanonicalFinal<InterruptedCanonicalStoreSession<'inv, O, PP, U, EvidenceKind, EvidenceTag>>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    pub const fn cause(&self) -> &StoreWorkError {
+        self.state.cause()
+    }
 
     pub fn validate_rich_failure(
         self,
+        fallback_slot: CanonicalCauseSlot<'inv, StoreRuntimeError>,
         validate: impl for<'session, 'storage, 'control> FnMut(
             &mut FailureEvidenceValidationSession<'session, 'storage, 'control, O, PP, U>,
             FailureEvidenceMember<'session, EvidenceKind, EvidenceTag>,
         ) -> bool,
     ) -> Result<
-        RootedFailureValidation<O, PP, U, StoreWorkError, EvidenceKind, EvidenceTag>,
+        RootedFailureValidation<'inv, O, PP, U, StoreWorkError, EvidenceKind, EvidenceTag>,
         StoreActivationContainment,
     >
     where
         EvidenceTag: Copy + Send + Sync + 'static,
     {
-        self.root.validate_rich_failure(validate)
+        self.state
+            .root
+            .validate_rich_failure(fallback_slot, validate)
     }
 
     pub fn prepare_minimal_fallback(
         self,
     ) -> Result<VerifiedMinimalFallback<StoreWorkError>, StorePrepareError> {
-        self.root.prepare_minimal_fallback()
+        self.state.root.prepare_minimal_fallback()
     }
 }
 
@@ -1368,7 +1718,7 @@ fn recover_canonical_evidence_build<T>(
     }
 }
 
-impl<O, PP, U, L> CanonicalOutcomeEvidenceLane<'_, O, PP, U, L>
+impl<'inv, 'lane, O, PP, U, L> CanonicalOutcomeEvidenceLane<'inv, 'lane, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,

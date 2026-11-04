@@ -155,6 +155,20 @@ permission is needed to execute the reviewed work.
 
 ## Isolated Implementation Checkpoints
 
+The [actual preparation-before-attachment checkpoint](../reviews/2026-11-05-preparation-before-attachment.md)
+provides original-account direct facts after capture cleanup and moves real preparation
+and unchanged classification before attachment. Final source3 passes 3,565 workspace
+tests (six existing skips), 183 doctests, 138 asset-consumer tests (one existing skip),
+both strict lints and both format checks. Standalone Scene configurations and fuzz
+compilation/library tests also pass. Independent source/evidence reviews retain their
+bounded coverage limits. The tight-budget tangent repair removes dead zero writes and
+defers its output allocation without changing numeric kernels or raising allowances.
+The exact reviewed 260-input Rust/embedded-document overlay is now applied to main after
+standalone checks and a pinned Linux registry ASan smoke; main-root strict compilation
+and formatting pass. The current-main ordinary control is retained separately. Native
+measurement, backing/promotion, remaining owner deletion, indexing and complete
+Windows/Linux convergence are not completed.
+
 The [shared action-region checkpoint](../reviews/2026-11-05-action-region-and-bound-prework.md)
 repairs reproduced ignored-error and caught-unwind reentry and lends the same runner to
 bound prework. Final source2 passes 3,557 workspace tests (six existing skips), 174
