@@ -119,6 +119,13 @@ main only a source-qualified, independently reviewed connected result.
 
 ## Meaningful Qualification
 
+The [ordinary-entry baseline correction](../reviews/2026-11-05-import-root-entry-baseline-correction.md)
+withdraws a false no-entry-poll premise found during Import migration. The qualified owning
+adapter's complete call chain includes one real checkpoint. Preserve that checkpoint and
+the original explicit frontiers; the separately reproduced original-error loss remains a
+real construction regression. Intermediate passes against false poll expectations do not
+qualify a replacement.
+
 - Compile actual changed/unchanged edits, space declaration changes and both import entries
   through attachment, central success/rejection/fallback, caller cleanup and outer finish.
   Owned Scene/facts/failure and independent storage leases escape successfully. Valid-method
