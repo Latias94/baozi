@@ -404,3 +404,14 @@ negative case only for a genuinely new boundary, not for incidental private layo
   terminal association without a finding. This supplies a required
   comparison-loop capability, not complete Import migration, an ordinary performance
   improvement or release acceptance.
+- The isolated [finite lexical-host Windows checkpoint](../reviews/2026-11-04-lexical-host-performance-checkpoint.md)
+  completes four C,N,N,C campaigns with the unchanged eight selected cases, 31 memory
+  lanes, three warmups and twenty retained pairs. Each campaign records external build/test
+  contention after a quiet preflight, so ordinary performance acceptance remains HOLD.
+  Report-derived repeated OBJ/STL pipeline decreases coexist with no-op preparation and
+  extraction increases, higher whole-child working sets and six of eight pipelines still
+  above 3x Assimp. Independent reconstruction verifies all 5,704 children and 3,596 summary
+  slots with zero validation errors and unchanged reported work/output signatures. No
+  performance keep, no-regression or complete Windows/Linux 110-lane claim follows. Full-service
+  Import migration, actual backing/attachment/promotion, obsolete-owner deletion, main Rust
+  application, uncontaminated confirmation and the complete final acceptance remain open.

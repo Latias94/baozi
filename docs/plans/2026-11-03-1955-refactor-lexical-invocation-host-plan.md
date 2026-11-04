@@ -385,3 +385,13 @@ source/evidence review verifies the exact delta, actual probes and terminal asso
 without an actionable finding. This is the first facade prerequisite; full-service
 roles, detection, format migration, old-adapter deletion and all subsequent gates above
 remain open.
+
+The [finite Windows source checkpoint](../reviews/2026-11-04-lexical-host-performance-checkpoint.md)
+then measures this exact isolated source against the retained bound-services worker.
+Four completed campaigns retain all selected eight-case/31-memory-lane observations, but
+each records external Cargo/rustc/test activity and cannot establish an uncontaminated
+ordinary keep. Observed repeated OBJ/STL pipeline reductions coexist with no-op and
+extraction costs; all remaining implementation and complete Windows/Linux timing/memory
+gates persist. Independent raw reconstruction verifies all 5,704 children and 3,596
+summary slots with zero validation errors and unchanged reported work/output signatures;
+the 25 actual interference observations and all costs/tails remain explicit.
