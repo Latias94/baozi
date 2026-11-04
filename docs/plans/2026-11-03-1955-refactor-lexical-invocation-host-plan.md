@@ -374,3 +374,14 @@ of `LocalWork`/`BoundWorkGroup`. Current-state single-start attachment, shared-s
 state promotion, exact accounting/deletion, main Rust application and the unchanged
 Windows/Linux timing/memory campaign remain open. This component establishes no new
 ordinary performance improvement.
+
+The subsequent [borrowed singleton replenishment receipt](../reviews/2026-11-04-borrowed-parser-replenishment.md)
+adds the missing thin Operation/Import forwarding required by actual comparison loops.
+Three real Operation host tests preserve literal prefixes, sticky denial and the 257th
+checkpoint; an actual custom importer performs six comparisons and submits only after the
+numeric loan ends. Its frozen four-file delta passes 1,450 Operation/Import runtime tests
+(zero skips), 140 affected doctests, strict workspace lint and formatting. Independent
+source/evidence review verifies the exact delta, actual probes and terminal association
+without an actionable finding. This is the first facade prerequisite; full-service
+roles, detection, format migration, old-adapter deletion and all subsequent gates above
+remain open.

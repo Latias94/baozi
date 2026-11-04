@@ -396,3 +396,11 @@ negative case only for a genuinely new boundary, not for incidental private layo
   Import/detection/startup numeric consumers, attachment, promotion, deletion, main application
   and the unchanged Windows/Linux comparison remain open. This component supplies no new
   ordinary performance keep.
+- The isolated [borrowed singleton parser facade](../reviews/2026-11-04-borrowed-parser-replenishment.md)
+  forwards the existing replenishment kernel without resetting channels or control debt.
+  Actual borrowed Operation and public Import comparison regressions pass within 1,450
+  affected runtime tests (zero skips) and 140 doctests; strict workspace lint and formatting
+  also pass. Independent source/evidence review verifies the actual probes and exact
+  terminal association without a finding. This supplies a required
+  comparison-loop capability, not complete Import migration, an ordinary performance
+  improvement or release acceptance.
