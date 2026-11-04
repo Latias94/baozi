@@ -239,3 +239,14 @@ workspace/consumer lint and both format checks. Independent final source/evidenc
 closes the earlier test-oracle findings without relabeling any historical RED. This bounded
 checkpoint does not qualify a whole-workspace runtime or ordinary performance; all remaining
 schema/authority/backing/attachment/promotion work and main Rust application are still open.
+
+The [precommit Import catalog receipt](../reviews/2026-11-04-import-precommit-catalog.md)
+then admits the complete schema against the actual finish root before restoration/generation,
+and removes fallible post-handoff report projection. Independent review finds a secondary
+cleanup-panic escape during an existing unwind; an actual new regression aborts on the old
+gate. Source2 preserves the original unwind and passes that same regression, 2,423 affected
+tests (6 existing skips), 105 doctests, 138 consumer tests (1 existing skip), strict workspace/
+consumer lint and both format checks. Independent final review verifies the exact RED/GREEN,
+all source/QA identities and F1 closure. Old terminal authority, unreachable canonical API
+arms, numeric backing, attachment/promotion and ordinary performance gates remain open;
+main Rust is still unapplied.
