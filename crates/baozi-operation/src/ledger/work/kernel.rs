@@ -54,24 +54,6 @@ impl<const N: usize> WorkLayout<N> {
 }
 
 impl<const N: usize> WorkLayout<N> {
-    #[inline]
-    fn representative(&self, index: usize) -> usize {
-        if N <= 1 {
-            index
-        } else {
-            self.representatives[index]
-        }
-    }
-
-    #[inline]
-    fn ordered_indices(&self) -> [usize; N] {
-        if N <= 1 {
-            std::array::from_fn(|index| index)
-        } else {
-            self.completion_order
-        }
-    }
-
     fn dimension<D: Copy>(&self, catalog: &[D], index: usize) -> D {
         catalog[self.positions[index]]
     }
@@ -81,13 +63,9 @@ impl<const N: usize> WorkLayout<N> {
         amounts: [u64; N],
         class: CounterClass,
     ) -> Result<[u64; N], LedgerCause<D>> {
-        // Empty and singleton layouts cannot alias or overflow while aggregating.
-        if N <= 1 {
-            return Ok(amounts);
-        }
         let mut totals = [0_u64; N];
         for (index, amount) in amounts.into_iter().enumerate() {
-            let first = self.representative(index);
+            let first = self.representatives[index];
             totals[first] = totals[first].checked_add(amount).ok_or_else(|| {
                 LedgerCause::ArithmeticOverflow {
                     class,
@@ -179,14 +157,13 @@ impl<const N: usize> WorkLayout<N> {
         let catalog = state.catalog;
         let mut consumed = [0; N];
         let mut cursor = 0;
-        let completion_order = self.ordered_indices();
         while cursor < N {
-            let index = completion_order[cursor];
+            let index = self.completion_order[cursor];
             let position = self.positions[index];
             let dimension = || self.dimension(catalog, index);
             let mut total = 0_u64;
-            while cursor < N && self.positions[completion_order[cursor]] == position {
-                total = add_consumed(total, amounts[completion_order[cursor]], dimension)?;
+            while cursor < N && self.positions[self.completion_order[cursor]] == position {
+                total = add_consumed(total, amounts[self.completion_order[cursor]], dimension)?;
                 cursor += 1;
             }
             let row = &state.rows[position];
@@ -199,8 +176,8 @@ impl<const N: usize> WorkLayout<N> {
                 row.policy.consumed_limit,
             )?;
         }
-        for index in completion_order {
-            if self.representative(index) == index {
+        for index in self.completion_order {
+            if self.representatives[index] == index {
                 state.rows[self.positions[index]].state.consumed = consumed[index];
             }
         }
@@ -260,7 +237,7 @@ impl<const N: usize> WorkLayout<N> {
             })?;
         }
         for index in 0..N {
-            if self.representative(index) != index {
+            if self.representatives[index] != index {
                 continue;
             }
             let row = &rows[self.positions[index]];
@@ -268,7 +245,7 @@ impl<const N: usize> WorkLayout<N> {
             // Preserve caller-first projection precedence, including a later group's overflow.
             let mut amount = 0;
             for (other, repeated_amount) in repeated.iter().copied().enumerate() {
-                if self.representative(other) == index {
+                if self.representatives[other] == index {
                     amount = add_attempted(amount, repeated_amount, dimension)?;
                 }
             }
@@ -342,7 +319,7 @@ impl<const N: usize> WorkLayout<N> {
         let mut consumed_failure = None;
         // Project every arithmetic operation before committing even non-refundable attempts.
         for (index, amount) in totals.into_iter().enumerate() {
-            if amount == 0 || self.representative(index) != index {
+            if amount == 0 || self.representatives[index] != index {
                 continue;
             }
             let row = &state.rows[self.positions[index]];
@@ -371,7 +348,7 @@ impl<const N: usize> WorkLayout<N> {
             }
         }
         for (index, amount) in totals.into_iter().enumerate() {
-            if amount != 0 && self.representative(index) == index {
+            if amount != 0 && self.representatives[index] == index {
                 state.rows[self.positions[index]].state.attempted = attempted[index];
             }
         }
@@ -379,7 +356,7 @@ impl<const N: usize> WorkLayout<N> {
             return Err(cause);
         }
         for (index, amount) in totals.into_iter().enumerate() {
-            if amount != 0 && self.representative(index) == index {
+            if amount != 0 && self.representatives[index] == index {
                 state.rows[self.positions[index]].state.pending_consumed = pending[index];
             }
         }
@@ -447,9 +424,9 @@ impl<const N: usize> WorkFrame<N> {
         let mut pending = [0; N];
         let mut failure = None;
         let mut prefix_exceeds_attempted = false;
-        for index in group.ordered_indices() {
+        for index in group.completion_order {
             let amount = totals[index];
-            if amount == 0 || group.representative(index) != index {
+            if amount == 0 || group.representatives[index] != index {
                 continue;
             }
             let row = &state.rows[group.positions[index]];
@@ -482,8 +459,8 @@ impl<const N: usize> WorkFrame<N> {
             }
         }
         // No fallible operation or key comparison remains in the physical-prefix commit.
-        for index in group.ordered_indices() {
-            if totals[index] != 0 && group.representative(index) == index {
+        for index in group.completion_order {
+            if totals[index] != 0 && group.representatives[index] == index {
                 let row = &mut state.rows[group.positions[index]];
                 row.state.consumed = consumed[index];
                 row.state.pending_consumed = pending[index];
@@ -517,7 +494,7 @@ impl<const N: usize> WorkFrame<N> {
         // Validate the entire release before changing any pending row or channel.
         if !lane_is_open(state, self.lane)
             || totals.iter().enumerate().any(|(index, amount)| {
-                group.representative(index) == index
+                group.representatives[index] == index
                     && state.rows[group.positions[index]].state.pending_consumed < *amount
             })
         {
@@ -526,7 +503,7 @@ impl<const N: usize> WorkFrame<N> {
             return Err(LedgerCause::FinalSnapshotShapeMismatch);
         }
         for (index, amount) in totals.into_iter().enumerate() {
-            if group.representative(index) == index {
+            if group.representatives[index] == index {
                 state.rows[group.positions[index]].state.pending_consumed -= amount;
             }
         }
