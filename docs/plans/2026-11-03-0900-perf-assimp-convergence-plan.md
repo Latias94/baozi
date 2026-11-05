@@ -731,3 +731,15 @@ negative case only for a genuinely new boundary, not for incidental private layo
   artifact transfer to 1.08-1.60 seconds without moving benchmark clocks. Next
   investigate repeated immutable-source text conformance at its actual owner,
   retaining new output layout/recovery checks and precise resource/control bounds.
+- The [text emission cleanup](../reviews/2026-11-05-text-emission.md) at
+  `7900255` removes repeated build-time policy qualification over the private
+  planner's same immutable input. Source review, 818 affected tests, 49 doctests,
+  138 consumer tests and strict lint/format pass with 908 stable inputs. Four
+  complete Windows and two GNU ordinary campaigns retain every original lane;
+  GNU confirmation cannot start. Independent disposition supports source-only
+  retention with an unproven speed hypothesis, retaining repeated extraction
+  costs, opposing pipeline/tail/elapsed observations and all load limits. Six
+  whole-worker Ir decreases of 0.01-0.52% are diagnostic only. All release gates
+  remain open. The next closed-payload design must delete actual duplicate
+  passes, transport observed semantic rejection honestly and preserve the
+  stronger validation cancellation cadence.
