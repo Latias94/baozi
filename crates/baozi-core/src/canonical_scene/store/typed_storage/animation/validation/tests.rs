@@ -3,6 +3,7 @@ use crate::canonical_scene::store::production::input::deformation::MorphTargetId
 use crate::canonical_scene::store::typed_storage::deformation::{
     StoredLogicalMorph, StoredMeshInstanceDeformation, StoredMorphDefinition,
 };
+use crate::canonical_scene::store::typed_storage::finite::FiniteScalarPool;
 use crate::canonical_scene::store::typed_storage::{
     StoredLogicalMesh, StoredLogicalMeshIndex, StoredMeshInstance, StoredNode, StoredNodeIndex,
 };
@@ -112,8 +113,8 @@ fn fixture() -> Fixture {
             },
         ],
         names: Vec::new(),
-        f32_values: Vec::new(),
-        f64_values: Vec::new(),
+        f32_values: FiniteScalarPool::fixture(&[]),
+        f64_values: FiniteScalarPool::fixture(&[]),
         u32_values: Vec::new(),
         i32_values: Vec::new(),
     };

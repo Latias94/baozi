@@ -379,7 +379,7 @@ impl GeometryStorage {
         }
         let lanes = usize::from(attribute.lanes);
         macro_rules! dense {
-            ($range:expr, $values:ident $(, $check:path)?) => {{
+            ($range:expr, $values:ident) => {{
                 let Some(dense_count) = (attribute.element_count as usize).checked_mul(lanes)
                 else {
                     return Ok(false);
@@ -390,13 +390,10 @@ impl GeometryStorage {
                 if values.len() != dense_count {
                     return Ok(false);
                 }
-                $(if !visit(values, control, $check)? {
-                    return Ok(false);
-                })?
             }};
         }
         macro_rules! sparse {
-            ($indices:expr, $values:expr, $default:expr, $pool:ident $(, $check:path)?) => {{
+            ($indices:expr, $values:expr, $default:expr, $pool:ident) => {{
                 let Some(indices) =
                     consume_range($indices, &self.u32_values, &mut pools.u32_values)
                 else {
@@ -420,31 +417,27 @@ impl GeometryStorage {
                 let Some(default) = consume_range($default, &self.$pool, &mut pools.$pool) else {
                     return Ok(false);
                 };
-                if indices.len().checked_mul(lanes) != Some(values.len())
-                    || default.len() != lanes
+                if indices.len().checked_mul(lanes) != Some(values.len()) || default.len() != lanes
                 {
                     return Ok(false);
                 }
-                $(if !visit(values, control, $check)? || !visit(default, control, $check)? {
-                    return Ok(false);
-                })?
             }};
         }
         match attribute.payload {
-            StoredAttributePayload::DenseF32(range) => dense!(range, f32_values, f32::is_finite),
-            StoredAttributePayload::DenseF64(range) => dense!(range, f64_values, f64::is_finite),
+            StoredAttributePayload::DenseF32(range) => dense!(range, f32_values),
+            StoredAttributePayload::DenseF64(range) => dense!(range, f64_values),
             StoredAttributePayload::DenseU32(range) => dense!(range, u32_values),
             StoredAttributePayload::DenseI32(range) => dense!(range, i32_values),
             StoredAttributePayload::SparseF32 {
                 indices,
                 values,
                 default,
-            } => sparse!(indices, values, default, f32_values, f32::is_finite),
+            } => sparse!(indices, values, default, f32_values),
             StoredAttributePayload::SparseF64 {
                 indices,
                 values,
                 default,
-            } => sparse!(indices, values, default, f64_values, f64::is_finite),
+            } => sparse!(indices, values, default, f64_values),
             StoredAttributePayload::SparseU32 {
                 indices,
                 values,
@@ -479,19 +472,6 @@ fn consume_range<'a, T>(
     let slice = range.get(values)?;
     *cursor = cursor.checked_add(range.len())?;
     Some(slice)
-}
-
-fn visit<T: Copy, C: TypedStorageValidationControl>(
-    values: &[T],
-    control: &mut C,
-    check: impl Fn(T) -> bool,
-) -> Result<bool, C::Error> {
-    for &value in values {
-        if control.run_unit(|| check(value))? != Some(true) {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 fn attribute_schema(attribute: &StoredAttribute) -> bool {

@@ -9,8 +9,8 @@ use crate::canonical_scene::store::production::{
     InfluenceAuthoring, InfluenceRowsAuthoring, LogicalMeshLocalId, LogicalMorphAuthoring,
     MeshInstanceDeformationAuthoring, MorphDeltaAuthoring, MorphTargetDefinitionAuthoring,
     NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, NodeParent, PrimitiveDeformationAuthoring,
-    PrimitiveMorphTargetAuthoring, SkinLocalId, validate_deformation_batch_with_control,
-    validate_geometry_batch_with_control, validate_node_batch_with_control,
+    PrimitiveMorphTargetAuthoring, SkinLocalId, prepare_geometry_batch_with_control,
+    validate_deformation_batch_with_control, validate_node_batch_with_control,
 };
 use crate::deform::{SkinMatrixCorrection, SkinMatrixSpace};
 use crate::entity::AuthoredTransform;
@@ -161,7 +161,7 @@ fn with_fixture<T>(
         GeometryMeshInstanceAuthoring::new(NodeLocalId::new(2), LogicalMeshLocalId::new(1)),
         GeometryMeshInstanceAuthoring::new(NodeLocalId::new(1), LogicalMeshLocalId::new(1)),
     ];
-    let geometry = validate_geometry_batch_with_control(
+    let geometry = prepare_geometry_batch_with_control(
         GeometryAuthoringBatch::new(
             &meshes,
             &geometry_primitives,
@@ -543,7 +543,7 @@ fn affine_bind_and_inline_correction_preserve_shear_reflection_and_singular_bits
     )
     .unwrap();
     assert_eq!(nodes.canonical_index_by_local(), [2, 1]);
-    let geometry = validate_geometry_batch_with_control(
+    let geometry = prepare_geometry_batch_with_control(
         GeometryAuthoringBatch::empty(),
         2,
         0,
@@ -602,7 +602,7 @@ fn empty_deformation_has_seventeen_empty_capacities_and_only_its_initialized_hea
         &mut authoring,
     )
     .unwrap();
-    let geometry = validate_geometry_batch_with_control(
+    let geometry = prepare_geometry_batch_with_control(
         GeometryAuthoringBatch::empty(),
         0,
         0,

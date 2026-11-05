@@ -8,7 +8,7 @@ use super::super::plan::deformation::{
     DeformationAuthoringFailure, DeformationAuthoringLimit, DeformationAuthoringSemanticError,
     validate_deformation_batch_with_control,
 };
-use super::super::plan::geometry::validate_geometry_batch_with_control;
+use super::super::plan::geometry::prepare_geometry_batch_with_control;
 use super::super::{
     AuthoringRange, DeformationAuthoringBatch, GeometryAuthoringBatch,
     GeometryLogicalMeshAuthoring, GeometryPrimitiveAuthoring, GeometryTopologyAuthoring,
@@ -44,7 +44,7 @@ fn validate_skin_batch<'input>(
         &mut setup_control,
     )
     .expect("the deformation fixture node must validate");
-    let geometry = validate_geometry_batch_with_control(
+    let geometry = prepare_geometry_batch_with_control(
         GeometryAuthoringBatch::empty(),
         nodes.len(),
         0,
@@ -238,7 +238,7 @@ fn nested_descriptors_and_uniqueness_growth_release_at_each_control_failure() {
         crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 0),
     )];
-    let geometry = validate_geometry_batch_with_control(
+    let geometry = prepare_geometry_batch_with_control(
         GeometryAuthoringBatch::new(&meshes, &primitives, &[], &[]),
         0,
         0,
@@ -425,7 +425,7 @@ fn borrowed_deformation_names_preserve_empty_unicode_and_bounded_errors() {
         crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 0),
     )];
-    let geometry = validate_geometry_batch_with_control(
+    let geometry = prepare_geometry_batch_with_control(
         GeometryAuthoringBatch::new(&meshes, &primitives, &[], &[]),
         nodes.len(),
         0,

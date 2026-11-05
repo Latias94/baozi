@@ -16,7 +16,7 @@ use crate::canonical_scene::store::production::plan::deformation::{
 };
 use crate::canonical_scene::store::production::plan::geometry::{
     GeometryAuthoringFailure, GeometryAuthoringLimit, GeometryAuthoringSemanticError,
-    validate_geometry_batch_with_control,
+    prepare_geometry_batch_with_control,
 };
 use crate::canonical_scene::store::production::plan::profile::{
     ProfileAuthoringFailure, ProfileAuthoringLimit, ProfileAuthoringSemanticError,
@@ -212,7 +212,7 @@ fn appearance_relation_limit_failures_preserve_the_exact_completed_prefix() {
 
 fn expect_geometry_semantic(
     result: Result<
-        super::super::plan::geometry::ValidatedGeometryBatch<'_, ()>,
+        super::super::plan::geometry::PreparedGeometryBatch<'_, ()>,
         GeometryAuthoringFailure<Infallible>,
     >,
 ) -> GeometryAuthoringSemanticError {
@@ -243,7 +243,7 @@ fn validate_two_geometry_relations(
     )];
     let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
 
-    expect_geometry_semantic(validate_geometry_batch_with_control(
+    expect_geometry_semantic(prepare_geometry_batch_with_control(
         GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &[]),
         0,
         0,
@@ -312,7 +312,7 @@ fn animation_relation_limit_failures_preserve_the_exact_completed_prefix() {
         &mut setup_control,
     )
     .expect("the animation target node must validate");
-    let validated_geometry = validate_geometry_batch_with_control(
+    let validated_geometry = prepare_geometry_batch_with_control(
         GeometryAuthoringBatch::empty(),
         nodes.len(),
         0,
@@ -412,7 +412,7 @@ fn deformation_relation_limit_failures_preserve_the_exact_completed_prefix() {
         &mut setup_control,
     )
     .expect("the two skin-joint nodes must validate");
-    let validated_geometry = validate_geometry_batch_with_control(
+    let validated_geometry = prepare_geometry_batch_with_control(
         GeometryAuthoringBatch::empty(),
         nodes.len(),
         0,
@@ -599,7 +599,7 @@ fn profile_relation_limit_failures_preserve_the_exact_completed_prefix() {
         &mut setup_control,
     )
     .expect("empty appearance must validate for the profile owner catalog");
-    let validated_geometry = validate_geometry_batch_with_control(
+    let validated_geometry = prepare_geometry_batch_with_control(
         geometry_input,
         nodes.len(),
         validated_appearance.material_count(),

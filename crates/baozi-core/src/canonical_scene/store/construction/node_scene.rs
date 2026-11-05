@@ -104,7 +104,6 @@ struct NodeSceneBuildFaults {
     directory_revision: Option<u32>,
     evidence_revision: Option<u32>,
     alter_first_authored_transform: bool,
-    alter_first_geometry_f32: bool,
     appearance: Option<test_support::AppearanceBuildFault>,
     spatial: Option<test_support::SpatialBuildFault>,
     deformation: Option<test_support::DeformationBuildFault>,
@@ -121,7 +120,6 @@ impl NodeSceneBuildFaults {
             directory_revision: None,
             evidence_revision: None,
             alter_first_authored_transform: false,
-            alter_first_geometry_f32: false,
             appearance: None,
             spatial: None,
             deformation: None,
@@ -135,13 +133,6 @@ impl NodeSceneBuildFaults {
     const fn altered_authored_transform() -> Self {
         Self {
             alter_first_authored_transform: true,
-            ..Self::none()
-        }
-    }
-
-    const fn altered_geometry_f32() -> Self {
-        Self {
-            alter_first_geometry_f32: true,
             ..Self::none()
         }
     }

@@ -12,7 +12,7 @@ use super::super::plan::animation::{
     AnimationTargetCatalog, ValidatedAnimationBatch, validate_animation_batch_with_control,
 };
 use super::super::plan::deformation::validate_deformation_batch_with_control;
-use super::super::plan::geometry::validate_geometry_batch_with_control;
+use super::super::plan::geometry::prepare_geometry_batch_with_control;
 use super::super::{
     AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationClipAuthoring,
     AnimationTargetAuthoring, AuthoringRange, DeformationAuthoringBatch, GeometryAuthoringBatch,
@@ -324,7 +324,7 @@ fn validate_input<'input>(
         &mut setup,
     )
     .unwrap();
-    let geometry = validate_geometry_batch_with_control(
+    let geometry = prepare_geometry_batch_with_control(
         GeometryAuthoringBatch::empty(),
         1,
         0,

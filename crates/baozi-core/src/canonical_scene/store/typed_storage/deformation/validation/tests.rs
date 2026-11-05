@@ -1,6 +1,7 @@
 use super::*;
 use crate::attribute::AttributeDomain;
 use crate::canonical_scene::store::production::input::deformation::MorphTargetIdentity;
+use crate::canonical_scene::store::typed_storage::finite::FiniteScalarPool;
 use crate::canonical_scene::store::typed_storage::{
     StoredAttribute, StoredAttributePayload, StoredAttributeSemantic, StoredLogicalMesh,
     StoredLogicalMeshIndex, StoredMeshInstance, StoredNode, StoredPrimitive,
@@ -153,7 +154,7 @@ fn fixture() -> Fixture {
             ),
         });
     }
-    geometry.f32_values = vec![0.0; 33];
+    geometry.f32_values = FiniteScalarPool::fixture(&[0.0; 33]);
     geometry.logical_meshes = vec![
         StoredLogicalMesh {
             primitives: TableRange::new(0, 2),
@@ -357,8 +358,8 @@ fn empty_geometry() -> GeometryStorage {
         attributes: Vec::new(),
         mesh_instances: Vec::new(),
         names: Vec::new(),
-        f32_values: Vec::new(),
-        f64_values: Vec::new(),
+        f32_values: FiniteScalarPool::fixture(&[]),
+        f64_values: FiniteScalarPool::fixture(&[]),
         u32_values: Vec::new(),
         i32_values: Vec::new(),
     }

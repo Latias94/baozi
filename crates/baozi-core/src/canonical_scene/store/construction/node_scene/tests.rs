@@ -40,10 +40,11 @@ use super::materialization::{NodeScenePlanningFault, test_scene_authoring_batch}
 use super::profile::ProfileBuildFault;
 use super::publication::post_evidence_build_failure_code;
 use super::{
-    NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_NODE_AUTHORING_REJECTION_CODE,
-    NODE_SCENE_PLANNING_REJECTION_CODE, NODE_SCENE_STORAGE_REJECTION_CODE, NodeSceneBuildFaults,
-    NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraftBuild,
-    NodeSceneRichFailure, NodeSceneTestTransaction, PendingNodeSceneDraft, SceneParseOutcome,
+    NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_GEOMETRY_AUTHORING_REJECTION_CODE,
+    NODE_SCENE_NODE_AUTHORING_REJECTION_CODE, NODE_SCENE_PLANNING_REJECTION_CODE,
+    NODE_SCENE_STORAGE_REJECTION_CODE, NodeSceneBuildFaults, NodeSceneConstructionRejection,
+    NodeSceneConstructionTerminal, NodeSceneDraftBuild, NodeSceneRichFailure,
+    NodeSceneTestTransaction, PendingNodeSceneDraft, SceneParseOutcome,
 };
 
 mod gltf_capability;
@@ -1645,25 +1646,20 @@ fn central_validation_rejects_each_corrupted_profile_structure() {
     }
 }
 
-#[test]
-fn invalid_geometry_payload_fault_is_a_build_invariant_rich_failure() {
+fn assert_nonfinite_geometry_rejection(
+    attributes: &[GeometryAttributeAuthoring<'_>],
+    attribute: usize,
+    scalar: usize,
+) {
     let factory = test_factory();
     let account = test_account(&factory, 256);
     let roots = [];
     let nodes = [];
-    let positions = [0.0_f32, 0.0, 0.0];
-    let attributes = [GeometryAttributeAuthoring::f32(
-        AttributeSemantic::Position,
-        AttributeDomain::Vertex,
-        3,
-        &positions,
-        Presence::Absent,
-    )];
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::Points,
         Presence::Absent,
         crate::MaterialAssignment::Unspecified,
-        AuthoringRange::new(0, 1),
+        AuthoringRange::new(0, u32::try_from(attributes.len()).unwrap()),
     )];
     let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
     let logical_morphs = [LogicalMorphAuthoring::new(AuthoringRange::new(0, 0), &[])];
@@ -1671,7 +1667,7 @@ fn invalid_geometry_payload_fault_is_a_build_invariant_rich_failure() {
     let spatial = SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]);
     let node_batch = NodeAuthoringBatch::new(Presence::Present(&roots), &nodes);
     let appearance = AppearanceAuthoringBatch::empty();
-    let geometry = GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &[]);
+    let geometry = GeometryAuthoringBatch::new(&logical_meshes, &primitives, attributes, &[]);
     let deformation =
         DeformationAuthoringBatch::new(&[], &[], &logical_morphs, &primitive_deformations, &[]);
     let animations = AnimationAuthoringBatch::empty();
@@ -1694,28 +1690,98 @@ fn invalid_geometry_payload_fault_is_a_build_invariant_rich_failure() {
     );
     let mut invocation_root_20 =
         crate::canonical_scene::store::construction::SceneCanonicalInvocationHost::new();
-    let build = NodeSceneTestTransaction::with_account(
-        &mut invocation_root_20,
-        &account,
-        test_limits(),
-        input,
-        SceneValidationLimits::default(),
-    )
-    .expect("geometry semantic fault operation")
-    .finish_draft_with_faults(NodeSceneBuildFaults::altered_geometry_f32())
-    .expect("invalid geometry payload must prepare an exact scoped outcome");
+    let failure = {
+        let build = NodeSceneTestTransaction::with_account(
+            &mut invocation_root_20,
+            &account,
+            test_limits(),
+            input,
+            SceneValidationLimits::default(),
+        )
+        .expect("geometry authoring operation")
+        .finish_draft()
+        .expect("invalid geometry payload must prepare an exact scoped outcome");
 
-    let failure = rich_failure(
-        build
-            .publish_for_test()
-            .expect("invalid geometry payload must publish rich failure"),
-    );
+        let NodeSceneDraftBuild::Failure {
+            authoring_rejection: Some(rejection),
+            prepared,
+        } = build
+        else {
+            panic!("a rejected float write must preserve its owned semantic cause");
+        };
+        let rejection = super::materialization::NodeSceneLaneRejection::from(rejection);
+        assert_eq!(
+            rejection.scene_validation_error(),
+            Some(crate::SceneValidationError::NonFiniteAttributeValue { attribute, scalar }),
+        );
+        let build = NodeSceneDraftBuild::Failure {
+            authoring_rejection: Some(rejection.into_inner()),
+            prepared,
+        };
+
+        rich_failure(
+            build
+                .publish_with_generation_source_for_test(|| {
+                    panic!("a rejected float write must not reserve a Scene generation")
+                })
+                .expect("invalid geometry payload must publish rich failure"),
+        )
+    };
     assert_eq!(
         terminal_failure_code(failure.ledger_evidence()),
-        NODE_SCENE_BUILD_INVARIANT_CODE,
+        NODE_SCENE_GEOMETRY_AUTHORING_REJECTION_CODE,
     );
     drop(invocation_root_20);
     assert_released(failure, &account);
+}
+
+#[test]
+fn nonfinite_geometry_input_is_an_authoring_rich_failure() {
+    let positions = [0.0_f32, f32::NAN, 0.0];
+    let attributes = [GeometryAttributeAuthoring::f32(
+        AttributeSemantic::Position,
+        AttributeDomain::Vertex,
+        3,
+        &positions,
+        Presence::Absent,
+    )];
+    assert_nonfinite_geometry_rejection(&attributes, 0, 1);
+}
+
+#[test]
+fn nonfinite_sparse_default_rejection_retains_source_coordinates_and_releases_partial_storage() {
+    for count in [0, 1] {
+        let positions = [0.0_f32; 3];
+        let prefix = [16_777_217.0_f64, -0.0, f64::from_bits(1)];
+        let default = [1.0_f64, f64::INFINITY, 0.0];
+        let attributes = [
+            GeometryAttributeAuthoring::f32(
+                AttributeSemantic::Position,
+                AttributeDomain::Vertex,
+                3,
+                &positions[..count * 3],
+                Presence::Absent,
+            ),
+            GeometryAttributeAuthoring::f64(
+                AttributeSemantic::Normal,
+                AttributeDomain::Vertex,
+                3,
+                &prefix[..count * 3],
+            ),
+            GeometryAttributeAuthoring::sparse_f64(
+                AttributeSemantic::Custom(
+                    crate::attribute::CustomAttributeSemantic::new("test:sparse").unwrap(),
+                ),
+                AttributeDomain::Vertex,
+                3,
+                count as u32,
+                &[],
+                &[],
+                &default,
+            ),
+        ];
+        assert_nonfinite_geometry_rejection(&attributes, 2, 1);
+    }
 }
 
 #[test]

@@ -257,7 +257,7 @@ pub(in crate::canonical_scene::store) enum GeometryAttributePayloadKind {
     Sparse,
 }
 
-pub(in crate::canonical_scene::store) struct ValidatedGeometryAttribute {
+pub(in crate::canonical_scene::store) struct PreparedGeometryAttribute {
     input_index: usize,
     element_count: u32,
     // Semantic tests inspect the validator's decisions for projection and scalar accounting.
@@ -276,13 +276,13 @@ pub(in crate::canonical_scene::store) struct ValidatedGeometryAttribute {
     payload_block_count: u32,
 }
 
-impl ValidatedGeometryAttribute {
+impl PreparedGeometryAttribute {
     pub(in crate::canonical_scene::store) const fn element_count(&self) -> u32 {
         self.element_count
     }
 }
 
-struct ValidatedGeometryPrimitivePlan {
+struct PreparedGeometryPrimitivePlan {
     input_index: usize,
     topology: TopologyKind,
     vertex_count: u32,
@@ -291,16 +291,16 @@ struct ValidatedGeometryPrimitivePlan {
     attribute_plans: AuthoringRange,
 }
 
-pub(in crate::canonical_scene::store) struct ValidatedGeometryPrimitive<'batch, 'input> {
+pub(in crate::canonical_scene::store) struct PreparedGeometryPrimitive<'batch, 'input> {
     input: GeometryPrimitiveAuthoring<'input>,
-    plan: &'batch ValidatedGeometryPrimitivePlan,
+    plan: &'batch PreparedGeometryPrimitivePlan,
     #[cfg(test)]
-    attributes: &'batch [ValidatedGeometryAttribute],
+    attributes: &'batch [PreparedGeometryAttribute],
     #[cfg(test)]
     input_attributes: &'input [GeometryAttributeAuthoring<'input>],
 }
 
-impl<'batch, 'input> ValidatedGeometryPrimitive<'batch, 'input> {
+impl<'batch, 'input> PreparedGeometryPrimitive<'batch, 'input> {
     pub(in crate::canonical_scene::store) const fn authored_topology(
         &self,
     ) -> GeometryTopologyAuthoring<'input> {
@@ -342,10 +342,10 @@ impl<'batch, 'input> ValidatedGeometryPrimitive<'batch, 'input> {
     #[cfg(test)]
     pub(in crate::canonical_scene::store) fn attributes(
         &self,
-    ) -> impl ExactSizeIterator<Item = ValidatedGeometryAttributeView<'_, 'input>> + '_ {
+    ) -> impl ExactSizeIterator<Item = PreparedGeometryAttributeView<'_, 'input>> + '_ {
         self.attributes.iter().map(|plan| {
             let input = &self.input_attributes[plan.input_index];
-            ValidatedGeometryAttributeView { input, plan }
+            PreparedGeometryAttributeView { input, plan }
         })
     }
 
@@ -353,19 +353,19 @@ impl<'batch, 'input> ValidatedGeometryPrimitive<'batch, 'input> {
     pub(in crate::canonical_scene::store) fn attribute(
         &self,
         index: usize,
-    ) -> Option<ValidatedGeometryAttributeView<'_, 'input>> {
+    ) -> Option<PreparedGeometryAttributeView<'_, 'input>> {
         let plan = self.attributes.get(index)?;
         let input = self.input_attributes.get(plan.input_index)?;
-        Some(ValidatedGeometryAttributeView { input, plan })
+        Some(PreparedGeometryAttributeView { input, plan })
     }
 }
 
-pub(in crate::canonical_scene::store) struct ValidatedGeometryAttributeView<'view, 'input> {
+pub(in crate::canonical_scene::store) struct PreparedGeometryAttributeView<'view, 'input> {
     input: &'view GeometryAttributeAuthoring<'input>,
-    plan: &'view ValidatedGeometryAttribute,
+    plan: &'view PreparedGeometryAttribute,
 }
 
-impl<'input> ValidatedGeometryAttributeView<'_, 'input> {
+impl<'input> PreparedGeometryAttributeView<'_, 'input> {
     pub(in crate::canonical_scene::store) const fn semantic(&self) -> &AttributeSemantic {
         self.input.semantic()
     }
@@ -438,13 +438,15 @@ impl<'input> ValidatedGeometryAttributeView<'_, 'input> {
     }
 }
 
-#[must_use = "dropping the validated geometry batch releases its compiled-plan reservation"]
-pub(in crate::canonical_scene::store) struct ValidatedGeometryBatch<'input, R> {
-    compiled: GeometryValidationStorage<R>,
+/// Structural geometry facts with full-source checks for projected F32 input.
+/// Ordinary floating-point values qualify when typed storage is written.
+#[must_use = "dropping the prepared geometry batch releases its compiled-plan reservation"]
+pub(in crate::canonical_scene::store) struct PreparedGeometryBatch<'input, R> {
+    compiled: GeometryPreparationStorage<R>,
     input: GeometryAuthoringBatch<'input>,
 }
 
-struct GeometryValidationStorage<R> {
+struct GeometryPreparationStorage<R> {
     logical_mesh_count: u32,
     logical_mesh_name_byte_count: u32,
     attribute_semantic_name_byte_count: u32,
@@ -465,18 +467,18 @@ struct GeometryValidationStorage<R> {
     canonical_bytes: u64,
     validation_work: u64,
     scratch_bytes: u64,
-    primitive_plans: Vec<ValidatedGeometryPrimitivePlan>,
-    attribute_plans: Vec<ValidatedGeometryAttribute>,
+    primitive_plans: Vec<PreparedGeometryPrimitivePlan>,
+    attribute_plans: Vec<PreparedGeometryAttribute>,
     #[cfg(test)]
     storage_drop_probe: Option<GeometryStorageDropProbe>,
     // Held solely to cover compiled plans; all allocations above must drop before this token.
     _reservation: R,
 }
 
-impl<'input, R> ValidatedGeometryBatch<'input, R> {
+impl<'input, R> PreparedGeometryBatch<'input, R> {
     const fn new(
         input: GeometryAuthoringBatch<'input>,
-        compiled: GeometryValidationStorage<R>,
+        compiled: GeometryPreparationStorage<R>,
     ) -> Self {
         Self { compiled, input }
     }
@@ -571,13 +573,13 @@ impl<'input, R> ValidatedGeometryBatch<'input, R> {
     pub(in crate::canonical_scene::store) fn primitive(
         &self,
         index: usize,
-    ) -> Option<ValidatedGeometryPrimitive<'_, 'input>> {
+    ) -> Option<PreparedGeometryPrimitive<'_, 'input>> {
         let plan = self.compiled.primitive_plans.get(index)?;
         let input = *self.input.primitives().get(plan.input_index)?;
         #[cfg(test)]
         let range =
             checked_range(plan.attribute_plans, self.compiled.attribute_plans.len()).ok()?;
-        Some(ValidatedGeometryPrimitive {
+        Some(PreparedGeometryPrimitive {
             input,
             plan,
             #[cfg(test)]
@@ -590,10 +592,10 @@ impl<'input, R> ValidatedGeometryBatch<'input, R> {
     pub(in crate::canonical_scene::store) fn attribute(
         &self,
         index: usize,
-    ) -> Option<ValidatedGeometryAttributeView<'_, 'input>> {
+    ) -> Option<PreparedGeometryAttributeView<'_, 'input>> {
         let plan = self.compiled.attribute_plans.get(index)?;
         let input = self.input.attributes().get(plan.input_index)?;
-        Some(ValidatedGeometryAttributeView { input, plan })
+        Some(PreparedGeometryAttributeView { input, plan })
     }
 
     #[cfg(test)]
@@ -608,7 +610,7 @@ impl<'input, R> ValidatedGeometryBatch<'input, R> {
     pub(in crate::canonical_scene::store::production) fn into_compiled_facts_for_test(
         self,
     ) -> (u32, u32, u32, u32, usize, usize, R) {
-        let GeometryValidationStorage {
+        let GeometryPreparationStorage {
             logical_mesh_count,
             primitive_count,
             mesh_instance_count,
@@ -630,10 +632,10 @@ impl<'input, R> ValidatedGeometryBatch<'input, R> {
     }
 }
 
-impl<R> fmt::Debug for ValidatedGeometryBatch<'_, R> {
+impl<R> fmt::Debug for PreparedGeometryBatch<'_, R> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("ValidatedGeometryBatch")
+            .debug_struct("PreparedGeometryBatch")
             .field("logical_mesh_count", &self.compiled.logical_mesh_count)
             .field(
                 "logical_mesh_name_byte_count",
@@ -681,17 +683,17 @@ impl Drop for GeometryStorageDropProbe {
     }
 }
 
-struct GeometryValidationScratch<R> {
-    primitive_plans: Vec<ValidatedGeometryPrimitivePlan>,
-    attribute_plans: Vec<ValidatedGeometryAttribute>,
+struct GeometryPreparationScratch<R> {
+    primitive_plans: Vec<PreparedGeometryPrimitivePlan>,
+    attribute_plans: Vec<PreparedGeometryAttribute>,
     // Every allocation above must drop before its accounting token.
     reservation: R,
 }
 
-type GeometryValidationResult<T, C> =
+type GeometryPreparationResult<T, C> =
     Result<T, GeometryAuthoringFailure<<C as CanonicalAuthoringControl>::Error>>;
 
-struct GeometryValidationContext<'control, C: CanonicalAuthoringControl> {
+struct GeometryPreparationContext<'control, C: CanonicalAuthoringControl> {
     control: &'control mut C,
     limits: SceneValidationLimits,
     work: u64,
@@ -711,7 +713,7 @@ struct GeometryValidationContext<'control, C: CanonicalAuthoringControl> {
     tangent_schema_name_bytes: u32,
 }
 
-impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control, C> {
+impl<'control, C: CanonicalAuthoringControl> GeometryPreparationContext<'control, C> {
     const fn new(limits: SceneValidationLimits, control: &'control mut C) -> Self {
         Self {
             control,
@@ -734,7 +736,7 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
         }
     }
 
-    fn poll_now(&mut self) -> GeometryValidationResult<(), C> {
+    fn poll_now(&mut self) -> GeometryPreparationResult<(), C> {
         self.control
             .poll()
             .map_err(GeometryAuthoringFailure::Control)?;
@@ -742,7 +744,7 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
         Ok(())
     }
 
-    fn finish(&mut self) -> GeometryValidationResult<(), C> {
+    fn finish(&mut self) -> GeometryPreparationResult<(), C> {
         self.poll_now()
     }
 
@@ -750,7 +752,7 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
         &mut self,
         kind: SceneValidationWork,
         action: impl FnMut() -> R,
-    ) -> GeometryValidationResult<R, C> {
+    ) -> GeometryPreparationResult<R, C> {
         self.run_controlled_unit(|control| control.run_unit(kind, action))
     }
 
@@ -758,14 +760,14 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
         &mut self,
         kind: SceneValidationWork,
         action: impl Fn() -> R + Copy,
-    ) -> GeometryValidationResult<R, C> {
+    ) -> GeometryPreparationResult<R, C> {
         self.run_controlled_unit(|control| control.run_copy_unit(kind, action))
     }
 
     fn run_controlled_unit<R>(
         &mut self,
         action: impl FnOnce(&mut C) -> Result<R, C::Error>,
-    ) -> GeometryValidationResult<R, C> {
+    ) -> GeometryPreparationResult<R, C> {
         let final_work =
             self.work
                 .checked_add(1)
@@ -787,7 +789,7 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
         Ok(result)
     }
 
-    fn add_relations(&mut self, amount: u64) -> GeometryValidationResult<(), C> {
+    fn add_relations(&mut self, amount: u64) -> GeometryPreparationResult<(), C> {
         for _ in 0..amount {
             let current_edges = self.edges;
             let max_edges = self.limits.max_edges();
@@ -835,7 +837,7 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
         u32_scalars: u64,
         i32_scalars: u64,
         payload_blocks: u32,
-    ) -> GeometryValidationResult<(), C> {
+    ) -> GeometryPreparationResult<(), C> {
         let added_cells = f32_scalars
             .checked_add(f64_scalars)
             .and_then(|count| count.checked_add(u32_scalars))
@@ -902,7 +904,7 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
         Ok(())
     }
 
-    fn add_integer_attribute_scalars(&mut self, count: u64) -> GeometryValidationResult<(), C> {
+    fn add_integer_attribute_scalars(&mut self, count: u64) -> GeometryPreparationResult<(), C> {
         self.integer_attribute_scalar_count = self
             .integer_attribute_scalar_count
             .checked_add(count)
@@ -912,7 +914,7 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
         Ok(())
     }
 
-    fn add_utf8_payload(&mut self, bytes: u64) -> GeometryValidationResult<(), C> {
+    fn add_utf8_payload(&mut self, bytes: u64) -> GeometryPreparationResult<(), C> {
         let final_cells = self.semantic_cells.checked_add(bytes).ok_or(
             GeometryAuthoringSemanticError::AccountingOverflow {
                 dimension: "semantic cells",
@@ -952,7 +954,7 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
         Ok(())
     }
 
-    fn add_payload_blocks(&mut self, blocks: u32) -> GeometryValidationResult<(), C> {
+    fn add_payload_blocks(&mut self, blocks: u32) -> GeometryPreparationResult<(), C> {
         self.payload_blocks = self.payload_blocks.checked_add(blocks).ok_or(
             GeometryAuthoringSemanticError::AccountingOverflow {
                 dimension: "payload block count",
@@ -961,7 +963,7 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
         Ok(())
     }
 
-    fn set_shape(&mut self, rows: [u64; 4]) -> GeometryValidationResult<(), C> {
+    fn set_shape(&mut self, rows: [u64; 4]) -> GeometryPreparationResult<(), C> {
         let bytes =
             GeometryStoragePlan::canonical_bytes_for_shape(rows, 0, [0; 4]).map_err(|_| {
                 GeometryAuthoringSemanticError::AccountingOverflow {
@@ -987,7 +989,7 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
             .map_err(|cause| GeometryAuthoringSemanticError::ScratchCapacity { resource, cause })
     }
 
-    fn reserve_scratch(&mut self, bytes: u64) -> GeometryValidationResult<C::Reservation, C> {
+    fn reserve_scratch(&mut self, bytes: u64) -> GeometryPreparationResult<C::Reservation, C> {
         enforce_limit::<C::Error>(
             GeometryAuthoringLimit::ScratchBytes,
             bytes,
@@ -1007,7 +1009,7 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
         &mut self,
         reservation: &mut C::Reservation,
         bytes: u64,
-    ) -> GeometryValidationResult<(), C> {
+    ) -> GeometryPreparationResult<(), C> {
         enforce_limit::<C::Error>(
             GeometryAuthoringLimit::ScratchBytes,
             bytes,
@@ -1036,17 +1038,17 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
     }
 }
 
-pub(in crate::canonical_scene::store) fn validate_geometry_batch_with_control<'input, C>(
+pub(in crate::canonical_scene::store) fn prepare_geometry_batch_with_control<'input, C>(
     input: GeometryAuthoringBatch<'input>,
     authored_node_count: usize,
     appearance_material_count: u32,
     limits: SceneValidationLimits,
     control: &mut C,
-) -> Result<ValidatedGeometryBatch<'input, C::Reservation>, GeometryAuthoringFailure<C::Error>>
+) -> Result<PreparedGeometryBatch<'input, C::Reservation>, GeometryAuthoringFailure<C::Error>>
 where
     C: CanonicalAuthoringControl,
 {
-    validate_geometry_batch_inner(
+    prepare_geometry_batch_inner(
         input,
         authored_node_count,
         appearance_material_count,
@@ -1055,17 +1057,17 @@ where
     )
 }
 
-fn validate_geometry_batch_inner<'input, C>(
+fn prepare_geometry_batch_inner<'input, C>(
     input: GeometryAuthoringBatch<'input>,
     authored_node_count: usize,
     appearance_material_count: u32,
     limits: SceneValidationLimits,
     control: &mut C,
-) -> Result<ValidatedGeometryBatch<'input, C::Reservation>, GeometryAuthoringFailure<C::Error>>
+) -> Result<PreparedGeometryBatch<'input, C::Reservation>, GeometryAuthoringFailure<C::Error>>
 where
     C: CanonicalAuthoringControl,
 {
-    let mut context = GeometryValidationContext::new(limits, control);
+    let mut context = GeometryPreparationContext::new(limits, control);
     context.poll_now()?;
 
     // Admit observation of the fixed top-level shape before reserving input-sized scratch.
@@ -1100,33 +1102,33 @@ where
         u64::from(mesh_instance_count),
     ])?;
 
-    let primitive_plan = context.scratch_plan::<ValidatedGeometryPrimitivePlan>(
+    let primitive_plan = context.scratch_plan::<PreparedGeometryPrimitivePlan>(
         input.primitives().len(),
-        "validated primitive plans",
+        "prepared primitive plans",
     )?;
-    let attribute_plan = context.scratch_plan::<ValidatedGeometryAttribute>(
+    let attribute_plan = context.scratch_plan::<PreparedGeometryAttribute>(
         input.attributes().len(),
-        "validated attribute plans",
+        "prepared attribute plans",
     )?;
     let scratch_envelope = checked_sum_bytes(
         [
-            scratch_envelope(primitive_plan, "validated primitive plans")?,
-            scratch_envelope(attribute_plan, "validated attribute plans")?,
+            scratch_envelope(primitive_plan, "prepared primitive plans")?,
+            scratch_envelope(attribute_plan, "prepared attribute plans")?,
         ],
         "geometry scratch envelope",
     )?;
 
     let mut reservation = context.reserve_scratch(scratch_envelope)?;
     let (primitive_plans, primitive_plan_bytes) =
-        context.allocate_scratch(primitive_plan, "validated primitive plans")?;
+        context.allocate_scratch(primitive_plan, "prepared primitive plans")?;
     let (attribute_plans, attribute_plan_bytes) =
-        context.allocate_scratch(attribute_plan, "validated attribute plans")?;
+        context.allocate_scratch(attribute_plan, "prepared attribute plans")?;
     let scratch_actual = checked_sum_bytes(
         [primitive_plan_bytes, attribute_plan_bytes],
         "geometry scratch allocation",
     )?;
     context.resize_scratch(&mut reservation, scratch_actual)?;
-    let mut storage = GeometryValidationScratch {
+    let mut storage = GeometryPreparationScratch {
         primitive_plans,
         attribute_plans,
         reservation,
@@ -1331,12 +1333,12 @@ where
 
     let canonical_bytes = context.canonical_bytes;
     let validation_work = context.work;
-    let GeometryValidationScratch {
+    let GeometryPreparationScratch {
         primitive_plans,
         attribute_plans,
         reservation,
     } = storage;
-    let compiled = GeometryValidationStorage {
+    let compiled = GeometryPreparationStorage {
         logical_mesh_count,
         logical_mesh_name_byte_count: logical_mesh_name_offset,
         attribute_semantic_name_byte_count: attribute_semantic_name_offset,
@@ -1363,9 +1365,9 @@ where
         storage_drop_probe: None,
         _reservation: reservation,
     };
-    let validated = ValidatedGeometryBatch::new(input, compiled);
+    let prepared = PreparedGeometryBatch::new(input, compiled);
     context.finish()?;
-    Ok(validated)
+    Ok(prepared)
 }
 
 fn validate_primitive<C>(
@@ -1373,10 +1375,10 @@ fn validate_primitive<C>(
     primitive: GeometryPrimitiveAuthoring<'_>,
     attribute_indices: Range<usize>,
     attributes: &[GeometryAttributeAuthoring<'_>],
-    attribute_plans: &mut Vec<ValidatedGeometryAttribute>,
+    attribute_plans: &mut Vec<PreparedGeometryAttribute>,
     attribute_semantic_name_offset: &mut u32,
-    context: &mut GeometryValidationContext<'_, C>,
-) -> GeometryValidationResult<ValidatedGeometryPrimitivePlan, C>
+    context: &mut GeometryPreparationContext<'_, C>,
+) -> GeometryPreparationResult<PreparedGeometryPrimitivePlan, C>
 where
     C: CanonicalAuthoringControl,
 {
@@ -1491,7 +1493,7 @@ where
         attribute_plans.push(plan);
     }
 
-    Ok(ValidatedGeometryPrimitivePlan {
+    Ok(PreparedGeometryPrimitivePlan {
         input_index: primitive_index,
         topology,
         vertex_count,
@@ -1504,8 +1506,8 @@ where
 fn infer_missing_position_vertex_count<C>(
     primitive: GeometryPrimitiveAuthoring<'_>,
     mut inferred: u32,
-    context: &mut GeometryValidationContext<'_, C>,
-) -> GeometryValidationResult<u32, C>
+    context: &mut GeometryPreparationContext<'_, C>,
+) -> GeometryPreparationResult<u32, C>
 where
     C: CanonicalAuthoringControl,
 {
@@ -1545,8 +1547,8 @@ fn validate_index_stream<C>(
     primitive_index: usize,
     indices: Presence<&[u32]>,
     vertex_count: u32,
-    context: &mut GeometryValidationContext<'_, C>,
-) -> GeometryValidationResult<u32, C>
+    context: &mut GeometryPreparationContext<'_, C>,
+) -> GeometryPreparationResult<u32, C>
 where
     C: CanonicalAuthoringControl,
 {
@@ -1583,8 +1585,8 @@ fn validate_topology<C>(
     primitive_index: usize,
     topology: GeometryTopologyAuthoring<'_>,
     corner_count: u32,
-    context: &mut GeometryValidationContext<'_, C>,
-) -> GeometryValidationResult<(TopologyKind, u32), C>
+    context: &mut GeometryPreparationContext<'_, C>,
+) -> GeometryPreparationResult<(TopologyKind, u32), C>
 where
     C: CanonicalAuthoringControl,
 {
@@ -1706,8 +1708,8 @@ fn validate_attribute<C>(
     attribute: &GeometryAttributeAuthoring<'_>,
     expected_cardinality: Option<u32>,
     attribute_semantic_name_offset: &mut u32,
-    context: &mut GeometryValidationContext<'_, C>,
-) -> GeometryValidationResult<ValidatedGeometryAttribute, C>
+    context: &mut GeometryPreparationContext<'_, C>,
+) -> GeometryPreparationResult<PreparedGeometryAttribute, C>
 where
     C: CanonicalAuthoringControl,
 {
@@ -1800,8 +1802,8 @@ where
             let payload_block_count = block_for_u64(canonical_scalar_count);
             context.add_payload(canonical_scalar_count, 0, 0, 0, payload_block_count)?;
 
-            inspect_f32_values(attribute_index, source_values, context)?;
             if let Some(indices) = projection {
+                inspect_f32_values(attribute_index, source_values, context)?;
                 for (element, &index) in indices.iter().enumerate() {
                     context.run_unit(SceneValidationWork::PayloadCell, || {
                         if index >= source_element_count {
@@ -1818,7 +1820,7 @@ where
                     })??;
                 }
             }
-            Ok(ValidatedGeometryAttribute {
+            Ok(PreparedGeometryAttribute {
                 input_index: attribute_index,
                 #[cfg(test)]
                 scalar_kind: GeometryAttributeScalarKind::F32,
@@ -1857,8 +1859,7 @@ where
             let canonical_scalar_count = usize_to_u64(values.len(), "f64 attribute scalars")?;
             let payload_block_count = block_for_len(values.len());
             context.add_payload(0, canonical_scalar_count, 0, 0, payload_block_count)?;
-            inspect_f64_values(attribute_index, values, context)?;
-            Ok(ValidatedGeometryAttribute {
+            Ok(PreparedGeometryAttribute {
                 input_index: attribute_index,
                 #[cfg(test)]
                 scalar_kind: GeometryAttributeScalarKind::F64,
@@ -1898,7 +1899,7 @@ where
             let payload_block_count = block_for_len(values.len());
             context.add_payload(0, 0, canonical_scalar_count, 0, payload_block_count)?;
             context.add_integer_attribute_scalars(canonical_scalar_count)?;
-            Ok(ValidatedGeometryAttribute {
+            Ok(PreparedGeometryAttribute {
                 input_index: attribute_index,
                 #[cfg(test)]
                 scalar_kind: GeometryAttributeScalarKind::U32,
@@ -1938,7 +1939,7 @@ where
             let payload_block_count = block_for_len(values.len());
             context.add_payload(0, 0, 0, canonical_scalar_count, payload_block_count)?;
             context.add_integer_attribute_scalars(canonical_scalar_count)?;
-            Ok(ValidatedGeometryAttribute {
+            Ok(PreparedGeometryAttribute {
                 input_index: attribute_index,
                 #[cfg(test)]
                 scalar_kind: GeometryAttributeScalarKind::I32,
@@ -2026,67 +2027,24 @@ where
     }
 }
 
-trait GeometryScalar: Copy {
+trait GeometryScalar {
     const KIND: GeometryAttributeScalarKind;
-
-    fn inspect<C: CanonicalAuthoringControl>(
-        attribute_index: usize,
-        values: &[Self],
-        scalar_offset: usize,
-        context: &mut GeometryValidationContext<'_, C>,
-    ) -> GeometryValidationResult<(), C>;
 }
 
 impl GeometryScalar for f32 {
     const KIND: GeometryAttributeScalarKind = GeometryAttributeScalarKind::F32;
-
-    fn inspect<C: CanonicalAuthoringControl>(
-        attribute_index: usize,
-        values: &[Self],
-        scalar_offset: usize,
-        context: &mut GeometryValidationContext<'_, C>,
-    ) -> GeometryValidationResult<(), C> {
-        inspect_f32_values_from(attribute_index, values, scalar_offset, context)
-    }
 }
 
 impl GeometryScalar for f64 {
     const KIND: GeometryAttributeScalarKind = GeometryAttributeScalarKind::F64;
-
-    fn inspect<C: CanonicalAuthoringControl>(
-        attribute_index: usize,
-        values: &[Self],
-        scalar_offset: usize,
-        context: &mut GeometryValidationContext<'_, C>,
-    ) -> GeometryValidationResult<(), C> {
-        inspect_f64_values_from(attribute_index, values, scalar_offset, context)
-    }
 }
 
 impl GeometryScalar for u32 {
     const KIND: GeometryAttributeScalarKind = GeometryAttributeScalarKind::U32;
-
-    fn inspect<C: CanonicalAuthoringControl>(
-        _attribute_index: usize,
-        _values: &[Self],
-        _scalar_offset: usize,
-        _context: &mut GeometryValidationContext<'_, C>,
-    ) -> GeometryValidationResult<(), C> {
-        Ok(())
-    }
 }
 
 impl GeometryScalar for i32 {
     const KIND: GeometryAttributeScalarKind = GeometryAttributeScalarKind::I32;
-
-    fn inspect<C: CanonicalAuthoringControl>(
-        _attribute_index: usize,
-        _values: &[Self],
-        _scalar_offset: usize,
-        _context: &mut GeometryValidationContext<'_, C>,
-    ) -> GeometryValidationResult<(), C> {
-        Ok(())
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2099,8 +2057,8 @@ fn validate_sparse_attribute<C, T>(
     values: &[T],
     default: &[T],
     expected_cardinality: Option<u32>,
-    context: &mut GeometryValidationContext<'_, C>,
-) -> GeometryValidationResult<ValidatedGeometryAttribute, C>
+    context: &mut GeometryPreparationContext<'_, C>,
+) -> GeometryPreparationResult<PreparedGeometryAttribute, C>
 where
     C: CanonicalAuthoringControl,
     T: GeometryScalar,
@@ -2194,8 +2152,6 @@ where
         }
     }
 
-    T::inspect(attribute_index, values, 0, context)?;
-    T::inspect(attribute_index, default, values.len(), context)?;
     let mut previous = None;
     for (element, &index) in indices.iter().enumerate() {
         previous = context.run_unit(SceneValidationWork::PayloadCell, || {
@@ -2216,7 +2172,7 @@ where
             Ok(Some(index))
         })??;
     }
-    Ok(ValidatedGeometryAttribute {
+    Ok(PreparedGeometryAttribute {
         input_index: attribute_index,
         #[cfg(test)]
         scalar_kind,
@@ -2591,71 +2547,15 @@ fn validate_attribute_schema(
 fn inspect_f32_values<C>(
     attribute_index: usize,
     values: &[f32],
-    context: &mut GeometryValidationContext<'_, C>,
-) -> GeometryValidationResult<(), C>
+    context: &mut GeometryPreparationContext<'_, C>,
+) -> GeometryPreparationResult<(), C>
 where
     C: CanonicalAuthoringControl,
 {
-    inspect_f32_values_from(attribute_index, values, 0, context)
-}
-
-fn inspect_f32_values_from<C>(
-    attribute_index: usize,
-    values: &[f32],
-    scalar_offset: usize,
-    context: &mut GeometryValidationContext<'_, C>,
-) -> GeometryValidationResult<(), C>
-where
-    C: CanonicalAuthoringControl,
-{
-    for (relative_scalar, value) in values.iter().enumerate() {
+    for (scalar, value) in values.iter().enumerate() {
         let finite =
             context.run_copy_unit(SceneValidationWork::PayloadCell, || value.is_finite())?;
         if !finite {
-            let scalar = scalar_offset.checked_add(relative_scalar).ok_or(
-                GeometryAuthoringSemanticError::AccountingOverflow {
-                    dimension: "attribute scalar index",
-                },
-            )?;
-            return Err(GeometryAuthoringSemanticError::NonFiniteAttributeValue {
-                attribute: attribute_index,
-                scalar,
-            }
-            .into());
-        }
-    }
-    Ok(())
-}
-
-fn inspect_f64_values<C>(
-    attribute_index: usize,
-    values: &[f64],
-    context: &mut GeometryValidationContext<'_, C>,
-) -> GeometryValidationResult<(), C>
-where
-    C: CanonicalAuthoringControl,
-{
-    inspect_f64_values_from(attribute_index, values, 0, context)
-}
-
-fn inspect_f64_values_from<C>(
-    attribute_index: usize,
-    values: &[f64],
-    scalar_offset: usize,
-    context: &mut GeometryValidationContext<'_, C>,
-) -> GeometryValidationResult<(), C>
-where
-    C: CanonicalAuthoringControl,
-{
-    for (relative_scalar, value) in values.iter().enumerate() {
-        let finite =
-            context.run_copy_unit(SceneValidationWork::PayloadCell, || value.is_finite())?;
-        if !finite {
-            let scalar = scalar_offset.checked_add(relative_scalar).ok_or(
-                GeometryAuthoringSemanticError::AccountingOverflow {
-                    dimension: "attribute scalar index",
-                },
-            )?;
             return Err(GeometryAuthoringSemanticError::NonFiniteAttributeValue {
                 attribute: attribute_index,
                 scalar,

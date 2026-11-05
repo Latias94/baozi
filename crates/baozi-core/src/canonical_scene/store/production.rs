@@ -86,7 +86,7 @@ pub(super) use plan::deformation::{
 };
 pub(super) use plan::deformation::{DeformationAuthoringLimit, DeformationAuthoringSemanticError};
 pub(super) use plan::geometry::{
-    GeometryAuthoringFailure, ValidatedGeometryBatch, validate_geometry_batch_with_control,
+    GeometryAuthoringFailure, PreparedGeometryBatch, prepare_geometry_batch_with_control,
 };
 pub(super) use plan::geometry::{GeometryAuthoringLimit, GeometryAuthoringSemanticError};
 pub(super) use plan::profile::{

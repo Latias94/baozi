@@ -270,6 +270,25 @@ appearance, deformation, or animation rows are not copied into a second validati
 cancellable and metered. Complete owner coverage, topology, payload shape, finite values, range
 bounds, sparse index order, and cross-domain references remain mandatory before generation reservation.
 
+Geometry float pools establish finiteness at their closed write boundary. Initial scalar writes,
+selected reconstruction and bounded spatial tuple writes qualify the final-width values inside
+their existing admitted action before initializing the contiguous F32/F64 pool. Only immutable
+slices escape that pool; neither a mutable slice nor an unchecked Vec conversion is available.
+Central geometry validation therefore checks the actual ranges, coverage, shape, topology,
+sparse indices and references without rescanning stored floats. Other domains retain their
+own finite-value and stronger numeric checks. Generated unit normals, tangent signs, exact
+bit correspondence and spatial overflow/underflow remain separate obligations.
+
+The internal geometry preparation batch proves structural facts and capacities. Ordinary dense
+and sparse float values, including sparse defaults with no explicit entries, are qualified
+when written. Projected F32 input still checks its entire source before projection indices,
+including present-empty projections and unselected values. Rejection coordinates refer to the
+source attribute/scalar; a sparse default follows the explicit values in that coordinate space.
+A returned invalid-value attempt consumes its actual action without initializing a cell.
+Runtime, resource, control or structural rejection can precede an ordinary invalid float that
+has not been observed. Once a cause is observed, existing first-cause and cleanup ownership
+rules apply. Unpublished historical prevalidation ordering does not require another float pass.
+
 A node-transform edit replaces its node table and shares the unchanged geometry, spatial,
 deformation, and animation owners and both appearance children.
 Geometry tables and their payload pools retain their original addresses and one physical charge

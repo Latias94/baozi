@@ -137,8 +137,8 @@ impl<'a> GeometryAttributeAuthoring<'a> {
     /// Authors a dense F64 attribute without reducing its precision.
     ///
     /// Position, Normal, Tangent, Texcoord, and custom semantics retain F64 values.
-    /// Validation requires finite values and the semantic's lanes and domain
-    /// cardinality. Color retains its F32 contract.
+    /// Structural preparation checks the semantic's lanes and domain cardinality;
+    /// retained writes require finite final-width values. Color retains its F32 contract.
     pub const fn f64(
         semantic: AttributeSemantic,
         domain: AttributeDomain,

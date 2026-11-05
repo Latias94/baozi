@@ -5,13 +5,17 @@ use crate::SceneValidationLimits;
 use crate::attribute::{AttributeDomain, AttributeSemantic, CustomAttributeSemantic};
 use crate::canonical_scene::store::production::plan::geometry::{
     GeometryAttributePayloadKind, GeometryAttributeScalarKind, GeometryAuthoringFailure,
-    GeometryAuthoringLimit, GeometryAuthoringSemanticError, ValidatedGeometryBatch,
-    validate_geometry_batch_with_control,
+    GeometryAuthoringLimit, GeometryAuthoringSemanticError, PreparedGeometryBatch,
+    prepare_geometry_batch_with_control,
 };
 use crate::canonical_scene::store::production::{
     AuthoringRange, GeometryAttributeAuthoring, GeometryAuthoringBatch,
     GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring, GeometryPrimitiveAuthoring,
     GeometryTopologyAuthoring, LogicalMeshLocalId, MaterialLocalId, NodeLocalId, Presence,
+};
+use crate::canonical_scene::store::typed_storage::build::{
+    GeometryStorageBuildError, GeometryStoragePlan, NonFiniteGeometryValue,
+    TypedStorageBuildControl,
 };
 use crate::geometry::TopologyKind;
 
@@ -49,7 +53,7 @@ fn expected_geometry_bytes(rows: [usize; 4], scalars: [usize; 4], name_bytes: us
 
 fn expect_semantic(
     result: Result<
-        ValidatedGeometryBatch<'_, TestReservation>,
+        PreparedGeometryBatch<'_, TestReservation>,
         GeometryAuthoringFailure<TestControlError>,
     >,
 ) -> GeometryAuthoringSemanticError {
@@ -67,7 +71,7 @@ fn reject_geometry(
     authored_node_count: usize,
 ) -> GeometryAuthoringSemanticError {
     let mut control = TestControl::default();
-    let error = expect_semantic(validate_geometry_batch_with_control(
+    let error = expect_semantic(prepare_geometry_batch_with_control(
         input,
         authored_node_count,
         0,
@@ -78,12 +82,57 @@ fn reject_geometry(
     error
 }
 
+fn reject_nonfinite_geometry(input: GeometryAuthoringBatch<'_>) -> NonFiniteGeometryValue {
+    struct BuildControl;
+
+    impl TypedStorageBuildControl for BuildControl {
+        type Error = std::convert::Infallible;
+
+        fn run_unit<R>(&mut self, action: impl FnOnce() -> R) -> Result<R, Self::Error> {
+            Ok(action())
+        }
+
+        fn run_string_unit<R>(&mut self, action: impl FnOnce() -> R) -> Result<R, Self::Error> {
+            Ok(action())
+        }
+    }
+
+    let mut control = TestControl::default();
+    let geometry = prepare_geometry_batch_with_control(
+        input,
+        0,
+        0,
+        SceneValidationLimits::default(),
+        &mut control,
+    )
+    .expect("ordinary nonfinite values must pass structural preparation");
+    let nodes = super::validate(
+        Presence::Present(&[]),
+        &[],
+        SceneValidationLimits::default(),
+        &mut control,
+    )
+    .expect("empty node preparation");
+    let error = match GeometryStoragePlan::new(&geometry)
+        .expect("prepared geometry capacity plan")
+        .build(&geometry, &nodes, BuildControl)
+    {
+        Err(GeometryStorageBuildError::NonFinite(error)) => error,
+        Err(error) => panic!("expected nonfinite write rejection, got {error:?}"),
+        Ok(_) => panic!("expected nonfinite write rejection"),
+    };
+    drop((geometry, nodes));
+    assert_eq!(control.live.get(), 0);
+    assert_eq!(control.current_bytes.get(), 0);
+    error
+}
+
 #[test]
 fn empty_geometry_charges_its_initialized_header_at_the_exact_limit() {
     let expected = expected_geometry_bytes([0; 4], [0; 4], 0);
     let mut control = TestControl::default();
     let limits = SceneValidationLimits::default().with_max_canonical_bytes(expected);
-    let batch = validate_geometry_batch_with_control(
+    let batch = prepare_geometry_batch_with_control(
         GeometryAuthoringBatch::empty(),
         0,
         0,
@@ -97,7 +146,7 @@ fn empty_geometry_charges_its_initialized_header_at_the_exact_limit() {
     drop(batch);
     assert_eq!(control.live.get(), 0);
     assert!(matches!(
-        expect_semantic(validate_geometry_batch_with_control(
+        expect_semantic(prepare_geometry_batch_with_control(
             GeometryAuthoringBatch::empty(),
             0,
             0,
@@ -159,7 +208,7 @@ fn f64_custom_attributes_charge_eight_bytes_per_scalar_and_exact_work() {
     )];
     let input = GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &[]);
     let mut control = TestControl::default();
-    let validated = validate_geometry_batch_with_control(
+    let validated = prepare_geometry_batch_with_control(
         input,
         0,
         0,
@@ -168,7 +217,7 @@ fn f64_custom_attributes_charge_eight_bytes_per_scalar_and_exact_work() {
     )
     .expect("finite F64 values must retain their own scalar type");
     let mut f32_control = TestControl::default();
-    let f32_validated = validate_geometry_batch_with_control(
+    let f32_validated = prepare_geometry_batch_with_control(
         GeometryAuthoringBatch::new(&meshes, &primitives, &f32_attributes, &[]),
         0,
         0,
@@ -188,8 +237,10 @@ fn f64_custom_attributes_charge_eight_bytes_per_scalar_and_exact_work() {
         validated.canonical_bytes(),
         f32_validated.canonical_bytes() + 6 * 4
     );
-    assert_eq!(validated.validation_work(), f32_validated.validation_work());
-    assert_eq!(control.work, validated.validation_work());
+    assert_eq!(validated.validation_work(), 28);
+    assert_eq!(f32_validated.validation_work(), 28);
+    assert_eq!(control.work, 28);
+    assert_eq!(f32_control.work, 28);
     let primitive = validated.primitive(0).unwrap();
     let attribute = primitive.attribute(1).unwrap();
     assert_eq!(attribute.scalar_kind(), GeometryAttributeScalarKind::F64);
@@ -202,7 +253,7 @@ fn f64_custom_attributes_charge_eight_bytes_per_scalar_and_exact_work() {
 
     let mut limited = TestControl::default();
     assert!(matches!(
-        expect_semantic(validate_geometry_batch_with_control(
+        expect_semantic(prepare_geometry_batch_with_control(
             input, 0, 0,
             SceneValidationLimits::default().with_max_canonical_bytes(validated.canonical_bytes() - 1),
             &mut limited,
@@ -215,7 +266,7 @@ fn f64_custom_attributes_charge_eight_bytes_per_scalar_and_exact_work() {
 }
 
 #[test]
-fn f64_custom_attributes_reject_non_finite_values_in_every_primitive_domain() {
+fn f64_custom_attributes_reject_nonfinite_at_checked_writes_in_every_primitive_domain() {
     let positions = [0.0_f32; 9];
     let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
     let primitives = [GeometryPrimitiveAuthoring::new(
@@ -246,16 +297,18 @@ fn f64_custom_attributes_reject_non_finite_values_in_every_primitive_domain() {
                     &values,
                 ),
             ];
-            assert!(matches!(
-                reject_geometry(
-                    GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &[]),
-                    0
-                ),
-                GeometryAuthoringSemanticError::NonFiniteAttributeValue {
+            assert_eq!(
+                reject_nonfinite_geometry(GeometryAuthoringBatch::new(
+                    &meshes,
+                    &primitives,
+                    &attributes,
+                    &[],
+                )),
+                NonFiniteGeometryValue {
                     attribute: 1,
-                    scalar: 2
+                    scalar: 2,
                 }
-            ));
+            );
         }
     }
 }
@@ -388,7 +441,7 @@ fn compiled_geometry_facts_do_not_borrow_authored_storage() {
             LogicalMeshLocalId::new(0),
         )];
 
-        validate_geometry_batch_with_control(
+        prepare_geometry_batch_with_control(
             GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &instances),
             1,
             0,
@@ -462,7 +515,7 @@ fn obj_corner_domains_preserve_shared_positions_without_tuple_vertex_expansion()
     let input = GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &instances);
     let mut control = TestControl::default();
 
-    let validated = validate_geometry_batch_with_control(
+    let validated = prepare_geometry_batch_with_control(
         input,
         1,
         0,
@@ -483,8 +536,8 @@ fn obj_corner_domains_preserve_shared_positions_without_tuple_vertex_expansion()
         validated.canonical_bytes(),
         expected_geometry_bytes([1, 1, 4, 1], [39, 0, 8, 0], 0)
     );
-    assert_eq!(validated.validation_work(), 71);
-    assert_eq!(control.work, 71);
+    assert_eq!(validated.validation_work(), 62);
+    assert_eq!(control.work, 62);
 
     let primitive = validated
         .primitive(0)
@@ -570,7 +623,7 @@ fn custom_dense_and_sparse_i32_attributes_preserve_signed_values_and_exact_accou
     let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
     let mut control = TestControl::default();
 
-    let validated = validate_geometry_batch_with_control(
+    let validated = prepare_geometry_batch_with_control(
         GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &[]),
         0,
         0,
@@ -591,8 +644,15 @@ fn custom_dense_and_sparse_i32_attributes_preserve_signed_values_and_exact_accou
         validated.canonical_bytes(),
         expected_geometry_bytes([1, 1, 3, 0], [9, 0, 1, 5], 33)
     );
-    assert_eq!(validated.validation_work(), 64);
-    assert_eq!(control.work, 64);
+    assert_eq!(validated.validation_work(), 55);
+    assert_eq!(control.work, 55);
+    assert_eq!(
+        GeometryStoragePlan::new(&validated)
+            .unwrap()
+            .validation_work()
+            .unwrap(),
+        7
+    );
 
     let primitive = validated.primitive(0).expect("validated primitive");
     let dense = primitive.attribute(1).expect("dense I32 attribute");
@@ -660,7 +720,7 @@ fn sparse_integer_scalar_count_keeps_defaults_and_excludes_indices() {
     )];
     let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
     let mut control = TestControl::default();
-    let validated = validate_geometry_batch_with_control(
+    let validated = prepare_geometry_batch_with_control(
         GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &[]),
         0,
         0,
@@ -678,7 +738,8 @@ fn sparse_integer_scalar_count_keeps_defaults_and_excludes_indices() {
         validated.canonical_bytes(),
         expected_geometry_bytes([1, 1, 3, 0], [9, 0, 6, 4], 10)
     );
-    assert_eq!(validated.validation_work(), control.work);
+    assert_eq!(validated.validation_work(), 35);
+    assert_eq!(control.work, 35);
     let primitive = validated.primitive(0).expect("validated integer primitive");
     let default_only = primitive.attribute(1).expect("default-only U32 attribute");
     assert_eq!(default_only.element_count(), 3);
@@ -709,7 +770,7 @@ fn absent_and_present_empty_index_streams_remain_distinct() {
         AuthoringRange::new(0, 1),
     )];
     let mut absent_control = TestControl::default();
-    let absent = validate_geometry_batch_with_control(
+    let absent = prepare_geometry_batch_with_control(
         GeometryAuthoringBatch::new(&logical_meshes, &absent_primitives, &attributes, &[]),
         0,
         0,
@@ -729,7 +790,7 @@ fn absent_and_present_empty_index_streams_remain_distinct() {
         AuthoringRange::new(0, 1),
     )];
     let mut empty_control = TestControl::default();
-    let present_empty = validate_geometry_batch_with_control(
+    let present_empty = prepare_geometry_batch_with_control(
         GeometryAuthoringBatch::new(&logical_meshes, &empty_primitives, &attributes, &[]),
         0,
         0,
@@ -783,7 +844,7 @@ fn sparse_attribute_counts_indices_values_and_default_without_dense_expansion() 
     let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
     let mut control = TestControl::default();
 
-    let validated = validate_geometry_batch_with_control(
+    let validated = prepare_geometry_batch_with_control(
         GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &[]),
         0,
         0,
@@ -829,7 +890,7 @@ fn nonempty_vertex_domain_requires_position() {
     let mut control = TestControl::default();
 
     assert!(matches!(
-        expect_semantic(validate_geometry_batch_with_control(
+        expect_semantic(prepare_geometry_batch_with_control(
             GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &[]),
             0,
             0,
@@ -910,7 +971,7 @@ fn flat_ownership_and_cross_table_references_are_exact() {
                 AuthoringRange::new(0, 1),
             )];
             let mut control = TestControl::default();
-            let Err(failure) = validate_geometry_batch_with_control(
+            let Err(failure) = prepare_geometry_batch_with_control(
                 GeometryAuthoringBatch::new(&valid_mesh, &primitives, &attributes, &[]),
                 0,
                 1,
@@ -928,7 +989,7 @@ fn flat_ownership_and_cross_table_references_are_exact() {
     }
 
     let mut material_control = TestControl::default();
-    let material_geometry = validate_geometry_batch_with_control(
+    let material_geometry = prepare_geometry_batch_with_control(
         GeometryAuthoringBatch::new(&valid_mesh, &unknown_material, &attributes, &[]),
         0,
         1,
@@ -980,7 +1041,7 @@ fn flat_ownership_and_cross_table_references_are_exact() {
 }
 
 #[test]
-fn malformed_indices_topology_projection_and_floats_are_rejected() {
+fn malformed_indices_topology_and_projection_are_rejected_during_preparation() {
     let positions = [0.0_f32, 0.0, 0.0];
     let position = [GeometryAttributeAuthoring::f32(
         AttributeSemantic::Position,
@@ -1066,31 +1127,200 @@ fn malformed_indices_topology_projection_and_floats_are_rejected() {
             source_count: 1,
         }
     ));
+}
 
-    let non_finite = [f32::NAN, 0.0, 0.0];
-    let invalid_position = [GeometryAttributeAuthoring::f32(
-        AttributeSemantic::Position,
-        AttributeDomain::Vertex,
-        3,
-        &non_finite,
-        Presence::Absent,
-    )];
+#[test]
+fn ordinary_f32_dense_sparse_values_and_defaults_reject_at_checked_writes() {
+    let mesh = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
     let points = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::Points,
         Presence::Absent,
         crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 1),
     )];
-    assert!(matches!(
-        reject_geometry(
-            GeometryAuthoringBatch::new(&mesh, &points, &invalid_position, &[]),
-            0,
-        ),
-        GeometryAuthoringSemanticError::NonFiniteAttributeValue {
-            attribute: 0,
-            scalar: 0,
+    for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        for location in 0..5 {
+            let mut values = [0.0_f32; 3];
+            let mut default = [0.0_f32; 3];
+            if location < 2 {
+                values[0] = invalid;
+            } else {
+                default[0] = invalid;
+            }
+            let attributes = [match location {
+                0 => GeometryAttributeAuthoring::f32(
+                    AttributeSemantic::Position,
+                    AttributeDomain::Vertex,
+                    3,
+                    &values,
+                    Presence::Absent,
+                ),
+                1 | 2 => GeometryAttributeAuthoring::sparse_f32(
+                    AttributeSemantic::Position,
+                    AttributeDomain::Vertex,
+                    3,
+                    1,
+                    &[0],
+                    &values,
+                    &default,
+                ),
+                _ => GeometryAttributeAuthoring::sparse_f32(
+                    AttributeSemantic::Position,
+                    AttributeDomain::Vertex,
+                    3,
+                    if location == 3 { 0 } else { u32::MAX },
+                    &[],
+                    &[],
+                    &default,
+                ),
+            }];
+            assert_eq!(
+                reject_nonfinite_geometry(GeometryAuthoringBatch::new(
+                    &mesh,
+                    &points,
+                    &attributes,
+                    &[],
+                )),
+                NonFiniteGeometryValue {
+                    attribute: 0,
+                    scalar: if location == 2 { values.len() } else { 0 },
+                }
+            );
         }
-    ));
+    }
+}
+
+#[test]
+fn projected_f32_checks_unselected_source_values_and_keeps_source_coordinates() {
+    let positions = [0.0_f32; 9];
+    let projection = [0_u32; 3];
+    let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
+    let primitives = [GeometryPrimitiveAuthoring::new(
+        GeometryTopologyAuthoring::TriangleList,
+        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
+        AuthoringRange::new(0, 2),
+    )];
+    for unused in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1.0] {
+        let source = [0.0, 0.0, 1.0, unused, 0.0, 0.0];
+        let attributes = [
+            GeometryAttributeAuthoring::f32(
+                AttributeSemantic::Position,
+                AttributeDomain::Vertex,
+                3,
+                &positions,
+                Presence::Absent,
+            ),
+            GeometryAttributeAuthoring::f32(
+                AttributeSemantic::Normal,
+                AttributeDomain::Corner,
+                3,
+                &source,
+                Presence::Present(&projection),
+            ),
+        ];
+        let mut control = TestControl::default();
+        let result = prepare_geometry_batch_with_control(
+            GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &[]),
+            0,
+            0,
+            SceneValidationLimits::default().with_max_work(26),
+            &mut control,
+        );
+        if unused.is_finite() {
+            let batch = result.expect("finite unselected source values must prepare");
+            assert_eq!(batch.validation_work(), 26);
+            assert_eq!(control.work, 26);
+            assert_eq!(batch.f32_scalar_count(), 18);
+            assert_eq!(batch.semantic_cell_count(), 18);
+            assert_eq!(
+                batch.canonical_bytes(),
+                expected_geometry_bytes([1, 1, 2, 0], [18, 0, 0, 0], 0)
+            );
+            let normal = batch.attribute(1).unwrap();
+            assert_eq!(normal.source_element_count(), 2);
+            assert_eq!(normal.element_count(), 3);
+            assert_eq!(normal.canonical_scalar_count(), 9);
+            drop(batch);
+        } else {
+            assert!(matches!(
+                expect_semantic(result),
+                GeometryAuthoringSemanticError::NonFiniteAttributeValue {
+                    attribute: 1,
+                    scalar: 3,
+                }
+            ));
+            assert_eq!(control.work, 20);
+            assert_eq!(
+                control.last_work(),
+                Some(crate::SceneValidationWork::PayloadCell)
+            );
+        }
+        assert_eq!(control.live.get(), 0);
+        assert_eq!(control.current_bytes.get(), 0);
+    }
+}
+
+#[test]
+fn present_empty_projection_checks_its_entire_f32_source_without_retaining_cells() {
+    let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
+    let primitives = [GeometryPrimitiveAuthoring::new(
+        GeometryTopologyAuthoring::Points,
+        Presence::Absent,
+        crate::MaterialAssignment::Unspecified,
+        AuthoringRange::new(0, 1),
+    )];
+    for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1.0] {
+        let source = [value, 0.0, 0.0];
+        let attributes = [GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Normal,
+            AttributeDomain::Corner,
+            3,
+            &source,
+            Presence::Present(&[]),
+        )];
+        let mut control = TestControl::default();
+        let result = prepare_geometry_batch_with_control(
+            GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &[]),
+            0,
+            0,
+            SceneValidationLimits::default().with_max_work(16),
+            &mut control,
+        );
+        if value.is_finite() {
+            let batch = result.expect("finite source with an empty projection must prepare");
+            assert_eq!(batch.validation_work(), 16);
+            assert_eq!(control.work, 16);
+            assert_eq!(batch.f32_scalar_count(), 0);
+            assert_eq!(batch.semantic_cell_count(), 0);
+            assert_eq!(batch.payload_block_count(), 0);
+            assert_eq!(
+                batch.canonical_bytes(),
+                expected_geometry_bytes([1, 1, 1, 0], [0; 4], 0)
+            );
+            let normal = batch.attribute(0).unwrap();
+            assert_eq!(normal.source_element_count(), 1);
+            assert_eq!(normal.element_count(), 0);
+            assert_eq!(normal.canonical_scalar_count(), 0);
+            assert_eq!(batch.primitive(0).unwrap().corner_count(), 0);
+            drop(batch);
+        } else {
+            assert!(matches!(
+                expect_semantic(result),
+                GeometryAuthoringSemanticError::NonFiniteAttributeValue {
+                    attribute: 0,
+                    scalar: 0,
+                }
+            ));
+            assert_eq!(control.work, 13);
+            assert_eq!(
+                control.last_work(),
+                Some(crate::SceneValidationWork::PayloadCell)
+            );
+        }
+        assert_eq!(control.live.get(), 0);
+        assert_eq!(control.current_bytes.get(), 0);
+    }
 }
 
 #[test]
@@ -1221,7 +1451,7 @@ fn geometry_limits_are_typed_and_fail_without_leaking_scratch() {
     for (limits, expected_limit) in cases {
         let mut control = TestControl::default();
         assert!(matches!(
-            expect_semantic(validate_geometry_batch_with_control(
+            expect_semantic(prepare_geometry_batch_with_control(
                 input,
                 0,
                 0,
@@ -1255,7 +1485,7 @@ fn zero_work_rejects_before_geometry_scratch_allocation() {
     let mut control = TestControl::default();
 
     assert!(matches!(
-        expect_semantic(validate_geometry_batch_with_control(
+        expect_semantic(prepare_geometry_batch_with_control(
             GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &[]),
             0,
             0,
@@ -1296,7 +1526,7 @@ fn empty_primitive_validation_polls_with_bounded_scratch() {
     };
 
     assert!(matches!(
-        validate_geometry_batch_with_control(
+        prepare_geometry_batch_with_control(
             GeometryAuthoringBatch::new(&logical_meshes, &primitives, &[], &[]),
             0,
             0,
@@ -1345,7 +1575,7 @@ fn empty_attribute_semantic_pass_is_work_bounded_and_cancellable() {
     let input = || GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &[]);
 
     let mut baseline = TestControl::default();
-    let validated = validate_geometry_batch_with_control(
+    let validated = prepare_geometry_batch_with_control(
         input(),
         0,
         0,
@@ -1362,7 +1592,7 @@ fn empty_attribute_semantic_pass_is_work_bounded_and_cancellable() {
 
     let mut bounded = TestControl::default();
     assert!(matches!(
-        expect_semantic(validate_geometry_batch_with_control(
+        expect_semantic(prepare_geometry_batch_with_control(
             input(),
             0,
             0,
@@ -1389,7 +1619,7 @@ fn empty_attribute_semantic_pass_is_work_bounded_and_cancellable() {
         ..TestControl::default()
     };
     assert!(matches!(
-        validate_geometry_batch_with_control(
+        prepare_geometry_batch_with_control(
             input(),
             0,
             0,
@@ -1413,18 +1643,28 @@ fn empty_attribute_semantic_pass_is_work_bounded_and_cancellable() {
 #[test]
 fn periodic_cancellation_and_drop_order_cover_compiled_geometry_storage() {
     let positions = [0.0_f32; 900];
-    let attributes = [GeometryAttributeAuthoring::f32(
-        AttributeSemantic::Position,
-        AttributeDomain::Vertex,
-        3,
-        &positions,
-        Presence::Absent,
-    )];
+    let projection: [u32; 300] = std::array::from_fn(|index| index as u32);
+    let attributes = [
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Position,
+            AttributeDomain::Vertex,
+            3,
+            &positions,
+            Presence::Absent,
+        ),
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Normal,
+            AttributeDomain::Corner,
+            3,
+            &positions,
+            Presence::Present(&projection),
+        ),
+    ];
     let primitives = [GeometryPrimitiveAuthoring::new(
         GeometryTopologyAuthoring::Points,
         Presence::Absent,
         crate::MaterialAssignment::Unspecified,
-        AuthoringRange::new(0, 1),
+        AuthoringRange::new(0, 2),
     )];
     let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
     let input = GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &[]);
@@ -1434,7 +1674,7 @@ fn periodic_cancellation_and_drop_order_cover_compiled_geometry_storage() {
     };
 
     assert!(matches!(
-        validate_geometry_batch_with_control(
+        prepare_geometry_batch_with_control(
             input,
             0,
             0,
@@ -1445,6 +1685,12 @@ fn periodic_cancellation_and_drop_order_cover_compiled_geometry_storage() {
             TestControlError::Cancelled
         ))
     ));
+    assert_eq!(cancelled.polls, 2);
+    assert_eq!(cancelled.work, crate::SCENE_VALIDATION_POLL_INTERVAL);
+    assert_eq!(
+        cancelled.last_work(),
+        Some(crate::SceneValidationWork::PayloadCell)
+    );
     assert_eq!(cancelled.reserves, 1);
     assert_eq!(cancelled.live.get(), 0);
 
@@ -1453,7 +1699,7 @@ fn periodic_cancellation_and_drop_order_cover_compiled_geometry_storage() {
         ..TestControl::default()
     };
     assert!(matches!(
-        validate_geometry_batch_with_control(
+        prepare_geometry_batch_with_control(
             GeometryAuthoringBatch::new(&[], &[], &[], &[]),
             0,
             0,
@@ -1473,7 +1719,7 @@ fn periodic_cancellation_and_drop_order_cover_compiled_geometry_storage() {
         reservation_drop_stage: Some(Rc::clone(&stage)),
         ..TestControl::default()
     };
-    let mut validated = validate_geometry_batch_with_control(
+    let mut validated = prepare_geometry_batch_with_control(
         input,
         0,
         0,

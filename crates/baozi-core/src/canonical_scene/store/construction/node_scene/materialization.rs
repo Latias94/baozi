@@ -35,14 +35,14 @@ use crate::canonical_scene::store::production::{
     ProvenanceNodeAuthoring, ProvenanceOperationAuthoring, SpatialAuthoringBatch,
 };
 use crate::canonical_scene::store::production::{
-    AnimationTargetCatalog, CanonicalAuthoringControl, ProfileOwnerCatalog, SceneAuthoringBatch,
-    ScopedAuthoringControl, ValidatedAnimationBatch, ValidatedAppearanceBatch,
-    ValidatedDeformationBatch, ValidatedGeometryBatch, ValidatedNodeBatch, ValidatedProfileBatch,
-    ValidatedSpatialBatch, animation_limits_after_deformation, appearance_limits_after_nodes,
+    AnimationTargetCatalog, CanonicalAuthoringControl, PreparedGeometryBatch, ProfileOwnerCatalog,
+    SceneAuthoringBatch, ScopedAuthoringControl, ValidatedAnimationBatch, ValidatedAppearanceBatch,
+    ValidatedDeformationBatch, ValidatedNodeBatch, ValidatedProfileBatch, ValidatedSpatialBatch,
+    animation_limits_after_deformation, appearance_limits_after_nodes,
     deformation_limits_after_geometry, geometry_limits_after_appearance, node_limits_after_spatial,
-    profile_limits_after_animation, scene_input_terminal_attribution_slots,
-    validate_animation_batch_with_control, validate_appearance_batch_with_control,
-    validate_deformation_batch_with_control, validate_geometry_batch_with_control,
+    prepare_geometry_batch_with_control, profile_limits_after_animation,
+    scene_input_terminal_attribution_slots, validate_animation_batch_with_control,
+    validate_appearance_batch_with_control, validate_deformation_batch_with_control,
     validate_node_batch_with_control, validate_profile_batch_with_control,
     validate_scene_aggregate, validate_spatial_batch_with_control,
 };
@@ -900,7 +900,7 @@ where
     .map_err(NodeSceneConstructionRejection::AppearanceAuthoring)?;
     let geometry_limits = geometry_limits_after_appearance(&appearance, appearance_limits)
         .map_err(NodeSceneConstructionRejection::Aggregate)?;
-    let geometry = validate_geometry_batch_with_control(
+    let geometry = prepare_geometry_batch_with_control(
         input.geometry(),
         nodes.authored_node_count(),
         appearance.material_count(),
@@ -995,7 +995,7 @@ struct SceneStorageBatches<'input, R> {
     profile: ValidatedProfileBatch<'input, R>,
     animations: ValidatedAnimationBatch<'input, R>,
     deformation: ValidatedDeformationBatch<'input, R>,
-    geometry: ValidatedGeometryBatch<'input, R>,
+    geometry: PreparedGeometryBatch<'input, R>,
     appearance: ValidatedAppearanceBatch<'input, R>,
     nodes: ValidatedNodeBatch<'input, R>,
     spatial: ValidatedSpatialBatch<'input, R>,
@@ -1440,14 +1440,32 @@ where
         rows: appearance_rows,
         payloads: appearance_payloads,
     };
-    let geometry = materialize!(retain_geometry(
-        &mut lane,
-        plans.geometry,
-        &batches.geometry,
-        &batches.nodes,
-        #[cfg(test)]
-        &mut faults,
-    ));
+    let geometry =
+        match retain_geometry(&mut lane, plans.geometry, &batches.geometry, &batches.nodes) {
+            Ok(geometry) => geometry,
+            Err(error) => {
+                use crate::canonical_scene::store::production::{
+                    GeometryAuthoringFailure, GeometryAuthoringSemanticError,
+                };
+                let rejection = match error {
+                    CanonicalStorageBuildError::Runtime(cause) => {
+                        NodeSceneConstructionRejection::Materialization(cause)
+                    }
+                    CanonicalStorageBuildError::Rejected(value) => {
+                        NodeSceneConstructionRejection::GeometryAuthoring(
+                            GeometryAuthoringFailure::Semantic(
+                                GeometryAuthoringSemanticError::NonFiniteAttributeValue {
+                                    attribute: value.attribute,
+                                    scalar: value.scalar,
+                                },
+                            ),
+                        )
+                    }
+                };
+                let stable_code = rejection.stable_code();
+                return lane.reject(map_rejection(rejection), stable_code);
+            }
+        };
     let deformation_capacities = materialize!(
         plans
             .deformation

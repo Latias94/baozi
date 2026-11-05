@@ -24,7 +24,7 @@ use super::super::input::deformation::{
 };
 use super::super::input::geometry::AuthoringRange;
 use super::ValidatedNodeBatch;
-use super::geometry::ValidatedGeometryBatch;
+use super::geometry::PreparedGeometryBatch;
 
 const MORPH_DELTA_LANES: u32 = 3;
 const INVERSE_BIND_SCALARS: u32 = 16;
@@ -1235,7 +1235,7 @@ pub(in crate::canonical_scene::store) fn validate_deformation_batch_with_control
 >(
     input: DeformationAuthoringBatch<'input>,
     nodes: &ValidatedNodeBatch<'_, NR>,
-    geometry: &ValidatedGeometryBatch<'_, GR>,
+    geometry: &PreparedGeometryBatch<'_, GR>,
     limits: SceneValidationLimits,
     control: &mut C,
 ) -> Result<ValidatedDeformationBatch<'input, C::Reservation>, DeformationAuthoringFailure<C::Error>>
@@ -1248,7 +1248,7 @@ where
 fn validate_deformation_batch_inner<'input, NR, GR, C>(
     input: DeformationAuthoringBatch<'input>,
     nodes: &ValidatedNodeBatch<'_, NR>,
-    geometry: &ValidatedGeometryBatch<'_, GR>,
+    geometry: &PreparedGeometryBatch<'_, GR>,
     limits: SceneValidationLimits,
     control: &mut C,
 ) -> Result<ValidatedDeformationBatch<'input, C::Reservation>, DeformationAuthoringFailure<C::Error>>
@@ -1923,7 +1923,7 @@ where
 #[allow(clippy::too_many_arguments)]
 fn validate_primitives<C, GR>(
     input: DeformationAuthoringBatch<'_>,
-    geometry: &ValidatedGeometryBatch<'_, GR>,
+    geometry: &PreparedGeometryBatch<'_, GR>,
     influence_row_offset_count: &mut u32,
     influence_count: &mut u32,
     morph_value_count: &mut u32,
@@ -2497,7 +2497,7 @@ where
 
 fn validate_mesh_instances<C, GR>(
     input: DeformationAuthoringBatch<'_>,
-    geometry: &ValidatedGeometryBatch<'_, GR>,
+    geometry: &PreparedGeometryBatch<'_, GR>,
     morph_weight_cursor: &mut u32,
     storage: &mut DeformationValidationScratch<C::Reservation>,
     context: &mut DeformationValidationContext<'_, C>,

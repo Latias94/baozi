@@ -4,7 +4,7 @@ use super::*;
 
 pub(super) enum Mode<'a> {
     Count,
-    Build(&'a mut GeometryStorage),
+    Build(&'a mut GeometryStorage, &'a [CapacityPlan; 9]),
     Compare(&'a GeometryStorage),
 }
 
@@ -158,6 +158,23 @@ impl<'a, C: TypedStorageBuildControl> Writer<'a, C> {
 
 macro_rules! emit {
     ($method:ident, $field:ident, $pool:expr, $ty:ty, $same:expr) => {
+        emit!(
+            $method,
+            $field,
+            $pool,
+            $ty,
+            $same,
+            |values: &mut Vec<$ty>, value, _| {
+                if values.len() == values.capacity() {
+                    false
+                } else {
+                    values.push(value);
+                    true
+                }
+            }
+        );
+    };
+    ($method:ident, $field:ident, $pool:expr, $ty:ty, $same:expr, $write:expr) => {
         impl<C: TypedStorageBuildControl> Writer<'_, C> {
             pub(super) fn $method(&mut self, value: $ty) -> EditResult<usize, C::Error> {
                 let index = self.counts[$pool];
@@ -168,13 +185,8 @@ macro_rules! emit {
                     .control
                     .run_unit(|| match mode {
                         Mode::Count => true,
-                        Mode::Build(output) => {
-                            if output.$field.len() == output.$field.capacity() {
-                                false
-                            } else {
-                                output.$field.push(value);
-                                true
-                            }
+                        Mode::Build(output, capacities) => {
+                            ($write)(&mut output.$field, value, capacities[$pool])
                         }
                         Mode::Compare(output) => {
                             let index = if $pool < 4 {
@@ -240,10 +252,22 @@ emit!(
     |a: StoredMeshInstance, b: StoredMeshInstance| a.owner_node == b.owner_node
         && a.logical_mesh == b.logical_mesh
 );
-emit!(f32, f32_values, 5, f32, |a: f32, b: f32| a.to_bits()
-    == b.to_bits());
-emit!(f64, f64_values, 6, f64, |a: f64, b: f64| a.to_bits()
-    == b.to_bits());
+emit!(
+    f32,
+    f32_values,
+    5,
+    f32,
+    |a: f32, b: f32| a.to_bits() == b.to_bits(),
+    |values: &mut FiniteScalarPool<f32>, value, plan| values.try_push(value, plan).is_ok()
+);
+emit!(
+    f64,
+    f64_values,
+    6,
+    f64,
+    |a: f64, b: f64| a.to_bits() == b.to_bits(),
+    |values: &mut FiniteScalarPool<f64>, value, plan| values.try_push(value, plan).is_ok()
+);
 emit!(u32, u32_values, 7, u32, |a, b| a == b);
 emit!(i32, i32_values, 8, i32, |a, b| a == b);
 
@@ -268,7 +292,7 @@ impl<C: TypedStorageBuildControl> Writer<'_, C> {
             .control
             .run_string_unit(|| match mode {
                 Mode::Count => true,
-                Mode::Build(output) => {
+                Mode::Build(output, _) => {
                     if output.names.len() == output.names.capacity() {
                         false
                     } else {

@@ -1,4 +1,5 @@
 use super::*;
+use crate::canonical_scene::store::typed_storage::finite::{FiniteScalar, FiniteScalarPool};
 use crate::canonical_scene::store::typed_storage::{
     StoredLogicalMeshIndex, StoredNodeIndex, TextRange,
 };
@@ -46,6 +47,13 @@ fn values<T: Copy>(pool: &mut Vec<T>, values: &[T]) -> TableRange<T> {
     pool.extend_from_slice(values);
     TableRange::new(start, values.len())
 }
+fn float_values<T: FiniteScalar>(pool: &mut FiniteScalarPool<T>, values: &[T]) -> TableRange<T> {
+    let start = pool.len();
+    let mut scalars = pool.to_vec();
+    scalars.extend_from_slice(values);
+    *pool = FiniteScalarPool::fixture(&scalars);
+    TableRange::new(start, values.len())
+}
 fn empty() -> GeometryStorage {
     GeometryStorage {
         integer_attribute_scalar_count: 0,
@@ -54,8 +62,8 @@ fn empty() -> GeometryStorage {
         attributes: Vec::new(),
         mesh_instances: Vec::new(),
         names: Vec::new(),
-        f32_values: Vec::new(),
-        f64_values: Vec::new(),
+        f32_values: FiniteScalarPool::fixture(&[]),
+        f64_values: FiniteScalarPool::fixture(&[]),
         u32_values: Vec::new(),
         i32_values: Vec::new(),
     }
@@ -144,7 +152,7 @@ fn triangles(indexed: bool) -> GeometryStorage {
         [13.0, 14.0, 15.0],
         [16.0, 17.0, 18.0],
     ];
-    let positions = values(
+    let positions = float_values(
         &mut storage.f32_values,
         positions[..vertices as usize].as_flattened(),
     );
@@ -156,7 +164,7 @@ fn triangles(indexed: bool) -> GeometryStorage {
         vertices,
         StoredAttributePayload::DenseF32(positions),
     );
-    let normals = values(
+    let normals = float_values(
         &mut storage.f32_values,
         vec![[2.0, 3.0, 5.0]; vertices as usize].as_flattened(),
     );
@@ -170,11 +178,11 @@ fn triangles(indexed: bool) -> GeometryStorage {
     );
     let payload = StoredAttributePayload::SparseF32 {
         indices: values(&mut storage.u32_values, &[1, 2, 4]),
-        values: values(
+        values: float_values(
             &mut storage.f32_values,
             &[2.0, 3.0, 5.0, 7.0, 11.0, 13.0, 2.0, 3.0, 5.0],
         ),
-        default: values(&mut storage.f32_values, &[2.0, 3.0, 5.0]),
+        default: float_values(&mut storage.f32_values, &[2.0, 3.0, 5.0]),
     };
     attribute(
         &mut storage,
@@ -184,7 +192,7 @@ fn triangles(indexed: bool) -> GeometryStorage {
         6,
         payload,
     );
-    let tangents = values(
+    let tangents = float_values(
         &mut storage.f32_values,
         vec![[2.0, 3.0, 5.0, 1.0]; vertices as usize].as_flattened(),
     );
@@ -198,13 +206,13 @@ fn triangles(indexed: bool) -> GeometryStorage {
     );
     let payload = StoredAttributePayload::SparseF32 {
         indices: values(&mut storage.u32_values, &[1, 2, 5]),
-        values: values(
+        values: float_values(
             &mut storage.f32_values,
             &[
                 2.0, 3.0, 5.0, -0.0, 7.0, 11.0, 13.0, -1.0, 17.0, 19.0, 23.0, 1.0,
             ],
         ),
-        default: values(&mut storage.f32_values, &[2.0, 3.0, 5.0, -0.0]),
+        default: float_values(&mut storage.f32_values, &[2.0, 3.0, 5.0, -0.0]),
     };
     attribute(
         &mut storage,
@@ -214,7 +222,7 @@ fn triangles(indexed: bool) -> GeometryStorage {
         6,
         payload,
     );
-    let uv = values(
+    let uv = float_values(
         &mut storage.f32_values,
         &[
             0.0, 10.0, 1.0, 11.0, 2.0, 12.0, 3.0, 13.0, 4.0, 14.0, 5.0, 15.0,
@@ -228,7 +236,7 @@ fn triangles(indexed: bool) -> GeometryStorage {
         6,
         StoredAttributePayload::DenseF32(uv),
     );
-    let color = values(&mut storage.f32_values, &[0.0, -0.0, 1.0, 0.5, 1.0, -0.0]);
+    let color = float_values(&mut storage.f32_values, &[0.0, -0.0, 1.0, 0.5, 1.0, -0.0]);
     attribute(
         &mut storage,
         StoredAttributeSemantic::Color(0),
@@ -258,7 +266,7 @@ fn triangles(indexed: bool) -> GeometryStorage {
 
 fn opaque() -> GeometryStorage {
     let mut storage = empty();
-    let positions = values(&mut storage.f32_values, &[0.0; 18]);
+    let positions = float_values(&mut storage.f32_values, &[0.0; 18]);
     attribute(
         &mut storage,
         StoredAttributeSemantic::Position,
@@ -272,11 +280,11 @@ fn opaque() -> GeometryStorage {
         let semantic =
             StoredAttributeSemantic::Custom(TextRange(values(&mut storage.names, &name)));
         let payload = match kind {
-            0 => StoredAttributePayload::DenseF32(values(
+            0 => StoredAttributePayload::DenseF32(float_values(
                 &mut storage.f32_values,
                 &[-0.0, f32::from_bits(1), f32::MAX, -1.0, 2.0, 3.0],
             )),
-            1 => StoredAttributePayload::DenseF64(values(
+            1 => StoredAttributePayload::DenseF64(float_values(
                 &mut storage.f64_values,
                 &[f64::from_bits(1), -0.0, f64::MAX, -f64::MAX, 3.0, 4.0],
             )),
@@ -290,8 +298,8 @@ fn opaque() -> GeometryStorage {
             )),
             4 => StoredAttributePayload::SparseF32 {
                 indices: values(&mut storage.u32_values, &[1, 2, 5]),
-                values: values(&mut storage.f32_values, &[7.0, -0.0, 11.0, 13.0, 7.0, -0.0]),
-                default: values(&mut storage.f32_values, &[7.0, -0.0]),
+                values: float_values(&mut storage.f32_values, &[7.0, -0.0, 11.0, 13.0, 7.0, -0.0]),
+                default: float_values(&mut storage.f32_values, &[7.0, -0.0]),
             },
             5 => StoredAttributePayload::SparseU32 {
                 indices: values(&mut storage.u32_values, &[1, 2, 5]),
@@ -326,7 +334,7 @@ fn opaque() -> GeometryStorage {
 fn topology_fixture(topology: TopologyKind, empty_primitive: bool) -> GeometryStorage {
     let mut storage = empty();
     let corners = if empty_primitive { 0 } else { 4 };
-    let positions = values(&mut storage.f32_values, &vec![1.0; corners as usize * 3]);
+    let positions = float_values(&mut storage.f32_values, &vec![1.0; corners as usize * 3]);
     attribute(
         &mut storage,
         StoredAttributeSemantic::Position,
@@ -335,7 +343,7 @@ fn topology_fixture(topology: TopologyKind, empty_primitive: bool) -> GeometrySt
         corners,
         StoredAttributePayload::DenseF32(positions),
     );
-    let uv = values(&mut storage.f32_values, &vec![2.0; corners as usize * 2]);
+    let uv = float_values(&mut storage.f32_values, &vec![2.0; corners as usize * 2]);
     attribute(
         &mut storage,
         StoredAttributeSemantic::Texcoord(0),
@@ -397,7 +405,7 @@ fn assert_valid(storage: &GeometryStorage) -> u64 {
 #[test]
 fn default_only_integer_attributes_keep_values_without_validation_padding() {
     let mut source = empty();
-    let position = values(&mut source.f32_values, &[0.0; 9]);
+    let position = float_values(&mut source.f32_values, &[0.0; 9]);
     attribute(
         &mut source,
         StoredAttributeSemantic::Position,
@@ -429,8 +437,8 @@ fn default_only_integer_attributes_keep_values_without_validation_padding() {
         None,
     );
     assert_eq!(source.integer_attribute_scalar_count, 2);
-    assert_eq!(source.validation_work(), Some(16));
-    assert_eq!(assert_valid(&source), 16);
+    assert_eq!(source.validation_work(), Some(7));
+    assert_eq!(assert_valid(&source), 7);
 
     let plan =
         GeometrySpacePlan::try_new(&source, winding_only(), &mut Control::default()).unwrap();
@@ -451,9 +459,9 @@ fn default_only_integer_attributes_keep_values_without_validation_padding() {
     assert!(values.get(&output.u32_values).unwrap().is_empty());
     assert_eq!(default.get(&output.u32_values), Some(&[0, u32::MAX][..]));
     assert_eq!(output.u32_values.len(), 5);
-    assert_eq!(plan.validation_work(), 19);
-    assert_eq!(output.validation_work(), Some(19));
-    assert_eq!(assert_valid(&output), 19);
+    assert_eq!(plan.validation_work(), 10);
+    assert_eq!(output.validation_work(), Some(10));
+    assert_eq!(assert_valid(&output), 10);
 }
 
 #[test]
@@ -482,7 +490,7 @@ fn precision_contract_space_conversion_transports_f64_builtins_without_narrowing
             &[16_777_217.0, f64::from_bits(1)][..],
         ),
     ] {
-        let payload = StoredAttributePayload::DenseF64(values(&mut source.f64_values, tuple));
+        let payload = StoredAttributePayload::DenseF64(float_values(&mut source.f64_values, tuple));
         attribute(
             &mut source,
             semantic,
@@ -542,7 +550,8 @@ fn precision_contract_space_conversion_rejects_true_f64_overflow_and_underflow()
         ),
     ] {
         let mut source = empty();
-        let payload = StoredAttributePayload::DenseF64(values(&mut source.f64_values, &point));
+        let payload =
+            StoredAttributePayload::DenseF64(float_values(&mut source.f64_values, &point));
         attribute(
             &mut source,
             StoredAttributeSemantic::Position,
@@ -562,7 +571,7 @@ fn precision_contract_space_conversion_rejects_true_f64_overflow_and_underflow()
 #[test]
 fn precision_contract_sparse_f64_conversion_remaps_explicit_values_and_transforms_default() {
     let mut source = empty();
-    let positions = values(
+    let positions = float_values(
         &mut source.f64_values,
         &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
     );
@@ -577,11 +586,11 @@ fn precision_contract_sparse_f64_conversion_remaps_explicit_values_and_transform
     let next_one = f64::from_bits(1.0_f64.to_bits() + 1);
     let payload = StoredAttributePayload::SparseF64 {
         indices: values(&mut source.u32_values, &[1, 2]),
-        values: values(
+        values: float_values(
             &mut source.f64_values,
             &[next_one, -0.0, 2.0, 3.0, 0.0, f64::from_bits(1)],
         ),
-        default: values(&mut source.f64_values, &[-0.0, 1.0, f64::from_bits(1)]),
+        default: float_values(&mut source.f64_values, &[-0.0, 1.0, f64::from_bits(1)]),
     };
     attribute(
         &mut source,
@@ -816,7 +825,7 @@ fn indexed_and_nonindexed_reflection_preserve_vertex_identity_and_pair_all_corne
 #[test]
 fn mixed_primitive_packing_places_synthesized_indices_before_later_primitive_streams() {
     let mut source = empty();
-    let position = values(&mut source.f32_values, &[1.0; 9]);
+    let position = float_values(&mut source.f32_values, &[1.0; 9]);
     attribute(
         &mut source,
         StoredAttributeSemantic::Position,
@@ -839,7 +848,7 @@ fn mixed_primitive_packing_places_synthesized_indices_before_later_primitive_str
         3,
         payload,
     );
-    let position = values(&mut source.f32_values, &[2.0; 9]);
+    let position = float_values(&mut source.f32_values, &[2.0; 9]);
     attribute(
         &mut source,
         StoredAttributeSemantic::Position,
@@ -1123,7 +1132,9 @@ fn planning_rejects_custom_spatial_semantics_and_actual_dense_or_sparse_numeric_
         Err(GeometrySpacePlanError::CustomAttribute { attribute: 1 })
     ));
     let mut source = triangles(true);
-    source.f32_values[0] = f32::MAX;
+    let mut f32_values = source.f32_values.to_vec();
+    f32_values[0] = f32::MAX;
+    source.f32_values = FiniteScalarPool::fixture(&f32_values);
     assert!(matches!(
         GeometrySpacePlan::try_new(&source, reflected(), &mut Control::default()),
         Err(GeometrySpacePlanError::Numeric {
@@ -1131,7 +1142,8 @@ fn planning_rejects_custom_spatial_semantics_and_actual_dense_or_sparse_numeric_
             source: NumericConversionError::NonFiniteOutput
         })
     ));
-    source.f32_values[0] = f32::from_bits(1);
+    f32_values[0] = f32::from_bits(1);
+    source.f32_values = FiniteScalarPool::fixture(&f32_values);
     let half = conversion(Handedness::Right, 2.0, FrontFaceWinding::CounterClockwise);
     assert!(matches!(
         GeometrySpacePlan::try_new(&source, half, &mut Control::default()),
@@ -1143,8 +1155,8 @@ fn planning_rejects_custom_spatial_semantics_and_actual_dense_or_sparse_numeric_
     let mut source = empty();
     let payload = StoredAttributePayload::SparseF32 {
         indices: values(&mut source.u32_values, &[]),
-        values: values(&mut source.f32_values, &[]),
-        default: values(&mut source.f32_values, &[f32::MAX, 0.0, 0.0]),
+        values: float_values(&mut source.f32_values, &[]),
+        default: float_values(&mut source.f32_values, &[f32::MAX, 0.0, 0.0]),
     };
     attribute(
         &mut source,
@@ -1246,8 +1258,9 @@ fn central_correspondence_rejects_changed_bits_ranges_owner_fields_and_foreign_s
     let plan = GeometrySpacePlan::try_new(&source, reflected(), &mut Control::default()).unwrap();
     for fault in 0..10 {
         let mut output = plan.materialize(&mut Control::default()).unwrap();
+        let mut f32_values = output.f32_values.to_vec();
         match fault {
-            0 => output.f32_values[0] = -output.f32_values[0],
+            0 => f32_values[0] = -f32_values[0],
             1 => output.primitives[0].vertex_count += 1,
             2 => output.primitives[0].face_count += 1,
             3 => output.primitives[0].attributes = TableRange::new(1, source.attributes.len() - 1),
@@ -1270,10 +1283,11 @@ fn central_correspondence_rejects_changed_bits_ranges_owner_fields_and_foreign_s
                     panic!()
                 };
                 let w = default.start() + 3;
-                output.f32_values[w] = -output.f32_values[w];
+                f32_values[w] = -f32_values[w];
             }
             _ => output.u32_values[0] += 1,
         }
+        output.f32_values = FiniteScalarPool::fixture(&f32_values);
         assert_eq!(
             plan.validate_correspondence(&output, &mut Control::default()),
             Ok(false),
@@ -1281,7 +1295,9 @@ fn central_correspondence_rejects_changed_bits_ranges_owner_fields_and_foreign_s
         );
     }
     let mut foreign = triangles(true);
-    foreign.f32_values[0] = 23.0;
+    let mut f32_values = foreign.f32_values.to_vec();
+    f32_values[0] = 23.0;
+    foreign.f32_values = FiniteScalarPool::fixture(&f32_values);
     let other = GeometrySpacePlan::try_new(&foreign, reflected(), &mut Control::default()).unwrap();
     let foreign_output = other.materialize(&mut Control::default()).unwrap();
     assert_valid(&foreign_output);
@@ -1296,8 +1312,8 @@ fn sparse_vertex_positions_scale_explicit_values_and_default_without_remapping_v
     let mut source = empty();
     let payload = StoredAttributePayload::SparseF32 {
         indices: values(&mut source.u32_values, &[1]),
-        values: values(&mut source.f32_values, &[5.0, 7.0, 11.0]),
-        default: values(&mut source.f32_values, &[2.0, 3.0, 5.0]),
+        values: float_values(&mut source.f32_values, &[5.0, 7.0, 11.0]),
+        default: float_values(&mut source.f32_values, &[2.0, 3.0, 5.0]),
     };
     attribute(
         &mut source,
@@ -1366,8 +1382,8 @@ fn empty_geometry_and_zero_explicit_sparse_payloads_keep_presence_and_exact_work
     let mut source = empty();
     let payload = StoredAttributePayload::SparseF32 {
         indices: values(&mut source.u32_values, &[]),
-        values: values(&mut source.f32_values, &[]),
-        default: values(&mut source.f32_values, &[2.0, 3.0, 5.0]),
+        values: float_values(&mut source.f32_values, &[]),
+        default: float_values(&mut source.f32_values, &[2.0, 3.0, 5.0]),
     };
     attribute(
         &mut source,

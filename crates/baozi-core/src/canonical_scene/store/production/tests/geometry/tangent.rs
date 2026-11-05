@@ -45,7 +45,7 @@ fn vertex_and_corner_tangents_keep_independent_conventions_on_one_primitive() {
     )];
     let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
     let mut control = TestControl::default();
-    let batch = validate_geometry_batch_with_control(
+    let batch = prepare_geometry_batch_with_control(
         GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &[]),
         0,
         0,
@@ -53,6 +53,8 @@ fn vertex_and_corner_tangents_keep_independent_conventions_on_one_primitive() {
         &mut control,
     )
     .unwrap();
+    assert_eq!(batch.validation_work(), 21);
+    assert_eq!(control.work, 21);
     assert_eq!(batch.attribute(0).unwrap().tangent_conventions(), None);
     assert_eq!(
         batch.attribute(1).unwrap().tangent_conventions(),
@@ -106,15 +108,19 @@ fn tangent_schema_names_are_admitted_as_geometry_text_at_exact_limits() {
     let input = GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &[]);
     let canonical_bytes = expected_geometry_bytes([1, 1, 2, 0], [21, 0, 0, 0], schema_bytes);
     let cells = 21 + schema_bytes as u64;
+    let work = 17 + schema_bytes as u64;
     let limits = SceneValidationLimits::default()
         .with_max_canonical_bytes(canonical_bytes)
-        .with_max_payload_cells(cells);
+        .with_max_payload_cells(cells)
+        .with_max_work(work);
     let mut control = TestControl::default();
-    let batch = validate_geometry_batch_with_control(input, 0, 0, limits, &mut control).unwrap();
+    let batch = prepare_geometry_batch_with_control(input, 0, 0, limits, &mut control).unwrap();
     assert_eq!(batch.tangent_schema_name_byte_count(), schema_bytes as u32);
     assert_eq!(batch.attribute_semantic_name_byte_count(), 0);
     assert_eq!(batch.semantic_cell_count(), cells);
     assert_eq!(batch.canonical_bytes(), canonical_bytes);
+    assert_eq!(batch.validation_work(), work);
+    assert_eq!(control.work, work);
     drop(batch);
     for (limits, dimension) in [
         (
@@ -125,9 +131,10 @@ fn tangent_schema_names_are_admitted_as_geometry_text_at_exact_limits() {
             limits.with_max_canonical_bytes(canonical_bytes - 1),
             GeometryAuthoringLimit::CanonicalBytes,
         ),
+        (limits.with_max_work(work - 1), GeometryAuthoringLimit::Work),
     ] {
         assert!(matches!(
-            expect_semantic(validate_geometry_batch_with_control(input, 0, 0, limits, &mut control)),
+            expect_semantic(prepare_geometry_batch_with_control(input, 0, 0, limits, &mut control)),
             GeometryAuthoringSemanticError::LimitExceeded { limit, actual, maximum }
                 if limit == dimension && actual == maximum + 1
         ));

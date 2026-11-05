@@ -169,6 +169,7 @@ fn overflow<E>() -> TypedStorageBuildError<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::canonical_scene::store::typed_storage::finite::FiniteScalarPool;
     use crate::canonical_scene::store::typed_storage::validation::TypedStorageValidationControl;
     use crate::canonical_scene::store::typed_storage::{
         StoredAttributeSemantic, StoredLogicalMeshIndex, StoredNodeIndex, TextRange,
@@ -344,11 +345,11 @@ mod tests {
                 logical_mesh: StoredLogicalMeshIndex(0),
             }],
             names,
-            f32_values,
-            f64_values: vec![
+            f32_values: FiniteScalarPool::fixture(&f32_values),
+            f64_values: FiniteScalarPool::fixture(&[
                 1.0e200, -0.0, 2.0e200, 0.0, 3.0e200, -0.0, 4.0e200, 0.0, 5.0e200, -0.0, 6.0e200,
                 0.0, 7.0e200, -0.0,
-            ],
+            ]),
             u32_values: vec![1, 7, 0, 0, 3, 6, 41, 42, 4, 3, 0, 1, 2, 3, 0, 3, 4],
             i32_values: vec![0, -30, 60, 0],
         }
@@ -379,7 +380,9 @@ mod tests {
             Ok(true)
         );
         assert_eq!(validation.completed, plan.validation_work());
-        assert_eq!(validation.completed, 96);
+        // Surviving validation: 1 mesh + 2 * 2 primitive visits + 7 attributes
+        // + 1 instance + 14 index cells; the 69 float visits are gone.
+        assert_eq!(validation.completed, 27);
         assert_eq!(source.integer_attribute_scalar_count, 8);
         assert_eq!(output.integer_attribute_scalar_count, 10);
         assert_eq!(output.primitives[0].topology, TopologyKind::TriangleList);
@@ -518,10 +521,10 @@ mod tests {
             source.u32_values[index_range].copy_from_slice(source_indices);
             let value_start = source.f64_values.len();
             let value_count = source_indices.len() * 2;
-            source
-                .f64_values
-                .extend_from_slice(&tuples.as_flattened()[..value_count]);
-            source.f64_values.extend_from_slice(&tuples[0]);
+            let mut f64_values = source.f64_values.to_vec();
+            f64_values.extend_from_slice(&tuples.as_flattened()[..value_count]);
+            f64_values.extend_from_slice(&tuples[0]);
+            source.f64_values = FiniteScalarPool::fixture(&f64_values);
             source.attributes[row].domain = domain;
             source.attributes[row].lanes = 2;
             source.attributes[row].element_count = count;
@@ -596,7 +599,9 @@ mod tests {
             );
             for scalar in [values.start(), default.start()] {
                 let mut corrupted = plan.materialize(&mut Control::default()).unwrap();
-                corrupted.f64_values[scalar] = 0.0;
+                let mut f64_values = corrupted.f64_values.to_vec();
+                f64_values[scalar] = 0.0;
+                corrupted.f64_values = FiniteScalarPool::fixture(&f64_values);
                 assert_eq!(
                     plan.validate_correspondence(&corrupted, &mut Control::default()),
                     Ok(false)
@@ -715,8 +720,8 @@ mod tests {
             ],
             mesh_instances: vec![],
             names: [basis.as_bytes(), encoding.as_bytes()].concat(),
-            f32_values: vec![0.0; 28],
-            f64_values: vec![],
+            f32_values: FiniteScalarPool::fixture(&[0.0; 28]),
+            f64_values: FiniteScalarPool::fixture(&[]),
             u32_values: vec![4, 0, 1, 2, 3],
             i32_values: vec![],
         };

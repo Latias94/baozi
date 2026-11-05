@@ -9,8 +9,8 @@ use crate::canonical_scene::store::production::{
     LogicalMorphAuthoring, MeshInstanceDeformationAuthoring, MorphTargetDefinitionAuthoring,
     MorphTargetIdentity, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, NodeParent,
     PrimitiveDeformationAuthoring, PrimitiveMorphTargetAuthoring,
-    validate_animation_batch_with_control, validate_deformation_batch_with_control,
-    validate_geometry_batch_with_control, validate_node_batch_with_control,
+    prepare_geometry_batch_with_control, validate_animation_batch_with_control,
+    validate_deformation_batch_with_control, validate_node_batch_with_control,
 };
 use crate::entity::AuthoredTransform;
 use crate::{SceneValidationLimits, SceneValidationWork};
@@ -130,7 +130,7 @@ fn with_fixture<T>(action: impl FnOnce(&ValidatedAnimationBatch<'_, u64>) -> T) 
         GeometryMeshInstanceAuthoring::new(NodeLocalId::new(0), LogicalMeshLocalId::new(0)),
         GeometryMeshInstanceAuthoring::new(NodeLocalId::new(2), LogicalMeshLocalId::new(0)),
     ];
-    let geometry = validate_geometry_batch_with_control(
+    let geometry = prepare_geometry_batch_with_control(
         GeometryAuthoringBatch::new(&meshes, &primitives, &[], &instances),
         source_nodes.len(),
         0,
@@ -636,7 +636,7 @@ fn empty_owner_has_seven_empty_capacities_and_zero_materialization_actions() {
         &mut authoring,
     )
     .unwrap();
-    let geometry = validate_geometry_batch_with_control(
+    let geometry = prepare_geometry_batch_with_control(
         GeometryAuthoringBatch::empty(),
         0,
         0,

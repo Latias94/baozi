@@ -32,9 +32,10 @@ fn precision_contract_sparse_f64_charges_explicit_values_defaults_and_indices_at
     let bytes = expected_geometry_bytes([1, 1, 1, 0], [0, 9, 2, 0], 0);
     let limits = SceneValidationLimits::default()
         .with_max_canonical_bytes(bytes)
-        .with_max_payload_cells(11);
+        .with_max_payload_cells(11)
+        .with_max_work(15);
     let mut control = TestControl::default();
-    let batch = validate_geometry_batch_with_control(input, 0, 0, limits, &mut control)
+    let batch = prepare_geometry_batch_with_control(input, 0, 0, limits, &mut control)
         .expect("sparse F64 storage must depend only on explicit data and one default");
     assert_eq!(batch.canonical_bytes(), bytes);
     assert_eq!(batch.semantic_cell_count(), 11);
@@ -53,8 +54,8 @@ fn precision_contract_sparse_f64_charges_explicit_values_defaults_and_indices_at
     assert_eq!(attribute.explicit_element_count(), 2);
     assert_eq!(attribute.canonical_scalar_count(), 9);
     let work = batch.validation_work();
-    assert_eq!(control.work, work);
-    assert!(work < crate::SCENE_VALIDATION_POLL_INTERVAL);
+    assert_eq!(work, 15);
+    assert_eq!(control.work, 15);
     drop(batch);
     assert_eq!(control.live.get(), 0);
 
@@ -77,7 +78,7 @@ fn precision_contract_sparse_f64_charges_explicit_values_defaults_and_indices_at
     ] {
         let mut control = TestControl::default();
         assert!(matches!(
-            expect_semantic(validate_geometry_batch_with_control(input, 0, 0, limits, &mut control)),
+            expect_semantic(prepare_geometry_batch_with_control(input, 0, 0, limits, &mut control)),
             GeometryAuthoringSemanticError::LimitExceeded { limit, actual, maximum }
                 if limit == expected_limit && actual == expected_actual && maximum + 1 == actual
         ));
@@ -86,7 +87,7 @@ fn precision_contract_sparse_f64_charges_explicit_values_defaults_and_indices_at
 }
 
 #[test]
-fn precision_contract_f64_builtins_reject_nonfinite_dense_values_sparse_values_and_defaults() {
+fn precision_contract_f64_builtins_reject_nonfinite_dense_sparse_and_default_writes() {
     let positions = [0.0_f32; 3];
     let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
     let one_attribute = [GeometryPrimitiveAuthoring::new(
@@ -156,11 +157,18 @@ fn precision_contract_f64_builtins_reject_nonfinite_dense_values_sparse_values_a
                 } else {
                     lane_count - 1
                 };
-                assert!(matches!(
-                    reject_geometry(GeometryAuthoringBatch::new(&meshes, primitives, attributes, &[]), 0),
-                    GeometryAuthoringSemanticError::NonFiniteAttributeValue { attribute, scalar }
-                        if attribute == attribute_index && scalar == scalar_index
-                ));
+                assert_eq!(
+                    reject_nonfinite_geometry(GeometryAuthoringBatch::new(
+                        &meshes,
+                        primitives,
+                        attributes,
+                        &[],
+                    )),
+                    NonFiniteGeometryValue {
+                        attribute: attribute_index,
+                        scalar: scalar_index,
+                    }
+                );
             }
         }
     }
@@ -340,7 +348,7 @@ fn precision_contract_sparse_f64_default_only_geometry_is_bounded_and_cancellabl
         )];
         let input = GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &[]);
         let mut control = TestControl::default();
-        let batch = validate_geometry_batch_with_control(
+        let batch = prepare_geometry_batch_with_control(
             input,
             0,
             0,
@@ -355,7 +363,8 @@ fn precision_contract_sparse_f64_default_only_geometry_is_bounded_and_cancellabl
             batch.canonical_bytes(),
             expected_geometry_bytes([1, 1, 1, 0], [0, 3, 0, 0], 0)
         );
-        assert!(batch.validation_work() < crate::SCENE_VALIDATION_POLL_INTERVAL);
+        assert_eq!(batch.validation_work(), 13);
+        assert_eq!(control.work, 13);
         drop(batch);
         assert_eq!(control.live.get(), 0);
 
@@ -364,7 +373,7 @@ fn precision_contract_sparse_f64_default_only_geometry_is_bounded_and_cancellabl
             ..TestControl::default()
         };
         assert!(matches!(
-            validate_geometry_batch_with_control(
+            prepare_geometry_batch_with_control(
                 input,
                 0,
                 0,
@@ -375,13 +384,41 @@ fn precision_contract_sparse_f64_default_only_geometry_is_bounded_and_cancellabl
                 TestControlError::Cancelled
             ))
         ));
+        assert_eq!(cancelled.polls, 2);
+        assert_eq!(cancelled.work, 13);
         assert_eq!(cancelled.live.get(), 0);
+
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let invalid_default = [default[0], default[1], invalid];
+            let attributes = [GeometryAttributeAuthoring::sparse_f64(
+                AttributeSemantic::Position,
+                AttributeDomain::Vertex,
+                3,
+                count,
+                &[],
+                &[],
+                &invalid_default,
+            )];
+            assert_eq!(
+                reject_nonfinite_geometry(GeometryAuthoringBatch::new(
+                    &meshes,
+                    &primitives,
+                    &attributes,
+                    &[],
+                )),
+                NonFiniteGeometryValue {
+                    attribute: 0,
+                    scalar: 2,
+                }
+            );
+        }
     }
 }
 
 #[test]
-fn precision_contract_sparse_f64_scalar_validation_polls_before_finishing_the_values() {
-    let indices: [u32; 300] = std::array::from_fn(|index| index as u32);
+fn precision_contract_sparse_f64_index_validation_cancels_before_the_next_invalid_index() {
+    let mut indices: [u32; 300] = std::array::from_fn(|index| index as u32);
+    indices[247] = 300;
     let values = [f64::from_bits(1); 900];
     let default = [-0.0_f64; 3];
     let attributes = [GeometryAttributeAuthoring::sparse_f64(
@@ -400,13 +437,14 @@ fn precision_contract_sparse_f64_scalar_validation_polls_before_finishing_the_va
         crate::MaterialAssignment::Unspecified,
         AuthoringRange::new(0, 1),
     )];
+    let input = GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &[]);
     let mut control = TestControl {
         cancel_on_poll: Some(2),
         ..TestControl::default()
     };
     assert!(matches!(
-        validate_geometry_batch_with_control(
-            GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &[]),
+        prepare_geometry_batch_with_control(
+            input,
             0,
             0,
             SceneValidationLimits::default(),
@@ -423,4 +461,24 @@ fn precision_contract_sparse_f64_scalar_validation_polls_before_finishing_the_va
         Some(crate::SceneValidationWork::PayloadCell)
     );
     assert_eq!(control.live.get(), 0);
+
+    let mut observed = TestControl::default();
+    assert!(matches!(
+        expect_semantic(prepare_geometry_batch_with_control(
+            input,
+            0,
+            0,
+            SceneValidationLimits::default(),
+            &mut observed,
+        )),
+        GeometryAuthoringSemanticError::SparseIndexOutOfRange {
+            attribute: 0,
+            element: 247,
+            index: 300,
+            logical_count: 300,
+        }
+    ));
+    assert_eq!(observed.work, crate::SCENE_VALIDATION_POLL_INTERVAL + 1);
+    assert_eq!(observed.live.get(), 0);
+    assert_eq!(observed.current_bytes.get(), 0);
 }

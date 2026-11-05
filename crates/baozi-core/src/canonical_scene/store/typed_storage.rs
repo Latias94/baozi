@@ -20,6 +20,7 @@ pub(super) mod appearance;
 pub(super) mod build;
 pub(super) mod deformation;
 pub(super) mod edit;
+pub(super) mod finite;
 pub(super) mod profile;
 pub(super) mod spatial;
 #[cfg(test)]
@@ -354,27 +355,25 @@ pub(super) struct GeometryStorage {
     pub(super) attributes: Vec<StoredAttribute>,
     pub(super) mesh_instances: Vec<StoredMeshInstance>,
     pub(super) names: Vec<u8>,
-    pub(super) f32_values: Vec<f32>,
-    pub(super) f64_values: Vec<f64>,
+    pub(super) f32_values: finite::FiniteScalarPool<f32>,
+    pub(super) f64_values: finite::FiniteScalarPool<f64>,
     pub(super) u32_values: Vec<u32>,
     pub(super) i32_values: Vec<i32>,
 }
 
 impl GeometryStorage {
     pub(in crate::canonical_scene::store) fn validation_work(&self) -> Option<u64> {
+        let indices = (self.u32_values.len() as u64)
+            .checked_add(self.i32_values.len() as u64)?
+            .checked_sub(self.integer_attribute_scalar_count)?;
         [
             self.logical_meshes.len(),
             self.primitives.len(),
             self.primitives.len(),
             self.attributes.len(),
             self.mesh_instances.len(),
-            self.f32_values.len(),
-            self.f64_values.len(),
-            self.u32_values.len(),
-            self.i32_values.len(),
         ]
         .into_iter()
-        .try_fold(0_u64, |sum, count| sum.checked_add(count as u64))
-        .and_then(|work| work.checked_sub(self.integer_attribute_scalar_count))
+        .try_fold(indices, |sum, count| sum.checked_add(count as u64))
     }
 }

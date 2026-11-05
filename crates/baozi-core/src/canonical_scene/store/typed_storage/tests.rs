@@ -1,4 +1,5 @@
 use super::build::{NodeStoragePlan, TypedStorageBuildControl, TypedStorageBuildError};
+use super::finite::FiniteScalarPool;
 use super::validation::TypedStorageValidationControl;
 use super::*;
 
@@ -93,11 +94,11 @@ fn geometry() -> GeometryStorage {
             logical_mesh: StoredLogicalMeshIndex(0),
         }],
         names: b"ply:mass".to_vec(),
-        f32_values: vec![
+        f32_values: FiniteScalarPool::fixture(&[
             0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0,
             1.0,
-        ],
-        f64_values: vec![1.0e200, 2.0e200, 3.0e200],
+        ]),
+        f64_values: FiniteScalarPool::fixture(&[1.0e200, 2.0e200, 3.0e200]),
         u32_values: vec![0, 2, 7, 0, 1, 2],
         i32_values: vec![],
     }
@@ -157,8 +158,8 @@ fn tangent_geometry() -> GeometryStorage {
         ],
         mesh_instances: vec![],
         names: b"test:basistest:sign".to_vec(),
-        f32_values: vec![0.0; 33],
-        f64_values: vec![],
+        f32_values: FiniteScalarPool::fixture(&[0.0; 33]),
+        f64_values: FiniteScalarPool::fixture(&[]),
         u32_values: vec![],
         i32_values: vec![],
     }
@@ -225,10 +226,12 @@ fn f64_geometry() -> GeometryStorage {
         ],
         mesh_instances: vec![],
         names: vec![],
-        f32_values: vec![],
-        f64_values: (0..41)
-            .map(|index| [-0.0, f64::from_bits(1), 16_777_217.0, f64::MAX][index % 4])
-            .collect(),
+        f32_values: FiniteScalarPool::fixture(&[]),
+        f64_values: FiniteScalarPool::fixture(
+            &(0..41)
+                .map(|index| [-0.0, f64::from_bits(1), 16_777_217.0, f64::MAX][index % 4])
+                .collect::<Vec<_>>(),
+        ),
         u32_values: vec![0, 3, 1, 0, 1, 2, 0, 2, 3],
         i32_values: vec![],
     }
@@ -243,6 +246,7 @@ fn precision_contract_central_f64_validation_is_allocation_free_and_interruptibl
     });
     assert_eq!(allocations.count_total, 0);
     assert_eq!(allocations.bytes_total, 0);
+    assert_eq!(control.completed, 16);
     assert_eq!(
         control.completed,
         storage.validation_work().unwrap() as usize
@@ -262,7 +266,7 @@ fn precision_contract_central_f64_validation_is_allocation_free_and_interruptibl
 
 #[test]
 fn precision_contract_central_f64_validation_rejects_corrupt_sparse_ranges_and_schema() {
-    let corruptions: [fn(&mut GeometryStorage); 16] = [
+    let corruptions: [fn(&mut GeometryStorage); 13] = [
         |s| s.attributes[0].payload = StoredAttributePayload::DenseF64(TableRange::new(1, 12)),
         |s| s.attributes[0].domain = AttributeDomain::Corner,
         |s| s.attributes[1].domain = AttributeDomain::Face,
@@ -290,13 +294,14 @@ fn precision_contract_central_f64_validation_rejects_corrupt_sparse_ranges_and_s
         },
         |s| s.u32_values[1] = 0,
         |s| s.u32_values[1] = 6,
-        |s| s.f64_values[12] = f64::NAN,
-        |s| s.f64_values[18] = f64::INFINITY,
-        |s| s.f64_values[25] = f64::NEG_INFINITY,
         |s| s.attributes[2].tangent_conventions = None,
         |s| s.attributes[2].lanes = 3,
         |s| s.attributes[3].semantic = StoredAttributeSemantic::Color(0),
-        |s| s.f64_values.push(1.0),
+        |s| {
+            let mut values = s.f64_values.to_vec();
+            values.push(1.0);
+            s.f64_values = FiniteScalarPool::fixture(&values);
+        },
     ];
     for corrupt in corruptions {
         let mut storage = f64_geometry();
@@ -329,7 +334,7 @@ fn precision_contract_central_sparse_f64_default_only_validation_does_not_expand
             values: TableRange::new(0, 0),
             default: TableRange::new(0, 3),
         };
-        storage.f64_values.truncate(3);
+        storage.f64_values = FiniteScalarPool::fixture(&storage.f64_values[..3]);
         storage.u32_values.clear();
         let mut control = Control::default();
         let allocations = allocation_counter::measure(|| {
@@ -337,7 +342,7 @@ fn precision_contract_central_sparse_f64_default_only_validation_does_not_expand
         });
         assert_eq!(allocations.count_total, 0);
         assert_eq!(allocations.bytes_total, 0);
-        assert_eq!(control.completed, 7);
+        assert_eq!(control.completed, 4);
     }
 }
 
@@ -422,15 +427,15 @@ fn validation_borrows_vertex_corner_face_sparse_and_f64_tables_without_allocatin
         assert_eq!(storage.validate(&mut control, [1, 1, 4, 1], 2, 0), Ok(true));
     });
     assert_eq!(allocations.count_total, 0);
-    assert_eq!(control.completed, 34);
+    assert_eq!(control.completed, 13);
     assert_eq!(storage.f32_values.as_ptr(), before);
-    assert_eq!(storage.f64_values, [1.0e200, 2.0e200, 3.0e200]);
+    assert_eq!(&storage.f64_values[..], &[1.0e200, 2.0e200, 3.0e200]);
 }
 
 #[test]
 fn every_geometry_validation_action_is_interruptible_before_its_effect() {
     let storage = geometry();
-    for completed in 0..34 {
+    for completed in 0..13 {
         let mut control = Control {
             completed: 0,
             reject_before: Some(completed),
@@ -455,7 +460,9 @@ fn typed_ranges_reject_foreign_domain_targets_and_uncovered_payloads() {
         Ok(false)
     );
     storage.u32_values[1] = 2;
-    storage.f32_values.push(17.0);
+    let mut values = storage.f32_values.to_vec();
+    values.push(17.0);
+    storage.f32_values = FiniteScalarPool::fixture(&values);
     assert_eq!(
         storage.validate(&mut Control::default(), [1, 1, 4, 1], 2, 0),
         Ok(false)
@@ -463,16 +470,14 @@ fn typed_ranges_reject_foreign_domain_targets_and_uncovered_payloads() {
 }
 
 #[test]
-fn typed_geometry_rejects_invalid_ranges_cardinality_schema_and_nonfinite_values() {
-    let corruptions: [fn(&mut GeometryStorage); 10] = [
+fn typed_geometry_rejects_invalid_ranges_cardinality_schema_and_counts() {
+    let corruptions: [fn(&mut GeometryStorage); 8] = [
         |storage| storage.primitives[0].attributes = TableRange::new(usize::MAX, 2),
         |storage| storage.attributes[1].element_count = 2,
         |storage| storage.attributes[0].domain = AttributeDomain::Corner,
         |storage| {
             storage.attributes[3].payload = StoredAttributePayload::DenseF64(TableRange::new(0, 2))
         },
-        |storage| storage.f64_values[0] = f64::INFINITY,
-        |storage| storage.f32_values[15] = f32::NAN,
         |storage| storage.u32_values[5] = 3,
         |storage| storage.names[7] = b'\n',
         |storage| storage.integer_attribute_scalar_count = 0,

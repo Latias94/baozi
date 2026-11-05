@@ -33,7 +33,7 @@ use super::ValidatedNodeBatch;
 use super::animation::ValidatedAnimationBatch;
 use super::appearance::ValidatedAppearanceBatch;
 use super::deformation::ValidatedDeformationBatch;
-use super::geometry::ValidatedGeometryBatch;
+use super::geometry::PreparedGeometryBatch;
 use super::spatial::ValidatedSpatialBatch;
 
 mod lineage;
@@ -473,7 +473,7 @@ impl<'nodes> ProfileOwnerCatalog<'nodes> {
         spatial: &ValidatedSpatialBatch<'_, SR>,
         nodes: &'nodes ValidatedNodeBatch<'_, NR>,
         appearance: &ValidatedAppearanceBatch<'_, AR>,
-        geometry: &ValidatedGeometryBatch<'_, GR>,
+        geometry: &PreparedGeometryBatch<'_, GR>,
         deformation: &ValidatedDeformationBatch<'_, DR>,
         animation: &ValidatedAnimationBatch<'_, XR>,
     ) -> Result<Self, ProfileOwnerCatalogError> {

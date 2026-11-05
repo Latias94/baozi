@@ -2,9 +2,10 @@
 
 #[cfg(test)]
 use super::NodeSceneBuildFaults;
-use crate::canonical_scene::store::production::{ValidatedGeometryBatch, ValidatedNodeBatch};
+use crate::canonical_scene::store::production::{PreparedGeometryBatch, ValidatedNodeBatch};
 use crate::canonical_scene::store::typed_storage::build::{
-    GeometryStoragePlan, NodeStoragePlan, TypedStorageBuildControl, TypedStorageBuildError,
+    GeometryStorageBuildError, GeometryStoragePlan, NodeStoragePlan, NonFiniteGeometryValue,
+    TypedStorageBuildControl, TypedStorageBuildError,
 };
 use crate::canonical_scene::store::typed_storage::{GeometryStorage, NodeStorage};
 use baozi_operation::__retained_store_integration::activation::{
@@ -77,10 +78,9 @@ where
 pub(super) fn retain_geometry<O, PP, U, L, R, NR>(
     lane: &mut CanonicalLane<'_, '_, O, PP, U, L>,
     plan: GeometryStoragePlan,
-    batch: &ValidatedGeometryBatch<'_, R>,
+    batch: &PreparedGeometryBatch<'_, R>,
     nodes: &ValidatedNodeBatch<'_, NR>,
-    #[cfg(test)] faults: &mut NodeSceneBuildFaults,
-) -> Result<RetainedStorage<GeometryStorage>, StoreRuntimeError>
+) -> Result<RetainedStorage<GeometryStorage>, CanonicalStorageBuildError<NonFiniteGeometryValue>>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -91,19 +91,17 @@ where
         plan.work().map_err(StoreRuntimeError::Plan)?,
         plan.name_bytes() as u64,
         |control| {
-            #[allow(unused_mut)]
-            let mut storage = plan.build(batch, nodes, control).map_err(map_build)?;
-            #[cfg(test)]
-            if faults.alter_first_geometry_f32
-                && let Some(value) = storage.f32_values.first_mut()
-            {
-                *value = f32::NAN;
-                faults.alter_first_geometry_f32 = false;
-            }
-            Ok(storage)
+            plan.build(batch, nodes, control)
+                .map_err(|error| match error {
+                    GeometryStorageBuildError::Storage(error) => {
+                        CanonicalStorageBuildError::Runtime(map_build(error))
+                    }
+                    GeometryStorageBuildError::NonFinite(value) => {
+                        CanonicalStorageBuildError::Rejected(value)
+                    }
+                })
         },
     )
-    .map_err(CanonicalStorageBuildError::into_runtime)
 }
 
 pub(super) fn map_build(error: TypedStorageBuildError<StoreRuntimeError>) -> StoreRuntimeError {

@@ -15,6 +15,8 @@ use crate::attribute::AttributeDomain;
 use crate::geometry::TopologyKind;
 use crate::identity::PrimitiveId;
 
+use super::super::build::finish;
+use super::super::finite::FiniteScalarPool;
 use super::super::validation::TypedStorageValidationControl;
 use super::super::{
     StoredAttributeSemantic as Semantic, StoredTangentBasis, StoredTangentConventions,
@@ -203,16 +205,15 @@ impl<'a> GeometrySelectionPlan<'a> {
             capacity::<u32, C::Error>(counts[7])?,
             capacity::<i32, C::Error>(counts[8])?,
         ];
-        let validation_work = [
-            counts[0], counts[1], counts[1], counts[2], counts[3], counts[5], counts[6], counts[7],
-            counts[8],
-        ]
-        .into_iter()
-        .try_fold(0_u64, |sum, n| {
-            sum.checked_add(n as u64).ok_or_else(overflow)
-        })?
-        .checked_sub(integer_attribute_scalar_count)
-        .ok_or_else(overflow)?;
+        let indices = (counts[7] as u64)
+            .checked_add(counts[8] as u64)
+            .and_then(|count| count.checked_sub(integer_attribute_scalar_count))
+            .ok_or_else(overflow)?;
+        let validation_work = [counts[0], counts[1], counts[1], counts[2], counts[3]]
+            .into_iter()
+            .try_fold(indices, |sum, n| {
+                sum.checked_add(n as u64).ok_or_else(overflow)
+            })?;
         Ok(Self {
             source,
             edits,
@@ -280,13 +281,13 @@ impl<'a> GeometrySelectionPlan<'a> {
             attributes: allocate(p[2])?,
             mesh_instances: allocate(p[3])?,
             names: allocate(p[4])?,
-            f32_values: allocate(p[5])?,
-            f64_values: allocate(p[6])?,
+            f32_values: FiniteScalarPool::allocate(p[5])?,
+            f64_values: FiniteScalarPool::allocate(p[6])?,
             u32_values: allocate(p[7])?,
             i32_values: allocate(p[8])?,
         };
         {
-            let mut writer = Writer::new(Mode::Build(&mut output), control);
+            let mut writer = Writer::new(Mode::Build(&mut output, &p), control);
             reconstruct(
                 self.source,
                 self.edits,
@@ -300,23 +301,15 @@ impl<'a> GeometrySelectionPlan<'a> {
                 return Err(TypedStorageBuildError::Invariant);
             }
         }
-        for (actual, plan) in [
-            output.logical_meshes.capacity(),
-            output.primitives.capacity(),
-            output.attributes.capacity(),
-            output.mesh_instances.capacity(),
-            output.names.capacity(),
-            output.f32_values.capacity(),
-            output.f64_values.capacity(),
-            output.u32_values.capacity(),
-            output.i32_values.capacity(),
-        ]
-        .into_iter()
-        .zip(p)
-        {
-            plan.finish(0, actual)
-                .map_err(TypedStorageBuildError::Capacity)?;
-        }
+        finish(&output.logical_meshes, p[0])?;
+        finish(&output.primitives, p[1])?;
+        finish(&output.attributes, p[2])?;
+        finish(&output.mesh_instances, p[3])?;
+        finish(&output.names, p[4])?;
+        output.f32_values.finish(p[5])?;
+        output.f64_values.finish(p[6])?;
+        finish(&output.u32_values, p[7])?;
+        finish(&output.i32_values, p[8])?;
         Ok(output)
     }
 

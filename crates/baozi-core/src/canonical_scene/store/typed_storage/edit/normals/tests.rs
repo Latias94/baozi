@@ -1,4 +1,5 @@
 use super::*;
+use crate::canonical_scene::store::typed_storage::finite::{FiniteScalar, FiniteScalarPool};
 use crate::canonical_scene::store::typed_storage::{
     StoredLogicalMeshIndex, StoredNodeIndex, TextRange,
 };
@@ -62,6 +63,14 @@ fn values<T: Copy>(pool: &mut Vec<T>, values: &[T]) -> TableRange<T> {
     TableRange::new(start, values.len())
 }
 
+fn float_values<T: FiniteScalar>(pool: &mut FiniteScalarPool<T>, values: &[T]) -> TableRange<T> {
+    let start = pool.len();
+    let mut scalars = pool.to_vec();
+    scalars.extend_from_slice(values);
+    *pool = FiniteScalarPool::fixture(&scalars);
+    TableRange::new(start, values.len())
+}
+
 fn name(storage: &mut GeometryStorage, text: &str) -> TextRange {
     TextRange(values(&mut storage.names, text.as_bytes()))
 }
@@ -110,12 +119,12 @@ fn geometry(normal: bool, tangent: bool) -> GeometryStorage {
             },
         ],
         names: Vec::new(),
-        f32_values: Vec::new(),
-        f64_values: Vec::new(),
+        f32_values: FiniteScalarPool::fixture(&[]),
+        f64_values: FiniteScalarPool::fixture(&[]),
         u32_values: Vec::new(),
         i32_values: Vec::new(),
     };
-    let left_position = values(
+    let left_position = float_values(
         &mut storage.f32_values,
         &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
     );
@@ -128,7 +137,7 @@ fn geometry(normal: bool, tangent: bool) -> GeometryStorage {
         StoredAttributePayload::DenseF32(left_position),
     );
     let target_start = storage.attributes.len();
-    let position = values(
+    let position = float_values(
         &mut storage.f32_values,
         &[0.0, -0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0],
     );
@@ -143,8 +152,8 @@ fn geometry(normal: bool, tangent: bool) -> GeometryStorage {
     if normal {
         let payload = StoredAttributePayload::SparseF32 {
             indices: values(&mut storage.u32_values, &[2]),
-            values: values(&mut storage.f32_values, &[0.0, -0.0, 1.0]),
-            default: values(&mut storage.f32_values, &[-0.0, 0.0, 1.0]),
+            values: float_values(&mut storage.f32_values, &[0.0, -0.0, 1.0]),
+            default: float_values(&mut storage.f32_values, &[-0.0, 0.0, 1.0]),
         };
         attribute(
             &mut storage,
@@ -158,11 +167,11 @@ fn geometry(normal: bool, tangent: bool) -> GeometryStorage {
     if tangent {
         let payload = StoredAttributePayload::SparseF32 {
             indices: values(&mut storage.u32_values, &[1, 5]),
-            values: values(
+            values: float_values(
                 &mut storage.f32_values,
                 &[1.0, -0.0, 0.0, -1.0, 1.0, 0.0, 0.0, 1.0],
             ),
-            default: values(&mut storage.f32_values, &[1.0, 0.0, -0.0, 1.0]),
+            default: float_values(&mut storage.f32_values, &[1.0, 0.0, -0.0, 1.0]),
         };
         attribute(
             &mut storage,
@@ -173,7 +182,7 @@ fn geometry(normal: bool, tangent: bool) -> GeometryStorage {
             payload,
         );
     }
-    let uv = values(
+    let uv = float_values(
         &mut storage.f32_values,
         &[0.0, -0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0],
     );
@@ -187,8 +196,8 @@ fn geometry(normal: bool, tangent: bool) -> GeometryStorage {
     );
     let color = StoredAttributePayload::SparseF32 {
         indices: values(&mut storage.u32_values, &[1]),
-        values: values(&mut storage.f32_values, &[-0.0, 0.5, 1.0]),
-        default: values(&mut storage.f32_values, &[-0.0, 0.5, 1.0]),
+        values: float_values(&mut storage.f32_values, &[-0.0, 0.5, 1.0]),
+        default: float_values(&mut storage.f32_values, &[-0.0, 0.5, 1.0]),
     };
     attribute(
         &mut storage,
@@ -212,7 +221,7 @@ fn geometry(normal: bool, tangent: bool) -> GeometryStorage {
         groups,
     );
     let wide = name(&mut storage, "edit:a_dense_f64");
-    let wide_values = values(
+    let wide_values = float_values(
         &mut storage.f64_values,
         &[
             1.0e250,
@@ -272,7 +281,7 @@ fn geometry(normal: bool, tangent: bool) -> GeometryStorage {
         StoredAttributePayload::DenseI32(signed_values),
     );
     let target_end = storage.attributes.len();
-    let right_position = values(
+    let right_position = float_values(
         &mut storage.f32_values,
         &[2.0, 0.0, 0.0, 3.0, 0.0, 0.0, 3.0, 1.0, 0.0, 2.0, 1.0, 0.0],
     );
@@ -284,7 +293,7 @@ fn geometry(normal: bool, tangent: bool) -> GeometryStorage {
         4,
         StoredAttributePayload::DenseF32(right_position),
     );
-    let right_normal = values(
+    let right_normal = float_values(
         &mut storage.f32_values,
         &[
             0.0, 0.0, -1.0, 0.0, -0.0, -1.0, 0.0, 0.0, -1.0, -0.0, 0.0, -1.0,
@@ -490,7 +499,7 @@ fn removing_target_tangent_preserves_other_primitive_tangent_conventions_and_nam
     let retained_values = [
         1.0, -0.0, 0.0, -1.0, 0.0, 1.0, -0.0, 1.0, -0.0, 0.0, 1.0, -1.0, 1.0, 0.0, 0.0, 1.0,
     ];
-    let payload = values(&mut source.f32_values, &retained_values);
+    let payload = float_values(&mut source.f32_values, &retained_values);
     let retained_attribute = attribute(
         &mut source,
         StoredAttributeSemantic::Tangent,
@@ -818,7 +827,9 @@ fn generated_f64_normals_use_the_f64_pool_and_preserve_candidate_bits() {
             Ok(true)
         );
         assert_eq!(correspondence.completed, plan.correspondence_work());
-        output.f64_values[range.start() + 2] = 0.0;
+        let mut f64_values = output.f64_values.to_vec();
+        f64_values[range.start() + 2] = 0.0;
+        output.f64_values = FiniteScalarPool::fixture(&f64_values);
         assert_eq!(
             plan.validate_correspondence(&output, &mut Control::default()),
             Ok(false)
@@ -908,8 +919,8 @@ fn sparse_f64_survives_normal_addition_and_replacement_with_exact_work() {
         }
         source.attributes[source_row].payload = StoredAttributePayload::SparseF64 {
             indices,
-            values: values(&mut source.f64_values, &explicit),
-            default: values(&mut source.f64_values, &explicit[..2]),
+            values: float_values(&mut source.f64_values, &explicit),
+            default: float_values(&mut source.f64_values, &explicit[..2]),
         };
         assert_eq!(
             source.validate(
@@ -990,12 +1001,14 @@ fn sparse_f64_survives_normal_addition_and_replacement_with_exact_work() {
         );
         for corruption in 0..3 {
             let mut output = plan.materialize(&mut Control::default()).unwrap();
+            let mut f64_values = output.f64_values.to_vec();
             match corruption {
-                0 => output.f64_values[values.start()] = 0.0,
-                1 => output.f64_values[default.start()] = 0.0,
+                0 => f64_values[values.start()] = 0.0,
+                1 => f64_values[default.start()] = 0.0,
                 2 => output.u32_values[indices.start()] = 1,
                 _ => unreachable!(),
             }
+            output.f64_values = FiniteScalarPool::fixture(&f64_values);
             assert_eq!(
                 plan.validate_correspondence(&output, &mut Control::default()),
                 Ok(false)
@@ -1355,9 +1368,15 @@ fn correspondence_compares_bits_and_sparse_explicitness_and_rejects_descriptor_c
             let StoredAttributePayload::DenseF32(range) = output.attributes[2].payload else {
                 unreachable!()
             };
-            output.f32_values[range.start()] = 0.0;
+            let mut f32_values = output.f32_values.to_vec();
+            f32_values[range.start()] = 0.0;
+            output.f32_values = FiniteScalarPool::fixture(&f32_values);
         },
-        |output| output.f64_values[1] = 0.0,
+        |output| {
+            let mut f64_values = output.f64_values.to_vec();
+            f64_values[1] = 0.0;
+            output.f64_values = FiniteScalarPool::fixture(&f64_values);
+        },
         |output| {
             let StoredAttributePayload::SparseF32 { indices, .. } = output.attributes[4].payload
             else {
@@ -1414,7 +1433,9 @@ fn correspondence_is_independent_of_private_pool_offsets() {
     // Move a complete Position payload, keeping every referenced scalar's bit value unchanged.
     let split = 9;
     let length = output.f32_values.len();
-    output.f32_values.rotate_left(split);
+    let mut f32_values = output.f32_values.to_vec();
+    f32_values.rotate_left(split);
+    output.f32_values = FiniteScalarPool::fixture(&f32_values);
     let relocate = |range: TableRange<f32>| {
         TableRange::new(
             if range.start() < split {

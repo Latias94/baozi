@@ -1,5 +1,6 @@
 use super::*;
 use crate::canonical_scene::store::typed_storage::StoredAttributeSemantic;
+use crate::canonical_scene::store::typed_storage::finite::FiniteScalarPool;
 use crate::identity::{LogicalMeshId, SceneGenerationId};
 
 #[derive(Default)]
@@ -38,8 +39,8 @@ fn source(count: usize, topology: TopologyKind) -> GeometryStorage {
         attributes: Vec::new(),
         mesh_instances: Vec::new(),
         names: Vec::new(),
-        f32_values: Vec::new(),
-        f64_values: Vec::new(),
+        f32_values: FiniteScalarPool::fixture(&[]),
+        f64_values: FiniteScalarPool::fixture(&[]),
         u32_values: Vec::new(),
         i32_values: Vec::new(),
     };
@@ -48,9 +49,10 @@ fn source(count: usize, topology: TopologyKind) -> GeometryStorage {
     } else {
         4
     };
+    let mut f64_values = Vec::new();
     for _ in 0..count {
-        let start = geometry.f64_values.len();
-        geometry.f64_values.extend_from_slice(
+        let start = f64_values.len();
+        f64_values.extend_from_slice(
             &[0.0, -0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0][..corners * 3],
         );
         geometry.attributes.push(StoredAttribute {
@@ -76,6 +78,7 @@ fn source(count: usize, topology: TopologyKind) -> GeometryStorage {
             attributes: TableRange::new(geometry.attributes.len() - 1, 1),
         });
     }
+    geometry.f64_values = FiniteScalarPool::fixture(&f64_values);
     geometry
 }
 fn requests<'a>(count: usize) -> Vec<SceneGeometryReplacement<'a>> {
@@ -236,11 +239,10 @@ fn every_materialization_action_is_cancellable_and_source_remains_unchanged() {
 #[test]
 fn tangent_dependency_mapping_uses_the_selected_authored_normal_domain() {
     let mut source = source(1, TopologyKind::TriangleList);
+    let mut f64_values = source.f64_values.to_vec();
     for domain in [AttributeDomain::Vertex, AttributeDomain::Corner] {
-        let start = source.f64_values.len();
-        source
-            .f64_values
-            .extend_from_slice(&[0.0, 0.0, 1.0].repeat(3));
+        let start = f64_values.len();
+        f64_values.extend_from_slice(&[0.0, 0.0, 1.0].repeat(3));
         source.attributes.push(StoredAttribute {
             semantic: Semantic::Normal,
             tangent_conventions: None,
@@ -250,10 +252,9 @@ fn tangent_dependency_mapping_uses_the_selected_authored_normal_domain() {
             payload: Payload::DenseF64(TableRange::new(start, 9)),
         });
     }
-    let start = source.f64_values.len();
-    source
-        .f64_values
-        .extend_from_slice(&[0.0, 0.0, 1.0, 0.0, 0.0, 1.0]);
+    let start = f64_values.len();
+    f64_values.extend_from_slice(&[0.0, 0.0, 1.0, 0.0, 0.0, 1.0]);
+    source.f64_values = FiniteScalarPool::fixture(&f64_values);
     source.attributes.push(StoredAttribute {
         semantic: Semantic::Texcoord(0),
         tangent_conventions: None,
@@ -303,7 +304,9 @@ fn correspondence_follows_relocated_generated_and_source_payloads_and_rejects_ch
     )
     .unwrap();
     let mut output = plan.materialize(&mut Control::default()).unwrap();
-    output.f64_values.rotate_left(9);
+    let mut f64_values = output.f64_values.to_vec();
+    f64_values.rotate_left(9);
+    output.f64_values = FiniteScalarPool::fixture(&f64_values);
     for a in &mut output.attributes {
         let Payload::DenseF64(range) = a.payload else {
             panic!("dense fixture")
@@ -318,11 +321,13 @@ fn correspondence_follows_relocated_generated_and_source_payloads_and_rejects_ch
     assert_eq!(control.completed, plan.correspondence_work());
     for scalar in [0, 9] {
         let original = output.f64_values[scalar];
-        output.f64_values[scalar] = f64::from_bits(original.to_bits() ^ 1);
+        f64_values[scalar] = f64::from_bits(original.to_bits() ^ 1);
+        output.f64_values = FiniteScalarPool::fixture(&f64_values);
         assert_eq!(
             plan.validate_correspondence(&output, &mut Control::default()),
             Ok(false)
         );
-        output.f64_values[scalar] = original;
+        f64_values[scalar] = original;
+        output.f64_values = FiniteScalarPool::fixture(&f64_values);
     }
 }

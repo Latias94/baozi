@@ -5,10 +5,11 @@ use baozi_operation::{CapacityPlan, CapacityPlanError, StorePlanError};
 use crate::attribute::{TangentBasisConvention, TangentConventions, TangentHandednessEncoding};
 
 use crate::canonical_scene::store::production::{
-    GeometryAttributePayloadAuthoring, GeometryTopologyAuthoring, Presence, ValidatedGeometryBatch,
+    GeometryAttributePayloadAuthoring, GeometryTopologyAuthoring, PreparedGeometryBatch, Presence,
     ValidatedNodeBatch,
 };
 
+use super::finite::{FiniteScalar, FiniteScalarPool, FiniteWriteError};
 use super::*;
 
 #[derive(Debug, thiserror::Error)]
@@ -24,6 +25,24 @@ pub(in crate::canonical_scene::store) enum TypedStorageBuildError<E> {
 }
 
 pub(in crate::canonical_scene::store) type BuildResult<T, E> = Result<T, TypedStorageBuildError<E>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::canonical_scene::store) struct NonFiniteGeometryValue {
+    pub(in crate::canonical_scene::store) attribute: usize,
+    pub(in crate::canonical_scene::store) scalar: usize,
+}
+
+#[derive(Debug)]
+pub(in crate::canonical_scene::store) enum GeometryStorageBuildError<E> {
+    Storage(TypedStorageBuildError<E>),
+    NonFinite(NonFiniteGeometryValue),
+}
+
+impl<E> From<TypedStorageBuildError<E>> for GeometryStorageBuildError<E> {
+    fn from(error: TypedStorageBuildError<E>) -> Self {
+        Self::Storage(error)
+    }
+}
 
 /// Action-scoped work adapter; admission and counters stay in operation.
 pub(in crate::canonical_scene::store) trait TypedStorageBuildControl {
@@ -268,7 +287,7 @@ pub(in crate::canonical_scene::store) struct GeometryStoragePlan {
     f64_values: CapacityPlan,
     u32_values: CapacityPlan,
     i32_values: CapacityPlan,
-    scalar_validation_work: u64,
+    index_validation_work: u64,
 }
 
 impl GeometryStoragePlan {
@@ -311,7 +330,7 @@ impl GeometryStoragePlan {
     }
 
     pub(in crate::canonical_scene::store) fn new<R>(
-        batch: &ValidatedGeometryBatch<'_, R>,
+        batch: &PreparedGeometryBatch<'_, R>,
     ) -> Result<Self, StorePlanError> {
         let name_bytes = u64::from(batch.logical_mesh_name_byte_count())
             .checked_add(u64::from(batch.attribute_semantic_name_byte_count()))
@@ -327,11 +346,9 @@ impl GeometryStoragePlan {
             f64_values: capacity::<f64>(batch.f64_scalar_count())?,
             u32_values: capacity::<u32>(batch.u32_scalar_count())?,
             i32_values: capacity::<i32>(batch.i32_scalar_count())?,
-            scalar_validation_work: batch
-                .f32_scalar_count()
-                .checked_add(batch.f64_scalar_count())
-                .and_then(|count| count.checked_add(batch.u32_scalar_count()))
-                .and_then(|count| count.checked_add(batch.i32_scalar_count()))
+            index_validation_work: batch
+                .u32_scalar_count()
+                .checked_add(batch.i32_scalar_count())
                 .and_then(|count| count.checked_sub(batch.integer_attribute_scalar_count()))
                 .ok_or(StorePlanError::SizeOverflow)?,
         };
@@ -367,7 +384,7 @@ impl GeometryStoragePlan {
             self.primitives,
             self.primitives,
         ])?;
-        rows.checked_add(self.scalar_validation_work)
+        rows.checked_add(self.index_validation_work)
             .ok_or(StorePlanError::SizeOverflow)
     }
 
@@ -390,10 +407,10 @@ impl GeometryStoragePlan {
     /// The caller must admit every capacity before invoking this builder.
     pub(in crate::canonical_scene::store) fn build<R, NR, C: TypedStorageBuildControl>(
         self,
-        batch: &ValidatedGeometryBatch<'_, R>,
+        batch: &PreparedGeometryBatch<'_, R>,
         nodes: &ValidatedNodeBatch<'_, NR>,
         mut unit: C,
-    ) -> BuildResult<GeometryStorage, C::Error> {
+    ) -> Result<GeometryStorage, GeometryStorageBuildError<C::Error>> {
         let mut storage = GeometryStorage {
             integer_attribute_scalar_count: batch.integer_attribute_scalar_count(),
             logical_meshes: allocate(self.logical_meshes)?,
@@ -401,8 +418,8 @@ impl GeometryStoragePlan {
             attributes: allocate(self.attributes)?,
             mesh_instances: allocate(self.mesh_instances)?,
             names: allocate(self.names)?,
-            f32_values: allocate(self.f32_values)?,
-            f64_values: allocate(self.f64_values)?,
+            f32_values: FiniteScalarPool::allocate(self.f32_values)?,
+            f64_values: FiniteScalarPool::allocate(self.f64_values)?,
             u32_values: allocate(self.u32_values)?,
             i32_values: allocate(self.i32_values)?,
         };
@@ -427,7 +444,7 @@ impl GeometryStoragePlan {
                 &mut unit,
             )?;
             let payload =
-                self.append_payload(&mut storage, attribute.authored_payload(), &mut unit)?;
+                self.append_payload(&mut storage, attribute.authored_payload(), index, &mut unit)?;
             push(
                 &mut storage.attributes,
                 self.attributes,
@@ -519,8 +536,8 @@ impl GeometryStoragePlan {
         finish(&storage.attributes, self.attributes)?;
         finish(&storage.mesh_instances, self.mesh_instances)?;
         finish(&storage.names, self.names)?;
-        finish(&storage.f32_values, self.f32_values)?;
-        finish(&storage.f64_values, self.f64_values)?;
+        storage.f32_values.finish(self.f32_values)?;
+        storage.f64_values.finish(self.f64_values)?;
         finish(&storage.u32_values, self.u32_values)?;
         finish(&storage.i32_values, self.i32_values)?;
         Ok(storage)
@@ -530,8 +547,9 @@ impl GeometryStoragePlan {
         self,
         storage: &mut GeometryStorage,
         payload: GeometryAttributePayloadAuthoring<'_>,
+        attribute: usize,
         unit: &mut C,
-    ) -> BuildResult<StoredAttributePayload, C::Error> {
+    ) -> Result<StoredAttributePayload, GeometryStorageBuildError<C::Error>> {
         Ok(match payload {
             GeometryAttributePayloadAuthoring::DenseF32 {
                 lanes,
@@ -541,10 +559,12 @@ impl GeometryStoragePlan {
                 let start = storage.f32_values.len();
                 match source_indices {
                     Presence::Absent => {
-                        append(
+                        append_finite(
                             &mut storage.f32_values,
                             self.f32_values,
                             source_values,
+                            attribute,
+                            0,
                             unit,
                         )?;
                     }
@@ -559,7 +579,14 @@ impl GeometryStoragePlan {
                             let values = source_values
                                 .get(offset..end)
                                 .ok_or(TypedStorageBuildError::Invariant)?;
-                            append(&mut storage.f32_values, self.f32_values, values, unit)?;
+                            append_finite(
+                                &mut storage.f32_values,
+                                self.f32_values,
+                                values,
+                                attribute,
+                                offset,
+                                unit,
+                            )?;
                         }
                     }
                 }
@@ -569,10 +596,12 @@ impl GeometryStoragePlan {
                 ))
             }
             GeometryAttributePayloadAuthoring::DenseF64 { values, .. } => {
-                StoredAttributePayload::DenseF64(append(
+                StoredAttributePayload::DenseF64(append_finite(
                     &mut storage.f64_values,
                     self.f64_values,
                     values,
+                    attribute,
+                    0,
                     unit,
                 )?)
             }
@@ -599,8 +628,22 @@ impl GeometryStoragePlan {
                 ..
             } => StoredAttributePayload::SparseF32 {
                 indices: append(&mut storage.u32_values, self.u32_values, indices, unit)?,
-                values: append(&mut storage.f32_values, self.f32_values, values, unit)?,
-                default: append(&mut storage.f32_values, self.f32_values, default, unit)?,
+                values: append_finite(
+                    &mut storage.f32_values,
+                    self.f32_values,
+                    values,
+                    attribute,
+                    0,
+                    unit,
+                )?,
+                default: append_finite(
+                    &mut storage.f32_values,
+                    self.f32_values,
+                    default,
+                    attribute,
+                    values.len(),
+                    unit,
+                )?,
             },
             GeometryAttributePayloadAuthoring::SparseF64 {
                 indices,
@@ -609,8 +652,22 @@ impl GeometryStoragePlan {
                 ..
             } => StoredAttributePayload::SparseF64 {
                 indices: append(&mut storage.u32_values, self.u32_values, indices, unit)?,
-                values: append(&mut storage.f64_values, self.f64_values, values, unit)?,
-                default: append(&mut storage.f64_values, self.f64_values, default, unit)?,
+                values: append_finite(
+                    &mut storage.f64_values,
+                    self.f64_values,
+                    values,
+                    attribute,
+                    0,
+                    unit,
+                )?,
+                default: append_finite(
+                    &mut storage.f64_values,
+                    self.f64_values,
+                    default,
+                    attribute,
+                    values.len(),
+                    unit,
+                )?,
             },
             GeometryAttributePayloadAuthoring::SparseU32 {
                 indices,
@@ -634,6 +691,37 @@ impl GeometryStoragePlan {
             },
         })
     }
+}
+
+fn append_finite<T: FiniteScalar, C: TypedStorageBuildControl>(
+    values: &mut FiniteScalarPool<T>,
+    plan: CapacityPlan,
+    source: &[T],
+    attribute: usize,
+    scalar_offset: usize,
+    unit: &mut C,
+) -> Result<TableRange<T>, GeometryStorageBuildError<C::Error>> {
+    let start = values.len();
+    for (relative_scalar, &value) in source.iter().enumerate() {
+        let result = unit
+            .run_unit(|| values.try_push(value, plan))
+            .map_err(TypedStorageBuildError::Control)?;
+        match result {
+            Ok(()) => {}
+            Err(FiniteWriteError::Capacity) => {
+                return Err(TypedStorageBuildError::Invariant.into());
+            }
+            Err(FiniteWriteError::NonFinite { .. }) => {
+                let scalar = scalar_offset
+                    .checked_add(relative_scalar)
+                    .ok_or(TypedStorageBuildError::Invariant)?;
+                return Err(GeometryStorageBuildError::NonFinite(
+                    NonFiniteGeometryValue { attribute, scalar },
+                ));
+            }
+        }
+    }
+    Ok(TableRange::new(start, source.len()))
 }
 
 fn append_tangent_conventions<C: TypedStorageBuildControl>(
@@ -784,4 +872,97 @@ pub(in crate::canonical_scene::store) fn finish<T, E>(
     plan.finish(0, values.capacity())
         .map_err(TypedStorageBuildError::Capacity)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod geometry_float_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct Control {
+        completed: u64,
+        deny_before: Option<u64>,
+        panic_before: Option<u64>,
+    }
+
+    impl TypedStorageBuildControl for Control {
+        type Error = u64;
+
+        fn run_unit<R>(&mut self, action: impl FnOnce() -> R) -> Result<R, Self::Error> {
+            if self.deny_before == Some(self.completed) {
+                return Err(self.completed);
+            }
+            assert_ne!(
+                self.panic_before,
+                Some(self.completed),
+                "injected action panic"
+            );
+            let value = action();
+            self.completed += 1;
+            Ok(value)
+        }
+
+        fn run_string_unit<R>(&mut self, action: impl FnOnce() -> R) -> Result<R, Self::Error> {
+            self.run_unit(action)
+        }
+    }
+
+    #[test]
+    fn nonfinite_write_returns_source_coordinates_and_completes_its_attempt() {
+        let plan = capacity::<f32>(3).unwrap();
+        let mut pool = FiniteScalarPool::allocate::<u64>(plan).unwrap();
+        let mut control = Control::default();
+        assert!(matches!(
+            append_finite(&mut pool, plan, &[1.0, f32::NAN, 2.0], 7, 6, &mut control),
+            Err(GeometryStorageBuildError::NonFinite(
+                NonFiniteGeometryValue {
+                    attribute: 7,
+                    scalar: 7,
+                }
+            )),
+        ));
+        assert_eq!(&*pool, &[1.0]);
+        assert_eq!(control.completed, 2);
+    }
+
+    #[test]
+    fn denial_before_nonfinite_observation_preserves_the_control_cause() {
+        let plan = capacity::<f64>(3).unwrap();
+        let mut pool = FiniteScalarPool::allocate::<u64>(plan).unwrap();
+        let mut control = Control {
+            deny_before: Some(1),
+            ..Control::default()
+        };
+        assert!(matches!(
+            append_finite(
+                &mut pool,
+                plan,
+                &[1.0, f64::INFINITY, 2.0],
+                2,
+                0,
+                &mut control
+            ),
+            Err(GeometryStorageBuildError::Storage(
+                TypedStorageBuildError::Control(1)
+            )),
+        ));
+        assert_eq!(&*pool, &[1.0]);
+        assert_eq!(control.completed, 1);
+    }
+
+    #[test]
+    fn interrupted_write_preserves_only_the_completed_prefix() {
+        let plan = capacity::<f32>(3).unwrap();
+        let mut pool = FiniteScalarPool::allocate::<u64>(plan).unwrap();
+        let mut control = Control {
+            panic_before: Some(1),
+            ..Control::default()
+        };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            append_finite(&mut pool, plan, &[1.0, 2.0, 3.0], 0, 0, &mut control)
+        }));
+        assert!(result.is_err());
+        assert_eq!(&*pool, &[1.0]);
+        assert_eq!(control.completed, 1);
+    }
 }

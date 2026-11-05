@@ -7,8 +7,8 @@ use crate::canonical_scene::store::schema::{
 
 use super::input::{Presence, SceneAuthoringBatch};
 use super::{
-    ValidatedAnimationBatch, ValidatedAppearanceBatch, ValidatedDeformationBatch,
-    ValidatedGeometryBatch, ValidatedNodeBatch, ValidatedProfileBatch, ValidatedSpatialBatch,
+    PreparedGeometryBatch, ValidatedAnimationBatch, ValidatedAppearanceBatch,
+    ValidatedDeformationBatch, ValidatedNodeBatch, ValidatedProfileBatch, ValidatedSpatialBatch,
 };
 
 /// Checks top-level count domains and limits, then returns the terminal attribution capacity.
@@ -270,7 +270,7 @@ pub(in crate::canonical_scene::store) fn geometry_limits_after_appearance<R>(
 }
 
 pub(in crate::canonical_scene::store) fn deformation_limits_after_geometry<R>(
-    geometry: &ValidatedGeometryBatch<'_, R>,
+    geometry: &PreparedGeometryBatch<'_, R>,
     remaining_limits: SceneValidationLimits,
 ) -> Result<SceneValidationLimits, SceneAuthoringAggregateError> {
     remaining_limits_after(geometry_metrics(geometry), remaining_limits)
@@ -295,7 +295,7 @@ pub(in crate::canonical_scene::store) fn validate_scene_aggregate<SR, NR, AR, GR
     spatial: &ValidatedSpatialBatch<'_, SR>,
     nodes: &ValidatedNodeBatch<'_, NR>,
     appearance: &ValidatedAppearanceBatch<'_, AR>,
-    geometry: &ValidatedGeometryBatch<'_, GR>,
+    geometry: &PreparedGeometryBatch<'_, GR>,
     deformation: &ValidatedDeformationBatch<'_, DR>,
     animation: &ValidatedAnimationBatch<'_, ANR>,
     profile: &ValidatedProfileBatch<'_, PR>,
@@ -386,7 +386,7 @@ const fn appearance_metrics<R>(appearance: &ValidatedAppearanceBatch<'_, R>) -> 
     }
 }
 
-const fn geometry_metrics<R>(geometry: &ValidatedGeometryBatch<'_, R>) -> SceneDomainMetrics {
+const fn geometry_metrics<R>(geometry: &PreparedGeometryBatch<'_, R>) -> SceneDomainMetrics {
     SceneDomainMetrics {
         entities: geometry.entity_count(),
         edges: geometry.edge_count(),

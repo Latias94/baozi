@@ -12,6 +12,7 @@ use crate::space_conversion::{NumericConversionError, SpaceConversion};
 use super::super::build::{
     BuildResult, TypedStorageBuildControl, TypedStorageBuildError, allocate, append, finish, push,
 };
+use super::super::finite::{FiniteScalar, FiniteScalarPool};
 use super::super::validation::TypedStorageValidationControl;
 use super::super::{
     GeometryStorage, StoredAttribute, StoredAttributePayload, StoredAttributeSemantic,
@@ -249,8 +250,8 @@ impl<'a> GeometrySpacePlan<'a> {
             attributes: allocate(c[2])?,
             mesh_instances: allocate(c[3])?,
             names: allocate(c[4])?,
-            f32_values: allocate(c[5])?,
-            f64_values: allocate(c[6])?,
+            f32_values: FiniteScalarPool::allocate(c[5])?,
+            f64_values: FiniteScalarPool::allocate(c[6])?,
             u32_values: allocate(c[7])?,
             i32_values: allocate(c[8])?,
         };
@@ -317,8 +318,8 @@ impl<'a> GeometrySpacePlan<'a> {
         finish(&output.attributes, c[2])?;
         finish(&output.mesh_instances, c[3])?;
         finish(&output.names, c[4])?;
-        finish(&output.f32_values, c[5])?;
-        finish(&output.f64_values, c[6])?;
+        output.f32_values.finish(c[5])?;
+        output.f64_values.finish(c[6])?;
         finish(&output.u32_values, c[7])?;
         finish(&output.i32_values, c[8])?;
         Ok(output)
@@ -331,7 +332,7 @@ impl<'a> GeometrySpacePlan<'a> {
         output: &mut GeometryStorage,
         control: &mut C,
     ) -> BuildResult<StoredAttributePayload, C::Error> {
-        let lanes = usize::from(attribute.lanes);
+        let lanes = attribute.lanes;
         let remap = flip && attribute.domain == AttributeDomain::Corner;
         let spatial = spatial_tuple(attribute).ok_or(TypedStorageBuildError::Invariant)?;
         macro_rules! dense {
@@ -693,7 +694,7 @@ impl<'a> GeometrySpacePlan<'a> {
         actual: &GeometryStorage,
         control: &mut C,
     ) -> Result<bool, C::Error> {
-        let lanes = usize::from(attribute.lanes);
+        let lanes = attribute.lanes;
         let remap = flip && attribute.domain == AttributeDomain::Corner;
         let Some(spatial) = spatial_tuple(attribute) else {
             return Ok(false);
@@ -710,7 +711,7 @@ impl<'a> GeometrySpacePlan<'a> {
                     lanes,
                     remap: $remap,
                 };
-                for (ordinal, tuple) in actual.chunks_exact(lanes).enumerate() {
+                for (ordinal, tuple) in actual.chunks_exact(usize::from(lanes)).enumerate() {
                     if control.run_unit(|| {
                         map.get(source, ordinal).is_some_and(|expected| {
                             expected
@@ -971,7 +972,7 @@ fn attribute_work(source: &GeometryStorage, attribute: StoredAttribute) -> Optio
 }
 
 /// Width dispatch stays private to this conversion; storage and Scene have one scalar family.
-trait SpatialFloat: Copy {
+trait SpatialFloat: FiniteScalar {
     type Bits: Eq;
     fn bits(self) -> Self::Bits;
     fn convert(
@@ -1068,7 +1069,7 @@ fn sparse_ordinal(ids: &[u32], ordinal: usize, remap: bool) -> Option<usize> {
 #[derive(Clone, Copy)]
 struct TupleMap<'a> {
     indices: Option<&'a [u32]>,
-    lanes: usize,
+    lanes: u8,
     remap: bool,
 }
 impl TupleMap<'_> {
@@ -1077,8 +1078,9 @@ impl TupleMap<'_> {
             Some(ids) => sparse_ordinal(ids, ordinal, self.remap)?,
             None => corner_ordinal(ordinal, self.remap)?,
         };
-        let start = origin.checked_mul(self.lanes)?;
-        values.get(start..start.checked_add(self.lanes)?)
+        let lanes = usize::from(self.lanes);
+        let start = origin.checked_mul(lanes)?;
+        values.get(start..start.checked_add(lanes)?)
     }
 }
 
@@ -1096,7 +1098,7 @@ fn room<T, E>(values: &Vec<T>, capacity: CapacityPlan, count: usize) -> BuildRes
 fn copy_tuples<T: Copy, C: TypedStorageBuildControl>(
     values: &[T],
     indices: Option<&[u32]>,
-    lanes: usize,
+    lanes: u8,
     remap: bool,
     output: &mut Vec<T>,
     capacity: CapacityPlan,
@@ -1108,6 +1110,7 @@ fn copy_tuples<T: Copy, C: TypedStorageBuildControl>(
         lanes,
         remap,
     };
+    let lanes = usize::from(lanes);
     for ordinal in 0..values.len() / lanes {
         room(output, capacity, lanes)?;
         control
@@ -1128,26 +1131,27 @@ fn copy_float_tuples<T: SpatialFloat, C: TypedStorageBuildControl>(
     map: TupleMap<'_>,
     spatial: Option<SpatialTuple>,
     conversion: SpaceConversion,
-    output: &mut Vec<T>,
+    output: &mut FiniteScalarPool<T>,
     capacity: CapacityPlan,
     control: &mut C,
 ) -> BuildResult<TableRange<T>, C::Error> {
     let start = output.len();
-    for ordinal in 0..values.len() / map.lanes {
-        room(output, capacity, map.lanes)?;
+    let lanes = usize::from(map.lanes);
+    for ordinal in 0..values.len() / lanes {
         control
             .run_unit(|| {
                 let tuple = map
                     .get(values, ordinal)
                     .ok_or(TypedStorageBuildError::Invariant)?;
                 match spatial {
-                    Some(spatial) => output.extend_from_slice(
+                    Some(spatial) => output.try_extend_tuple(
                         &T::convert(conversion, spatial, tuple)
-                            .map_err(|_| TypedStorageBuildError::Invariant)?[..map.lanes],
+                            .map_err(|_| TypedStorageBuildError::Invariant)?[..lanes],
+                        capacity,
                     ),
-                    None => output.extend_from_slice(tuple),
+                    None => output.try_extend_tuple(tuple, capacity),
                 }
-                Ok(())
+                .map_err(|_| TypedStorageBuildError::Invariant)
             })
             .map_err(TypedStorageBuildError::Control)??;
     }
@@ -1210,14 +1214,15 @@ fn compare_float_tuples<T: SpatialFloat, C: TypedStorageValidationControl>(
     conversion: SpaceConversion,
     control: &mut C,
 ) -> Result<bool, C::Error> {
-    for (ordinal, tuple) in actual.chunks_exact(map.lanes).enumerate() {
+    let lanes = usize::from(map.lanes);
+    for (ordinal, tuple) in actual.chunks_exact(lanes).enumerate() {
         if control.run_unit(|| {
             let Some(expected) = map.get(source, ordinal) else {
                 return false;
             };
             match spatial {
                 Some(spatial) => T::convert(conversion, spatial, expected).is_ok_and(|expected| {
-                    expected[..map.lanes]
+                    expected[..lanes]
                         .iter()
                         .map(|value| value.bits())
                         .eq(tuple.iter().map(|value| value.bits()))

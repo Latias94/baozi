@@ -13,7 +13,7 @@ use super::super::plan::animation::{
 };
 use super::super::plan::appearance::validate_appearance_batch_with_control;
 use super::super::plan::deformation::validate_deformation_batch_with_control;
-use super::super::plan::geometry::validate_geometry_batch_with_control;
+use super::super::plan::geometry::prepare_geometry_batch_with_control;
 use super::super::plan::profile::{ProfileOwnerCatalog, validate_profile_batch_with_control};
 use super::super::plan::spatial::validate_spatial_batch_with_control;
 use super::super::scene::{
@@ -443,7 +443,7 @@ fn scene_aggregate_accepts_exact_limits_and_rejects_each_one_short() {
         &mut control,
     )
     .expect("empty appearance domain validates independently");
-    let geometry_batch = validate_geometry_batch_with_control(
+    let geometry_batch = prepare_geometry_batch_with_control(
         geometry_input,
         nodes.len(),
         appearance_batch.material_count(),

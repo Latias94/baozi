@@ -17,20 +17,20 @@ use crate::{FormatId, SceneValidationLimits, SceneValidationWork};
 use super::super::plan::animation::validate_animation_batch_with_control;
 use super::super::plan::appearance::validate_appearance_batch_with_control;
 use super::super::plan::deformation::validate_deformation_batch_with_control;
-use super::super::plan::geometry::validate_geometry_batch_with_control;
+use super::super::plan::geometry::prepare_geometry_batch_with_control;
 use super::super::plan::spatial::validate_spatial_batch_with_control;
 use super::super::{
     AnimationAuthoringBatch, AnimationTargetCatalog, AppearanceAuthoringBatch,
     CanonicalProfileOwner, DeformationAuthoringBatch, GeometryAuthoringBatch,
     LineageAuthoringBatch, MetadataAuthoringBatch, MetadataAuthoringEntry, NodeAuthoringBatch,
-    NodeAuthoringNode, NodeLocalId, ObservedResourceAuthoring, OwnerProvenanceAuthoring, Presence,
-    ProfileAuthoringBatch, ProfileAuthoringFailure, ProfileAuthoringLimit,
-    ProfileAuthoringSemanticError, ProfileOwner, ProfileOwnerCatalog, ProvenanceLocalId,
-    ProvenanceNodeAuthoring, ProvenanceOperationAuthoring, ResourceIdentityLocalId,
-    ResourceIdentityStability, SessionOpaqueReason, SourceIdentityAuthoring, SourceIdentityLocalId,
-    SpatialAuthoringBatch, StableResourceIdentityFixture, ValidatedAnimationBatch,
-    ValidatedAppearanceBatch, ValidatedDeformationBatch, ValidatedGeometryBatch,
-    ValidatedNodeBatch, ValidatedProfileBatch, ValidatedSpatialBatch,
+    NodeAuthoringNode, NodeLocalId, ObservedResourceAuthoring, OwnerProvenanceAuthoring,
+    PreparedGeometryBatch, Presence, ProfileAuthoringBatch, ProfileAuthoringFailure,
+    ProfileAuthoringLimit, ProfileAuthoringSemanticError, ProfileOwner, ProfileOwnerCatalog,
+    ProvenanceLocalId, ProvenanceNodeAuthoring, ProvenanceOperationAuthoring,
+    ResourceIdentityLocalId, ResourceIdentityStability, SessionOpaqueReason,
+    SourceIdentityAuthoring, SourceIdentityLocalId, SpatialAuthoringBatch,
+    StableResourceIdentityFixture, ValidatedAnimationBatch, ValidatedAppearanceBatch,
+    ValidatedDeformationBatch, ValidatedNodeBatch, ValidatedProfileBatch, ValidatedSpatialBatch,
     classify_stable_resource_identity_fixture,
 };
 use super::{TestControl, TestControlError, TestReservation, trs, validate};
@@ -95,7 +95,7 @@ struct ValidatedDomains<'input> {
     spatial: ValidatedSpatialBatch<'input, TestReservation>,
     nodes: ValidatedNodeBatch<'input, TestReservation>,
     appearance: ValidatedAppearanceBatch<'input, TestReservation>,
-    geometry: ValidatedGeometryBatch<'input, TestReservation>,
+    geometry: PreparedGeometryBatch<'input, TestReservation>,
     deformation: ValidatedDeformationBatch<'input, TestReservation>,
     animation: ValidatedAnimationBatch<'input, TestReservation>,
 }
@@ -153,7 +153,7 @@ fn validated_domains<'input>(
         control,
     )
     .expect("the fixture appearance domain must validate");
-    let geometry = validate_geometry_batch_with_control(
+    let geometry = prepare_geometry_batch_with_control(
         GeometryAuthoringBatch::empty(),
         roots.len(),
         appearance.material_count(),
