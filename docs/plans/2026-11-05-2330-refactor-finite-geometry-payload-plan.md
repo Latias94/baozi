@@ -85,3 +85,18 @@ Success means all initialized geometry floats are qualified at their only write 
 ## Design review record
 
 The independent bounded review approves beginning the domain-rejection/cleanup slice, with the mandatory Copy payload, explicit failed-suffix resolution, first-runtime history, ownership-failure reporting, exact-final-action checkpoint and terminal-lane rejection corrections incorporated above. Its receipt is `.git/baozi-review/performance-convergence/finite-payload-plan-review-1.md`. Current edit preflights already establish stronger deterministic generated-value constraints; their checked writer rejects unexpected nonfinite results as internal construction failure rather than widening the entire edit transaction without a reachable input case. Initial authoring rejection retains its public semantic mapping. Source execution, final-implementation review and native qualification remain pending; this review does not clear those gates.
+
+## Execution record
+
+Step 1 is source-qualified at `5e3aff55b0dd9ad1113740fac2346ea0a79b5836`.
+The [retention receipt](../reviews/2026-11-06-typed-retention-rejection.md) records
+one Runtime/Copy-Rejected factory, terminal rejected lanes, explicit failed-work
+settlement, runtime-first ownership history and 256/final control observations.
+The actual full run passes 3,595 workspace tests, 188 doctests, 138 consumer tests
+and both strict lints/formats, with existing skips. A subsequent test-only fault
+delta passes 1,080 Operation tests, 128 doctests, strict lint and format; runtime
+identity is tied to the earlier full run without claiming another complete
+workspace execution. Independent source/fault review closes both requested P2
+test gaps. Geometry pools, finite scans, work formulas and public semantic mapping
+remain unchanged in this slice. Steps 2-5, native owner benefit and every original
+convergence/release gate remain open.

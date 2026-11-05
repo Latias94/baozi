@@ -743,3 +743,13 @@ negative case only for a genuinely new boundary, not for incidental private layo
   remain open. The next closed-payload design must delete actual duplicate
   passes, transport observed semantic rejection honestly and preserve the
   stronger validation cancellation cadence.
+- [Typed retention rejection](../reviews/2026-11-06-typed-retention-rejection.md)
+  qualifies the first step of the [finite geometry owner plan](2026-11-05-2330-refactor-finite-geometry-payload-plan.md)
+  at `5e3aff5`: one factory transports Copy domain facts, rejected lanes cannot
+  continue successfully, failed suffixes settle explicitly, first-runtime and
+  ownership history remain, and normal completion observes the 256-action bound.
+  Full workspace/consumer qualification and a test-only Operation fault follow-up
+  pass; independent source review closes the two requested fault-test gaps.
+  This is a structural prerequisite, with no new ordinary or heap claim. The
+  three float writers, finite-pool invariant and duplicate-scan deletion remain
+  the next actual implementation slice; all release gates stay open.
