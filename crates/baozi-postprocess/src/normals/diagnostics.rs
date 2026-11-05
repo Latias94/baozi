@@ -90,6 +90,10 @@ fn sample<P: PositionSource>(label: &str, positions: P, indices: &[u32], groups:
 
 #[test]
 #[ignore = "manual optimized operation attribution; empty actions are not normal generation"]
+#[allow(
+    clippy::result_large_err,
+    reason = "the diagnostic measures the real host with its inline accounting and control causes"
+)]
 fn observed_unit_protocol_with_empty_actions_preserves_exact_work_evidence() {
     use baozi_operation::__retained_store_integration::activation::CanonicalOperationPublication;
     use baozi_operation::__retained_store_integration::authority::PreparedStoreEvidenceOnlyOutcome;
@@ -110,32 +114,22 @@ fn observed_unit_protocol_with_empty_actions_preserves_exact_work_evidence() {
                     .dimension_state(keys.work)
                     .expect("initial work state");
                 let elapsed = {
-                    let (work, mut services) = operation
-                        .execution()
-                        .expect("borrow the scene edit execution region");
-                    let group = work
-                        .bind_group([keys.work])
-                        .expect("bind one ordinary work role");
-                    let start = Instant::now();
-                    for _ in 0..ACTIONS {
-                        services
-                            .before_action(1)
-                            .expect("admit bounded control debt");
-                        let mut permit = group.admit_observed([1]).expect("admit one empty action");
-                        black_box(());
-                        permit
-                            .complete([1])
-                            .expect("record the physically completed empty action");
-                        permit.finish().expect("resolve the completed envelope");
-                        services.completed_action(1).expect("checked control cost");
-                    }
-                    let elapsed = start.elapsed().as_nanos();
-                    services
-                        .checkpoint()
-                        .expect("final empty-action control checkpoint");
-                    work.finish_region()
-                        .expect("every borrowed action resolved");
-                    elapsed
+                    operation
+                        .with_action_execution::<_, baozi_operation::StoreRuntimeError>(
+                            keys.work,
+                            |actions| {
+                                let start = Instant::now();
+                                for _ in 0..ACTIONS {
+                                    actions.begin_action(1)?;
+                                    black_box(());
+                                    actions.complete_action()?;
+                                }
+                                let elapsed = start.elapsed().as_nanos();
+                                actions.checkpoint()?;
+                                Ok(elapsed)
+                            },
+                        )
+                        .expect("every actual empty-action prefix resolves")
                 };
                 let state = operation
                     .producer_host()
@@ -165,6 +159,6 @@ fn observed_unit_protocol_with_empty_actions_preserves_exact_work_evidence() {
     drop(source_evidence);
     drop(scene);
     println!(
-        "{{\"schema\":\"baozi-observed-unit-diagnostic/v2\",\"actions\":{ACTIONS},\"action_count_basis\":\"historical-pre-P3-control-sites\",\"warmups\":3,\"samples_ns\":{samples:?},\"scope\":\"actual scene edit operation borrowed unit group with empty actions; binding, setup, final checkpoint and publication outside timer; not geometric work or a replacement benchmark\"}}"
+        "{{\"schema\":\"baozi-observed-unit-diagnostic/v3\",\"actions\":{ACTIONS},\"action_count_basis\":\"historical-pre-P3-control-sites\",\"warmups\":3,\"samples_ns\":{samples:?},\"scope\":\"actual scene edit action host with empty actions; binding, entry, final checkpoint and publication outside timer; not geometric work or a replacement benchmark\"}}"
     );
 }

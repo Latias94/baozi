@@ -1,5 +1,4 @@
 use super::*;
-use crate::concrete_store::{StoreExecutionServices, StoreExecutionWork};
 
 #[cfg(test)]
 mod tests;
@@ -165,23 +164,6 @@ where
         StoreActivationContainmentAnchor {
             raw: self.dormant.containment_anchor.share(),
         }
-    }
-
-    /// Lends disjoint work, storage and callback capabilities before consuming activation.
-    #[allow(
-        clippy::type_complexity,
-        reason = "the concrete views share the invocation lifetime"
-    )]
-    pub fn execution(
-        &mut self,
-    ) -> Result<
-        (
-            StoreExecutionWork<'_, O>,
-            StoreExecutionServices<'_, O, PP, U>,
-        ),
-        StoreRuntimeError,
-    > {
-        self.dormant.operation_mut().execution()
     }
 
     /// Lends the existing root with the ordinary loan's original entry checkpoint.

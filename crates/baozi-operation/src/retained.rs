@@ -231,9 +231,8 @@ use triomphe::{Arc, UniqueArc};
 #[cfg(test)]
 pub(crate) use operation::panic_next_publication_account_open;
 pub(crate) use operation::{
-    BorrowedRetainedWorkPermission, ExclusiveOperationParts, ExecutionError, ExecutionGroup,
-    ExecutionOrdinaryStorage, ExecutionPermit, ExecutionServices, ExecutionWork,
-    ORDINARY_WORK_PERMIT_ABANDONED_CODE, RetainedFailureWorkConsumeError,
+    BorrowedRetainedWorkPermission, ExclusiveOperationParts, ExecutionError,
+    ExecutionOrdinaryStorage, ORDINARY_WORK_PERMIT_ABANDONED_CODE, RetainedFailureWorkConsumeError,
     RetainedFailureWorkFinishError, RetainedFailureWorkPermission, RetainedFailureWorkStartError,
     RetainedPlanningBaseline, RetainedPlanningContainmentAnchor, RetainedProducerHost,
     RetainedProducerWorkStartError, RetainedWorkConsumeError, RetainedWorkFinishError,
@@ -255,8 +254,8 @@ pub(crate) use operation_start::{
 use operation_start::{
     StartupRetainedPartGuard, StartupTerminalEvidenceBuildError,
     map_account_action_admission_error, map_batch_error, map_faulted_pending_rollback,
-    map_pending_rollback_or, try_admit_retained_share_work,
-    try_admit_retained_share_work_before_physical, try_open_publication_account,
+    map_pending_rollback_or, try_admit_retained_share_work_before_physical,
+    try_open_publication_account,
 };
 use publication_contract::RetainedPublicationOpenDisposition;
 pub(super) use publication_contract::retained_publication_error_requires_containment;

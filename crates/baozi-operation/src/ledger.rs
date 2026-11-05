@@ -2620,18 +2620,6 @@ where
         self.storage_view().planning_state()
     }
 
-    pub(crate) fn storage_observation(
-        &self,
-        dimension: D,
-    ) -> Result<LedgerStorageObservation<'_, P, D>, LedgerCause<D>> {
-        let position = self.bound_dimension_position(dimension)?;
-        Ok(LedgerStorageObservation {
-            state: &self.state,
-            position,
-            local: PhantomData,
-        })
-    }
-
     pub(crate) fn release_progress_evidence(&self, retained_bytes: u64) {
         let mut state = lock(&self.state);
         debug_assert!(state.current_evidence_bytes >= retained_bytes);

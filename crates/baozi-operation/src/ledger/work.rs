@@ -465,6 +465,7 @@ pub(crate) struct LinearWorkBatchPermit<'op, D: Copy, const N: usize> {
 }
 
 impl<D: Copy, const N: usize> LinearWorkBatchPermit<'_, D, N> {
+    #[cfg(test)]
     pub(crate) fn remaining(&self) -> [u64; N] {
         self.frame.remaining
     }
@@ -547,6 +548,7 @@ impl<D: Copy, const N: usize> LinearWorkBatchPermit<'_, D, N> {
     }
 }
 
+#[cfg(test)]
 impl<D: Copy> LinearWorkBatchPermit<'_, D, 1> {
     pub(crate) fn replenish_one(&mut self) -> Result<(), LedgerCause<D>> {
         if !self.frame.active

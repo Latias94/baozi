@@ -1,3 +1,4 @@
+use super::super::operation_start::try_admit_retained_share_work;
 use super::*;
 
 #[test]

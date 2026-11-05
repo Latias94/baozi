@@ -556,3 +556,19 @@ negative case only for a genuinely new boundary, not for incidental private layo
   Remaining actual backing/startup/share/cold users, obsolete execution-facade
   deletion, fixed/dynamic backing, shared promotion, exact accounting, indexing and
   the unchanged complete Windows/Linux comparisons remain required. Release stays HOLD.
+- The [execution facade retirement](../reviews/2026-11-05-execution-facade-retirement.md)
+  moves actual retained-backing admission to the unique numeric/storage split and
+  deletes the old work/group/permit/services facade with its forwarding methods.
+  Nineteen integration cases and the ignored manual diagnostic now use actual
+  invocation/action hosts; all 23 parent and 19 child tests remain. Independent
+  final production and test reviews find no blocking source issue. Frozen source2
+  passes all seven serial gates: 3,589 workspace tests, 187 doctests, 138 consumer
+  tests, both strict lints and both formats, with the six/one existing skips.
+  The diagnostic-only Clippy failure is fixed locally and retained in QA1.
+  Independent final evidence review reconciles all seven commands/logs and frozen
+  source identities without a blocking mismatch. Next, measure the cumulative qualified
+  successor against `308e9ab` using the prospectively fixed original Windows
+  matrix before another representation change. Startup's four account shares,
+  publication opening and both table creations form the next coherent owner cut;
+  cold numeric users, fixed/dynamic backing, shared promotion, exact accounting,
+  indexing and all full Windows/Linux/heap convergence gates remain open.

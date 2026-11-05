@@ -169,8 +169,7 @@ mod deferred;
 pub use deferred::TerminalStoreLineage;
 mod execution;
 pub use execution::{
-    StoreActionExecution, StoreBoundWorkGroup, StoreChildAdmission, StoreExecutionPermit,
-    StoreExecutionServices, StoreExecutionWork, StoreExtensionResult, StoreFailureStorage,
+    StoreActionExecution, StoreChildAdmission, StoreExtensionResult, StoreFailureStorage,
     StoreImporterBoundary, StoreInvocation, StoreInvocationError, StoreInvocationLayout,
     StoreInvocationParser, StoreInvocationServices, StoreOrdinaryStorage, StoreParserWorkError,
     StoreScanReturn,
@@ -1874,16 +1873,30 @@ where
 /// Logical live bytes are separate from physical retained storage. This view borrows the
 /// invocation, cannot cross threads and owns no `Arc` or `Weak` allocation header.
 ///
-/// ```compile_fail,E0505
+/// ```
 /// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit, StoreDimensionKey};
 /// use baozi_operation::__retained_store_integration::authority::RetainedStoreOperation;
+/// use baozi_operation::__retained_store_integration::activation::StoreInvocationError;
+/// fn observe<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     operation: &mut RetainedStoreOperation<'_, O, P, U>, dimension: StoreDimensionKey,
+/// ) -> Result<u64, StoreInvocationError> {
+///     operation.with_exclusive_execution(|context| {
+///         let observation = context.storage_observation(dimension)?;
+///         Ok(observation.live_bytes())
+///     })
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit, StoreDimensionKey};
+/// use baozi_operation::__retained_store_integration::authority::RetainedStoreOperation;
+/// use baozi_operation::__retained_store_integration::activation::StoreInvocationError;
 /// fn outlive<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
-///     mut operation: RetainedStoreOperation<'_, O, P, U>, dimension: StoreDimensionKey,
+///     operation: &mut RetainedStoreOperation<'_, O, P, U>, dimension: StoreDimensionKey,
 /// ) {
-///     let (work, _) = operation.execution().unwrap();
-///     let observation = work.storage_observation(dimension).unwrap();
-///     drop(operation);
-///     let _ = observation.live_bytes();
+///     let _ = operation.with_exclusive_execution::<_, StoreInvocationError>(|context| {
+///         context.storage_observation(dimension)
+///     });
 /// }
 /// ```
 ///

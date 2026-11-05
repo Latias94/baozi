@@ -608,3 +608,25 @@ retained-backing helper, startup/table sharing and cold numeric observations rem
 actual migration work. Delete those owners with their last callers before claiming
 LocalWork retired. Fixed/dynamic backing, shared promotion, exact accounting,
 indexing and the original performance/memory/heap acceptance remain open.
+
+## Execution Facade Retirement, 2026-11-05
+
+The [retained-backing and facade cut](../reviews/2026-11-05-execution-facade-retirement.md)
+uses the existing unique InternalWork beside ExclusiveStorage for actual backing
+admission, preserving account/logical/share/physical order and the original early
+work-open rejection. The unused aliasable execution facade and forwarding API are
+deleted. All meaningful integration cases use real hosts; the observation examples
+exercise the live generative API. Final source2 passes the complete seven serial
+workspace/consumer gates: 3,589 runtime tests, 187 doctests, 138 consumer tests,
+both strict lints and both formats, with existing skips retained. Source and final
+evidence reviews find no blocking issue; original command/log and source identities
+reconcile.
+
+Before the next representation change, measure this cumulative successor against
+the last measured `308e9ab` worker. Startup's four account shares, publication
+opening and canonical/evidence table creation need one coherent borrowed-owner
+migration. Use deferred WorkLayout projection and the admitted numeric view beside
+storage; preserve pending consumption, gate precedence and physical release.
+Cold/shared numeric callers still prevent LocalWork retirement. Fixed/dynamic
+backing, shared promotion, exact accounting, indexing and full ordinary Windows/
+Linux/heap qualification remain open; this cut has no new performance acceptance.

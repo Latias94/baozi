@@ -353,7 +353,9 @@ fn postallocation_control_rejection_drops_real_backing_before_the_next_child_pie
     assert_eq!(signal.polls.load(Ordering::SeqCst), 3);
     assert_eq!(next_piece.get(), 0);
     assert!(matches!(
-        operation.execution(),
+        operation.with_action_execution::<(), StoreRuntimeError>(keys.other_dimension, |_| panic!(
+            "a cancelled invocation cannot reenter its action host"
+        )),
         Err(StoreRuntimeError::Control(ControlCause::Cancelled {
             origin: CancellationOrigin::Signal
         }))

@@ -222,11 +222,6 @@ impl<'a, PP, U> OperationProgressFields<'a, PP, U> {
     }
 }
 
-type SplitProgress<'a, O, LP, PP, U, D> = (
-    OperationPollCheckpoint<'a, PP, U>,
-    OperationProgressState<'a, O, LP, PP, U, D>,
-);
-
 type SplitExclusiveProgress<'a, O, LP, PP, U, D> = (
     OperationPollCheckpoint<'a, PP, U>,
     OperationProgressFields<'a, PP, U>,
@@ -241,10 +236,6 @@ where
     U: ProgressUnit,
     D: Copy + Ord + fmt::Debug,
 {
-    pub(crate) fn into_parts(self) -> SplitProgress<'a, O, LP, PP, U, D> {
-        (self.poll, self.state)
-    }
-
     fn report_progress_with_delivery(
         &mut self,
         phase: PP,

@@ -64,8 +64,7 @@ mod execution;
 #[cfg(test)]
 mod root_tests;
 pub(crate) use execution::{
-    ExecutionError, ExecutionGroup, ExecutionOrdinaryStorage, ExecutionPermit, ExecutionServices,
-    ExecutionStorage, ExecutionWork, check_execution_state, poll_execution,
+    ExecutionError, ExecutionOrdinaryStorage, check_execution_state, poll_execution,
 };
 
 /// Execution has stopped independently of the owner's eventual terminal classification.
@@ -2294,13 +2293,46 @@ where
         allocations: u64,
     ) -> Result<(LiveReservation<O, P, D>, super::RetainedStorageLease), RetainedWriterError<D>>
     {
-        let storage = ExecutionStorage {
-            ledger: self.common.coordinator.retained_ledger(),
-            account: self.retained.baseline.account(),
-            share_work: self.retained.terminal_account_share_work,
-            failure: &self.common.sticky_terminal_cause,
-        };
-        storage.reserve_retained(phase, dimension, bytes, allocations)
+        let Self {
+            retained, common, ..
+        } = self;
+        let RetainedOperationFields {
+            baseline,
+            terminal_account_share_work,
+            ..
+        } = &mut **retained;
+        let OperationInvocation {
+            coordinator,
+            sticky_terminal_cause,
+            ..
+        } = &mut **common;
+        let (_, _, ledger) = coordinator.split_exclusive_progress_and_ledger();
+        ledger
+            .ensure_work_open()
+            .map_err(RetainedWriterError::Ledger)?;
+        let (mut work, storage) = ledger.split_internal();
+        let share_plan = *terminal_account_share_work;
+        let share_work = &mut work;
+        let result = super::reserve_exclusive_backing(
+            &storage,
+            baseline.account(),
+            phase,
+            dimension,
+            bytes,
+            allocations,
+            move || {
+                let share_work = share_work;
+                super::operation_start::admit_internal_share(share_work, share_plan)
+            },
+        );
+        if let Err(cause) = &result {
+            let code = match cause {
+                RetainedWriterError::Ledger(_) => PreparationFailureCode::ledger(),
+                _ => PreparationFailureCode::product_graph(0x5354_4f52),
+            };
+            record_terminal_cause_with_precedence(sticky_terminal_cause, code);
+        }
+        result
     }
 
     pub(super) fn activate_failure_terminal_work(

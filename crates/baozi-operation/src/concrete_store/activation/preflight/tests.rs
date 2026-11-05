@@ -597,37 +597,45 @@ fn prior_failure_still_contains_a_panicking_transaction_capture_drop() {
 }
 
 #[test]
-fn prior_outstanding_zero_or_completed_permit_cannot_use_the_healthy_failure_exit() {
-    for admitted in [0_u64, 1] {
+fn forgotten_zero_or_completed_action_loan_keeps_host_cleanup_and_healthy_rejection() {
+    for completed in [false, true] {
         let mut invocation_host = InvocationHost::new();
-        let body = invocation_host.run_body(|parts, _disposition| {
-            let CanonicalBodyParts {
-                startup: invocation_root,
-                output,
-                activation,
-                ..
-            } = parts;
-            let (mut operation, keys, account) =
-                body_operation(invocation_root, 4096, 4096, OperationControl::default());
-            {
-                let (work, _) = operation.execution().unwrap();
-                let group = work.bind_group([keys.work]).unwrap();
-                let mut permit = group.admit_observed([admitted]).unwrap();
-                permit.complete([admitted]).unwrap();
-                std::mem::forget(permit);
-            }
-            let transaction_ran = std::cell::Cell::new(false);
-            let outcome: Result<SemanticOutcome<'_>, _> = keys
-                .body_session(operation)
-                .plan_and_activate_scoped(output, activation, |planning| {
-                    transaction_ran.set(true);
-                    planning.reject((), 90)
-                });
-            assert!(!transaction_ran.get());
-            assert!(outcome.is_err());
-            assert!(account.snapshot().poisoned());
-        });
-        assert!(body.is_err());
+        let mut retained_account = None;
+        let finish = invocation_host
+            .run_body(|parts, disposition| {
+                let CanonicalBodyParts {
+                    startup,
+                    output,
+                    activation,
+                    ..
+                } = parts;
+                let (mut operation, keys, account) =
+                    body_operation(startup, 4096, 4096, OperationControl::default());
+                operation
+                    .with_action_execution::<_, StoreRuntimeError>(keys.work, |actions| {
+                        if completed {
+                            actions.begin_action(1)?;
+                            actions.complete_action()?;
+                        }
+                        let _forgotten = std::mem::ManuallyDrop::new(actions);
+                        Ok(())
+                    })
+                    .unwrap();
+                let transaction_ran = std::cell::Cell::new(false);
+                let outcome: SemanticOutcome<'_> = keys
+                    .body_session(operation)
+                    .plan_and_activate_scoped(output, activation, |planning| {
+                        transaction_ran.set(true);
+                        planning.reject((), 90)
+                    })
+                    .unwrap();
+                assert!(transaction_ran.get());
+                assert!(!account.snapshot().poisoned());
+                request_semantic_rejection(outcome, disposition);
+                retained_account = Some(account);
+            })
+            .unwrap();
+        release_semantic_rejection(finish.resume().outcome, retained_account.as_ref().unwrap());
     }
 }
 

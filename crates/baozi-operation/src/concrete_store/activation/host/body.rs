@@ -8,8 +8,8 @@ use crate::concrete_store::{
     BoundStoreOperation, CanonicalInheritanceSource, FreshStoreLineage, PublishedCanonicalStore,
     RetainedStoreBatchLimits, RetainedStoreControlCheckpoint, RetainedStoreOperation,
     RetainedStoreProducerHost, RetainedStoreReservation, RetainedStoreStartError,
-    RetainedStoreStartPlan, StoreActionExecution, StoreDimensionKey, StoreExecutionServices,
-    StoreExecutionWork, StoreInvocationStart, StoreLedgerPlan, StorePhaseKey, StoreRuntimeError,
+    RetainedStoreStartPlan, StoreActionExecution, StoreDimensionKey, StoreInvocationStart,
+    StoreLedgerPlan, StorePhaseKey, StoreRuntimeError,
 };
 use crate::{
     OperationControl, OperationOwner, PhysicalStorageAccount, ProgressPhase, ProgressUnit,
@@ -378,19 +378,6 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    #[allow(clippy::type_complexity)]
-    pub fn execution(
-        &mut self,
-    ) -> Result<
-        (
-            StoreExecutionWork<'_, O>,
-            StoreExecutionServices<'_, O, PP, U>,
-        ),
-        StoreRuntimeError,
-    > {
-        self.operation.execution()
-    }
-
     /// Runs bounded geometry events while the outer invocation retains all final authority.
     pub fn with_action_execution<R, E: From<StoreRuntimeError>>(
         &mut self,

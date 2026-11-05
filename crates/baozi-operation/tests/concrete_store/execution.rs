@@ -6,7 +6,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use baozi_operation::__retained_store_integration::activation::{
-    StoreBoundWorkGroup, StoreExecutionServices, StoreInvocationError,
+    StoreActionExecution, StoreInvocationError, StoreScanReturn,
 };
 use baozi_operation::__retained_store_integration::authority::PreparedStoreEvidenceOnlyOutcome;
 use baozi_operation::{
@@ -91,16 +91,12 @@ fn operation_with_work_policy<'inv>(
 }
 
 fn write_unit(
-    group: &StoreBoundWorkGroup<'_, 1>,
-    services: &mut StoreExecutionServices<'_, TestOwner, TestProgress, TestUnit>,
+    execution: &mut StoreActionExecution<'_, TestOwner, TestProgress, TestUnit>,
     destination: &mut u8,
 ) -> Result<(), StoreRuntimeError> {
-    services.before_action(1)?;
-    let mut permit = group.admit_observed([1])?;
+    execution.begin_action(1)?;
     *destination = 1;
-    permit.complete([1])?;
-    services.completed_action(1)?;
-    permit.finish()
+    execution.complete_action()
 }
 
 fn rejected_success_evidence<'inv>(
@@ -139,30 +135,31 @@ fn borrowed_storage_observation_reads_logical_capacity_before_operation_detach()
     let mut invocation_root = TestInvocationRoot::new();
     let (mut operation, keys) = operation(&mut invocation_root, &account);
     let physical = account.snapshot();
-    {
-        let (work, mut services) = operation.execution().unwrap();
-        let baseline = work.dimension_state(keys.dimension).unwrap().live_bytes();
-        let observation = work.storage_observation(keys.dimension).unwrap();
-        let mut first = services
-            .ordinary()
-            .reserve(keys.phase, keys.dimension, 17)
-            .unwrap();
-        let cloned = observation;
-        assert_eq!(observation.live_bytes(), baseline + 17);
-        services.resize(&mut first, 9).unwrap();
-        assert_eq!(cloned.live_bytes(), baseline + 9);
-        let second = services
-            .ordinary()
-            .reserve(keys.phase, keys.dimension, 31)
-            .unwrap();
-        assert_eq!(observation.live_bytes(), baseline + 40);
-        assert_eq!(account.snapshot(), physical);
-        drop(first);
-        assert_eq!(cloned.live_bytes(), baseline + 31);
-        drop(second);
-        assert_eq!(observation.live_bytes(), baseline);
-        work.finish_region().unwrap();
-    }
+    operation
+        .with_exclusive_execution::<_, StoreInvocationError>(|context| {
+            let baseline = context.dimension_state(keys.dimension)?.live_bytes();
+            let observation = context.storage_observation(keys.dimension)?;
+            let mut first =
+                context
+                    .services()
+                    .ordinary_storage()
+                    .reserve(keys.phase, keys.dimension, 17)?;
+            let cloned = observation;
+            assert_eq!(observation.live_bytes(), baseline + 17);
+            context.services().resize(&mut first, 9)?;
+            assert_eq!(cloned.live_bytes(), baseline + 9);
+            let second = context
+                .ordinary_storage()
+                .reserve(keys.phase, keys.dimension, 31)?;
+            assert_eq!(observation.live_bytes(), baseline + 40);
+            assert_eq!(account.snapshot(), physical);
+            drop(first);
+            assert_eq!(cloned.live_bytes(), baseline + 31);
+            drop(second);
+            assert_eq!(observation.live_bytes(), baseline);
+            Ok(())
+        })
+        .unwrap();
     let prepared = operation
         .prepare_evidence_only_success(final_progress())
         .unwrap();
@@ -208,73 +205,81 @@ fn group_and_partial_permit_survive_real_storage_and_progress() {
     let physical_before = account.snapshot();
     let mut output = [0; 3];
 
-    let (retained, retained_bytes) = {
-        let (work, mut services) = operation.execution().unwrap();
-        let group = work.bind_group([keys.other_dimension]).unwrap();
-        // Moving the view proves that the group borrows the invocation, not this wrapper.
-        let region = work;
-        let mut permit = group.admit_observed([3]).unwrap();
+    let (retained, retained_bytes) = operation
+        .with_exclusive_execution::<_, StoreInvocationError>(|context| {
+            let layout = context.bind_group([keys.other_dimension])?;
+            let retained = context.parser_scan_child::<_, StoreInvocationError, 1>(
+                layout,
+                [3],
+                [None],
+                |child| {
+                    child.run_prefix([1], 1, || {
+                        output[0] = 1;
+                        Ok::<_, StoreInvocationError>(())
+                    })?;
+                    child.services().report_progress(
+                        TestProgress::Build,
+                        TestUnit::Items,
+                        1,
+                        None,
+                    )?;
+                    assert_eq!(callbacks.load(Ordering::SeqCst), 1);
 
-        services.before_action(1).unwrap();
-        output[0] = 1;
-        permit.complete([1]).unwrap();
-        services.completed_action(1).unwrap();
-        services
-            .report_progress(TestProgress::Build, TestUnit::Items, 1, None)
-            .unwrap();
-        assert_eq!(callbacks.load(Ordering::SeqCst), 1);
+                    let temporary_plan = CapacityPlan::for_type::<u8>(0, 0, 17).unwrap();
+                    let mut temporary = child
+                        .services()
+                        .ordinary_storage()
+                        .reserve(
+                            keys.phase,
+                            keys.dimension,
+                            temporary_plan.envelope_delta_bytes().unwrap(),
+                        )
+                        .unwrap();
+                    let mut scratch = Vec::<u8>::new();
+                    scratch
+                        .try_reserve_exact(temporary_plan.allocator_additional())
+                        .unwrap();
+                    let scratch_bytes = temporary_plan
+                        .finish(scratch.len(), scratch.capacity())
+                        .unwrap();
+                    child.services().resize(&mut temporary, scratch_bytes)?;
+                    scratch.resize(temporary_plan.desired_capacity(), 7);
+                    assert_eq!(scratch, [7; 17]);
+                    drop(scratch);
+                    drop(temporary);
 
-        let temporary_plan = CapacityPlan::for_type::<u8>(0, 0, 17).unwrap();
-        let mut temporary = services
-            .ordinary()
-            .reserve(
-                keys.phase,
-                keys.dimension,
-                temporary_plan.envelope_delta_bytes().unwrap(),
-            )
-            .unwrap();
-        let mut scratch = Vec::<u8>::new();
-        scratch
-            .try_reserve_exact(temporary_plan.allocator_additional())
-            .unwrap();
-        let scratch_bytes = temporary_plan
-            .finish(scratch.len(), scratch.capacity())
-            .unwrap();
-        services.resize(&mut temporary, scratch_bytes).unwrap();
-        scratch.resize(temporary_plan.desired_capacity(), 7);
-        assert_eq!(scratch, [7; 17]);
-        drop(scratch);
-        drop(temporary);
+                    let retained_plan = CapacityPlan::for_type::<u8>(0, 0, 31).unwrap();
+                    let mut reservation = child
+                        .services()
+                        .reserve_retained(
+                            keys.phase,
+                            keys.dimension,
+                            retained_plan.envelope_delta_bytes().unwrap(),
+                            1,
+                        )
+                        .expect("the internal account share can nest inside a parser channel");
+                    let mut value = Vec::<u8>::new();
+                    value
+                        .try_reserve_exact(retained_plan.allocator_additional())
+                        .unwrap();
+                    let retained_bytes =
+                        retained_plan.finish(value.len(), value.capacity()).unwrap();
+                    child.services().resize(&mut reservation, retained_bytes)?;
+                    value.resize(retained_plan.desired_capacity(), 9);
+                    let retained = reservation.bind_storage(value).unwrap();
 
-        let retained_plan = CapacityPlan::for_type::<u8>(0, 0, 31).unwrap();
-        let mut reservation = services
-            .reserve_retained(
-                keys.phase,
-                keys.dimension,
-                retained_plan.envelope_delta_bytes().unwrap(),
-                1,
-            )
-            .expect("the internal account share can nest inside an ordinary permit");
-        let mut value = Vec::<u8>::new();
-        value
-            .try_reserve_exact(retained_plan.allocator_additional())
-            .unwrap();
-        let retained_bytes = retained_plan.finish(value.len(), value.capacity()).unwrap();
-        services.resize(&mut reservation, retained_bytes).unwrap();
-        value.resize(retained_plan.desired_capacity(), 9);
-        let retained = reservation.bind_storage(value).unwrap();
-
-        assert_eq!(permit.remaining(), [2]);
-        services.before_action(1).unwrap();
-        output[1] = 2;
-        permit.complete([1]).unwrap();
-        services.completed_action(1).unwrap();
-        permit.finish_partial().unwrap();
-        write_unit(&group, &mut services, &mut output[2]).unwrap();
-        region.finish_region().unwrap();
-        services.checkpoint().unwrap();
-        (retained, retained_bytes)
-    };
+                    assert_eq!(child.remaining(), [2]);
+                    child.run_prefix([1], 1, || {
+                        output[1] = 2;
+                        Ok::<_, StoreInvocationError>(())
+                    })?;
+                    Ok(StoreScanReturn::Boundary((retained, retained_bytes)))
+                },
+            )?;
+            context.run_action(layout, [1], 1, || output[2] = 1)?;
+            Ok(retained)
+        })
+        .unwrap();
 
     assert_eq!(output, [1, 2, 1]);
     assert_eq!(retained.as_ref(), &[9; 31]);
@@ -343,50 +348,50 @@ fn idle_sequence_keeps_retained_share_work_and_storage_on_the_same_authority() {
         .unwrap();
     let physical = account.snapshot();
     let mut output = [0; 2];
-    {
-        let (work, mut services) = operation.execution().unwrap();
-        let group = work.bind_group([keys.dimension]).unwrap();
-        services.before_action(1).unwrap();
-        let mut permit = group.admit_observed([1]).unwrap();
-        output[0] = 1;
-        permit.complete([1]).unwrap();
-        services.completed_action(1).unwrap();
+    operation
+        .with_action_execution::<_, StoreRuntimeError>(keys.dimension, |execution| {
+            execution.begin_action(1)?;
+            output[0] = 1;
+            execution.complete_action()?;
 
-        let plan = CapacityPlan::for_type::<u8>(0, 0, 5).unwrap();
-        let mut reservation = services
-            .reserve_retained(
-                keys.phase,
-                keys.dimension,
-                plan.envelope_delta_bytes().unwrap(),
-                1,
-            )
-            .unwrap();
-        let mut values = Vec::<u8>::new();
-        values
-            .try_reserve_exact(plan.allocator_additional())
-            .unwrap();
-        let bytes = plan.finish(values.len(), values.capacity()).unwrap();
-        services.resize(&mut reservation, bytes).unwrap();
-        values.extend_from_slice(&[2, 3, 4, 5, 6]);
-        let retained = reservation.bind_storage(values).unwrap();
-        assert_eq!(retained.as_ref(), &[2, 3, 4, 5, 6]);
-        assert_eq!(physical_delta(physical, account.snapshot()), (bytes, 1));
-        assert_eq!(permit.remaining(), [0]);
-
-        services.before_action(1).unwrap();
-        permit.replenish_one().unwrap();
-        output[1] = retained.as_ref()[0];
-        permit.complete([1]).unwrap();
-        services.completed_action(1).unwrap();
-        permit.finish().unwrap();
-        drop(retained);
-        let state = work.dimension_state(keys.dimension).unwrap();
-        assert_eq!(state.attempted(), baseline.attempted() + 4);
-        assert_eq!(state.consumed(), baseline.consumed() + 4);
-        assert_eq!(state.live_bytes(), baseline.live_bytes());
-        work.finish_region().unwrap();
-        services.checkpoint().unwrap();
-    }
+            let plan = CapacityPlan::for_type::<u8>(0, 0, 5).unwrap();
+            let mut reservation = execution
+                .reserve_retained(
+                    keys.phase,
+                    keys.dimension,
+                    plan.envelope_delta_bytes().unwrap(),
+                    1,
+                )
+                .unwrap();
+            let mut values = Vec::<u8>::new();
+            values
+                .try_reserve_exact(plan.allocator_additional())
+                .unwrap();
+            let bytes = plan.finish(values.len(), values.capacity()).unwrap();
+            execution.resize(&mut reservation, bytes)?;
+            values.extend_from_slice(&[2, 3, 4, 5, 6]);
+            let retained = reservation.bind_storage(values).unwrap();
+            assert_eq!(retained.as_ref(), &[2, 3, 4, 5, 6]);
+            assert_eq!(physical_delta(physical, account.snapshot()), (bytes, 1));
+            execution.begin_action(1)?;
+            output[1] = retained.as_ref()[0];
+            execution.complete_action()?;
+            drop(retained);
+            assert_eq!(
+                execution.work_counters(keys.dimension)?,
+                (baseline.attempted() + 4, baseline.consumed() + 4, 0)
+            );
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        operation
+            .producer_host()
+            .dimension_state(keys.dimension)
+            .unwrap()
+            .live_bytes(),
+        baseline.live_bytes()
+    );
     assert_eq!(output, [1, 2]);
     assert_eq!(physical_delta(physical, account.snapshot()), (0, 0));
     let published = operation.prepare_minimal_fallback(71).unwrap().handoff();
@@ -418,40 +423,38 @@ fn tightened_policy_rejects_refill_once_and_preserves_the_written_prefix() {
         DimensionPolicy::counter(8, 8, 0),
     );
     let mut output = [73; 3];
-    {
-        let (work, mut services) = operation.execution().unwrap();
-        let group = work.bind_group([keys.other_dimension]).unwrap();
-        let mut permit = group.admit_observed([0]).unwrap();
-        for destination in output.iter_mut().take(2) {
-            services.before_action(1).unwrap();
-            permit.replenish_one().unwrap();
-            *destination = 1;
-            permit.complete([1]).unwrap();
-            services.completed_action(1).unwrap();
-        }
-        work.tighten_dimension_policy(keys.other_dimension, DimensionPolicy::counter(2, 2, 0))
-            .unwrap();
-        let denied = permit.replenish_one();
-        if denied.is_ok() {
-            output[2] = 1;
-        }
-        assert!(matches!(
-            denied,
-            Err(StoreRuntimeError::Ledger(LedgerCause::LimitExceeded {
-                dimension,
-                class: CounterClass::Attempted,
-                value: 3,
-                limit: 2,
-            })) if dimension == keys.other_dimension
-        ));
-        assert!(matches!(
-            permit.replenish_one(),
-            Err(StoreRuntimeError::FallbackOnly)
-        ));
-        assert_eq!(permit.remaining(), [0]);
-        permit.finish_partial().unwrap();
-        work.finish_region().unwrap();
-    }
+    let result = operation.with_action_execution::<_, StoreRuntimeError>(
+        keys.other_dimension,
+        |execution| {
+            for destination in output.iter_mut().take(2) {
+                write_unit(execution, destination)?;
+            }
+            execution.tighten_dimension_policy(
+                keys.other_dimension,
+                DimensionPolicy::counter(2, 2, 0),
+            )?;
+            let denied = execution.begin_action(1);
+            if denied.is_ok() {
+                output[2] = 1;
+            }
+            assert!(matches!(
+                denied,
+                Err(StoreRuntimeError::Ledger(LedgerCause::LimitExceeded {
+                    dimension,
+                    class: CounterClass::Attempted,
+                    value: 3,
+                    limit: 2,
+                })) if dimension == keys.other_dimension
+            ));
+            assert!(matches!(
+                execution.begin_action(1),
+                Err(StoreRuntimeError::FallbackOnly)
+            ));
+            assert_eq!(execution.work_counters(keys.other_dimension)?, (3, 2, 0));
+            denied
+        },
+    );
+    assert!(result.is_err());
     assert_eq!(output, [1, 1, 73]);
     let evidence = rejected_success_evidence(operation, StorePreparationFailureClass::Ledger);
     assert_work(&evidence, keys.other_dimension, 3, 2);
@@ -480,26 +483,18 @@ fn exact_work_is_independent_of_entry_periodic_and_final_poll_counts() {
         );
         signal.polls.store(0, Ordering::SeqCst);
         let mut physical = [0; 257];
-        {
-            let (work, mut services) = operation.execution().unwrap();
-            assert_eq!(signal.polls.load(Ordering::SeqCst), 1);
-            let group = work.bind_group([keys.other_dimension]).unwrap();
-            let mut permit = group.admit_observed([0]).unwrap();
-            for destination in physical.iter_mut().take(actions) {
-                services.before_action(1).unwrap();
-                permit.replenish_one().unwrap();
-                *destination = 1;
-                permit.complete([1]).unwrap();
-                services.completed_action(1).unwrap();
-            }
-            permit.finish().unwrap();
-            assert_eq!(signal.polls.load(Ordering::SeqCst), expected_polls - 1);
-            work.finish_region().unwrap();
-            assert_eq!(signal.polls.load(Ordering::SeqCst), expected_polls - 1);
-            services.checkpoint().unwrap();
-            assert_eq!(signal.polls.load(Ordering::SeqCst), expected_polls);
-            assert_eq!(progress_events.load(Ordering::SeqCst), 0);
-        }
+        operation
+            .with_action_execution::<_, StoreRuntimeError>(keys.other_dimension, |execution| {
+                assert_eq!(signal.polls.load(Ordering::SeqCst), 1);
+                for destination in physical.iter_mut().take(actions) {
+                    write_unit(execution, destination)?;
+                }
+                assert_eq!(signal.polls.load(Ordering::SeqCst), expected_polls - 1);
+                assert_eq!(progress_events.load(Ordering::SeqCst), 0);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(signal.polls.load(Ordering::SeqCst), expected_polls);
         assert!(physical[..actions].iter().all(|value| *value == 1));
         assert!(physical[actions..].iter().all(|value| *value == 0));
         let state = operation
@@ -556,67 +551,53 @@ fn cancellation_is_observed_at_entry_or_within_the_explicit_action_bound() {
         let mut physical = [0; 513];
         if cancel_after == 0 {
             signal.token.cancel();
-            assert!(matches!(
-                operation.execution(),
-                Err(StoreRuntimeError::Control(ControlCause::Cancelled {
-                    origin: CancellationOrigin::Signal,
-                }))
-            ));
-        } else {
-            let (work, mut services) = operation.execution().unwrap();
-            let group = work.bind_group([keys.other_dimension]).unwrap();
-            let mut permit = group.admit_observed([0]).unwrap();
-            let mut stopped = false;
-            for (index, destination) in physical.iter_mut().enumerate() {
-                let result = services
-                    .before_action(1)
-                    .and_then(|()| permit.replenish_one());
-                if result.is_err() {
-                    assert!(matches!(
-                        result,
-                        Err(StoreRuntimeError::Control(ControlCause::Cancelled {
-                            origin: CancellationOrigin::Signal,
-                        }))
-                    ));
-                    assert_eq!(index, expected_actions);
-                    stopped = true;
-                    break;
-                }
-                *destination = 1;
-                permit.complete([1]).unwrap();
-                services.completed_action(1).unwrap();
-                if index + 1 == cancel_after {
-                    signal.token.cancel();
-                }
-            }
-            assert!(
-                stopped,
-                "cancellation must be observed within the finite action bound"
-            );
-            assert!(expected_actions - cancel_after <= 256);
-            assert!(matches!(
-                permit.replenish_one(),
-                Err(StoreRuntimeError::FallbackOnly)
-            ));
-            permit.finish_partial().unwrap();
-            assert!(matches!(
-                group.admit_observed([0]),
-                Err(StoreRuntimeError::FallbackOnly)
-            ));
-            work.finish_region().unwrap();
-            assert!(matches!(
-                services.checkpoint(),
-                Err(StoreRuntimeError::Control(ControlCause::Cancelled {
-                    origin: CancellationOrigin::Signal,
-                }))
-            ));
-            assert!(matches!(
-                services.before_action(1),
-                Err(StoreRuntimeError::Control(ControlCause::Cancelled {
-                    origin: CancellationOrigin::Signal,
-                }))
-            ));
         }
+        let result = operation.with_action_execution::<(), StoreRuntimeError>(
+            keys.other_dimension,
+            |execution| {
+                assert_ne!(cancel_after, 0);
+                for (index, destination) in physical.iter_mut().enumerate() {
+                    if let Err(cause) = execution.begin_action(1) {
+                        assert!(matches!(
+                            cause,
+                            StoreRuntimeError::Control(ControlCause::Cancelled {
+                                origin: CancellationOrigin::Signal,
+                            })
+                        ));
+                        assert_eq!(index, expected_actions);
+                        assert!(expected_actions - cancel_after <= 256);
+                        assert!(matches!(
+                            execution.begin_action(1),
+                            Err(StoreRuntimeError::Control(_))
+                        ));
+                        assert!(matches!(
+                            execution.checkpoint(),
+                            Err(StoreRuntimeError::Control(_))
+                        ));
+                        return Err(cause);
+                    }
+                    *destination = 1;
+                    execution.complete_action()?;
+                    if index + 1 == cancel_after {
+                        signal.token.cancel();
+                    }
+                }
+                panic!("cancellation must be observed within the finite action bound")
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(StoreRuntimeError::Control(ControlCause::Cancelled {
+                origin: CancellationOrigin::Signal,
+            }))
+        ));
+        assert!(matches!(
+            operation
+                .with_action_execution::<(), StoreRuntimeError>(keys.other_dimension, |_| panic!(
+                    "cancelled regions cannot reenter"
+                )),
+            Err(StoreRuntimeError::Control(_))
+        ));
         assert!(physical[..expected_actions].iter().all(|value| *value == 1));
         assert!(physical[expected_actions..].iter().all(|value| *value == 0));
         assert_eq!(signal.polls.load(Ordering::SeqCst), expected_polls);
@@ -651,29 +632,40 @@ fn final_checkpoint_preserves_partial_envelope_prefixes_including_a_zero_action_
         );
         signal.polls.store(0, Ordering::SeqCst);
         let mut physical = [0; 257];
-        {
-            let (work, mut services) = operation.execution().unwrap();
-            let group = work.bind_group([keys.other_dimension]).unwrap();
-            let mut permit = group.admit_observed([attempted]).unwrap();
-            for destination in physical.iter_mut().take(actions) {
-                services.before_action(1).unwrap();
-                *destination = 1;
-                permit.complete([1]).unwrap();
-                services.completed_action(1).unwrap();
-            }
-            signal.token.cancel();
-            assert_eq!(signal.polls.load(Ordering::SeqCst), expected_polls - 1);
-            assert!(matches!(
-                services.checkpoint(),
-                Err(StoreRuntimeError::Control(ControlCause::Cancelled {
-                    origin: CancellationOrigin::Signal,
-                }))
-            ));
-            assert_eq!(signal.polls.load(Ordering::SeqCst), expected_polls);
-            assert_eq!(permit.remaining(), [1]);
-            permit.finish_partial().unwrap();
-            work.finish_region().unwrap();
-        }
+        let result = operation.with_exclusive_execution::<_, StoreInvocationError>(|context| {
+            let layout = context.bind_group([keys.other_dimension])?;
+            context.parser_child::<_, StoreInvocationError, 1>(
+                layout,
+                [attempted],
+                [None],
+                |child| {
+                    for destination in physical.iter_mut().take(actions) {
+                        child.run_prefix([1], 1, || {
+                            *destination = 1;
+                            Ok::<_, StoreInvocationError>(())
+                        })?;
+                    }
+                    signal.token.cancel();
+                    assert_eq!(signal.polls.load(Ordering::SeqCst), expected_polls - 1);
+                    let checkpoint = child.checkpoint();
+                    assert!(matches!(
+                        checkpoint,
+                        Err(StoreInvocationError::Runtime(StoreRuntimeError::Control(
+                            ControlCause::Cancelled {
+                                origin: CancellationOrigin::Signal,
+                            }
+                        )))
+                    ));
+                    assert_eq!(signal.polls.load(Ordering::SeqCst), expected_polls);
+                    assert_eq!(child.remaining(), [1]);
+                    checkpoint
+                },
+            )
+        });
+        assert!(matches!(
+            result,
+            Err(StoreInvocationError::Runtime(StoreRuntimeError::Control(_)))
+        ));
         assert!(physical[..actions].iter().all(|value| *value == 1));
         assert!(physical[actions..].iter().all(|value| *value == 0));
         let evidence = rejected_success_evidence(operation, StorePreparationFailureClass::Control);
@@ -695,25 +687,27 @@ fn explicit_checkpoint_resets_the_debt_shared_by_nested_control_reborrows() {
     );
     signal.polls.store(0, Ordering::SeqCst);
     let mut physical = [0; 512];
-    {
-        let (work, mut services) = operation.execution().unwrap();
-        let group = work.bind_group([keys.other_dimension]).unwrap();
-        for destination in &mut physical[..255] {
-            write_unit(&group, &mut services, destination).unwrap();
-        }
-        assert_eq!(signal.polls.load(Ordering::SeqCst), 1);
-        services.checkpoint().unwrap();
-        assert_eq!(signal.polls.load(Ordering::SeqCst), 2);
-        for destination in &mut physical[255..511] {
-            write_unit(&group, &mut services, destination).unwrap();
-        }
-        assert_eq!(signal.polls.load(Ordering::SeqCst), 2);
-        write_unit(&group, &mut services, &mut physical[511]).unwrap();
-        assert_eq!(signal.polls.load(Ordering::SeqCst), 3);
-        work.finish_region().unwrap();
-        services.checkpoint().unwrap();
-        assert_eq!(signal.polls.load(Ordering::SeqCst), 4);
-    }
+    operation
+        .with_action_execution::<_, StoreRuntimeError>(keys.other_dimension, |execution| {
+            for destination in &mut physical[..255] {
+                write_unit(&mut *execution, destination)?;
+            }
+            assert_eq!(signal.polls.load(Ordering::SeqCst), 1);
+            {
+                let nested = &mut *execution;
+                nested.checkpoint()?;
+            }
+            assert_eq!(signal.polls.load(Ordering::SeqCst), 2);
+            for destination in &mut physical[255..511] {
+                write_unit(&mut *execution, destination)?;
+            }
+            assert_eq!(signal.polls.load(Ordering::SeqCst), 2);
+            write_unit(execution, &mut physical[511])?;
+            assert_eq!(signal.polls.load(Ordering::SeqCst), 3);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(signal.polls.load(Ordering::SeqCst), 4);
     assert_eq!(physical, [1; 512]);
     let evidence = operation
         .prepare_minimal_fallback(72)
@@ -746,50 +740,44 @@ fn every_action_checks_attempted_and_consumed_budgets_between_control_polls() {
             );
             signal.polls.store(0, Ordering::SeqCst);
             let mut physical = [0; 256];
-            {
-                let (work, mut services) = operation.execution().unwrap();
-                let group = work.bind_group([keys.other_dimension]).unwrap();
-                let mut permit = group.admit_observed([0]).unwrap();
-                for destination in physical.iter_mut().take(allowed) {
-                    services.before_action(1).unwrap();
-                    permit.replenish_one().unwrap();
-                    *destination = 1;
-                    permit.complete([1]).unwrap();
-                    services.completed_action(1).unwrap();
-                }
-                services.before_action(1).unwrap();
-                let rejected = permit.replenish_one();
-                if rejected.is_ok() {
-                    physical[allowed] = 1;
-                }
-                assert!(matches!(
-                    rejected,
-                    Err(StoreRuntimeError::Ledger(LedgerCause::LimitExceeded {
-                        class: rejected_class,
-                        dimension,
-                        value,
-                        limit,
-                    })) if rejected_class == class
-                        && dimension == keys.other_dimension
-                        && value == allowed as u64 + 1
-                        && limit == allowed as u64
-                ));
-                assert_eq!(permit.remaining(), [0]);
-                permit.finish_partial().unwrap();
-                assert!(matches!(
-                    group.admit_observed([0]),
-                    Err(StoreRuntimeError::FallbackOnly)
-                ));
-                assert!(matches!(
-                    services.before_action(1),
-                    Err(StoreRuntimeError::FallbackOnly)
-                ));
-                work.finish_region().unwrap();
-                assert!(matches!(
-                    services.checkpoint(),
-                    Err(StoreRuntimeError::FallbackOnly)
-                ));
-            }
+            let result = operation.with_action_execution::<_, StoreRuntimeError>(
+                keys.other_dimension,
+                |execution| {
+                    for destination in physical.iter_mut().take(allowed) {
+                        write_unit(execution, destination)?;
+                    }
+                    let rejected = execution.begin_action(1);
+                    if rejected.is_ok() {
+                        physical[allowed] = 1;
+                    }
+                    assert!(matches!(
+                        rejected,
+                        Err(StoreRuntimeError::Ledger(LedgerCause::LimitExceeded {
+                            class: rejected_class,
+                            dimension,
+                            value,
+                            limit,
+                        })) if rejected_class == class
+                            && dimension == keys.other_dimension
+                            && value == allowed as u64 + 1
+                            && limit == allowed as u64
+                    ));
+                    assert!(matches!(
+                        execution.begin_action(1),
+                        Err(StoreRuntimeError::FallbackOnly)
+                    ));
+                    assert!(matches!(
+                        execution.checkpoint(),
+                        Err(StoreRuntimeError::FallbackOnly)
+                    ));
+                    assert_eq!(
+                        execution.work_counters(keys.other_dimension)?,
+                        (allowed as u64 + 1, allowed as u64, 0)
+                    );
+                    rejected
+                },
+            );
+            assert!(result.is_err());
             assert!(physical[..allowed].iter().all(|value| *value == 1));
             assert!(physical[allowed..].iter().all(|value| *value == 0));
             assert_eq!(signal.polls.load(Ordering::SeqCst), 1);
@@ -806,7 +794,11 @@ fn every_action_checks_attempted_and_consumed_budgets_between_control_polls() {
 }
 
 #[test]
-fn finish_region_rejects_forgotten_fully_completed_and_zero_amount_permits() {
+#[allow(
+    forgetting_references,
+    reason = "the real host retains ownership of forgotten client borrows"
+)]
+fn host_resolves_forgotten_fully_completed_and_zero_action_borrows() {
     for amount in [0, 3] {
         let factory = factory(1);
         let account = account(&factory);
@@ -817,41 +809,40 @@ fn finish_region_rejects_forgotten_fully_completed_and_zero_amount_permits() {
             OperationControl::default(),
             DimensionPolicy::counter(16, 16, 0),
         );
+        operation
+            .with_action_execution::<_, StoreRuntimeError>(keys.other_dimension, |execution| {
+                let mut physical = [0; 3];
+                for destination in physical.iter_mut().take(amount as usize) {
+                    write_unit(execution, destination)?;
+                }
+                assert_eq!(u64::from(physical.iter().sum::<u8>()), amount);
+                std::mem::forget(execution);
+                Ok(())
+            })
+            .unwrap();
+        operation
+            .with_action_execution::<_, StoreRuntimeError>(keys.other_dimension, |_| Ok(()))
+            .unwrap();
+        let success = match operation
+            .prepare_evidence_only_success(final_progress())
+            .unwrap()
         {
-            let (work, mut services) = operation.execution().unwrap();
-            let group = work.bind_group([keys.other_dimension]).unwrap();
-            let mut permit = group.admit_observed([0]).unwrap();
-            let mut physical = [0; 3];
-            for destination in physical.iter_mut().take(amount as usize) {
-                services.before_action(1).unwrap();
-                permit.replenish_one().unwrap();
-                *destination = 1;
-                permit.complete([1]).unwrap();
-                services.completed_action(1).unwrap();
+            PreparedStoreEvidenceOnlyOutcome::Success(success) => success.handoff(),
+            PreparedStoreEvidenceOnlyOutcome::MinimalFallback(_) => {
+                panic!("host-resolved actions must allow success")
             }
-            assert_eq!(u64::from(physical.iter().sum::<u8>()), amount);
-            assert_eq!(permit.remaining(), [0]);
-            std::mem::forget(permit);
-            assert!(matches!(
-                work.finish_region(),
-                Err(StoreRuntimeError::Ledger(
-                    LedgerCause::OutstandingLinearWorkPermits { count: 1 }
-                ))
-            ));
-            assert!(matches!(
-                services.checkpoint(),
-                Err(StoreRuntimeError::FallbackOnly)
-            ));
-        }
-        assert!(matches!(
-            operation.prepare_evidence_only_success(final_progress()),
-            Err(StorePrepareError::FinalizationContainment(_))
-        ));
+        };
+        assert_work(
+            &success.ledger_evidence,
+            keys.other_dimension,
+            amount,
+            amount,
+        );
     }
 }
 
 #[test]
-fn dropping_fully_completed_and_zero_amount_permits_still_prevents_success() {
+fn unwinding_zero_and_completed_action_hosts_resolves_work_and_prevents_success() {
     for amount in [0, 3] {
         let factory = factory(1);
         let account = account(&factory);
@@ -862,30 +853,25 @@ fn dropping_fully_completed_and_zero_amount_permits_still_prevents_success() {
             OperationControl::default(),
             DimensionPolicy::counter(16, 16, 0),
         );
-        {
-            let (work, mut services) = operation.execution().unwrap();
-            let group = work.bind_group([keys.other_dimension]).unwrap();
-            let mut permit = group.admit_observed([0]).unwrap();
-            let mut physical = [0; 3];
-            for destination in physical.iter_mut().take(amount as usize) {
-                services.before_action(1).unwrap();
-                permit.replenish_one().unwrap();
-                *destination = 1;
-                permit.complete([1]).unwrap();
-                services.completed_action(1).unwrap();
-            }
-            assert_eq!(u64::from(physical.iter().sum::<u8>()), amount);
-            drop(permit);
-            work.finish_region().unwrap();
-            assert!(matches!(
-                group.admit_observed([0]),
-                Err(StoreRuntimeError::FallbackOnly)
-            ));
-            assert!(matches!(
-                services.checkpoint(),
-                Err(StoreRuntimeError::FallbackOnly)
-            ));
-        }
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: Result<(), StoreRuntimeError> =
+                operation.with_action_execution(keys.other_dimension, |execution| {
+                    let mut physical = [0; 3];
+                    for destination in physical.iter_mut().take(amount as usize) {
+                        write_unit(execution, destination)?;
+                    }
+                    assert_eq!(u64::from(physical.iter().sum::<u8>()), amount);
+                    panic!("unwind the actual host after its completed prefix")
+                });
+        }));
+        assert!(panic.is_err());
+        assert!(matches!(
+            operation
+                .with_action_execution::<(), StoreRuntimeError>(keys.other_dimension, |_| panic!(
+                    "an unwound region cannot reenter"
+                )),
+            Err(StoreRuntimeError::FallbackOnly)
+        ));
         let evidence =
             rejected_success_evidence(operation, StorePreparationFailureClass::ProductGraph);
         assert_work(&evidence, keys.other_dimension, amount, amount);
@@ -904,31 +890,30 @@ fn ignored_incomplete_finish_keeps_the_exact_prefix_and_sticky_failure() {
         DimensionPolicy::counter(16, 16, 0),
     );
     let mut physical = 0;
-    {
-        let (work, mut services) = operation.execution().unwrap();
-        let group = work.bind_group([keys.other_dimension]).unwrap();
-        let mut permit = group.admit_observed([3]).unwrap();
-        services.before_action(1).unwrap();
-        physical += 1;
-        permit.complete([1]).unwrap();
-        services.completed_action(1).unwrap();
-        assert!(matches!(
-            permit.finish(),
-            Err(StoreRuntimeError::FallbackOnly)
-        ));
-        assert!(matches!(
-            group.admit_observed([0]),
-            Err(StoreRuntimeError::FallbackOnly)
-        ));
-        work.finish_region().unwrap();
-        assert!(matches!(
-            services.checkpoint(),
-            Err(StoreRuntimeError::FallbackOnly)
-        ));
-    }
+    let result = operation.with_action_execution::<_, StoreRuntimeError>(
+        keys.other_dimension,
+        |execution| {
+            execution.begin_action(1)?;
+            physical += 1;
+            execution.complete_action()?;
+            execution.begin_action(1)?;
+            Ok(())
+        },
+    );
+    assert!(matches!(
+        result,
+        Err(StoreRuntimeError::ObservedWorkIncomplete)
+    ));
+    assert!(matches!(
+        operation.with_action_execution::<_, StoreRuntimeError>(keys.other_dimension, |_| {
+            physical += 1;
+            Ok(())
+        }),
+        Err(StoreRuntimeError::FallbackOnly)
+    ));
     assert_eq!(physical, 1);
     let evidence = rejected_success_evidence(operation, StorePreparationFailureClass::ProductGraph);
-    assert_work(&evidence, keys.other_dimension, 3, 1);
+    assert_work(&evidence, keys.other_dimension, 2, 1);
 }
 
 #[test]
@@ -948,29 +933,42 @@ fn binding_rejects_foreign_unplanned_and_protected_keys_before_zero_work() {
             2 => keys.failure_terminal_dimension,
             _ => unreachable!(),
         };
-        {
-            let (work, mut services) = operation.execution().unwrap();
-            match work.bind_group([keys.dimension, invalid_dimension]) {
-                Err(StoreRuntimeError::ForeignDimensionDomain { dimension }) => {
+        let result = operation.with_exclusive_execution::<_, StoreInvocationError>(|context| {
+            match context.bind_group([keys.dimension, invalid_dimension]) {
+                Err(StoreInvocationError::Runtime(StoreRuntimeError::ForeignDimensionDomain {
+                    dimension,
+                })) => {
                     assert_eq!(invalid_role, 0);
                     assert_eq!(dimension, invalid_dimension);
                 }
-                Err(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension { dimension })) => {
+                Err(StoreInvocationError::Runtime(StoreRuntimeError::Ledger(
+                    LedgerCause::UnknownDimension { dimension },
+                ))) => {
                     assert_ne!(invalid_role, 0);
                     assert_eq!(dimension, invalid_dimension);
                 }
                 _ => panic!("binding must validate every lane before any amount, including zero"),
             }
             assert!(matches!(
-                work.bind_group([keys.dimension]),
-                Err(StoreRuntimeError::FallbackOnly)
+                context.bind_group([keys.dimension]),
+                Err(StoreInvocationError::Runtime(
+                    StoreRuntimeError::FallbackOnly
+                ))
             ));
-            work.finish_region().unwrap();
             assert!(matches!(
-                services.checkpoint(),
-                Err(StoreRuntimeError::FallbackOnly)
+                context.checkpoint(),
+                Err(StoreInvocationError::Runtime(
+                    StoreRuntimeError::FallbackOnly
+                ))
             ));
-        }
+            Ok(())
+        });
+        assert!(matches!(
+            result,
+            Err(StoreInvocationError::Runtime(
+                StoreRuntimeError::FallbackOnly
+            ))
+        ));
         let evidence = rejected_success_evidence(operation, StorePreparationFailureClass::Ledger);
         assert_work(
             &evidence,
@@ -1227,8 +1225,7 @@ fn bound_storage_rejects_foreign_keys_before_polling_or_admitting_bytes() {
                 .dimension_state(keys.dimension)
                 .unwrap();
             let before = account.snapshot();
-            {
-                let (work, mut services) = operation.execution().unwrap();
+            let result = operation.with_exclusive_execution::<_, StoreInvocationError>(|context| {
                 let polls = signal.polls.load(Ordering::SeqCst);
                 let phase = if invalid_phase {
                     foreign_phase()
@@ -1237,18 +1234,25 @@ fn bound_storage_rejects_foreign_keys_before_polling_or_admitting_bytes() {
                 };
                 let dimension = foreign_dimension();
                 let result = if retained {
-                    services.reserve_retained(phase, dimension, 8, 1)
+                    context.services().reserve_retained(phase, dimension, 8, 1)
                 } else {
-                    services.ordinary().reserve(phase, dimension, 8)
+                    context
+                        .ordinary_storage()
+                        .reserve(phase, dimension, 8)
+                        .map_err(StoreInvocationError::from)
                 };
                 match result {
-                    Err(StoreRuntimeError::ForeignPhaseDomain { phase: rejected }) => {
+                    Err(StoreInvocationError::Runtime(StoreRuntimeError::ForeignPhaseDomain {
+                        phase: rejected,
+                    })) => {
                         assert!(invalid_phase);
                         assert_eq!(rejected, phase);
                     }
-                    Err(StoreRuntimeError::ForeignDimensionDomain {
-                        dimension: rejected,
-                    }) => {
+                    Err(StoreInvocationError::Runtime(
+                        StoreRuntimeError::ForeignDimensionDomain {
+                            dimension: rejected,
+                        },
+                    )) => {
                         assert!(!invalid_phase);
                         assert_eq!(rejected, dimension);
                     }
@@ -1256,12 +1260,20 @@ fn bound_storage_rejects_foreign_keys_before_polling_or_admitting_bytes() {
                 }
                 assert_eq!(signal.polls.load(Ordering::SeqCst), polls);
                 assert!(matches!(
-                    services.checkpoint(),
-                    Err(StoreRuntimeError::FallbackOnly)
+                    context.services().checkpoint(),
+                    Err(StoreInvocationError::Runtime(
+                        StoreRuntimeError::FallbackOnly
+                    ))
                 ));
                 assert_eq!(signal.polls.load(Ordering::SeqCst), polls);
-                work.finish_region().unwrap();
-            }
+                Ok(())
+            });
+            assert!(matches!(
+                result,
+                Err(StoreInvocationError::Runtime(
+                    StoreRuntimeError::FallbackOnly
+                ))
+            ));
             assert_eq!(physical_delta(before, account.snapshot()), (0, 0));
             let evidence =
                 rejected_success_evidence(operation, StorePreparationFailureClass::Ledger);
@@ -1298,71 +1310,91 @@ fn bound_services_reject_foreign_live_tokens_without_changing_the_source_capacit
                 DimensionPolicy::counter(16, 16, 0),
             );
             let before = account.snapshot();
-            {
-                let (source_work, mut source_services) = source.execution().unwrap();
-                let (receiver_work, mut receiver_services) = receiver.execution().unwrap();
-                let observation = source_work
-                    .storage_observation(source_keys.dimension)
-                    .unwrap();
-                let baseline = observation.live_bytes();
-                let mut reservation = if retained {
-                    source_services
-                        .reserve_retained(source_keys.phase, source_keys.dimension, 8, 1)
-                        .unwrap()
-                } else {
-                    source_services
-                        .ordinary()
-                        .reserve(source_keys.phase, source_keys.dimension, 8)
-                        .unwrap()
-                };
-                let expected_physical = if retained { (8, 1) } else { (0, 0) };
-                assert_eq!(observation.live_bytes(), baseline + 8);
-                assert_eq!(
-                    physical_delta(before, account.snapshot()),
-                    expected_physical
-                );
-                let polls = signal.polls.load(Ordering::SeqCst);
-                let result = match action {
-                    0 => receiver_services.validate_live_owner(&reservation),
-                    1 => receiver_services.ordinary().resize(&mut reservation, 4),
-                    2 => receiver_services.resize(&mut reservation, 4),
-                    3 => receiver_services.transition(
-                        &mut reservation,
-                        receiver_keys.phase,
-                        receiver_keys.dimension,
-                        4,
-                    ),
-                    _ => unreachable!(),
-                };
-                assert!(matches!(
-                    result,
-                    Err(StoreRuntimeError::Ledger(LedgerCause::OwnerMismatch))
-                ));
-                assert_eq!(signal.polls.load(Ordering::SeqCst), polls);
-                assert_eq!(observation.live_bytes(), baseline + 8);
-                assert_eq!(
-                    physical_delta(before, account.snapshot()),
-                    expected_physical
-                );
-                source_services.checkpoint().unwrap();
-                source_services.validate_live_owner(&reservation).unwrap();
-                source_services.resize(&mut reservation, 4).unwrap();
-                assert_eq!(observation.live_bytes(), baseline + 4);
-                assert_eq!(
-                    physical_delta(before, account.snapshot()),
-                    if retained { (4, 1) } else { (0, 0) }
-                );
-                reservation.release_storage(());
-                assert_eq!(observation.live_bytes(), baseline);
-                assert_eq!(physical_delta(before, account.snapshot()), (0, 0));
-                assert!(matches!(
-                    receiver_services.checkpoint(),
-                    Err(StoreRuntimeError::FallbackOnly)
-                ));
-                assert_eq!(signal.polls.load(Ordering::SeqCst), polls);
-                receiver_work.finish_region().unwrap();
-                source_work.finish_region().unwrap();
-            }
+            source
+                .with_exclusive_execution::<_, StoreInvocationError>(|source_context| {
+                    let observation = source_context.storage_observation(source_keys.dimension)?;
+                    let baseline = observation.live_bytes();
+                    let mut reservation = if retained {
+                        source_context
+                            .services()
+                            .reserve_retained(source_keys.phase, source_keys.dimension, 8, 1)
+                            .unwrap()
+                    } else {
+                        source_context
+                            .ordinary_storage()
+                            .reserve(source_keys.phase, source_keys.dimension, 8)
+                            .unwrap()
+                    };
+                    let expected_physical = if retained { (8, 1) } else { (0, 0) };
+                    assert_eq!(observation.live_bytes(), baseline + 8);
+                    assert_eq!(
+                        physical_delta(before, account.snapshot()),
+                        expected_physical
+                    );
+                    let rejected = receiver.with_exclusive_execution::<_, StoreInvocationError>(
+                        |receiver_context| {
+                            let polls = signal.polls.load(Ordering::SeqCst);
+                            let result = match action {
+                                0 => receiver_context
+                                    .services()
+                                    .validate_live_owner(&reservation),
+                                1 => receiver_context
+                                    .ordinary_storage()
+                                    .resize(&mut reservation, 4)
+                                    .map_err(StoreInvocationError::from),
+                                2 => receiver_context.services().resize(&mut reservation, 4),
+                                3 => receiver_context.services().transition(
+                                    &mut reservation,
+                                    receiver_keys.phase,
+                                    receiver_keys.dimension,
+                                    4,
+                                ),
+                                _ => unreachable!(),
+                            };
+                            assert!(matches!(
+                                result,
+                                Err(StoreInvocationError::Runtime(StoreRuntimeError::Ledger(
+                                    LedgerCause::OwnerMismatch
+                                )))
+                            ));
+                            assert_eq!(signal.polls.load(Ordering::SeqCst), polls);
+                            assert_eq!(observation.live_bytes(), baseline + 8);
+                            assert_eq!(
+                                physical_delta(before, account.snapshot()),
+                                expected_physical
+                            );
+                            assert!(matches!(
+                                receiver_context.services().checkpoint(),
+                                Err(StoreInvocationError::Runtime(
+                                    StoreRuntimeError::FallbackOnly
+                                ))
+                            ));
+                            assert_eq!(signal.polls.load(Ordering::SeqCst), polls);
+                            Ok(())
+                        },
+                    );
+                    assert!(matches!(
+                        rejected,
+                        Err(StoreInvocationError::Runtime(
+                            StoreRuntimeError::FallbackOnly
+                        ))
+                    ));
+                    source_context.services().checkpoint()?;
+                    source_context
+                        .services()
+                        .validate_live_owner(&reservation)?;
+                    source_context.services().resize(&mut reservation, 4)?;
+                    assert_eq!(observation.live_bytes(), baseline + 4);
+                    assert_eq!(
+                        physical_delta(before, account.snapshot()),
+                        if retained { (4, 1) } else { (0, 0) }
+                    );
+                    reservation.release_storage(());
+                    assert_eq!(observation.live_bytes(), baseline);
+                    assert_eq!(physical_delta(before, account.snapshot()), (0, 0));
+                    Ok(())
+                })
+                .unwrap();
             assert_eq!(physical_delta(before, account.snapshot()), (0, 0));
             let _ = rejected_success_evidence(receiver, StorePreparationFailureClass::Ledger);
             let published = source.prepare_minimal_fallback(71).unwrap().handoff();
@@ -1398,43 +1430,48 @@ fn ordinary_loans_end_before_progress_and_keep_the_same_poll_frontiers() {
         DimensionPolicy::counter(16, 16, 0),
     );
     let physical = account.snapshot();
-    {
-        let (work, mut services) = operation.execution().unwrap();
-        let observation = work.storage_observation(keys.dimension).unwrap();
-        let baseline = observation.live_bytes();
-        let polls = signal.polls.load(Ordering::SeqCst);
-        let first = {
-            let mut loan = services.ordinary();
-            assert_eq!(signal.polls.load(Ordering::SeqCst), polls);
+    operation
+        .with_exclusive_execution::<_, StoreInvocationError>(|context| {
+            let observation = context.storage_observation(keys.dimension)?;
+            let baseline = observation.live_bytes();
+            let polls = signal.polls.load(Ordering::SeqCst);
             let first = {
-                let mut short = loan.reborrow();
-                let mut reservation = short.reserve(keys.phase, keys.dimension, 8).unwrap();
-                short.resize(&mut reservation, 4).unwrap();
-                reservation
+                let mut services = context.services();
+                let mut loan = services.ordinary_storage();
+                assert_eq!(signal.polls.load(Ordering::SeqCst), polls);
+                let first = {
+                    let mut short = loan.reborrow();
+                    let mut reservation = short.reserve(keys.phase, keys.dimension, 8).unwrap();
+                    short.resize(&mut reservation, 4).unwrap();
+                    reservation
+                };
+                loan.checkpoint().unwrap();
+                first
             };
-            loan.checkpoint().unwrap();
-            first
-        };
-        services
-            .report_progress(TestProgress::Build, TestUnit::Items, 1, Some(2))
-            .unwrap();
-        assert_eq!(signal.polls.load(Ordering::SeqCst), polls + 4);
-        assert_eq!(callbacks.load(Ordering::SeqCst), 1);
-        assert_eq!(observation.live_bytes(), baseline + 4);
-        let second = services
-            .ordinary()
-            .reserve(keys.phase, keys.dimension, 16)
-            .unwrap();
-        services
-            .report_progress(TestProgress::Build, TestUnit::Items, 2, Some(2))
-            .unwrap();
-        assert_eq!(signal.polls.load(Ordering::SeqCst), polls + 7);
-        assert_eq!(callbacks.load(Ordering::SeqCst), 2);
-        assert_eq!(observation.live_bytes(), baseline + 20);
-        drop((first, second));
-        assert_eq!(observation.live_bytes(), baseline);
-        work.finish_region().unwrap();
-    }
+            context
+                .services()
+                .report_progress(TestProgress::Build, TestUnit::Items, 1, Some(2))
+                .unwrap();
+            assert_eq!(signal.polls.load(Ordering::SeqCst), polls + 4);
+            assert_eq!(callbacks.load(Ordering::SeqCst), 1);
+            assert_eq!(observation.live_bytes(), baseline + 4);
+            let second = context
+                .services()
+                .ordinary_storage()
+                .reserve(keys.phase, keys.dimension, 16)
+                .unwrap();
+            context
+                .services()
+                .report_progress(TestProgress::Build, TestUnit::Items, 2, Some(2))
+                .unwrap();
+            assert_eq!(signal.polls.load(Ordering::SeqCst), polls + 7);
+            assert_eq!(callbacks.load(Ordering::SeqCst), 2);
+            assert_eq!(observation.live_bytes(), baseline + 20);
+            drop((first, second));
+            assert_eq!(observation.live_bytes(), baseline);
+            Ok(())
+        })
+        .unwrap();
     assert_eq!(physical_delta(physical, account.snapshot()), (0, 0));
     let _ = operation.prepare_minimal_fallback(71).unwrap().handoff();
     assert!(!account.snapshot().poisoned());
@@ -1461,25 +1498,21 @@ fn weighted_control_frontiers_do_not_charge_estimated_inner_work() {
             DimensionPolicy::counter(64, 64, 0),
         );
         let mut physical = vec![0; costs.len()];
-        {
-            let (work, mut services) = operation.execution().unwrap();
-            let group = work.bind_group([keys.other_dimension]).unwrap();
-            let mut permit = group.admit_observed([0]).unwrap();
-            let entry_polls = signal.polls.load(Ordering::SeqCst);
-            for (index, (&cost, destination)) in costs.iter().zip(&mut physical).enumerate() {
-                services.before_action(cost).unwrap();
-                assert_eq!(
-                    signal.polls.load(Ordering::SeqCst),
-                    entry_polls + usize::from(index + 1 == costs.len())
-                );
-                permit.replenish_one().unwrap();
-                *destination = 1;
-                permit.complete([1]).unwrap();
-                services.completed_action(cost).unwrap();
-            }
-            permit.finish().unwrap();
-            work.finish_region().unwrap();
-        }
+        operation
+            .with_action_execution::<_, StoreRuntimeError>(keys.other_dimension, |execution| {
+                let entry_polls = signal.polls.load(Ordering::SeqCst);
+                for (index, (&cost, destination)) in costs.iter().zip(&mut physical).enumerate() {
+                    execution.begin_action(cost)?;
+                    assert_eq!(
+                        signal.polls.load(Ordering::SeqCst),
+                        entry_polls + usize::from(index + 1 == costs.len())
+                    );
+                    *destination = 1;
+                    execution.complete_action()?;
+                }
+                Ok(())
+            })
+            .unwrap();
         assert!(physical.iter().all(|value| *value == 1));
         let published = operation.prepare_minimal_fallback(71).unwrap().handoff();
         assert_work(
@@ -1504,38 +1537,38 @@ fn weighted_frontier_cancellation_precedes_next_action_and_retains_cause_on_regi
         DimensionPolicy::counter(8, 8, 0),
     );
     let mut output = [0; 3];
-    let polls;
-    {
-        let (work, mut services) = operation.execution().unwrap();
-        let group = work.bind_group([keys.other_dimension]).unwrap();
-        let mut permit = group.admit_observed([0]).unwrap();
-        for destination in output.iter_mut().take(2) {
-            services.before_action(118).unwrap();
-            permit.replenish_one().unwrap();
-            *destination = 1;
-            permit.complete([1]).unwrap();
-            services.completed_action(118).unwrap();
-        }
-        polls = signal.polls.load(Ordering::SeqCst);
-        signal.token.cancel();
-        let next = services.before_action(35);
-        if next.is_ok() {
-            output[2] = 1;
-        }
-        assert!(matches!(
-            next,
-            Err(StoreRuntimeError::Control(ControlCause::Cancelled { .. }))
-        ));
-        assert_eq!(signal.polls.load(Ordering::SeqCst), polls + 1);
-        permit.finish_partial().unwrap();
-        work.finish_region().unwrap();
-    }
+    let result = operation.with_action_execution::<_, StoreRuntimeError>(
+        keys.other_dimension,
+        |execution| {
+            for destination in output.iter_mut().take(2) {
+                execution.begin_action(118)?;
+                *destination = 1;
+                execution.complete_action()?;
+            }
+            let polls = signal.polls.load(Ordering::SeqCst);
+            signal.token.cancel();
+            let next = execution.begin_action(35);
+            if next.is_ok() {
+                output[2] = 1;
+            }
+            assert!(matches!(
+                next,
+                Err(StoreRuntimeError::Control(ControlCause::Cancelled { .. }))
+            ));
+            assert_eq!(signal.polls.load(Ordering::SeqCst), polls + 1);
+            next
+        },
+    );
+    assert!(matches!(result, Err(StoreRuntimeError::Control(_))));
     assert_eq!(output, [1, 1, 0]);
-    // Obtaining a later region must preserve the already recorded Control cause.
+    let polls = signal.polls.load(Ordering::SeqCst);
     assert!(matches!(
-        operation.execution(),
+        operation.with_action_execution::<(), StoreRuntimeError>(keys.other_dimension, |_| panic!(
+            "a cancelled region cannot reenter"
+        )),
         Err(StoreRuntimeError::Control(_))
     ));
+    assert_eq!(signal.polls.load(Ordering::SeqCst), polls);
     let evidence = rejected_success_evidence(operation, StorePreparationFailureClass::Control);
     assert_work(&evidence, keys.other_dimension, 2, 2);
 }
@@ -1552,14 +1585,23 @@ fn invalid_control_cost_is_sticky_without_running_or_charging_work() {
             OperationControl::default(),
             DimensionPolicy::counter(8, 8, 0),
         );
-        {
-            let (work, mut services) = operation.execution().unwrap();
-            assert!(matches!(
-                services.before_action(invalid),
-                Err(StoreRuntimeError::FallbackOnly)
-            ));
-            work.finish_region().unwrap();
-        }
+        let result = operation.with_action_execution::<_, StoreRuntimeError>(
+            keys.other_dimension,
+            |execution| {
+                let polls = execution.work_counters(keys.other_dimension)?;
+                assert!(matches!(
+                    execution.begin_action(invalid),
+                    Err(StoreRuntimeError::FallbackOnly)
+                ));
+                assert_eq!(execution.work_counters(keys.other_dimension)?, polls);
+                assert!(matches!(
+                    execution.begin_action(1),
+                    Err(StoreRuntimeError::FallbackOnly)
+                ));
+                Ok(())
+            },
+        );
+        assert!(matches!(result, Err(StoreRuntimeError::FallbackOnly)));
         let evidence =
             rejected_success_evidence(operation, StorePreparationFailureClass::ProductGraph);
         assert_work(&evidence, keys.other_dimension, 0, 0);
