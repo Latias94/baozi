@@ -1,8 +1,8 @@
 # Prepare Replacement Capacity Without Copying
 
-Status: implemented and qualified as a bounded source prerequisite on
-`refactor/text-capacity-owner`, based on `80f4364`. Local main remains `6967818`.
-This is not performance acceptance. The
+Status: implemented, independently reviewed and integrated into local main. The
+capacity-only source was qualified at `eb82ccf` after separate development on
+`refactor/text-capacity-owner` from `80f4364`. This is not performance acceptance. The
 [read-sequence experiment](../reviews/2026-11-06-parser-read-sequence.md) remains
 isolated because neither platform could start ordinary measurement.
 
@@ -180,3 +180,26 @@ and test delta (19 additions, 38 deletions). The fresh receipt
 tests, 49 doctests, strict Import Clippy and workspace formatting passed on 909 stable
 inputs. The reviewer verified all four log hashes and the four changed source hashes.
 No runtime speedup is inferred from fewer source checks.
+
+## Local main integration
+
+Selected only the capacity commits onto `6967818`: `3090dbc` became `b0272b1`, and
+`89450d1` became `eb82ccf`. The integrated source changes five Import Rust files and
+this plan. Four Rust files are byte-identical to the reviewed development candidate;
+`text_input.rs` changes only its private helper name and candidate-plan return shape.
+Operation and parser execution remain identical to the prior main edition. Neither
+read-sequence commit `d02ba6e` nor its evidence commit `80f4364` is an ancestor.
+
+Fresh serial qualification is recorded separately in
+`target/review/convergence/text-capacity-main-qa-1.json`: 484 Import nextest tests,
+49 doctests (15 ordinary plus 34 compile-fail), strict Import Clippy and workspace
+formatting passed with all 909 source inputs unchanged. Independent integration review
+verified the actual source, receipt and log hashes and approved this exact local merge.
+The one test present only in the earlier 485-test experiment is
+`read_sequence_rechecks_import_terminal_after_ignored_metadata_failure`; it belongs to
+the excluded reader implementation. All capacity/failure/control tests remain present.
+
+Local main fast-forwarded from `6967818` to the qualified `eb82ccf` source after that
+review. All five pre-existing user notes retain their original hashes. This record is
+a documentation-only follow-up; no benchmark, broader workspace/consumer rerun or
+release acceptance is inferred. The earlier read-sequence experiment remains isolated.
