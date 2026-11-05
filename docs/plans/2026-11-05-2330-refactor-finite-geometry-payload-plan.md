@@ -1,6 +1,6 @@
 # Finite Geometry Payload Construction
 
-Status: proposed for independent design review. This is the next bounded architecture experiment under the active [Assimp convergence plan](2026-11-03-0900-perf-assimp-convergence-plan.md), not implemented functionality, a speed forecast or release approval. Runtime base is qualified e5; the separate 7900255 text candidate is completing its ordinary disposition. Use whichever exact qualified source is selected there and record that commit before implementation.
+Status: steps 1-3 source-qualified under the active [Assimp convergence plan](2026-11-03-0900-perf-assimp-convergence-plan.md). Step 1 is merged into local main at `19c0a42`. Closed pools, all three writers, duplicate-scan deletion and work/contract changes are qualified at `b3a748c` on `refactor/finite-geometry-writes`: 3,609 workspace tests, 188 doctests, 138 consumer tests and strict lint/format gates pass, with existing skips. Independent source/simplicity and final test-delta reviews close without P1/P2. Native diagnostics, time/memory qualification and measured disposition remain open; this is not release approval. The prior text cleanup retains its documented mixed native results.
 
 ## Problem and decision
 
@@ -100,3 +100,16 @@ workspace execution. Independent source/fault review closes both requested P2
 test gaps. Geometry pools, finite scans, work formulas and public semantic mapping
 remain unchanged in this slice. Steps 2-5, native owner benefit and every original
 convergence/release gate remain open.
+
+Steps 2-3 are integrated and source-qualified at `b3a748c`. The
+[closed-payload receipt](../reviews/2026-11-06-finite-geometry-payload.md) records
+initial/selected/converted checked writes, ordinary source and retained finite-scan
+deletion, projected whole-source preservation, structural preparation naming,
+source-coordinate rejection and the updated row/index work convention. The final
+stable run passes 3,609 workspace tests, 188 doctests and 138 consumer tests, both
+strict all-target/all-feature lints and both formats. The initial failed run and
+two test-only corrections are retained with independent bounded review. All five
+user notes remain unchanged. The candidate is committed on its isolated branch;
+main merge waits for the original native time/memory comparison and disposition.
+Step 4's diagnostics/ordinary measurements and step 5 remain open. No new native
+performance, heap, convergence or release result is inferred from source tests.

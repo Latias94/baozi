@@ -753,3 +753,12 @@ negative case only for a genuinely new boundary, not for incidental private layo
   This is a structural prerequisite, with no new ordinary or heap claim. The
   three float writers, finite-pool invariant and duplicate-scan deletion remain
   the next actual implementation slice; all release gates stay open.
+- [Closed geometry payload](../reviews/2026-11-06-finite-geometry-payload.md)
+  source-qualifies that owner cut at `b3a748c`: all three writers qualify final-width
+  floats, ordinary source and retained scans disappear together, projected whole-source
+  checking and actual output validation remain, and all work formulas follow surviving
+  visits. The corrected stable candidate passes 3,609 workspace tests, 188 doctests,
+  138 consumer tests and both strict lints/formats, with existing skips and independent
+  source/simplicity/test-delta review. Original failed verification stays retained.
+  Native instruction, unchanged 110-lane timing/memory and separate heap observations
+  remain pending before measured keep and local-main integration. Release HOLD remains.
