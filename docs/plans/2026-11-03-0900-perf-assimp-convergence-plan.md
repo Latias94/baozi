@@ -495,3 +495,15 @@ negative case only for a genuinely new boundary, not for incidental private layo
   preserved. The measured Linux copy edges motivate this candidate; ordinary timing,
   memory, backing/promotion, obsolete-owner deletion, indexing and full convergence
   remain open. A finite full-matrix four-campaign decision precedes candidate build.
+- The metadata successor's [ordinary/instruction/heap report](../reviews/2026-11-05-parse-metadata-borrowing-performance.md)
+  retains four complete Windows matrices and independent reconstruction of 20,240
+  children / 40,480 logs. Grid import/pipeline costs fall descriptively, while small
+  STL/F64 preparation and selected commit peaks grow. Tool observations 0/70/27/27
+  prevent clean confirmation; candidate timing breaches remain 57/59 above 3x and
+  nine pipelines above 3x in both rounds. All measured whole-child memory stays
+  within 3x. Six exact-source Linux profiles independently verify reduced copying
+  and 7.31% fewer grid whole-worker instructions, not Windows timing causation.
+  Eighteen separate heap observations have identical control/candidate reported
+  calls and rounded peaks; analysis/stderr temporary-count differences are retained.
+  Performance and release remain HOLD; live typed-table producer migration and all
+  remaining backing/promotion/deletion/indexing and final Windows/Linux gates persist.

@@ -7,8 +7,9 @@ work/resource arithmetic, cancellation and exit checkpoints remain unchanged.
 
 The exact source2 passes the seven current-root correctness/consumer gates below,
 and final independent source/evidence association finds no actionable mismatch.
-No ordinary measurement of this candidate or performance keep follows from those
-results. The complete
+No ordinary performance keep follows from those correctness results. The subsequent
+[Windows, instruction and heap report](2026-11-05-parse-metadata-borrowing-performance.md)
+records the measured benefits, costs and continued HOLD. The complete
 [convergence plan](../plans/2026-11-03-0900-perf-assimp-convergence-plan.md) and
 [lexical-host plan](../plans/2026-11-03-1955-refactor-lexical-invocation-host-plan.md)
 remain active and HOLD.
@@ -163,7 +164,10 @@ The 20-second watched-tool quiet start has a prospective 180-second wait cap.
 Ordinary release construction must also retire stale Baozi release fingerprints and
 verify fresh Import compiler output/dep-info before retaining the executable. This
 prevents debug cache repair alone from being mistaken for ordinary build identity.
-No new ordinary result or performance keep exists yet.
+The subsequent [performance report](2026-11-05-parse-metadata-borrowing-performance.md)
+retains all four completed campaigns, load limits, separate Linux instruction results
+and independent heap observations. It does not establish an ordinary performance
+keep or release acceptance.
 
 Fixed/dynamic borrowed backing, shared-shell-before-state promotion, exact administrative
 accounting, remaining `LocalWork`/owning-path deletion and indexed selection remain open.
