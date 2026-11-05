@@ -1481,13 +1481,13 @@ fn build_text_input<'session>(
         while offset < bytes.len() {
             cursor.poll_before_unit(scope, facts, bytes, offset)?;
             let unit = scope.run_returned(|| {
-                let unit = classify_text_unit(facts, options.decoding_mode, bytes, offset);
+                let unit = TextEmission::read(bytes, offset);
                 Ok((unit, [unit.raw_len() as u64]))
             })?;
             let unit_end =
                 checked_add_usize(scope.error_view(), offset, unit.raw_len(), options.resource)?;
             match unit {
-                TextUnit::Valid { newline, .. } => {
+                TextEmission::Valid { newline, .. } => {
                     if unit_end.saturating_sub(valid_run_start) > TEXT_INPUT_WORK_CHUNK_BYTES {
                         append_valid_run(
                             scope.error_view(),
@@ -1498,7 +1498,7 @@ fn build_text_input<'session>(
                         )?;
                         valid_run_start = offset;
                     }
-                    if newline.is_some() {
+                    if newline {
                         append_valid_run(
                             scope.error_view(),
                             &mut text,
@@ -1527,7 +1527,7 @@ fn build_text_input<'session>(
                         valid_run_start = unit_end;
                     }
                 }
-                TextUnit::Replacement { .. } => {
+                TextEmission::Replacement { .. } => {
                     append_valid_run(
                         scope.error_view(),
                         &mut text,
@@ -1545,11 +1545,6 @@ fn build_text_input<'session>(
                         decoded_end,
                     ))?;
                     valid_run_start = unit_end;
-                }
-                TextUnit::Violation { .. } => {
-                    return Err(scope
-                        .error_view()
-                        .descriptor_contract_failure("text-input-plan-revalidation-failed"));
                 }
             }
             offset = unit_end;
@@ -1601,6 +1596,44 @@ fn append_valid_run(
     let decoded = std::str::from_utf8(chunk)
         .map_err(|_| errors.descriptor_contract_failure("text-input-copy-utf8-invalid"))?;
     text.try_push_str_reserved(decoded)
+}
+
+/// Navigation over the same immutable input already accepted by the private planning pass.
+/// Construction still validates actual output lengths, ranges and capacity separately.
+#[derive(Debug, Clone, Copy)]
+enum TextEmission {
+    Valid { raw_len: usize, newline: bool },
+    Replacement { raw_len: usize },
+}
+
+impl TextEmission {
+    fn read(bytes: &[u8], offset: usize) -> Self {
+        if let Some((_, raw_len)) = newline_at(bytes, offset) {
+            return Self::Valid {
+                raw_len,
+                newline: true,
+            };
+        }
+        if bytes.get(offset).is_some_and(u8::is_ascii) {
+            return Self::Valid {
+                raw_len: 1,
+                newline: false,
+            };
+        }
+        match classify_utf8_unit(bytes, offset) {
+            Utf8Unit::Valid(raw_len) => Self::Valid {
+                raw_len,
+                newline: false,
+            },
+            Utf8Unit::Invalid(raw_len) => Self::Replacement { raw_len },
+        }
+    }
+
+    const fn raw_len(self) -> usize {
+        match self {
+            Self::Valid { raw_len, .. } | Self::Replacement { raw_len } => raw_len,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
