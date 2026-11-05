@@ -266,3 +266,20 @@ proof, widen budgets, weaken mathematical results or move benchmark work outside
   payload/capacity metrics, independent terminal facts and cleanup-before-finish;
   indexed selection follows that seam. None of these remaining items is complete
   merely because numeric RefCell and execution wrappers have been removed.
+- The subsequent [Linux-filesystem full matrix](../reviews/2026-11-05-linux-filesystem-convergence.md)
+  completes with the original protocol and exact ordinary binary/corpus bytes.
+  Fourteen candidate pipelines remain above 3x in both repeats and shared glTF 32
+  remains above 10x in both file/memory modes. All whole-child RSS ratios are below
+  3x, but three campaigns overlap Windows tools and source contrasts are mixed.
+  The root replacement must therefore preserve honest finite setup and terminal
+  ownership while the actual large-model parser/execution owner is also analyzed.
+  Current-source bounded design review requires: one mutable storage selector
+  loan with storage-free progress metadata; a once-only unused backing loan whose
+  failed construction retains real cleanup ownership without resetting started;
+  explicit optional promotion source slots and one final infallible move; and
+  independent clean finite facts versus actual dirty Inline/Shared/dynamic
+  containment owners. Four progress slots start with zero logical occupancy;
+  fixed binding bypasses temporary Vec plans while retaining existing admission
+  order. Existing invariant StoreInvocationLayout is retained, not replaced by
+  the backing lifetime. Selected interface dispositions still need concrete
+  compiler/runtime/promotion/cleanup proofs before the production cutover.

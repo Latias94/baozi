@@ -23,6 +23,11 @@ comparison includes both that change and
 [startup/publication borrowing](2026-11-05-startup-and-publication-share-borrowing.md)
 against `05b7d9b`; individual-step causation is not available.
 
+The subsequent [Linux-filesystem checkpoint](2026-11-05-linux-filesystem-convergence.md)
+completes the same four-campaign matrix with byte-identical executables and
+corpus on that filesystem. It retains fourteen candidate pipeline lanes above
+3x and later Windows load overlaps; it does not replace this original matrix.
+
 ## Immutable Native Workers
 
 | Identity | Control | Candidate |

@@ -642,3 +642,22 @@ negative case only for a genuinely new boundary, not for incidental private layo
   against current six-dimension/three-phase direct runtime; fixed/dynamic roots,
   shared promotion, exact accounting, terminal facts, cleanup/indexing and every
   original Windows/Linux release gate remain open.
+- The [Linux-filesystem full-matrix checkpoint](../reviews/2026-11-05-linux-filesystem-convergence.md)
+  completes all four original campaigns and both functional preflights with
+  unchanged debug0 worker bytes, same input bytes, clocks and semantics. Each
+  campaign has 110 lanes and 5,060 successful native children. Actual exec96388
+  terminates zero; raw copies occur afterward and are excluded from child clocks
+  and campaign windows. Candidate N0/N1 still have 69/70 stage lanes above 3x,
+  34/38 at least 10x and fourteen of twenty-eight pipelines above 3x in both.
+  Shared glTF 32 file and memory exceed 10x in both repeats; all whole-child RSS
+  ratios remain below 3x (maxima 2.097/2.051). Windows named tools overlap C0,
+  N0 and N1 in 26/54, 33/52 and 38/54 snapshots; C1 has 0/55. Preserve mixed
+  contrasts, RSS increases, all tails and original DrvFS data. No clean source
+  gain or release acceptance follows. Next address both finite initialization
+  ownership and large-model per-element parser/numeric/execution costs; replacing
+  initialization Vecs alone does not establish a scaling fix. Current-root design
+  review requires one actual mutable storage authority with storage-free progress
+  metadata, explicit unused/failed-start backing loans, movable storage source
+  slots and genuine dirty containment distinct from clean finite facts. Main
+  selected dispositions remain uncompiled; retain the existing invariant layout
+  brand and one kernel. All original Windows/runtime/performance gates remain.
