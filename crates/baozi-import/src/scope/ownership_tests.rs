@@ -271,6 +271,8 @@ fn paired_live_contexts_reject_foreign_capabilities_before_zero_or_nonzero_actio
     enum Case {
         Vector { grow: bool },
         ExclusiveVector { grow: bool },
+        PrepareVector { additional: usize },
+        PrepareString { additional: usize },
         EmptyDecodedAppend,
         SourceObserveEmpty,
         SourceFinish,
@@ -283,6 +285,12 @@ fn paired_live_contexts_reject_foreign_capabilities_before_zero_or_nonzero_actio
         Case::Vector { grow: true },
         Case::ExclusiveVector { grow: false },
         Case::ExclusiveVector { grow: true },
+        Case::PrepareVector { additional: 0 },
+        Case::PrepareVector { additional: 1 },
+        Case::PrepareVector { additional: 8 },
+        Case::PrepareString { additional: 0 },
+        Case::PrepareString { additional: 1 },
+        Case::PrepareString { additional: 8 },
         Case::EmptyDecodedAppend,
         Case::SourceObserveEmpty,
         Case::SourceFinish,
@@ -378,7 +386,8 @@ fn paired_live_contexts_reject_foreign_capabilities_before_zero_or_nonzero_actio
                                 rejected
                             })
                         }
-                        Case::ExclusiveVector { grow } => {
+                        Case::ExclusiveVector { .. } | Case::PrepareVector { .. } => {
+                            let grow = !matches!(case, Case::ExclusiveVector { grow: false });
                             let mut values = sender.services()?.metered_vec::<u8>(
                                 ImportStorageClass::FormatNormalization,
                                 "foreign-exclusive-vector",
@@ -392,10 +401,21 @@ fn paired_live_contexts_reject_foreign_capabilities_before_zero_or_nonzero_actio
                             reject_without_accounting_changes(&mut receiver, true, &receiver_before, move |root| {
                                 let mut values = values;
                                 let capacity = values.capacity();
+                                let pointer = values.as_slice().as_ptr();
+                                let token_bytes = values.capacity.as_ref().map(ImportStoreReservation::bytes);
                                 let additional = if grow { capacity + 1 } else { 0 };
-                                let rejected = root.storage()?.reserve_vec(&mut values, additional);
+                                let rejected = if let Case::PrepareVector { additional } = case {
+                                    inject_next_metered_allocation_failure();
+                                    let result = root.storage()?.prepare_vec_replacement(&values, additional).map(drop);
+                                    assert!(FAIL_NEXT_METERED_ALLOCATION.with(|fault| fault.replace(false)));
+                                    result
+                                } else {
+                                    root.storage()?.reserve_vec(&mut values, additional)
+                                };
                                 assert!(rejected.is_err());
                                 assert_eq!(values.capacity(), capacity);
+                                assert_eq!(values.as_slice().as_ptr(), pointer);
+                                assert_eq!(values.capacity.as_ref().map(ImportStoreReservation::bytes), token_bytes);
                                 assert_eq!(values.as_slice(), if grow { &[7][..] } else { &[] });
                                 assert_eq!(accounting(&source_exec.store), before);
                                 values.identity.check(&source_exec.services()?)?;
@@ -403,6 +423,29 @@ fn paired_live_contexts_reject_foreign_capabilities_before_zero_or_nonzero_actio
                                     values.try_push_reserved(9)?;
                                     assert_eq!(values.as_slice(), &[7, 9]);
                                 }
+                                rejected
+                            })
+                        }
+                        Case::PrepareString { additional } => {
+                            let mut text = sender.services()?.metered_string(
+                                ImportStorageClass::FormatNormalization, "foreign-prepared-string",
+                            );
+                            text.try_push_str(&mut sender.services()?, "a")?;
+                            let before = accounting(&sender.store);
+                            let source_exec = &mut *sender;
+                            reject_without_accounting_changes(&mut receiver, true, &receiver_before, move |root| {
+                                let mut text = text;
+                                let old = (text.as_str().as_ptr(), text.capacity(), text.capacity.as_ref().unwrap().bytes());
+                                FAIL_NEXT_METERED_QUALIFICATION.with(|fault| fault.set(true));
+                                let rejected = root.storage()?.prepare_string_replacement(&text, additional).map(drop);
+                                assert!(FAIL_NEXT_METERED_QUALIFICATION.with(|fault| fault.replace(false)));
+                                assert!(rejected.is_err());
+                                assert_eq!(text.as_str(), "a");
+                                assert_eq!(old, (text.as_str().as_ptr(), text.capacity(), text.capacity.as_ref().unwrap().bytes()));
+                                assert_eq!(accounting(&source_exec.store), before);
+                                text.identity.check(&source_exec.services()?)?;
+                                text.try_push_str_reserved("b")?;
+                                assert_eq!(text.as_str(), "ab");
                                 rejected
                             })
                         }

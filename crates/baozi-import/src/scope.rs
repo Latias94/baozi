@@ -5664,6 +5664,397 @@ mod tests {
     }
 
     #[test]
+    fn prepared_vector_capacity_preserves_empty_and_nonclone_sources() {
+        struct DropElement<'a>(&'a Cell<usize>);
+        impl Drop for DropElement<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+        with_store_body(ResourceLimits::default(), Default::default(), |store| {
+            testing::with_context(&mut store.owner, |context| {
+                let drops = Cell::new(0);
+                context
+                    .with_execution(|exec| -> ParseResult<()> {
+                        let observed =
+                            testing::storage_observation(exec, ImportDimension::ScratchBytes);
+                        let baseline = observed.live_bytes();
+                        let mut values = exec.storage()?.metered_vec(
+                            ImportStorageClass::FormatNormalization,
+                            "prepared-vector",
+                        );
+                        assert_eq!((values.len(), values.capacity()), (0, 0));
+                        assert!(values.capacity.is_none());
+                        for populated in [false, true] {
+                            if populated {
+                                exec.storage()?.reserve_vec(&mut values, 1)?;
+                                values.try_push_reserved(DropElement(&drops))?;
+                            }
+                            let old = (
+                                values.as_slice().as_ptr(),
+                                values.len(),
+                                values.capacity(),
+                                values.capacity.as_ref().map(ImportStoreReservation::bytes),
+                            );
+                            let live = observed.live_bytes();
+                            let spare = values.capacity() - values.len();
+                            assert!(
+                                exec.storage()?
+                                    .prepare_vec_replacement(&values, spare)?
+                                    .is_none()
+                            );
+                            assert_eq!(observed.live_bytes(), live);
+                            let additional = values.capacity() + 1;
+                            let candidate = exec
+                                .storage()?
+                                .prepare_vec_replacement(&values, additional)?
+                                .unwrap();
+                            assert!(candidate.is_empty());
+                            assert!(candidate.capacity() >= values.len() + additional);
+                            assert_eq!(candidate.class, values.class);
+                            assert_eq!(candidate.resource, values.resource);
+                            assert!(std::ptr::eq(
+                                candidate.identity.issuer,
+                                values.identity.issuer
+                            ));
+                            assert!(std::ptr::eq(
+                                candidate.identity.terminal,
+                                values.identity.terminal
+                            ));
+                            let bytes = candidate.capacity.as_ref().unwrap().bytes();
+                            assert_eq!(
+                                bytes,
+                                (candidate.capacity() * size_of::<DropElement<'_>>()) as u64
+                            );
+                            assert_eq!(observed.live_bytes(), live + bytes);
+                            assert_eq!(
+                                old,
+                                (
+                                    values.as_slice().as_ptr(),
+                                    values.len(),
+                                    values.capacity(),
+                                    values.capacity.as_ref().map(ImportStoreReservation::bytes),
+                                )
+                            );
+                            drop(candidate);
+                            assert_eq!(observed.live_bytes(), live);
+                            assert_eq!(drops.get(), 0);
+                        }
+                        let additional = values.capacity() + 1;
+                        let required = values.len() + additional;
+                        exec.storage()?.reserve_vec(&mut values, additional)?;
+                        assert!(values.capacity() >= required);
+                        assert_eq!(values.len(), 1);
+                        assert!(std::ptr::eq(values.as_slice()[0].0, &drops));
+                        assert_eq!(drops.get(), 0);
+                        drop(values);
+                        assert_eq!(drops.get(), 1);
+                        assert_eq!(observed.live_bytes(), baseline);
+                        Ok::<_, ParseFailure>(())
+                    })
+                    .unwrap();
+            });
+        });
+    }
+
+    #[test]
+    fn prepared_string_capacity_preserves_empty_and_populated_sources() {
+        with_store_body(ResourceLimits::default(), Default::default(), |store| {
+            testing::with_context(&mut store.owner, |context| {
+                context
+                    .with_execution(|exec| -> ParseResult<()> {
+                        let observed =
+                            testing::storage_observation(exec, ImportDimension::ScratchBytes);
+                        let baseline = observed.live_bytes();
+                        let mut text = exec.storage()?.metered_string(
+                            ImportStorageClass::FormatNormalization,
+                            "prepared-string",
+                        );
+                        assert_eq!((text.len(), text.capacity()), (0, 0));
+                        assert!(text.capacity.is_none());
+                        for populated in [false, true] {
+                            if populated {
+                                text.try_push_str(&mut exec.services()?, "aé")?;
+                            }
+                            let old = (
+                                text.as_str().as_ptr(),
+                                text.len(),
+                                text.capacity(),
+                                text.capacity.as_ref().map(ImportStoreReservation::bytes),
+                            );
+                            let live = observed.live_bytes();
+                            let spare = text.capacity() - text.len();
+                            assert!(
+                                exec.storage()?
+                                    .prepare_string_replacement(&text, spare)?
+                                    .is_none()
+                            );
+                            assert_eq!(observed.live_bytes(), live);
+                            let additional = text.capacity() + 1;
+                            let candidate = exec
+                                .storage()?
+                                .prepare_string_replacement(&text, additional)?
+                                .unwrap();
+                            assert!(candidate.is_empty());
+                            assert!(candidate.capacity() >= text.len() + additional);
+                            assert_eq!(candidate.class, text.class);
+                            assert_eq!(candidate.resource, text.resource);
+                            assert!(std::ptr::eq(
+                                candidate.identity.issuer,
+                                text.identity.issuer
+                            ));
+                            assert!(std::ptr::eq(
+                                candidate.identity.terminal,
+                                text.identity.terminal
+                            ));
+                            let bytes = candidate.capacity.as_ref().unwrap().bytes();
+                            assert_eq!(bytes, candidate.capacity() as u64);
+                            assert_eq!(observed.live_bytes(), live + bytes);
+                            assert_eq!(text.as_str(), if populated { "aé" } else { "" });
+                            assert_eq!(
+                                old,
+                                (
+                                    text.as_str().as_ptr(),
+                                    text.len(),
+                                    text.capacity(),
+                                    text.capacity.as_ref().map(ImportStoreReservation::bytes)
+                                )
+                            );
+                            drop(candidate);
+                            assert_eq!(observed.live_bytes(), live);
+                        }
+                        drop(text);
+                        assert_eq!(observed.live_bytes(), baseline);
+                        Ok::<_, ParseFailure>(())
+                    })
+                    .unwrap();
+            });
+        });
+    }
+
+    #[test]
+    fn prepared_capacity_faults_preserve_old_payload_tokens_and_first_cause() {
+        for (string, qualification) in [(false, false), (false, true), (true, true)] {
+            with_store_body(ResourceLimits::default(), Default::default(), |store| {
+                testing::with_context(&mut store.owner, |context| {
+                    let terminal = context.terminal;
+                    assert!(
+                        context
+                            .with_execution(|exec| -> ParseResult<()> {
+                                let observed = testing::storage_observation(
+                                    exec,
+                                    ImportDimension::ScratchBytes,
+                                );
+                                let baseline = observed.live_bytes();
+                                let mut values = exec.storage()?.metered_vec(
+                                    ImportStorageClass::FormatNormalization,
+                                    "prepared-vector-fault",
+                                );
+                                values.try_push(&mut exec.services()?, 17_u32)?;
+                                let mut text = exec.storage()?.metered_string(
+                                    ImportStorageClass::FormatNormalization,
+                                    "prepared-string-fault",
+                                );
+                                text.try_push_str(&mut exec.services()?, "aé")?;
+                                let old = (
+                                    values.as_slice().as_ptr(),
+                                    values.capacity(),
+                                    values.capacity.as_ref().unwrap().bytes(),
+                                    text.as_str().as_ptr(),
+                                    text.capacity(),
+                                    text.capacity.as_ref().unwrap().bytes(),
+                                );
+                                let live = observed.live_bytes();
+                                if qualification {
+                                    FAIL_NEXT_METERED_QUALIFICATION.with(|fault| fault.set(true));
+                                } else {
+                                    inject_next_metered_allocation_failure();
+                                }
+                                let mut storage = exec.storage()?;
+                                let result = if string {
+                                    storage
+                                        .prepare_string_replacement(&text, text.capacity() + 1)
+                                        .map(drop)
+                                } else {
+                                    storage
+                                        .prepare_vec_replacement(&values, values.capacity() + 1)
+                                        .map(drop)
+                                };
+                                assert!(result.is_err());
+                                assert!(
+                                    storage
+                                        .prepare_string_replacement(&text, usize::MAX)
+                                        .is_err()
+                                );
+                                assert!(
+                                    storage
+                                        .prepare_vec_replacement(&values, usize::MAX)
+                                        .is_err()
+                                );
+                                assert_eq!(values.as_slice(), &[17]);
+                                assert_eq!(text.as_str(), "aé");
+                                assert_eq!(
+                                    old,
+                                    (
+                                        values.as_slice().as_ptr(),
+                                        values.capacity(),
+                                        values.capacity.as_ref().unwrap().bytes(),
+                                        text.as_str().as_ptr(),
+                                        text.capacity(),
+                                        text.capacity.as_ref().unwrap().bytes()
+                                    )
+                                );
+                                assert_eq!(observed.live_bytes(), live);
+                                drop((values, text));
+                                assert_eq!(observed.live_bytes(), baseline);
+                                let resource = if string {
+                                    "prepared-string-fault"
+                                } else {
+                                    "prepared-vector-fault"
+                                };
+                                assert!(
+                                    matches!(terminal.borrow().as_ref(),
+                            Some(ScopeAbortCause::CapacityEnvelope { resource: actual, .. })
+                                if qualification && *actual == resource)
+                                        || matches!(terminal.borrow().as_ref(),
+                                Some(ScopeAbortCause::Allocation { resource: actual })
+                                    if !qualification && *actual == resource)
+                                );
+                                result
+                            })
+                            .is_err()
+                    );
+                });
+            });
+        }
+    }
+
+    #[test]
+    fn prepared_capacity_requires_exact_old_and_candidate_overlap_budget() {
+        for string in [false, true] {
+            for shortfall in [0, 1] {
+                with_store_body(ResourceLimits::default(), Default::default(), |store| {
+                    testing::with_context(&mut store.owner, |context| {
+                        let terminal = context.terminal;
+                        let result = context.with_execution(|exec| -> ParseResult<()> {
+                            let observed = testing::storage_observation(exec, ImportDimension::ScratchBytes);
+                            let baseline = observed.live_bytes();
+                            let mut values = exec.storage()?.metered_vec::<u32>(
+                                ImportStorageClass::FormatNormalization, "prepared-overlap",
+                            );
+                            let mut text = exec.storage()?.metered_string(
+                                ImportStorageClass::FormatNormalization, "prepared-overlap",
+                            );
+                            if string {
+                                text.try_push_str(&mut exec.services()?, "aé")?;
+                            } else {
+                                values.try_push(&mut exec.services()?, 23)?;
+                            }
+                            let (len, capacity, old_bytes) = if string {
+                                (text.len(), text.capacity(), text.capacity.as_ref().unwrap().bytes())
+                            } else {
+                                (values.len(), values.capacity(), values.capacity.as_ref().unwrap().bytes())
+                            };
+                            let additional = capacity + 1;
+                            let (_, replacement) = if string {
+                                metered_replacement_plans_with_element_size(len, capacity, len + additional, 1)
+                            } else {
+                                metered_vec_replacement_plans::<u32>(len, capacity, len + additional)
+                            }.unwrap();
+                            let admitted = replacement.envelope_delta_bytes().unwrap();
+                            let live = observed.live_bytes();
+                            assert_eq!(live, baseline + old_bytes);
+                            let limit = live + admitted - shortfall;
+                            exec.store.tighten_dimension_policy(
+                                ImportDimension::ScratchBytes,
+                                DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, 0, limit),
+                            ).unwrap();
+                            let candidates = if string {
+                                exec.storage()?.prepare_string_replacement(&text, additional)
+                                    .map(|candidate| (None, candidate))
+                            } else {
+                                exec.storage()?.prepare_vec_replacement(&values, additional)
+                                    .map(|candidate| (candidate, None))
+                            };
+                            let result = candidates.map(|(vector, string)| {
+                                let token = vector.as_ref().and_then(|value| value.capacity.as_ref())
+                                    .or_else(|| string.as_ref().and_then(|value| value.capacity.as_ref()))
+                                    .unwrap();
+                                assert_eq!(token.bytes(), admitted);
+                                assert_eq!(observed.live_bytes(), live + token.bytes());
+                                drop((vector, string));
+                            });
+                            assert_eq!(observed.live_bytes(), live);
+                            if shortfall != 0 {
+                                assert!(matches!(terminal.borrow().as_ref(),
+                                    Some(ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                                        class: CounterClass::Live, dimension: ImportDimension::ScratchBytes,
+                                        value, limit: actual_limit,
+                                    })) if *value == live + admitted && *actual_limit == limit));
+                            }
+                            drop((values, text));
+                            assert_eq!(observed.live_bytes(), baseline);
+                            result
+                        });
+                        assert_eq!(result.is_ok(), shortfall == 0);
+                    });
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn prepared_zst_vector_checks_length_overflow_before_capacity_fit() {
+        with_store_body(ResourceLimits::default(), Default::default(), |store| {
+            testing::with_context(&mut store.owner, |context| {
+                let terminal = context.terminal;
+                assert!(
+                    context
+                        .with_execution(|exec| -> ParseResult<()> {
+                            let observed =
+                                testing::storage_observation(exec, ImportDimension::ScratchBytes);
+                            let baseline = observed.live_bytes();
+                            let mut values = exec.storage()?.metered_vec::<()>(
+                                ImportStorageClass::FormatNormalization,
+                                "prepared-zst",
+                            );
+                            assert!(
+                                exec.storage()?
+                                    .prepare_vec_replacement(&values, usize::MAX)?
+                                    .is_none()
+                            );
+                            values.try_push_reserved(())?;
+                            let pointer = values.as_slice().as_ptr();
+                            assert!(
+                                exec.storage()?
+                                    .prepare_vec_replacement(&values, usize::MAX - 1)?
+                                    .is_none()
+                            );
+                            let result = exec
+                                .storage()?
+                                .prepare_vec_replacement(&values, usize::MAX)
+                                .map(drop);
+                            assert!(result.is_err());
+                            assert_eq!(values.as_slice(), &[()]);
+                            assert_eq!(values.as_slice().as_ptr(), pointer);
+                            assert_eq!(values.capacity(), usize::MAX);
+                            assert!(values.capacity.is_none());
+                            assert_eq!(observed.live_bytes(), baseline);
+                            assert!(matches!(
+                                terminal.borrow().as_ref(),
+                                Some(ScopeAbortCause::Allocation {
+                                    resource: "prepared-zst"
+                                })
+                            ));
+                            result
+                        })
+                        .is_err()
+                );
+            });
+        });
+    }
+
+    #[test]
     fn exclusive_replacement_faults_preserve_old_payload_token_and_verified_prefix() {
         for qualification in [false, true] {
             with_store_body(

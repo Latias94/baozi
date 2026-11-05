@@ -198,12 +198,12 @@ impl<'b, 'op: 'b, 'session: 'b> ParseStorage<'b, 'op, 'session> {
             resource,
         }
     }
-    /// Admits and qualifies full replacement capacity while the source remains live.
-    pub fn reserve_vec<T>(
+    /// Prepares covered, empty replacement capacity without copying or changing the source.
+    pub(crate) fn prepare_vec_replacement<T>(
         &mut self,
-        values: &mut MeteredVec<'session, T>,
+        values: &MeteredVec<'session, T>,
         additional: usize,
-    ) -> ParseResult<()> {
+    ) -> ParseResult<Option<MeteredVec<'session, T>>> {
         self.check_identity(values.identity)?;
         self.poll()?;
         let required = values
@@ -212,7 +212,7 @@ impl<'b, 'op: 'b, 'session: 'b> ParseStorage<'b, 'op, 'session> {
             .checked_add(additional)
             .ok_or_else(|| values.identity.allocation_failure(values.resource))?;
         if required <= values.values.capacity() {
-            return Ok(());
+            return Ok(None);
         }
 
         let (plan, replacement_plan) = metered_vec_replacement_plans::<T>(
@@ -246,18 +246,35 @@ impl<'b, 'op: 'b, 'session: 'b> ParseStorage<'b, 'op, 'session> {
         if fail_next_metered_qualification() {
             return Err(values.identity.qualification_failure(values.resource));
         }
+        Ok(Some(MeteredVec {
+            values: replacement,
+            capacity: token,
+            identity: values.identity,
+            class: values.class,
+            resource: values.resource,
+        }))
+    }
+
+    /// Admits and qualifies full replacement capacity while the source remains live.
+    pub fn reserve_vec<T>(
+        &mut self,
+        values: &mut MeteredVec<'session, T>,
+        additional: usize,
+    ) -> ParseResult<()> {
+        let Some(mut replacement) = self.prepare_vec_replacement(values, additional)? else {
+            return Ok(());
+        };
         self.check_identity(values.identity)?;
         self.poll()?;
 
         assert!(
-            replacement.capacity() >= values.values.len(),
+            replacement.values.capacity() >= values.values.len(),
             "a prepared metered vector must retain every live element"
         );
-        replacement.append(&mut values.values);
-        let retired_values = std::mem::replace(&mut values.values, replacement);
-        let retired_token = std::mem::replace(&mut values.capacity, token);
-        drop(retired_values);
-        drop(retired_token);
+        replacement.values.append(&mut values.values);
+        std::mem::swap(values, &mut replacement);
+        drop(replacement.values);
+        drop(replacement.capacity);
         Ok(())
     }
     /// Grows through the same owner, then performs the real write.
@@ -292,12 +309,12 @@ impl<'b, 'op: 'b, 'session: 'b> ParseStorage<'b, 'op, 'session> {
         values.values.truncate(len);
         Ok(())
     }
-    /// Qualifies replacement capacity and copies old contents at the established frontiers.
-    pub fn reserve_string(
+    /// Prepares a covered, empty String without copying or changing the source.
+    pub(crate) fn prepare_string_replacement(
         &mut self,
-        value: &mut MeteredString<'session>,
+        value: &MeteredString<'session>,
         additional: usize,
-    ) -> ParseResult<()> {
+    ) -> ParseResult<Option<MeteredString<'session>>> {
         self.check_identity(value.identity)?;
         self.poll()?;
         let required = value
@@ -306,7 +323,7 @@ impl<'b, 'op: 'b, 'session: 'b> ParseStorage<'b, 'op, 'session> {
             .checked_add(additional)
             .ok_or_else(|| value.identity.allocation_failure(value.resource))?;
         if required <= value.value.capacity() {
-            return Ok(());
+            return Ok(None);
         }
 
         let (plan, replacement_plan) = metered_replacement_plans_with_element_size(
@@ -338,14 +355,31 @@ impl<'b, 'op: 'b, 'session: 'b> ParseStorage<'b, 'op, 'session> {
         if fail_next_metered_qualification() {
             return Err(value.identity.qualification_failure(value.resource));
         }
-        append_metered_string(self, &mut replacement, &value.value)?;
+        Ok(Some(MeteredString {
+            value: replacement,
+            capacity: token,
+            identity: value.identity,
+            class: value.class,
+            resource: value.resource,
+        }))
+    }
+
+    /// Qualifies replacement capacity and copies old contents at the established frontiers.
+    pub fn reserve_string(
+        &mut self,
+        value: &mut MeteredString<'session>,
+        additional: usize,
+    ) -> ParseResult<()> {
+        let Some(mut replacement) = self.prepare_string_replacement(value, additional)? else {
+            return Ok(());
+        };
+        append_metered_string(self, &mut replacement.value, &value.value)?;
         self.check_identity(value.identity)?;
         self.poll()?;
 
-        let retired_value = std::mem::replace(&mut value.value, replacement);
-        let retired_token = std::mem::replace(&mut value.capacity, token);
-        drop(retired_value);
-        drop(retired_token);
+        std::mem::swap(value, &mut replacement);
+        drop(replacement.value);
+        drop(replacement.capacity);
         Ok(())
     }
     /// Copies actual text in bounded UTF-8 chunks; an error can retain a copied prefix.
