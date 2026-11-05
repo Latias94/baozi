@@ -318,7 +318,8 @@ pub mod __retained_store_integration {
             RetainedStoreDimensionState, RetainedStoreWriterRole, StoreActionExecution,
             StoreChildAdmission, StoreExtensionResult, StoreFailureStorage, StoreImporterBoundary,
             StoreInvocation, StoreInvocationError, StoreInvocationLayout, StoreInvocationParser,
-            StoreInvocationServices, StoreOrdinaryStorage, StoreParserWorkError, StoreScanReturn,
+            StoreInvocationServices, StoreOrdinaryStorage, StoreParserReadRow,
+            StoreParserWorkError, StoreScanReturn,
         };
     }
 

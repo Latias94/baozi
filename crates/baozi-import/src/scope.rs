@@ -65,6 +65,7 @@ use std::sync::Arc;
 
 mod parser_execution;
 mod storage;
+pub(crate) use parser_execution::ParseReadRow;
 pub use parser_execution::{
     ParseChildren, ParseErrorView, ParseParser, ParsePieceError, ParseRoot, ParseScanReturn,
     ParseWorkLayout,

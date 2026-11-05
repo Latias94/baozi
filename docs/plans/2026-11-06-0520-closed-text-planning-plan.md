@@ -5,7 +5,8 @@ amendment below. Control source is capacity-only main `3cd9997`, with Rust sourc
 qualified at `eb82ccf`: 484 Import tests, 49 doctests, strict Clippy and formatting passed.
 The earlier
 read-sequence source (`d02ba6e`) remains a separate experiment with no ordinary timing
-acceptance. No implementation or performance acceptance is recorded by this plan.
+acceptance. Implementation and qualification progress are recorded below; performance
+acceptance is still pending.
 
 ## Problem and decision
 
@@ -156,3 +157,75 @@ Independent adversarial design review found no P0/P1 blocker and one P2 omission
 original implementation map: actual borrowed fields, the whole-region armed lifetime
 and stopped-result precedence. Those details are now explicit above. Design GO permits
 the bounded first slice; compilation, source review and performance evidence remain due.
+
+## Execution record
+
+The kernel now lends a `ParserReadRow` containing the actual row and frame remainder.
+`StoreParserReadRow` adds the original failure/debt cells and one stopped flag. The same
+armed host spans a whole region; its common owned-error materializer serves the existing
+prefix runner and the new loan. An independent frozen-source review found no defect in
+this first slice and approved the later Import wiring.
+
+The first-slice receipt `target/review/convergence/closed-text-row-focused-1.json` records
+seven focused tests, strict Operation Clippy and formatting passed on 909 stable inputs;
+1,080 tests were filtered, not executed by that focused run. A separate actual run in
+`closed-text-row-operation-tests-1.json` passed all 1,087 Operation tests with no skips.
+Those receipts predate the following cancellation test and Import integration.
+
+The review requested one additional actual cancellation oracle. The extended existing
+fixture now carries a real `CancellationToken`: after debt 255 -> 256, the row ends and
+the actual checkpoint observes cancellation. The new assertion requires exactly one
+classification, counters `(2, 1, 0)`, remainder `[1]`, debt 256, preserved Control cause
+and no entry into a later row body. Two paired doctests cover an owned readiness result
+and a row reference that cannot escape. All three passed in the integrated run below.
+
+Import now uses the private `scan_text_plan_region`, with its existing offset/line/poll
+state held in one `TextPlanCursor`. It calls classification directly, completes that
+literal width into the actual row, then performs the original policy/count arithmetic.
+Raw-frontier handbacks advance `next_poll_at` only after the actual checkpoint; debt
+handbacks leave it unchanged. The private Import adapter only projects failures, with
+terminal checks at region entry/exit. The old per-unit planning `run_returned` body is
+removed; its BOM read and the separate emission pass remain. No per-unit callable reader,
+secondary work counter, cumulative decoded quota or compatibility rail was introduced.
+
+The integrated Import library check passed. Independent final Import source review found
+no issue in the twelve-file candidate and retained the earlier kernel/host proof. Fresh
+serial qualification then completed in
+`target/review/convergence/closed-text-final-qa-1.json`, with all 909 before/after source
+inputs unchanged:
+
+| Integrated check | Actual result |
+| --- | --- |
+| Workspace nextest, all features, one build job/test thread | 3,622 passed (two slow), six existing skips |
+| Workspace doctests, all features | 190 passed, including both new row examples |
+| Workspace Clippy, all targets/features, `-D warnings` | Passed |
+| Asset-consumer nextest, all features, one build job/test thread | 138 passed, one existing skip |
+| Asset-consumer Clippy, all targets/features, `-D warnings` | Passed |
+| Workspace and asset-consumer formatting | Both passed |
+
+The intentional panic stderr from the passing postprocess unwind/cleanup test remains
+in the log; its repeated success output is not another test. Final independent review
+verified all seven log hashes, serial command intervals, all 909 current source hashes
+and the retained twelve-file source-proof chain. The existing skipped cases are manual
+experiments/scale fixtures, not wasm execution. This closes the recorded Windows
+correctness/lint/format scope; no measured performance keep follows from it.
+
+The fixed main `3cd9997` GNU control was built with Rust 1.95.0, opt3/debug1, System
+allocation and the existing shared target; all archived files and 909 QA inputs matched
+the build. Binary SHA-256:
+`43681a578cfee585588b21a17c901ace6fd97f92fb040767be1b973169c3d5bb`.
+Six fresh control profiles completed in
+`target/review/convergence/closed-text-control-attribution/report.json`:
+
+| Case | Whole-worker control Ir |
+| --- | ---: |
+| glTF shared 1 | 5,947,738 |
+| glTF shared 32 | 29,540,514 |
+| F64 PLY neighbors | 2,510,384 |
+| STL repeated 1024 | 14,070,989 |
+| OBJ repeated 16384 | 796,422,241 |
+| OBJ grid 128 | 2,685,124,942 |
+
+These are new fixed-main instruction observations, not native timings or an improvement
+claim. Candidate build/comparison and independent evidence review remain due. Raw stdout,
+stderr, Callgrind profiles and inclusive/self annotations are retained.

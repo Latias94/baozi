@@ -171,8 +171,8 @@ mod execution;
 pub use execution::{
     StoreActionExecution, StoreChildAdmission, StoreExtensionResult, StoreFailureStorage,
     StoreImporterBoundary, StoreInvocation, StoreInvocationError, StoreInvocationLayout,
-    StoreInvocationParser, StoreInvocationServices, StoreOrdinaryStorage, StoreParserWorkError,
-    StoreScanReturn,
+    StoreInvocationParser, StoreInvocationServices, StoreOrdinaryStorage, StoreParserReadRow,
+    StoreParserWorkError, StoreScanReturn,
 };
 mod terminal_output;
 mod transcript;

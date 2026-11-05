@@ -14,7 +14,7 @@ mod kernel;
 mod parser;
 
 pub(crate) use kernel::ParserChannel;
-pub(crate) use kernel::{ParserFrame, WorkFrame, WorkLayout, WorkView};
+pub(crate) use kernel::{ParserFrame, ParserReadRow, WorkFrame, WorkLayout, WorkView};
 #[cfg(test)]
 use kernel::{
     add_attempted, add_consumed, charge_attempted_entry, check_limit, consume_observed_entry,

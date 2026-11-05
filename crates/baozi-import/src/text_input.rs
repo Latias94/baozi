@@ -11,7 +11,7 @@ use crate::ledger::ImportProgressPhase;
 use crate::metered_storage::{MeteredDecodedText, MeteredVec, metered_vec_replacement_plan};
 use crate::scope::{
     ImportStorageClass, ImportWorkClass, METERED_COPY_POLL_INTERVAL, ParseChildren, ParseErrorView,
-    ParseFailure, ParseParser, ParseResult, ParseServices,
+    ParseFailure, ParseParser, ParseReadRow, ParseResult, ParseServices,
 };
 use baozi_operation::__retained_store_integration::activation::StoreScanReturn;
 use std::fmt;
@@ -1271,6 +1271,111 @@ impl From<ParseFailure> for TextInputScanError {
     }
 }
 
+struct TextPlanCursor {
+    offset: usize,
+    line_len: usize,
+    work: WorkCursor,
+}
+
+enum TextPlanRegionExit {
+    Exhausted,
+    RawPoll,
+    DebtPoll,
+    Violation(TextConformanceViolation),
+}
+
+fn scan_text_plan_region(
+    reads: &mut ParseReadRow<'_, '_, '_>,
+    errors: ParseErrorView<'_>,
+    facts: &TextProfileFacts,
+    bytes: &[u8],
+    options: TextInputOptions,
+    plan: &mut TextInputPlan,
+    cursor: &mut TextPlanCursor,
+) -> ParseResult<TextPlanRegionExit> {
+    while cursor.offset < bytes.len() {
+        if cursor
+            .work
+            .poll_before_unit_due(facts, bytes, cursor.offset)
+        {
+            return Ok(TextPlanRegionExit::RawPoll);
+        }
+        if !reads.ready_for_read()? {
+            return Ok(TextPlanRegionExit::DebtPoll);
+        }
+        let unit = classify_text_unit(facts, options.decoding_mode, bytes, cursor.offset);
+        reads.complete_read(unit.raw_len() as u64)?;
+        let unit_end = checked_add_usize(errors, cursor.offset, unit.raw_len(), options.resource)?;
+        match unit {
+            TextUnit::Valid { raw_len, newline } => {
+                plan.decoded_len =
+                    checked_add_usize(errors, plan.decoded_len, raw_len, options.resource)?;
+                enforce_usize_limit(
+                    errors,
+                    plan.decoded_len,
+                    options.decoded_resource,
+                    errors.limits().max_decoded_utf8_bytes,
+                )?;
+                if newline.is_some() {
+                    enforce_usize_limit(
+                        errors,
+                        cursor.line_len,
+                        options.line_resource,
+                        errors.limits().max_line_bytes as u64,
+                    )?;
+                    if unit_end < bytes.len() {
+                        plan.line_index_limit_dirty |= plan
+                            .line_starts
+                            .add::<TextInputLineStart>(errors, options.line_index_resource)?;
+                    }
+                    enforce_line_index_limit(errors, plan, options)?;
+                    cursor.line_len = 0;
+                } else {
+                    cursor.line_len =
+                        checked_add_usize(errors, cursor.line_len, raw_len, options.resource)?;
+                }
+            }
+            TextUnit::Replacement { .. } => {
+                plan.decoded_len = checked_add_usize(
+                    errors,
+                    plan.decoded_len,
+                    '\u{fffd}'.len_utf8(),
+                    options.resource,
+                )?;
+                enforce_usize_limit(
+                    errors,
+                    plan.decoded_len,
+                    options.decoded_resource,
+                    errors.limits().max_decoded_utf8_bytes,
+                )?;
+                plan.line_index_limit_dirty |= plan
+                    .replacements
+                    .add::<TextInputReplacement>(errors, options.line_index_resource)?;
+                cursor.line_len = checked_add_usize(
+                    errors,
+                    cursor.line_len,
+                    '\u{fffd}'.len_utf8(),
+                    options.resource,
+                )?;
+                enforce_line_index_limit(errors, plan, options)?;
+            }
+            TextUnit::Violation { kind, .. } => {
+                return Ok(TextPlanRegionExit::Violation(TextConformanceViolation::at(
+                    kind,
+                    raw_range_parse(errors, options, cursor.offset, unit_end)?,
+                )));
+            }
+        }
+        cursor.offset = unit_end;
+        #[cfg(test)]
+        tests::classified_unit(tests::ScanPass::Planning, cursor.offset);
+        if cursor.offset >= cursor.work.next_poll_at {
+            return Ok(TextPlanRegionExit::RawPoll);
+        }
+    }
+    Ok(TextPlanRegionExit::Exhausted)
+}
+
 fn plan_text_input(
     scope: &mut ParseChildren<'_, '_, '_>,
     facts: &TextProfileFacts,
@@ -1291,7 +1396,6 @@ fn plan_text_input(
         &group,
         [work_amount],
         |scope| -> ParseResult<StoreScanReturn<TextConformanceResult<()>>> {
-            let mut cursor = WorkCursor::new();
             let has_bom = scope.run_returned(|| {
                 let has_bom = options.raw_base == 0 && bytes.starts_with(&[0xef, 0xbb, 0xbf]);
                 Ok((has_bom, [u64::from(has_bom) * 3]))
@@ -1322,101 +1426,39 @@ fn plan_text_input(
                     .line_starts
                     .add::<TextInputLineStart>(scope.error_view(), options.line_index_resource)?;
             }
-            let mut offset = plan.input_start;
-            let mut line_len = 0usize;
-            while offset < bytes.len() {
-                cursor.poll_before_unit(scope, facts, bytes, offset)?;
-                let unit = scope.run_returned(|| {
-                    let unit = classify_text_unit(facts, options.decoding_mode, bytes, offset);
-                    Ok((unit, [unit.raw_len() as u64]))
-                })?;
-                let unit_end = checked_add_usize(
-                    scope.error_view(),
-                    offset,
-                    unit.raw_len(),
-                    options.resource,
-                )?;
-                match unit {
-                    TextUnit::Valid { raw_len, newline } => {
-                        plan.decoded_len = checked_add_usize(
-                            scope.error_view(),
-                            plan.decoded_len,
-                            raw_len,
-                            options.resource,
-                        )?;
-                        enforce_usize_limit(
-                            scope.error_view(),
-                            plan.decoded_len,
-                            options.decoded_resource,
-                            scope.error_view().limits().max_decoded_utf8_bytes,
-                        )?;
-                        if newline.is_some() {
-                            enforce_usize_limit(
-                                scope.error_view(),
-                                line_len,
-                                options.line_resource,
-                                scope.error_view().limits().max_line_bytes as u64,
-                            )?;
-                            if unit_end < bytes.len() {
-                                plan.line_index_limit_dirty |=
-                                    plan.line_starts.add::<TextInputLineStart>(
-                                        scope.error_view(),
-                                        options.line_index_resource,
-                                    )?;
-                            }
-                            enforce_line_index_limit(scope.error_view(), &mut plan, options)?;
-                            line_len = 0;
-                        } else {
-                            line_len = checked_add_usize(
-                                scope.error_view(),
-                                line_len,
-                                raw_len,
-                                options.resource,
-                            )?;
-                        }
+            let mut cursor = TextPlanCursor {
+                offset: plan.input_start,
+                line_len: 0,
+                work: WorkCursor::new(),
+            };
+            let errors = scope.error_view();
+            while cursor.offset < bytes.len() {
+                match scope.with_read_row(&mut |reads| {
+                    scan_text_plan_region(
+                        reads,
+                        errors,
+                        facts,
+                        bytes,
+                        options,
+                        &mut plan,
+                        &mut cursor,
+                    )
+                })? {
+                    TextPlanRegionExit::Exhausted => break,
+                    TextPlanRegionExit::RawPoll => {
+                        scope.poll()?;
+                        cursor.work.next_poll_at =
+                            cursor.offset.saturating_add(TEXT_INPUT_WORK_CHUNK_BYTES);
                     }
-                    TextUnit::Replacement { .. } => {
-                        plan.decoded_len = checked_add_usize(
-                            scope.error_view(),
-                            plan.decoded_len,
-                            '\u{fffd}'.len_utf8(),
-                            options.resource,
-                        )?;
-                        enforce_usize_limit(
-                            scope.error_view(),
-                            plan.decoded_len,
-                            options.decoded_resource,
-                            scope.error_view().limits().max_decoded_utf8_bytes,
-                        )?;
-                        plan.line_index_limit_dirty |=
-                            plan.replacements.add::<TextInputReplacement>(
-                                scope.error_view(),
-                                options.line_index_resource,
-                            )?;
-                        line_len = checked_add_usize(
-                            scope.error_view(),
-                            line_len,
-                            '\u{fffd}'.len_utf8(),
-                            options.resource,
-                        )?;
-                        enforce_line_index_limit(scope.error_view(), &mut plan, options)?;
-                    }
-                    TextUnit::Violation { kind, .. } => {
-                        let violation = TextConformanceViolation::at(
-                            kind,
-                            raw_range_parse(scope.error_view(), options, offset, unit_end)?,
-                        );
+                    TextPlanRegionExit::DebtPoll => scope.poll()?,
+                    TextPlanRegionExit::Violation(violation) => {
                         return Ok(StoreScanReturn::Boundary(Err(violation)));
                     }
                 }
-                offset = unit_end;
-                #[cfg(test)]
-                tests::classified_unit(tests::ScanPass::Planning, offset);
-                cursor.poll_if_chunk_complete(scope, offset)?;
             }
             enforce_usize_limit(
                 scope.error_view(),
-                line_len,
+                cursor.line_len,
                 options.line_resource,
                 scope.error_view().limits().max_line_bytes as u64,
             )?;
@@ -1837,16 +1879,20 @@ impl WorkCursor {
         bytes: &[u8],
         offset: usize,
     ) -> ParseResult<()> {
-        if offset.saturating_add(4) <= self.next_poll_at {
-            return Ok(());
-        }
-        // Only bounded width lookahead precedes the poll; semantic classification follows it.
-        let raw_len = text_unit_raw_len(facts, bytes, offset);
-        if offset.saturating_add(raw_len) > self.next_poll_at {
+        if self.poll_before_unit_due(facts, bytes, offset) {
             scope.poll()?;
             self.next_poll_at = offset.saturating_add(TEXT_INPUT_WORK_CHUNK_BYTES);
         }
         Ok(())
+    }
+
+    fn poll_before_unit_due(&self, facts: &TextProfileFacts, bytes: &[u8], offset: usize) -> bool {
+        if offset.saturating_add(4) <= self.next_poll_at {
+            return false;
+        }
+        // Only bounded width lookahead precedes the poll; semantic classification follows it.
+        let raw_len = text_unit_raw_len(facts, bytes, offset);
+        offset.saturating_add(raw_len) > self.next_poll_at
     }
 
     fn poll_if_chunk_complete(

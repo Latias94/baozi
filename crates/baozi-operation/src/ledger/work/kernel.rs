@@ -759,6 +759,35 @@ pub(crate) struct ParserFrame<const N: usize> {
     pub(crate) active: bool,
 }
 
+pub(crate) struct ParserReadRow<'loan, D> {
+    row: &'loan mut WorkEntry<D>,
+    remaining: &'loan mut u64,
+    dimension: D,
+}
+
+impl<D: Copy> ParserReadRow<'_, D> {
+    pub(crate) fn complete(&mut self, amount: u64) -> Result<(), LedgerCause<D>> {
+        if amount > *self.remaining {
+            return Err(LedgerCause::InactiveLinearWorkPermit);
+        }
+        if amount == 0 {
+            return Ok(());
+        }
+        let dimension = self.dimension;
+        let consumed = add_consumed(self.row.state.consumed, amount, || dimension)?;
+        check_effective(
+            || dimension,
+            consumed,
+            self.row.state.pending_consumed,
+            self.row.state.attempted,
+            self.row.policy.consumed_limit,
+        )?;
+        self.row.state.consumed = consumed;
+        *self.remaining -= amount;
+        Ok(())
+    }
+}
+
 impl<const N: usize> ParserFrame<N> {
     /// Records one exact group prefix without reserving a pending-consumed envelope.
     pub(crate) fn complete<D: Copy>(
@@ -825,6 +854,26 @@ impl<const N: usize> ParserFrame<N> {
 }
 
 impl ParserFrame<1> {
+    pub(crate) fn borrow_read_row<'a, D: Copy>(
+        &'a mut self,
+        group: &WorkLayout<1>,
+        state: &'a mut WorkView<'_, D>,
+    ) -> Result<ParserReadRow<'a, D>, LedgerCause<D>> {
+        if group.positions[0] >= state.catalog.len() {
+            return Err(LedgerCause::FinalSnapshotShapeMismatch);
+        }
+        group.validate_active(state)?;
+        if group.grant != WorkGrant::Ordinary {
+            return Err(LedgerCause::InactiveLinearWorkPermit);
+        }
+        self.validate(state)?;
+        Ok(ParserReadRow {
+            row: &mut state.rows[group.positions[0]],
+            remaining: &mut self.remaining[0],
+            dimension: state.catalog[group.positions[0]],
+        })
+    }
+
     /// Admits another chunk only for a fully consumed scope without a per-item limit.
     pub(crate) fn replenish<D: Copy>(
         &mut self,

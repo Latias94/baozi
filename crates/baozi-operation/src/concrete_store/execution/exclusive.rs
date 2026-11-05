@@ -1,7 +1,9 @@
 //! Exclusive numeric execution and host-owned action/parser frames over one invocation.
 
 use super::*;
-use crate::ledger::{ParserChannel, ParserFrame, WorkFrame, WorkLane, WorkLayout, WorkView};
+use crate::ledger::{
+    ParserChannel, ParserFrame, ParserReadRow, WorkFrame, WorkLane, WorkLayout, WorkView,
+};
 use crate::retained::{
     AdmittedShareWork, ExclusiveOperationParts, PreparationFailureCode, StoreExecutionState,
     checked_action_debt, record_terminal_cause_with_precedence,
@@ -1172,6 +1174,61 @@ impl<const N: usize> Drop for ParserActionHost<'_, '_, N> {
     }
 }
 
+/// A short loan of one actual parser row and remainder, with no storage or callback runner.
+/// The enclosing host retains the frame and its armed unwind guard.
+pub struct StoreParserReadRow<'read> {
+    row: ParserReadRow<'read, StoreDimensionKey>,
+    failure: &'read Cell<Option<PreparationFailureCode>>,
+    debt: Option<&'read Cell<u16>>,
+    stopped: bool,
+}
+
+impl StoreParserReadRow<'_> {
+    /// Returns false before a direct-mode checkpoint is due. End this loan and checkpoint
+    /// through the parser host before reading another unit; loan entry never resets debt.
+    pub fn ready_for_read(&mut self) -> Result<bool, StoreInvocationError> {
+        if self.stopped {
+            return Err(StoreRuntimeError::FallbackOnly.into());
+        }
+        match self.debt.map(|debt| checked_action_debt(debt.get(), 1)) {
+            None => Ok(true),
+            Some(Ok(next)) => Ok(next.is_some()),
+            Some(Err(())) => Err(self.reject_cost()),
+        }
+    }
+
+    /// Commits one literal returned read before any later policy, write or control action.
+    /// Numeric failure leaves row/remainder unchanged and stops every later call in this loan.
+    pub fn complete_read(&mut self, amount: u64) -> Result<(), StoreInvocationError> {
+        if self.stopped {
+            return Err(StoreRuntimeError::FallbackOnly.into());
+        }
+        let next_debt = match self.debt.map(|debt| checked_action_debt(debt.get(), 1)) {
+            None => None,
+            Some(Ok(Some(next))) => Some(next),
+            Some(Ok(None) | Err(())) => return Err(self.reject_cost()),
+        };
+        if let Err(cause) = self.row.complete(amount) {
+            self.stopped = true;
+            record(self.failure, PreparationFailureCode::ledger());
+            return Err(StoreRuntimeError::Ledger(cause).into());
+        }
+        if let Some((debt, next)) = self.debt.zip(next_debt) {
+            debt.set(next);
+        }
+        Ok(())
+    }
+
+    fn reject_cost(&mut self) -> StoreInvocationError {
+        self.stopped = true;
+        record(
+            self.failure,
+            PreparationFailureCode::product_graph(INVALID_COST),
+        );
+        StoreRuntimeError::FallbackOnly.into()
+    }
+}
+
 /// A borrowed parser view. The host keeps the actual frame even if this borrow is forgotten.
 /// Only a parent has `child`; a child can perform prefixes and storage, then returns its borrow.
 ///
@@ -1387,19 +1444,9 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, const N: usize,
         let value = match action(storage) {
             Ok(value) => value,
             Err(cause) => {
-                StoreExecutionState::stop(prefix.execution_state, StoreExecutionState::KnownError);
                 prefix.armed = false;
                 drop(prefix);
-                let owned = materialize(self, cause);
-                if self.host.frame.active {
-                    let _ = ledger(
-                        self.host.context.parts.ordinary.failure,
-                        self.host
-                            .frame
-                            .resolve(&mut self.host.context.parts.work.work),
-                    );
-                }
-                return Err(owned);
+                return Err(self.materialize_error(cause, materialize));
             }
         };
         let result = prefix.complete(completed(&value));
@@ -1413,6 +1460,24 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, const N: usize,
             return Err(project(cause));
         }
         Ok(value)
+    }
+
+    fn materialize_error<P, E>(
+        &mut self,
+        cause: P,
+        materialize: impl FnOnce(&mut Self, P) -> E,
+    ) -> E {
+        self.host.context.stop_known_error();
+        let owned = materialize(self, cause);
+        if self.host.frame.active {
+            let _ = ledger(
+                self.host.context.parts.ordinary.failure,
+                self.host
+                    .frame
+                    .resolve(&mut self.host.context.parts.work.work),
+            );
+        }
+        owned
     }
 
     /// A live loan excludes reentry of this parser role.
@@ -1476,6 +1541,108 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, const N: usize,
         count: usize,
     ) -> Result<crate::retained::RetainedStorage<Vec<u8>>, StoreInvocationError> {
         self.host.context.allocate_bytes(phase, dimension, count)
+    }
+}
+
+impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit>
+    StoreInvocationParser<'_, '_, 'op, O, PP, U, 1, true>
+{
+    /// Lends the actual singleton row to a closed first-party read loop. Each read completes
+    /// immediately; a healthy return keeps the admitted frame open for the next region.
+    /// The loop must return before a due checkpoint; the host owns control and settlement.
+    ///
+    /// An owned result can leave the region; the borrowed row cannot:
+    ///
+    /// ```
+    /// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+    /// use baozi_operation::__retained_store_integration::activation::{
+    ///     StoreInvocationError, StoreInvocationParser,
+    /// };
+    /// fn ready<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+    ///     child: &mut StoreInvocationParser<'_, '_, '_, O, P, U, 1, true>,
+    /// ) -> Result<bool, StoreInvocationError> {
+    ///     child.with_read_row(&mut |row| row.ready_for_read(), |cause| cause, |_, cause| cause)
+    /// }
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+    /// use baozi_operation::__retained_store_integration::activation::{
+    ///     StoreInvocationError, StoreInvocationParser,
+    /// };
+    /// fn escape<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+    ///     child: &mut StoreInvocationParser<'_, '_, '_, O, P, U, 1, true>,
+    /// ) {
+    ///     let _escaped = child.with_read_row(
+    ///         &mut |row| Ok::<_, StoreInvocationError>(row),
+    ///         |cause| cause, |_, cause| cause,
+    ///     );
+    /// }
+    /// ```
+    pub fn with_read_row<T, P, E>(
+        &mut self,
+        body: &mut impl FnMut(&mut StoreParserReadRow<'_>) -> Result<T, P>,
+        project: impl FnOnce(StoreInvocationError) -> E,
+        materialize: impl FnOnce(&mut Self, P) -> E,
+    ) -> Result<T, E> {
+        if let Err(cause) = self.host.context.running() {
+            return Err(project(cause));
+        }
+        let failure = self.host.context.parts.ordinary.failure;
+        let debt = self
+            .host
+            .context
+            .boundary
+            .is_none()
+            .then_some(self.host.context.parts.ordinary.debt);
+        let mut scope = ParserActionHost {
+            work: &mut self.host.context.parts.work.work,
+            frame: &mut self.host.frame,
+            layout: self.host.layout,
+            failure,
+            execution_state: self.host.context.parts.ordinary.execution_state,
+            boundary: self.host.context.boundary,
+            armed: true,
+        };
+        let (result, stopped) = {
+            let row = match scope.frame.borrow_read_row(&scope.layout, scope.work) {
+                Ok(row) => row,
+                Err(cause) => {
+                    record(failure, PreparationFailureCode::ledger());
+                    let _ = scope.frame.resolve(scope.work);
+                    scope.armed = false;
+                    return Err(project(StoreRuntimeError::Ledger(cause).into()));
+                }
+            };
+            let mut reads = StoreParserReadRow {
+                row,
+                failure,
+                debt,
+                stopped: false,
+            };
+            let result = body(&mut reads);
+            (result, reads.stopped)
+        };
+        scope.armed = false;
+        drop(scope);
+        if stopped && result.is_ok() {
+            let _ = ledger(
+                failure,
+                self.host
+                    .frame
+                    .resolve(&mut self.host.context.parts.work.work),
+            );
+            let cause = project(StoreRuntimeError::FallbackOnly.into());
+            drop(result);
+            return Err(cause);
+        }
+        match result {
+            Ok(value) => {
+                self.host.context.running().map_err(project)?;
+                Ok(value)
+            }
+            Err(cause) => Err(self.materialize_error(cause, materialize)),
+        }
     }
 }
 

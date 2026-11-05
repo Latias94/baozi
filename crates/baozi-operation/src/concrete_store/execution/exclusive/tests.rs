@@ -3,8 +3,8 @@ use super::*;
 use crate::ledger::{Ledger, LedgerLimits};
 use crate::retained::RetainedHandleSharePlan;
 use crate::{
-    CancellationSignal, OperationControl, OperationCoordinator, PhysicalStorageAccountFactory,
-    PhysicalStorageAccountLimits,
+    CancellationSignal, CancellationToken, OperationControl, OperationCoordinator,
+    PhysicalStorageAccountFactory, PhysicalStorageAccountLimits,
 };
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;
@@ -48,16 +48,27 @@ impl ProgressUnit for ParserUnit {
     }
 }
 
-struct ParserPolls(Arc<AtomicUsize>);
+struct ParserPolls(Arc<AtomicUsize>, CancellationToken);
 
 impl CancellationSignal for ParserPolls {
     fn is_cancelled(&self) -> bool {
         self.0.fetch_add(1, Ordering::SeqCst);
-        false
+        self.1.is_cancelled()
     }
 }
 
 fn with_parser_operation(
+    body: impl FnOnce(
+        &mut RetainedStoreOperation<'_, Owner, ParserProgress, ParserUnit>,
+        StoreDimensionKey,
+        &AtomicUsize,
+    ),
+) {
+    with_cancellable_parser_operation(CancellationToken::new(), body);
+}
+
+fn with_cancellable_parser_operation(
+    cancellation: CancellationToken,
     body: impl FnOnce(
         &mut RetainedStoreOperation<'_, Owner, ParserProgress, ParserUnit>,
         StoreDimensionKey,
@@ -117,7 +128,8 @@ fn with_parser_operation(
         .try_create_account(PhysicalStorageAccountLimits::new(1 << 20, 32).unwrap())
         .unwrap();
     let polls = Arc::new(AtomicUsize::new(0));
-    let control = OperationControl::default().with_cancellation(ParserPolls(Arc::clone(&polls)));
+    let control = OperationControl::default()
+        .with_cancellation(ParserPolls(Arc::clone(&polls), cancellation));
     let mut root = StoreInvocationRoot::<Owner, ParserProgress, ParserUnit>::new();
     let mut operation =
         RetainedStoreOperation::try_start(&mut root, control, ledger_plan, &account, start)
@@ -129,6 +141,299 @@ fn with_parser_operation(
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
     assert!(!account.snapshot().poisoned());
+}
+
+#[test]
+fn read_row_handback_keeps_actual_remainder_and_direct_debt_until_checkpoint() {
+    with_parser_operation(|operation, key, polls| {
+        let mut reads = 0;
+        operation
+            .with_exclusive_execution::<_, StoreInvocationError>(|context| {
+                let layout = context.bind_group([key])?;
+                context.parser_child::<_, StoreInvocationError, 1>(
+                    layout,
+                    [2],
+                    [None],
+                    |child| {
+                        child.host.context.parts.ordinary.debt.set(255);
+                        child.with_read_row(
+                            &mut |row| -> Result<(), StoreInvocationError> {
+                                assert!(row.ready_for_read()?);
+                                reads += 1;
+                                row.complete_read(1)?;
+                                assert!(!row.ready_for_read()?);
+                                Ok(())
+                            },
+                            |cause| cause,
+                            |_, cause| cause,
+                        )?;
+                        assert_eq!(reads, 1);
+                        assert_eq!(child.host.frame.remaining, [1]);
+                        assert!(child.host.frame.active);
+                        assert_eq!(child.work_counters(key)?, (2, 1, 0));
+                        assert_eq!(child.host.context.parts.ordinary.debt.get(), 256);
+                        assert_eq!(polls.load(Ordering::SeqCst), 1);
+                        child.checkpoint()?;
+                        assert_eq!(polls.load(Ordering::SeqCst), 2);
+                        child.with_read_row(
+                            &mut |row| -> Result<(), StoreInvocationError> {
+                                assert!(row.ready_for_read()?);
+                                reads += 1;
+                                row.complete_read(1)
+                            },
+                            |cause| cause,
+                            |_, cause| cause,
+                        )?;
+                        assert_eq!(child.host.frame.remaining, [0]);
+                        assert_eq!(child.work_counters(key)?, (2, 2, 0));
+                        assert_eq!(child.host.context.parts.ordinary.debt.get(), 1);
+                        Ok(())
+                    },
+                )?;
+                context.parts.work.check_quiescent().unwrap();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(reads, 2);
+        assert_eq!(polls.load(Ordering::SeqCst), 3);
+    });
+}
+
+#[test]
+fn read_row_debt_checkpoint_cancellation_retains_only_the_first_classification() {
+    let cancellation = CancellationToken::new();
+    with_cancellable_parser_operation(cancellation.clone(), |operation, key, polls| {
+        let classified = Cell::new(0);
+        let result = operation.with_exclusive_execution::<_, StoreInvocationError>(|context| {
+            let layout = context.bind_group([key])?;
+            let result =
+                context.parser_child::<_, StoreInvocationError, 1>(layout, [2], [None], |child| {
+                    child.host.context.parts.ordinary.debt.set(255);
+                    child.with_read_row(
+                        &mut |row| -> Result<(), StoreInvocationError> {
+                            assert!(row.ready_for_read()?);
+                            classified.set(classified.get() + 1);
+                            row.complete_read(1)?;
+                            assert!(!row.ready_for_read()?);
+                            Ok(())
+                        },
+                        |cause| cause,
+                        |_, cause| cause,
+                    )?;
+                    cancellation.cancel();
+                    let cause = child.checkpoint().unwrap_err();
+                    assert!(matches!(
+                        &cause,
+                        StoreInvocationError::Runtime(StoreRuntimeError::Control(
+                            crate::ControlCause::Cancelled {
+                                origin: crate::CancellationOrigin::Signal
+                            }
+                        ))
+                    ));
+                    assert_eq!(polls.load(Ordering::SeqCst), 2);
+                    assert_eq!(classified.get(), 1);
+                    assert_eq!(child.host.frame.remaining, [1]);
+                    assert_eq!(child.work_counters(key)?, (2, 1, 0));
+                    assert_eq!(child.host.context.parts.ordinary.debt.get(), 256);
+                    let next = child.with_read_row(
+                        &mut |_| -> Result<(), StoreInvocationError> {
+                            panic!("cancelled row body entered")
+                        },
+                        |cause| cause,
+                        |_, cause| cause,
+                    );
+                    assert!(matches!(
+                        next,
+                        Err(StoreInvocationError::Runtime(StoreRuntimeError::Control(
+                            crate::ControlCause::Cancelled {
+                                origin: crate::CancellationOrigin::Signal
+                            }
+                        )))
+                    ));
+                    assert_eq!(child.host.frame.remaining, [1]);
+                    assert_eq!(child.work_counters(key)?, (2, 1, 0));
+                    Err::<(), _>(cause)
+                });
+            context.parts.work.check_quiescent().unwrap();
+            assert_eq!(context.work_counters(key)?, (2, 1, 0));
+            assert_eq!(
+                context.parts.ordinary.failure.get(),
+                Some(PreparationFailureCode::from_control(
+                    &crate::ControlCause::Cancelled {
+                        origin: crate::CancellationOrigin::Signal
+                    }
+                ))
+            );
+            result
+        });
+        assert!(matches!(
+            result,
+            Err(StoreInvocationError::Runtime(StoreRuntimeError::Control(
+                crate::ControlCause::Cancelled {
+                    origin: crate::CancellationOrigin::Signal
+                }
+            )))
+        ));
+        assert_eq!(classified.get(), 1);
+    });
+}
+
+#[test]
+fn read_row_registry_units_do_not_change_direct_debt() {
+    with_parser_operation(|operation, key, _| {
+        let boundary = StoreImporterBoundary::default();
+        assert!(boundary.begin());
+        operation
+            .with_parser_execution::<_, StoreInvocationError>(&boundary, |context| {
+                let layout = context.bind_group([key])?;
+                context.parser_child::<_, StoreInvocationError, 1>(
+                    layout,
+                    [257],
+                    [None],
+                    |child| {
+                        child.with_read_row(
+                            &mut |row| -> Result<(), StoreInvocationError> {
+                                for _ in 0..257 {
+                                    assert!(row.ready_for_read()?);
+                                    row.complete_read(1)?;
+                                }
+                                Ok(())
+                            },
+                            |cause| cause,
+                            |_, cause| cause,
+                        )?;
+                        assert_eq!(child.host.context.parts.ordinary.debt.get(), 0);
+                        assert_eq!(child.work_counters(key)?, (257, 257, 0));
+                        Ok(())
+                    },
+                )?;
+                assert_eq!(context.parts.ordinary.debt.get(), 1);
+                context.parts.work.check_quiescent().unwrap();
+                Ok(())
+            })
+            .unwrap();
+    });
+}
+
+#[test]
+fn read_row_numeric_failure_stops_zero_writes_and_normal_or_error_returns() {
+    for propagated in [false, true] {
+        with_parser_operation(|operation, key, _| {
+            let result = operation.with_exclusive_execution::<_, StoreInvocationError>(|context| {
+                let layout = context.bind_group([key])?;
+                let result = context.parser_child::<_, StoreInvocationError, 1>(
+                    layout,
+                    [2],
+                    [None],
+                    |child| {
+                        let result = child.with_read_row(
+                            &mut |row| -> Result<(), StoreInvocationError> {
+                                row.complete_read(1)?;
+                                let cause = row.complete_read(2).unwrap_err();
+                                assert!(matches!(
+                                    &cause,
+                                    StoreInvocationError::Runtime(StoreRuntimeError::Ledger(
+                                        LedgerCause::InactiveLinearWorkPermit
+                                    ))
+                                ));
+                                assert!(row.complete_read(0).is_err());
+                                assert!(row.complete_read(1).is_err());
+                                assert!(row.ready_for_read().is_err());
+                                if propagated { Err(cause) } else { Ok(()) }
+                            },
+                            |cause| cause,
+                            |host, cause| {
+                                assert!(host.host.frame.active);
+                                assert_eq!(host.host.frame.remaining, [1]);
+                                cause
+                            },
+                        );
+                        if propagated {
+                            assert!(matches!(
+                                &result,
+                                Err(StoreInvocationError::Runtime(StoreRuntimeError::Ledger(
+                                    LedgerCause::InactiveLinearWorkPermit
+                                )))
+                            ));
+                        } else {
+                            assert!(matches!(
+                                &result,
+                                Err(StoreInvocationError::Runtime(
+                                    StoreRuntimeError::FallbackOnly
+                                ))
+                            ));
+                        }
+                        assert!(!child.host.frame.active);
+                        assert_eq!(child.host.frame.remaining, [1]);
+                        assert_eq!(child.work_counters(key)?, (2, 1, 0));
+                        assert!(
+                            child
+                                .with_read_row(
+                                    &mut |_| -> Result<(), StoreInvocationError> {
+                                        panic!("stopped host reentered")
+                                    },
+                                    |cause| cause,
+                                    |_, cause| cause,
+                                )
+                                .is_err()
+                        );
+                        // Even an integration caller ignoring this result cannot manufacture success.
+                        Ok(())
+                    },
+                );
+                assert!(result.is_err());
+                assert_ne!(
+                    context.parts.ordinary.execution_state.get(),
+                    StoreExecutionState::IncompleteSuccess
+                );
+                assert_eq!(
+                    context.parts.ordinary.failure.get(),
+                    Some(PreparationFailureCode::ledger())
+                );
+                assert_eq!(context.work_counters(key)?, (2, 1, 0));
+                context.parts.work.check_quiescent().unwrap();
+                result
+            });
+            assert!(result.is_err());
+        });
+    }
+}
+
+#[test]
+fn read_row_unwind_keeps_only_completed_units_and_the_scope_guard_armed() {
+    with_parser_operation(|operation, key, _| {
+        let physical = Cell::new(0);
+        let result = operation.with_exclusive_execution::<_, StoreInvocationError>(|context| {
+            let layout = context.bind_group([key])?;
+            let result =
+                context.parser_child::<_, StoreInvocationError, 1>(layout, [3], [None], |child| {
+                    let unwind = catch_unwind(AssertUnwindSafe(|| {
+                        let _: Result<(), StoreInvocationError> = child.with_read_row(
+                            &mut |row| -> Result<(), StoreInvocationError> {
+                                physical.set(1);
+                                row.complete_read(1)?;
+                                physical.set(2);
+                                panic!("second classification interrupted before completion")
+                            },
+                            |cause| cause,
+                            |_, cause| cause,
+                        );
+                    }));
+                    assert!(unwind.is_err());
+                    assert!(!child.host.frame.active);
+                    assert_eq!(child.host.frame.remaining, [2]);
+                    assert_eq!(child.work_counters(key)?, (3, 1, 0));
+                    assert!(child.checkpoint().is_err());
+                    Ok(())
+                });
+            assert!(result.is_err());
+            assert_eq!(physical.get(), 2);
+            assert_eq!(context.work_counters(key)?, (3, 1, 0));
+            context.parts.work.check_quiescent().unwrap();
+            result
+        });
+        assert!(result.is_err());
+    });
 }
 
 #[test]

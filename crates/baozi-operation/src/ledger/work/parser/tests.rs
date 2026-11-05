@@ -262,6 +262,132 @@ fn direct_completion_accounts_for_internal_pending_after_policy_tightening() {
 }
 
 #[test]
+fn read_row_completion_preserves_pending_competition_on_failure() {
+    let (catalog, mut work) = owner([(1, 20, 20)]);
+    let roles = work
+        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .unwrap();
+    let mut view = work.view(&catalog);
+    let mut frame = roles
+        .begin_parser(&mut view, [4], [None], ParserChannel::Child)
+        .unwrap();
+    let mut internal = roles
+        .admit_observed(&mut view, [3], WorkLane::Internal)
+        .unwrap();
+    view.rows[0].policy.consumed_limit = 5;
+    assert_eq!(
+        frame
+            .borrow_read_row(&roles, &mut view)
+            .unwrap()
+            .complete(3),
+        Err(LedgerCause::LimitExceeded {
+            class: CounterClass::Consumed,
+            dimension: 1,
+            value: 6,
+            limit: 5,
+        })
+    );
+    assert_eq!(frame.remaining, [4]);
+    assert_eq!(counters(&view), [(7, 0, 3)]);
+    assert_eq!(channels(&view), (false, true, 1));
+    assert!(!view.header.integrity_fault);
+    frame.resolve(&mut view).unwrap();
+    internal.resolve(&roles, &mut view, false).unwrap();
+    check_quiescent(view.rows, view.header).unwrap();
+}
+
+#[test]
+fn read_row_completion_checks_each_unit_and_preserves_zero_and_overrun_behavior() {
+    let (catalog, mut work) = owner([(1, 20, 2)]);
+    let roles = work
+        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .unwrap();
+    let mut view = work.view(&catalog);
+    let mut frame = roles
+        .begin_parser(&mut view, [4], [None], ParserChannel::Parent)
+        .unwrap();
+    for (amount, expected) in [(0, Ok(())), (5, Err(LedgerCause::InactiveLinearWorkPermit))] {
+        assert_eq!(
+            frame
+                .borrow_read_row(&roles, &mut view)
+                .unwrap()
+                .complete(amount),
+            expected
+        );
+        assert_eq!(frame.remaining, [4]);
+        assert_eq!(counters(&view), [(4, 0, 0)]);
+    }
+    {
+        let mut row = frame.borrow_read_row(&roles, &mut view).unwrap();
+        row.complete(1).unwrap();
+        row.complete(1).unwrap();
+        assert_eq!(
+            row.complete(1),
+            Err(LedgerCause::LimitExceeded {
+                class: CounterClass::Consumed,
+                dimension: 1,
+                value: 3,
+                limit: 2,
+            })
+        );
+    }
+    assert_eq!(frame.remaining, [2]);
+    assert_eq!(counters(&view), [(4, 2, 0)]);
+    frame.resolve(&mut view).unwrap();
+    check_quiescent(view.rows, view.header).unwrap();
+}
+
+#[test]
+fn read_row_entry_rejects_invalid_layout_role_mode_and_frame_channel() {
+    let (catalog, mut work) = owner([(1, 20, 20)]);
+    let roles = work
+        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .unwrap();
+    let mut view = work.view(&catalog);
+    let mut frame = roles
+        .begin_parser(&mut view, [4], [None], ParserChannel::Parent)
+        .unwrap();
+    let invalid = WorkLayout {
+        positions: [1],
+        ..roles
+    };
+    assert!(matches!(
+        frame.borrow_read_row(&invalid, &mut view),
+        Err(LedgerCause::FinalSnapshotShapeMismatch)
+    ));
+    view.header.protected_dimension = Some(0);
+    assert!(matches!(
+        frame.borrow_read_row(&roles, &mut view),
+        Err(LedgerCause::UnknownDimension { dimension: 1 })
+    ));
+    view.header.protected_dimension = None;
+    view.header.mode = WorkMode::Closed;
+    assert!(matches!(
+        frame.borrow_read_row(&roles, &mut view),
+        Err(LedgerCause::PublicationAlreadyCompleted)
+    ));
+    view.header.mode = WorkMode::Ordinary;
+    let mut child = roles
+        .begin_parser(&mut view, [0], [None], ParserChannel::Child)
+        .unwrap();
+    assert!(matches!(
+        frame.borrow_read_row(&roles, &mut view),
+        Err(LedgerCause::InactiveLinearWorkPermit)
+    ));
+    assert!(!view.header.integrity_fault);
+    child.resolve(&mut view).unwrap();
+    frame.resolve(&mut view).unwrap();
+    assert!(matches!(
+        frame.borrow_read_row(&roles, &mut view),
+        Err(LedgerCause::InactiveLinearWorkPermit)
+    ));
+    assert_eq!(frame.remaining, [4]);
+    assert_eq!(counters(&view), [(4, 0, 0)]);
+    assert_eq!(channels(&view), (false, false, 0));
+    check_quiescent(view.rows, view.header).unwrap();
+}
+
+#[test]
 fn parent_sequential_children_and_internal_shares_use_the_same_rows() {
     let (catalog, mut work) = owner([(1, 40, 40)]);
     let roles = work

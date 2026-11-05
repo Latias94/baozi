@@ -5,7 +5,7 @@ use crate::store::{ImportExecutionFailure, ImportStoreVocabulary, project_store_
 use baozi_operation::__retained_store_integration::activation::{
     StoreChildAdmission, StoreExtensionResult, StoreFailureStorage, StoreInvocationError,
     StoreInvocationLayout, StoreInvocationParser, StoreInvocationServices, StoreOrdinaryStorage,
-    StoreParserWorkError, StoreScanReturn,
+    StoreParserReadRow, StoreParserWorkError, StoreScanReturn,
 };
 
 type OrdinaryStorage<'b, 'op> =
@@ -330,6 +330,27 @@ pub struct ParseParser<'borrow, 'frame, 'ctx, 'op, 'session, const N: usize, con
     >,
     vocabulary: &'borrow ImportStoreVocabulary,
     views: &'borrow ParseViews<'borrow, 'session>,
+}
+
+/// Private text integration over the actual numeric row; error projection is the only adapter.
+pub(crate) struct ParseReadRow<'borrow, 'read, 'session> {
+    numeric: &'borrow mut StoreParserReadRow<'read>,
+    vocabulary: &'borrow ImportStoreVocabulary,
+    views: &'borrow ParseViews<'borrow, 'session>,
+}
+
+impl ParseReadRow<'_, '_, '_> {
+    pub(crate) fn ready_for_read(&mut self) -> ParseResult<bool> {
+        self.numeric
+            .ready_for_read()
+            .map_err(|cause| self.views.runtime(self.vocabulary, cause))
+    }
+
+    pub(crate) fn complete_read(&mut self, amount: u64) -> ParseResult<()> {
+        self.numeric
+            .complete_read(amount)
+            .map_err(|cause| self.views.runtime(self.vocabulary, cause))
+    }
 }
 
 impl<'borrow, 'op, 'session> ParseServices<'borrow, 'op, 'session> {
@@ -1139,6 +1160,30 @@ impl<'op, 'session, const N: usize, const CHILD: bool>
         )
     }
 }
+impl ParseParser<'_, '_, '_, '_, '_, 1, true> {
+    pub(crate) fn with_read_row<T>(
+        &mut self,
+        body: &mut impl FnMut(&mut ParseReadRow<'_, '_, '_>) -> ParseResult<T>,
+    ) -> ParseResult<T> {
+        self.views.preflight()?;
+        let views = self.views;
+        let vocabulary = self.vocabulary;
+        let value = self.numeric.with_read_row(
+            &mut |numeric| {
+                body(&mut ParseReadRow {
+                    numeric,
+                    vocabulary,
+                    views,
+                })
+            },
+            |cause| views.runtime(vocabulary, cause),
+            |_, cause| cause,
+        )?;
+        views.preflight()?;
+        Ok(value)
+    }
+}
+
 impl<const CHILD: bool> ParseParser<'_, '_, '_, '_, '_, 1, CHILD> {
     /// Admits another singleton chunk after the previous chunk has been completed.
     ///

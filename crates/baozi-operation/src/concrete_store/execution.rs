@@ -6,7 +6,7 @@ use crate::retained::{ExecutionError, ExecutionOrdinaryStorage};
 pub use exclusive::{
     StoreActionExecution, StoreChildAdmission, StoreExtensionResult, StoreFailureStorage,
     StoreImporterBoundary, StoreInvocation, StoreInvocationError, StoreInvocationLayout,
-    StoreInvocationParser, StoreInvocationServices, StoreScanReturn,
+    StoreInvocationParser, StoreInvocationServices, StoreParserReadRow, StoreScanReturn,
 };
 
 /// Ordinary storage and real poll authority, borrowing no numeric work or progress state.
