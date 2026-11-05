@@ -3,7 +3,7 @@
 Status: implemented, independently reviewed and integrated into local main. The
 capacity-only source was qualified at `eb82ccf` after separate development on
 `refactor/text-capacity-owner` from `80f4364`. This is not performance acceptance. The
-[read-sequence experiment](../reviews/2026-11-06-parser-read-sequence.md) remains
+read-sequence experiment and its report remain on `refactor/parser-read-sequence`,
 isolated because neither platform could start ordinary measurement.
 
 ## Problem and decision
