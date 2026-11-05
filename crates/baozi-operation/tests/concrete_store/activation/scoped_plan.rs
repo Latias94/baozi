@@ -586,6 +586,98 @@ fn derived_operation_for_scoped_activation<'inv>(
     )
 }
 
+#[test]
+fn typed_storage_prepare_share_finishes_before_the_borrowed_build_envelope() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let source = publish_sequence_source(&account);
+    let source_baseline = account.snapshot();
+    let mut invocation_host = TestInvocationHost::<
+        _,
+        (),
+        MaterializationRejection,
+        ValidationRejection,
+        GenerationRejection,
+        ScalarSequence<u32>,
+    >::new();
+    let finish = invocation_host
+        .run_body(
+            |CanonicalBodyParts {
+                 startup,
+                 output,
+                 activation,
+                 ..
+             },
+             disposition| {
+                let (operation, keys) = derived_operation_for_scoped_activation(startup, &source.canonical);
+                let TestScopedActivation { policy, failure, success } = scoped_activation_shape(keys, 1, 1);
+                let owner = operation.into_test_session_outcome_owner(policy, failure).unwrap();
+                let mut success = Some(success);
+                let outcome: DerivedScopedOutcome<'_, MaterializationRejection> = owner
+                    .plan_and_activate_scoped(output, activation, |mut planning| {
+                        let ((), completion) = planning.with_semantic_work(|semantic| {
+                            semantic.run_unit(|| ()).unwrap();
+                            Ok::<(), StoreRuntimeError>(())
+                        }).unwrap();
+                        let permit = match planning.seal_activation(bind_test_execution(&mut success, ()), completion) {
+                            CanonicalActivationSeal::Sealed(permit) => permit,
+                            CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
+                        };
+                        permit.activate(|mut lane, _plan| {
+                            let baseline = account.snapshot();
+                            let capacity = baozi_operation::CapacityPlan::for_type::<u8>(0, 0, 2).unwrap();
+                            let child = lane.try_retain_storage([capacity], 2, 2, |control| {
+                                let mut value = String::with_capacity(capacity.envelope_capacity());
+                                control.run_string_unit(|| value.push('a'))?;
+                                control.run_string_unit(|| value.push('b'))?;
+                                Ok(value)
+                            }).unwrap();
+                            let child_baseline = account.snapshot();
+                            let parent = lane.try_retain_storage_prepared(
+                                [],
+                                1,
+                                0,
+                                |lane| lane.try_share_storage(&child),
+                                |shared, control| control.run_unit(|| shared),
+                            ).expect("the completed Internal share leaves Producer admission quiescent");
+                            assert_eq!(parent.as_ref().as_ref(), "ab");
+                            assert_eq!(account.snapshot().live_retained_allocations(), child_baseline.live_retained_allocations() + 1);
+                            drop(child);
+                            assert_eq!(parent.as_ref().as_ref(), "ab");
+                            let second = lane.try_retain_storage([], 1, 0, |control| control.run_unit(|| 37_u8))
+                                .expect("the first table resolves its numeric frame before the next table");
+                            assert_eq!(*second.as_ref(), 37);
+                            drop(second);
+                            drop(parent);
+                            let released = account.snapshot();
+                            assert!(!released.poisoned());
+                            assert_eq!(released.live_retained_bytes(), baseline.live_retained_bytes());
+                            assert_eq!(released.live_retained_allocations(), baseline.live_retained_allocations());
+                            lane.reject::<(), _, ScalarSequence<u32>, SequenceTag>(MaterializationRejection::Semantic, 77)
+                        })
+                    }).unwrap();
+                request_rejected_activation_finish!(outcome, disposition);
+            },
+        ).unwrap();
+    let published = publish_derived_rejection(finish.resume().outcome);
+    assert_eq!(published.ledger_evidence.header().current_live_bytes(), 0);
+    assert_eq!(published.ledger_evidence.header().active_reservations(), 0);
+    drop(published);
+    drop(invocation_host);
+    assert!(!account.snapshot().poisoned());
+    assert_eq!(
+        account.snapshot().live_retained_bytes(),
+        source_baseline.live_retained_bytes()
+    );
+    assert_eq!(
+        account.snapshot().live_retained_allocations(),
+        source_baseline.live_retained_allocations()
+    );
+    drop(source);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
 fn derived_operation_with_materialization_work_limit<'inv>(
     root: CanonicalBodyStart<'inv, TestOwner, TestProgress, TestUnit>,
     source: &SourceCanonical,

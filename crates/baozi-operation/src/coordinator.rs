@@ -237,26 +237,6 @@ where
         (self.poll, self.state)
     }
 
-    pub(crate) fn poll(&mut self) -> Result<(), ControlCause> {
-        self.poll.poll()
-    }
-
-    pub(crate) fn report_progress(
-        &mut self,
-        phase: PP,
-        unit: U,
-        completed: u64,
-        total: Option<u64>,
-    ) -> Result<(), ControlCause> {
-        self.report_progress_with_delivery(
-            phase,
-            unit,
-            completed,
-            total,
-            ProgressDelivery::Transient,
-        )
-    }
-
     fn report_progress_with_delivery(
         &mut self,
         phase: PP,

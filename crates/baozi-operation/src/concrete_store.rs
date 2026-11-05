@@ -150,10 +150,7 @@ use crate::retained::{
     RetainedPublicationOpenRecovery, RetainedPublicationPrepareError, RetainedSuccessValidation,
     RetainedWorkControl, RetainedWriterError, ValidatedRetainedFailure, ValidatedRetainedSuccess,
 };
-use crate::retained::{
-    RetainedProducerHost, RetainedProducerWorkFinishError, RetainedProducerWorkPermit,
-    RetainedProducerWorkStartError, RetainedWorkConsumeError,
-};
+use crate::retained::{RetainedProducerHost, RetainedProducerWorkStartError};
 use terminal_output::prepared_store_success_from_raw;
 use terminal_output::{
     classify_prepared_evidence_only, classify_prepared_failure, classify_prepared_fallback,
@@ -1759,8 +1756,6 @@ type RawStoreControlCheckpoint<'a, O, PP, U> =
     RetainedControlCheckpoint<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
 type RawStoreProducerHost<'a, O, PP, U> =
     RetainedProducerHost<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
-type RawStoreProducerWork<'a, O, PP, U, const N: usize> =
-    RetainedProducerWorkPermit<'a, O, StorePhaseKey, PP, U, StoreDimensionKey, N>;
 type RawStoreWorkControl<'a, O, PP, U> =
     RetainedWorkControl<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
 type RawStoreBorrowedWorkPermit<'borrow, 'operation, O, PP, U> =
@@ -2027,21 +2022,6 @@ where
     raw: RawStoreProducerHost<'a, O, PP, U>,
     domain: &'a StoreKeyDomain,
     terminal_only: bool,
-}
-
-/// Linear completion capability for one admitted producer action.
-///
-/// Each completion call records one physical prefix across every planned dimension atomically.
-/// Normal short reads and EOF must call [`Self::finish_partial`]. Dropping an unresolved owner
-/// records ProductGraph; forgetting it leaves an outstanding ledger permit and blocks preparation.
-#[must_use = "observed work must finish exactly or explicitly resolve its completed prefix"]
-pub struct RetainedStoreObservedWork<'a, O, PP, U, const N: usize>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    raw: RawStoreProducerWork<'a, O, PP, U, N>,
 }
 
 /// Borrowed control-and-budget capability for one retained-store producer.
@@ -2329,24 +2309,6 @@ where
             .charge_consumed_batch(&charges)
             .map_err(map_producer_work_start_error)
     }
-
-    /// Admits one fixed, domain-qualified observed-work envelope before its action begins.
-    ///
-    /// Attempted work is permanent at admission. Future completion calls accept one amount per
-    /// plan entry and commit the complete group under one ledger lock.
-    pub fn try_begin_observed_work<const N: usize>(
-        &mut self,
-        charges: [(StoreDimensionKey, u64); N],
-    ) -> Result<RetainedStoreObservedWork<'_, O, PP, U, N>, StoreRuntimeError> {
-        self.ensure_mutable()?;
-        for &(dimension, _) in &charges {
-            self.validate_dimension(dimension)?;
-        }
-        self.raw
-            .try_begin_observed_work(charges)
-            .map(|raw| RetainedStoreObservedWork { raw })
-            .map_err(map_producer_work_start_error)
-    }
 }
 
 fn map_producer_work_start_error(
@@ -2356,66 +2318,6 @@ fn map_producer_work_start_error(
         RetainedProducerWorkStartError::Control(cause) => StoreRuntimeError::Control(cause),
         RetainedProducerWorkStartError::Ledger(cause) => StoreRuntimeError::Ledger(cause),
         RetainedProducerWorkStartError::Outstanding => StoreRuntimeError::ObservedWorkOutstanding,
-    }
-}
-
-impl<O, PP, U, const N: usize> RetainedStoreObservedWork<'_, O, PP, U, N>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    /// Polls cancellation and deadline state while the work owner remains live.
-    pub fn poll(&mut self) -> Result<(), StoreRuntimeError> {
-        self.raw.poll().map_err(StoreRuntimeError::Control)
-    }
-
-    /// Reports bounded semantic progress while the work owner remains live.
-    pub fn report_progress(
-        &mut self,
-        phase: PP,
-        unit: U,
-        completed: u64,
-        total: Option<u64>,
-    ) -> Result<(), StoreRuntimeError> {
-        self.raw
-            .report_progress(phase, unit, completed, total)
-            .map_err(StoreRuntimeError::Control)
-    }
-
-    /// Returns the unfinished admitted suffix for every plan entry.
-    pub fn remaining(&self) -> [u64; N] {
-        self.raw.remaining()
-    }
-
-    /// Records one physically completed prefix across the complete dimension group.
-    ///
-    /// Invalid amounts change no consumed counter. Any ledger completion error is sticky even when
-    /// the caller ignores the returned value.
-    pub fn complete(&mut self, amounts: [u64; N]) -> Result<(), StoreRuntimeError> {
-        self.raw
-            .complete_batch(amounts)
-            .map_err(|cause| match cause {
-                RetainedWorkConsumeError::ExceedsAttempted => {
-                    StoreRuntimeError::ObservedWorkExceedsAdmitted
-                }
-                RetainedWorkConsumeError::Ledger(cause) => StoreRuntimeError::Ledger(cause),
-            })
-    }
-
-    /// Resolves an exactly completed work envelope.
-    pub fn finish(self) -> Result<(), StoreRuntimeError> {
-        self.raw.finish().map_err(|cause| match cause {
-            RetainedProducerWorkFinishError::Incomplete => {
-                StoreRuntimeError::ObservedWorkIncomplete
-            }
-            RetainedProducerWorkFinishError::Ledger(cause) => StoreRuntimeError::Ledger(cause),
-        })
-    }
-
-    /// Resolves a normal short read or EOF while preserving its exact completed prefix.
-    pub fn finish_partial(self) {
-        self.raw.finish_partial();
     }
 }
 

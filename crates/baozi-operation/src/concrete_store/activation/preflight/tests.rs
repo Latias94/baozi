@@ -227,10 +227,20 @@ fn exact_transfer_preserves_work_and_qualifies_four_real_evidence_members() {
     let (mut operation, keys, account) =
         operation(&mut invocation_root, 512, 500, OperationControl::default());
     {
-        let mut host = operation.producer_host();
-        let mut work = host.try_begin_observed_work([(keys.work, 7)]).unwrap();
-        work.complete([4]).unwrap();
-        work.finish_partial();
+        let mut parts = operation
+            .raw
+            .exclusive_parts()
+            .unwrap_or_else(|_| panic!("the original operation lends its numeric work"));
+        let layout = parts.work.bind([keys.work]).unwrap();
+        parts.ordinary.poll.poll().unwrap();
+        let mut frame = layout
+            .admit_observed(&mut parts.work.work, [7], crate::ledger::WorkLane::Producer)
+            .unwrap();
+        frame
+            .complete_batch_with_outcome(&layout, &mut parts.work.work, [4])
+            .into_result()
+            .unwrap();
+        frame.resolve(&layout, &mut parts.work.work, false).unwrap();
     }
     let before = counters(&mut operation, keys);
     // Two record members (2 + 3 fields) and two scalar members (6 + 20 fields).

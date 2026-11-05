@@ -532,3 +532,26 @@ fingerprints and verified new main-root dep-info distinguish the corrected run.
 The full original ordinary matrix still determines performance acceptance. Fixed/dynamic
 backing, shared promotion, exact administrative accounting, remaining owning-path
 deletion and indexing remain required; metadata borrowing does not complete them.
+
+## Borrowed Typed-Table Producer, 2026-11-05
+
+The [actual typed-table producer cut](../reviews/2026-11-05-borrowed-typed-table-producer.md)
+replaces its old owning numeric permit with an outer-owned frame over the unique invocation
+view. Whole-envelope admission after preparation, actual returned prefixes, existing polls,
+physical cleanup and semantic-string completion remain. The retired permit/facade/admission
+paths are deleted. Frozen source3 passes the seven workspace/consumer gates and independent
+source/evidence review. The interrupted original process is not called successful; its three
+completed gates and the separately resumed four remain distinctly recorded.
+
+The next live retained-work seam must move full-ledger aliases and their actual canonical,
+validation, inheritance and protected callers together. Independent design review requires
+joint current-mode/destination attribution at its original post-share-admission point;
+deferred binding without pre-admitted budgets; separate acquisition, grant, lane and terminal
+poll policy; and exact/partial/sticky completion inside the physical builder before lease
+commit or proof acceptance. Revised design2 closes those four document findings. Generic/
+lifetime feasibility and actual caller qualification remain implementation obligations.
+The design and two reviews are retained under `.git/baozi-review/performance-convergence/`
+as `borrowed-retained-work-cut-design-{1,2}.md` and corresponding `design-review-{1,2}.md`.
+
+No ordinary timing or memory result is attributed to this producer cut. All remaining
+numeric/backing/promotion/deletion/indexing work and full convergence gates stay open.

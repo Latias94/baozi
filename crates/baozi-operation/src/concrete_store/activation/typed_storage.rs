@@ -2,8 +2,124 @@
 
 use super::*;
 use crate::CapacityPlan;
-use crate::concrete_store::RetainedStoreObservedWork;
-use crate::retained::{RetainedWriterError, SharedRetainedStorage};
+use crate::concrete_store::execution::map_execution_error;
+use crate::ledger::{WorkFrame, WorkLane, WorkLayout};
+use crate::retained::{
+    ExclusiveOperationParts, ORDINARY_WORK_PERMIT_ABANDONED_CODE, RetainedWriterError,
+    SharedRetainedStorage, record_terminal_cause_with_precedence,
+};
+
+struct RetainedStorageWorkHost<'a, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    parts: ExclusiveOperationParts<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>,
+    layout: WorkLayout<1>,
+    frame: WorkFrame<1>,
+}
+
+impl<'a, O, PP, U> RetainedStorageWorkHost<'a, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn try_admit(
+        mut parts: ExclusiveOperationParts<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>,
+        dimension: StoreDimensionKey,
+        work: u64,
+    ) -> Result<Self, StoreRuntimeError> {
+        let layout = parts.work.bind([dimension]).map_err(|cause| {
+            record_terminal_cause_with_precedence(
+                parts.ordinary.failure,
+                PreparationFailureCode::ledger(),
+            );
+            StoreRuntimeError::Ledger(cause)
+        })?;
+        parts.ordinary.poll.poll().map_err(|cause| {
+            record_terminal_cause_with_precedence(
+                parts.ordinary.failure,
+                PreparationFailureCode::from_control(&cause),
+            );
+            StoreRuntimeError::Control(cause)
+        })?;
+        let frame = layout
+            .admit_observed(&mut parts.work.work, [work], WorkLane::Producer)
+            .map_err(|cause| {
+                record_terminal_cause_with_precedence(
+                    parts.ordinary.failure,
+                    PreparationFailureCode::ledger(),
+                );
+                StoreRuntimeError::Ledger(cause)
+            })?;
+        Ok(Self {
+            parts,
+            layout,
+            frame,
+        })
+    }
+
+    fn poll(&mut self) -> Result<(), StoreRuntimeError> {
+        self.parts.ordinary.poll.poll().map_err(|cause| {
+            record_terminal_cause_with_precedence(
+                self.parts.ordinary.failure,
+                PreparationFailureCode::from_control(&cause),
+            );
+            StoreRuntimeError::Control(cause)
+        })
+    }
+
+    fn complete_unit(&mut self) -> Result<(), StoreRuntimeError> {
+        self.frame
+            .complete_batch_with_outcome(&self.layout, &mut self.parts.work.work, [1])
+            .into_result()
+            .map_err(|cause| {
+                record_terminal_cause_with_precedence(
+                    self.parts.ordinary.failure,
+                    PreparationFailureCode::ledger(),
+                );
+                StoreRuntimeError::Ledger(cause)
+            })
+    }
+
+    fn finish(mut self) -> Result<(), StoreRuntimeError> {
+        if self.frame.remaining != [0] {
+            record_terminal_cause_with_precedence(
+                self.parts.ordinary.failure,
+                PreparationFailureCode::product_graph(ORDINARY_WORK_PERMIT_ABANDONED_CODE),
+            );
+            return Err(StoreRuntimeError::ObservedWorkIncomplete);
+        }
+        self.resolve()
+    }
+
+    fn resolve(&mut self) -> Result<(), StoreRuntimeError> {
+        self.frame
+            .resolve(&self.layout, &mut self.parts.work.work, false)
+            .map_err(|cause| {
+                record_terminal_cause_with_precedence(
+                    self.parts.ordinary.failure,
+                    PreparationFailureCode::ledger(),
+                );
+                StoreRuntimeError::Ledger(cause)
+            })
+    }
+}
+
+impl<O, PP, U> Drop for RetainedStorageWorkHost<'_, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn drop(&mut self) {
+        if self.frame.active {
+            let _ = self.resolve();
+        }
+    }
+}
 
 /// One admitted typed-table copy. Each normally returned action completes one work unit.
 pub struct CanonicalRetainedStorageBuildControl<'a, O, PP, U>
@@ -12,7 +128,7 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    work: Option<RetainedStoreObservedWork<'a, O, PP, U, 1>>,
+    work: Option<RetainedStorageWorkHost<'a, O, PP, U>>,
     strings_remaining: u64,
     sticky: Option<StoreRuntimeError>,
     since_poll: usize,
@@ -33,7 +149,7 @@ where
             self.sticky = Some(cause.clone());
             return Err(cause);
         };
-        if work.remaining()[0] == 0 {
+        if work.frame.remaining[0] == 0 {
             let cause = StoreRuntimeError::ObservedWorkExceedsAdmitted;
             self.sticky = Some(cause.clone());
             return Err(cause);
@@ -45,7 +161,7 @@ where
             return Err(cause);
         }
         let value = action();
-        if let Err(cause) = work.complete([1]) {
+        if let Err(cause) = work.complete_unit() {
             drop(value);
             self.sticky = Some(cause.clone());
             return Err(cause);
@@ -80,27 +196,14 @@ where
             };
         };
         if !complete || self.sticky.is_some() {
-            work.finish_partial();
+            drop(work);
             return self.sticky.clone().map_or(Ok(()), Err);
         }
         if self.strings_remaining != 0 {
-            work.finish_partial();
+            drop(work);
             return Err(StoreRuntimeError::ObservedWorkIncomplete);
         }
         work.finish()
-    }
-}
-
-impl<O, PP, U> Drop for CanonicalRetainedStorageBuildControl<'_, O, PP, U>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    fn drop(&mut self) {
-        if let Some(work) = self.work.take() {
-            work.finish_partial();
-        }
     }
 }
 
@@ -238,11 +341,19 @@ where
                 return Err(map_publication_error(&cause));
             }
         };
-        let mut host = operation.producer_host();
         let observed = match if work == 0 {
             Ok(None)
         } else {
-            host.try_begin_observed_work([(self.materialization_work_dimension, work)])
+            operation
+                .exclusive_parts()
+                .map_err(map_execution_error)
+                .and_then(|parts| {
+                    RetainedStorageWorkHost::try_admit(
+                        parts,
+                        self.materialization_work_dimension,
+                        work,
+                    )
+                })
                 .map(Some)
         } {
             Ok(work) => work,
@@ -250,11 +361,11 @@ where
                 if !crate::retained::release_owned_storage(physical, prepared) {
                     attribution.retain_fail_closed_in_place();
                 }
-                return Err(super::super::map_producer_work_start_error(cause));
+                return Err(cause);
             }
         };
         let mut control = CanonicalRetainedStorageBuildControl {
-            work: observed.map(|raw| RetainedStoreObservedWork { raw }),
+            work: observed,
             strings_remaining: semantic_bytes,
             sticky: None,
             since_poll: 0,

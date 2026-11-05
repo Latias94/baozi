@@ -349,6 +349,8 @@ mod host_states;
 mod joint_commit;
 #[path = "activation/scoped_plan.rs"]
 mod scoped_plan;
+#[path = "activation/typed_storage.rs"]
+mod typed_storage;
 
 #[test]
 fn failure_evidence_member_remains_linear() {

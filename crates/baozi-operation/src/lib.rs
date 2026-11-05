@@ -315,12 +315,12 @@ pub mod __retained_store_integration {
             VerifiedMinimalFallback,
         };
         pub use crate::concrete_store::{
-            RetainedStoreDimensionState, RetainedStoreObservedWork, RetainedStoreWriterRole,
-            StoreActionExecution, StoreBoundWorkGroup, StoreChildAdmission, StoreExecutionPermit,
-            StoreExecutionServices, StoreExecutionWork, StoreExtensionResult, StoreFailureStorage,
-            StoreImporterBoundary, StoreInvocation, StoreInvocationError, StoreInvocationLayout,
-            StoreInvocationParser, StoreInvocationServices, StoreOrdinaryStorage,
-            StoreParserWorkError, StoreParserWorkScope, StoreScanReturn,
+            RetainedStoreDimensionState, RetainedStoreWriterRole, StoreActionExecution,
+            StoreBoundWorkGroup, StoreChildAdmission, StoreExecutionPermit, StoreExecutionServices,
+            StoreExecutionWork, StoreExtensionResult, StoreFailureStorage, StoreImporterBoundary,
+            StoreInvocation, StoreInvocationError, StoreInvocationLayout, StoreInvocationParser,
+            StoreInvocationServices, StoreOrdinaryStorage, StoreParserWorkError,
+            StoreParserWorkScope, StoreScanReturn,
         };
     }
 

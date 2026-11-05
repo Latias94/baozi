@@ -12,12 +12,12 @@ impl ProgressObserver<TestProgress, TestUnit> for CancelProgress {
     }
 }
 
-fn operation_with_producer_dimensions<'inv>(
-    root: &'inv mut TestInvocationRoot,
+pub(super) fn operation_with_producer_dimensions<'inv, S: TestOperationStart<'inv>>(
+    root: S,
     account: &PhysicalStorageAccount,
     control: OperationControl<TestProgress, TestUnit>,
     other_policy: DimensionPolicy,
-) -> (TestOperation<'inv>, TestKeys) {
+) -> (S::Operation, TestKeys) {
     let TestVocabulary { domain, keys } = test_vocabulary();
     let failure_terminal_work = unbounded_failure_terminal_work(keys);
     let primary_attempted_limit = failure_terminal_work
@@ -60,7 +60,7 @@ fn operation_with_producer_dimensions<'inv>(
         failure_terminal_work,
     );
     (
-        TestOperation::try_start(root, control, ledger_plan, account, start)
+        root.start(control, ledger_plan, account, start)
             .expect("producer-host operation"),
         keys,
     )
@@ -75,186 +75,6 @@ fn requested_fallback_evidence<'inv>(
         .expect("producer-host operation remains terminally publishable")
         .handoff()
         .ledger_evidence
-}
-
-#[test]
-fn explicit_partial_work_preserves_attempted_and_completed_prefix() {
-    let factory = factory(1);
-    let account = account(&factory);
-    let mut invocation_root = TestInvocationRoot::new();
-    let (mut operation, keys) = operation(&mut invocation_root, &account);
-    let baseline = operation
-        .producer_host()
-        .dimension_state(keys.dimension)
-        .expect("primary dimension state");
-
-    {
-        let mut host = operation.producer_host();
-        let mut work = host
-            .try_begin_observed_work([(keys.dimension, 4)])
-            .expect("four work units are admitted");
-        work.complete([3])
-            .expect("three physically completed units are recorded");
-        work.finish_partial();
-    }
-
-    let state = operation
-        .producer_host()
-        .dimension_state(keys.dimension)
-        .expect("partial dimension state");
-    assert_eq!(state.attempted(), baseline.attempted() + 4);
-    assert_eq!(state.consumed(), baseline.consumed() + 3);
-    assert_eq!(state.live_bytes(), baseline.live_bytes());
-
-    let evidence = requested_fallback_evidence(operation, 71);
-    assert_eq!(
-        store_failure_cause(&evidence).class(),
-        StorePreparationFailureClass::Requested
-    );
-    let terminal = evidence
-        .dimension(keys.dimension)
-        .expect("terminal primary dimension");
-    assert_eq!(terminal.attempted(), baseline.attempted() + 4);
-    assert_eq!(terminal.consumed(), baseline.consumed() + 3);
-}
-
-#[test]
-fn exact_work_completion_resolves_without_changing_the_requested_terminal_cause() {
-    let factory = factory(1);
-    let account = account(&factory);
-    let mut invocation_root = TestInvocationRoot::new();
-    let (mut operation, keys) = operation(&mut invocation_root, &account);
-
-    {
-        let mut host = operation.producer_host();
-        let mut work = host
-            .try_begin_observed_work([(keys.dimension, 2)])
-            .expect("two work units are admitted");
-        work.complete([2])
-            .expect("the exact physical prefix is recorded");
-        work.finish()
-            .expect("the exact observed-work envelope resolves cleanly");
-    }
-
-    let evidence = requested_fallback_evidence(operation, 80);
-    assert_eq!(
-        store_failure_cause(&evidence).class(),
-        StorePreparationFailureClass::Requested
-    );
-}
-
-#[test]
-fn incomplete_exact_finish_latches_product_graph_and_preserves_the_prefix() {
-    let factory = factory(1);
-    let account = account(&factory);
-    let mut invocation_root = TestInvocationRoot::new();
-    let (mut operation, keys) = operation(&mut invocation_root, &account);
-    let baseline = operation
-        .producer_host()
-        .dimension_state(keys.dimension)
-        .expect("primary dimension state");
-
-    {
-        let mut host = operation.producer_host();
-        let mut work = host
-            .try_begin_observed_work([(keys.dimension, 2)])
-            .expect("two work units are admitted");
-        work.complete([1])
-            .expect("the completed physical prefix is recorded");
-        assert!(matches!(
-            work.finish(),
-            Err(StoreRuntimeError::ObservedWorkIncomplete)
-        ));
-    }
-
-    let evidence = requested_fallback_evidence(operation, 81);
-    assert_eq!(
-        store_failure_cause(&evidence).class(),
-        StorePreparationFailureClass::ProductGraph
-    );
-    let terminal = evidence
-        .dimension(keys.dimension)
-        .expect("terminal primary dimension");
-    assert_eq!(terminal.attempted(), baseline.attempted() + 2);
-    assert_eq!(terminal.consumed(), baseline.consumed() + 1);
-}
-
-#[test]
-fn unresolved_drop_latches_product_graph_without_refunding_attempted_work() {
-    let factory = factory(1);
-    let account = account(&factory);
-    let mut invocation_root = TestInvocationRoot::new();
-    let (mut operation, keys) = operation(&mut invocation_root, &account);
-    let baseline = operation
-        .producer_host()
-        .dimension_state(keys.dimension)
-        .expect("primary dimension state");
-
-    {
-        let mut host = operation.producer_host();
-        let mut work = host
-            .try_begin_observed_work([(keys.dimension, 4)])
-            .expect("four work units are admitted");
-        work.complete([3])
-            .expect("three physically completed units are recorded");
-    }
-
-    let evidence = requested_fallback_evidence(operation, 72);
-    assert_eq!(
-        store_failure_cause(&evidence).class(),
-        StorePreparationFailureClass::ProductGraph
-    );
-    let terminal = evidence
-        .dimension(keys.dimension)
-        .expect("terminal primary dimension");
-    assert_eq!(terminal.attempted(), baseline.attempted() + 4);
-    assert_eq!(terminal.consumed(), baseline.consumed() + 3);
-}
-
-#[test]
-fn grouped_completion_records_two_dimension_prefixes_together() {
-    let factory = factory(1);
-    let account = account(&factory);
-    let mut invocation_root = TestInvocationRoot::new();
-    let (mut operation, keys) = operation_with_producer_dimensions(
-        &mut invocation_root,
-        &account,
-        OperationControl::default(),
-        DimensionPolicy::counter(16, 16, 0),
-    );
-    let primary = operation
-        .producer_host()
-        .dimension_state(keys.dimension)
-        .expect("primary dimension state");
-    let secondary = operation
-        .producer_host()
-        .dimension_state(keys.other_dimension)
-        .expect("secondary dimension state");
-
-    {
-        let mut host = operation.producer_host();
-        let mut work = host
-            .try_begin_observed_work([(keys.dimension, 2), (keys.other_dimension, 3)])
-            .expect("two-dimensional action is admitted");
-        work.complete([1, 2])
-            .expect("one physical action records both dimension prefixes");
-        work.finish_partial();
-    }
-
-    let primary_after = operation
-        .producer_host()
-        .dimension_state(keys.dimension)
-        .expect("primary dimension state after completion");
-    let secondary_after = operation
-        .producer_host()
-        .dimension_state(keys.other_dimension)
-        .expect("secondary dimension state after completion");
-    assert_eq!(primary_after.attempted(), primary.attempted() + 2);
-    assert_eq!(primary_after.consumed(), primary.consumed() + 1);
-    assert_eq!(secondary_after.attempted(), secondary.attempted() + 3);
-    assert_eq!(secondary_after.consumed(), secondary.consumed() + 2);
-
-    drop(requested_fallback_evidence(operation, 73));
 }
 
 #[test]
@@ -407,16 +227,15 @@ fn direct_consumed_batches_reject_late_invalid_keys_without_changing_the_prefix(
 }
 
 #[test]
-fn direct_accounting_preserves_domain_then_outstanding_then_membership_precedence() {
+fn direct_accounting_preserves_domain_then_membership_precedence() {
     let factory = factory(1);
     let account = account(&factory);
     let mut invocation_root = TestInvocationRoot::new();
     let (mut operation, keys) = operation(&mut invocation_root, &account);
     {
         let mut host = operation.producer_host();
-        let mut permit = host.try_begin_observed_work([(keys.dimension, 3)]).unwrap();
-        permit.complete([1]).unwrap();
-        std::mem::forget(permit);
+        host.charge_attempted(keys.dimension, 3).unwrap();
+        host.charge_consumed(keys.dimension, 1).unwrap();
     }
     let baseline = operation
         .producer_host()
@@ -433,34 +252,37 @@ fn direct_accounting_preserves_domain_then_outstanding_then_membership_precedenc
             host.charge_attempted(foreign, 0),
             Err(StoreRuntimeError::ForeignDimensionDomain { dimension: foreign })
         );
-        for dimension in [
-            keys.dimension,
-            keys.other_dimension,
-            keys.failure_terminal_dimension,
-        ] {
+        for dimension in [keys.other_dimension, keys.failure_terminal_dimension] {
             assert_eq!(
                 host.charge_attempted(dimension, 0),
-                Err(StoreRuntimeError::ObservedWorkOutstanding)
+                Err(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension {
+                    dimension,
+                }))
             );
             assert_eq!(
                 host.charge_consumed_batch([(dimension, 0)]),
-                Err(StoreRuntimeError::ObservedWorkOutstanding)
+                Err(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension {
+                    dimension,
+                }))
             );
         }
-        assert_eq!(
-            host.charge_consumed_batch([]),
-            Err(StoreRuntimeError::ObservedWorkOutstanding)
-        );
+        host.charge_attempted(keys.dimension, 0).unwrap();
+        host.charge_consumed_batch([(keys.dimension, 0)]).unwrap();
+        host.charge_consumed_batch([]).unwrap();
         assert_eq!(host.dimension_state(keys.dimension).unwrap(), baseline);
     }
-    assert!(matches!(
-        operation.prepare_minimal_fallback(85),
-        Err(StorePrepareError::FinalizationContainment(_))
-    ));
+    let evidence = requested_fallback_evidence(operation, 85);
+    assert_eq!(
+        store_failure_cause(&evidence).class(),
+        StorePreparationFailureClass::Ledger
+    );
+    let terminal = evidence.dimension(keys.dimension).unwrap();
+    assert_eq!(terminal.attempted(), baseline.attempted());
+    assert_eq!(terminal.consumed(), baseline.consumed());
 }
 
 #[test]
-fn direct_accounting_resumes_after_a_normally_resolved_partial_permit() {
+fn direct_accounting_preserves_duplicate_completed_prefixes() {
     let factory = factory(1);
     let account = account(&factory);
     let mut invocation_root = TestInvocationRoot::new();
@@ -480,11 +302,10 @@ fn direct_accounting_resumes_after_a_normally_resolved_partial_permit() {
         .unwrap();
     {
         let mut host = operation.producer_host();
-        let mut permit = host
-            .try_begin_observed_work([(keys.dimension, 3), (keys.other_dimension, 2)])
+        host.charge_attempted(keys.dimension, 3).unwrap();
+        host.charge_attempted(keys.other_dimension, 2).unwrap();
+        host.charge_consumed_batch([(keys.dimension, 1), (keys.other_dimension, 1)])
             .unwrap();
-        permit.complete([1, 1]).unwrap();
-        permit.finish_partial();
         host.charge_attempted(keys.dimension, 1).unwrap();
         host.charge_attempted(keys.other_dimension, 1).unwrap();
         host.charge_consumed_batch([
@@ -492,7 +313,7 @@ fn direct_accounting_resumes_after_a_normally_resolved_partial_permit() {
             (keys.dimension, 1),
             (keys.other_dimension, 1),
         ])
-        .expect("resolved pending suffixes no longer reserve direct consumed capacity");
+        .expect("duplicate dimensions retain their complete direct-accounting prefix");
     }
     let primary_after = operation
         .producer_host()
@@ -519,76 +340,6 @@ fn direct_accounting_resumes_after_a_normally_resolved_partial_permit() {
     assert_eq!(primary_terminal.consumed(), primary_after.consumed());
     assert_eq!(secondary_terminal.attempted(), secondary_after.attempted());
     assert_eq!(secondary_terminal.consumed(), secondary_after.consumed());
-}
-
-#[test]
-fn group_overrun_is_side_effect_free_and_latches_product_graph() {
-    let factory = factory(1);
-    let account = account(&factory);
-    let mut invocation_root = TestInvocationRoot::new();
-    let (mut operation, keys) = operation_with_producer_dimensions(
-        &mut invocation_root,
-        &account,
-        OperationControl::default(),
-        DimensionPolicy::counter(16, 16, 0),
-    );
-    let primary = operation
-        .producer_host()
-        .dimension_state(keys.dimension)
-        .expect("primary dimension state");
-    let secondary = operation
-        .producer_host()
-        .dimension_state(keys.other_dimension)
-        .expect("secondary dimension state");
-
-    {
-        let mut host = operation.producer_host();
-        let mut work = host
-            .try_begin_observed_work([(keys.dimension, 2), (keys.other_dimension, 3)])
-            .expect("two-dimensional action is admitted");
-        assert!(matches!(
-            work.complete([1, 4]),
-            Err(StoreRuntimeError::ObservedWorkExceedsAdmitted)
-        ));
-        work.finish_partial();
-    }
-
-    let primary_after = operation
-        .producer_host()
-        .dimension_state(keys.dimension)
-        .expect("primary dimension state after rejection");
-    let secondary_after = operation
-        .producer_host()
-        .dimension_state(keys.other_dimension)
-        .expect("secondary dimension state after rejection");
-    assert_eq!(primary_after.consumed(), primary.consumed());
-    assert_eq!(secondary_after.consumed(), secondary.consumed());
-
-    let evidence = requested_fallback_evidence(operation, 74);
-    assert_eq!(
-        store_failure_cause(&evidence).class(),
-        StorePreparationFailureClass::ProductGraph
-    );
-}
-
-#[test]
-fn forgotten_observed_work_permit_blocks_terminal_preparation() {
-    let factory = factory(1);
-    let account = account(&factory);
-    let mut invocation_root = TestInvocationRoot::new();
-    let (mut operation, keys) = operation(&mut invocation_root, &account);
-    {
-        let mut host = operation.producer_host();
-        let permit = host
-            .try_begin_observed_work([(keys.dimension, 1)])
-            .expect("one work unit is admitted");
-        std::mem::forget(permit);
-    }
-
-    assert!(matches!(
-        operation.prepare_minimal_fallback(75),
-        Err(StorePrepareError::FinalizationContainment(_))
-    ));
 }
 
 #[test]
@@ -633,8 +384,10 @@ fn producer_policy_can_only_tighten_and_remains_domain_qualified() {
             .expect("policy tightens before work");
         host.tighten_dimension_policy(keys.other_dimension, DimensionPolicy::counter(8, 8, 0))
             .expect("a relaxation request cannot widen the frozen policy");
+        host.poll()
+            .expect("control permits the direct producer action");
         assert!(matches!(
-            host.try_begin_observed_work([(keys.other_dimension, 5)]),
+            host.charge_attempted(keys.other_dimension, 5),
             Err(StoreRuntimeError::Ledger(LedgerCause::LimitExceeded {
                 class: CounterClass::Attempted,
                 dimension,
@@ -642,6 +395,9 @@ fn producer_policy_can_only_tighten_and_remains_domain_qualified() {
                 limit: 4,
             })) if dimension == keys.other_dimension
         ));
+        let state = host.dimension_state(keys.other_dimension).unwrap();
+        assert_eq!(state.attempted(), 5);
+        assert_eq!(state.consumed(), 0);
     }
 
     let evidence = requested_fallback_evidence(operation, 77);
@@ -661,7 +417,7 @@ fn producer_host_rejects_foreign_and_unplanned_dimensions_before_work() {
     assert!(matches!(
         foreign_operation
             .producer_host()
-            .try_begin_observed_work([(foreign_dimension(), 1)]),
+            .charge_attempted(foreign_dimension(), 1),
         Err(StoreRuntimeError::ForeignDimensionDomain { .. })
     ));
     let foreign_evidence = requested_fallback_evidence(foreign_operation, 78);
@@ -675,7 +431,7 @@ fn producer_host_rejects_foreign_and_unplanned_dimensions_before_work() {
     assert!(matches!(
         unplanned_operation
             .producer_host()
-            .try_begin_observed_work([(keys.other_dimension, 1)]),
+            .charge_attempted(keys.other_dimension, 1),
         Err(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension {
             dimension,
         })) if dimension == keys.other_dimension

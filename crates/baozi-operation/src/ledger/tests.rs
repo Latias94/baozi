@@ -1489,7 +1489,9 @@ fn forgotten_linear_work_permit_blocks_prepare_and_final_snapshot() {
     for (admitted, completed) in [(1, 0), (1, 1), (0, 0)] {
         let ledger = test_ledger(limits());
         let mut permit = ledger
-            .try_admit_producer_work_batch(&[(Dimension::Records, admitted)])
+            .bind_work([Dimension::Records])
+            .unwrap()
+            .admit_observed([admitted], WorkLane::Producer)
             .expect("the producer envelope is admitted even when empty");
         permit.complete(0, completed).unwrap();
         std::mem::forget(permit);

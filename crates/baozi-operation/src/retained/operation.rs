@@ -34,9 +34,7 @@ use super::{
     test_retained_final_owner_allocator_entries,
 };
 use crate::control::discard_untrusted_panic_payload;
-use crate::coordinator::{
-    OperationCoordinator, OperationPollCheckpoint, OperationProgressCheckpoint,
-};
+use crate::coordinator::{OperationCoordinator, OperationPollCheckpoint};
 use crate::ledger::{
     AttributionBatchPlan, CanonicalOutput, LedgerCause, LedgerLimits, LinearWorkBatchPermit,
     LinearWorkCompletion, LiveReservation, OutcomeEvidenceDestination, PhaseCompletionError,
@@ -1413,33 +1411,6 @@ pub(crate) enum RetainedProducerWorkStartError<D> {
     Outstanding,
 }
 
-pub(crate) enum RetainedProducerWorkFinishError<D> {
-    Incomplete,
-    Ledger(LedgerCause<D>),
-}
-
-/// Linear observed-work authority for one pre-admitted producer action.
-///
-/// Grouped completion transfers every dimension in one local work transaction. Explicit partial
-/// finish is the only normal way to release an unfinished suffix. An unresolved drop records
-/// ProductGraph; forgetting the owner leaves the ledger permit active so final preparation fails closed.
-#[must_use = "observed work must finish exactly or explicitly resolve its completed prefix"]
-pub(crate) struct RetainedProducerWorkPermit<'a, O, P, PP, U, D, const N: usize>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-    D: Copy + Ord + fmt::Debug,
-{
-    progress: OperationProgressCheckpoint<'a, O, P, PP, U, D>,
-    permit_outstanding: &'a mut bool,
-    sticky_terminal_cause: &'a Cell<Option<PreparationFailureCode>>,
-    work: Option<LinearWorkBatchPermit<'a, D, N>>,
-    remaining: [u64; N],
-    resolved: bool,
-}
-
 /// Poll, observed-work, and scratch authority bound to prevalidated dimensions.
 ///
 /// This private capability is moved into a retained builder or validator closure. Work and live
@@ -1709,55 +1680,6 @@ where
         result.map_err(RetainedProducerWorkStartError::Ledger)
     }
 
-    pub(crate) fn try_begin_observed_work<const N: usize>(
-        &mut self,
-        charges: [(D, u64); N],
-    ) -> Result<RetainedProducerWorkPermit<'_, O, P, PP, U, D, N>, RetainedProducerWorkStartError<D>>
-    {
-        if *self.permit_outstanding {
-            record_terminal_cause_with_precedence(
-                self.sticky_terminal_cause,
-                PreparationFailureCode::product_graph(ORDINARY_WORK_PERMIT_ABANDONED_CODE),
-            );
-            return Err(RetainedProducerWorkStartError::Outstanding);
-        }
-        if !charges.iter().any(|(_, amount)| *amount != 0) {
-            self.record_ledger_failure();
-            return Err(RetainedProducerWorkStartError::Ledger(
-                LedgerCause::InactiveLinearWorkPermit,
-            ));
-        }
-        for &(dimension, _) in &charges {
-            self.validate_dimension(dimension)
-                .map_err(RetainedProducerWorkStartError::Ledger)?;
-        }
-        self.poll()
-            .map_err(RetainedProducerWorkStartError::Control)?;
-        let (progress, ledger) = self
-            .coordinator
-            .split_progress_checkpoint_and_retained_ledger();
-        let result = ledger.try_admit_producer_work_batch(&charges);
-        let work = match result {
-            Ok(work) => work,
-            Err(cause) => {
-                record_terminal_cause_with_precedence(
-                    self.sticky_terminal_cause,
-                    PreparationFailureCode::ledger(),
-                );
-                return Err(RetainedProducerWorkStartError::Ledger(cause));
-            }
-        };
-        *self.permit_outstanding = true;
-        Ok(RetainedProducerWorkPermit {
-            progress,
-            permit_outstanding: &mut *self.permit_outstanding,
-            sticky_terminal_cause: self.sticky_terminal_cause,
-            work: Some(work),
-            remaining: charges.map(|(_, amount)| amount),
-            resolved: false,
-        })
-    }
-
     pub(crate) fn record_ledger_failure(&mut self) {
         record_terminal_cause_with_precedence(
             self.sticky_terminal_cause,
@@ -1791,143 +1713,6 @@ where
             self.record_ledger_failure();
             Err(LedgerCause::UnknownDimension { dimension })
         }
-    }
-}
-
-impl<O, P, PP, U, D, const N: usize> RetainedProducerWorkPermit<'_, O, P, PP, U, D, N>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-    D: Copy + Ord + fmt::Debug,
-{
-    pub(crate) fn poll(&mut self) -> Result<(), ControlCause> {
-        let result = self.progress.poll();
-        if let Err(cause) = &result {
-            record_terminal_cause_with_precedence(
-                self.sticky_terminal_cause,
-                PreparationFailureCode::from_control(cause),
-            );
-        }
-        result
-    }
-
-    pub(crate) fn report_progress(
-        &mut self,
-        phase: PP,
-        unit: U,
-        completed: u64,
-        total: Option<u64>,
-    ) -> Result<(), ControlCause> {
-        let result = self.progress.report_progress(phase, unit, completed, total);
-        if let Err(cause) = &result {
-            record_terminal_cause_with_precedence(
-                self.sticky_terminal_cause,
-                PreparationFailureCode::from_control(cause),
-            );
-        }
-        result
-    }
-
-    pub(crate) const fn remaining(&self) -> [u64; N] {
-        self.remaining
-    }
-
-    pub(crate) fn complete_batch(
-        &mut self,
-        amounts: [u64; N],
-    ) -> Result<(), RetainedWorkConsumeError<D>> {
-        if amounts
-            .iter()
-            .zip(self.remaining.iter())
-            .any(|(amount, remaining)| amount > remaining)
-        {
-            record_terminal_cause_with_precedence(
-                self.sticky_terminal_cause,
-                PreparationFailureCode::product_graph(ORDINARY_WORK_PERMIT_OVERRUN_CODE),
-            );
-            return Err(RetainedWorkConsumeError::ExceedsAttempted);
-        }
-        let completion = self
-            .work
-            .as_mut()
-            .expect("an unresolved producer work permit retains its work")
-            .complete_batch_with_outcome(amounts);
-        if completion.prefix_was_applied() {
-            for (remaining, amount) in self.remaining.iter_mut().zip(amounts) {
-                *remaining -= amount;
-            }
-        }
-        completion.into_result().map_err(|cause| {
-            record_terminal_cause_with_precedence(
-                self.sticky_terminal_cause,
-                PreparationFailureCode::ledger(),
-            );
-            RetainedWorkConsumeError::Ledger(cause)
-        })
-    }
-
-    pub(crate) fn finish(mut self) -> Result<(), RetainedProducerWorkFinishError<D>> {
-        if self.remaining.iter().any(|remaining| *remaining != 0) {
-            record_terminal_cause_with_precedence(
-                self.sticky_terminal_cause,
-                PreparationFailureCode::product_graph(ORDINARY_WORK_PERMIT_ABANDONED_CODE),
-            );
-            return Err(RetainedProducerWorkFinishError::Incomplete);
-        }
-        let result = self
-            .work
-            .take()
-            .expect("a producer work permit resolves at most once")
-            .finish();
-        self.resolved = true;
-        result.map_err(|cause| {
-            record_terminal_cause_with_precedence(
-                self.sticky_terminal_cause,
-                PreparationFailureCode::ledger(),
-            );
-            RetainedProducerWorkFinishError::Ledger(cause)
-        })?;
-        *self.permit_outstanding = false;
-        Ok(())
-    }
-
-    pub(crate) fn finish_partial(mut self) {
-        let result = self
-            .work
-            .take()
-            .expect("a producer work permit resolves at most once")
-            .finish_partial();
-        self.resolved = true;
-        match result {
-            Ok(()) => *self.permit_outstanding = false,
-            Err(_) => record_terminal_cause_with_precedence(
-                self.sticky_terminal_cause,
-                PreparationFailureCode::ledger(),
-            ),
-        }
-    }
-}
-
-impl<O, P, PP, U, D, const N: usize> Drop for RetainedProducerWorkPermit<'_, O, P, PP, U, D, N>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-    D: Copy + Ord + fmt::Debug,
-{
-    fn drop(&mut self) {
-        if self.resolved {
-            return;
-        }
-        finish_dropped_work(
-            &mut self.work,
-            self.permit_outstanding,
-            self.sticky_terminal_cause,
-            ORDINARY_WORK_PERMIT_ABANDONED_CODE,
-        );
     }
 }
 

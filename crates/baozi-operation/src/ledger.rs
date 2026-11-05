@@ -1649,14 +1649,6 @@ where
             .admit_observed(charges.map(|(_, amount)| amount), WorkLane::Internal)
     }
 
-    pub(crate) fn try_admit_producer_work_batch<const N: usize>(
-        &self,
-        charges: &[(D, u64); N],
-    ) -> Result<LinearWorkBatchPermit<'_, D, N>, LedgerCause<D>> {
-        self.bind_work(charges.map(|(dimension, _)| dimension))?
-            .admit_observed(charges.map(|(_, amount)| amount), WorkLane::Producer)
-    }
-
     pub(crate) fn try_admit_failure_work(
         &self,
         dimension: D,

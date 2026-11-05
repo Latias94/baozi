@@ -507,3 +507,14 @@ negative case only for a genuinely new boundary, not for incidental private layo
   calls and rounded peaks; analysis/stderr temporary-count differences are retained.
   Performance and release remain HOLD; live typed-table producer migration and all
   remaining backing/promotion/deletion/indexing and final Windows/Linux gates persist.
+- The [actual typed-table Producer migration](../reviews/2026-11-05-borrowed-typed-table-producer.md)
+  borrows the unique numeric view and existing frame, deleting the former owning permit,
+  facade, admission shim and unused checkpoint methods. Independent source reviews close
+  actual prepare-share, prepare-cancellation and consumed-denial cases. Frozen source3
+  passes 3,566 workspace tests (six existing skips), 188 doctests, 138 asset-consumer tests
+  (one existing skip), both strict lints and both format checks. The interrupted QA1 retains
+  its first three terminal gates; QA2 verifies that unchanged source/log association and
+  completes only the remaining four, with actual terminal success and independent final
+  evidence review. This source qualification supplies no new ordinary performance result.
+  Internal/protected/share migration, obsolete parser deletion, backing/promotion/exact
+  accounting/indexing and the unchanged full Windows/Linux/heap release gates remain open.
