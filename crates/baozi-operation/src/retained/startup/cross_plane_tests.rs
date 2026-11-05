@@ -321,10 +321,10 @@ fn ledger_rejection_precedes_all_four_owner_shares_and_physical_admission() {
     let shares = account.share_call_count();
     let allocations = test_startup_graph_allocation_entries();
     let (limits, plan) = cross_plane_plan();
-    let (ledger, admission) = start_ledger(&account, &[], limits)
+    let (mut ledger, admission) = start_ledger(&account, &[], limits)
         .unwrap_or_else(|_| panic!("start must be admitted before ledger initialization"));
 
-    let result = admission.try_prepare_startup_cross_plane(&ledger, plan);
+    let result = admission.try_prepare_startup_cross_plane(&mut ledger, plan);
 
     assert!(matches!(
         result,
@@ -355,11 +355,11 @@ fn ready_pair_charges_four_shares_exactly_once() {
     let shares = account.share_call_count();
     let allocations = test_startup_graph_allocation_entries();
     let (limits, plan) = cross_plane_plan();
-    let (ledger, admission) = start_ledger(&account, &[Phase::Build], limits)
+    let (mut ledger, admission) = start_ledger(&account, &[Phase::Build], limits)
         .unwrap_or_else(|_| panic!("start must be admitted"));
 
     let ready = admission
-        .try_prepare_startup_cross_plane(&ledger, plan)
+        .try_prepare_startup_cross_plane(&mut ledger, plan)
         .unwrap_or_else(|_| panic!("cross-plane startup must be ready"));
 
     assert_eq!(account.share_call_count(), shares + 4);
@@ -384,11 +384,11 @@ fn aggregate_plan_preserves_each_checked_physical_allocation_count() {
     let (limits, parts) = ledger_request(2, 3);
     let plan = StartupCrossPlanePlan::try_new(parts, physical_manifest(charge(2, 2), charge(3, 3)))
         .unwrap_or_else(|error| panic!("allocation-qualified cross-plane plan: {error:?}"));
-    let (ledger, admission) = start_ledger(&account, &[Phase::Build], limits)
+    let (mut ledger, admission) = start_ledger(&account, &[Phase::Build], limits)
         .unwrap_or_else(|_| panic!("start must be admitted"));
 
     let ready = admission
-        .try_prepare_startup_cross_plane(&ledger, plan)
+        .try_prepare_startup_cross_plane(&mut ledger, plan)
         .unwrap_or_else(|_| panic!("cross-plane startup must preserve allocation counts"));
 
     assert_eq!(account.snapshot().live_retained_bytes(), 5);
@@ -403,10 +403,10 @@ fn physical_no_mutation_drops_the_complete_graph_normally() {
     let releases = test_startup_graph_storage_releases();
     let release_locks = test_startup_graph_ledger_release_locks();
     let (limits, plan) = cross_plane_plan();
-    let (ledger, admission) = start_ledger(&account, &[Phase::Build], limits)
+    let (mut ledger, admission) = start_ledger(&account, &[Phase::Build], limits)
         .unwrap_or_else(|_| panic!("start must be admitted"));
 
-    let result = admission.try_prepare_startup_cross_plane(&ledger, plan);
+    let result = admission.try_prepare_startup_cross_plane(&mut ledger, plan);
 
     assert!(matches!(
         result,
@@ -434,11 +434,12 @@ fn precommit_panic_contains_the_graph_without_fabricating_a_refund() {
     let releases = test_startup_graph_storage_releases();
     let release_locks = test_startup_graph_ledger_release_locks();
     let (limits, plan) = cross_plane_plan();
-    let (ledger, admission) = start_ledger(&account, &[Phase::Build], limits)
+    let (mut ledger, admission) = start_ledger(&account, &[Phase::Build], limits)
         .unwrap_or_else(|_| panic!("start must be admitted"));
     set_startup_transition_panic(StartupTransitionPanicPoint::BeforeCommit);
 
-    let containment = expect_uncertain(admission.try_prepare_startup_cross_plane(&ledger, plan));
+    let containment =
+        expect_uncertain(admission.try_prepare_startup_cross_plane(&mut ledger, plan));
     let ledger_before = ledger_observation(&ledger);
     assert_eq!(ledger_before.1, 6);
     assert_eq!(
@@ -465,11 +466,12 @@ fn postcommit_panic_contains_the_graph_and_complete_physical_charge() {
     let releases = test_startup_graph_storage_releases();
     let release_locks = test_startup_graph_ledger_release_locks();
     let (limits, plan) = cross_plane_plan();
-    let (ledger, admission) = start_ledger(&account, &[Phase::Build], limits)
+    let (mut ledger, admission) = start_ledger(&account, &[Phase::Build], limits)
         .unwrap_or_else(|_| panic!("start must be admitted"));
     set_startup_transition_panic(StartupTransitionPanicPoint::AfterCommit);
 
-    let containment = expect_uncertain(admission.try_prepare_startup_cross_plane(&ledger, plan));
+    let containment =
+        expect_uncertain(admission.try_prepare_startup_cross_plane(&mut ledger, plan));
     let ledger_before = ledger_observation(&ledger);
     assert_eq!(ledger_before.1, 6);
     assert_eq!(
@@ -497,10 +499,10 @@ fn ready_drop_poison_contains_both_accounting_planes() {
     let releases = test_startup_graph_storage_releases();
     let release_locks = test_startup_graph_ledger_release_locks();
     let (limits, plan) = cross_plane_plan();
-    let (ledger, admission) = start_ledger(&account, &[Phase::Build], limits)
+    let (mut ledger, admission) = start_ledger(&account, &[Phase::Build], limits)
         .unwrap_or_else(|_| panic!("start must be admitted"));
     let ready = admission
-        .try_prepare_startup_cross_plane(&ledger, plan)
+        .try_prepare_startup_cross_plane(&mut ledger, plan)
         .unwrap_or_else(|_| panic!("cross-plane startup must be ready"));
     let ledger_before = ledger_observation(&ledger);
 
@@ -521,10 +523,10 @@ fn ready_split_is_state_only_and_runtime_drop_remains_fail_closed() {
     let factory = factory();
     let account = account(&factory, 5, 2);
     let (limits, plan) = cross_plane_plan();
-    let (ledger, admission) = start_ledger(&account, &[Phase::Build], limits)
+    let (mut ledger, admission) = start_ledger(&account, &[Phase::Build], limits)
         .unwrap_or_else(|_| panic!("start must be admitted"));
     let ready = admission
-        .try_prepare_startup_cross_plane(&ledger, plan)
+        .try_prepare_startup_cross_plane(&mut ledger, plan)
         .unwrap_or_else(|_| panic!("cross-plane startup must be ready"));
     reset_startup_lock_probe();
     let allocations = test_startup_graph_allocation_entries();
@@ -563,13 +565,13 @@ fn ready_runtime_baseline_keeps_its_original_ledger_owner() {
     let factory = factory();
     let account = account(&factory, 5, 2);
     let (limits, plan) = cross_plane_plan();
-    let (ledger, admission) = start_ledger(&account, &[Phase::Build], limits)
+    let (mut ledger, admission) = start_ledger(&account, &[Phase::Build], limits)
         .unwrap_or_else(|_| panic!("start must be admitted"));
     let (foreign_limits, _foreign_plan) = cross_plane_plan();
     let foreign = Ledger::<Owner, Phase, Dimension>::try_new(foreign_limits, &[Phase::Build])
         .unwrap_or_else(|error| panic!("foreign ledger: {error}"));
     let ready = admission
-        .try_prepare_startup_cross_plane(&ledger, plan)
+        .try_prepare_startup_cross_plane(&mut ledger, plan)
         .unwrap_or_else(|_| panic!("cross-plane startup must be ready"));
     let ledger_before = ledger_observation(&ledger);
     let foreign_before = ledger_observation(&foreign);
@@ -602,7 +604,7 @@ fn existing_ledger_work_and_live_scratch_survive_startup_and_runtime_split() {
     let factory = factory();
     let account = account(&factory, 5, 2);
     let (limits, plan) = cross_plane_plan();
-    let (ledger, admission) = start_ledger(&account, &[Phase::Build], limits)
+    let (mut ledger, admission) = start_ledger(&account, &[Phase::Build], limits)
         .unwrap_or_else(|_| panic!("start must be admitted"));
     ledger
         .charge_attempted(Dimension::Records, 7)
@@ -616,7 +618,7 @@ fn existing_ledger_work_and_live_scratch_survive_startup_and_runtime_split() {
     assert_eq!(ledger_observation(&ledger), (11, 1, 7, 3, 0));
 
     let ready = admission
-        .try_prepare_startup_cross_plane(&ledger, plan)
+        .try_prepare_startup_cross_plane(&mut ledger, plan)
         .unwrap_or_else(|_| panic!("startup must use the existing ledger"));
 
     let ledger_after = ledger_observation(&ledger);
@@ -657,7 +659,7 @@ fn foreign_ledger_prehold_rejects_before_work_shares_or_physical_mutation() {
     let account = account(&factory, 5, 2);
     let (limits, plan) = cross_plane_plan();
     reset_startup_lock_probe();
-    let (ledger, admission) = start_ledger(&account, &[Phase::Build], limits)
+    let (mut ledger, admission) = start_ledger(&account, &[Phase::Build], limits)
         .unwrap_or_else(|_| panic!("start must be admitted"));
     ledger
         .charge_observed_batch(&[(Dimension::Records, 7)])
@@ -666,7 +668,7 @@ fn foreign_ledger_prehold_rejects_before_work_shares_or_physical_mutation() {
         .reserve(Phase::Build, Dimension::Scratch, 11)
         .unwrap_or_else(|error| panic!("existing source scratch: {error}"));
     let (foreign_limits, _foreign_plan) = cross_plane_plan();
-    let foreign = Ledger::<Owner, Phase, Dimension>::try_new(foreign_limits, &[Phase::Build])
+    let mut foreign = Ledger::<Owner, Phase, Dimension>::try_new(foreign_limits, &[Phase::Build])
         .unwrap_or_else(|error| panic!("foreign ledger: {error}"));
     foreign
         .charge_observed_batch(&[(Dimension::Records, 9)])
@@ -692,7 +694,7 @@ fn foreign_ledger_prehold_rejects_before_work_shares_or_physical_mutation() {
 
     assert!(matches!(
         (StartupGraphPreholdAuthority { admitted, manifest })
-            .try_commit_physical(admission, &foreign),
+            .try_commit_physical(admission, &mut foreign),
         Err(StartupCrossPlaneAdmissionFailure::OwnerShare(
             RetainedWriterError::OwnershipUnverified
         ))
@@ -734,7 +736,7 @@ fn forgetting_ready_keeps_the_numeric_host_separate_from_contained_storage() {
     let factory = factory();
     let account = account(&factory, 5, 2);
     let (limits, plan) = cross_plane_plan();
-    let (ledger, admission) = start_ledger(&account, &[Phase::Build], limits)
+    let (mut ledger, admission) = start_ledger(&account, &[Phase::Build], limits)
         .unwrap_or_else(|_| panic!("start must be admitted"));
     ledger
         .charge_observed_batch(&[(Dimension::Records, 7)])
@@ -745,7 +747,7 @@ fn forgetting_ready_keeps_the_numeric_host_separate_from_contained_storage() {
     let releases = test_startup_graph_storage_releases();
     let release_locks = test_startup_graph_ledger_release_locks();
     let ready = admission
-        .try_prepare_startup_cross_plane(&ledger, plan)
+        .try_prepare_startup_cross_plane(&mut ledger, plan)
         .unwrap_or_else(|_| panic!("startup must use the existing numeric host"));
     let ledger_before = ledger_observation(&ledger);
     let account_before = account.snapshot();

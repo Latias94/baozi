@@ -687,7 +687,7 @@ pub(super) struct StartupAdmissionGuard<'account> {
 
 /// Test-only proof for physical-account fixtures that bypass operation-ledger work.
 ///
-/// Production writers use `RetainedShareWorkPermit`, which admits Attempted separately and records
+/// Production writers borrow the invocation's share frame, which admits Attempted separately and records
 /// Consumed only after the physical clone and handle construction complete.
 #[cfg(test)]
 pub(super) struct AdmittedRetainedShareWork {

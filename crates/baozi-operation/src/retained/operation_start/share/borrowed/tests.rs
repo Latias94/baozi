@@ -199,3 +199,56 @@ fn borrowed_share_clone_completion_failure_returns_its_owner_and_releases_only_t
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
     assert!(!account.snapshot().poisoned());
 }
+
+#[test]
+fn startup_shares_preserve_non_unit_duplicate_charges_and_the_admitted_physical_prefix() {
+    for (attempted_limit, consumed_limit, completed_shares, attempted, consumed, denied) in [
+        (20, 20, 4, 20, 20, None),
+        (14, 14, 2, 15, 10, Some(CounterClass::Attempted)),
+        (20, 14, 2, 15, 10, Some(CounterClass::Consumed)),
+    ] {
+        let mut ledger = ledger(attempted_limit, consumed_limit);
+        let (account, source) = source();
+        let baseline = account.snapshot();
+        let shares_before = account.share_call_count();
+        let result = {
+            let (mut work, _) = ledger.split_internal();
+            super::super::try_admit_start_share_work(
+                &mut work,
+                &account,
+                StartupAccountShareEnvelope::four_identical([(1, 2), (1, 3)]),
+            )
+        };
+        if let Some(class) = denied {
+            assert!(matches!(
+                result,
+                Err(RetainedWriterError::Ledger(LedgerCause::LimitExceeded {
+                    class: actual,
+                    dimension: 1,
+                    value: 15,
+                    limit: 14,
+                })) if actual == class
+            ));
+        } else {
+            assert!(result.is_ok());
+        }
+        drop(result);
+        let work = ledger.dimension_evidence(1).unwrap();
+        assert_eq!((work.attempted(), work.consumed()), (attempted, consumed));
+        ledger.check_work_quiescent().unwrap();
+        assert_eq!(account.share_call_count(), shares_before + completed_shares);
+        assert_eq!(
+            account.snapshot().live_retained_bytes(),
+            baseline.live_retained_bytes()
+        );
+        assert_eq!(
+            account.snapshot().live_retained_allocations(),
+            baseline.live_retained_allocations()
+        );
+        assert_eq!(*source.as_ref(), 37);
+        drop(source);
+        assert_eq!(account.snapshot().live_retained_bytes(), 0);
+        assert_eq!(account.snapshot().live_retained_allocations(), 0);
+        assert!(!account.snapshot().poisoned());
+    }
+}

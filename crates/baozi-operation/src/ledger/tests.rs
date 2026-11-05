@@ -852,7 +852,7 @@ fn producer_consumed_batch_numeric_failures_leave_every_counter_unchanged() {
             },
         ),
     ] {
-        let ledger = test_ledger(
+        let mut ledger = test_ledger(
             LedgerLimits::new(
                 0,
                 [
@@ -872,10 +872,12 @@ fn producer_consumed_batch_numeric_failures_leave_every_counter_unchanged() {
         ledger
             .charge_consumed(Dimension::Records, consumed)
             .unwrap();
-        let permit = (pending != 0).then(|| {
-            ledger
-                .try_admit_linear_work(Dimension::Records, pending)
-                .expect("pending work fits before the competing batch")
+        let frame = (pending != 0).then(|| {
+            let (mut work, layout) = ledger.bind_internal_work([Dimension::Records]).unwrap();
+            let frame = layout
+                .admit_observed(&mut work.work, [pending], WorkLane::Internal)
+                .expect("pending work fits before the competing batch");
+            (layout, frame)
         });
         let before = {
             let state = ledger.work.borrow_state().unwrap();
@@ -897,8 +899,12 @@ fn producer_consumed_batch_numeric_failures_leave_every_counter_unchanged() {
             assert_eq!([state.rows[0].state, state.rows[1].state], before);
             assert_eq!(state.header.open_envelopes, u64::from(pending != 0));
         }
-        if let Some(permit) = permit {
-            permit.finish_partial().unwrap();
+        if let Some((layout, mut frame)) = frame {
+            ledger
+                .split_internal()
+                .0
+                .resolve(layout, &mut frame, false)
+                .unwrap();
         }
     }
 }
@@ -1050,12 +1056,18 @@ fn producer_membership_precedes_publication_without_changing_general_entry_order
 
 #[test]
 fn producer_consumed_batch_preserves_pending_capacity_through_partial_completion_and_finish() {
-    let ledger = test_ledger(
+    let mut ledger = test_ledger(
         LedgerLimits::new(0, [(Dimension::Records, DimensionPolicy::counter(4, 3, 0))])
             .expect("partial producer work policy"),
     );
     ledger.charge_attempted(Dimension::Records, 1).unwrap();
-    let mut permit = ledger.try_admit_linear_work(Dimension::Records, 3).unwrap();
+    let (layout, mut frame) = {
+        let (mut work, layout) = ledger.bind_internal_work([Dimension::Records]).unwrap();
+        let frame = layout
+            .admit_observed(&mut work.work, [3], WorkLane::Internal)
+            .unwrap();
+        (layout, frame)
+    };
     for (consumed, pending) in [(0, 3), (1, 2)] {
         let expected = WorkDimensionState {
             attempted: 4,
@@ -1082,10 +1094,21 @@ fn producer_consumed_batch_preserves_pending_capacity_through_partial_completion
             assert_eq!(state.header.open_envelopes, 1);
         }
         if consumed == 0 {
-            permit.complete(0, 1).unwrap();
+            frame
+                .complete_batch_with_outcome(
+                    &layout,
+                    &mut ledger.split_internal().0.reborrow().unwrap().work,
+                    [1],
+                )
+                .into_result()
+                .unwrap();
         }
     }
-    permit.finish_partial().unwrap();
+    ledger
+        .split_internal()
+        .0
+        .resolve(layout, &mut frame, false)
+        .unwrap();
     {
         let state = ledger.work.borrow_state().unwrap();
         assert_eq!(
@@ -1116,26 +1139,40 @@ fn producer_consumed_batch_preserves_pending_capacity_through_partial_completion
 
 #[test]
 fn linear_work_admission_records_attempted_before_consumed_completion() {
-    let ledger = test_ledger(limits());
+    let mut ledger = test_ledger(limits());
 
-    let mut permit = ledger
-        .try_admit_linear_work(Dimension::Records, 3)
-        .expect("three linear work units fit both counters");
+    let (layout, mut frame) = {
+        let (mut work, layout) = ledger.bind_internal_work([Dimension::Records]).unwrap();
+        let frame = layout
+            .admit_observed(&mut work.work, [3], WorkLane::Internal)
+            .expect("three linear work units fit both counters");
+        (layout, frame)
+    };
     let admitted = ledger
         .dimension_evidence(Dimension::Records)
         .expect("admitted work evidence");
     assert_eq!((admitted.attempted(), admitted.consumed()), (3, 0));
 
-    permit
-        .complete(0, 2)
+    frame
+        .complete_batch_with_outcome(
+            &layout,
+            &mut ledger.split_internal().0.reborrow().unwrap().work,
+            [2],
+        )
+        .into_result()
         .expect("the completed prefix fits the admitted envelope");
     let prefix = ledger
         .dimension_evidence(Dimension::Records)
         .expect("completed-prefix evidence");
     assert_eq!((prefix.attempted(), prefix.consumed()), (3, 2));
 
-    permit
-        .complete(0, 1)
+    frame
+        .complete_batch_with_outcome(
+            &layout,
+            &mut ledger.split_internal().0.reborrow().unwrap().work,
+            [1],
+        )
+        .into_result()
         .expect("the exact completed suffix fits the admitted envelope");
     let complete = ledger
         .dimension_evidence(Dimension::Records)
@@ -1145,8 +1182,11 @@ fn linear_work_admission_records_attempted_before_consumed_completion() {
         ledger.work.check_quiescent(),
         Err(LedgerCause::OutstandingLinearWorkPermits { count: 1 })
     ));
-    permit
-        .finish()
+    assert_eq!(frame.remaining, [0]);
+    ledger
+        .split_internal()
+        .0
+        .resolve(layout, &mut frame, false)
         .expect("fully completed work still needs explicit resolution");
     ledger.work.check_quiescent().unwrap();
 }
@@ -1158,10 +1198,14 @@ fn linear_work_admission_preserves_attempted_when_consumed_capacity_is_short() {
         [(Dimension::Records, DimensionPolicy::counter(4, 2, 0))],
     )
     .expect("linear work limits");
-    let ledger = test_ledger(constrained);
+    let mut ledger = test_ledger(constrained);
 
+    let admission = {
+        let (mut work, layout) = ledger.bind_internal_work([Dimension::Records]).unwrap();
+        layout.admit_observed(&mut work.work, [3], WorkLane::Internal)
+    };
     assert!(matches!(
-        ledger.try_admit_linear_work(Dimension::Records, 3),
+        admission,
         Err(LedgerCause::LimitExceeded {
             class: CounterClass::Consumed,
             dimension: Dimension::Records,
@@ -1186,10 +1230,16 @@ fn linear_work_batch_aggregates_one_dimension_before_recording_attempted() {
         [(Dimension::Records, DimensionPolicy::counter(4, 1, 0))],
     )
     .expect("linear batch limits");
-    let ledger = test_ledger(constrained);
+    let mut ledger = test_ledger(constrained);
 
+    let admission = {
+        let (mut work, layout) = ledger
+            .bind_internal_work([Dimension::Records, Dimension::Records])
+            .unwrap();
+        layout.admit_observed(&mut work.work, [1, 1], WorkLane::Internal)
+    };
     assert!(matches!(
-        ledger.try_admit_linear_work_batch(&[(Dimension::Records, 1), (Dimension::Records, 1),]),
+        admission,
         Err(LedgerCause::LimitExceeded {
             class: CounterClass::Consumed,
             dimension: Dimension::Records,
@@ -1209,10 +1259,16 @@ fn linear_work_batch_aggregates_one_dimension_before_recording_attempted() {
 
 #[test]
 fn linear_work_batch_aggregate_overflow_is_side_effect_free() {
-    let ledger = test_ledger(limits());
+    let mut ledger = test_ledger(limits());
 
+    let admission = {
+        let (mut work, layout) = ledger
+            .bind_internal_work([Dimension::Bytes, Dimension::Bytes])
+            .unwrap();
+        layout.admit_observed(&mut work.work, [u64::MAX, 1], WorkLane::Internal)
+    };
     assert!(matches!(
-        ledger.try_admit_linear_work_batch(&[(Dimension::Bytes, u64::MAX), (Dimension::Bytes, 1),]),
+        admission,
         Err(LedgerCause::ArithmeticOverflow {
             class: CounterClass::Attempted,
             dimension: Dimension::Bytes,
@@ -1226,12 +1282,22 @@ fn linear_work_batch_aggregate_overflow_is_side_effect_free() {
 
 #[test]
 fn linear_work_group_completion_commits_every_dimension_under_one_preflight() {
-    let ledger = test_ledger(limits());
-    let mut permit = ledger
-        .try_admit_linear_work_batch(&[(Dimension::Bytes, 3), (Dimension::Records, 4)])
-        .expect("the grouped work envelope is admitted");
+    let mut ledger = test_ledger(limits());
+    let (layout, mut frame) = {
+        let (mut work, layout) = ledger
+            .bind_internal_work([Dimension::Bytes, Dimension::Records])
+            .unwrap();
+        let frame = layout
+            .admit_observed(&mut work.work, [3, 4], WorkLane::Internal)
+            .expect("the grouped work envelope is admitted");
+        (layout, frame)
+    };
 
-    let completion = permit.complete_batch_with_outcome([2, 3]);
+    let completion = frame.complete_batch_with_outcome(
+        &layout,
+        &mut ledger.split_internal().0.reborrow().unwrap().work,
+        [2, 3],
+    );
     assert!(completion.into_result().is_ok());
 
     let bytes = ledger
@@ -1242,20 +1308,32 @@ fn linear_work_group_completion_commits_every_dimension_under_one_preflight() {
         .expect("record evidence");
     assert_eq!((bytes.attempted(), bytes.consumed()), (3, 2));
     assert_eq!((records.attempted(), records.consumed()), (4, 3));
-    permit
-        .finish_partial()
+    ledger
+        .split_internal()
+        .0
+        .resolve(layout, &mut frame, false)
         .expect("release only the grouped unfinished suffix");
 }
 
 #[test]
 fn linear_work_group_completion_rejects_the_whole_invalid_prefix() {
-    let ledger = test_ledger(limits());
-    let mut permit = ledger
-        .try_admit_linear_work_batch(&[(Dimension::Bytes, 3), (Dimension::Records, 4)])
-        .expect("the grouped work envelope is admitted");
+    let mut ledger = test_ledger(limits());
+    let (layout, mut frame) = {
+        let (mut work, layout) = ledger
+            .bind_internal_work([Dimension::Bytes, Dimension::Records])
+            .unwrap();
+        let frame = layout
+            .admit_observed(&mut work.work, [3, 4], WorkLane::Internal)
+            .expect("the grouped work envelope is admitted");
+        (layout, frame)
+    };
 
     assert!(matches!(
-        permit.complete_batch_with_outcome([2, 5]),
+        frame.complete_batch_with_outcome(
+            &layout,
+            &mut ledger.split_internal().0.reborrow().unwrap().work,
+            [2, 5],
+        ),
         LinearWorkCompletion::NotCompleted(LedgerCause::InactiveLinearWorkPermit)
     ));
 
@@ -1267,8 +1345,10 @@ fn linear_work_group_completion_rejects_the_whole_invalid_prefix() {
         .expect("record evidence");
     assert_eq!((bytes.attempted(), bytes.consumed()), (3, 0));
     assert_eq!((records.attempted(), records.consumed()), (4, 0));
-    permit
-        .finish_partial()
+    ledger
+        .split_internal()
+        .0
+        .resolve(layout, &mut frame, false)
         .expect("an invalid prefix must leave the admitted suffix releasable");
 }
 
@@ -1282,10 +1362,16 @@ fn linear_work_group_completion_preserves_every_prefix_after_competing_observed_
         ],
     )
     .expect("grouped pending observed-work limits");
-    let ledger = test_ledger(constrained);
-    let mut permit = ledger
-        .try_admit_linear_work_batch(&[(Dimension::Bytes, 2), (Dimension::Records, 2)])
-        .expect("the grouped permit reserves both consumed envelopes");
+    let mut ledger = test_ledger(constrained);
+    let (layout, mut frame) = {
+        let (mut work, layout) = ledger
+            .bind_internal_work([Dimension::Bytes, Dimension::Records])
+            .unwrap();
+        let frame = layout
+            .admit_observed(&mut work.work, [2, 2], WorkLane::Internal)
+            .expect("the grouped frame reserves both consumed envelopes");
+        (layout, frame)
+    };
 
     assert!(matches!(
         ledger.charge_observed_batch(&[(Dimension::Bytes, 1)]),
@@ -1300,7 +1386,11 @@ fn linear_work_group_completion_preserves_every_prefix_after_competing_observed_
         .charge_observed_batch(&[(Dimension::Records, 1)])
         .expect("the second competing action also completes before grouped completion");
     assert!(matches!(
-        permit.complete_batch_with_outcome([1, 1]),
+        frame.complete_batch_with_outcome(
+            &layout,
+            &mut ledger.split_internal().0.reborrow().unwrap().work,
+            [1, 1],
+        ),
         LinearWorkCompletion::CompletedWithLedgerFailure(LedgerCause::LimitExceeded {
             class: CounterClass::Consumed,
             dimension: Dimension::Bytes,
@@ -1308,8 +1398,10 @@ fn linear_work_group_completion_preserves_every_prefix_after_competing_observed_
             limit: 2,
         })
     ));
-    permit
-        .finish_partial()
+    ledger
+        .split_internal()
+        .0
+        .resolve(layout, &mut frame, false)
         .expect("resolve the unfinished suffix after the applied failure");
 
     let snapshot = ledger
@@ -1332,13 +1424,21 @@ fn linear_work_pending_capacity_prevents_oversell_and_partial_finish_releases_th
         [(Dimension::Records, DimensionPolicy::counter(8, 2, 0))],
     )
     .expect("pending-work limits");
-    let ledger = test_ledger(constrained);
-    let first = ledger
-        .try_admit_linear_work(Dimension::Records, 2)
-        .expect("the first permit reserves the complete consumed envelope");
+    let mut ledger = test_ledger(constrained);
+    let (layout, mut first) = {
+        let (mut work, layout) = ledger.bind_internal_work([Dimension::Records]).unwrap();
+        let first = layout
+            .admit_observed(&mut work.work, [2], WorkLane::Internal)
+            .expect("the first frame reserves the complete consumed envelope");
+        (layout, first)
+    };
 
+    let competing = {
+        let (mut work, layout) = ledger.bind_internal_work([Dimension::Records]).unwrap();
+        layout.admit_observed(&mut work.work, [1], WorkLane::Internal)
+    };
     assert!(matches!(
-        ledger.try_admit_linear_work(Dimension::Records, 1),
+        competing,
         Err(LedgerCause::LimitExceeded {
             class: CounterClass::Consumed,
             dimension: Dimension::Records,
@@ -1374,7 +1474,11 @@ fn linear_work_pending_capacity_prevents_oversell_and_partial_finish_releases_th
         assert_eq!(state.header.open_envelopes, 1);
     }
 
-    first.finish_partial().unwrap();
+    ledger
+        .split_internal()
+        .0
+        .resolve(layout, &mut first, false)
+        .unwrap();
     {
         let state = ledger.work.borrow_state().unwrap();
         let entry = state
@@ -1397,10 +1501,14 @@ fn linear_completion_preserves_prefix_after_competing_observed_work() {
         [(Dimension::Records, DimensionPolicy::counter(3, 2, 0))],
     )
     .expect("pending observed-work limits");
-    let ledger = test_ledger(constrained);
-    let mut permit = ledger
-        .try_admit_linear_work(Dimension::Records, 2)
-        .expect("the linear permit reserves the consumed envelope");
+    let mut ledger = test_ledger(constrained);
+    let (layout, mut frame) = {
+        let (mut work, layout) = ledger.bind_internal_work([Dimension::Records]).unwrap();
+        let frame = layout
+            .admit_observed(&mut work.work, [2], WorkLane::Internal)
+            .expect("the linear frame reserves the consumed envelope");
+        (layout, frame)
+    };
 
     assert!(matches!(
         ledger.charge_observed_batch(&[(Dimension::Records, 1)]),
@@ -1417,7 +1525,13 @@ fn linear_completion_preserves_prefix_after_competing_observed_work() {
     assert_eq!((rejected.attempted(), rejected.consumed()), (3, 1));
 
     assert!(matches!(
-        permit.complete(0, 1),
+        frame
+            .complete_batch_with_outcome(
+                &layout,
+                &mut ledger.split_internal().0.reborrow().unwrap().work,
+                [1],
+            )
+            .into_result(),
         Err(LedgerCause::LimitExceeded {
             class: CounterClass::Consumed,
             dimension: Dimension::Records,
@@ -1426,10 +1540,20 @@ fn linear_completion_preserves_prefix_after_competing_observed_work() {
         })
     ));
     assert!(matches!(
-        permit.complete(0, 1),
+        frame
+            .complete_batch_with_outcome(
+                &layout,
+                &mut ledger.split_internal().0.reborrow().unwrap().work,
+                [1],
+            )
+            .into_result(),
         Err(LedgerCause::InactiveLinearWorkPermit)
     ));
-    permit.finish_partial().unwrap();
+    ledger
+        .split_internal()
+        .0
+        .resolve(layout, &mut frame, false)
+        .unwrap();
     {
         let state = ledger.work.borrow_state().unwrap();
         let entry = state
@@ -1451,16 +1575,20 @@ fn linear_completion_preserves_prefix_after_competing_observed_work() {
 }
 
 #[test]
-fn abandoned_linear_permit_preserves_observed_prefix_but_rejects_finalization() {
+fn abandoned_linear_frame_preserves_observed_prefix_but_rejects_finalization() {
     let constrained = LedgerLimits::new(
         16,
         [(Dimension::Records, DimensionPolicy::counter(3, 2, 0))],
     )
     .expect("pending observed-work limits");
-    let ledger = test_ledger(constrained);
-    let permit = ledger
-        .try_admit_linear_work(Dimension::Records, 2)
-        .expect("the linear permit reserves the consumed envelope");
+    let mut ledger = test_ledger(constrained);
+    let (layout, mut frame) = {
+        let (mut work, layout) = ledger.bind_internal_work([Dimension::Records]).unwrap();
+        let frame = layout
+            .admit_observed(&mut work.work, [2], WorkLane::Internal)
+            .expect("the linear frame reserves the consumed envelope");
+        (layout, frame)
+    };
 
     assert!(matches!(
         ledger.charge_observed_batch(&[(Dimension::Records, 1)]),
@@ -1471,11 +1599,21 @@ fn abandoned_linear_permit_preserves_observed_prefix_but_rejects_finalization() 
             limit: 2,
         })
     ));
-    drop(permit);
+    ledger
+        .split_internal()
+        .0
+        .resolve(layout, &mut frame, true)
+        .expect("abandonment releases pending capacity and latches the integrity fault");
+    {
+        let state = ledger.work.borrow_state().unwrap();
+        assert_eq!(state.rows[0].state.pending_consumed, 0);
+        assert_eq!(state.header.open_envelopes, 0);
+        assert!(state.header.integrity_fault);
+    }
 
-    let error = ledger.finish().expect_err(
-        "abandoning a permit faults finalization even after releasing pending capacity",
-    );
+    let error = ledger
+        .finish()
+        .expect_err("abandoning a frame faults finalization even after releasing pending capacity");
     assert_eq!(error.cause(), &LedgerCause::FinalSnapshotShapeMismatch);
     let records = error
         .snapshot()
@@ -1485,16 +1623,28 @@ fn abandoned_linear_permit_preserves_observed_prefix_but_rejects_finalization() 
 }
 
 #[test]
-fn forgotten_linear_work_permit_blocks_prepare_and_final_snapshot() {
+fn unresolved_linear_work_frame_blocks_prepare_and_final_snapshot() {
     for (admitted, completed) in [(1, 0), (1, 1), (0, 0)] {
-        let ledger = test_ledger(limits());
-        let mut permit = ledger
-            .bind_work([Dimension::Records])
-            .unwrap()
-            .admit_observed([admitted], WorkLane::Producer)
-            .expect("the producer envelope is admitted even when empty");
-        permit.complete(0, completed).unwrap();
-        std::mem::forget(permit);
+        let mut ledger = test_ledger(limits());
+        {
+            let (mut internal, _) = ledger.split_internal();
+            let layout = internal.bind_ordinary([Dimension::Records]).unwrap();
+            let mut frame = layout
+                .admit_observed(
+                    &mut internal.reborrow().unwrap().work,
+                    [admitted],
+                    WorkLane::Producer,
+                )
+                .expect("the producer envelope is admitted even when empty");
+            frame
+                .complete_batch_with_outcome(
+                    &layout,
+                    &mut internal.reborrow().unwrap().work,
+                    [completed],
+                )
+                .into_result()
+                .unwrap();
+        }
 
         let mut reservations = PublicationReservationBatch::default();
         assert!(matches!(
@@ -1503,7 +1653,7 @@ fn forgotten_linear_work_permit_blocks_prepare_and_final_snapshot() {
         ));
         let error = ledger
             .finish()
-            .expect_err("forgotten ownership must fail closed even with no pending capacity");
+            .expect_err("unresolved ownership must fail closed even with no pending capacity");
         assert_eq!(
             error.cause(),
             &LedgerCause::OutstandingLinearWorkPermits { count: 1 }
@@ -1520,11 +1670,15 @@ fn forgotten_linear_work_permit_blocks_prepare_and_final_snapshot() {
 }
 
 #[test]
-fn corrupt_pending_release_rejects_final_snapshot_after_permit_drop() {
-    let ledger = test_ledger(limits());
-    let permit = ledger
-        .try_admit_linear_work(Dimension::Records, 1)
-        .expect("one work unit is admitted");
+fn corrupt_pending_frame_release_rejects_final_snapshot() {
+    let mut ledger = test_ledger(limits());
+    let (layout, mut frame) = {
+        let (mut work, layout) = ledger.bind_internal_work([Dimension::Records]).unwrap();
+        let frame = layout
+            .admit_observed(&mut work.work, [1], WorkLane::Internal)
+            .expect("one work unit is admitted");
+        (layout, frame)
+    };
     {
         let mut state = ledger.work.borrow_state_mut().unwrap();
         let entry = state
@@ -1534,11 +1688,14 @@ fn corrupt_pending_release_rejects_final_snapshot_after_permit_drop() {
             .expect("record dimension remains frozen");
         entry.state.pending_consumed = 0;
     }
-    drop(permit);
+    assert_eq!(
+        ledger.split_internal().0.resolve(layout, &mut frame, false),
+        Err(LedgerCause::FinalSnapshotShapeMismatch)
+    );
 
     let error = ledger
         .finish()
-        .expect_err("a corrupted permit release must fault final evidence");
+        .expect_err("a corrupted frame release must fault final evidence");
     assert_eq!(error.cause(), &LedgerCause::FinalSnapshotShapeMismatch);
 }
 
@@ -1820,7 +1977,7 @@ fn terminal_work_transfer_rejects_spent_attempted_or_consumed_capacity_atomicall
 
 #[test]
 fn terminal_work_transfer_respects_pending_work_and_current_tightened_policy() {
-    let ledger = test_ledger(
+    let mut ledger = test_ledger(
         LedgerLimits::new(
             0,
             [
@@ -1830,14 +1987,29 @@ fn terminal_work_transfer_respects_pending_work_and_current_tightened_policy() {
         )
         .unwrap(),
     );
-    let mut permit = ledger.try_admit_linear_work(Dimension::Bytes, 10).unwrap();
+    let (layout, mut frame) = {
+        let (mut work, layout) = ledger.bind_internal_work([Dimension::Bytes]).unwrap();
+        let frame = layout
+            .admit_observed(&mut work.work, [10], WorkLane::Internal)
+            .unwrap();
+        (layout, frame)
+    };
     assert!(matches!(
         ledger.transfer_failure_terminal_work(Dimension::Bytes, Dimension::Records, 1),
         Err(LedgerCause::OutstandingLinearWorkPermits { count: 1 })
     ));
-    permit.complete(0, 4).unwrap();
-    permit
-        .finish_partial()
+    frame
+        .complete_batch_with_outcome(
+            &layout,
+            &mut ledger.split_internal().0.reborrow().unwrap().work,
+            [4],
+        )
+        .into_result()
+        .unwrap();
+    ledger
+        .split_internal()
+        .0
+        .resolve(layout, &mut frame, false)
         .expect("resolve pending work before transferring terminal capacity");
     let before = ledger.dimension_evidence(Dimension::Bytes).unwrap();
     ledger

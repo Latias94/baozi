@@ -19,12 +19,12 @@ use super::{
     AdmittedShareWork, PendingAccountActionAdmission, PhysicalStorageAccount, RetainedBatchLimits,
     RetainedHandleSharePlan, RetainedPublicationError, RetainedShareAdmissionError,
     RetainedWorkBinding, RetainedWorkControl, RetainedWorkRoot, RetainedWriterError,
-    RetainedWriterPlan, map_account_action_admission_error, map_batch_error,
-    try_admit_retained_share_work_before_physical,
+    RetainedWriterPlan, admit_internal_share_before_physical, map_account_action_admission_error,
+    map_batch_error,
 };
 use crate::control::{ControlCause, discard_untrusted_panic_payload};
 use crate::ledger::{
-    AttributionBatchPlan, AttributionReservationBatch, CanonicalOutput, Ledger, LedgerCause,
+    AttributionBatchPlan, AttributionReservationBatch, CanonicalOutput, LedgerCause,
     PublicationDestination,
 };
 use crate::{CapacityPlan, OperationOwner};
@@ -2441,7 +2441,7 @@ where
 }
 #[allow(clippy::too_many_arguments)]
 pub(super) fn try_create_retained_block_table<O, P, D, Destination, Block>(
-    ledger: &Ledger<O, P, D>,
+    root: &mut RetainedWorkRoot<'_, O, P, D>,
     account: &PhysicalStorageAccount,
     handle_share_work: RetainedHandleSharePlan<D>,
     batch: &mut AttributionReservationBatch<O, P, D, Destination>,
@@ -2476,13 +2476,16 @@ where
         .admit_action()
         .map_err(map_account_action_admission_error)?;
     let admitted_share_work =
-        try_admit_retained_share_work_before_physical(ledger, account, handle_share_work)?;
+        admit_internal_share_before_physical(&mut root.work, account, handle_share_work)?;
     let attribution_result = catch_unwind(AssertUnwindSafe(|| {
-        ledger.reserve_operation_attribution::<Destination>(
-            phase,
-            attribution_dimension,
-            charge.bytes,
-        )
+        admitted_share_work
+            .work()
+            .reserve_operation_attribution::<Destination, O, P>(
+                &root.storage,
+                phase,
+                attribution_dimension,
+                charge.bytes,
+            )
     }));
     let attribution = match attribution_result {
         Err(payload) => {

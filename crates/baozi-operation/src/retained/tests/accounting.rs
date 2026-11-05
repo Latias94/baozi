@@ -1,4 +1,4 @@
-use super::super::operation_start::try_admit_retained_share_work;
+use super::super::operation_start::admit_internal_share;
 use super::*;
 
 #[test]
@@ -749,18 +749,19 @@ fn physical_share_admission_rejection_preserves_attempted_only_work() {
     let policy = DimensionPolicy::counter(8, 8, 0);
     let limits = LedgerLimits::new(0, [(TestDimension::Bytes, policy)])
         .unwrap_or_else(|_| panic!("share-work limits must qualify"));
-    let ledger =
+    let mut ledger =
         Ledger::<TestOwner, TestPhase, TestDimension>::try_new(limits, &[TestPhase::Build])
             .unwrap_or_else(|_| panic!("share-work ledger must open"));
     let admission = account
         .try_admit_account_action()
         .unwrap_or_else(|_| panic!("account action must admit before the physical limit"));
-    let permit = try_admit_retained_share_work(&ledger, share_work())
-        .unwrap_or_else(|_| panic!("two share-work units must admit"));
     let shares_before = account.share_call_count();
-
-    let result =
-        account.try_admit_retained_after_action(admission, AdmissionCharge::new(2, 2), permit);
+    let result = {
+        let (mut work, _) = ledger.split_internal();
+        let permit = admit_internal_share(&mut work, share_work())
+            .unwrap_or_else(|_| panic!("two share-work units must admit"));
+        account.try_admit_retained_after_action(admission, AdmissionCharge::new(2, 2), permit)
+    };
 
     assert!(matches!(
         result,

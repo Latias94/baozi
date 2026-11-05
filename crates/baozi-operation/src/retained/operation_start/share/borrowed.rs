@@ -1,13 +1,20 @@
 //! Internal retained shares borrow the numeric owner only through the physical clone and handle.
 
 use super::*;
-use crate::ledger::{ExclusiveWork, InternalWork, WorkFrame, WorkLane, WorkLayout};
+use crate::ledger::{ExclusiveWork, InternalWork, Ledger, WorkFrame, WorkLane, WorkLayout};
+use crate::owner::OperationOwner;
 
 pub(in crate::retained) fn admit_internal_share<'op, D: Copy + Ord + fmt::Debug>(
     work: &'op mut InternalWork<'_, D>,
     plan: RetainedHandleSharePlan<D>,
 ) -> Result<BorrowedRetainedShareWork<'op, D>, RetainedWriterError<D>> {
-    let charges = plan.charges();
+    admit_internal_share_charges(work, plan.charges())
+}
+
+pub(super) fn admit_internal_share_charges<'op, D: Copy + Ord + fmt::Debug>(
+    work: &'op mut InternalWork<'_, D>,
+    charges: [(D, u64); 2],
+) -> Result<BorrowedRetainedShareWork<'op, D>, RetainedWriterError<D>> {
     let layout = work
         .bind_share(charges.map(|(dimension, _)| dimension))
         .map_err(RetainedWriterError::Ledger)?;
@@ -22,6 +29,24 @@ pub(in crate::retained) fn admit_internal_share<'op, D: Copy + Ord + fmt::Debug>
         frame,
         amounts,
     })
+}
+
+pub(in crate::retained) fn admit_internal_share_before_physical<'op, D: Copy + Ord + fmt::Debug>(
+    work: &'op mut InternalWork<'_, D>,
+    account: &PhysicalStorageAccount,
+    plan: RetainedHandleSharePlan<D>,
+) -> Result<BorrowedRetainedShareWork<'op, D>, RetainedWriterError<D>> {
+    match catch_unwind(AssertUnwindSafe(move || {
+        let work = work;
+        admit_internal_share(work, plan)
+    })) {
+        Ok(result) => result,
+        Err(payload) => {
+            let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            discard_untrusted_panic_payload(payload);
+            Err(RetainedWriterError::AccountPoisoned(poisoned))
+        }
+    }
 }
 
 pub(in crate::retained) struct BorrowedRetainedShareWork<'op, D: Copy> {

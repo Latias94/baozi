@@ -2214,9 +2214,11 @@ where
                     RetainedOperationStartError::Writer(RetainedWriterError::Ledger(cause))
                 })?;
         }
-        let ready = admission
-            .try_prepare_startup_cross_plane(ledger, cross_plane)
-            .map_err(map_startup_cross_plane_error)?;
+        let ready = {
+            let (_, _, ledger) = common.coordinator.split_exclusive_progress_and_ledger();
+            admission.try_prepare_startup_cross_plane(ledger, cross_plane)
+        }
+        .map_err(map_startup_cross_plane_error)?;
         #[cfg(test)]
         STARTUP_READY_FINAL_OWNER_ALLOCATOR_ENTRIES.with(|entries| {
             entries.set(Some(test_retained_final_owner_allocator_entries()));
@@ -2228,6 +2230,7 @@ where
         // ordinary share steps cannot consume or change that dormant pool.
         let failure_terminal_work = failure_terminal_work
             .map(|(failure_plan, _)| FailureTerminalWorkCapability::from_qualified(failure_plan));
+        let ledger = common.coordinator.retained_ledger();
         let startup_owner_result = startup_guard.try_build(build_fallback, || {
             #[cfg(test)]
             {
@@ -2848,9 +2851,14 @@ where
         let open_result = catch_unwind(AssertUnwindSafe(|| {
             #[cfg(test)]
             inject_publication_account_open_panic();
+            let Self {
+                common, retained, ..
+            } = &mut self;
+            let (_, _, ledger) = common.coordinator.split_exclusive_progress_and_ledger();
+            let (mut work, _) = ledger.split_internal();
             try_open_publication_account(
-                self.common.coordinator.retained_ledger(),
-                self.account(),
+                &mut work,
+                retained.baseline.account(),
                 open_handle_share_work,
             )
         }));
@@ -2916,7 +2924,7 @@ where
                 None => unreachable_final_owner_state(),
             };
             let table = match try_create_retained_block_table(
-                self.common.coordinator.retained_ledger(),
+                &mut self.internal_work_root(),
                 &account,
                 open_handle_share_work,
                 batch,
@@ -2938,7 +2946,7 @@ where
             None
         };
         let evidence_table = match try_create_retained_block_table(
-            self.common.coordinator.retained_ledger(),
+            &mut self.internal_work_root(),
             &account,
             open_handle_share_work,
             &mut evidence_batch,

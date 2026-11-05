@@ -18,8 +18,8 @@ mod startup;
 mod work;
 
 pub(crate) use work::{
-    BoundWorkGroup, InternalWork, LinearWorkBatchPermit, ParserChannel, ParserFrame,
-    ParserWorkError, WorkFrame, WorkLane, WorkLayout, WorkView,
+    BoundWorkGroup, InternalWork, ParserChannel, ParserFrame, ParserWorkError, WorkFrame, WorkLane,
+    WorkLayout, WorkView,
 };
 use work::{LocalWork, WorkDimensionState, WorkEntry, WorkGrant, WorkMode, WorkPolicy, WorkState};
 
@@ -1621,39 +1621,6 @@ where
         self.ensure_work_open()?;
         self.bind_work([dimension])?
             .consume_observed_in_order([amount])
-    }
-
-    #[cfg(test)]
-    pub(crate) fn try_admit_linear_work(
-        &self,
-        dimension: D,
-        amount: u64,
-    ) -> Result<LinearWorkBatchPermit<'_, D, 1>, LedgerCause<D>> {
-        self.try_admit_linear_work_batch(&[(dimension, amount)])
-    }
-
-    pub(crate) fn try_admit_linear_work_batch<const N: usize>(
-        &self,
-        charges: &[(D, u64); N],
-    ) -> Result<LinearWorkBatchPermit<'_, D, N>, LedgerCause<D>> {
-        let grant = match self.work.borrow_state()?.header.mode {
-            WorkMode::Protected => WorkGrant::Protected,
-            _ => WorkGrant::Ordinary,
-        };
-        self.work
-            .bind(charges.map(|(dimension, _)| dimension), grant)?
-            .admit_observed(charges.map(|(_, amount)| amount), WorkLane::Internal)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn try_admit_failure_work(
-        &self,
-        dimension: D,
-        amount: u64,
-    ) -> Result<LinearWorkBatchPermit<'_, D, 1>, LedgerCause<D>> {
-        self.work
-            .bind([dimension], WorkGrant::Protected)?
-            .admit_observed([amount], WorkLane::Protected)
     }
 
     pub fn charge_observed_batch(&self, charges: &[(D, u64)]) -> Result<(), LedgerCause<D>> {

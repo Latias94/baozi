@@ -178,16 +178,21 @@ fn zero_and_full_completion_still_own_a_frame_until_host_resolution() {
 }
 
 #[test]
-fn exclusive_entry_does_not_recover_forgotten_legacy_ownership_or_borrows() {
+fn exclusive_entry_does_not_recover_unresolved_frames_or_forgotten_guards() {
     for amount in [0, 1] {
         let mut owner = LocalWork::new(vec![1], vec![row(1, 8, 8)]);
-        let mut permit = owner
-            .bind([1], WorkGrant::Ordinary)
-            .unwrap()
-            .admit_observed([amount], WorkLane::Producer)
-            .unwrap();
-        permit.complete(0, amount).unwrap();
-        std::mem::forget(permit);
+        {
+            let (catalog, mut view) = owner.exclusive().unwrap();
+            let layout = WorkLayout::bind(catalog, &[1], WorkGrant::Ordinary).unwrap();
+            let mut frame = layout
+                .admit_observed(&mut view, [amount], WorkLane::Producer)
+                .unwrap();
+            frame
+                .complete_batch_with_outcome(&layout, &mut view, [amount])
+                .into_result()
+                .unwrap();
+            let _unresolved_frame = frame;
+        }
         assert!(matches!(
             owner.exclusive(),
             Err(LedgerCause::OutstandingLinearWorkPermits { count: 1 })

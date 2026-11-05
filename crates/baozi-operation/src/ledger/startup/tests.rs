@@ -797,13 +797,21 @@ fn startup_preflight_includes_existing_live_and_observed_work() {
 #[test]
 fn startup_preflight_uses_current_share_policy_and_pending_consumption() {
     let (limits, parts, _) = default_graph_request();
-    let ledger = frozen_graph_ledger(limits);
-    let work = ledger
-        .bind_work([Dimension::Records])
-        .expect("share work binding");
-    let pending = work
-        .admit_observed([4], super::super::WorkLane::Internal)
-        .expect("existing pending work");
+    let mut ledger = frozen_graph_ledger(limits);
+    let (layout, mut pending) = {
+        let (mut work, _) = ledger.split_internal();
+        let layout = work
+            .bind_ordinary([Dimension::Records])
+            .expect("share work binding");
+        let pending = layout
+            .admit_observed(
+                &mut work.reborrow().expect("current internal work").work,
+                [4],
+                super::super::WorkLane::Internal,
+            )
+            .expect("existing pending work");
+        (layout, pending)
+    };
     ledger
         .tighten_dimension_policy(
             Dimension::Records,
@@ -830,10 +838,98 @@ fn startup_preflight_uses_current_share_policy_and_pending_consumption() {
         })
     );
     assert_eq!(ledger_graph_observation(&ledger), (0, 0, 0, 0, 0, 4, 0, 0));
-    pending
-        .finish_partial()
+    ledger
+        .split_internal()
+        .0
+        .resolve(layout, &mut pending, false)
         .expect("release existing pending work");
     assert_eq!(preflight_startup(&ledger, &parts), Ok(()));
+}
+
+#[test]
+fn startup_graph_projection_preserves_pending_work_and_current_share_policy() {
+    test_reset_startup_graph_probes(None);
+    let (limits, parts, _) = default_graph_request();
+    let mut ledger = frozen_graph_ledger(limits);
+    let (layout, mut pending) = {
+        let (mut work, _storage) = ledger.split_internal();
+        let layout = work
+            .bind_ordinary([Dimension::Records])
+            .expect("share work binding");
+        let mut numeric = work.reborrow().expect("current internal work");
+        let pending = layout
+            .admit_observed(&mut numeric.work, [4], super::super::WorkLane::Internal)
+            .expect("existing pending work");
+        (layout, pending)
+    };
+    ledger
+        .tighten_dimension_policy(
+            Dimension::Records,
+            DimensionPolicy::counter(16, 16, u64::MAX)
+                .with_published_outcome_evidence_limit(u64::MAX),
+        )
+        .expect("exact share headroom");
+    assert_eq!(preflight_startup(&ledger, &parts), Ok(()));
+    let graph = ledger
+        .try_bind_startup_attribution_graph(parts)
+        .expect("startup graph permits an existing internal frame");
+    {
+        let state = ledger.work.borrow_state().expect("current work state");
+        let records = state
+            .rows
+            .iter()
+            .find(|row| row.dimension == Dimension::Records)
+            .expect("record work state");
+        assert_eq!(state.header.open_envelopes, 1);
+        assert_eq!(records.state.attempted, 4);
+        assert_eq!(records.state.consumed, 0);
+        assert_eq!(records.state.pending_consumed, 4);
+    }
+    assert_eq!(ledger.test_probe().active_reservations(), 6);
+    drop(graph);
+
+    ledger
+        .tighten_dimension_policy(
+            Dimension::Records,
+            DimensionPolicy::counter(16, 15, u64::MAX)
+                .with_published_outcome_evidence_limit(u64::MAX),
+        )
+        .expect("one-short current share headroom");
+    let (_, parts, _) = default_graph_request();
+    assert_eq!(
+        preflight_startup(&ledger, &parts),
+        Err(LedgerCause::LimitExceeded {
+            class: CounterClass::Consumed,
+            dimension: Dimension::Records,
+            value: 16,
+            limit: 15,
+        })
+    );
+    assert!(matches!(
+        ledger.try_bind_startup_attribution_graph(parts),
+        Err(AttributionBatchCreateError::Ledger(
+            LedgerCause::LimitExceeded {
+                class: CounterClass::Consumed,
+                dimension: Dimension::Records,
+                value: 16,
+                limit: 15,
+            }
+        ))
+    ));
+    assert_eq!(ledger_graph_observation(&ledger), (0, 0, 0, 0, 0, 4, 0, 0));
+    assert_eq!(test_startup_graph_allocation_entries(), 8);
+    ledger
+        .split_internal()
+        .0
+        .resolve(layout, &mut pending, false)
+        .expect("release only the existing frame's pending work");
+
+    let (_, parts, _) = default_graph_request();
+    let graph = ledger
+        .try_bind_startup_attribution_graph(parts)
+        .expect("released pending work restores current share headroom");
+    drop(graph);
+    assert_eq!(ledger_graph_observation(&ledger), (0, 0, 0, 0, 0, 4, 0, 0));
 }
 
 #[test]
@@ -900,7 +996,7 @@ fn startup_preflight_preserves_live_work_and_commitment_error_order() {
         .into_iter()
         .try_fold(8_u64, u64::checked_add)
         .expect("startup live envelope");
-    let ledger = frozen_graph_ledger(graph_limits(u64::MAX, total_live - 1, u64::MAX, 11, 11));
+    let mut ledger = frozen_graph_ledger(graph_limits(u64::MAX, total_live - 1, u64::MAX, 11, 11));
     parts.account_shares = StartupAccountShareEnvelope::four_identical([
         (Dimension::Unknown, 1),
         (Dimension::Records, 2),
@@ -915,8 +1011,23 @@ fn startup_preflight_preserves_live_work_and_commitment_error_order() {
             limit: total_live - 1,
         })
     );
+    assert_eq!(
+        ledger
+            .try_admit_startup_ledger(
+                parts.reservation_specs(),
+                &parts.account_shares,
+                parts.commitments,
+            )
+            .err(),
+        Some(LedgerCause::LimitExceeded {
+            class: CounterClass::Live,
+            dimension: Dimension::Bytes,
+            value: total_live,
+            limit: total_live - 1,
+        })
+    );
 
-    let ledger = frozen_graph_ledger(graph_limits(u64::MAX, u64::MAX, u64::MAX, 11, 11));
+    let mut ledger = frozen_graph_ledger(graph_limits(u64::MAX, u64::MAX, u64::MAX, 11, 11));
     parts.account_shares = startup_account_shares();
     assert_eq!(
         preflight_startup(&ledger, &parts),
@@ -927,8 +1038,23 @@ fn startup_preflight_preserves_live_work_and_commitment_error_order() {
             limit: 11,
         })
     );
+    assert_eq!(
+        ledger
+            .try_admit_startup_ledger(
+                parts.reservation_specs(),
+                &parts.account_shares,
+                parts.commitments,
+            )
+            .err(),
+        Some(LedgerCause::LimitExceeded {
+            class: CounterClass::Attempted,
+            dimension: Dimension::Records,
+            value: 12,
+            limit: 11,
+        })
+    );
 
-    let ledger = frozen_graph_ledger(graph_limits(u64::MAX, u64::MAX, u64::MAX, 3, 3));
+    let mut ledger = frozen_graph_ledger(graph_limits(u64::MAX, u64::MAX, u64::MAX, 3, 3));
     parts.account_shares = StartupAccountShareEnvelope::four_identical([
         (Dimension::Records, 1),
         (Dimension::Bytes, u64::MAX),
@@ -942,6 +1068,21 @@ fn startup_preflight_preserves_live_work_and_commitment_error_order() {
             limit: 3,
         })
     );
+    assert_eq!(
+        ledger
+            .try_admit_startup_ledger(
+                parts.reservation_specs(),
+                &parts.account_shares,
+                parts.commitments,
+            )
+            .err(),
+        Some(LedgerCause::LimitExceeded {
+            class: CounterClass::Attempted,
+            dimension: Dimension::Records,
+            value: 4,
+            limit: 3,
+        })
+    );
     parts.account_shares = StartupAccountShareEnvelope::four_identical([
         (Dimension::Bytes, u64::MAX),
         (Dimension::Records, 1),
@@ -949,6 +1090,19 @@ fn startup_preflight_preserves_live_work_and_commitment_error_order() {
     assert_eq!(
         preflight_startup(&ledger, &parts),
         Err(LedgerCause::ArithmeticOverflow {
+            class: CounterClass::Attempted,
+            dimension: Dimension::Bytes,
+        })
+    );
+    assert_eq!(
+        ledger
+            .try_admit_startup_ledger(
+                parts.reservation_specs(),
+                &parts.account_shares,
+                parts.commitments,
+            )
+            .err(),
+        Some(LedgerCause::ArithmeticOverflow {
             class: CounterClass::Attempted,
             dimension: Dimension::Bytes,
         })
@@ -978,18 +1132,98 @@ fn startup_preflight_checks_current_publication_before_deferred_bindings() {
         ),
     ] {
         let (limits, mut parts, _) = default_graph_request();
-        let ledger = frozen_graph_ledger(limits);
+        let mut ledger = frozen_graph_ledger(limits);
         lock(&ledger.state).publication = publication;
         parts.batches.canonical_assembly.phase = Phase::Unknown;
-        assert_eq!(preflight_startup(&ledger, &parts), Err(cause));
+        assert_eq!(preflight_startup(&ledger, &parts), Err(cause.clone()));
+        assert!(matches!(
+            ledger.try_bind_startup_attribution_graph(parts),
+            Err(AttributionBatchCreateError::Ledger(actual)) if actual == cause
+        ));
     }
+}
+
+#[test]
+fn startup_graph_preserves_forgotten_guard_error_precedence() {
+    use super::super::PublicationState;
+
+    for shared in [false, true] {
+        for publication in [PublicationState::Open, PublicationState::Pending] {
+            test_reset_startup_graph_probes(None);
+            let (limits, mut parts, _) = default_graph_request();
+            let mut ledger = frozen_graph_ledger(limits);
+            parts.batches.canonical_assembly.phase = Phase::Unknown;
+            lock(&ledger.state).publication = publication;
+            if shared {
+                mem::forget(ledger.work.borrow_state().expect("shared work guard"));
+            } else {
+                mem::forget(ledger.work.borrow_state_mut().expect("mutable work guard"));
+            }
+            let cause = if !shared {
+                LedgerCause::FinalSnapshotShapeMismatch
+            } else if publication == PublicationState::Pending {
+                LedgerCause::PublicationAlreadyPending
+            } else {
+                LedgerCause::UnknownPhase
+            };
+            assert!(matches!(
+                ledger.preflight_startup_attribution_graph(&parts),
+                Err(AttributionBatchCreateError::Ledger(actual)) if actual == cause
+            ));
+            assert!(matches!(
+                ledger.try_bind_startup_attribution_graph(parts),
+                Err(AttributionBatchCreateError::Ledger(actual)) if actual == cause
+            ));
+            let (_, mut invalid_capacity, _) = default_graph_request();
+            invalid_capacity.batches.fallback.attribution_limit = 0;
+            assert!(matches!(
+                ledger.try_bind_startup_attribution_graph(invalid_capacity),
+                Err(AttributionBatchCreateError::CapacityOverflow)
+            ));
+            assert_eq!(test_startup_graph_allocation_entries(), 0);
+            assert_eq!(test_startup_graph_storage_releases(), 0);
+            assert_eq!(test_startup_graph_ledger_release_locks(), 0);
+            let state = lock(&ledger.state);
+            assert_eq!(state.current_live_bytes, 0);
+            assert_eq!(state.active_reservations, 0);
+        }
+    }
+}
+
+#[test]
+fn startup_graph_read_only_projection_does_not_recover_a_forgotten_shared_guard() {
+    test_reset_startup_graph_probes(None);
+    let (limits, parts, _) = default_graph_request();
+    let mut ledger = frozen_graph_ledger(limits);
+    mem::forget(ledger.work.borrow_state().expect("shared work guard"));
+    assert_eq!(preflight_startup(&ledger, &parts), Ok(()));
+    let graph = ledger
+        .try_bind_startup_attribution_graph(parts)
+        .expect("read-only projection preserves shared-guard precedence");
+    assert_eq!(ledger.test_probe().active_reservations(), 6);
+    {
+        let (mut work, _storage) = ledger.split_internal();
+        assert!(matches!(
+            work.reborrow(),
+            Err(LedgerCause::FinalSnapshotShapeMismatch)
+        ));
+    }
+    drop(graph);
+    let work = ledger.work.borrow_state().expect("work remains observable");
+    assert!(work.rows.iter().all(|row| row.state.attempted == 0
+        && row.state.consumed == 0
+        && row.state.pending_consumed == 0));
+    assert_eq!(work.header.open_envelopes, 0);
+    let state = lock(&ledger.state);
+    assert_eq!(state.current_live_bytes, 0);
+    assert_eq!(state.active_reservations, 0);
 }
 
 #[test]
 fn startup_graph_owns_exact_envelopes_and_drops_storage_before_one_ledger_rollback() {
     test_reset_startup_graph_probes(None);
     let (limits, parts, covers) = default_graph_request();
-    let ledger = frozen_graph_ledger(limits);
+    let mut ledger = frozen_graph_ledger(limits);
     let total_live = covers
         .into_iter()
         .try_fold(8_u64, u64::checked_add)
@@ -1075,7 +1309,7 @@ fn startup_graph_accounts_cross_dimension_and_phase_reservations_exactly() {
             (Phase::Finalize, Dimension::Scratch, 5),
         ],
     );
-    let ledger = frozen_graph_ledger(limits);
+    let mut ledger = frozen_graph_ledger(limits);
     assert_eq!(preflight_startup(&ledger, &parts), Ok(()));
     let graph = ledger
         .try_admit_startup_attribution_graph(parts)
@@ -1161,7 +1395,7 @@ fn startup_graph_rejects_missing_terminal_slots_before_ledger_or_allocator_side_
                 StartupRetainedAttribution::new(Phase::Build, Dimension::Bytes, 5),
             ],
         );
-        let ledger = frozen_graph_ledger(limits);
+        let mut ledger = frozen_graph_ledger(limits);
         let before = ledger_graph_observation(&ledger);
 
         assert!(matches!(
@@ -1231,7 +1465,7 @@ fn startup_graph_commit_tail_is_infallible_and_has_no_dynamic_phase_path() {
 fn startup_graph_rejects_unknown_phase_and_invalid_dimensions_without_a_prefix() {
     test_reset_startup_graph_probes(None);
     let (limits, parts, _) = default_graph_request();
-    let ledger = Ledger::<Owner, Phase, Dimension>::try_new(limits, &[])
+    let mut ledger = Ledger::<Owner, Phase, Dimension>::try_new(limits, &[])
         .expect("empty frozen catalog is valid for an unknown-phase fixture");
     let before = ledger_graph_observation(&ledger);
     assert_eq!(
@@ -1256,7 +1490,7 @@ fn startup_graph_rejects_unknown_phase_and_invalid_dimensions_without_a_prefix()
             (Phase::Build, Dimension::Bytes, 5),
         ],
     );
-    let ledger = frozen_graph_ledger(limits);
+    let mut ledger = frozen_graph_ledger(limits);
     let before = ledger_graph_observation(&ledger);
     assert_eq!(
         preflight_startup(&ledger, &parts),
@@ -1274,7 +1508,7 @@ fn startup_graph_rejects_unknown_phase_and_invalid_dimensions_without_a_prefix()
     test_reset_startup_graph_probes(None);
     let (limits, mut parts, _) = default_graph_request();
     parts.batches.canonical_assembly.capacity_dimension = Dimension::Unknown;
-    let ledger = frozen_graph_ledger(limits);
+    let mut ledger = frozen_graph_ledger(limits);
     let before = ledger_graph_observation(&ledger);
     assert_eq!(
         preflight_startup(&ledger, &parts),
@@ -1296,7 +1530,7 @@ fn startup_graph_rejects_unknown_phase_and_invalid_dimensions_without_a_prefix()
     test_reset_startup_graph_probes(None);
     let (limits, mut parts, _) = default_graph_request();
     parts.batches.canonical_assembly.capacity_dimension = Dimension::Records;
-    let ledger = frozen_graph_ledger(limits);
+    let mut ledger = frozen_graph_ledger(limits);
     let before = ledger_graph_observation(&ledger);
     assert_eq!(
         preflight_startup(&ledger, &parts),
@@ -1324,7 +1558,7 @@ fn startup_graph_runtime_live_work_and_commitment_limits_are_atomic() {
         .into_iter()
         .try_fold(8_u64, u64::checked_add)
         .expect("startup graph live bytes");
-    let ledger = frozen_graph_ledger(graph_limits(
+    let mut ledger = frozen_graph_ledger(graph_limits(
         u64::MAX,
         total_live.checked_sub(1).expect("nonzero graph"),
         u64::MAX,
@@ -1352,7 +1586,7 @@ fn startup_graph_runtime_live_work_and_commitment_limits_are_atomic() {
         .into_iter()
         .try_fold(8_u64, u64::checked_add)
         .expect("startup graph live bytes");
-    let ledger = frozen_graph_ledger(graph_limits(
+    let mut ledger = frozen_graph_ledger(graph_limits(
         total_live.checked_sub(1).expect("nonzero graph"),
         u64::MAX,
         u64::MAX,
@@ -1376,7 +1610,7 @@ fn startup_graph_runtime_live_work_and_commitment_limits_are_atomic() {
 
     test_reset_startup_graph_probes(None);
     let (_, parts, _) = default_graph_request();
-    let ledger = frozen_graph_ledger(graph_limits(u64::MAX, u64::MAX, u64::MAX, 11, 11));
+    let mut ledger = frozen_graph_ledger(graph_limits(u64::MAX, u64::MAX, u64::MAX, 11, 11));
     let before = ledger_graph_observation(&ledger);
     assert!(matches!(
         ledger.try_admit_startup_attribution_graph(parts),
@@ -1394,7 +1628,7 @@ fn startup_graph_runtime_live_work_and_commitment_limits_are_atomic() {
 
     test_reset_startup_graph_probes(None);
     let (_, parts, _) = default_graph_request();
-    let ledger = frozen_graph_ledger(graph_limits(u64::MAX, u64::MAX, u64::MAX, u64::MAX, 11));
+    let mut ledger = frozen_graph_ledger(graph_limits(u64::MAX, u64::MAX, u64::MAX, u64::MAX, 11));
     let before = ledger_graph_observation(&ledger);
     assert!(matches!(
         ledger.try_admit_startup_attribution_graph(parts),
@@ -1412,7 +1646,7 @@ fn startup_graph_runtime_live_work_and_commitment_limits_are_atomic() {
 
     test_reset_startup_graph_probes(None);
     let (_, parts, _) = default_graph_request();
-    let ledger = frozen_graph_ledger(graph_limits_with_published(
+    let mut ledger = frozen_graph_ledger(graph_limits_with_published(
         u64::MAX,
         u64::MAX,
         u64::MAX,
@@ -1440,7 +1674,7 @@ fn startup_graph_runtime_live_work_and_commitment_limits_are_atomic() {
 fn startup_graph_overflow_checks_leave_all_prior_ledger_state_unchanged() {
     test_reset_startup_graph_probes(None);
     let (limits, parts, _) = default_graph_request();
-    let ledger = frozen_graph_ledger(limits);
+    let mut ledger = frozen_graph_ledger(limits);
     ledger
         .charge_attempted(Dimension::Records, u64::MAX)
         .expect("maximum attempted baseline");
@@ -1469,7 +1703,7 @@ fn startup_graph_overflow_checks_leave_all_prior_ledger_state_unchanged() {
 
     test_reset_startup_graph_probes(None);
     let (limits, parts, _) = default_graph_request();
-    let ledger = frozen_graph_ledger(limits);
+    let mut ledger = frozen_graph_ledger(limits);
     let live = ledger
         .reserve(Phase::Build, Dimension::Bytes, u64::MAX)
         .expect("maximum live baseline");
@@ -1496,7 +1730,7 @@ fn startup_graph_overflow_checks_leave_all_prior_ledger_state_unchanged() {
 
     test_reset_startup_graph_probes(None);
     let (limits, parts, _) = default_graph_request();
-    let ledger = frozen_graph_ledger(limits);
+    let mut ledger = frozen_graph_ledger(limits);
     {
         let mut state = lock(&ledger.state);
         state.active_reservations = u64::MAX;
@@ -1524,7 +1758,7 @@ fn startup_graph_overflow_checks_leave_all_prior_ledger_state_unchanged() {
 
     test_reset_startup_graph_probes(None);
     let (limits, parts, _) = default_graph_request();
-    let ledger = frozen_graph_ledger(limits);
+    let mut ledger = frozen_graph_ledger(limits);
     let build_position = ledger
         .bound_phase_position(Phase::Build)
         .expect("build phase");
@@ -1572,7 +1806,7 @@ fn every_startup_graph_allocator_failure_drops_eight_backings_then_rolls_back_si
     for failure_index in 0..8 {
         test_reset_startup_graph_probes(Some(failure_index));
         let (limits, parts, _) = default_graph_request();
-        let ledger = frozen_graph_ledger(limits);
+        let mut ledger = frozen_graph_ledger(limits);
 
         assert!(matches!(
             ledger.try_admit_startup_attribution_graph(parts),
@@ -1602,7 +1836,7 @@ fn startup_graph_allocator_failpoints_are_thread_local() {
             std::thread::spawn(move || {
                 test_reset_startup_graph_probes(Some(failure_index));
                 let (limits, parts, _) = default_graph_request();
-                let ledger = frozen_graph_ledger(limits);
+                let mut ledger = frozen_graph_ledger(limits);
 
                 assert!(matches!(
                     ledger.try_admit_startup_attribution_graph(parts),

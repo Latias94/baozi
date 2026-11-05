@@ -649,3 +649,31 @@ startup/publication/table borrowed owner as a prerequisite to replacing the
 allocationful finite startup representation. Preserve all uncollected ordinary
 gates, current-policy projection, completed prefixes and physical ownership;
 LocalWork, fixed/dynamic backing, promotion, exact accounting and indexing remain.
+
+## Startup and Publication Share Cut, 2026-11-05
+
+The [startup/publication borrowing cut](../reviews/2026-11-05-startup-and-publication-share-borrowing.md)
+uses one existing numeric owner for four startup shares, publication opening and
+both table creations. Deferred eight-entry projection retains current policy,
+pending consumption and error precedence. The owning retained share permit and
+now-unused aliasable linear permit are deleted with their constructors. Useful
+tests use the real kernel and borrowed hosts; wrapper-only Drop/index contracts
+are explicitly retired rather than kept in a test-only implementation.
+
+Production workspace and Operation all-target compilation pass without warnings.
+Frozen source1 has independent production/test source reviews without a blocking
+finding. QA1's invalid test-fixture failure is preserved; source2 corrects that
+single row with independent follow-up and unchanged production. All seven final
+gates pass: 3,592 workspace tests, 187 doctests, 138 consumer tests, both strict
+lints and both formats, with existing skips. Final evidence review reconciles
+all seven command/log identities and frozen/staged input hashes; new performance
+qualification is not claimed.
+
+The next coherent representation change stores WorkState directly and removes
+LocalWork, BoundWorkGroup and numeric RefCell with their actual cold writers.
+Use mutable ledger access for counting, policies, modes and deferral sealing;
+retain shared snapshots/range qualification and the original escaping storage Arc.
+The checkpoint split and account preflight loan must migrate with those APIs.
+Real frame ownership and failure prefixes survive; dynamic-guard-only faults
+disappear with the obsolete representation. Fixed/dynamic backing and all remaining
+promotion/accounting/indexing and ordinary convergence gates remain required.

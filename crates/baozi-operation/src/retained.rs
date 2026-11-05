@@ -253,9 +253,8 @@ pub(crate) use operation_start::{
 };
 use operation_start::{
     StartupRetainedPartGuard, StartupTerminalEvidenceBuildError,
-    map_account_action_admission_error, map_batch_error, map_faulted_pending_rollback,
-    map_pending_rollback_or, try_admit_retained_share_work_before_physical,
-    try_open_publication_account,
+    admit_internal_share_before_physical, map_account_action_admission_error, map_batch_error,
+    map_faulted_pending_rollback, map_pending_rollback_or, try_open_publication_account,
 };
 use publication_contract::RetainedPublicationOpenDisposition;
 pub(super) use publication_contract::retained_publication_error_requires_containment;

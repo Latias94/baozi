@@ -76,11 +76,11 @@ where
 
     fn try_prehold_accounts(
         self,
-        ledger: &Ledger<O, P, D>,
+        ledger: &mut Ledger<O, P, D>,
         account: &PhysicalStorageAccount,
     ) -> Result<PreheldStartupLedgerGraph<O, P, D>, RetainedWriterError<D>>
     where
-        D: fmt::Debug + Send + Sync + 'static,
+        D: fmt::Debug,
     {
         let Self {
             graph,
@@ -89,7 +89,10 @@ where
         if !graph.belongs_to(ledger) {
             return Err(RetainedWriterError::OwnershipUnverified);
         }
-        let owners = try_admit_start_share_work(ledger, account, account_shares)?;
+        let owners = {
+            let (mut work, _storage) = ledger.split_internal();
+            try_admit_start_share_work(&mut work, account, account_shares)?
+        };
         Ok((SharedStartupLedgerGraph { graph }, owners))
     }
 }
@@ -202,7 +205,7 @@ impl StartupPhysicalManifest {
     }
 }
 
-/// Four account owners whose share work completed through the startup ledger's linear permits.
+/// Four account owners whose share work completed through the startup ledger's numeric state.
 ///
 /// Only the cross-plane transition can assemble this value, after ledger admission owns the
 /// complete startup attribution graph.
@@ -291,10 +294,10 @@ where
     fn try_commit_physical<'account>(
         self,
         admission: PendingOperationStartAdmission<'account>,
-        ledger: &Ledger<O, P, D>,
+        ledger: &mut Ledger<O, P, D>,
     ) -> Result<ReadyStartupCrossPlane<'account, O, P, D>, StartupCrossPlaneAdmissionFailure<O, P, D>>
     where
-        D: fmt::Debug + Send + Sync + 'static,
+        D: fmt::Debug,
     {
         let Self { admitted, manifest } = self;
         let account = admission.account;
@@ -660,13 +663,13 @@ impl<'account> PendingOperationStartAdmission<'account> {
 
     pub(super) fn try_prepare_startup_cross_plane<O, P, D>(
         self,
-        ledger: &Ledger<O, P, D>,
+        ledger: &mut Ledger<O, P, D>,
         plan: StartupCrossPlanePlan<O, P, D>,
     ) -> Result<ReadyStartupCrossPlane<'account, O, P, D>, StartupCrossPlaneAdmissionFailure<O, P, D>>
     where
         O: OperationOwner,
         P: Copy + Ord,
-        D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+        D: Copy + Ord + fmt::Debug,
     {
         let StartupCrossPlanePlan {
             ledger: parts,

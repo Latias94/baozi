@@ -22,10 +22,7 @@ pub(crate) use pair::{
 };
 pub(crate) use share::AdmittedShareWork;
 pub(in crate::retained) use share::{
-    admit_internal_share, try_admit_borrowed_retained_share_work,
-    try_admit_retained_share_work_before_physical, try_admit_start_share_work,
+    admit_internal_share, admit_internal_share_before_physical,
+    try_admit_borrowed_retained_share_work, try_admit_start_share_work,
     try_open_publication_account,
 };
-
-#[cfg(test)]
-pub(in crate::retained) use share::try_admit_retained_share_work;

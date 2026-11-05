@@ -2,7 +2,8 @@ use super::{
     AttributionBatchCreateError, AttributionBatchPlan, AttributionReservationBatch,
     CanonicalOutput, CounterClass, FallbackBatchBaseline, Ledger, LedgerCause, LedgerState,
     OperationAttributionReservation, OutcomeEvidenceDestination, OutputCommitment,
-    PublicationDestination, ReservationCore, StorageCoveringReservation, lock,
+    PublicationDestination, ReservationCore, StorageCoveringReservation, WorkGrant, WorkLayout,
+    lock,
 };
 use crate::retained::{AdmittedStartupLedgerGraph, ReadyStartupGraphSplitAuthority};
 use crate::{CapacityPlan, OperationOwner};
@@ -251,9 +252,9 @@ struct StartupReservationBinding<P, D> {
     dimension_position: Result<usize, LedgerCause<D>>,
 }
 
-struct StartupLedgerBindings<'op, P, D: Copy> {
+struct StartupLedgerBindings<P, D: Copy> {
     reservations: [StartupReservationBinding<P, D>; STARTUP_RESERVATION_COUNT as usize],
-    work: Result<super::BoundWorkGroup<'op, D, 8>, LedgerCause<D>>,
+    work: Result<WorkLayout<8>, LedgerCause<D>>,
     work_amounts: [u64; 8],
     commitments: [OutputCommitment<D, OutcomeEvidenceDestination>; 2],
     commitment_bindings: [Result<(), LedgerCause<D>>; 2],
@@ -592,14 +593,28 @@ where
             .map_err(AttributionBatchCreateError::Ledger)?;
         let state = lock(&self.state);
         Self::ensure_open(&state).map_err(AttributionBatchCreateError::Ledger)?;
-        self.preflight_startup_ledger(&state, &work_state, bindings)
-            .map(|_| ())
-            .map_err(AttributionBatchCreateError::Ledger)
+        Self::preflight_startup_ledger(
+            &state,
+            self.operation_live_byte_limit,
+            bindings,
+            |layout, amounts| {
+                self.work.ensure_active(&work_state, WorkGrant::Ordinary)?;
+                layout.preflight_repeated_observed(
+                    self.work.catalogue(),
+                    &work_state.rows,
+                    &work_state.header,
+                    amounts,
+                    std::num::NonZeroU64::MIN,
+                )
+            },
+        )
+        .map(|_| ())
+        .map_err(AttributionBatchCreateError::Ledger)
     }
 
     /// Atomically admits the complete graph without moving the invocation's ledger.
     pub(crate) fn try_bind_startup_attribution_graph(
-        &self,
+        &mut self,
         parts: StartupLedgerPlanParts<O, P, D>,
     ) -> Result<AdmittedStartupLedgerGraph<O, P, D>, AttributionBatchCreateError<D>> {
         let (graph, account_shares) = self.try_build_startup_attribution_graph(parts)?;
@@ -613,7 +628,7 @@ where
     /// Preserves direct ledger-module probes without exposing a borrowed production seam.
     #[cfg(test)]
     pub(crate) fn try_admit_startup_attribution_graph(
-        &self,
+        &mut self,
         parts: StartupLedgerPlanParts<O, P, D>,
     ) -> Result<StartupAttributionGraphAdmission<O, P, D>, AttributionBatchCreateError<D>> {
         let (graph, account_shares) = self.try_build_startup_attribution_graph(parts)?;
@@ -625,7 +640,7 @@ where
 
     /// Builds the ledger-owned graph while the public production boundary retains `self`.
     fn try_build_startup_attribution_graph(
-        &self,
+        &mut self,
         parts: StartupLedgerPlanParts<O, P, D>,
     ) -> Result<BuiltStartupAttributionGraph<O, P, D>, AttributionBatchCreateError<D>> {
         parts.validate_graph_capacity()?;
@@ -683,19 +698,33 @@ where
     }
 
     fn try_admit_startup_ledger(
-        &self,
+        &mut self,
         reservation_specs: [StartupReservationSpec<P, D>; STARTUP_RESERVATION_COUNT as usize],
         account_shares: &StartupAccountShareEnvelope<D>,
         commitments: [OutputCommitment<D, OutcomeEvidenceDestination>; 2],
     ) -> Result<StartupLedgerCommit<O, P, D>, LedgerCause<D>> {
         let bindings = self.bind_startup_ledger(reservation_specs, account_shares, commitments);
-        let work_state = self.work.borrow_state()?;
+        let work = self.work.split_internal();
+        let work_state = work.read_state()?;
         let mut state = lock(&self.state);
         Self::ensure_open(&state)?;
-        let admission = self.preflight_startup_ledger(&state, &work_state, bindings)?;
+        let admission = Self::preflight_startup_ledger(
+            &state,
+            self.operation_live_byte_limit,
+            bindings,
+            |layout, amounts| {
+                work.ensure_active(work_state, WorkGrant::Ordinary)?;
+                layout.preflight_repeated_observed(
+                    work.catalog,
+                    &work_state.rows,
+                    &work_state.header,
+                    amounts,
+                    std::num::NonZeroU64::MIN,
+                )
+            },
+        )?;
         commit_startup_ledger(&mut state, &admission);
         drop(state);
-        drop(work_state);
         let StartupLedgerAdmission {
             reservations,
             commitments,
@@ -721,7 +750,7 @@ where
         reservation_specs: [StartupReservationSpec<P, D>; STARTUP_RESERVATION_COUNT as usize],
         account_shares: &StartupAccountShareEnvelope<D>,
         mut commitments: [OutputCommitment<D, OutcomeEvidenceDestination>; 2],
-    ) -> StartupLedgerBindings<'_, P, D> {
+    ) -> StartupLedgerBindings<P, D> {
         let reservations = reservation_specs.map(|spec| StartupReservationBinding {
             spec,
             phase_position: self.bound_phase_position(spec.phase),
@@ -744,7 +773,10 @@ where
             steps[3].charges[0],
             steps[3].charges[1],
         ];
-        let work = self.bind_work(work_specs.map(|(dimension, _)| dimension));
+        let work = self.work.bind_layout(
+            work_specs.map(|(dimension, _)| dimension),
+            WorkGrant::Ordinary,
+        );
         let commitment_bindings = std::array::from_fn(|index| {
             let commitment = &mut commitments[index];
             commitment.dimension_position = usize::MAX;
@@ -768,10 +800,10 @@ where
     }
 
     fn preflight_startup_ledger(
-        &self,
         state: &LedgerState<P, D>,
-        work_state: &super::WorkState<D>,
-        bindings: StartupLedgerBindings<'_, P, D>,
+        operation_live_byte_limit: u64,
+        bindings: StartupLedgerBindings<P, D>,
+        preflight_work: impl FnOnce(WorkLayout<8>, [u64; 8]) -> Result<(), LedgerCause<D>>,
     ) -> Result<StartupLedgerAdmission<P, D>, LedgerCause<D>> {
         let mut reservations =
             bindings
@@ -878,12 +910,12 @@ where
                     class: CounterClass::Live,
                     dimension: projection.spec.dimension,
                 })?;
-            if operation_live_after > self.operation_live_byte_limit {
+            if operation_live_after > operation_live_byte_limit {
                 return Err(LedgerCause::LimitExceeded {
                     class: CounterClass::Live,
                     dimension: projection.spec.dimension,
                     value: operation_live_after,
-                    limit: self.operation_live_byte_limit,
+                    limit: operation_live_byte_limit,
                 });
             }
         }
@@ -895,11 +927,7 @@ where
                 dimension: reservations[0].spec.dimension,
             })?;
 
-        bindings.work?.preflight_repeated_observed_state(
-            work_state,
-            bindings.work_amounts,
-            std::num::NonZeroU64::MIN,
-        )?;
+        preflight_work(bindings.work?, bindings.work_amounts)?;
 
         let commitments = bindings.commitments;
         for (index, binding) in bindings.commitment_bindings.into_iter().enumerate() {

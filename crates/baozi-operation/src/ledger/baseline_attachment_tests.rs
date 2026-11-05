@@ -112,15 +112,21 @@ fn attachment_preserves_live_scratch_and_preexisting_work_but_strict_binding_rej
 
 #[test]
 fn attachment_preserves_pending_linear_work_until_explicit_resolution() {
-    let ledger = ledger();
-    let mut linear = ledger.try_admit_linear_work(Dimension::Work, 3).unwrap();
+    let mut ledger = ledger();
+    let (layout, mut linear) = {
+        let (mut work, layout) = ledger.bind_internal_work([Dimension::Work]).unwrap();
+        let frame = layout
+            .admit_observed(&mut work.work, [3], WorkLane::Internal)
+            .unwrap();
+        (layout, frame)
+    };
     let mut baseline = baseline(&ledger);
     let before = ledger.try_snapshot().unwrap();
 
     ledger.try_attach_fallback_baseline(&mut baseline).unwrap();
 
     assert_eq!(ledger.try_snapshot().unwrap(), before);
-    assert_eq!(linear.remaining(), [3]);
+    assert_eq!(linear.remaining, [3]);
     {
         let work = ledger.work.borrow_state().unwrap();
         assert_eq!(work.rows[1].state.pending_consumed, 3);
@@ -141,8 +147,14 @@ fn attachment_preserves_pending_linear_work_until_explicit_resolution() {
     }
     assert_eq!(ledger.try_snapshot().unwrap(), before);
 
-    linear.complete(0, 3).unwrap();
-    linear.finish().unwrap();
+    {
+        let (mut work, _) = ledger.split_internal();
+        linear
+            .complete_batch_with_outcome(&layout, &mut work.reborrow().unwrap().work, [3])
+            .into_result()
+            .unwrap();
+        work.resolve(layout, &mut linear, false).unwrap();
+    }
     ledger.try_bind_fallback_baseline(&mut baseline).unwrap();
     ledger
         .preflight_configure_protected_work(Dimension::Failure)

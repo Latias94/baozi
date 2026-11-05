@@ -587,3 +587,20 @@ negative case only for a genuinely new boundary, not for incidental private layo
   reconciliation record rather than newly reproduced raw bytes. Continue the
   real startup/publication/table owner cut before fixed/dynamic state and shared
   promotion; preserve the incomplete performance gates and release HOLD.
+- The [startup/publication share implementation](../reviews/2026-11-05-startup-and-publication-share-borrowing.md)
+  moves the four startup account shares, publication opening and both table
+  creations to the existing numeric/storage split. Startup stores a deferred
+  eight-entry layout, preserving pending consumption and live/work/commitment
+  precedence. RetainedShareWorkPermit and the now-production-dead
+  LinearWorkBatchPermit are deleted with their constructors; useful test oracles
+  move to the actual kernel and hosts. Final source1 compiles without warnings,
+  and independent production/test source reviews find no blocking issue.
+  Final source2 passes seven serial gates: 3,592 workspace tests, 187 doctests,
+  138 consumer tests, both strict lints and both formats, with existing skips.
+  QA1's invalid test-fixture failure is retained and the one-row correction has
+  independent source follow-up. Final evidence review reconciles all seven
+  commands/logs and frozen/staged inputs without a blocking mismatch. This cut
+  has no performance acceptance. Next remove the remaining numeric
+  RefCell, LocalWork and cold BoundWorkGroup together with shared-write API
+  migration, retaining the storage Arc identity and existing kernel. Fixed/dynamic
+  backing, shared promotion, exact accounting, indexing and full convergence stay open.

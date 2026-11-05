@@ -229,7 +229,11 @@ impl<D> LocalWork<D> {
         self.check_integrity(&state)
     }
 
-    fn ensure_active(&self, state: &WorkState<D>, grant: WorkGrant) -> Result<(), LedgerCause<D>> {
+    pub(super) fn ensure_active(
+        &self,
+        state: &WorkState<D>,
+        grant: WorkGrant,
+    ) -> Result<(), LedgerCause<D>> {
         self.check_integrity(state)?;
         kernel::check_active_mode(&state.header, grant)
     }
@@ -253,12 +257,21 @@ impl<D> InternalWork<'_, D> {
         }
     }
 
-    fn read_state(&self) -> Result<&WorkState<D>, LedgerCause<D>> {
+    pub(super) fn read_state(&self) -> Result<&WorkState<D>, LedgerCause<D>> {
         if !self.shared_available {
             self.borrow_fault.set(true);
             return Err(LedgerCause::FinalSnapshotShapeMismatch);
         }
         Ok(self.state)
+    }
+
+    pub(super) fn ensure_active(
+        &self,
+        state: &WorkState<D>,
+        grant: WorkGrant,
+    ) -> Result<(), LedgerCause<D>> {
+        state.check_integrity(self.catalog.len(), self.borrow_fault.get())?;
+        kernel::check_active_mode(&state.header, grant)
     }
 
     pub(crate) fn reborrow(&mut self) -> Result<super::ExclusiveWork<'_, D>, LedgerCause<D>> {
@@ -332,8 +345,7 @@ impl<D: Copy + Ord> InternalWork<'_, D> {
     ) -> Result<WorkLayout<N>, LedgerCause<D>> {
         let layout = WorkLayout::bind(self.catalog, &dimensions, grant)?;
         let state = self.read_state()?;
-        state.check_integrity(self.catalog.len(), self.borrow_fault.get())?;
-        kernel::check_active_mode(&state.header, grant)?;
+        self.ensure_active(state, grant)?;
         layout.validate_binding(&state.header, &dimensions)?;
         Ok(layout)
     }
@@ -439,139 +451,6 @@ impl<'op, D: Copy, const N: usize> BoundWorkGroup<'op, D, N> {
             amounts,
             repetitions,
         )
-    }
-
-    pub(crate) fn admit_observed(
-        &self,
-        amounts: [u64; N],
-        lane: WorkLane,
-    ) -> Result<LinearWorkBatchPermit<'op, D, N>, LedgerCause<D>> {
-        let frame = self.layout.admit_observed(
-            &mut self.borrow_active()?.view(&self.owner.catalog),
-            amounts,
-            lane,
-        )?;
-        Ok(LinearWorkBatchPermit {
-            group: *self,
-            frame,
-        })
-    }
-}
-
-#[must_use = "finish the work envelope explicitly, even after completing every prefix"]
-pub(crate) struct LinearWorkBatchPermit<'op, D: Copy, const N: usize> {
-    group: BoundWorkGroup<'op, D, N>,
-    frame: WorkFrame<N>,
-}
-
-impl<D: Copy, const N: usize> LinearWorkBatchPermit<'_, D, N> {
-    #[cfg(test)]
-    pub(crate) fn remaining(&self) -> [u64; N] {
-        self.frame.remaining
-    }
-    pub(crate) fn complete(&mut self, index: usize, amount: u64) -> Result<(), LedgerCause<D>> {
-        self.complete_with_outcome(index, amount).into_result()
-    }
-    pub(crate) fn complete_with_outcome(
-        &mut self,
-        index: usize,
-        amount: u64,
-    ) -> LinearWorkCompletion<D> {
-        if index >= N {
-            return LinearWorkCompletion::NotCompleted(LedgerCause::InactiveLinearWorkPermit);
-        }
-        let mut amounts = [0; N];
-        amounts[index] = amount;
-        self.complete_batch_with_outcome(amounts)
-    }
-    #[cfg(test)]
-    pub(crate) fn complete_batch(&mut self, amounts: [u64; N]) -> Result<(), LedgerCause<D>> {
-        self.complete_batch_with_outcome(amounts).into_result()
-    }
-    pub(crate) fn complete_batch_with_outcome(
-        &mut self,
-        amounts: [u64; N],
-    ) -> LinearWorkCompletion<D> {
-        // Keep invalid-call precedence before attempting the legacy dynamic borrow.
-        if !self.frame.active
-            || self.frame.faulted
-            || amounts
-                .iter()
-                .zip(self.frame.remaining)
-                .any(|(amount, remaining)| *amount > remaining)
-        {
-            return LinearWorkCompletion::NotCompleted(LedgerCause::InactiveLinearWorkPermit);
-        }
-        let mut state = match self.group.borrow_active() {
-            Ok(state) => state,
-            Err(cause) => {
-                self.frame.faulted = true;
-                return LinearWorkCompletion::NotCompleted(cause);
-            }
-        };
-        self.frame.complete_batch_with_outcome(
-            &self.group.layout,
-            &mut state.view(&self.group.owner.catalog),
-            amounts,
-        )
-    }
-    pub(crate) fn finish(mut self) -> Result<(), LedgerCause<D>> {
-        if self.frame.remaining.iter().any(|amount| *amount != 0) {
-            return Err(LedgerCause::InactiveLinearWorkPermit);
-        }
-        self.resolve(false)
-    }
-    pub(crate) fn finish_partial(mut self) -> Result<(), LedgerCause<D>> {
-        self.resolve(false)
-    }
-    fn resolve(&mut self, abandoned: bool) -> Result<(), LedgerCause<D>> {
-        if !self.frame.active {
-            return Err(LedgerCause::InactiveLinearWorkPermit);
-        }
-        // The kernel checks aggregation before ownership mutation, as before.
-        self.group.layout.aggregate(
-            &self.group.owner.catalog,
-            self.frame.remaining,
-            CounterClass::Consumed,
-        )?;
-        let mut state = self.group.owner.borrow_state_mut()?;
-        if state.rows.len() != self.group.owner.catalog.len() {
-            state.header.integrity_fault = true;
-            self.frame.active = false;
-            return Err(LedgerCause::FinalSnapshotShapeMismatch);
-        }
-        self.frame.resolve(
-            &self.group.layout,
-            &mut state.view(&self.group.owner.catalog),
-            abandoned,
-        )
-    }
-}
-
-#[cfg(test)]
-impl<D: Copy> LinearWorkBatchPermit<'_, D, 1> {
-    pub(crate) fn replenish_one(&mut self) -> Result<(), LedgerCause<D>> {
-        if !self.frame.active
-            || self.frame.faulted
-            || self.frame.lane != WorkLane::Producer
-            || self.group.layout.grant != WorkGrant::Ordinary
-            || self.frame.remaining != [0]
-        {
-            return Err(LedgerCause::InactiveLinearWorkPermit);
-        }
-        let mut state = self.group.borrow_active()?;
-        self.frame.replenish_one(
-            &self.group.layout,
-            &mut state.view(&self.group.owner.catalog),
-        )
-    }
-}
-
-impl<D: Copy, const N: usize> Drop for LinearWorkBatchPermit<'_, D, N> {
-    fn drop(&mut self) {
-        if self.frame.active {
-            let _ = self.resolve(true);
-        }
     }
 }
 

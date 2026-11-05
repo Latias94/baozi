@@ -1,5 +1,5 @@
 use super::*;
-use crate::DimensionPolicy;
+use crate::{DimensionPolicy, ledger::WorkLane};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Debug)]
@@ -93,37 +93,89 @@ fn final_gate_remains_sealed_for_protected_recovery_and_internal_share_nesting()
         .activate_protected_work(Dimension::Protected)
         .expect("a later generation rejection can still activate its finite grant");
 
-    let mut producer = coordinator
-        .ledger
-        .try_admit_failure_work(Dimension::Protected, 4)
-        .expect("one protected producer envelope");
+    let (producer_layout, mut producer) = {
+        let (mut internal, _) = coordinator.ledger.split_internal();
+        let layout = internal.bind_protected([Dimension::Protected]).unwrap();
+        let producer = layout
+            .admit_observed(
+                &mut internal.reborrow().unwrap().work,
+                [4],
+                WorkLane::Protected,
+            )
+            .expect("one protected producer envelope");
+        (layout, producer)
+    };
     assert!(matches!(
         coordinator
             .ledger
-            .try_admit_linear_work_batch(&[(Dimension::Ordinary, 0)]),
+            .split_internal()
+            .0
+            .bind_share([Dimension::Ordinary]),
         Err(LedgerCause::InactiveLinearWorkPermit)
     ));
-    let mut share = coordinator
-        .ledger
-        .try_admit_linear_work_batch(&[(Dimension::Protected, 1), (Dimension::Protected, 1)])
-        .expect("protected internal clone-and-handle work coexists with its producer");
-    producer
-        .complete(0, 2)
-        .expect("first physical producer prefix");
-    share.complete(0, 1).expect("reference clone completed");
-    share.complete(1, 1).expect("retained handle completed");
-    share
-        .finish()
-        .expect("internal share explicitly closes its envelope");
-    producer
-        .complete(0, 2)
-        .expect("remaining physical producer prefix");
+    let (share_layout, mut share) = {
+        let (mut internal, _) = coordinator.ledger.split_internal();
+        let layout = internal
+            .bind_share([Dimension::Protected, Dimension::Protected])
+            .unwrap();
+        let share = layout
+            .admit_observed(
+                &mut internal.reborrow().unwrap().work,
+                [1, 1],
+                WorkLane::Internal,
+            )
+            .expect("protected internal clone-and-handle work coexists with its producer");
+        (layout, share)
+    };
+    {
+        let (mut internal, _) = coordinator.ledger.split_internal();
+        producer
+            .complete_batch_with_outcome(
+                &producer_layout,
+                &mut internal.reborrow().unwrap().work,
+                [2],
+            )
+            .into_result()
+            .expect("first physical producer prefix");
+        share
+            .complete_batch_with_outcome(
+                &share_layout,
+                &mut internal.reborrow().unwrap().work,
+                [1, 0],
+            )
+            .into_result()
+            .expect("reference clone completed");
+        share
+            .complete_batch_with_outcome(
+                &share_layout,
+                &mut internal.reborrow().unwrap().work,
+                [0, 1],
+            )
+            .into_result()
+            .expect("retained handle completed");
+        assert_eq!(share.remaining, [0, 0]);
+        internal
+            .resolve(share_layout, &mut share, false)
+            .expect("internal share explicitly closes its envelope");
+        producer
+            .complete_batch_with_outcome(
+                &producer_layout,
+                &mut internal.reborrow().unwrap().work,
+                [2],
+            )
+            .into_result()
+            .expect("remaining physical producer prefix");
+    }
     assert_eq!(
         coordinator.ledger.close_work(),
         Err(LedgerCause::OutstandingLinearWorkPermits { count: 1 })
     );
-    producer
-        .finish()
+    assert_eq!(producer.remaining, [0]);
+    coordinator
+        .ledger
+        .split_internal()
+        .0
+        .resolve(producer_layout, &mut producer, false)
         .expect("a completed producer must still explicitly finish");
     coordinator
         .ledger
@@ -138,7 +190,9 @@ fn final_gate_remains_sealed_for_protected_recovery_and_internal_share_nesting()
     assert!(matches!(
         coordinator
             .ledger
-            .try_admit_linear_work_batch(&[(Dimension::Protected, 0)]),
+            .split_internal()
+            .0
+            .bind_share([Dimension::Protected]),
         Err(LedgerCause::PublicationAlreadyCompleted)
     ));
     let snapshot = coordinator
