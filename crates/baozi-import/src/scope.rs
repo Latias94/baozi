@@ -281,21 +281,7 @@ pub struct ParseContext<'session, 'inv: 'session> {
 /// Retained evidence uses that invocation's real work owner; ordinary storage remains separate.
 pub struct ParseServices<'borrow, 'op, 'session> {
     store: crate::store::ImportStoreServices<'borrow, 'op>,
-    entry: &'borrow RegistryEntry,
-    primary_io: &'session dyn AssetIo,
-    primary_authority: &'session AuthorityDomain,
-    primary_source: &'session AssetPath,
-    primary_bytes: &'session [u8],
-    dependency_origin_issuer: &'session DependencyOriginIssuer,
-    conformance_policy: ConformancePolicy,
-    loss_policy: LossPolicy,
-    limits: &'session ResourceLimits,
-    diagnostics: &'session RefCell<DiagnosticSink>,
-    loss_evidence: &'session RefCell<AccountedVec<ImportLossEvidence>>,
-    source_scope_record: &'session RefCell<Option<LiveSourceScopeRecord>>,
-    format_failure_storage: &'session RefCell<FailureEvidenceStorage>,
-    callback_active: &'borrow Cell<bool>,
-    terminal: &'session RefCell<Option<ScopeAbortCause>>,
+    views: &'borrow parser_execution::ParseViews<'borrow, 'session>,
 }
 
 pub(crate) struct ParseContextParts<'session, 'inv: 'session> {
@@ -565,35 +551,35 @@ impl<'session, 'inv: 'session> ParseContext<'session, 'inv> {
 
 impl<'op, 'session> ParseServices<'_, 'op, 'session> {
     pub fn source(&self) -> &'session AssetPath {
-        self.primary_source
+        self.views.source
     }
 
     pub const fn conformance_policy(&self) -> ConformancePolicy {
-        self.conformance_policy
+        self.views.conformance_policy
     }
 
     pub const fn loss_policy(&self) -> LossPolicy {
-        self.loss_policy
+        self.views.loss_policy
     }
 
     pub fn primary_bytes(&self) -> &'session [u8] {
-        self.primary_bytes
+        self.views.bytes
     }
 
     pub fn diagnostic_source(&self) -> DiagnosticSource<'session> {
         DiagnosticSource::new(
-            self.primary_authority.clone(),
-            self.primary_source,
-            self.primary_bytes,
+            self.views.primary_authority.clone(),
+            self.views.source,
+            self.views.bytes,
         )
     }
 
     pub fn limits(&self) -> &'session ResourceLimits {
-        self.limits
+        self.views.limits
     }
 
     pub fn root_origin(&self) -> DependencyOrigin<'session> {
-        DependencyOrigin::primary(self.dependency_origin_issuer, self.primary_io)
+        DependencyOrigin::primary(self.views.issuer, self.views.primary_io)
     }
 }
 
@@ -687,16 +673,16 @@ impl<'op, 'session> ParseServices<'_, 'op, 'session> {
         self.preflight_active()?;
         let identity = self.storage_identity();
         let raw = self.store.ordinary();
-        Ok(ParseStorage::new(raw, identity, self.callback_active))
+        Ok(ParseStorage::new(raw, identity, self.views.callback_active))
     }
 
     pub(crate) fn session_issuer(&self) -> &'session DependencyOriginIssuer {
-        self.dependency_origin_issuer
+        self.views.issuer
     }
 
     pub(crate) fn check_session(&self, issuer: &DependencyOriginIssuer) -> ParseResult<()> {
         self.preflight_active()?;
-        if std::ptr::eq(self.dependency_origin_issuer, issuer) {
+        if std::ptr::eq(self.views.issuer, issuer) {
             Ok(())
         } else {
             Err(self.abort(ScopeAbortCause::DescriptorContract {
@@ -869,8 +855,8 @@ impl<'op, 'session> ParseServices<'_, 'op, 'session> {
 
     fn storage_identity(&self) -> StorageIdentity<'session> {
         StorageIdentity {
-            issuer: self.dependency_origin_issuer,
-            terminal: self.terminal,
+            issuer: self.views.issuer,
+            terminal: self.views.terminal,
         }
     }
 }
@@ -1038,17 +1024,22 @@ impl<'op, 'session> ParseServices<'_, 'op, 'session> {
         }
 
         let descriptor_allows_recovery =
-            self.entry
+            self.views
+                .entry
                 .descriptor()
                 .text_profile()
                 .is_some_and(|profile| {
                     profile.allows_decoding_mode(TextDecodingMode::ReplaceInvalidUtf8)
                 });
         let disposition = if !descriptor_allows_recovery
-            || self.conformance_policy != ConformancePolicy::AllowDeclaredRecovery
+            || self.views.conformance_policy != ConformancePolicy::AllowDeclaredRecovery
         {
             ImportLossDisposition::RejectedByConformance
-        } else if !self.loss_policy.allows(ImportLossKind::FormatRecovery) {
+        } else if !self
+            .views
+            .loss_policy
+            .allows(ImportLossKind::FormatRecovery)
+        {
             ImportLossDisposition::RejectedByLossPolicy
         } else {
             ImportLossDisposition::Applied
@@ -1098,7 +1089,11 @@ impl<'op, 'session> ParseServices<'_, 'op, 'session> {
         message: fmt::Arguments<'_>,
     ) -> ParseResult<()> {
         self.preflight_active()?;
-        let disposition = if self.loss_policy.allows(ImportLossKind::SourceSemanticLoss) {
+        let disposition = if self
+            .views
+            .loss_policy
+            .allows(ImportLossKind::SourceSemanticLoss)
+        {
             ImportLossDisposition::Applied
         } else {
             ImportLossDisposition::RejectedByLossPolicy
@@ -1142,12 +1137,12 @@ impl<'op, 'session> ParseServices<'_, 'op, 'session> {
         &mut self,
         finalized: FinalizedSourceScopeRecord<'session>,
     ) -> ParseResult<()> {
-        let diagnostics = self.diagnostics;
-        let loss_evidence = self.loss_evidence;
-        let source_scope_record = self.source_scope_record;
+        let diagnostics = self.views.diagnostics;
+        let loss_evidence = self.views.loss_evidence;
+        let source_scope_record = self.views.source_scope_record;
 
         self.preflight_active()?;
-        if !finalized.is_issued_by(self.dependency_origin_issuer) {
+        if !finalized.is_issued_by(self.views.issuer) {
             return Err(self.abort(ScopeAbortCause::DescriptorContract {
                 code: "source-scope-record-owner-mismatch",
             }));
@@ -1188,7 +1183,7 @@ impl<'op, 'session> ParseServices<'_, 'op, 'session> {
                 severity: DiagnosticSeverity::Warning,
                 code,
                 phase: ImportProgressPhase::Normalize,
-                source: self.primary_source,
+                source: self.views.source,
                 byte_range: None,
                 line_column: None,
                 object_path: None,
@@ -1205,11 +1200,11 @@ impl<'op, 'session> ParseServices<'_, 'op, 'session> {
             let (resource, limit) = match reason {
                 DiagnosticDropReason::CountLimit => (
                     "source-scope-collapse-diagnostic-count",
-                    self.limits.max_diagnostics,
+                    self.views.limits.max_diagnostics,
                 ),
                 DiagnosticDropReason::StoredByteLimit => (
                     "source-scope-collapse-diagnostic-bytes",
-                    self.limits.max_diagnostic_bytes,
+                    self.views.limits.max_diagnostic_bytes,
                 ),
             };
             return Err(self.abort(ScopeAbortCause::ResourceLimit { resource, limit }));
@@ -1275,7 +1270,7 @@ impl<'op, 'session> ParseServices<'_, 'op, 'session> {
         raw_range: Option<DiagnosticByteRange>,
         disposition: ImportLossDisposition,
     ) -> ParseResult<PreparedLossEvidence> {
-        let loss_evidence = self.loss_evidence;
+        let loss_evidence = self.views.loss_evidence;
 
         self.store
             .charge_attempted(ImportDimension::LossEvidenceCount, 1)
@@ -1359,7 +1354,7 @@ impl<'op, 'session> ParseServices<'_, 'op, 'session> {
     }
 
     fn commit_loss_evidence(&mut self, prepared: PreparedLossEvidence) -> ParseResult<()> {
-        let loss_evidence = self.loss_evidence;
+        let loss_evidence = self.views.loss_evidence;
 
         let mut loss_evidence = loss_evidence
             .try_borrow_mut()
@@ -1395,7 +1390,7 @@ impl<'op, 'session> ParseServices<'_, 'op, 'session> {
                 severity,
                 code,
                 phase: ImportProgressPhase::Decode,
-                source: self.primary_source,
+                source: self.views.source,
                 byte_range: None,
                 line_column: None,
                 object_path: None,
@@ -1532,7 +1527,7 @@ impl<'op, 'session> ParseServices<'_, 'op, 'session> {
         details: impl FnOnce(&mut dyn DiagnosticDetailSink),
         message: fmt::Arguments<'_>,
     ) -> ParseResult<PreparedDiagnosticEvent> {
-        let diagnostics = self.diagnostics;
+        let diagnostics = self.views.diagnostics;
 
         let DiagnosticEventMetadata {
             severity,
@@ -1705,7 +1700,7 @@ impl<'op, 'session> ParseServices<'_, 'op, 'session> {
     }
 
     fn commit_diagnostic_event(&mut self, event: PreparedDiagnosticEvent) -> ParseResult<()> {
-        let diagnostics = self.diagnostics;
+        let diagnostics = self.views.diagnostics;
 
         if !event.is_stored() {
             return Ok(());
@@ -1741,7 +1736,7 @@ impl<'op, 'session> ParseServices<'_, 'op, 'session> {
     }
 
     fn discard_diagnostic_event(&self, event: PreparedDiagnosticEvent) -> ParseResult<()> {
-        let diagnostics = self.diagnostics;
+        let diagnostics = self.views.diagnostics;
 
         let mut diagnostics = diagnostics
             .try_borrow_mut()
@@ -1921,10 +1916,10 @@ impl ParseServices<'_, '_, '_> {
         parser_execution::capture_format_failure(
             parser_execution::FormatFailureHost::services(
                 self.store.failure_storage(),
-                self.entry,
-                self.terminal,
-                self.callback_active,
-                self.format_failure_storage,
+                self.views.entry,
+                self.views.terminal,
+                self.views.callback_active,
+                self.views.failure_storage,
             ),
             producer,
         )
@@ -3144,14 +3139,14 @@ impl<'op, 'session> ParseRoot<'_, 'op, 'session> {
 
 impl ParseServices<'_, '_, '_> {
     fn abort(&self, cause: ScopeAbortCause) -> ParseFailure {
-        latch_abort(self.terminal, cause)
+        latch_abort(self.views.terminal, cause)
     }
 
     fn preflight_active(&self) -> ParseResult<()> {
-        if self.callback_active.get() {
+        if self.views.callback_active.get() {
             return Err(self.reentrant_capability_failure());
         }
-        preflight_terminal(self.terminal)
+        preflight_terminal(self.views.terminal)
     }
 
     pub fn poll(&mut self) -> ParseResult<()> {

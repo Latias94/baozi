@@ -483,3 +483,15 @@ negative case only for a genuinely new boundary, not for incidental private layo
   so there is no complete clean confirmation. All six rounds and costs are retained;
   performance keep and release remain HOLD. Twelve exact-source Linux instruction
   profiles are collected for attribution, not the remaining full ordinary Linux gate.
+- The [parse-metadata borrowing checkpoint](../reviews/2026-11-05-parse-metadata-borrowing.md)
+  removes repeated by-value metadata/service expansion from the real Import root,
+  child and parser roles, preserving the numeric owner and all existing work/control
+  calls. Independent source review finds no P1/P2 defect; the exact source2 passes
+  3,565 freshly compiled workspace tests (six existing skips), 188 doctests including
+  five new service-loan contracts, 138 asset-consumer tests (one existing skip), both
+  strict lints and both format checks. Independent final evidence review verifies
+  all seven commands, 1,448-file maps and fresh main-root artifact association.
+  An earlier cached isolated-workspace runtime result is explicitly excluded and
+  preserved. The measured Linux copy edges motivate this candidate; ordinary timing,
+  memory, backing/promotion, obsolete-owner deletion, indexing and full convergence
+  remain open. A finite full-matrix four-campaign decision precedes candidate build.

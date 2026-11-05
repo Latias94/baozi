@@ -22,7 +22,7 @@ pub enum ParseScanReturn<T> {
     Boundary(T),
 }
 
-#[derive(Clone, Copy)]
+/// Immutable metadata owned once by the root and borrowed by its short execution roles.
 pub(super) struct ParseViews<'borrow, 'session> {
     pub(super) entry: &'borrow RegistryEntry,
     pub(super) source: &'session AssetPath,
@@ -313,7 +313,7 @@ pub struct ParseChildren<'borrow, 'op, 'session> {
         ImportProgressUnit,
     >,
     vocabulary: &'borrow ImportStoreVocabulary,
-    pub(super) views: ParseViews<'borrow, 'session>,
+    pub(super) views: &'borrow ParseViews<'borrow, 'session>,
 }
 
 /// A sequential parent/child borrow. It cannot recover the root or escape its host.
@@ -329,15 +329,15 @@ pub struct ParseParser<'borrow, 'frame, 'ctx, 'op, 'session, const N: usize, con
         CHILD,
     >,
     vocabulary: &'borrow ImportStoreVocabulary,
-    views: ParseViews<'borrow, 'session>,
+    views: &'borrow ParseViews<'borrow, 'session>,
 }
 
 impl<'borrow, 'op, 'session> ParseServices<'borrow, 'op, 'session> {
     pub fn error_view(&self) -> ParseErrorView<'session> {
         ParseErrorView {
-            terminal: self.terminal,
-            limits: self.limits,
-            issuer: self.dependency_origin_issuer,
+            terminal: self.views.terminal,
+            limits: self.views.limits,
+            issuer: self.views.issuer,
         }
     }
 
@@ -350,25 +350,11 @@ impl<'borrow, 'op, 'session> ParseServices<'borrow, 'op, 'session> {
             ImportProgressUnit,
         >,
         vocabulary: &'borrow ImportStoreVocabulary,
-        views: ParseViews<'borrow, 'session>,
+        views: &'borrow ParseViews<'borrow, 'session>,
     ) -> Self {
         Self {
             store: crate::store::ImportStoreServices::new(numeric, vocabulary),
-            entry: views.entry,
-            primary_io: views.primary_io,
-            primary_authority: views.primary_authority,
-            primary_source: views.source,
-            primary_bytes: views.bytes,
-            dependency_origin_issuer: views.issuer,
-            conformance_policy: views.conformance_policy,
-            loss_policy: views.loss_policy,
-            limits: views.limits,
-            diagnostics: views.diagnostics,
-            loss_evidence: views.loss_evidence,
-            source_scope_record: views.source_scope_record,
-            format_failure_storage: views.failure_storage,
-            callback_active: views.callback_active,
-            terminal: views.terminal,
+            views,
         }
     }
 }
@@ -612,12 +598,32 @@ impl<'op, 'session> ParseRoot<'_, 'op, 'session> {
         }
     }
 
+    /// Borrows this root's numeric services and immutable metadata together.
+    /// Session data can outlive the short service loan:
+    ///
+    /// ```
+    /// use baozi_import::{ParseContext, ParseFailure};
+    /// fn primary<'session, 'inv: 'session>(
+    ///     context: &mut ParseContext<'session, 'inv>,
+    /// ) -> Result<&'session [u8], ParseFailure> {
+    ///     context.with_parser_execution(|root| Ok(root.services()?.primary_bytes()))
+    /// }
+    /// ```
+    ///
+    /// The service capability itself cannot escape the root:
+    ///
+    /// ```compile_fail
+    /// use baozi_import::{ParseContext, ParseFailure};
+    /// fn escape(context: &mut ParseContext<'_, '_>) {
+    ///     let _services = context.with_parser_execution::<_, ParseFailure>(|root| root.services());
+    /// }
+    /// ```
     pub fn services(&mut self) -> ParseResult<ParseServices<'_, 'op, 'session>> {
         self.views.preflight()?;
         Ok(ParseServices::bind(
             self.store.raw.services(),
             self.vocabulary,
-            self.views,
+            &self.views,
         ))
     }
 
@@ -626,7 +632,7 @@ impl<'op, 'session> ParseRoot<'_, 'op, 'session> {
         Ok(ParseChildren {
             numeric: self.store.raw.child_admission(),
             vocabulary: self.vocabulary,
-            views: self.views,
+            views: &self.views,
         })
     }
     /// Borrows ordinary storage/poll services without lending numeric work.
@@ -660,7 +666,7 @@ impl<'op, 'session> ParseRoot<'_, 'op, 'session> {
             FormatFailureHost::exclusive(
                 self.store.raw.failure_storage(),
                 self.vocabulary,
-                self.views,
+                &self.views,
             ),
             producer,
         )
@@ -801,7 +807,7 @@ impl<'op, 'session> ParseRoot<'_, 'op, 'session> {
         body: impl FnOnce(&mut ParseParser<'_, '_, '_, 'op, 'session, N, false>) -> Result<T, E>,
     ) -> Result<T, E> {
         self.views.preflight().map_err(E::from)?;
-        let views = self.views;
+        let views = &self.views;
         let vocabulary = self.vocabulary;
         let result = self.store.raw.parser_parent(
             layout.raw,
@@ -831,7 +837,7 @@ impl<'op, 'session> ParseRoot<'_, 'op, 'session> {
         ParseChildren {
             numeric: self.store.raw.child_admission(),
             vocabulary: self.vocabulary,
-            views: self.views,
+            views: &self.views,
         }
         .finish_parser(result, limits)
     }
@@ -872,6 +878,58 @@ impl<'op, 'session, const N: usize, const CHILD: bool>
         self.numeric.remaining()
     }
 
+    /// Session bytes remain available after parent and child service loans end:
+    ///
+    /// ```
+    /// use baozi_import::{ImportWorkClass, ParseContext, ParseFailure};
+    /// fn source<'session, 'inv: 'session>(
+    ///     context: &mut ParseContext<'session, 'inv>,
+    /// ) -> Result<&'session [u8], ParseFailure> {
+    ///     context.with_parser_execution(|root| {
+    ///         let work = root.bind_group([ImportWorkClass::WorkUnits])?;
+    ///         root.parent(&work, [0], |parent| {
+    ///             let bytes = parent.services()?.primary_bytes();
+    ///             parent.poll()?;
+    ///             parent.child(&work, [0], |child| {
+    ///                 let child_bytes = child.services()?.primary_bytes();
+    ///                 child.poll()?;
+    ///                 Ok::<_, ParseFailure>(child_bytes)
+    ///             })?;
+    ///             Ok(bytes)
+    ///         })
+    ///     })
+    /// }
+    /// ```
+    ///
+    /// A live service loan excludes reentry of either role:
+    ///
+    /// ```compile_fail,E0499
+    /// use baozi_import::{ImportWorkClass, ParseContext, ParseFailure};
+    /// fn parent_reentry(context: &mut ParseContext<'_, '_>) -> Result<(), ParseFailure> {
+    ///     context.with_parser_execution(|root| {
+    ///         let work = root.bind_group([ImportWorkClass::WorkUnits])?;
+    ///         root.parent(&work, [0], |parent| {
+    ///             let mut services = parent.services()?;
+    ///             parent.poll()?;
+    ///             services.poll()
+    ///         })
+    ///     })
+    /// }
+    /// ```
+    ///
+    /// ```compile_fail,E0499
+    /// use baozi_import::{ImportWorkClass, ParseContext, ParseFailure};
+    /// fn child_reentry(context: &mut ParseContext<'_, '_>) -> Result<(), ParseFailure> {
+    ///     context.with_parser_execution(|root| {
+    ///         let work = root.bind_group([ImportWorkClass::WorkUnits])?;
+    ///         root.child(&work, [0], |child| {
+    ///             let mut services = child.services()?;
+    ///             child.poll()?;
+    ///             services.poll()
+    ///         })
+    ///     })
+    /// }
+    /// ```
     pub fn services(&mut self) -> ParseResult<ParseServices<'_, 'op, 'session>> {
         self.views.preflight()?;
         Ok(ParseServices::bind(
@@ -1206,7 +1264,7 @@ impl<'b, 'op> FormatFailureHost<'b, 'op> {
     fn exclusive<'session: 'b>(
         storage: FailureStorage<'b, 'op>,
         vocabulary: &'b ImportStoreVocabulary,
-        views: ParseViews<'b, 'session>,
+        views: &'b ParseViews<'b, 'session>,
     ) -> Self {
         Self {
             storage,

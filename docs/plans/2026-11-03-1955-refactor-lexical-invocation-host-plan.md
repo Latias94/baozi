@@ -515,3 +515,20 @@ Performance and release remain HOLD. Fixed/dynamic backing, shared promotion, ex
 administrative accounting, remaining `LocalWork`/owning-path deletion and indexing are
 still implementation work. Full current-source ordinary Linux and separate heap gates
 are open; completed Linux instruction attribution is a separate diagnostic step.
+
+## Borrowed Parse Metadata, 2026-11-05
+
+The [two-file metadata checkpoint](../reviews/2026-11-05-parse-metadata-borrowing.md)
+keeps immutable context metadata in the actual `ParseRoot` and lends it through child,
+parser and service roles. It removes the aggregate Copy path and expanded service
+fields without changing numeric admission, completion, errors, cancellation or exit
+polls. Parent/child compiler contracts guard session-data return and exclude role
+reentry while a service is live. Frozen source2 passes the actual freshly compiled
+3,565-test workspace, 188 doctests, 138 consumer tests, strict lints and formats;
+independent source and final evidence reviews close that bounded qualification.
+
+The first cached workspace runtime is not used to qualify this change. Preserved
+fingerprints and verified new main-root dep-info distinguish the corrected run.
+The full original ordinary matrix still determines performance acceptance. Fixed/dynamic
+backing, shared promotion, exact administrative accounting, remaining owning-path
+deletion and indexing remain required; metadata borrowing does not complete them.
