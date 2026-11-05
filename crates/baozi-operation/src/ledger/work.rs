@@ -147,6 +147,16 @@ impl<D> LocalWork<D> {
         Ok((&self.catalog, self.state.get_mut().view(&self.catalog)))
     }
 
+    /// Reborrows the existing owner for a library-owned Internal action. Its enclosing frame may
+    /// remain active; this is not an external invocation entry or recovery of a forgotten guard.
+    pub(super) fn reborrow(&mut self) -> Result<(&[D], WorkView<'_, D>), LedgerCause<D>> {
+        {
+            let state = self.borrow_state_mut()?;
+            self.check_integrity(&state)?;
+        }
+        Ok((&self.catalog, self.state.get_mut().view(&self.catalog)))
+    }
+
     /// Consumes the exact numeric state before final composition takes any storage guard.
     pub(super) fn into_state(self) -> (Vec<D>, WorkState<D>) {
         // Either kind of forgotten guard remains a fault even though into_inner can recover T.
@@ -214,14 +224,23 @@ impl<D: Copy + Ord> LocalWork<D> {
         dimensions: [D; N],
         grant: WorkGrant,
     ) -> Result<BoundWorkGroup<'_, D, N>, LedgerCause<D>> {
-        let layout = WorkLayout::bind(&self.catalog, &dimensions, grant)?;
-        let state = self.borrow_state()?;
-        self.ensure_active(&state, grant)?;
-        layout.validate_binding(&state.header, &dimensions)?;
+        let layout = self.bind_layout(dimensions, grant)?;
         Ok(BoundWorkGroup {
             owner: self,
             layout,
         })
+    }
+
+    pub(super) fn bind_layout<const N: usize>(
+        &self,
+        dimensions: [D; N],
+        grant: WorkGrant,
+    ) -> Result<WorkLayout<N>, LedgerCause<D>> {
+        let layout = WorkLayout::bind(&self.catalog, &dimensions, grant)?;
+        let state = self.borrow_state()?;
+        self.ensure_active(&state, grant)?;
+        layout.validate_binding(&state.header, &dimensions)?;
+        Ok(layout)
     }
 }
 

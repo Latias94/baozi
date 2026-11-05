@@ -213,6 +213,66 @@ fn exclusive_entry_does_not_recover_forgotten_legacy_ownership_or_borrows() {
     assert!(owner.into_state().1.header.integrity_fault);
 }
 
+#[test]
+fn internal_reborrow_preserves_its_enclosing_frame_and_external_quiescence_gate() {
+    let mut owner = LocalWork::new(vec![1], vec![row(1, 8, 8)]);
+    let (layout, mut enclosing) = {
+        let (catalog, mut view) = owner.exclusive().unwrap();
+        let layout = WorkLayout::bind(catalog, &[1], WorkGrant::Ordinary).unwrap();
+        let enclosing = layout
+            .admit_observed(&mut view, [3], WorkLane::Internal)
+            .unwrap();
+        (layout, enclosing)
+    };
+    assert!(matches!(
+        owner.exclusive(),
+        Err(LedgerCause::OutstandingLinearWorkPermits { count: 1 })
+    ));
+    {
+        let (_, mut view) = owner.reborrow().unwrap();
+        let mut share = layout
+            .admit_observed(&mut view, [2], WorkLane::Internal)
+            .unwrap();
+        assert_eq!(view.header.open_envelopes, 2);
+        assert!(matches!(
+            share.complete_batch_with_outcome(&layout, &mut view, [2]),
+            LinearWorkCompletion::Completed
+        ));
+        share.resolve(&layout, &mut view, false).unwrap();
+        assert_eq!(view.header.open_envelopes, 1);
+        assert_eq!(view.rows[0].state.pending_consumed, 3);
+        assert!(matches!(
+            enclosing.complete_batch_with_outcome(&layout, &mut view, [1]),
+            LinearWorkCompletion::Completed
+        ));
+        enclosing.resolve(&layout, &mut view, false).unwrap();
+    }
+    let (_, view) = owner.exclusive().unwrap();
+    let state = view.rows[0].state;
+    assert_eq!(
+        (state.attempted, state.consumed, state.pending_consumed),
+        (5, 3, 0)
+    );
+}
+
+#[test]
+fn internal_reborrow_never_recovers_forgotten_dynamic_guards() {
+    for shared in [false, true] {
+        let mut owner = LocalWork::new(vec![1], vec![row(1, 8, 8)]);
+        if shared {
+            std::mem::forget(owner.borrow_state().unwrap());
+        } else {
+            std::mem::forget(owner.borrow_state_mut().unwrap());
+        }
+        assert!(matches!(
+            owner.reborrow(),
+            Err(LedgerCause::FinalSnapshotShapeMismatch)
+        ));
+        assert!(owner.borrow_fault.get());
+        assert!(owner.into_state().1.header.integrity_fault);
+    }
+}
+
 // Equal ordering identities intentionally have different diagnostic labels. These are the R2
 // registered/caller values, with a third row label to detect projection from mutable rows.
 #[derive(Debug, Clone, Copy)]

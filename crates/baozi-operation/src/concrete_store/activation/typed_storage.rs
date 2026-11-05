@@ -425,7 +425,7 @@ where
         let result = self
             .assembly
             .raw
-            .share_typed_storage(source, self.materialization_work_dimension)
+            .share_typed_storage(source)
             .map_err(|cause| map_publication_error(&cause));
         preserve_first_fault(self.first_fault, result)
     }

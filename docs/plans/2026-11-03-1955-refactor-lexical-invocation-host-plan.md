@@ -567,3 +567,20 @@ Both source reviews and final affected-gate evidence review pass. This removes o
 compiled compatibility dependency before the connected retained-work cut; live
 Internal/protected/share controls, cold observation, fixed/dynamic backing and all
 ordinary performance gates remain open.
+
+## Borrowed Typed-Storage Sharing, 2026-11-05
+
+The [actual typed-storage share leaf](../reviews/2026-11-05-borrowed-typed-storage-sharing.md)
+borrows the unique numeric state through the real physical clone and typed handle.
+It removes the discarded work-control construction and unused dimension argument,
+and reuses one retained-private allocation share executor. Internal reborrow retains
+the outer frame and rejects forgotten dynamic guards; external ordinary entry still
+requires quiescence. Source and test-only follow-up reviews pass with explicit
+coverage limits. Final affected gates pass 1,054 Operation tests, 138 consumer tests,
+both strict lints and both formats, with 188 doctests on unchanged production bytes.
+The earlier test-only Clippy failure remains recorded rather than erased.
+
+This is a bounded leaf of the reviewed connected design. Joint attribution,
+controlled construction and validation, inheritance, protected callbacks and the
+surviving old-owner deletion remain next. No new timing or heap result is assigned
+to this source checkpoint; full convergence and release stay HOLD.

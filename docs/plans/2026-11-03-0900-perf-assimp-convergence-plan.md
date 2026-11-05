@@ -529,3 +529,14 @@ negative case only for a genuinely new boundary, not for incidental private layo
   workspace run is not reassigned to this source. This is a prerequisite deletion without
   a new performance result. Remaining retained-work/backing/promotion/accounting/indexing
   and full ordinary Windows/Linux/heap convergence stay open.
+- The [typed-storage sharing leaf](../reviews/2026-11-05-borrowed-typed-storage-sharing.md)
+  now borrows the unique numeric view through the existing clone/handle executor.
+  Its discarded work-control construction and unused dimension argument are removed.
+  Ordinary external quiescence, Internal nesting, physical prefixes and fail-closed
+  abandonment remain. Independent source and test-only reviews find no blocking
+  defect and retain bounded coverage limits. Final source3 passes 1,054 Operation
+  tests, strict workspace/consumer lint, 138 consumer tests (one existing skip)
+  and both formats; source2's 188 doctests qualify identical production bytes.
+  QA1's test-only Clippy failure is preserved and fixed before successful QA2.
+  This does not complete connected canonical/protected borrowing or remove LocalWork.
+  There is no new performance result; the full convergence and release gates remain open.

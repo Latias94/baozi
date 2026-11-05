@@ -47,6 +47,22 @@ impl<O: OperationOwner, P: Copy + Ord, D: Copy + Ord + fmt::Debug> Ledger<O, P, 
             },
         ))
     }
+
+    /// Binds at the actual Internal action boundary, then lends the sole numeric state. Binding
+    /// retains the existing key/mode/role precedence and never admits attempted or consumed work.
+    pub(crate) fn bind_internal_work<const N: usize>(
+        &mut self,
+        dimensions: [D; N],
+    ) -> Result<(ExclusiveWork<'_, D>, WorkLayout<N>), LedgerCause<D>> {
+        let grant = match self.work.borrow_state()?.header.mode {
+            WorkMode::Protected => WorkGrant::Protected,
+            _ => WorkGrant::Ordinary,
+        };
+        let layout = self.work.bind_layout(dimensions, grant)?;
+        let (catalog, work) = self.work.reborrow()?;
+        layout.validate_active(&work)?;
+        Ok((ExclusiveWork { catalog, work }, layout))
+    }
 }
 
 impl<D: Copy + Ord + fmt::Debug> ExclusiveWork<'_, D> {

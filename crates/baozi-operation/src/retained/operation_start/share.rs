@@ -16,6 +16,9 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+mod borrowed;
+pub(in crate::retained) use borrowed::try_admit_borrowed_retained_share_work;
+
 /// Linear completion authority for one admitted clone-and-handle work pair.
 ///
 /// Admission records both attempted units and reserves their complete future consumed envelope
@@ -72,6 +75,32 @@ pub(crate) trait AdmittedShareWork<D>: Sized {
     }
 }
 
+/// Allocation handles remain private to retained storage, independently of the numeric adapter.
+fn share_allocation_after_admitted_work<T, D>(
+    mut work: impl AdmittedShareWork<D>,
+    allocation: &RetainedAllocation<T>,
+) -> Result<RetainedAllocation<T>, RetainedShareWorkCompletionFailure<RetainedAllocation<T>, D>> {
+    let inner = allocation.inner.share();
+    if let Err(cause) = work.complete_reference_clone() {
+        let cause = work.finish_partial().err().unwrap_or(cause);
+        return Err(RetainedShareWorkCompletionFailure {
+            owner: RetainedAllocation {
+                inner,
+                membership: None,
+            },
+            cause,
+        });
+    }
+    let owner = RetainedAllocation {
+        inner,
+        membership: None,
+    };
+    if let Err(cause) = work.complete_typed_handle() {
+        return Err(RetainedShareWorkCompletionFailure { owner, cause });
+    }
+    Ok(owner)
+}
+
 impl<O, P, D> AdmittedShareWork<D> for RetainedShareWorkPermit<'_, O, P, D>
 where
     O: OperationOwner,
@@ -122,29 +151,11 @@ where
     }
 
     pub(in crate::retained) fn try_share_allocation<T>(
-        mut self,
+        self,
         allocation: &RetainedAllocation<T>,
     ) -> Result<RetainedAllocation<T>, RetainedShareWorkCompletionFailure<RetainedAllocation<T>, D>>
     {
-        let inner = allocation.inner.share();
-        if let Err(cause) = self.complete_reference_clone() {
-            let cause = self.finish_partial().err().unwrap_or(cause);
-            return Err(RetainedShareWorkCompletionFailure {
-                owner: RetainedAllocation {
-                    inner,
-                    membership: None,
-                },
-                cause,
-            });
-        }
-        let owner = RetainedAllocation {
-            inner,
-            membership: None,
-        };
-        if let Err(cause) = self.complete_typed_handle() {
-            return Err(RetainedShareWorkCompletionFailure { owner, cause });
-        }
-        Ok(owner)
+        share_allocation_after_admitted_work(self, allocation)
     }
 }
 

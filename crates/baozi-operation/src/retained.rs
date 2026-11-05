@@ -509,7 +509,6 @@ where
     pub(crate) fn share_typed_storage<T: Send + Sync + 'static>(
         &mut self,
         source: &SharedRetainedStorage<T>,
-        work_dimension: D,
     ) -> Result<SharedRetainedStorage<T>, RetainedPublicationError<D>>
     where
         P: TerminalEvidenceKey,
@@ -532,14 +531,18 @@ where
         let action = preflight.admit_action().map_err(|cause| {
             RetainedPublicationError::Writer(map_account_action_admission_error(cause))
         })?;
-        let (_control, ledger) = self
+        let (_, _, ledger) = self
             .operation
             .as_mut()
             .ok_or(RetainedPublicationError::Poisoned)?
-            .split_work_control(work_dimension);
-        let admitted =
-            try_admit_retained_share_work(ledger, self.fields.ordinary_handle_share_work)
-                .map_err(RetainedPublicationError::Writer)?;
+            .common
+            .coordinator
+            .split_exclusive_progress_and_ledger();
+        let admitted = operation_start::try_admit_borrowed_retained_share_work(
+            ledger,
+            self.fields.ordinary_handle_share_work,
+        )
+        .map_err(RetainedPublicationError::Writer)?;
         let allocation = action
             .run(|_| admitted.try_share_allocation(source.allocation()))
             .map_err(|failure| {

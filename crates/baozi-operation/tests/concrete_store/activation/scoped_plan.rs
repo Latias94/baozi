@@ -641,6 +641,7 @@ fn typed_storage_prepare_share_finishes_before_the_borrowed_build_envelope() {
                                 |shared, control| control.run_unit(|| shared),
                             ).expect("the completed Internal share leaves Producer admission quiescent");
                             assert_eq!(parent.as_ref().as_ref(), "ab");
+                            assert!(std::ptr::eq(child.as_ref(), parent.as_ref().as_ref()));
                             assert_eq!(account.snapshot().live_retained_allocations(), child_baseline.live_retained_allocations() + 1);
                             drop(child);
                             assert_eq!(parent.as_ref().as_ref(), "ab");
