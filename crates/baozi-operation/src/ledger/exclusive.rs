@@ -15,6 +15,24 @@ pub(crate) struct ExclusiveStorage<'op, O, P, D> {
 }
 
 impl<'op, O, P, D> ExclusiveStorage<'op, O, P, D> {
+    pub(crate) fn reborrow(&self) -> ExclusiveStorage<'_, O, P, D> {
+        ExclusiveStorage {
+            state: self.state,
+            phases: self.phases,
+            catalog: self.catalog,
+            operation_live_byte_limit: self.operation_live_byte_limit,
+            owner: PhantomData,
+        }
+    }
+
+    pub(crate) fn planning_state(&self) -> LedgerPlanningState {
+        let state = lock(self.state);
+        LedgerPlanningState {
+            current_live_bytes: state.current_live_bytes - state.retained_output_bytes,
+            active_reservations: state.active_reservations - state.retained_output_reservations,
+        }
+    }
+
     pub(crate) fn progress_evidence(&self) -> ProgressEvidenceStorage<'op, O, P, D> {
         ProgressEvidenceStorage::new(self.state)
     }
@@ -23,6 +41,20 @@ impl<'op, O, P, D> ExclusiveStorage<'op, O, P, D> {
 type WorkAndStorage<'op, O, P, D> = (ExclusiveWork<'op, D>, ExclusiveStorage<'op, O, P, D>);
 
 impl<O: OperationOwner, P: Copy + Ord, D: Copy + Ord + fmt::Debug> Ledger<O, P, D> {
+    pub(crate) fn split_internal(
+        &mut self,
+    ) -> (InternalWork<'_, D>, ExclusiveStorage<'_, O, P, D>) {
+        let work = self.work.split_internal();
+        let storage = ExclusiveStorage {
+            state: &self.state,
+            phases: &self.phase_catalogue,
+            catalog: work.catalog,
+            operation_live_byte_limit: self.operation_live_byte_limit,
+            owner: PhantomData,
+        };
+        (work, storage)
+    }
+
     /// Transitional storage-only adapter: numeric work is never borrowed by this view.
     pub(crate) fn storage_view(&self) -> ExclusiveStorage<'_, O, P, D> {
         ExclusiveStorage {
@@ -65,7 +97,63 @@ impl<O: OperationOwner, P: Copy + Ord, D: Copy + Ord + fmt::Debug> Ledger<O, P, 
     }
 }
 
+#[cfg(test)]
+impl<D> ExclusiveWork<'_, D> {
+    pub(crate) fn reborrow(&mut self) -> ExclusiveWork<'_, D> {
+        ExclusiveWork {
+            catalog: self.catalog,
+            work: WorkView {
+                catalog: self.work.catalog,
+                rows: self.work.rows,
+                header: self.work.header,
+            },
+        }
+    }
+}
+
 impl<D: Copy + Ord + fmt::Debug> ExclusiveWork<'_, D> {
+    pub(crate) fn reserve_operation_attribution<
+        Destination: PublicationDestination,
+        O: OperationOwner,
+        P: Copy + Ord,
+    >(
+        &self,
+        storage: &ExclusiveStorage<'_, O, P, D>,
+        phase: P,
+        dimension: D,
+        bytes: u64,
+    ) -> Result<OperationAttributionReservation<O, P, D, Destination>, LedgerCause<D>> {
+        if self.work.header.integrity_fault || self.work.rows.len() != self.work.catalog.len() {
+            return Err(LedgerCause::FinalSnapshotShapeMismatch);
+        }
+        let admission =
+            Ledger::<O, P, D>::storage_admission_for_mode::<Destination>(self.work.header.mode)?;
+        Ledger::<O, P, D>::reserve_core_in(
+            storage.state,
+            storage.operation_live_byte_limit,
+            phase,
+            dimension,
+            bytes,
+            admission,
+            ReservationPositions {
+                dimension: storage
+                    .catalog
+                    .binary_search(&dimension)
+                    .map_err(|_| LedgerCause::UnknownDimension { dimension }),
+                phase: storage
+                    .phases
+                    .iter()
+                    .find(|entry| entry.phase == phase)
+                    .map(|entry| entry.state_position)
+                    .ok_or(LedgerCause::UnknownPhase),
+            },
+        )
+        .map(|core| OperationAttributionReservation {
+            core,
+            destination: PhantomData,
+        })
+    }
+
     pub(crate) fn bind<const N: usize>(
         &self,
         dimensions: [D; N],
@@ -73,6 +161,23 @@ impl<D: Copy + Ord + fmt::Debug> ExclusiveWork<'_, D> {
         let layout = WorkLayout::bind(self.catalog, &dimensions, WorkGrant::Ordinary)?;
         layout.validate_active(&self.work)?;
         Ok(layout)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bind_protected<const N: usize>(
+        &self,
+        dimensions: [D; N],
+    ) -> Result<WorkLayout<N>, LedgerCause<D>> {
+        let layout = WorkLayout::bind(self.catalog, &dimensions, WorkGrant::Protected)?;
+        layout.validate_active(&self.work)?;
+        Ok(layout)
+    }
+
+    pub(crate) fn validate_layout<const N: usize>(
+        &self,
+        layout: WorkLayout<N>,
+    ) -> Result<(), LedgerCause<D>> {
+        layout.validate_active(&self.work)
     }
 
     pub(crate) fn charge_attempted<const N: usize>(

@@ -16,10 +16,10 @@ use super::ownership::{
     map_inherited_cleanup_error,
 };
 use super::{
-    PendingAccountActionAdmission, PhysicalStorageAccount, RetainedBatchLimits,
+    AdmittedShareWork, PendingAccountActionAdmission, PhysicalStorageAccount, RetainedBatchLimits,
     RetainedHandleSharePlan, RetainedPublicationError, RetainedShareAdmissionError,
-    RetainedWorkControl, RetainedWriterError, RetainedWriterPlan,
-    map_account_action_admission_error, map_batch_error, try_admit_retained_share_work,
+    RetainedWorkBinding, RetainedWorkControl, RetainedWorkRoot, RetainedWriterError,
+    RetainedWriterPlan, map_account_action_admission_error, map_batch_error,
     try_admit_retained_share_work_before_physical,
 };
 use crate::control::{ControlCause, discard_untrusted_panic_payload};
@@ -1147,12 +1147,12 @@ where
 
 mod published_table_capability {
     use super::{
-        AccountPoisonReason, AssertUnwindSafe, Ledger, OperationOwner, PhysicalStorageAccount,
+        AccountPoisonReason, AssertUnwindSafe, OperationOwner, PhysicalStorageAccount,
         RetainedAllocation, RetainedBlockMember, RetainedBlockOrigin, RetainedHandleSharePlan,
         RetainedLookupMember, RetainedMembership, RetainedMembershipDestination,
         RetainedPublicationError, RetainedSetId, RetainedSlotIdentity, RetainedTableAllocation,
-        RetainedWriterError, TypeId, canonical_source_mapping_is_exact, catch_unwind,
-        discard_untrusted_panic_payload, map_account_action_admission_error,
+        RetainedWorkRoot, RetainedWriterError, TypeId, canonical_source_mapping_is_exact,
+        catch_unwind, discard_untrusted_panic_payload, map_account_action_admission_error,
     };
     use std::fmt;
 
@@ -1461,7 +1461,7 @@ mod published_table_capability {
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn share_retained_block<O, P, D, Block, Tag>(
-        ledger: &Ledger<O, P, D>,
+        root: &mut RetainedWorkRoot<'_, O, P, D>,
         account: &PhysicalStorageAccount,
         handle_share_work: RetainedHandleSharePlan<D>,
         table: &mut RetainedTableAllocation<Block>,
@@ -1482,7 +1482,7 @@ mod published_table_capability {
             return Err(RetainedPublicationError::InvalidSourceSlot);
         }
         share_retained_block_runtime(
-            ledger,
+            root,
             account,
             handle_share_work,
             table,
@@ -1496,7 +1496,7 @@ mod published_table_capability {
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn share_retained_block_runtime<O, P, D, Block>(
-        ledger: &Ledger<O, P, D>,
+        root: &mut RetainedWorkRoot<'_, O, P, D>,
         account: &PhysicalStorageAccount,
         handle_share_work: RetainedHandleSharePlan<D>,
         table: &mut RetainedTableAllocation<Block>,
@@ -1603,7 +1603,7 @@ mod published_table_capability {
         };
         match catch_unwind(AssertUnwindSafe(|| {
             super::try_share_retained_block_after_admission_runtime::<O, P, D, Block>(
-                ledger,
+                root,
                 share_admission,
                 handle_share_work,
                 table,
@@ -2620,7 +2620,7 @@ where
 }
 #[allow(clippy::too_many_arguments)]
 pub(super) fn try_retain_block<O, P, D, Destination, Block, Tag>(
-    ledger: &Ledger<O, P, D>,
+    root: &mut RetainedWorkRoot<'_, O, P, D>,
     account: &PhysicalStorageAccount,
     handle_share_work: RetainedHandleSharePlan<D>,
     phase: P,
@@ -2635,6 +2635,7 @@ pub(super) fn try_retain_block<O, P, D, Destination, Block, Tag>(
     build: impl for<'a> FnOnce(
         BlockEmplacer<'a, Block>,
         &'a RetainedBlockTable<Block>,
+        &mut RetainedWorkRoot<'_, O, P, D>,
     ) -> Result<BlockPlacement<'a, Block, Tag>, RetainedBuildFailureCode>,
 ) -> Result<RetainedSlotIdentity, RetainedPublicationError<D>>
 where
@@ -2715,15 +2716,29 @@ where
             RetainedWriterError::AccountPoisoned(poisoned),
         ));
     };
-    let admitted_share_work =
-        try_admit_retained_share_work_before_physical(ledger, account, handle_share_work)
-            .map_err(RetainedPublicationError::Writer)?;
+    let share_work = &mut root.work;
+    let admitted_share_work = match catch_unwind(AssertUnwindSafe(move || {
+        let share_work = share_work;
+        super::operation_start::admit_internal_share(share_work, handle_share_work)
+    })) {
+        Ok(result) => result.map_err(RetainedPublicationError::Writer)?,
+        Err(payload) => {
+            let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            discard_untrusted_panic_payload(payload);
+            return Err(RetainedPublicationError::Writer(
+                RetainedWriterError::AccountPoisoned(poisoned),
+            ));
+        }
+    };
     let attribution_result = catch_unwind(AssertUnwindSafe(|| {
-        ledger.reserve_operation_attribution::<Destination>(
-            phase,
-            attribution_dimension,
-            charge.bytes,
-        )
+        admitted_share_work
+            .work()
+            .reserve_operation_attribution::<Destination, O, P>(
+                &root.storage,
+                phase,
+                attribution_dimension,
+                charge.bytes,
+            )
     }));
     let attribution = match attribution_result {
         Err(payload) => {
@@ -2775,6 +2790,7 @@ where
                     marker: PhantomData,
                 },
                 table,
+                root,
             )
             .map(BlockPlacement::into_block)
         },
@@ -2852,7 +2868,8 @@ pub(super) fn try_bind_canonical_source_mapping<O, P, PP, U, D, Block>(
     table: &mut RetainedTableAllocation<Block>,
     destination_set: RetainedSetId,
     source: &PublishedCanonicalAggregate<Block>,
-    mut control: RetainedWorkControl<'_, O, P, PP, U, D>,
+    mut control: RetainedWorkBinding<'_, PP, U, D>,
+    root: &mut RetainedWorkRoot<'_, O, P, D>,
 ) -> Result<(), CanonicalSourceBindError<D>>
 where
     O: OperationOwner,
@@ -2932,7 +2949,7 @@ where
         for _ in 0..source_len {
             control.poll().map_err(CanonicalSourceBindError::Control)?;
             control
-                .charge_observed(1)
+                .charge_observed(root, 1)
                 .map_err(CanonicalSourceBindError::Ledger)?;
             mapping.entries.push(None);
         }
@@ -3039,13 +3056,13 @@ where
 }
 
 pub(super) fn try_inherit_all_canonical_leaves<O, P, PP, U, D, Block>(
-    ledger: &Ledger<O, P, D>,
+    root: &mut RetainedWorkRoot<'_, O, P, D>,
     account: &PhysicalStorageAccount,
     handle_share_work: RetainedHandleSharePlan<D>,
     table: &mut RetainedTableAllocation<Block>,
     destination_set: RetainedSetId,
     source: &PublishedCanonicalAggregate<Block>,
-    mut control: RetainedWorkControl<'_, O, P, PP, U, D>,
+    mut control: RetainedWorkBinding<'_, PP, U, D>,
 ) -> Result<(), CanonicalLeafInheritanceError<D>>
 where
     O: OperationOwner,
@@ -3074,7 +3091,7 @@ where
                 .poll()
                 .map_err(CanonicalLeafInheritanceError::Control)?;
             control
-                .charge_observed(1)
+                .charge_observed(root, 1)
                 .map_err(CanonicalLeafInheritanceError::Ledger)?;
             let Some(member) = source.inheritance_source_member(source_index, account) else {
                 let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
@@ -3104,7 +3121,7 @@ where
                 }
             }
             published_table_capability::share_retained_block_runtime(
-                ledger,
+                root,
                 account,
                 handle_share_work,
                 table,
@@ -3177,7 +3194,7 @@ where
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn try_retain_rewritten_canonical_block<O, P, D, Block, Tag>(
-    ledger: &Ledger<O, P, D>,
+    root: &mut RetainedWorkRoot<'_, O, P, D>,
     account: &PhysicalStorageAccount,
     handle_share_work: RetainedHandleSharePlan<D>,
     phase: P,
@@ -3190,6 +3207,7 @@ pub(super) fn try_retain_rewritten_canonical_block<O, P, D, Block, Tag>(
     plan: RetainedAllocationPlan,
     build: impl for<'a> FnOnce(
         BlockEmplacer<'a, Block>,
+        &mut RetainedWorkRoot<'_, O, P, D>,
     ) -> Result<BlockPlacement<'a, Block, Tag>, RetainedBuildFailureCode>,
 ) -> Result<RetainedSlotIdentity, RetainedPublicationError<D>>
 where
@@ -3207,7 +3225,7 @@ where
         source_identity,
     )?;
     try_retain_block(
-        ledger,
+        root,
         account,
         handle_share_work,
         phase,
@@ -3221,13 +3239,13 @@ where
             source: source_identity,
         },
         plan,
-        |emplacer, _| build(emplacer),
+        |emplacer, _, root| build(emplacer, root),
     )
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn try_rewrite_canonical_block_controlled<O, P, PP, U, D, Block, Tag>(
-    ledger: &Ledger<O, P, D>,
+    root: &mut RetainedWorkRoot<'_, O, P, D>,
     account: &PhysicalStorageAccount,
     handle_share_work: RetainedHandleSharePlan<D>,
     phase: P,
@@ -3238,7 +3256,7 @@ pub(super) fn try_rewrite_canonical_block_controlled<O, P, PP, U, D, Block, Tag>
     source: &PublishedCanonicalAggregate<Block>,
     source_identity: RetainedSlotIdentity,
     allocation_plan: RetainedAllocationPlan,
-    control: RetainedWorkControl<'_, O, P, PP, U, D>,
+    control: RetainedWorkBinding<'_, PP, U, D>,
     build: impl for<'placement, 'source, 'destination, 'control> FnOnce(
         BlockEmplacer<'placement, Block>,
         &'source Block,
@@ -3266,7 +3284,7 @@ where
         source_identity,
     )?;
     try_retain_block(
-        ledger,
+        root,
         account,
         handle_share_work,
         phase,
@@ -3280,16 +3298,18 @@ where
             source: source_identity,
         },
         allocation_plan,
-        move |emplacer, destination| {
+        move |emplacer, destination, root| {
             let mapping = CanonicalRetainedRewriteMap::new(source, destination, account, set_id);
-            build(emplacer, source_block, mapping, control)
+            control.build(root, |control| {
+                build(emplacer, source_block, mapping, control)
+            })
         },
     )
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn try_share_retained_block<O, P, D, Block, Tag>(
-    ledger: &Ledger<O, P, D>,
+    root: &mut RetainedWorkRoot<'_, O, P, D>,
     account: &PhysicalStorageAccount,
     handle_share_work: RetainedHandleSharePlan<D>,
     table: &mut RetainedTableAllocation<Block>,
@@ -3307,7 +3327,7 @@ where
     Tag: Copy + Send + Sync + 'static,
 {
     published_table_capability::share_retained_block::<O, P, D, Block, Tag>(
-        ledger,
+        root,
         account,
         handle_share_work,
         table,
@@ -3320,7 +3340,7 @@ where
 }
 #[allow(clippy::too_many_arguments)]
 pub(super) fn try_share_retained_block_after_admission<O, P, D, Block, Tag>(
-    ledger: &Ledger<O, P, D>,
+    root: &mut RetainedWorkRoot<'_, O, P, D>,
     share_admission: PendingAccountActionAdmission<'_>,
     handle_share_work: RetainedHandleSharePlan<D>,
     table: &mut RetainedBlockTable<Block>,
@@ -3342,7 +3362,7 @@ where
         return Err(RetainedPublicationError::InvalidSourceSlot);
     }
     try_share_retained_block_after_admission_runtime(
-        ledger,
+        root,
         share_admission,
         handle_share_work,
         table,
@@ -3357,7 +3377,7 @@ where
 
 #[allow(clippy::too_many_arguments)]
 fn try_share_retained_block_after_admission_runtime<O, P, D, Block>(
-    ledger: &Ledger<O, P, D>,
+    root: &mut RetainedWorkRoot<'_, O, P, D>,
     share_admission: PendingAccountActionAdmission<'_>,
     handle_share_work: RetainedHandleSharePlan<D>,
     table: &mut RetainedBlockTable<Block>,
@@ -3384,8 +3404,9 @@ where
             RetainedWriterError::AccountPoisoned(poisoned),
         ));
     }
-    let admitted_share_work = try_admit_retained_share_work(ledger, handle_share_work)
-        .map_err(RetainedPublicationError::Writer)?;
+    let admitted_share_work =
+        super::operation_start::admit_internal_share(&mut root.work, handle_share_work)
+            .map_err(RetainedPublicationError::Writer)?;
     let mut allocation = match share_admission
         .run(|_| admitted_share_work.try_share_allocation(source_allocation))
     {

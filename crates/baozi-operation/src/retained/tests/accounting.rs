@@ -833,13 +833,11 @@ fn admission_first_inherited_share_completes_then_later_share_is_rejected() {
         .inner
         .test_source_allocation(source_slot.identity())
         .unwrap_or_else(|| panic!("source slot must resolve"));
-    let ledger = assembly
+    let mut root = assembly
         .operation
-        .as_ref()
+        .as_mut()
         .unwrap_or_else(|| panic!("target retains operation"))
-        .common
-        .coordinator
-        .retained_ledger();
+        .internal_work_root();
     let identity = try_share_retained_block_after_admission::<
         TestOwner,
         TestPhase,
@@ -847,7 +845,7 @@ fn admission_first_inherited_share_completes_then_later_share_is_rejected() {
         u64,
         CanonicalRootTag,
     >(
-        ledger,
+        &mut root,
         share_admission,
         assembly.fields.ordinary_handle_share_work,
         assembly

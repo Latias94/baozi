@@ -584,3 +584,27 @@ This is a bounded leaf of the reviewed connected design. Joint attribution,
 controlled construction and validation, inheritance, protected callbacks and the
 surviving old-owner deletion remain next. No new timing or heap result is assigned
 to this source checkpoint; full convergence and release stay HOLD.
+
+## Connected Retained Work, 2026-11-05
+
+The [connected retained-work implementation](../reviews/2026-11-05-connected-retained-work-borrowing.md)
+now carries ordinary/protected construction, inheritance and validation through a
+unique numeric/storage split. The deferred binding and original poll checkpoint
+survive until actual builder entry; sharing completes before builder admission.
+Joint attribution validates live mode and the typed destination at its original
+post-share point. An outer frame owns exact, partial and sticky completion before
+physical commit or proof acceptance; callbacks receive short permissions. The old
+three owning work permits and duplicate remaining counters are deleted.
+
+Source and final test-delta reviews close this implementation without a blocking
+finding. Direct protected body/capture-panic composition remains a named coverage
+limit. Final source passes all seven serial workspace/consumer gates: 3,589 runtime
+tests, 188 doctests, 138 consumer tests, both strict lints and both formats, with
+the six/one existing skips preserved and all 1,165 input hashes unchanged.
+Construction failures and corrected tests remain separately recorded.
+
+The remaining execution facade has forwarding/test/diagnostic callers, while its
+retained-backing helper, startup/table sharing and cold numeric observations remain
+actual migration work. Delete those owners with their last callers before claiming
+LocalWork retired. Fixed/dynamic backing, shared promotion, exact accounting,
+indexing and the original performance/memory/heap acceptance remain open.

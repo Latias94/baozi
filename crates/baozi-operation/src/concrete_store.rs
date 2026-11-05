@@ -135,7 +135,7 @@ use crate::owner::OperationOwner;
 #[cfg(test)]
 use crate::retained::RetainedAllocationError;
 use crate::retained::{
-    BlockEmplacer, BlockPlacement, BorrowedRetainedWorkPermit, RetainedPreFreezeClassification,
+    BlockEmplacer, BlockPlacement, BorrowedRetainedWorkPermission, RetainedPreFreezeClassification,
     RetainedSuccessFreezeContribution, RetainedSuccessFreezePermit,
     RetainedSuccessFreezePermitIssue,
 };
@@ -1759,7 +1759,7 @@ type RawStoreProducerHost<'a, O, PP, U> =
 type RawStoreWorkControl<'a, O, PP, U> =
     RetainedWorkControl<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
 type RawStoreBorrowedWorkPermit<'borrow, 'operation, O, PP, U> =
-    BorrowedRetainedWorkPermit<'borrow, 'operation, O, StorePhaseKey, PP, U, StoreDimensionKey>;
+    BorrowedRetainedWorkPermission<'borrow, 'operation, O, StorePhaseKey, PP, U, StoreDimensionKey>;
 type RawStoreAssembly<'inv, O, PP, U> = RetainedPublicationAssembly<
     'inv,
     O,

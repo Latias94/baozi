@@ -18,8 +18,8 @@ mod startup;
 mod work;
 
 pub(crate) use work::{
-    BoundWorkGroup, LinearWorkBatchPermit, ParserChannel, ParserFrame, ParserWorkError, WorkFrame,
-    WorkLane, WorkLayout, WorkView,
+    BoundWorkGroup, InternalWork, LinearWorkBatchPermit, ParserChannel, ParserFrame,
+    ParserWorkError, WorkFrame, WorkLane, WorkLayout, WorkView,
 };
 use work::{LocalWork, WorkDimensionState, WorkEntry, WorkGrant, WorkMode, WorkPolicy, WorkState};
 
@@ -1184,10 +1184,6 @@ pub(crate) enum LinearWorkCompletion<D> {
 }
 
 impl<D> LinearWorkCompletion<D> {
-    pub(crate) const fn prefix_was_applied(&self) -> bool {
-        matches!(self, Self::Completed | Self::CompletedWithLedgerFailure(_))
-    }
-
     pub(crate) fn into_result(self) -> Result<(), LedgerCause<D>> {
         match self {
             Self::Completed => Ok(()),
@@ -1649,6 +1645,7 @@ where
             .admit_observed(charges.map(|(_, amount)| amount), WorkLane::Internal)
     }
 
+    #[cfg(test)]
     pub(crate) fn try_admit_failure_work(
         &self,
         dimension: D,
@@ -1733,7 +1730,13 @@ where
         &self,
     ) -> Result<StorageAdmission, LedgerCause<D>> {
         self.work.validate_integrity()?;
-        match self.work.borrow_state()?.header.mode {
+        Self::storage_admission_for_mode::<Destination>(self.work.borrow_state()?.header.mode)
+    }
+
+    fn storage_admission_for_mode<Destination: PublicationDestination>(
+        mode: WorkMode,
+    ) -> Result<StorageAdmission, LedgerCause<D>> {
+        match mode {
             WorkMode::Ordinary => Ok(StorageAdmission::Ordinary),
             WorkMode::Protected if Destination::IS_OUTCOME_EVIDENCE => {
                 Ok(StorageAdmission::ProtectedEvidence)
@@ -2614,11 +2617,7 @@ where
 
     /// Observes only the transaction-temporary live state under one ledger lock.
     pub(crate) fn planning_state(&self) -> LedgerPlanningState {
-        let state = lock(&self.state);
-        LedgerPlanningState {
-            current_live_bytes: state.current_live_bytes - state.retained_output_bytes,
-            active_reservations: state.active_reservations - state.retained_output_reservations,
-        }
+        self.storage_view().planning_state()
     }
 
     pub(crate) fn storage_observation(

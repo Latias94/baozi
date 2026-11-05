@@ -1,7 +1,7 @@
 //! Disjoint invocation capabilities for repeated library execution.
 
 use super::*;
-use crate::ledger::{BoundWorkGroup, ExclusiveStorage, Ledger, WorkLane};
+use crate::ledger::{BoundWorkGroup, ExclusiveStorage, Ledger, LinearWorkBatchPermit, WorkLane};
 
 pub(crate) enum ExecutionError<D> {
     Control(ControlCause),

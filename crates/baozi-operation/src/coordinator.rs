@@ -146,6 +146,14 @@ pub(crate) struct OperationPollCheckpoint<'a, PP, U> {
 }
 
 impl<PP, U> OperationPollCheckpoint<'_, PP, U> {
+    pub(crate) fn reborrow(&mut self) -> OperationPollCheckpoint<'_, PP, U> {
+        OperationPollCheckpoint {
+            control: self.control,
+            terminal: self.terminal,
+            allow_preexisting_terminal: self.allow_preexisting_terminal,
+        }
+    }
+
     pub(crate) fn recorded_control_cause(&self) -> Option<ControlCause> {
         self.terminal.clone()
     }
@@ -824,7 +832,7 @@ where
     /// deadline failures remain observable at every protected-work poll.
     pub(crate) fn split_terminal_poll_checkpoint_and_retained_ledger(
         &mut self,
-    ) -> (OperationPollCheckpoint<'_, PP, U>, &Ledger<O, LP, D>) {
+    ) -> (OperationPollCheckpoint<'_, PP, U>, &mut Ledger<O, LP, D>) {
         let Self {
             control,
             terminal,

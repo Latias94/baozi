@@ -17,7 +17,9 @@ use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 mod borrowed;
-pub(in crate::retained) use borrowed::try_admit_borrowed_retained_share_work;
+pub(in crate::retained) use borrowed::{
+    admit_internal_share, try_admit_borrowed_retained_share_work,
+};
 
 /// Linear completion authority for one admitted clone-and-handle work pair.
 ///

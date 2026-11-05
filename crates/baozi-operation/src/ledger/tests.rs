@@ -4296,3 +4296,225 @@ fn publication_rejection_preserves_all_commitments_and_reservation_owners_for_re
         assert_eq!((row.state.pending_publication, row.state.committed), (0, 0));
     }
 }
+
+#[test]
+fn internal_split_keeps_storage_rejection_ahead_of_deferred_numeric_binding() {
+    let mut ledger = test_ledger(limits());
+    assert!(ledger.charge_attempted(Dimension::Records, 17).is_err());
+    ledger.seal_ordinary_work().unwrap();
+    ledger
+        .work
+        .borrow_state_mut()
+        .unwrap()
+        .header
+        .integrity_fault = true;
+
+    {
+        let (internal, storage) = ledger.split_internal();
+        let prepared = internal.bind_ordinary([Dimension::Unknown]);
+        assert!(matches!(
+            storage.reserve(Phase::Build, Dimension::Unknown, 1),
+            Err(LedgerCause::PublicationAlreadyPending)
+        ));
+        assert!(matches!(
+            prepared,
+            Err(LedgerCause::UnknownDimension {
+                dimension: Dimension::Unknown,
+            })
+        ));
+        assert_eq!(storage.planning_state().current_live_bytes(), 0);
+        assert_eq!(storage.planning_state().active_reservations(), 0);
+    }
+    let work = ledger.work.borrow_state().unwrap();
+    assert_eq!(work.rows[1].state.attempted, 17);
+    assert_eq!(work.rows[1].state.consumed, 0);
+    assert_eq!(work.rows[1].state.pending_consumed, 0);
+}
+
+#[test]
+fn joint_attribution_matches_existing_mode_destination_and_storage_error_precedence() {
+    for mode in [
+        WorkMode::Ordinary,
+        WorkMode::OrdinarySealed,
+        WorkMode::Protected,
+        WorkMode::Closed,
+    ] {
+        for publication in [
+            PublicationState::Open,
+            PublicationState::Closing,
+            PublicationState::Pending,
+            PublicationState::TerminalQualified,
+            PublicationState::Published,
+        ] {
+            for (phase, dimension, bytes) in [
+                (Phase::Build, Dimension::Bytes, 3),
+                (Phase::Unknown, Dimension::Unknown, 1),
+                (Phase::Unknown, Dimension::Bytes, 17),
+                (Phase::Unknown, Dimension::Bytes, 1),
+                (Phase::Build, Dimension::Records, 1),
+            ] {
+                for evidence in [false, true] {
+                    let mut ledger =
+                        Ledger::<Owner, Phase, Dimension>::try_new(limits(), &[Phase::Build])
+                            .unwrap();
+                    ledger.work.borrow_state_mut().unwrap().header.mode = mode;
+                    lock(&ledger.state).publication = publication;
+                    let expected = if evidence {
+                        ledger
+                            .reserve_operation_attribution::<OutcomeEvidenceDestination>(
+                                phase, dimension, bytes,
+                            )
+                            .map(|reservation| reservation.bytes())
+                    } else {
+                        ledger
+                            .reserve_operation_attribution::<CanonicalOutput>(
+                                phase, dimension, bytes,
+                            )
+                            .map(|reservation| reservation.bytes())
+                    };
+                    let (mut internal, storage) = ledger.split_internal();
+                    let work = internal.reborrow().unwrap();
+                    let actual = if evidence {
+                        work.reserve_operation_attribution::<OutcomeEvidenceDestination, _, _>(
+                            &storage, phase, dimension, bytes,
+                        )
+                        .map(|reservation| reservation.bytes())
+                    } else {
+                        work.reserve_operation_attribution::<CanonicalOutput, _, _>(
+                            &storage, phase, dimension, bytes,
+                        )
+                        .map(|reservation| reservation.bytes())
+                    };
+                    assert_eq!(actual, expected, "{mode:?} {publication:?} {dimension:?}");
+                    assert_eq!(storage.planning_state().current_live_bytes(), 0);
+                    assert_eq!(storage.planning_state().active_reservations(), 0);
+                    assert!(
+                        work.work
+                            .rows
+                            .iter()
+                            .all(|row| row.state == WorkDimensionState::default())
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn joint_attribution_and_saved_layouts_recheck_live_protected_mode_and_integrity() {
+    let mut ledger = test_ledger(limits());
+    ledger.configure_protected_work(Dimension::Records).unwrap();
+    let ordinary = {
+        let (internal, _) = ledger.split_internal();
+        internal.bind_ordinary([Dimension::Bytes]).unwrap()
+    };
+    ledger.activate_protected_work(Dimension::Records).unwrap();
+    assert_eq!(lock(&ledger.state).publication, PublicationState::Closing);
+
+    let (mut internal, storage) = ledger.split_internal();
+    let protected = internal.bind_protected([Dimension::Records]).unwrap();
+    let share = internal.bind_share([Dimension::Records]).unwrap();
+    let mut work = internal.reborrow().unwrap();
+    assert_eq!(
+        work.validate_layout(ordinary),
+        Err(LedgerCause::PublicationAlreadyPending)
+    );
+    assert!(matches!(
+        work.bind_protected([Dimension::Bytes]),
+        Err(LedgerCause::InactiveLinearWorkPermit)
+    ));
+    let actual = work.bind_protected([Dimension::Records]).unwrap();
+    work.validate_layout(actual).unwrap();
+    work.validate_layout(protected).unwrap();
+    work.validate_layout(share).unwrap();
+
+    let mut frame = protected
+        .admit_observed(&mut work.work, [2], WorkLane::Protected)
+        .unwrap();
+    assert!(matches!(
+        work.reserve_operation_attribution::<CanonicalOutput, _, _>(
+            &storage,
+            Phase::Build,
+            Dimension::Bytes,
+            1,
+        ),
+        Err(LedgerCause::PublicationAlreadyPending)
+    ));
+    let attribution = work
+        .reserve_operation_attribution::<OutcomeEvidenceDestination, _, _>(
+            &storage,
+            Phase::Build,
+            Dimension::Bytes,
+            3,
+        )
+        .unwrap();
+    assert_eq!(attribution.bytes(), 3);
+    assert_eq!(storage.planning_state().current_live_bytes(), 3);
+    assert_eq!(storage.planning_state().active_reservations(), 1);
+
+    work.work.header.mode = WorkMode::Closed;
+    assert!(matches!(
+        work.reserve_operation_attribution::<OutcomeEvidenceDestination, _, _>(
+            &storage,
+            Phase::Unknown,
+            Dimension::Unknown,
+            1,
+        ),
+        Err(LedgerCause::PublicationAlreadyCompleted)
+    ));
+    work.work.header.integrity_fault = true;
+    assert!(matches!(
+        work.reserve_operation_attribution::<CanonicalOutput, _, _>(
+            &storage,
+            Phase::Build,
+            Dimension::Unknown,
+            1,
+        ),
+        Err(LedgerCause::FinalSnapshotShapeMismatch)
+    ));
+    assert_eq!(
+        work.validate_layout(protected),
+        Err(LedgerCause::FinalSnapshotShapeMismatch)
+    );
+    work.work.header.integrity_fault = false;
+    work.work.header.mode = WorkMode::Protected;
+    assert!(matches!(
+        frame.complete_batch_with_outcome(&protected, &mut work.work, [1]),
+        LinearWorkCompletion::Completed
+    ));
+    frame.resolve(&protected, &mut work.work, false).unwrap();
+    assert_eq!(work.work.rows[1].state.attempted, 2);
+    assert_eq!(work.work.rows[1].state.consumed, 1);
+    assert_eq!(work.work.rows[1].state.pending_consumed, 0);
+    drop(attribution);
+    assert_eq!(storage.planning_state().current_live_bytes(), 0);
+    assert_eq!(storage.planning_state().active_reservations(), 0);
+}
+
+#[test]
+fn exclusive_storage_planning_observes_independent_live_reservation_release() {
+    let mut ledger = test_ledger(limits());
+    let first = ledger.reserve(Phase::Build, Dimension::Bytes, 2).unwrap();
+    let before = ledger.planning_state();
+    let (_, storage) = ledger.split_internal();
+    assert_eq!(
+        storage.planning_state().current_live_bytes(),
+        before.current_live_bytes()
+    );
+    assert_eq!(
+        storage.planning_state().active_reservations(),
+        before.active_reservations()
+    );
+    let second = storage
+        .reborrow()
+        .reserve(Phase::Build, Dimension::Bytes, 3)
+        .unwrap();
+    assert_eq!(storage.planning_state().current_live_bytes(), 5);
+    assert_eq!(storage.planning_state().active_reservations(), 2);
+    drop(first);
+    assert_eq!(storage.planning_state().current_live_bytes(), 3);
+    assert_eq!(storage.planning_state().active_reservations(), 1);
+    drop(second);
+    assert_eq!(storage.planning_state().current_live_bytes(), 0);
+    assert_eq!(storage.planning_state().active_reservations(), 0);
+}

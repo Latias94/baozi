@@ -1,7 +1,28 @@
 //! Internal retained shares borrow the numeric owner only through the physical clone and handle.
 
 use super::*;
-use crate::ledger::{ExclusiveWork, WorkFrame, WorkLane, WorkLayout};
+use crate::ledger::{ExclusiveWork, InternalWork, WorkFrame, WorkLane, WorkLayout};
+
+pub(in crate::retained) fn admit_internal_share<'op, D: Copy + Ord + fmt::Debug>(
+    work: &'op mut InternalWork<'_, D>,
+    plan: RetainedHandleSharePlan<D>,
+) -> Result<BorrowedRetainedShareWork<'op, D>, RetainedWriterError<D>> {
+    let charges = plan.charges();
+    let layout = work
+        .bind_share(charges.map(|(dimension, _)| dimension))
+        .map_err(RetainedWriterError::Ledger)?;
+    let mut work = work.reborrow().map_err(RetainedWriterError::Ledger)?;
+    let amounts = charges.map(|(_, amount)| amount);
+    let frame = layout
+        .admit_observed(&mut work.work, amounts, WorkLane::Internal)
+        .map_err(RetainedWriterError::Ledger)?;
+    Ok(BorrowedRetainedShareWork {
+        work,
+        layout,
+        frame,
+        amounts,
+    })
+}
 
 pub(in crate::retained) struct BorrowedRetainedShareWork<'op, D: Copy> {
     work: ExclusiveWork<'op, D>,
@@ -36,6 +57,9 @@ where
 }
 
 impl<D: Copy> BorrowedRetainedShareWork<'_, D> {
+    pub(in crate::retained) fn work(&self) -> &ExclusiveWork<'_, D> {
+        &self.work
+    }
     pub(in crate::retained) fn try_share_allocation<T>(
         self,
         allocation: &RetainedAllocation<T>,

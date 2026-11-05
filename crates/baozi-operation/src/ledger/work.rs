@@ -91,6 +91,17 @@ pub(super) struct WorkState<D> {
 }
 
 impl<D> WorkState<D> {
+    fn check_integrity(
+        &self,
+        catalog_len: usize,
+        borrow_fault: bool,
+    ) -> Result<(), LedgerCause<D>> {
+        if borrow_fault || self.header.integrity_fault || self.rows.len() != catalog_len {
+            return Err(LedgerCause::FinalSnapshotShapeMismatch);
+        }
+        Ok(())
+    }
+
     pub(super) fn view<'a>(&'a mut self, catalog: &'a [D]) -> WorkView<'a, D> {
         WorkView {
             catalog,
@@ -104,6 +115,14 @@ pub(super) struct LocalWork<D> {
     catalog: Vec<D>,
     pub(super) state: RefCell<WorkState<D>>,
     borrow_fault: Cell<bool>,
+}
+
+pub(crate) struct InternalWork<'op, D> {
+    pub(super) catalog: &'op [D],
+    state: &'op mut WorkState<D>,
+    borrow_fault: &'op Cell<bool>,
+    shared_available: bool,
+    mutable_available: bool,
 }
 
 impl<D> LocalWork<D> {
@@ -131,6 +150,18 @@ impl<D> LocalWork<D> {
 
     pub(super) fn catalogue(&self) -> &[D] {
         &self.catalog
+    }
+
+    pub(super) fn split_internal(&mut self) -> InternalWork<'_, D> {
+        let shared_available = self.state.try_borrow().is_ok();
+        let mutable_available = self.state.try_borrow_mut().is_ok();
+        InternalWork {
+            catalog: &self.catalog,
+            state: self.state.get_mut(),
+            borrow_fault: &self.borrow_fault,
+            shared_available,
+            mutable_available,
+        }
     }
 
     /// Exclusive entry is possible only at quiescence. A forgotten dynamic guard remains a
@@ -189,13 +220,7 @@ impl<D> LocalWork<D> {
     }
 
     fn check_integrity(&self, state: &WorkState<D>) -> Result<(), LedgerCause<D>> {
-        if self.borrow_fault.get()
-            || state.header.integrity_fault
-            || state.rows.len() != self.catalog.len()
-        {
-            return Err(LedgerCause::FinalSnapshotShapeMismatch);
-        }
-        Ok(())
+        state.check_integrity(self.catalog.len(), self.borrow_fault.get())
     }
 
     /// Allows interim observations with active work, but never after an integrity/borrow fault.
@@ -214,6 +239,103 @@ impl<D> LocalWork<D> {
         let state = self.borrow_state()?;
         self.check_integrity(&state)?;
         kernel::check_quiescent(&state.rows, &state.header)
+    }
+}
+
+impl<D> InternalWork<'_, D> {
+    pub(crate) fn loan(&mut self) -> InternalWork<'_, D> {
+        InternalWork {
+            catalog: self.catalog,
+            state: self.state,
+            borrow_fault: self.borrow_fault,
+            shared_available: self.shared_available,
+            mutable_available: self.mutable_available,
+        }
+    }
+
+    fn read_state(&self) -> Result<&WorkState<D>, LedgerCause<D>> {
+        if !self.shared_available {
+            self.borrow_fault.set(true);
+            return Err(LedgerCause::FinalSnapshotShapeMismatch);
+        }
+        Ok(self.state)
+    }
+
+    pub(crate) fn reborrow(&mut self) -> Result<super::ExclusiveWork<'_, D>, LedgerCause<D>> {
+        if !self.mutable_available {
+            self.borrow_fault.set(true);
+            return Err(LedgerCause::FinalSnapshotShapeMismatch);
+        }
+        self.state
+            .check_integrity(self.catalog.len(), self.borrow_fault.get())?;
+        Ok(super::ExclusiveWork {
+            catalog: self.catalog,
+            work: self.state.view(self.catalog),
+        })
+    }
+}
+
+impl<D: Copy> InternalWork<'_, D> {
+    pub(crate) fn resolve<const N: usize>(
+        &mut self,
+        layout: WorkLayout<N>,
+        frame: &mut WorkFrame<N>,
+        abandoned: bool,
+    ) -> Result<(), LedgerCause<D>> {
+        if !frame.active {
+            return Err(LedgerCause::InactiveLinearWorkPermit);
+        }
+        layout.aggregate(self.catalog, frame.remaining, CounterClass::Consumed)?;
+        if !self.mutable_available {
+            self.borrow_fault.set(true);
+            return Err(LedgerCause::FinalSnapshotShapeMismatch);
+        }
+        if self.state.rows.len() != self.catalog.len() {
+            self.state.header.integrity_fault = true;
+            frame.active = false;
+            return Err(LedgerCause::FinalSnapshotShapeMismatch);
+        }
+        frame.resolve(&layout, &mut self.state.view(self.catalog), abandoned)
+    }
+}
+
+impl<D: Copy + Ord> InternalWork<'_, D> {
+    pub(crate) fn bind_ordinary<const N: usize>(
+        &self,
+        dimensions: [D; N],
+    ) -> Result<WorkLayout<N>, LedgerCause<D>> {
+        self.bind(dimensions, WorkGrant::Ordinary)
+    }
+
+    pub(crate) fn bind_protected<const N: usize>(
+        &self,
+        dimensions: [D; N],
+    ) -> Result<WorkLayout<N>, LedgerCause<D>> {
+        self.bind(dimensions, WorkGrant::Protected)
+    }
+
+    pub(crate) fn bind_share<const N: usize>(
+        &self,
+        dimensions: [D; N],
+    ) -> Result<WorkLayout<N>, LedgerCause<D>> {
+        let grant = match self.read_state()?.header.mode {
+            WorkMode::Protected => WorkGrant::Protected,
+            _ => WorkGrant::Ordinary,
+        };
+        self.bind(dimensions, grant)
+    }
+
+    fn bind<const N: usize>(
+        &self,
+        dimensions: [D; N],
+        grant: WorkGrant,
+    ) -> Result<WorkLayout<N>, LedgerCause<D>> {
+        let layout = WorkLayout::bind(self.catalog, &dimensions, grant)?;
+        let state = self.read_state()?;
+        state.check_integrity(self.catalog.len(), self.borrow_fault.get())?;
+        kernel::check_active_mode(&state.header, grant)?;
+        layout.validate_binding(&state.header, &dimensions)?;
+        Ok(layout)
     }
 }
 

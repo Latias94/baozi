@@ -541,37 +541,13 @@ fn assert_unresolved_validation_permit_cannot_validate_success(forget: bool) {
                 && session.outcome_evidence(evidence) == Some(&7)
         },
     );
-    if forget {
-        let fallback = match validation {
-            RetainedSuccessValidation::FallbackOnly(fallback) => fallback,
-            RetainedSuccessValidation::Valid(_) | RetainedSuccessValidation::Rejected(_) => {
-                panic!("a forgotten validation permit must remain unresolvable")
-            }
-        };
-        let containment = match fallback.prepare_minimal_fallback() {
-            Ok(_) => panic!("a forgotten validation permit must not prepare any exact owner"),
-            Err(RetainedPublicationPrepareError::FinalizationContainment(containment)) => {
-                containment
-            }
-        };
-        assert_eq!(
-            containment.reason(),
-            AccountPoisonReason::OwnershipGraphUnverified
-        );
-        let snapshot = account.snapshot();
-        assert!(snapshot.poisoned());
-        assert!(snapshot.live_retained_allocations() > 0);
-        drop(account);
-        assert!(factory.snapshot().live_accounts() > 0);
-        return;
-    }
     let rejected = match validation {
         RetainedSuccessValidation::Rejected(rejected) => rejected,
         RetainedSuccessValidation::Valid(_) => {
-            panic!("a dropped validation permit must not produce a success proof")
+            panic!("an unresolved validation permission must not produce a success proof")
         }
         RetainedSuccessValidation::FallbackOnly(_) => {
-            panic!("a dropped validation permit must release its linear capability")
+            panic!("the validation host must release an unresolved frame")
         }
     };
     let published = handoff_for_test(
@@ -604,7 +580,7 @@ fn dropped_validation_permit_cannot_validate_success() {
 }
 
 #[test]
-fn forgotten_validation_permit_forces_finalization_containment() {
+fn forgotten_validation_permission_rejects_success_and_the_host_releases_its_frame() {
     assert_unresolved_validation_permit_cannot_validate_success(true);
 }
 

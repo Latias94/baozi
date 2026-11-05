@@ -540,3 +540,19 @@ negative case only for a genuinely new boundary, not for incidental private layo
   QA1's test-only Clippy failure is preserved and fixed before successful QA2.
   This does not complete connected canonical/protected borrowing or remove LocalWork.
   There is no new performance result; the full convergence and release gates remain open.
+- The [connected retained-work cut](../reviews/2026-11-05-connected-retained-work-borrowing.md)
+  moves actual canonical creation/rewrite, inheritance, ordinary/protected evidence
+  and controlled validation onto one unique numeric root beside shared storage.
+  Deferred binding, current joint attribution, protected poll policy and completion
+  before physical commit/proof acceptance remain connected at their real boundaries.
+  The three aliasable owning permits and their remaining-count mirror are removed.
+  Forgotten permissions reject success while the real host resolves its frame;
+  numeric panic cleanup preserves physical poison and unverified charges.
+  Independent production/test reviews find no blocking defect and retain the direct
+  protected-panic coverage limit. Frozen final source passes 3,589 workspace tests
+  (six existing skips), 188 doctests, 138 consumer tests (one existing skip), both
+  strict lints and both formats. The seven terminal gates retain all 1,165 input
+  identities. This is source qualification without new timing/memory/heap acceptance.
+  Remaining actual backing/startup/share/cold users, obsolete execution-facade
+  deletion, fixed/dynamic backing, shared promotion, exact accounting, indexing and
+  the unchanged complete Windows/Linux comparisons remain required. Release stays HOLD.

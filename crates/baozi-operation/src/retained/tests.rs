@@ -737,6 +737,7 @@ fn publish_scalar_source(account: &PhysicalStorageAccount) -> PublishedScalarSou
 
 mod accounting;
 mod architecture;
+mod borrowed_work;
 mod intermediate_unwind;
 mod publication;
 mod startup_operation;

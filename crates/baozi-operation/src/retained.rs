@@ -231,17 +231,18 @@ use triomphe::{Arc, UniqueArc};
 #[cfg(test)]
 pub(crate) use operation::panic_next_publication_account_open;
 pub(crate) use operation::{
-    BorrowedRetainedWorkPermit, ExclusiveOperationParts, ExecutionError, ExecutionGroup,
+    BorrowedRetainedWorkPermission, ExclusiveOperationParts, ExecutionError, ExecutionGroup,
     ExecutionOrdinaryStorage, ExecutionPermit, ExecutionServices, ExecutionWork,
     ORDINARY_WORK_PERMIT_ABANDONED_CODE, RetainedFailureWorkConsumeError,
-    RetainedFailureWorkFinishError, RetainedFailureWorkPermit, RetainedFailureWorkStartError,
+    RetainedFailureWorkFinishError, RetainedFailureWorkPermission, RetainedFailureWorkStartError,
     RetainedPlanningBaseline, RetainedPlanningContainmentAnchor, RetainedProducerHost,
     RetainedProducerWorkStartError, RetainedWorkConsumeError, RetainedWorkFinishError,
-    RetainedWorkPermit, RetainedWorkStartError, StoreExecutionState, check_execution_state,
+    RetainedWorkPermission, RetainedWorkStartError, StoreExecutionState, check_execution_state,
     checked_action_debt, poll_execution, record_terminal_cause_with_precedence,
 };
 pub(crate) use operation::{
-    RetainedControlCheckpoint, RetainedFailureWorkControl, RetainedOperation, RetainedWorkControl,
+    RetainedControlCheckpoint, RetainedFailureWorkControl, RetainedOperation, RetainedWorkBinding,
+    RetainedWorkControl, RetainedWorkRoot,
 };
 pub(crate) use operation_start::AdmittedShareWork;
 #[cfg(test)]
@@ -1596,9 +1597,7 @@ where
             };
             let control = match self.operation.as_mut() {
                 Some(operation) => Some(
-                    operation
-                        .split_work_and_reservation_control(work_dimension, scratch_dimension)
-                        .0,
+                    operation.split_work_and_reservation_control(work_dimension, scratch_dimension),
                 ),
                 None => {
                     self.fields.containment = AssemblyContainmentProvenance::NewFaultPending;
@@ -1619,7 +1618,7 @@ where
                 }
             };
             match parts {
-                Some((canonical, evidence, control, epoch)) => {
+                Some((canonical, evidence, (control, mut root), epoch)) => {
                     if canonical
                         .member(canonical_root.identity(), self.fields.set_id)
                         .is_none()
@@ -1640,7 +1639,9 @@ where
                             not_send_or_sync: PhantomData,
                         };
                         let accepted = match catch_unwind(AssertUnwindSafe(|| {
-                            validate(&mut session, canonical_root, evidence_root, control)
+                            control.validate(&mut root, |control| {
+                                validate(&mut session, canonical_root, evidence_root, control)
+                            })
                         })) {
                             Ok(accepted) => accepted,
                             Err(payload) => {
@@ -1786,7 +1787,7 @@ where
             let work = self.fields.failure_evidence_handle_share_work;
             let control = match (self.operation.as_mut(), work) {
                 (Some(operation), Some(work)) => {
-                    Some(operation.split_failure_terminal_work_control(work).0)
+                    Some(operation.split_failure_terminal_work_control(work))
                 }
                 _ => {
                     self.fields.containment = AssemblyContainmentProvenance::NewFaultPending;
@@ -1801,7 +1802,7 @@ where
                 }
             };
             match parts {
-                Some((evidence, control, epoch)) => {
+                Some((evidence, (control, mut root), epoch)) => {
                     if evidence
                         .member(evidence_root.identity(), self.fields.set_id)
                         .is_none()
@@ -1817,7 +1818,9 @@ where
                             not_send_or_sync: PhantomData,
                         };
                         let accepted = match catch_unwind(AssertUnwindSafe(|| {
-                            validate(&mut session, evidence_root, control)
+                            control.validate(&mut root, |control| {
+                                validate(&mut session, evidence_root, control)
+                            })
                         })) {
                             Ok(accepted) => accepted,
                             Err(payload) => {
@@ -1948,7 +1951,7 @@ where
                 RetainedPublicationError::WrongOutcomeMode,
             ));
         }
-        let (control, _) = self
+        let (control, mut root) = self
             .operation
             .as_mut()
             .ok_or(CanonicalSourceBindError::Publication(
@@ -1971,6 +1974,7 @@ where
             self.fields.set_id,
             source,
             control,
+            &mut root,
         );
         if let Err(CanonicalSourceBindError::Publication(error)) = &result {
             self.observe_publication_error(error);
@@ -2000,7 +2004,7 @@ where
                 RetainedPublicationError::WrongOutcomeMode,
             ));
         }
-        let (control, ledger) = self
+        let (control, mut root) = self
             .operation
             .as_mut()
             .ok_or(CanonicalLeafInheritanceError::Publication(
@@ -2008,7 +2012,7 @@ where
             ))?
             .split_work_control(work_dimension);
         let result = try_inherit_all_canonical_leaves(
-            ledger,
+            &mut root,
             self.fields
                 .account
                 .as_ref()
@@ -2096,12 +2100,11 @@ where
             .canonical_plan
             .ok_or(RetainedPublicationError::WrongOutcomeMode)?;
         let result = try_retain_block(
-            self.operation
-                .as_ref()
+            &mut self
+                .operation
+                .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?
-                .common
-                .coordinator
-                .retained_ledger(),
+                .internal_work_root(),
             self.fields
                 .account
                 .as_ref()
@@ -2122,7 +2125,7 @@ where
             RetainedPublicationError::CanonicalSlotLimit,
             RetainedBlockOrigin::New,
             plan,
-            |emplacer, _| build(emplacer),
+            |emplacer, _, _| build(emplacer),
         );
         match result {
             Ok(identity) => Ok(CanonicalRetainedSlot::from_identity(identity)),
@@ -2162,13 +2165,13 @@ where
             .fields
             .canonical_plan
             .ok_or(RetainedPublicationError::WrongOutcomeMode)?;
-        let (control, ledger) = self
+        let (control, mut root) = self
             .operation
             .as_mut()
             .ok_or(RetainedPublicationError::Poisoned)?
             .split_work_control(work_dimension);
         let result = try_retain_block(
-            ledger,
+            &mut root,
             self.fields
                 .account
                 .as_ref()
@@ -2189,7 +2192,7 @@ where
             RetainedPublicationError::CanonicalSlotLimit,
             RetainedBlockOrigin::New,
             plan,
-            move |emplacer, _| build(emplacer, control),
+            move |emplacer, _, root| control.build(root, |control| build(emplacer, control)),
         );
         match result {
             Ok(identity) => Ok(CanonicalRetainedSlot::from_identity(identity)),
@@ -2227,12 +2230,11 @@ where
             .canonical_plan
             .ok_or(RetainedPublicationError::WrongOutcomeMode)?;
         let result = try_retain_rewritten_canonical_block(
-            self.operation
-                .as_ref()
+            &mut self
+                .operation
+                .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?
-                .common
-                .coordinator
-                .retained_ledger(),
+                .internal_work_root(),
             self.fields
                 .account
                 .as_ref()
@@ -2252,7 +2254,7 @@ where
             source,
             source_slot.identity(),
             plan,
-            build,
+            |emplacer, _| build(emplacer),
         );
         match result {
             Ok(identity) => Ok(CanonicalRetainedSlot::from_identity(identity)),
@@ -2290,13 +2292,13 @@ where
             .fields
             .canonical_plan
             .ok_or(RetainedPublicationError::WrongOutcomeMode)?;
-        let (control, ledger) = self
+        let (control, mut root) = self
             .operation
             .as_mut()
             .ok_or(RetainedPublicationError::Poisoned)?
             .split_work_control(work_dimension);
         let result = try_retain_rewritten_canonical_block(
-            ledger,
+            &mut root,
             self.fields
                 .account
                 .as_ref()
@@ -2316,7 +2318,7 @@ where
             source,
             source_slot.identity(),
             plan,
-            move |emplacer| build(emplacer, control),
+            move |emplacer, root| control.build(root, |control| build(emplacer, control)),
         );
         match result {
             Ok(identity) => Ok(CanonicalRetainedSlot::from_identity(identity)),
@@ -2490,12 +2492,11 @@ where
             return Err(RetainedPublicationError::WrongOutcomeMode);
         }
         let result = try_share_retained_block::<O, P, D, CanonicalBlock, Tag>(
-            self.operation
-                .as_ref()
+            &mut self
+                .operation
+                .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?
-                .common
-                .coordinator
-                .retained_ledger(),
+                .internal_work_root(),
             self.fields
                 .account
                 .as_ref()
@@ -2552,13 +2553,13 @@ where
             .fields
             .canonical_plan
             .ok_or(RetainedPublicationError::WrongOutcomeMode)?;
-        let (control, ledger) = self
+        let (control, mut root) = self
             .operation
             .as_mut()
             .ok_or(RetainedPublicationError::Poisoned)?
             .split_work_control(work_dimension);
         let result = try_rewrite_canonical_block_controlled(
-            ledger,
+            &mut root,
             self.fields
                 .account
                 .as_ref()
@@ -2612,12 +2613,11 @@ where
             self.fields.failure_terminal_work_state == FailureTerminalWorkState::Active;
         let handle_share_work = self.outcome_evidence_handle_share_work()?;
         let result = try_retain_block(
-            self.operation
-                .as_ref()
+            &mut self
+                .operation
+                .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?
-                .common
-                .coordinator
-                .retained_ledger(),
+                .internal_work_root(),
             self.fields
                 .account
                 .as_ref()
@@ -2638,7 +2638,7 @@ where
             RetainedPublicationError::OutcomeEvidenceSlotLimit,
             RetainedBlockOrigin::New,
             plan,
-            |emplacer, _| build(emplacer),
+            |emplacer, _, _| build(emplacer),
         );
         match result {
             Ok(identity) => Ok(OutcomeEvidenceRetainedSlot::from_identity(identity)),
@@ -2677,13 +2677,13 @@ where
             return Err(RetainedPublicationError::Poisoned);
         }
         self.ensure_canonical_work_available()?;
-        let (control, ledger) = self
+        let (control, mut root) = self
             .operation
             .as_mut()
             .ok_or(RetainedPublicationError::Poisoned)?
             .split_work_control(work_dimension);
         let result = try_retain_block(
-            ledger,
+            &mut root,
             self.fields
                 .account
                 .as_ref()
@@ -2704,7 +2704,7 @@ where
             RetainedPublicationError::OutcomeEvidenceSlotLimit,
             RetainedBlockOrigin::New,
             plan,
-            move |emplacer, _| build(emplacer, control),
+            move |emplacer, _, root| control.build(root, |control| build(emplacer, control)),
         );
         match result {
             Ok(identity) => Ok(OutcomeEvidenceRetainedSlot::from_identity(identity)),
@@ -2737,13 +2737,13 @@ where
         let protected_action =
             self.fields.failure_terminal_work_state == FailureTerminalWorkState::Active;
         let handle_share_work = self.outcome_evidence_handle_share_work()?;
-        let (control, ledger) = self
+        let (control, mut root) = self
             .operation
             .as_mut()
             .ok_or(RetainedPublicationError::Poisoned)?
             .split_failure_terminal_work_control(handle_share_work);
         let result = try_retain_block(
-            ledger,
+            &mut root,
             self.fields
                 .account
                 .as_ref()
@@ -2764,7 +2764,7 @@ where
             RetainedPublicationError::OutcomeEvidenceSlotLimit,
             RetainedBlockOrigin::New,
             plan,
-            move |emplacer, _| build(emplacer, control),
+            move |emplacer, _, root| control.build(root, |control| build(emplacer, control)),
         );
         match result {
             Ok(identity) => Ok(OutcomeEvidenceRetainedSlot::from_identity(identity)),
@@ -2796,12 +2796,11 @@ where
             self.fields.failure_terminal_work_state == FailureTerminalWorkState::Active;
         let handle_share_work = self.outcome_evidence_handle_share_work()?;
         let result = try_share_retained_block::<O, P, D, EvidenceBlock, Tag>(
-            self.operation
-                .as_ref()
+            &mut self
+                .operation
+                .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?
-                .common
-                .coordinator
-                .retained_ledger(),
+                .internal_work_root(),
             self.fields
                 .account
                 .as_ref()

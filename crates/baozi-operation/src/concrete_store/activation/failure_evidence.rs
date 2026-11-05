@@ -65,7 +65,7 @@ where
         }
     }
 
-    const fn remaining_units(&self) -> u64 {
+    fn remaining_units(&self) -> u64 {
         match self {
             Self::Ordinary(permit) => permit.remaining_units(),
             Self::Protected(permit) => permit.remaining_units(),

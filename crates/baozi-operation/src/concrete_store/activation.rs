@@ -41,10 +41,10 @@ use crate::owner::OperationOwner;
 use crate::retained::{
     CanonicalRetainedRewriteMap, FinalizationContainmentError, PreparationFailureClass,
     PreparationFailureCode, RetainedActivationOpenDisposition, RetainedFailureWorkConsumeError,
-    RetainedFailureWorkControl, RetainedFailureWorkFinishError, RetainedFailureWorkPermit,
+    RetainedFailureWorkControl, RetainedFailureWorkFinishError, RetainedFailureWorkPermission,
     RetainedFailureWorkStartError, RetainedHandleSharePlan, RetainedPlanningBaseline,
     RetainedPlanningContainmentAnchor, RetainedPublicationPrepareError, RetainedWorkConsumeError,
-    RetainedWorkControl, RetainedWorkFinishError, RetainedWorkPermit, RetainedWorkStartError,
+    RetainedWorkControl, RetainedWorkFinishError, RetainedWorkPermission, RetainedWorkStartError,
 };
 
 mod canonical;
@@ -196,11 +196,11 @@ impl FailureEvidenceWorkBudget {
 type RawFailureEvidenceWorkControl<'a, O, PP, U> =
     RetainedFailureWorkControl<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
 type RawFailureEvidenceWorkPermit<'a, O, PP, U> =
-    RetainedFailureWorkPermit<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
+    RetainedFailureWorkPermission<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
 type RawOutcomeEvidenceWorkControl<'a, O, PP, U> =
     RetainedWorkControl<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
 type RawOutcomeEvidenceWorkPermit<'a, O, PP, U> =
-    RetainedWorkPermit<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
+    RetainedWorkPermission<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
 
 /// Internal linear completion permit shared by plan-bound builders and validators.
 #[must_use = "completed work must be recorded before resolving the permit"]
