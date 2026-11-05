@@ -169,6 +169,13 @@ descriptive/HOLD classification and every remaining release gate.
 
 ## Next Owner Work
 
+The subsequent [parser/pipeline root-cause investigation](2026-11-05-parser-pipeline-root-causes.md)
+completes two separate same-invocation diagnostics and pinned-source comparisons.
+It refines the order below: common semantic preflight and OBJ record/lexical
+execution precede a broad root replacement; glTF normalization precedes a whole
+JSON parser replacement. Fixed setup and terminal ownership remain required.
+The diagnostic intervals do not qualify an optimization or replace this matrix.
+
 This checkpoint changes the cost diagnosis, not the release criteria. The
 preceding six-case Callgrind and eighteen-case heap evidence still shows small
 mixed instruction changes and unchanged allocations for this source interval.

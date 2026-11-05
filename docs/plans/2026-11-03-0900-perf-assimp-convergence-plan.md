@@ -661,3 +661,18 @@ negative case only for a genuinely new boundary, not for incidental private layo
   slots and genuine dirty containment distinct from clean finite facts. Main
   selected dispositions remain uncompiled; retain the existing invariant layout
   brand and one kernel. All original Windows/runtime/performance gates remain.
+- The [parser/pipeline root-cause checkpoint](../reviews/2026-11-05-parser-pipeline-root-causes.md)
+  completes two separate nine-case same-invocation diagnostics, each with three
+  warmups and twenty observations, plus pinned Assimp source comparisons and
+  independent source/task/work/statistical review. Large grid/glTF/STL pipelines
+  spend about 99%/92%/91% in import. Internal spans locate grid record/token
+  parsing at 44.78% of import, its two text passes at a combined 24.98%, and
+  STL-1024 semantic preflight at 61.68% versus 3.78% in binary decode. glTF-32
+  normalization is 33.56%; syntax/index and typed decode are about 8% each.
+  These are instrumented locating intervals, not protocol CPU shares, expected
+  savings, paired Assimp effects or release evidence. Next cut the real common
+  semantic-unit execution owner and OBJ record/lexical boundary, preserving
+  exact prefixes, resource/control/failure semantics and one numeric kernel.
+  Address repeated glTF normalization before a whole JSON parser replacement.
+  Finite roots, terminal facts, unchanged selection, pool-transfer ownership and
+  all original integrated correctness/Windows/Linux performance gates remain.

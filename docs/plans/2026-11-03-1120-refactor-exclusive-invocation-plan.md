@@ -283,3 +283,13 @@ proof, widen budgets, weaken mathematical results or move benchmark work outside
   order. Existing invariant StoreInvocationLayout is retained, not replaced by
   the backing lifetime. Selected interface dispositions still need concrete
   compiler/runtime/promotion/cleanup proofs before the production cutover.
+- The [parser/pipeline diagnosis](../reviews/2026-11-05-parser-pipeline-root-causes.md)
+  establishes the next execution boundary using the actual unchanged task:
+  semantic preflight is 61.68% of STL-1024 import, while OBJ record/token parsing
+  is 44.78% of grid import and its two text passes total 24.98%. The common
+  semantic scalar path still admits/catches/completes/finishes a callback unit
+  per scalar. First retain a real exclusive lexical owner with bound rows and
+  exact prefix resolution at the semantic and OBJ lexical seams; moving setup
+  Vecs alone cannot solve those repetitions. These coarse diagnostic fractions
+  are not isolated protocol costs or savings. Root/backing, promotion, cleanup,
+  final evidence and every existing performance/correctness gate remain open.
