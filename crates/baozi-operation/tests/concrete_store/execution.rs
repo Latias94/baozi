@@ -6,7 +6,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use baozi_operation::__retained_store_integration::activation::{
-    StoreBoundWorkGroup, StoreExecutionServices,
+    StoreBoundWorkGroup, StoreExecutionServices, StoreInvocationError,
 };
 use baozi_operation::__retained_store_integration::authority::PreparedStoreEvidenceOnlyOutcome;
 use baozi_operation::{
@@ -993,47 +993,33 @@ fn parser_parent_child_and_storage_share_one_owner_without_callback_borrows() {
         DimensionPolicy::counter(16, 16, 0),
     );
     let physical_before = account.snapshot();
-    {
-        let (work, mut services) = operation.execution().unwrap();
-        let group = work.bind_group([keys.other_dimension]).unwrap();
-        let mut parent = group.begin_parser_parent([2], [None]).unwrap();
-        let mut child = group.begin_parser_child([3], [None]).unwrap();
-        let mut decoded = [0; 3];
-        decoded[0] = 8;
-        child.complete([1]).unwrap();
-        let plan = CapacityPlan::for_type::<u8>(0, 0, 8).unwrap();
-        let mut reservation = services
-            .reserve_retained(
-                keys.phase,
-                keys.dimension,
-                plan.envelope_delta_bytes().unwrap(),
-                1,
-            )
-            .unwrap();
-        let mut bytes = Vec::<u8>::new();
-        bytes
-            .try_reserve_exact(plan.allocator_additional())
-            .unwrap();
-        services
-            .resize(
-                &mut reservation,
-                plan.finish(bytes.len(), bytes.capacity()).unwrap(),
-            )
-            .unwrap();
-        let retained = reservation.bind_storage(bytes).unwrap();
-        services
-            .report_progress(TestProgress::Build, TestUnit::Items, 1, Some(3))
-            .unwrap();
-        decoded[1..].copy_from_slice(&[9, 10]);
-        child.complete_all().unwrap();
-        child.finish_exact().unwrap();
-        services.checkpoint().unwrap();
-        parent.complete_all().unwrap();
-        parent.finish_exact().unwrap();
-        work.finish_region().unwrap();
-        assert_eq!(decoded, [8, 9, 10]);
-        drop(retained);
-    }
+    let mut decoded = [0; 3];
+    operation
+        .with_exclusive_execution::<_, StoreInvocationError>(|context| {
+            let layout = context.bind_group([keys.other_dimension])?;
+            context.parser_parent::<_, StoreInvocationError, 1>(layout, [2], [None], |parent| {
+                parent.child::<_, StoreInvocationError, 1>(layout, [3], [None], |child| {
+                    child.run_prefix([1], 1, || {
+                        decoded[0] = 8;
+                        Ok::<_, StoreInvocationError>(())
+                    })?;
+                    let retained = child.allocate_bytes(keys.phase, keys.dimension, 8)?;
+                    child.report_progress(TestProgress::Build, TestUnit::Items, 1, Some(3))?;
+                    child.run_prefix([2], 1, || {
+                        decoded[1..].copy_from_slice(&[9, 10]);
+                        Ok::<_, StoreInvocationError>(())
+                    })?;
+                    drop(retained);
+                    Ok(())
+                })?;
+                parent.checkpoint()?;
+                parent.complete_parent()
+            })?;
+            assert_eq!(context.work_counters(keys.other_dimension)?, (5, 5, 0));
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(decoded, [8, 9, 10]);
     assert_eq!(physical_delta(physical_before, account.snapshot()), (0, 0));
     let published = operation.prepare_minimal_fallback(71).unwrap().handoff();
     assert_work(&published.ledger_evidence, keys.other_dimension, 5, 5);
@@ -1042,7 +1028,6 @@ fn parser_parent_child_and_storage_share_one_owner_without_callback_borrows() {
 
 #[test]
 fn ignored_parser_item_rejection_keeps_ordered_attempts_and_stops_success() {
-    use baozi_operation::__retained_store_integration::activation::StoreParserWorkError;
     let factory = factory(1);
     let account = account(&factory);
     let mut invocation_root = TestInvocationRoot::new();
@@ -1052,23 +1037,35 @@ fn ignored_parser_item_rejection_keeps_ordered_attempts_and_stops_success() {
         OperationControl::default(),
         DimensionPolicy::counter(16, 16, 0),
     );
-    {
-        let (work, mut services) = operation.execution().unwrap();
-        let group = work.bind_group([keys.other_dimension; 2]).unwrap();
+    let result = operation.with_exclusive_execution::<_, StoreInvocationError>(|context| {
+        let layout = context.bind_group([keys.other_dimension; 3])?;
         assert!(matches!(
-            group.begin_parser_child([1, 3], [None, Some(2)]),
-            Err(StoreParserWorkError::ItemLimit {
+            context.parser_child::<(), StoreInvocationError, 3>(
+                layout,
+                [1, 3, 2],
+                [None, Some(2), None],
+                |_| panic!("a rejected parser admission cannot run its body"),
+            ),
+            Err(StoreInvocationError::ItemLimit {
                 index: 1,
                 value: 3,
                 limit: 2
             })
         ));
-        work.finish_region().unwrap();
         assert!(matches!(
-            services.checkpoint(),
-            Err(StoreRuntimeError::FallbackOnly)
+            context.checkpoint(),
+            Err(StoreInvocationError::Runtime(
+                StoreRuntimeError::FallbackOnly
+            ))
         ));
-    }
+        Ok(())
+    });
+    assert!(matches!(
+        result,
+        Err(StoreInvocationError::Runtime(
+            StoreRuntimeError::FallbackOnly
+        ))
+    ));
     let evidence = rejected_success_evidence(operation, StorePreparationFailureClass::Ledger);
     assert_work(&evidence, keys.other_dimension, 4, 0);
 }
@@ -1085,45 +1082,83 @@ fn ignored_parser_completion_and_incomplete_finish_errors_remain_terminal() {
             OperationControl::default(),
             DimensionPolicy::counter(16, 16, 0),
         );
-        {
-            let (work, mut services) = operation.execution().unwrap();
-            let group = work.bind_group([keys.other_dimension]).unwrap();
-            let mut channel = group.begin_parser_child([4], [None]).unwrap();
-            let mut decoded = [0; 4];
-            decoded[..2].copy_from_slice(&[7, 8]);
-            channel.complete([2]).unwrap();
-            let result = if incomplete_finish {
-                channel.finish_exact()
+        let mut decoded = [0; 4];
+        let result = operation.with_exclusive_execution::<_, StoreInvocationError>(|context| {
+            let layout = context.bind_group([keys.other_dimension])?;
+            let rejected = context.parser_child::<_, StoreInvocationError, 1>(
+                layout,
+                [4],
+                [None],
+                |channel| {
+                    channel.run_prefix([2], 1, || {
+                        decoded[..2].copy_from_slice(&[7, 8]);
+                        Ok::<_, StoreInvocationError>(())
+                    })?;
+                    assert_eq!(channel.remaining(), [2]);
+                    if incomplete_finish {
+                        Ok(())
+                    } else {
+                        let rejected = channel.run_prefix([3], 1, || {
+                            decoded[2] = 1;
+                            Ok::<_, StoreInvocationError>(())
+                        });
+                        assert_eq!(channel.remaining(), [2]);
+                        rejected
+                    }
+                },
+            );
+            if incomplete_finish {
+                assert!(matches!(
+                    rejected,
+                    Err(StoreInvocationError::Runtime(
+                        StoreRuntimeError::ObservedWorkIncomplete
+                    ))
+                ));
             } else {
-                let rejected = channel.complete([3]);
-                assert_eq!(channel.remaining(), [2]);
-                channel.finish_partial().unwrap();
-                rejected
-            };
+                assert!(matches!(
+                    rejected,
+                    Err(StoreInvocationError::Runtime(
+                        StoreRuntimeError::ObservedWorkExceedsAdmitted
+                    ))
+                ));
+            }
             assert!(matches!(
-                result,
-                Err(StoreRuntimeError::Ledger(
-                    LedgerCause::InactiveLinearWorkPermit
+                context.run_action(layout, [0], 1, || decoded[3] = 1),
+                Err(StoreInvocationError::Runtime(
+                    StoreRuntimeError::FallbackOnly
                 ))
             ));
-            assert_eq!(decoded, [7, 8, 0, 0]);
-            work.finish_region().unwrap();
             assert!(matches!(
-                group.admit_observed([0]),
-                Err(StoreRuntimeError::FallbackOnly)
+                context.checkpoint(),
+                Err(StoreInvocationError::Runtime(
+                    StoreRuntimeError::FallbackOnly
+                ))
             ));
-            assert!(matches!(
-                services.checkpoint(),
-                Err(StoreRuntimeError::FallbackOnly)
-            ));
-        }
-        let evidence = rejected_success_evidence(operation, StorePreparationFailureClass::Ledger);
+            Ok(())
+        });
+        assert!(matches!(
+            result,
+            Err(StoreInvocationError::Runtime(
+                StoreRuntimeError::FallbackOnly
+            ))
+        ));
+        assert_eq!(decoded, [7, 8, 0, 0]);
+        let class = if incomplete_finish {
+            StorePreparationFailureClass::ProductGraph
+        } else {
+            StorePreparationFailureClass::Ledger
+        };
+        let evidence = rejected_success_evidence(operation, class);
         assert_work(&evidence, keys.other_dimension, 4, 2);
     }
 }
 
 #[test]
-fn forgotten_zero_and_completed_parser_channels_prevent_finalization() {
+#[allow(
+    forgetting_references,
+    reason = "forgetting a client borrow must leave the actual frame with its host"
+)]
+fn forgotten_zero_and_completed_parser_borrows_leave_host_channels_resolved() {
     for amount in [0, 1] {
         let factory = factory(1);
         let account = account(&factory);
@@ -1134,23 +1169,42 @@ fn forgotten_zero_and_completed_parser_channels_prevent_finalization() {
             OperationControl::default(),
             DimensionPolicy::counter(16, 16, 0),
         );
+        operation
+            .with_exclusive_execution::<_, StoreInvocationError>(|context| {
+                let layout = context.bind_group([keys.other_dimension])?;
+                context.parser_child::<_, StoreInvocationError, 1>(
+                    layout,
+                    [amount],
+                    [None],
+                    |channel| {
+                        channel.run_prefix([amount], 1, || Ok::<_, StoreInvocationError>(()))?;
+                        assert_eq!(channel.remaining(), [0]);
+                        std::mem::forget(channel);
+                        Ok(())
+                    },
+                )?;
+                assert_eq!(
+                    context.work_counters(keys.other_dimension)?,
+                    (amount, amount, 0)
+                );
+                context.parser_child::<_, StoreInvocationError, 1>(layout, [0], [None], |_| Ok(()))
+            })
+            .unwrap();
+        let success = match operation
+            .prepare_evidence_only_success(final_progress())
+            .unwrap()
         {
-            let (work, _services) = operation.execution().unwrap();
-            let group = work.bind_group([keys.other_dimension]).unwrap();
-            let mut channel = group.begin_parser_child([amount], [None]).unwrap();
-            channel.complete_all().unwrap();
-            std::mem::forget(channel);
-            assert!(matches!(
-                work.finish_region(),
-                Err(StoreRuntimeError::Ledger(
-                    LedgerCause::OutstandingLinearWorkPermits { count: 1 }
-                ))
-            ));
-        }
-        assert!(matches!(
-            operation.prepare_evidence_only_success(final_progress()),
-            Err(StorePrepareError::FinalizationContainment(_))
-        ));
+            PreparedStoreEvidenceOnlyOutcome::Success(success) => success.handoff(),
+            PreparedStoreEvidenceOnlyOutcome::MinimalFallback(_) => {
+                panic!("a host-resolved parser remains eligible for success")
+            }
+        };
+        assert_work(
+            &success.ledger_evidence,
+            keys.other_dimension,
+            amount,
+            amount,
+        );
     }
 }
 

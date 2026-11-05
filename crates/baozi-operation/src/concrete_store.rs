@@ -173,7 +173,7 @@ pub use execution::{
     StoreExecutionServices, StoreExecutionWork, StoreExtensionResult, StoreFailureStorage,
     StoreImporterBoundary, StoreInvocation, StoreInvocationError, StoreInvocationLayout,
     StoreInvocationParser, StoreInvocationServices, StoreOrdinaryStorage, StoreParserWorkError,
-    StoreParserWorkScope, StoreScanReturn,
+    StoreScanReturn,
 };
 mod terminal_output;
 mod transcript;

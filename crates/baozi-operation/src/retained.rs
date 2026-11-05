@@ -232,8 +232,8 @@ use triomphe::{Arc, UniqueArc};
 pub(crate) use operation::panic_next_publication_account_open;
 pub(crate) use operation::{
     BorrowedRetainedWorkPermit, ExclusiveOperationParts, ExecutionError, ExecutionGroup,
-    ExecutionOrdinaryStorage, ExecutionParserScope, ExecutionPermit, ExecutionServices,
-    ExecutionWork, ORDINARY_WORK_PERMIT_ABANDONED_CODE, RetainedFailureWorkConsumeError,
+    ExecutionOrdinaryStorage, ExecutionPermit, ExecutionServices, ExecutionWork,
+    ORDINARY_WORK_PERMIT_ABANDONED_CODE, RetainedFailureWorkConsumeError,
     RetainedFailureWorkFinishError, RetainedFailureWorkPermit, RetainedFailureWorkStartError,
     RetainedPlanningBaseline, RetainedPlanningContainmentAnchor, RetainedProducerHost,
     RetainedProducerWorkStartError, RetainedWorkConsumeError, RetainedWorkFinishError,

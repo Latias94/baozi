@@ -21,7 +21,7 @@ use kernel::{
 };
 pub(super) use kernel::{check_quiescent, validate_work_state};
 
-pub(crate) use parser::{ParserWorkError, ParserWorkScope};
+pub(crate) use parser::ParserWorkError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct WorkPolicy {

@@ -555,3 +555,15 @@ as `borrowed-retained-work-cut-design-{1,2}.md` and corresponding `design-review
 
 No ordinary timing or memory result is attributed to this producer cut. All remaining
 numeric/backing/promotion/deletion/indexing work and full convergence gates stay open.
+
+## Aliasable Parser Retirement, 2026-11-05
+
+The [parser compatibility retirement](../reviews/2026-11-05-parser-compat-retirement.md)
+deletes `ParserWorkScope`, `ExecutionParserScope`, `StoreParserWorkScope` and their
+constructors/exports. The actual parser kernel, exclusive host and their existing
+host tests remain byte-identical. Useful adapter tests now exercise the real kernel
+or actual borrowed host; legacy-only recovery is not preserved as a second backend.
+Both source reviews and final affected-gate evidence review pass. This removes one
+compiled compatibility dependency before the connected retained-work cut; live
+Internal/protected/share controls, cold observation, fixed/dynamic backing and all
+ordinary performance gates remain open.

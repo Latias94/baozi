@@ -682,35 +682,51 @@ fn zero_and_empty_envelopes_still_own_persistent_channels() {
 
 #[test]
 fn replenishment_keeps_one_envelope_and_records_each_immediate_prefix() {
-    let work = owner([(10, 8, 8), (90, 8, 8)]);
-    let roles = group(&work, [90]);
-    let mut permit = roles.admit_observed([0], WorkLane::Producer).unwrap();
-    for completed in [1, 2, 3] {
-        permit.replenish_one().unwrap();
-        assert_eq!(permit.remaining(), [1]);
-        assert_eq!(counters(&work), [(0, 0, 0), (completed, completed - 1, 1)]);
-        assert_eq!(
-            permit.replenish_one(),
+    let mut work = owner([(10, 8, 8), (90, 8, 8)]);
+    {
+        let (_, mut view) = work.exclusive().unwrap();
+        let roles = WorkLayout::bind(view.catalog, &[90], WorkGrant::Ordinary).unwrap();
+        let mut permit = roles
+            .admit_observed(&mut view, [0], WorkLane::Producer)
+            .unwrap();
+        for completed in [1, 2, 3] {
+            permit.replenish_one(&roles, &mut view).unwrap();
+            assert_eq!(permit.remaining, [1]);
+            let row = view.rows[1].state;
+            assert_eq!(
+                (row.attempted, row.consumed, row.pending_consumed),
+                (completed, completed - 1, 1)
+            );
+            assert_eq!(
+                permit.replenish_one(&roles, &mut view),
+                Err(LedgerCause::InactiveLinearWorkPermit)
+            );
+            assert!(matches!(
+                permit.complete_batch_with_outcome(&roles, &mut view, [1]),
+                LinearWorkCompletion::Completed
+            ));
+            assert_eq!(permit.remaining, [0]);
+            let row = view.rows[1].state;
+            assert_eq!(
+                (row.attempted, row.consumed, row.pending_consumed),
+                (completed, completed, 0)
+            );
+            assert_eq!(view.rows[0].state, WorkDimensionState::default());
+            assert_eq!(view.header.open_envelopes, 1);
+            assert!(view.header.producer_open);
+        }
+        assert!(matches!(
+            roles.admit_observed(&mut view, [0], WorkLane::Producer),
             Err(LedgerCause::InactiveLinearWorkPermit)
-        );
-        permit.complete(0, 1).unwrap();
-        assert_eq!(permit.remaining(), [0]);
-        assert_eq!(counters(&work), [(0, 0, 0), (completed, completed, 0)]);
-        let state = work.borrow_state().unwrap();
-        assert_eq!(state.header.open_envelopes, 1);
-        assert!(state.header.producer_open);
+        ));
+        assert!(matches!(
+            roles.begin_parser(&mut view, [0], [None], ParserChannel::Child),
+            Err(ParserWorkError::Ledger(
+                LedgerCause::InactiveLinearWorkPermit
+            ))
+        ));
+        permit.resolve(&roles, &mut view, false).unwrap();
     }
-    assert!(matches!(
-        roles.admit_observed([0], WorkLane::Producer),
-        Err(LedgerCause::InactiveLinearWorkPermit)
-    ));
-    assert!(matches!(
-        roles.begin_parser_child([0], [None]),
-        Err(ParserWorkError::Ledger(
-            LedgerCause::InactiveLinearWorkPermit
-        ))
-    ));
-    permit.finish().unwrap();
     work.check_quiescent().unwrap();
     assert_eq!(counters(&work), [(0, 0, 0), (3, 3, 0)]);
 }

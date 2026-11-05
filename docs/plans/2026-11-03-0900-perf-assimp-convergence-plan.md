@@ -518,3 +518,14 @@ negative case only for a genuinely new boundary, not for incidental private layo
   evidence review. This source qualification supplies no new ordinary performance result.
   Internal/protected/share migration, obsolete parser deletion, backing/promotion/exact
   accounting/indexing and the unchanged full Windows/Linux/heap release gates remain open.
+- The [obsolete aliasable parser chain](../reviews/2026-11-05-parser-compat-retirement.md)
+  is deleted across its numeric, retained and concrete layers. Four integration traces
+  now use the actual exclusive host; useful numeric oracles move to the existing kernel.
+  Independent source reviews preserve raw unresolved-frame versus borrowed-view semantics
+  and verify unchanged kernel/real-host bytes. The frozen integrated source passes 1,047
+  Operation runtime tests, 128 Operation doctests, workspace strict lint/compilation,
+  138 consumer runtime tests (one existing skip), consumer strict lint and both formats.
+  Independent final evidence review verifies those affected gates; the preceding full
+  workspace run is not reassigned to this source. This is a prerequisite deletion without
+  a new performance result. Remaining retained-work/backing/promotion/accounting/indexing
+  and full ordinary Windows/Linux/heap convergence stay open.

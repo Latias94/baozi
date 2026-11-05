@@ -57,9 +57,8 @@ mod execution;
 #[cfg(test)]
 mod root_tests;
 pub(crate) use execution::{
-    ExecutionError, ExecutionGroup, ExecutionOrdinaryStorage, ExecutionParserScope,
-    ExecutionPermit, ExecutionServices, ExecutionStorage, ExecutionWork, check_execution_state,
-    poll_execution,
+    ExecutionError, ExecutionGroup, ExecutionOrdinaryStorage, ExecutionPermit, ExecutionServices,
+    ExecutionStorage, ExecutionWork, check_execution_state, poll_execution,
 };
 
 /// Execution has stopped independently of the owner's eventual terminal classification.

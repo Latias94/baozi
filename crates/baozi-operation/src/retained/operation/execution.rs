@@ -1,9 +1,7 @@
 //! Disjoint invocation capabilities for repeated library execution.
 
 use super::*;
-use crate::ledger::{
-    BoundWorkGroup, ExclusiveStorage, Ledger, ParserWorkError, ParserWorkScope, WorkLane,
-};
+use crate::ledger::{BoundWorkGroup, ExclusiveStorage, Ledger, WorkLane};
 
 pub(crate) enum ExecutionError<D> {
     Control(ControlCause),
@@ -45,11 +43,6 @@ pub(crate) struct ExecutionGroup<'op, D: Copy, const N: usize> {
 
 pub(crate) struct ExecutionPermit<'op, D: Copy, const N: usize> {
     work: Option<LinearWorkBatchPermit<'op, D, N>>,
-    failure: &'op Cell<Option<PreparationFailureCode>>,
-}
-
-pub(crate) struct ExecutionParserScope<'op, D: Copy, const N: usize> {
-    work: ParserWorkScope<'op, D, N>,
     failure: &'op Cell<Option<PreparationFailureCode>>,
 }
 
@@ -218,35 +211,6 @@ where
 }
 
 impl<'op, D: Copy, const N: usize> ExecutionGroup<'op, D, N> {
-    pub(crate) fn begin_parser(
-        &self,
-        amounts: [u64; N],
-        item_limits: [Option<u64>; N],
-        parent: bool,
-    ) -> Result<ExecutionParserScope<'op, D, N>, ParserWorkError<D>> {
-        if self.failure.get().is_some() {
-            return Err(ParserWorkError::Ledger(
-                LedgerCause::PublicationAlreadyPending,
-            ));
-        }
-        let result = if parent {
-            self.bound.begin_parser_parent(amounts, item_limits)
-        } else {
-            self.bound.begin_parser_child(amounts, item_limits)
-        };
-        result
-            .map(|work| ExecutionParserScope {
-                work,
-                failure: self.failure,
-            })
-            .inspect_err(|_| {
-                record_terminal_cause_with_precedence(
-                    self.failure,
-                    PreparationFailureCode::ledger(),
-                );
-            })
-    }
-
     pub(crate) fn admit_observed(
         &self,
         amounts: [u64; N],
@@ -277,35 +241,6 @@ impl<'op, D: Copy, const N: usize> ExecutionGroup<'op, D, N> {
 
     pub(crate) fn charge_observed(&self, amounts: [u64; N]) -> Result<(), ExecutionError<D>> {
         preserve_ledger(self.failure, self.bound.charge_observed_ordered(amounts))
-    }
-}
-
-impl<D: Copy, const N: usize> ExecutionParserScope<'_, D, N> {
-    pub(crate) fn remaining(&self) -> [u64; N] {
-        self.work.remaining()
-    }
-
-    pub(crate) fn complete(&mut self, amounts: [u64; N]) -> Result<(), ExecutionError<D>> {
-        preserve_ledger(self.failure, self.work.complete(amounts))
-    }
-
-    pub(crate) fn complete_all(&mut self) -> Result<(), ExecutionError<D>> {
-        preserve_ledger(self.failure, self.work.complete_all())
-    }
-
-    pub(crate) fn finish_exact(self) -> Result<(), ExecutionError<D>> {
-        preserve_ledger(self.failure, self.work.finish_exact())
-    }
-
-    pub(crate) fn finish_partial(self) -> Result<(), ExecutionError<D>> {
-        preserve_ledger(self.failure, self.work.finish_partial())
-    }
-}
-
-impl<D: Copy> ExecutionParserScope<'_, D, 1> {
-    pub(crate) fn replenish(&mut self, amount: u64) -> Result<(), ExecutionError<D>> {
-        ensure_running(self.failure)?;
-        preserve_ledger(self.failure, self.work.replenish(amount))
     }
 }
 

@@ -3,8 +3,8 @@
 use super::*;
 mod exclusive;
 use crate::retained::{
-    ExecutionError, ExecutionGroup, ExecutionOrdinaryStorage, ExecutionParserScope,
-    ExecutionPermit, ExecutionServices, ExecutionWork,
+    ExecutionError, ExecutionGroup, ExecutionOrdinaryStorage, ExecutionPermit, ExecutionServices,
+    ExecutionWork,
 };
 pub use exclusive::{
     StoreActionExecution, StoreChildAdmission, StoreExtensionResult, StoreFailureStorage,
@@ -64,12 +64,6 @@ pub struct StoreBoundWorkGroup<'op, const N: usize> {
 #[must_use = "finish exact or explicitly resolve verified partial work"]
 pub struct StoreExecutionPermit<'op, const N: usize> {
     raw: ExecutionPermit<'op, StoreDimensionKey, N>,
-}
-
-/// An attempted-only parent or child parser channel on the invocation's existing work owner.
-#[must_use = "resolve the parser channel before leaving the execution region"]
-pub struct StoreParserWorkScope<'op, const N: usize> {
-    raw: ExecutionParserScope<'op, StoreDimensionKey, N>,
 }
 
 /// Parser admission projects per-item limits outside the numeric owner's short borrow.
@@ -192,49 +186,6 @@ impl<'op, O: OperationOwner> StoreExecutionWork<'op, O> {
 }
 
 impl<'op, const N: usize> StoreBoundWorkGroup<'op, N> {
-    /// Admits a semantic parent; its completion must follow every child and a full checkpoint.
-    pub fn begin_parser_parent(
-        &self,
-        amounts: [u64; N],
-        item_limits: [Option<u64>; N],
-    ) -> Result<StoreParserWorkScope<'op, N>, StoreParserWorkError> {
-        self.begin_parser(amounts, item_limits, true)
-    }
-
-    /// Admits one child/direct channel, optionally inside a semantic parent.
-    pub fn begin_parser_child(
-        &self,
-        amounts: [u64; N],
-        item_limits: [Option<u64>; N],
-    ) -> Result<StoreParserWorkScope<'op, N>, StoreParserWorkError> {
-        self.begin_parser(amounts, item_limits, false)
-    }
-
-    fn begin_parser(
-        &self,
-        amounts: [u64; N],
-        item_limits: [Option<u64>; N],
-        parent: bool,
-    ) -> Result<StoreParserWorkScope<'op, N>, StoreParserWorkError> {
-        self.raw
-            .begin_parser(amounts, item_limits, parent)
-            .map(|raw| StoreParserWorkScope { raw })
-            .map_err(|cause| match cause {
-                crate::ledger::ParserWorkError::Ledger(cause) => {
-                    StoreParserWorkError::Runtime(StoreRuntimeError::Ledger(cause))
-                }
-                crate::ledger::ParserWorkError::ItemLimit {
-                    index,
-                    value,
-                    limit,
-                } => StoreParserWorkError::ItemLimit {
-                    index,
-                    value,
-                    limit,
-                },
-            })
-    }
-
     /// Records the complete observed envelope before the physical action starts.
     pub fn admit_observed(
         &self,
@@ -272,40 +223,6 @@ impl<'op, const N: usize> StoreBoundWorkGroup<'op, N> {
         self.raw
             .charge_observed(amounts)
             .map_err(map_execution_error)
-    }
-}
-
-impl<const N: usize> StoreParserWorkScope<'_, N> {
-    /// Returns the admitted suffix without constructing an evidence snapshot.
-    pub fn remaining(&self) -> [u64; N] {
-        self.raw.remaining()
-    }
-
-    /// Atomically records the exact physical prefix across the prebound group.
-    pub fn complete(&mut self, amounts: [u64; N]) -> Result<(), StoreRuntimeError> {
-        self.raw.complete(amounts).map_err(map_execution_error)
-    }
-
-    /// Records the entire unfinished prefix.
-    pub fn complete_all(&mut self) -> Result<(), StoreRuntimeError> {
-        self.raw.complete_all().map_err(map_execution_error)
-    }
-
-    /// Closes a fully completed channel; an incomplete channel latches failure.
-    pub fn finish_exact(self) -> Result<(), StoreRuntimeError> {
-        self.raw.finish_exact().map_err(map_execution_error)
-    }
-
-    /// Closes ownership after a verified partial parse, retaining every completed prefix.
-    pub fn finish_partial(self) -> Result<(), StoreRuntimeError> {
-        self.raw.finish_partial().map_err(map_execution_error)
-    }
-}
-
-impl StoreParserWorkScope<'_, 1> {
-    /// Reuses a fully completed singleton without a per-item limit for the next chunk.
-    pub fn replenish(&mut self, amount: u64) -> Result<(), StoreRuntimeError> {
-        self.raw.replenish(amount).map_err(map_execution_error)
     }
 }
 

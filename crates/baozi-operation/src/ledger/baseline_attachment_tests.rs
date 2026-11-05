@@ -111,12 +111,9 @@ fn attachment_preserves_live_scratch_and_preexisting_work_but_strict_binding_rej
 }
 
 #[test]
-fn attachment_preserves_pending_linear_work_and_both_parser_channels() {
+fn attachment_preserves_pending_linear_work_until_explicit_resolution() {
     let ledger = ledger();
     let mut linear = ledger.try_admit_linear_work(Dimension::Work, 3).unwrap();
-    let parser = ledger.bind_work([Dimension::Work]).unwrap();
-    let mut parent = parser.begin_parser_parent([2], [None]).unwrap();
-    let mut child = parser.begin_parser_child([1], [None]).unwrap();
     let mut baseline = baseline(&ledger);
     let before = ledger.try_snapshot().unwrap();
 
@@ -124,8 +121,62 @@ fn attachment_preserves_pending_linear_work_and_both_parser_channels() {
 
     assert_eq!(ledger.try_snapshot().unwrap(), before);
     assert_eq!(linear.remaining(), [3]);
-    assert_eq!(parent.remaining(), [2]);
-    assert_eq!(child.remaining(), [1]);
+    {
+        let work = ledger.work.borrow_state().unwrap();
+        assert_eq!(work.rows[1].state.pending_consumed, 3);
+        assert_eq!(work.header.open_envelopes, 1);
+        assert!(!work.header.parser_parent_open);
+        assert!(!work.header.parser_child_open);
+        assert_eq!(work.header.protected_dimension, None);
+    }
+    for rejected in [
+        ledger.try_bind_fallback_baseline(&mut baseline),
+        ledger.preflight_configure_protected_work(Dimension::Failure),
+        ledger.configure_protected_work(Dimension::Failure),
+    ] {
+        assert_eq!(
+            rejected,
+            Err(LedgerCause::OutstandingLinearWorkPermits { count: 1 })
+        );
+    }
+    assert_eq!(ledger.try_snapshot().unwrap(), before);
+
+    linear.complete(0, 3).unwrap();
+    linear.finish().unwrap();
+    ledger.try_bind_fallback_baseline(&mut baseline).unwrap();
+    ledger
+        .preflight_configure_protected_work(Dimension::Failure)
+        .unwrap();
+    ledger.configure_protected_work(Dimension::Failure).unwrap();
+}
+
+#[test]
+fn attachment_preserves_forgotten_kernel_channels_and_pending_internal_work() {
+    let mut ledger = ledger();
+    let mut baseline = baseline(&ledger);
+    {
+        let (mut work, _storage) = ledger.exclusive().unwrap();
+        let layout = work.bind([Dimension::Work]).unwrap();
+        let linear = layout
+            .admit_observed(&mut work.work, [3], WorkLane::Internal)
+            .unwrap();
+        let parent = layout
+            .begin_parser(&mut work.work, [2], [None], ParserChannel::Parent)
+            .unwrap();
+        let child = layout
+            .begin_parser(&mut work.work, [1], [None], ParserChannel::Child)
+            .unwrap();
+        assert_eq!(linear.remaining, [3]);
+        assert_eq!(parent.remaining, [2]);
+        assert_eq!(child.remaining, [1]);
+        assert_eq!(work.counters(Dimension::Work).unwrap(), (6, 0, 3));
+        let _unresolved_frames = std::mem::ManuallyDrop::new((linear, parent, child));
+    }
+    let before = ledger.try_snapshot().unwrap();
+
+    ledger.try_attach_fallback_baseline(&mut baseline).unwrap();
+
+    assert_eq!(ledger.try_snapshot().unwrap(), before);
     {
         let work = ledger.work.borrow_state().unwrap();
         assert_eq!(work.rows[1].state.pending_consumed, 3);
@@ -145,18 +196,6 @@ fn attachment_preserves_pending_linear_work_and_both_parser_channels() {
         );
     }
     assert_eq!(ledger.try_snapshot().unwrap(), before);
-
-    linear.complete(0, 3).unwrap();
-    linear.finish().unwrap();
-    child.complete_all().unwrap();
-    child.finish_exact().unwrap();
-    parent.complete_all().unwrap();
-    parent.finish_exact().unwrap();
-    ledger.try_bind_fallback_baseline(&mut baseline).unwrap();
-    ledger
-        .preflight_configure_protected_work(Dimension::Failure)
-        .unwrap();
-    ledger.configure_protected_work(Dimension::Failure).unwrap();
 }
 
 #[test]

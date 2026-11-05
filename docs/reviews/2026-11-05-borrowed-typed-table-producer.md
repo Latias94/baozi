@@ -26,7 +26,7 @@ Physical storage leases still independently survive successful construction.
 
 Removed paths include `RetainedProducerWorkPermit`, `RetainedStoreObservedWork`,
 their entry/export/finish types, `Ledger::try_admit_producer_work_batch`, and now-unused
-coordinator checkpoint splitting. Surviving direct producer accounting, progress,
+coordinator progress-checkpoint methods. Surviving direct producer accounting, progress,
 policy and state interfaces remain. Existing Internal/protected/share work, storage
 owners and the common arithmetic kernel are still live and are not removed by this cut.
 

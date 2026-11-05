@@ -18,8 +18,8 @@ mod startup;
 mod work;
 
 pub(crate) use work::{
-    BoundWorkGroup, LinearWorkBatchPermit, ParserChannel, ParserFrame, ParserWorkError,
-    ParserWorkScope, WorkFrame, WorkLane, WorkLayout, WorkView,
+    BoundWorkGroup, LinearWorkBatchPermit, ParserChannel, ParserFrame, ParserWorkError, WorkFrame,
+    WorkLane, WorkLayout, WorkView,
 };
 use work::{LocalWork, WorkDimensionState, WorkEntry, WorkGrant, WorkMode, WorkPolicy, WorkState};
 
