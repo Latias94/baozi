@@ -132,6 +132,11 @@ original fourteen cases and 110 lanes, three warmup pairs and twenty retained
 AB/BA pairs. Keep all failed lanes and host-load observations. Windows and Linux
 release targets remain open.
 
+The subsequent [finite measurement attempt](2026-11-05-semantic-integer-performance-attempt.md)
+builds both ordinary workers and passes both versions' original functional
+preflights on Windows and Linux. Fixed load gates stop Windows before candidate
+sampling and Linux before ordinary sampling. No performance effect is established.
+
 Subsequent removal of repeated validation must identify the input/output owner
 and the exact invariant being transferred. A type or construction proof can
 replace an internal runtime scan when it covers the actual produced storage;

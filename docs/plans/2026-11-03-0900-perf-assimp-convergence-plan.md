@@ -699,3 +699,11 @@ negative case only for a genuinely new boundary, not for incidental private layo
   requires a closed private construction invariant before deleting them. Preserve
   output layout/reference validation and real numeric qualification of edited
   values; do not add a general proof engine or a second ledger.
+- The [cumulative measurement attempt](../reviews/2026-11-05-semantic-integer-performance-attempt.md)
+  builds immutable Windows/GNU ordinary workers from candidate `e5ca93b` and
+  passes four original 110-lane functional preflights. Windows old-source C0
+  completes all 5,062 commands but overlaps named build tools in 151 snapshots.
+  Its candidate N0 and Linux's initial C0 then reach the prospective startup wait
+  limit and do not run. Keep all raw results and not-started records. There are
+  no candidate ordinary samples, no source-change timing claim and no cleared
+  release gate; a future prospective collection needs an adequate host window.
