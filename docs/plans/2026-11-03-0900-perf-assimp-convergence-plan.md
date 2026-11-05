@@ -707,3 +707,16 @@ negative case only for a genuinely new boundary, not for incidental private layo
   limit and do not run. Keep all raw results and not-started records. There are
   no candidate ordinary samples, no source-change timing claim and no cleared
   release gate; a future prospective collection needs an adequate host window.
+- The [fresh instruction/heap attribution](../reviews/2026-11-05-semantic-integer-attribution.md)
+  retains six e5ca93b whole-worker Ir observations against exact 56eecd9 controls:
+  grid OBJ -6.029%, STL -7.019%, repeated OBJ -1.102%, and three small-task
+  increases of 0.793-1.127%. Eighteen fresh heap tasks show identical allocation
+  counts across Baozi versions, with unchanged OBJ rounded peaks and small
+  displayed increases elsewhere. Independent reviews preserve profiler warnings
+  and all temporary-count discrepancies. Source float execution remains a larger
+  STL chain than retained float rechecking. A one-kernel empty/singleton layout
+  mapping experiment passes focused tests and source review; its measurement and
+  integrated qualification remain pending. A second native window completes its
+  old-source C0, then stops before candidate N0 when external builds recur. Its
+  386-second post-collector file copy motivates standard tar retention outside
+  future worker clocks; every original task, timing boundary and load gate remains.
