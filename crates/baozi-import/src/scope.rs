@@ -27,8 +27,8 @@ use crate::limits::ResourceLimits;
 use crate::loss::{ImportLossDisposition, ImportLossEvidence, ImportLossSubject};
 use crate::metered_storage::{
     AccountedVec, MeteredDecodedText, MeteredOpaqueAllowance, MeteredOrderedMap, MeteredString,
-    MeteredVec, StorageIdentity, metered_replacement_plans_with_element_size,
-    metered_vec_replacement_plans,
+    MeteredVec, StorageIdentity, metered_replacement_plan_with_element_size,
+    metered_vec_replacement_plan,
 };
 use crate::registry::RegistryEntry;
 use crate::resource_graph::{
@@ -5956,10 +5956,10 @@ mod tests {
                                 (values.len(), values.capacity(), values.capacity.as_ref().unwrap().bytes())
                             };
                             let additional = capacity + 1;
-                            let (_, replacement) = if string {
-                                metered_replacement_plans_with_element_size(len, capacity, len + additional, 1)
+                            let replacement = if string {
+                                metered_replacement_plan_with_element_size(len, capacity, len + additional, 1)
                             } else {
-                                metered_vec_replacement_plans::<u32>(len, capacity, len + additional)
+                                metered_vec_replacement_plan::<u32>(len, capacity, len + additional)
                             }.unwrap();
                             let admitted = replacement.envelope_delta_bytes().unwrap();
                             let live = observed.live_bytes();
@@ -6151,7 +6151,7 @@ mod tests {
                                 .dimension_state(ImportDimension::ScratchBytes)
                                 .unwrap()
                                 .live_bytes();
-                            let (_, replacement) = metered_vec_replacement_plans::<u32>(
+                            let replacement = metered_vec_replacement_plan::<u32>(
                                 values.len(),
                                 values.capacity(),
                                 values.len() + 1,

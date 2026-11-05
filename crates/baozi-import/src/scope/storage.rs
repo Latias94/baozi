@@ -215,7 +215,7 @@ impl<'b, 'op: 'b, 'session: 'b> ParseStorage<'b, 'op, 'session> {
             return Ok(None);
         }
 
-        let (plan, replacement_plan) = metered_vec_replacement_plans::<T>(
+        let replacement_plan = metered_vec_replacement_plan::<T>(
             values.values.len(),
             values.values.capacity(),
             required,
@@ -225,11 +225,6 @@ impl<'b, 'op: 'b, 'session: 'b> ParseStorage<'b, 'op, 'session> {
             .envelope_delta_bytes()
             .map_err(|cause| values.identity.capacity_error(values.resource, cause))?;
         let mut token = self.reserve(values.identity, values.class, admitted)?;
-        plan.verify_preflight(values.values.len(), values.values.capacity())
-            .map_err(|cause| values.identity.capacity_error(values.resource, cause))?;
-        replacement_plan
-            .verify_preflight(0, 0)
-            .map_err(|cause| values.identity.capacity_error(values.resource, cause))?;
         let mut replacement = Vec::new();
         if fail_next_metered_allocation() {
             return Err(values.identity.allocation_failure(values.resource));
@@ -239,8 +234,6 @@ impl<'b, 'op: 'b, 'session: 'b> ParseStorage<'b, 'op, 'session> {
             .map_err(|_| values.identity.allocation_failure(values.resource))?;
         let complete_bytes = replacement_plan
             .finish(replacement.len(), replacement.capacity())
-            .map_err(|cause| values.identity.capacity_error(values.resource, cause))?;
-        plan.finish(values.values.len(), replacement.capacity())
             .map_err(|cause| values.identity.capacity_error(values.resource, cause))?;
         self.resize_exact(values.identity, &mut token, complete_bytes)?;
         if fail_next_metered_qualification() {
@@ -326,7 +319,7 @@ impl<'b, 'op: 'b, 'session: 'b> ParseStorage<'b, 'op, 'session> {
             return Ok(None);
         }
 
-        let (plan, replacement_plan) = metered_replacement_plans_with_element_size(
+        let replacement_plan = metered_replacement_plan_with_element_size(
             value.value.len(),
             value.value.capacity(),
             required,
@@ -337,19 +330,12 @@ impl<'b, 'op: 'b, 'session: 'b> ParseStorage<'b, 'op, 'session> {
             .envelope_delta_bytes()
             .map_err(|cause| value.identity.capacity_error(value.resource, cause))?;
         let mut token = self.reserve(value.identity, value.class, admitted)?;
-        plan.verify_preflight(value.value.len(), value.value.capacity())
-            .map_err(|cause| value.identity.capacity_error(value.resource, cause))?;
-        replacement_plan
-            .verify_preflight(0, 0)
-            .map_err(|cause| value.identity.capacity_error(value.resource, cause))?;
         let mut replacement = String::new();
         replacement
             .try_reserve_exact(replacement_plan.allocator_additional())
             .map_err(|_| value.identity.allocation_failure(value.resource))?;
         let complete_bytes = replacement_plan
             .finish(replacement.len(), replacement.capacity())
-            .map_err(|cause| value.identity.capacity_error(value.resource, cause))?;
-        plan.finish(value.value.len(), replacement.capacity())
             .map_err(|cause| value.identity.capacity_error(value.resource, cause))?;
         self.resize_exact(value.identity, &mut token, complete_bytes)?;
         if fail_next_metered_qualification() {

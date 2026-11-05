@@ -146,3 +146,37 @@ hashes and four log hashes, and distinguished the two doctest result groups.
 The fused text design still needs a concrete source/copy admission schedule and aggregate
 decoded-live ownership. The source prerequisite supplies neither a performance keep nor
 approval of a session-cumulative decoded counter. Release remains on hold.
+
+## Follow-up: remove closed-owner revalidation
+
+The preparation extraction was committed as `3090dbc`. A separate bounded follow-up
+removes checks made redundant by that interface, superseding their preservation in
+the initial extraction decision above:
+
+| Removed check | Ownership or retained check that supplies the guarantee |
+| --- | --- |
+| Recheck the captured source length/capacity before allocation | Preparation retains an immutable borrow of the source; no mutable container interface escapes. |
+| Check `(0, 0)` against the empty candidate plan before creating its backing | The private helper constructs that plan with `(0, 0)`, and the caller creates a fresh empty container directly. |
+| Qualify candidate capacity a second time against the source growth plan | For allocating storage, the candidate plan already requires the source envelope as its minimum and maximum capacity. Its retained `finish` checks actual length/capacity and byte arithmetic. |
+
+The crate-private planning helpers now return only that candidate plan, with singular
+names. All callers migrate together, including the table estimator. No retired tuple
+interface or compatibility alias remains. The temporary growth calculation still checks
+source shape, geometric arithmetic and allocation size while computing the same envelope.
+
+The checked required length, old-plus-candidate admission, fallible allocation, actual
+candidate qualification, exact token resize, identity checks, control polls and cleanup
+remain in their current order. General detached `CapacityPlan` preflight/finish methods
+retain their checks: their callers can change storage between planning and execution.
+This distinction uses ownership to remove impossible states in a closed operation,
+without weakening an interface that permits those states. Zero-sized vectors keep their
+allocation-free fit path and checked required-length overflow before that fit check.
+
+No new tests or fault framework are added. Existing candidate-policy assertions and
+actual-owner failure, overlap, cancellation, foreign-session and ZST tests qualify this
+deletion. Independent source/evidence review found no issue in the four-file production
+and test delta (19 additions, 38 deletions). The fresh receipt
+`target/review/convergence/text-capacity-simplification-qa-1.json` records 485 nextest
+tests, 49 doctests, strict Import Clippy and workspace formatting passed on 909 stable
+inputs. The reviewer verified all four log hashes and the four changed source hashes.
+No runtime speedup is inferred from fewer source checks.

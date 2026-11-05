@@ -8,7 +8,7 @@ use crate::diagnostic::{
     DiagnosticSource, TextDiagnosticLocation,
 };
 use crate::ledger::ImportProgressPhase;
-use crate::metered_storage::{MeteredDecodedText, MeteredVec, metered_vec_replacement_plans};
+use crate::metered_storage::{MeteredDecodedText, MeteredVec, metered_vec_replacement_plan};
 use crate::scope::{
     ImportStorageClass, ImportWorkClass, METERED_COPY_POLL_INTERVAL, ParseChildren, ParseErrorView,
     ParseFailure, ParseParser, ParseResult, ParseServices,
@@ -1248,7 +1248,7 @@ impl InitialMeteredVecPlan {
             return Ok(false);
         }
 
-        let (_, replacement_plan) = metered_vec_replacement_plans::<T>(0, 0, len)
+        let replacement_plan = metered_vec_replacement_plan::<T>(0, 0, len)
             .map_err(|_| errors.resource_limit_exceeded(resource, u64::MAX))?;
         self.len = len;
         self.capacity = replacement_plan.envelope_capacity();

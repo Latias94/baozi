@@ -25,25 +25,23 @@ pub(crate) struct AccountedVecIntoIter<T> {
 
 pub(crate) type AccountedReservationVec = AccountedVec<ImportStoreReservation>;
 
-pub(crate) fn metered_replacement_plans_with_element_size(
+pub(crate) fn metered_replacement_plan_with_element_size(
     len: usize,
     capacity: usize,
     required_capacity: usize,
     element_size: usize,
-) -> Result<(CapacityPlan, CapacityPlan), CapacityPlanError> {
+) -> Result<CapacityPlan, CapacityPlanError> {
     let desired = capacity.saturating_mul(2).max(required_capacity).max(4);
     let growth = CapacityPlan::with_element_size(len, capacity, desired, element_size)?;
-    let replacement =
-        CapacityPlan::with_element_size(0, 0, growth.envelope_capacity(), element_size)?;
-    Ok((growth, replacement))
+    CapacityPlan::with_element_size(0, 0, growth.envelope_capacity(), element_size)
 }
 
-pub(crate) fn metered_vec_replacement_plans<T>(
+pub(crate) fn metered_vec_replacement_plan<T>(
     len: usize,
     capacity: usize,
     required_capacity: usize,
-) -> Result<(CapacityPlan, CapacityPlan), CapacityPlanError> {
-    metered_replacement_plans_with_element_size(
+) -> Result<CapacityPlan, CapacityPlanError> {
+    metered_replacement_plan_with_element_size(
         len,
         capacity,
         required_capacity,
@@ -732,12 +730,9 @@ mod tests {
     #[test]
     fn shared_replacement_capacity_policy_is_exact_at_one_four_and_five_elements() {
         fn assert_typed_policy<T>() {
-            for (required, expected_desired, expected_envelope) in [(1, 4, 4), (4, 4, 4), (5, 5, 8)]
-            {
-                let (growth, replacement) = metered_vec_replacement_plans::<T>(0, 0, required)
+            for (required, expected_envelope) in [(1, 4), (4, 4), (5, 8)] {
+                let replacement = metered_vec_replacement_plan::<T>(0, 0, required)
                     .expect("small vector capacity plan must fit");
-                assert_eq!(growth.desired_capacity(), expected_desired);
-                assert_eq!(growth.envelope_capacity(), expected_envelope);
                 assert_eq!(replacement.desired_capacity(), expected_envelope);
                 assert_eq!(replacement.envelope_capacity(), expected_envelope);
                 assert_eq!(
@@ -757,7 +752,7 @@ mod tests {
         assert_typed_policy::<u8>();
         assert_typed_policy::<[usize; 3]>();
 
-        let (_, replacement) = metered_replacement_plans_with_element_size(0, 0, 5, 1)
+        let replacement = metered_replacement_plan_with_element_size(0, 0, 5, 1)
             .expect("small string capacity plan must fit");
         assert_eq!(replacement.envelope_capacity(), 8);
         assert_eq!(replacement.envelope_delta_bytes().unwrap(), 8);
