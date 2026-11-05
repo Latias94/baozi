@@ -11,7 +11,8 @@ use baozi_operation::__retained_store_integration::activation::{
 };
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalFailureRequirements, CanonicalLane, CanonicalMaterialization, CanonicalReservation,
-    CanonicalSemanticWorkSession, CanonicalValidationDecision, CanonicalValidationPlanning,
+    CanonicalSemanticWorkSession, CanonicalStorageBuildError, CanonicalValidationDecision,
+    CanonicalValidationPlanning,
 };
 use baozi_operation::__retained_store_integration::producer::{
     CanonicalActivationDescription, CanonicalActivationPlanSealer, CanonicalActivationRequest,
@@ -1340,11 +1341,8 @@ where
         central_validation,
     } = plan;
     let spatial_work = materialize!(plans.spatial.work().map_err(StoreRuntimeError::Plan));
-    let spatial = materialize!(lane.try_retain_storage(
-        plans.spatial.capacities(),
-        spatial_work,
-        0,
-        |control| {
+    let spatial = materialize!(
+        lane.try_retain_storage(plans.spatial.capacities(), spatial_work, 0, |control| {
             #[allow(
                 unused_mut,
                 reason = "tests corrupt actual values before central validation"
@@ -1358,8 +1356,9 @@ where
                 fault.corrupt_spatial(&mut storage);
             }
             Ok(storage)
-        },
-    ));
+        },)
+            .map_err(CanonicalStorageBuildError::into_runtime)
+    );
     let nodes = materialize!(retain_nodes(
         &mut lane,
         plans.nodes,
@@ -1379,26 +1378,29 @@ where
             .rows_work()
             .map_err(StoreRuntimeError::Plan)
     );
-    let appearance_rows = materialize!(lane.try_retain_storage(
-        appearance_rows_capacities,
-        appearance_rows_work,
-        0,
-        |control| {
-            #[allow(
-                unused_mut,
-                reason = "tests corrupt actual rows before central validation"
-            )]
-            let mut rows = plans
-                .appearance
-                .build_rows(&batches.appearance, control)
-                .map_err(super::geometry::map_build)?;
-            #[cfg(test)]
-            if let Some(fault) = faults.appearance {
-                fault.corrupt(&mut rows);
-            }
-            Ok(rows)
-        },
-    ));
+    let appearance_rows = materialize!(
+        lane.try_retain_storage(
+            appearance_rows_capacities,
+            appearance_rows_work,
+            0,
+            |control| {
+                #[allow(
+                    unused_mut,
+                    reason = "tests corrupt actual rows before central validation"
+                )]
+                let mut rows = plans
+                    .appearance
+                    .build_rows(&batches.appearance, control)
+                    .map_err(super::geometry::map_build)?;
+                #[cfg(test)]
+                if let Some(fault) = faults.appearance {
+                    fault.corrupt(&mut rows);
+                }
+                Ok(rows)
+            },
+        )
+        .map_err(CanonicalStorageBuildError::into_runtime)
+    );
     let appearance_payloads_capacities = materialize!(
         plans
             .appearance
@@ -1411,26 +1413,29 @@ where
             .payload_work()
             .map_err(StoreRuntimeError::Plan)
     );
-    let appearance_payloads = materialize!(lane.try_retain_storage(
-        appearance_payloads_capacities,
-        appearance_payloads_work,
-        plans.appearance.name_bytes() as u64,
-        |control| {
-            #[allow(
-                unused_mut,
-                reason = "tests corrupt actual payloads before central validation"
-            )]
-            let mut payloads = plans
-                .appearance
-                .build_payloads(&batches.appearance, control)
-                .map_err(super::geometry::map_build)?;
-            #[cfg(test)]
-            if let Some(fault) = faults.appearance {
-                fault.corrupt_payloads(&mut payloads);
-            }
-            Ok(payloads)
-        },
-    ));
+    let appearance_payloads = materialize!(
+        lane.try_retain_storage(
+            appearance_payloads_capacities,
+            appearance_payloads_work,
+            plans.appearance.name_bytes() as u64,
+            |control| {
+                #[allow(
+                    unused_mut,
+                    reason = "tests corrupt actual payloads before central validation"
+                )]
+                let mut payloads = plans
+                    .appearance
+                    .build_payloads(&batches.appearance, control)
+                    .map_err(super::geometry::map_build)?;
+                #[cfg(test)]
+                if let Some(fault) = faults.appearance {
+                    fault.corrupt_payloads(&mut payloads);
+                }
+                Ok(payloads)
+            },
+        )
+        .map_err(CanonicalStorageBuildError::into_runtime)
+    );
     let appearance = crate::canonical_scene::store::typed_storage::appearance::AppearanceStorage {
         rows: appearance_rows,
         payloads: appearance_payloads,
@@ -1450,26 +1455,29 @@ where
             .map_err(StoreRuntimeError::Plan)
     );
     let deformation_work = materialize!(plans.deformation.work().map_err(StoreRuntimeError::Plan));
-    let deformation = materialize!(lane.try_retain_storage(
-        deformation_capacities,
-        deformation_work,
-        plans.deformation.name_bytes() as u64,
-        |control| {
-            #[allow(
-                unused_mut,
-                reason = "tests corrupt actual values before central validation"
-            )]
-            let mut storage = plans
-                .deformation
-                .build(&batches.deformation, &batches.nodes, control)
-                .map_err(super::geometry::map_build)?;
-            #[cfg(test)]
-            if let Some(fault) = faults.deformation {
-                fault.corrupt(&mut storage);
-            }
-            Ok(storage)
-        },
-    ));
+    let deformation = materialize!(
+        lane.try_retain_storage(
+            deformation_capacities,
+            deformation_work,
+            plans.deformation.name_bytes() as u64,
+            |control| {
+                #[allow(
+                    unused_mut,
+                    reason = "tests corrupt actual values before central validation"
+                )]
+                let mut storage = plans
+                    .deformation
+                    .build(&batches.deformation, &batches.nodes, control)
+                    .map_err(super::geometry::map_build)?;
+                #[cfg(test)]
+                if let Some(fault) = faults.deformation {
+                    fault.corrupt(&mut storage);
+                }
+                Ok(storage)
+            },
+        )
+        .map_err(CanonicalStorageBuildError::into_runtime)
+    );
     let animation_capacities = materialize!(
         plans
             .animation
@@ -1477,26 +1485,29 @@ where
             .map_err(StoreRuntimeError::Plan)
     );
     let animation_work = materialize!(plans.animation.work().map_err(StoreRuntimeError::Plan));
-    let animation = materialize!(lane.try_retain_storage(
-        animation_capacities,
-        animation_work,
-        plans.animation.name_bytes() as u64,
-        |control| {
-            #[allow(
-                unused_mut,
-                reason = "tests corrupt actual values before central validation"
-            )]
-            let mut storage = plans
-                .animation
-                .build(&batches.animations, control)
-                .map_err(super::geometry::map_build)?;
-            #[cfg(test)]
-            if let Some(fault) = faults.animation {
-                fault.corrupt(&mut storage);
-            }
-            Ok(storage)
-        },
-    ));
+    let animation = materialize!(
+        lane.try_retain_storage(
+            animation_capacities,
+            animation_work,
+            plans.animation.name_bytes() as u64,
+            |control| {
+                #[allow(
+                    unused_mut,
+                    reason = "tests corrupt actual values before central validation"
+                )]
+                let mut storage = plans
+                    .animation
+                    .build(&batches.animations, control)
+                    .map_err(super::geometry::map_build)?;
+                #[cfg(test)]
+                if let Some(fault) = faults.animation {
+                    fault.corrupt(&mut storage);
+                }
+                Ok(storage)
+            },
+        )
+        .map_err(CanonicalStorageBuildError::into_runtime)
+    );
     let profile = materialize!(retain_profile(
         &mut lane,
         &plans.profile,

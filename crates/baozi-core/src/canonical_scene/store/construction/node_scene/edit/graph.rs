@@ -1,9 +1,11 @@
-use baozi_operation::__retained_store_integration::activation::CanonicalLane;
+use baozi_operation::__retained_store_integration::activation::{
+    CanonicalLane, CanonicalStorageBuildError,
+};
 use baozi_operation::__retained_store_integration::authority::CanonicalInheritanceSource;
 use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit, RecordPlan, StoreRuntimeError};
 
 use super::super::NodeSceneMaterializedRefs;
-use super::super::geometry::map_build;
+use super::super::geometry::map_storage_build;
 use super::plan::{BoundPendingNodeSceneEdit, NodeSceneEditProgram};
 use super::profile::retain_edited_profile;
 use super::required_record_view;
@@ -37,20 +39,22 @@ where
             let source_nodes = pending.input.read_nodes();
             let plan =
                 NodeStoragePlan::for_storage(source_nodes).map_err(StoreRuntimeError::Plan)?;
-            let nodes = lane.try_retain_storage(
-                plan.capacities(),
-                plan.work().map_err(StoreRuntimeError::Plan)?,
-                plan.name_bytes() as u64,
-                |control| {
-                    plan.rewrite(
-                        source_nodes,
-                        rewrite.target().canonical_row.as_usize(),
-                        rewrite.replacement(),
-                        control,
-                    )
-                    .map_err(map_build)
-                },
-            )?;
+            let nodes = lane
+                .try_retain_storage(
+                    plan.capacities(),
+                    plan.work().map_err(StoreRuntimeError::Plan)?,
+                    plan.name_bytes() as u64,
+                    |control| {
+                        plan.rewrite(
+                            source_nodes,
+                            rewrite.target().canonical_row.as_usize(),
+                            rewrite.replacement(),
+                            control,
+                        )
+                        .map_err(map_storage_build)
+                    },
+                )
+                .map_err(CanonicalStorageBuildError::into_runtime)?;
             (
                 nodes,
                 lane.try_share_storage(&pending.input.tables.geometry)?,
@@ -59,44 +63,52 @@ where
         #[cfg(test)]
         NodeSceneEditProgram::TriangulatePrimitive(plan) => {
             let nodes = lane.try_share_storage(&pending.input.tables.nodes)?;
-            let geometry = lane.try_retain_storage(
-                plan.capacities(),
-                plan.work(),
-                plan.name_bytes() as u64,
-                |mut control| plan.materialize(&mut control).map_err(map_build),
-            )?;
+            let geometry = lane
+                .try_retain_storage(
+                    plan.capacities(),
+                    plan.work(),
+                    plan.name_bytes() as u64,
+                    |mut control| plan.materialize(&mut control).map_err(map_storage_build),
+                )
+                .map_err(CanonicalStorageBuildError::into_runtime)?;
             (nodes, geometry)
         }
         #[cfg(test)]
         NodeSceneEditProgram::GenerateNormals { geometry: plan, .. } => {
             let nodes = lane.try_share_storage(&pending.input.tables.nodes)?;
-            let geometry = lane.try_retain_storage(
-                plan.capacities(),
-                plan.work(),
-                plan.name_bytes() as u64,
-                |control| plan.materialize(control).map_err(map_build),
-            )?;
+            let geometry = lane
+                .try_retain_storage(
+                    plan.capacities(),
+                    plan.work(),
+                    plan.name_bytes() as u64,
+                    |control| plan.materialize(control).map_err(map_storage_build),
+                )
+                .map_err(CanonicalStorageBuildError::into_runtime)?;
             (nodes, geometry)
         }
         #[cfg(test)]
         NodeSceneEditProgram::GenerateTangents(plan) => {
             let nodes = lane.try_share_storage(&pending.input.tables.nodes)?;
-            let geometry = lane.try_retain_storage(
-                plan.capacities(),
-                plan.work(),
-                plan.name_bytes() as u64,
-                |control| plan.materialize(control).map_err(map_build),
-            )?;
+            let geometry = lane
+                .try_retain_storage(
+                    plan.capacities(),
+                    plan.work(),
+                    plan.name_bytes() as u64,
+                    |control| plan.materialize(control).map_err(map_storage_build),
+                )
+                .map_err(CanonicalStorageBuildError::into_runtime)?;
             (nodes, geometry)
         }
         NodeSceneEditProgram::SelectedGeometry(plan) => {
             let nodes = lane.try_share_storage(&pending.input.tables.nodes)?;
-            let geometry = lane.try_retain_storage(
-                plan.capacities(),
-                plan.work(),
-                plan.name_bytes() as u64,
-                |control| plan.materialize(control).map_err(map_build),
-            )?;
+            let geometry = lane
+                .try_retain_storage(
+                    plan.capacities(),
+                    plan.work(),
+                    plan.name_bytes() as u64,
+                    |control| plan.materialize(control).map_err(map_storage_build),
+                )
+                .map_err(CanonicalStorageBuildError::into_runtime)?;
             (nodes, geometry)
         }
         NodeSceneEditProgram::ConvertSpace(plan) => {
@@ -108,8 +120,9 @@ where
                     nodes.capacities(),
                     nodes.work(),
                     nodes.name_bytes() as u64,
-                    |control| nodes.materialize(control).map_err(map_build),
-                )?
+                    |control| nodes.materialize(control).map_err(map_storage_build),
+                )
+                .map_err(CanonicalStorageBuildError::into_runtime)?
             } else {
                 lane.try_share_storage(&pending.input.tables.nodes)?
             };
@@ -120,8 +133,9 @@ where
                     geometry.capacities(),
                     geometry.work(),
                     geometry.name_bytes() as u64,
-                    |control| geometry.materialize(control).map_err(map_build),
-                )?
+                    |control| geometry.materialize(control).map_err(map_storage_build),
+                )
+                .map_err(CanonicalStorageBuildError::into_runtime)?
             };
             (nodes, geometry)
         }
@@ -135,8 +149,9 @@ where
     let spatial = if let NodeSceneEditProgram::ConvertSpace(plan) = &pending.program {
         let spatial = plan.spatial();
         lane.try_retain_storage(spatial.capacities(), spatial.work(), 0, |control| {
-            spatial.materialize(control).map_err(map_build)
-        })?
+            spatial.materialize(control).map_err(map_storage_build)
+        })
+        .map_err(CanonicalStorageBuildError::into_runtime)?
     } else {
         lane.try_share_storage(&pending.input.tables.spatial)?
     };
@@ -148,8 +163,9 @@ where
             appearance.capacities().map_err(StoreRuntimeError::Plan)?,
             appearance.work(),
             appearance.name_bytes() as u64,
-            |control| appearance.materialize(control).map_err(map_build),
-        )?
+            |control| appearance.materialize(control).map_err(map_storage_build),
+        )
+        .map_err(CanonicalStorageBuildError::into_runtime)?
     } else {
         lane.try_share_storage(&pending.input.tables.appearance.rows)?
     };
@@ -165,8 +181,9 @@ where
             deformation.capacities().map_err(StoreRuntimeError::Plan)?,
             deformation.work(),
             deformation.name_bytes() as u64,
-            |control| deformation.materialize(control).map_err(map_build),
-        )?
+            |control| deformation.materialize(control).map_err(map_storage_build),
+        )
+        .map_err(CanonicalStorageBuildError::into_runtime)?
     } else {
         lane.try_share_storage(&pending.input.tables.deformation)?
     };
@@ -178,8 +195,9 @@ where
             animation.capacities().map_err(StoreRuntimeError::Plan)?,
             animation.work(),
             animation.name_bytes() as u64,
-            |control| animation.materialize(control).map_err(map_build),
-        )?
+            |control| animation.materialize(control).map_err(map_storage_build),
+        )
+        .map_err(CanonicalStorageBuildError::into_runtime)?
     } else {
         lane.try_share_storage(&pending.input.tables.animation)?
     };

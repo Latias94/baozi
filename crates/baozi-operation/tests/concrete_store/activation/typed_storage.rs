@@ -1,6 +1,8 @@
 use super::super::producer_host::operation_with_producer_dimensions;
 use super::*;
+use baozi_operation::__retained_store_integration::activation::CanonicalStorageBuildError;
 use baozi_operation::{CancellationOrigin, CapacityPlan, ControlCause, CounterClass};
+use std::convert::Infallible;
 use std::mem::ManuallyDrop;
 
 #[test]
@@ -66,6 +68,7 @@ fn typed_storage_rejects_the_whole_work_envelope_before_the_build_callback() {
                                         Ok(value)
                                     },
                                 )
+                                .map_err(CanonicalStorageBuildError::into_runtime)
                                 .err()
                                 .expect("the complete envelope exceeds the remaining work budget");
                             assert_eq!(
@@ -170,30 +173,33 @@ fn typed_storage_forgotten_control_borrow_keeps_exact_partial_and_zero_cleanup_i
                         ),
                         |mut lane| {
                             let baseline = account.snapshot();
-                            let result = lane.try_retain_storage(
-                                [capacity],
-                                admitted,
-                                if partial { 0 } else { admitted },
-                                |control| {
-                                    let mut value =
-                                        String::with_capacity(capacity.envelope_capacity());
-                                    for _ in 0..completed {
-                                        if partial {
-                                            control.run_unit(|| value.push('a'))?;
-                                        } else {
-                                            control.run_string_unit(|| value.push('a'))?;
+                            let result = lane
+                                .try_retain_storage(
+                                    [capacity],
+                                    admitted,
+                                    if partial { 0 } else { admitted },
+                                    |control| {
+                                        let mut value =
+                                            String::with_capacity(capacity.envelope_capacity());
+                                        for _ in 0..completed {
+                                            if partial {
+                                                control.run_unit(|| value.push('a'))?;
+                                            } else {
+                                                control.run_string_unit(|| value.push('a'))?;
+                                            }
                                         }
-                                    }
-                                    let _forgotten_borrow = ManuallyDrop::new(&mut *control);
-                                    if partial {
-                                        Err(StoreRuntimeError::Build(
-                                            StoreBuildError::domain(71).unwrap(),
-                                        ))
-                                    } else {
-                                        Ok(value)
-                                    }
-                                },
-                            );
+                                        let _forgotten_borrow = ManuallyDrop::new(&mut *control);
+                                        if partial {
+                                            Err(StoreRuntimeError::Build(
+                                                StoreBuildError::domain(71).unwrap(),
+                                            )
+                                            .into())
+                                        } else {
+                                            Ok(value)
+                                        }
+                                    },
+                                )
+                                .map_err(CanonicalStorageBuildError::into_runtime);
                             if partial {
                                 assert_eq!(
                                     result
@@ -308,6 +314,7 @@ fn typed_storage_rejects_extra_units_before_the_physical_callback() {
                                 }
                                 Ok(value)
                             })
+                            .map_err(CanonicalStorageBuildError::into_runtime)
                             .err()
                             .expect("an ignored extra action cannot retain the table");
                         assert_eq!(cause, StoreRuntimeError::ObservedWorkExceedsAdmitted);
@@ -378,6 +385,7 @@ fn typed_storage_incomplete_units_or_strings_release_the_built_value() {
                                 }
                                 Ok(value)
                             })
+                            .map_err(CanonicalStorageBuildError::into_runtime)
                             .err()
                             .expect("both work and string envelopes must finish exactly");
                         assert_eq!(cause, StoreRuntimeError::ObservedWorkIncomplete);
@@ -442,6 +450,7 @@ fn typed_storage_build_panic_releases_prepared_shared_storage_before_containment
                             }
                             Ok(value)
                         })
+                        .map_err(CanonicalStorageBuildError::into_runtime)
                         .unwrap(),
                     );
                     assert_eq!(shared.as_ref().unwrap().as_ref(), "aa");
@@ -456,7 +465,7 @@ fn typed_storage_build_panic_releases_prepared_shared_storage_before_containment
                             4,
                             0,
                             |_| Ok(shared.take().unwrap()),
-                            |prepared, control| -> Result<String, StoreRuntimeError> {
+                            |prepared, control| -> Result<String, CanonicalStorageBuildError<Infallible>> {
                                 let _prepared = prepared;
                                 let mut value = String::with_capacity(capacity.envelope_capacity());
                                 for _ in 0..3 {
@@ -469,6 +478,7 @@ fn typed_storage_build_panic_releases_prepared_shared_storage_before_containment
                                 panic!("physical typed-table builder panicked after its prefix");
                             },
                         )
+                        .map_err(CanonicalStorageBuildError::into_runtime)
                         .err()
                         .expect("a panicking physical builder cannot return retained storage");
                     assert_eq!(cause, StoreRuntimeError::ConstructionInvariantUnverified);
@@ -505,121 +515,329 @@ fn typed_storage_build_panic_releases_prepared_shared_storage_before_containment
 }
 
 #[test]
-fn typed_storage_cancellation_is_observed_before_the_4097th_physical_unit() {
-    const PLANNED_UNITS: usize = 4_097;
-    const COMPLETED_PREFIX: usize = 4_096;
+fn typed_storage_domain_rejection_releases_partial_storage_and_keeps_the_physical_prefix() {
+    for (completed, cancel_after) in [(0_usize, false), (2, false), (4, false), (2, true)] {
+        let factory = factory(1);
+        let account = account(&factory);
+        let cancellation = CancellationToken::new();
+        let mut control = Some(OperationControl::default().with_cancellation(cancellation.clone()));
+        let mut invocation_host = TestInvocationHost::<_, (), MaterializationRejection>::new();
+        let mut body_keys = None;
+        let finish = invocation_host
+            .run_body(
+                |CanonicalBodyParts {
+                     startup,
+                     output,
+                     activation,
+                     ..
+                 },
+                 disposition| {
+                    let (operation, keys) = operation_with_producer_dimensions(
+                        startup,
+                        &account,
+                        control.take().unwrap(),
+                        DimensionPolicy::counter(16, 16, 0),
+                    );
+                    let capacity = CapacityPlan::for_type::<u8>(0, 0, 4).unwrap();
+                    let outcome = plan_scoped_activation!(
+                        operation,
+                        output,
+                        activation,
+                        scoped_activation_shape_with_dimensions(
+                            keys,
+                            1,
+                            1,
+                            keys.other_dimension,
+                            keys.dimension,
+                            keys.dimension,
+                            keys.dimension,
+                        ),
+                        |mut lane| {
+                            let baseline = account.snapshot();
+                            let result = lane.try_retain_storage::<Vec<u8>, _, 1>(
+                                [capacity],
+                                4,
+                                0,
+                                |control| {
+                                    let mut values =
+                                        Vec::with_capacity(capacity.envelope_capacity());
+                                    for _ in 0..completed {
+                                        control.run_unit(|| values.push(1_u8))?;
+                                    }
+                                    if cancel_after {
+                                        cancellation.cancel();
+                                    }
+                                    Err(CanonicalStorageBuildError::Rejected((7_usize, completed)))
+                                },
+                            );
+                            if cancel_after {
+                                assert!(matches!(
+                                    result,
+                                    Err(CanonicalStorageBuildError::Runtime(
+                                        StoreRuntimeError::Control(ControlCause::Cancelled {
+                                            origin: CancellationOrigin::Signal,
+                                        })
+                                    ))
+                                ));
+                            } else {
+                                let Err(CanonicalStorageBuildError::Rejected(position)) = result
+                                else {
+                                    panic!(
+                                        "a normal domain rejection must keep its owned coordinates"
+                                    )
+                                };
+                                assert_eq!(position, (7, completed));
+                            }
+                            assert!(!account.snapshot().poisoned());
+                            assert_eq!(
+                                account.snapshot().live_retained_bytes(),
+                                baseline.live_retained_bytes()
+                            );
+                            assert_eq!(
+                                account.snapshot().live_retained_allocations(),
+                                baseline.live_retained_allocations()
+                            );
+                            lane.reject::<(), _, ScalarSequence<u8>, SequenceTag>(
+                                MaterializationRejection::Semantic,
+                                71,
+                            )
+                        },
+                    )
+                    .unwrap();
+                    body_keys = Some(keys);
+                    request_rejected_activation_finish!(outcome, disposition);
+                },
+            )
+            .unwrap();
+        let CanonicalInvocationOutcome::Rejected(rejected) = finish.resume().outcome else {
+            panic!("the domain rejection must remain a normal rejected invocation")
+        };
+        let (prepared, _) = rejected.prepare_minimal_fallback().unwrap().into_parts();
+        let published = prepared.handoff();
+        let work = published
+            .ledger_evidence
+            .dimension(body_keys.unwrap().other_dimension)
+            .unwrap();
+        assert_eq!(
+            (work.attempted(), work.consumed()),
+            (5, 1 + completed as u64)
+        );
+        assert_eq!(
+            store_failure_cause(&published.ledger_evidence).class(),
+            if cancel_after {
+                StorePreparationFailureClass::Control
+            } else {
+                StorePreparationFailureClass::Requested
+            }
+        );
+        assert_eq!(published.ledger_evidence.header().current_live_bytes(), 0);
+        assert_eq!(published.ledger_evidence.header().active_reservations(), 0);
+        drop(published);
+        drop(invocation_host);
+        assert!(!account.snapshot().poisoned());
+        assert_eq!(account.snapshot().live_retained_bytes(), 0);
+        assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    }
+}
 
-    let factory = factory(1);
-    let account = account(&factory);
-    let cancellation = CancellationToken::new();
-    let mut control = Some(OperationControl::default().with_cancellation(cancellation.clone()));
-    let completed = Cell::new(0_usize);
-    let mut invocation_host = TestInvocationHost::<_, (), MaterializationRejection>::new();
-    let mut body_keys = None;
-    let finish = invocation_host
-        .run_body(
+#[test]
+fn typed_storage_ignored_domain_rejection_blocks_retry_and_success_completion() {
+    for retry in [false, true] {
+        let factory = factory(1);
+        let account = account(&factory);
+        let retried = Cell::new(false);
+        let mut invocation_host = TestInvocationHost::<_, (), MaterializationRejection>::new();
+        let body = invocation_host.run_body(
             |CanonicalBodyParts {
                  startup,
                  output,
                  activation,
                  ..
              },
-             disposition| {
-                let work = u64::try_from(PLANNED_UNITS).unwrap();
-                let (operation, keys) = operation_with_producer_dimensions(
-                    startup,
-                    &account,
-                    control.take().unwrap(),
-                    DimensionPolicy::counter(1 + work, 1 + work, 0),
-                );
-                let capacity = CapacityPlan::for_type::<u8>(0, 0, PLANNED_UNITS).unwrap();
+             _disposition| {
+                let (operation, keys) = operation(startup, &account);
                 let outcome = plan_scoped_activation!(
                     operation,
                     output,
                     activation,
-                    scoped_activation_shape_with_dimensions(
-                        keys,
-                        1,
-                        1,
-                        keys.other_dimension,
-                        keys.dimension,
-                        keys.dimension,
-                        keys.dimension,
-                    ),
+                    scoped_activation_shape(keys, 1, 1),
                     |mut lane| {
-                        let baseline = account.snapshot();
-                        let cause = lane
-                            .try_retain_storage([capacity], work, 0, |control| {
-                                let mut value = Vec::with_capacity(capacity.envelope_capacity());
-                                for _ in 0..PLANNED_UNITS {
-                                    control.run_unit(|| {
-                                        value.push(1_u8);
-                                        let next = completed.get() + 1;
-                                        completed.set(next);
-                                        if next == 1 {
-                                            cancellation.cancel();
-                                        }
-                                    })?;
-                                }
-                                Ok(value)
-                            })
-                            .err()
-                            .expect("cancellation must stop before the next bounded action");
-                        assert_eq!(
-                            cause,
-                            StoreRuntimeError::Control(ControlCause::Cancelled {
-                                origin: CancellationOrigin::Signal,
-                            })
-                        );
-                        assert_eq!(completed.get(), COMPLETED_PREFIX);
-                        let released = account.snapshot();
-                        assert!(!released.poisoned());
-                        assert_eq!(
-                            released.live_retained_bytes(),
-                            baseline.live_retained_bytes()
-                        );
-                        assert_eq!(
-                            released.live_retained_allocations(),
-                            baseline.live_retained_allocations()
-                        );
-                        lane.reject::<(), _, ScalarSequence<u8>, SequenceTag>(
-                            MaterializationRejection::Semantic,
-                            75,
-                        )
+                        let root = lane
+                            .try_retain_sequence(
+                                SequencePlan::<u8>::new(1).unwrap(),
+                                SequenceTag,
+                                |writer| {
+                                    writer.push(1)?;
+                                    Ok(())
+                                },
+                            )
+                            .unwrap();
+                        let rejected = lane.try_retain_storage::<Vec<u8>, _, 0>([], 0, 0, |_| {
+                            Err(CanonicalStorageBuildError::Rejected(3_u32))
+                        });
+                        assert!(matches!(
+                            rejected,
+                            Err(CanonicalStorageBuildError::Rejected(3))
+                        ));
+                        if retry {
+                            let second =
+                                lane.try_retain_storage::<Vec<u8>, Infallible, 0>([], 0, 0, |_| {
+                                    retried.set(true);
+                                    Ok(Vec::new())
+                                });
+                            assert!(matches!(
+                                second,
+                                Err(CanonicalStorageBuildError::Runtime(
+                                    StoreRuntimeError::ConstructionInvariantUnverified
+                                ))
+                            ));
+                            assert!(!retried.get());
+                            lane.reject::<(), _, ScalarSequence<u8>, SequenceTag>(
+                                MaterializationRejection::Semantic,
+                                71,
+                            )
+                        } else {
+                            lane.complete::<(), MaterializationRejection, _, _>(root, ())
+                        }
                     },
-                )
-                .unwrap();
-                body_keys = Some(keys);
-                request_rejected_activation_finish!(outcome, disposition);
+                );
+                let containment = outcome
+                    .err()
+                    .expect("ignored domain rejection cannot qualify another result");
+                assert_eq!(
+                    containment.cause().reason(),
+                    AccountPoisonReason::OwnershipGraphUnverified
+                );
             },
-        )
-        .unwrap();
-    let CanonicalInvocationOutcome::Rejected(rejected) = finish.resume().outcome else {
-        panic!("cancelled typed-table work must resume with its original rejection")
-    };
-    let (prepared, _) = rejected.prepare_minimal_fallback().unwrap().into_parts();
-    let published = prepared.handoff();
-    let work = published
-        .ledger_evidence
-        .dimension(body_keys.unwrap().other_dimension)
-        .unwrap();
-    assert_eq!(work.attempted(), 1 + u64::try_from(PLANNED_UNITS).unwrap());
-    assert_eq!(
-        work.consumed(),
-        1 + u64::try_from(COMPLETED_PREFIX).unwrap()
-    );
-    assert_eq!(work.attempted() - work.consumed(), 1);
-    assert_eq!(
-        store_failure_cause(&published.ledger_evidence).class(),
-        StorePreparationFailureClass::Control
-    );
-    assert_eq!(published.ledger_evidence.header().current_live_bytes(), 0);
-    assert_eq!(published.ledger_evidence.header().active_reservations(), 0);
-    drop(published);
-    drop(invocation_host);
-    assert!(!account.snapshot().poisoned());
-    assert_eq!(account.snapshot().live_retained_bytes(), 0);
-    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+        );
+        assert!(body.is_err());
+        assert!(!retried.get());
+        assert!(account.snapshot().poisoned());
+    }
+}
+
+#[test]
+fn typed_storage_cancellation_covers_short_exact_and_following_poll_frontiers() {
+    for planned_units in [255_usize, 256, 257] {
+        let completed_prefix = planned_units.min(256);
+
+        let factory = factory(1);
+        let account = account(&factory);
+        let cancellation = CancellationToken::new();
+        let mut control = Some(OperationControl::default().with_cancellation(cancellation.clone()));
+        let completed = Cell::new(0_usize);
+        let mut invocation_host = TestInvocationHost::<_, (), MaterializationRejection>::new();
+        let mut body_keys = None;
+        let finish = invocation_host
+            .run_body(
+                |CanonicalBodyParts {
+                     startup,
+                     output,
+                     activation,
+                     ..
+                 },
+                 disposition| {
+                    let work = u64::try_from(planned_units).unwrap();
+                    let (operation, keys) = operation_with_producer_dimensions(
+                        startup,
+                        &account,
+                        control.take().unwrap(),
+                        DimensionPolicy::counter(1 + work, 1 + work, 0),
+                    );
+                    let capacity = CapacityPlan::for_type::<u8>(0, 0, planned_units).unwrap();
+                    let outcome = plan_scoped_activation!(
+                        operation,
+                        output,
+                        activation,
+                        scoped_activation_shape_with_dimensions(
+                            keys,
+                            1,
+                            1,
+                            keys.other_dimension,
+                            keys.dimension,
+                            keys.dimension,
+                            keys.dimension,
+                        ),
+                        |mut lane| {
+                            let baseline = account.snapshot();
+                            let cause = lane
+                                .try_retain_storage([capacity], work, 0, |control| {
+                                    let mut value =
+                                        Vec::with_capacity(capacity.envelope_capacity());
+                                    for _ in 0..planned_units {
+                                        control.run_unit(|| {
+                                            value.push(1_u8);
+                                            let next = completed.get() + 1;
+                                            completed.set(next);
+                                            if next == 1 {
+                                                cancellation.cancel();
+                                            }
+                                        })?;
+                                    }
+                                    Ok(value)
+                                })
+                                .map_err(CanonicalStorageBuildError::into_runtime)
+                                .err()
+                                .expect("cancellation must stop before the next bounded action");
+                            assert_eq!(
+                                cause,
+                                StoreRuntimeError::Control(ControlCause::Cancelled {
+                                    origin: CancellationOrigin::Signal,
+                                })
+                            );
+                            assert_eq!(completed.get(), completed_prefix);
+                            let released = account.snapshot();
+                            assert!(!released.poisoned());
+                            assert_eq!(
+                                released.live_retained_bytes(),
+                                baseline.live_retained_bytes()
+                            );
+                            assert_eq!(
+                                released.live_retained_allocations(),
+                                baseline.live_retained_allocations()
+                            );
+                            lane.reject::<(), _, ScalarSequence<u8>, SequenceTag>(
+                                MaterializationRejection::Semantic,
+                                75,
+                            )
+                        },
+                    )
+                    .unwrap();
+                    body_keys = Some(keys);
+                    request_rejected_activation_finish!(outcome, disposition);
+                },
+            )
+            .unwrap();
+        let CanonicalInvocationOutcome::Rejected(rejected) = finish.resume().outcome else {
+            panic!("cancelled typed-table work must resume with its original rejection")
+        };
+        let (prepared, _) = rejected.prepare_minimal_fallback().unwrap().into_parts();
+        let published = prepared.handoff();
+        let work = published
+            .ledger_evidence
+            .dimension(body_keys.unwrap().other_dimension)
+            .unwrap();
+        assert_eq!(work.attempted(), 1 + u64::try_from(planned_units).unwrap());
+        assert_eq!(
+            work.consumed(),
+            1 + u64::try_from(completed_prefix).unwrap()
+        );
+        assert_eq!(
+            work.attempted() - work.consumed(),
+            (planned_units - completed_prefix) as u64
+        );
+        assert_eq!(
+            store_failure_cause(&published.ledger_evidence).class(),
+            StorePreparationFailureClass::Control
+        );
+        assert_eq!(published.ledger_evidence.header().current_live_bytes(), 0);
+        assert_eq!(published.ledger_evidence.header().active_reservations(), 0);
+        drop(published);
+        drop(invocation_host);
+        assert!(!account.snapshot().poisoned());
+        assert_eq!(account.snapshot().live_retained_bytes(), 0);
+        assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    }
 }
 
 #[test]
@@ -680,6 +898,7 @@ fn typed_storage_prepare_cancellation_releases_its_value_without_admitting_build
                                     Ok(value)
                                 },
                             )
+                            .map_err(CanonicalStorageBuildError::into_runtime)
                             .err()
                             .expect("prepare cancellation must prevent producer admission");
                         assert_eq!(

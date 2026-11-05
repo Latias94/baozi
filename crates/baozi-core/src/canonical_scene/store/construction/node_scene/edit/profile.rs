@@ -8,7 +8,9 @@ mod normals_tests;
 #[path = "tangents_tests.rs"]
 mod tangents_tests;
 
-use baozi_operation::__retained_store_integration::activation::CanonicalLane;
+use baozi_operation::__retained_store_integration::activation::{
+    CanonicalLane, CanonicalStorageBuildError,
+};
 use baozi_operation::__retained_store_integration::authority::CanonicalInheritanceSource;
 use baozi_operation::{
     CapacityPlan, OperationOwner, ProgressPhase, ProgressUnit, StorePlanError, StoreRuntimeError,
@@ -42,7 +44,7 @@ use crate::canonical_scene::store::typed_storage::profile::{
 use crate::canonical_scene::store::validation::ProfileMeteredCounts;
 use crate::provenance::{DIGEST_LEN, OperationIdentity, OperationKind};
 
-use super::super::geometry::map_build;
+use super::super::geometry::{map_build, map_storage_build};
 use super::super::{SceneEvidenceCounts, SceneStorage};
 use super::plan::{CheckedCount, NodeSceneEditPlanError};
 
@@ -857,15 +859,17 @@ where
 {
     let nonce =
         issue_profile_segment_nonce().map_err(|_| StoreRuntimeError::MembershipExhausted)?;
-    let lineage = lane.try_retain_storage(
-        plan.lineage,
-        plan.lineage_work().map_err(StoreRuntimeError::Plan)?,
-        0,
-        |control| {
-            plan.build_lineage(input, operation, nonce, control)
-                .map_err(map_build)
-        },
-    )?;
+    let lineage = lane
+        .try_retain_storage(
+            plan.lineage,
+            plan.lineage_work().map_err(StoreRuntimeError::Plan)?,
+            0,
+            |control| {
+                plan.build_lineage(input, operation, nonce, control)
+                    .map_err(map_storage_build)
+            },
+        )
+        .map_err(CanonicalStorageBuildError::into_runtime)?;
     let metadata = if plan.metadata.rewrites_payloads() {
         lane.try_retain_storage(
             plan.metadata.capacities(),
@@ -874,35 +878,38 @@ where
             |control| {
                 plan.metadata
                     .build_payloads(&input.tables.profile, control)
-                    .map_err(map_build)
+                    .map_err(map_storage_build)
             },
-        )?
+        )
+        .map_err(CanonicalStorageBuildError::into_runtime)?
     } else {
         lane.try_share_storage(&input.tables.profile.metadata)?
     };
-    let state = lane.try_retain_storage_prepared(
-        plan.state.capacities(),
-        plan.state_work(input).map_err(StoreRuntimeError::Plan)?,
-        0,
-        |lane| {
-            let mut segments = plan.state.allocate_segments().map_err(map_build)?;
-            for segment in &input.tables.profile.state.as_ref().segments {
+    let state = lane
+        .try_retain_storage_prepared(
+            plan.state.capacities(),
+            plan.state_work(input).map_err(StoreRuntimeError::Plan)?,
+            0,
+            |lane| {
+                let mut segments = plan.state.allocate_segments().map_err(map_build)?;
+                for segment in &input.tables.profile.state.as_ref().segments {
+                    segments.push(StoredProfileSegment {
+                        lineage: lane.try_share_storage(&segment.lineage)?,
+                        prefixes: segment.prefixes,
+                    });
+                }
                 segments.push(StoredProfileSegment {
-                    lineage: lane.try_share_storage(&segment.lineage)?,
-                    prefixes: segment.prefixes,
+                    lineage,
+                    prefixes: LineageCounts::default(),
                 });
-            }
-            segments.push(StoredProfileSegment {
-                lineage,
-                prefixes: LineageCounts::default(),
-            });
-            Ok(segments)
-        },
-        |segments, control| {
-            plan.build_state(input, segments, control)
-                .map_err(map_build)
-        },
-    )?;
+                Ok(segments)
+            },
+            |segments, control| {
+                plan.build_state(input, segments, control)
+                    .map_err(map_storage_build)
+            },
+        )
+        .map_err(CanonicalStorageBuildError::into_runtime)?;
     Ok(ProfileStorage { state, metadata })
 }
 

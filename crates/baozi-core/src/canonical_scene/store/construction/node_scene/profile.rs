@@ -1,6 +1,8 @@
 //! Retention of the actual typed profile owners through the single central storage admission.
 
-use baozi_operation::__retained_store_integration::activation::CanonicalLane;
+use baozi_operation::__retained_store_integration::activation::{
+    CanonicalLane, CanonicalStorageBuildError,
+};
 use baozi_operation::{
     OperationOwner, ProgressPhase, ProgressUnit, StorePlanError, StoreRuntimeError,
 };
@@ -15,7 +17,7 @@ use crate::canonical_scene::store::typed_storage::profile::{
 };
 use crate::canonical_scene::store::validation::ProfileMeteredCounts;
 
-use super::geometry::map_build;
+use super::geometry::{map_build, map_storage_build};
 
 #[derive(Clone, Copy)]
 pub(super) struct ProfileMaterializationPlans {
@@ -90,50 +92,61 @@ where
         issue_profile_segment_nonce().map_err(|_| StoreRuntimeError::MembershipExhausted)?;
     #[cfg(test)]
     let selected_fault = std::mem::replace(fault, ProfileBuildFault::None);
-    let lineage = lane.try_retain_storage(
-        plans.lineage.capacities(),
-        plans.lineage.work().map_err(StoreRuntimeError::Plan)?,
-        plans.lineage.text_bytes() as u64,
-        |control| {
-            #[allow(unused_mut)]
-            let mut lineage = plans
-                .lineage
-                .build(batch, nonce, control)
-                .map_err(map_build)?;
-            #[cfg(test)]
-            selected_fault.alter_lineage(&mut lineage);
-            Ok(lineage)
-        },
-    )?;
-    let metadata = lane.try_retain_storage(
-        plans.metadata.capacities(),
-        plans.metadata.work().map_err(StoreRuntimeError::Plan)?,
-        plans.metadata.text_bytes() as u64,
-        |control| plans.metadata.build(batch, control).map_err(map_build),
-    )?;
-    let state = lane.try_retain_storage_prepared(
-        plans.state.capacities(),
-        plans.state.work().map_err(StoreRuntimeError::Plan)?,
-        0,
-        |_| {
-            let mut segments = plans.state.allocate_segments().map_err(map_build)?;
-            segments.push(StoredProfileSegment {
-                lineage,
-                prefixes: LineageCounts::default(),
-            });
-            Ok(segments)
-        },
-        |segments, control| {
-            #[allow(unused_mut)]
-            let mut state = plans
-                .state
-                .build_fresh(segments, batch, metadata.as_ref(), control)
-                .map_err(map_build)?;
-            #[cfg(test)]
-            selected_fault.alter_state(&mut state)?;
-            Ok(state)
-        },
-    )?;
+    let lineage = lane
+        .try_retain_storage(
+            plans.lineage.capacities(),
+            plans.lineage.work().map_err(StoreRuntimeError::Plan)?,
+            plans.lineage.text_bytes() as u64,
+            |control| {
+                #[allow(unused_mut)]
+                let mut lineage = plans
+                    .lineage
+                    .build(batch, nonce, control)
+                    .map_err(map_build)?;
+                #[cfg(test)]
+                selected_fault.alter_lineage(&mut lineage);
+                Ok(lineage)
+            },
+        )
+        .map_err(CanonicalStorageBuildError::into_runtime)?;
+    let metadata = lane
+        .try_retain_storage(
+            plans.metadata.capacities(),
+            plans.metadata.work().map_err(StoreRuntimeError::Plan)?,
+            plans.metadata.text_bytes() as u64,
+            |control| {
+                plans
+                    .metadata
+                    .build(batch, control)
+                    .map_err(map_storage_build)
+            },
+        )
+        .map_err(CanonicalStorageBuildError::into_runtime)?;
+    let state = lane
+        .try_retain_storage_prepared(
+            plans.state.capacities(),
+            plans.state.work().map_err(StoreRuntimeError::Plan)?,
+            0,
+            |_| {
+                let mut segments = plans.state.allocate_segments().map_err(map_build)?;
+                segments.push(StoredProfileSegment {
+                    lineage,
+                    prefixes: LineageCounts::default(),
+                });
+                Ok(segments)
+            },
+            |segments, control| {
+                #[allow(unused_mut)]
+                let mut state = plans
+                    .state
+                    .build_fresh(segments, batch, metadata.as_ref(), control)
+                    .map_err(map_build)?;
+                #[cfg(test)]
+                selected_fault.alter_state(&mut state)?;
+                Ok(state)
+            },
+        )
+        .map_err(CanonicalStorageBuildError::into_runtime)?;
     Ok(ProfileStorage { state, metadata })
 }
 

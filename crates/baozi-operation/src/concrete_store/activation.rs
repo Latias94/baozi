@@ -66,7 +66,7 @@ pub use host::{
 mod payload_owner;
 mod preflight;
 mod typed_storage;
-pub use typed_storage::CanonicalRetainedStorageBuildControl;
+pub use typed_storage::{CanonicalRetainedStorageBuildControl, CanonicalStorageBuildError};
 mod work_batch;
 use payload_owner::{PayloadLoan, PayloadOwner, PayloadPair};
 
@@ -2429,9 +2429,27 @@ where
 {
     assembly: &'lane mut RetainedStorePublicationAssembly<'inv, O, PP, U, L>,
     first_fault: &'lane mut Option<ActivationFirstFault>,
+    pending_rejection: bool,
     materialization_phase: StorePhaseKey,
     materialization_work_dimension: StoreDimensionKey,
     materialization_scratch_dimension: StoreDimensionKey,
+}
+
+impl<O, PP, U, L> CanonicalLane<'_, '_, O, PP, U, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn entry_failure(&mut self) -> Option<StoreRuntimeError> {
+        if self.pending_rejection {
+            note_later_contract::<()>(
+                self.first_fault,
+                Err(StoreRuntimeError::ConstructionInvariantUnverified),
+            );
+        }
+        preserved_fault(self.first_fault)
+    }
 }
 
 /// Opaque result returned by the scoped materialization callback.
@@ -3369,12 +3387,12 @@ mod scoped_transition_tests {
         StoreLedgerPlan, StorePhaseSemanticId, StoreSemanticCatalogId,
     };
 
-    struct TestOwner;
+    pub(super) struct TestOwner;
 
     impl OperationOwner for TestOwner {}
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-    enum TestProgress {
+    pub(super) enum TestProgress {
         Build,
     }
 
@@ -3389,7 +3407,7 @@ mod scoped_transition_tests {
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-    enum TestUnit {
+    pub(super) enum TestUnit {
         Items,
     }
 
@@ -3400,17 +3418,17 @@ mod scoped_transition_tests {
     }
 
     #[derive(Clone, Copy)]
-    struct TestKeys {
+    pub(super) struct TestKeys {
         phase: StorePhaseKey,
-        dimension: StoreDimensionKey,
+        pub(super) dimension: StoreDimensionKey,
         failure_terminal_dimension: StoreDimensionKey,
     }
 
     #[derive(Clone, Copy)]
-    struct CanonicalTag;
+    pub(super) struct CanonicalTag;
 
     #[derive(Clone, Copy)]
-    enum TestRejection {
+    pub(super) enum TestRejection {
         Requested,
     }
 
@@ -3439,14 +3457,14 @@ mod scoped_transition_tests {
 
     struct PanickingResultDrop<'probe>(&'probe Cell<bool>);
 
-    struct TestActivationDescription<P> {
+    pub(super) struct TestActivationDescription<P> {
         request: CanonicalActivationRequest,
         requirements: CanonicalSuccessRequirements,
         execution: P,
     }
 
     impl<P> TestActivationDescription<P> {
-        fn new(requirements: CanonicalSuccessRequirements, execution: P) -> Self {
+        pub(super) fn new(requirements: CanonicalSuccessRequirements, execution: P) -> Self {
             let (identity, request) = mint_canonical_activation_request()
                 .expect("the test activation request identity must remain available");
             Self {
@@ -3492,7 +3510,7 @@ mod scoped_transition_tests {
         }
     }
 
-    type TestInvocationHost = CanonicalInvocationHost<
+    pub(super) type TestInvocationHost = CanonicalInvocationHost<
         TestOwner,
         TestProgress,
         TestUnit,
@@ -3506,8 +3524,9 @@ mod scoped_transition_tests {
         ScalarSequence<u8>,
         CanonicalTag,
     >;
-    type TestOperation<'inv> = CanonicalBodyOperation<'inv, TestOwner, TestProgress, TestUnit>;
-    type TestOutcome<'inv> = CanonicalActivationOutcome<
+    pub(super) type TestOperation<'inv> =
+        CanonicalBodyOperation<'inv, TestOwner, TestProgress, TestUnit>;
+    pub(super) type TestOutcome<'inv> = CanonicalActivationOutcome<
         'inv,
         TestOwner,
         TestProgress,
@@ -3539,7 +3558,7 @@ mod scoped_transition_tests {
         )
     }
 
-    fn account() -> PhysicalStorageAccount {
+    pub(super) fn account() -> PhysicalStorageAccount {
         PhysicalStorageAccountFactory::try_new(
             PhysicalStorageAccountFactoryLimits::new(u64::MAX, 1).unwrap(),
         )
@@ -3573,7 +3592,7 @@ mod scoped_transition_tests {
         )
     }
 
-    fn operation_with_control_and_evidence_limit<'inv>(
+    pub(super) fn operation_with_control_and_evidence_limit<'inv>(
         root: CanonicalBodyStart<'inv, TestOwner, TestProgress, TestUnit>,
         account: &PhysicalStorageAccount,
         control: OperationControl<TestProgress, TestUnit>,
@@ -3629,7 +3648,7 @@ mod scoped_transition_tests {
         )
     }
 
-    fn scoped_shape(
+    pub(super) fn scoped_shape(
         keys: TestKeys,
     ) -> (
         CanonicalActivationSessionPolicy,
@@ -4665,7 +4684,9 @@ mod scoped_transition_tests {
                     |lane| {
                         let physical_before = account.snapshot();
                         let storage = lane
-                            .try_retain_storage::<T, 0>([], 0, 0, |_| Ok(value.take().unwrap()))
+                            .try_retain_storage::<T, std::convert::Infallible, 0>([], 0, 0, |_| {
+                                Ok(value.take().unwrap())
+                            })
                             .unwrap();
                         assert_eq!(
                             account.snapshot().live_retained_bytes(),

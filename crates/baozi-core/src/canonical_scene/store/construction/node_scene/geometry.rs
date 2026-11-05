@@ -8,7 +8,7 @@ use crate::canonical_scene::store::typed_storage::build::{
 };
 use crate::canonical_scene::store::typed_storage::{GeometryStorage, NodeStorage};
 use baozi_operation::__retained_store_integration::activation::{
-    CanonicalLane, CanonicalRetainedStorageBuildControl,
+    CanonicalLane, CanonicalRetainedStorageBuildControl, CanonicalStorageBuildError,
 };
 use baozi_operation::__retained_store_integration::authority::SharedRetainedStorage as RetainedStorage;
 use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit, StoreRuntimeError};
@@ -71,6 +71,7 @@ where
             Ok(storage)
         },
     )
+    .map_err(CanonicalStorageBuildError::into_runtime)
 }
 
 pub(super) fn retain_geometry<O, PP, U, L, R, NR>(
@@ -102,6 +103,7 @@ where
             Ok(storage)
         },
     )
+    .map_err(CanonicalStorageBuildError::into_runtime)
 }
 
 pub(super) fn map_build(error: TypedStorageBuildError<StoreRuntimeError>) -> StoreRuntimeError {
@@ -111,4 +113,10 @@ pub(super) fn map_build(error: TypedStorageBuildError<StoreRuntimeError>) -> Sto
         TypedStorageBuildError::Invariant => StoreRuntimeError::ConstructionInvariantUnverified,
         TypedStorageBuildError::Control(cause) => cause,
     }
+}
+
+pub(super) fn map_storage_build(
+    error: TypedStorageBuildError<StoreRuntimeError>,
+) -> CanonicalStorageBuildError<std::convert::Infallible> {
+    CanonicalStorageBuildError::Runtime(map_build(error))
 }

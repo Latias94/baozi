@@ -1656,6 +1656,7 @@ where
             let lane = CanonicalLane {
                 assembly,
                 first_fault: &mut driver.first_fault,
+                pending_rejection: false,
                 materialization_phase,
                 materialization_work_dimension,
                 materialization_scratch_dimension,
@@ -2138,7 +2139,7 @@ where
         &'borrow mut self,
     ) -> Result<CanonicalMaterializationCheckpoint<'borrow, 'activation, O, PP, U>, StoreRuntimeError>
     {
-        if let Some(cause) = preserved_fault(self.first_fault) {
+        if let Some(cause) = self.entry_failure() {
             return Err(cause);
         }
         match self.assembly.try_control_checkpoint() {
@@ -2168,7 +2169,7 @@ where
         Tag: Copy + Send + Sync + 'static,
     {
         let mut build = ManuallyDrop::new(Some(build));
-        if let Some(cause) = preserved_fault(self.first_fault) {
+        if let Some(cause) = self.entry_failure() {
             note_later_contract(
                 self.first_fault,
                 plan.allocation_plan()
@@ -2229,7 +2230,7 @@ where
         Tag: Copy + Send + Sync + 'static,
     {
         let mut build = ManuallyDrop::new(Some(build));
-        if let Some(cause) = preserved_fault(self.first_fault) {
+        if let Some(cause) = self.entry_failure() {
             note_later_contract(
                 self.first_fault,
                 plan.allocation_plan()
@@ -2290,7 +2291,7 @@ where
         Tag: Copy + Send + Sync + 'static,
     {
         let mut build = ManuallyDrop::new(Some(build));
-        if let Some(cause) = preserved_fault(self.first_fault) {
+        if let Some(cause) = self.entry_failure() {
             note_later_contract(
                 self.first_fault,
                 plan.allocation_plan()
@@ -2351,7 +2352,7 @@ where
         Tag: Copy + Send + Sync + 'static,
     {
         let mut build = ManuallyDrop::new(Some(build));
-        if let Some(cause) = preserved_fault(self.first_fault) {
+        if let Some(cause) = self.entry_failure() {
             note_later_contract(
                 self.first_fault,
                 plan.allocation_plan()
@@ -2401,13 +2402,14 @@ where
     }
 
     pub fn complete<T, E, Kind, Tag>(
-        self,
+        mut self,
         root: CanonicalStoreRef<Kind, Tag>,
         output: T,
     ) -> CanonicalMaterialization<'activation, T, E, Kind, Tag>
     where
         Tag: Copy + Send + Sync + 'static,
     {
+        let _ = self.entry_failure();
         if !self.assembly.contains_activation_canonical_root(root) {
             let _ = preserve_first_fault::<()>(
                 self.first_fault,
@@ -2447,7 +2449,7 @@ where
         &mut self,
         source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
     ) -> Result<(), StoreRuntimeError> {
-        if let Some(cause) = preserved_fault(self.first_fault) {
+        if let Some(cause) = self.entry_failure() {
             note_later_contract(
                 self.first_fault,
                 self.assembly
@@ -2472,7 +2474,7 @@ where
         SlotKind: ShareableStoreKind,
         SlotTag: Copy + Send + Sync + 'static,
     {
-        if let Some(cause) = preserved_fault(self.first_fault) {
+        if let Some(cause) = self.entry_failure() {
             note_later_contract(
                 self.first_fault,
                 self.assembly
@@ -2502,6 +2504,7 @@ where
         Tag: Copy + Send + Sync + 'static,
     {
         let mut build = ManuallyDrop::new(Some(build));
+        let failure = self.entry_failure();
         let mut validate_source = || {
             self.assembly
                 .require_canonical_source_from(source.share_source())?;
@@ -2509,7 +2512,7 @@ where
                 .map(|_| ())
                 .ok_or(StoreRuntimeError::InvalidSourceSlot)
         };
-        if let Some(cause) = preserved_fault(self.first_fault) {
+        if let Some(cause) = failure {
             note_later_contract(self.first_fault, validate_source());
             note_later_contract(
                 self.first_fault,
@@ -2582,6 +2585,7 @@ where
         Tag: Copy + Send + Sync + 'static,
     {
         let mut build = ManuallyDrop::new(Some(build));
+        let failure = self.entry_failure();
         let mut validate_source = || {
             self.assembly
                 .require_canonical_source_from(source.share_source())?;
@@ -2589,7 +2593,7 @@ where
                 .map(|_| ())
                 .ok_or(StoreRuntimeError::InvalidSourceSlot)
         };
-        if let Some(cause) = preserved_fault(self.first_fault) {
+        if let Some(cause) = failure {
             note_later_contract(self.first_fault, validate_source());
             note_later_contract(
                 self.first_fault,
@@ -2683,6 +2687,7 @@ where
         Tag: Copy + Send + Sync + 'static,
     {
         let mut append = ManuallyDrop::new(Some(append));
+        let failure = self.entry_failure();
         let mut validate_source = || {
             self.assembly
                 .require_canonical_source_from(source.share_source())?;
@@ -2698,7 +2703,7 @@ where
             }
             Ok(())
         };
-        if let Some(cause) = preserved_fault(self.first_fault) {
+        if let Some(cause) = failure {
             note_later_contract(self.first_fault, validate_source());
             note_later_contract(
                 self.first_fault,

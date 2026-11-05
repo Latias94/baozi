@@ -1,4 +1,6 @@
 use super::*;
+use baozi_operation::__retained_store_integration::activation::CanonicalStorageBuildError;
+use std::convert::Infallible;
 
 type ScopedOutcome<'inv, E> = CanonicalActivationOutcome<
     'inv,
@@ -626,7 +628,7 @@ fn typed_storage_prepare_share_finishes_before_the_borrowed_build_envelope() {
                         permit.activate(|mut lane, _plan| {
                             let baseline = account.snapshot();
                             let capacity = baozi_operation::CapacityPlan::for_type::<u8>(0, 0, 2).unwrap();
-                            let child = lane.try_retain_storage([capacity], 2, 2, |control| {
+                            let child = lane.try_retain_storage::<_, Infallible, 1>([capacity], 2, 2, |control| {
                                 let mut value = String::with_capacity(capacity.envelope_capacity());
                                 control.run_string_unit(|| value.push('a'))?;
                                 control.run_string_unit(|| value.push('b'))?;
@@ -638,14 +640,18 @@ fn typed_storage_prepare_share_finishes_before_the_borrowed_build_envelope() {
                                 1,
                                 0,
                                 |lane| lane.try_share_storage(&child),
-                                |shared, control| control.run_unit(|| shared),
+                                |shared, control| control.run_unit(|| shared).map_err(
+                                    CanonicalStorageBuildError::<Infallible>::Runtime,
+                                ),
                             ).expect("the completed Internal share leaves Producer admission quiescent");
                             assert_eq!(parent.as_ref().as_ref(), "ab");
                             assert!(std::ptr::eq(child.as_ref(), parent.as_ref().as_ref()));
                             assert_eq!(account.snapshot().live_retained_allocations(), child_baseline.live_retained_allocations() + 1);
                             drop(child);
                             assert_eq!(parent.as_ref().as_ref(), "ab");
-                            let second = lane.try_retain_storage([], 1, 0, |control| control.run_unit(|| 37_u8))
+                            let second = lane.try_retain_storage([], 1, 0, |control| control.run_unit(|| 37_u8).map_err(
+                                CanonicalStorageBuildError::<Infallible>::Runtime,
+                            ))
                                 .expect("the first table resolves its numeric frame before the next table");
                             assert_eq!(*second.as_ref(), 37);
                             drop(second);
