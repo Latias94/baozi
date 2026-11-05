@@ -284,3 +284,36 @@ affected Clippy and workspace formatting, with all 909 before/after inputs stabl
 It used one build/test thread and set `RUST_TEST_THREADS=1` for doctests. No function
 body or test was added or removed. This permits its locating build; it is not the final
 full workspace/consumer qualification of the hint variant.
+
+The four-hint variant was committed as `247ff99`. Its same-profile GNU build exited
+zero with the archive/source map unchanged. The symbol-bearing binary is 76,296,064
+bytes (30,720 fewer than `2aff613`); this is not a heap/RSS measurement. Its six fresh
+profiles in `target/review/convergence/closed-text-inline-attribution/report.json` report:
+
+| Case | Hint Ir | Versus `2aff613` | Versus main `3cd9997` |
+| --- | ---: | ---: | ---: |
+| glTF shared 1 | 5,946,850 | -0.010% | -0.015% |
+| glTF shared 32 | 29,539,046 | -0.002% | -0.005% |
+| F64 PLY neighbors | 2,493,116 | -0.553% | -0.688% |
+| STL repeated 1024 | 14,060,688 | +0.001% | -0.073% |
+| OBJ repeated 16384 | 780,367,417 | -1.334% | -2.016% |
+| OBJ grid 128 | 2,471,833,928 | -5.712% | -7.943% |
+
+Both prospective predicates pass and all complete non-clock observations/work match
+both references. The tiny STL increase versus the immediate control is retained.
+The four outlined adapters disappear as separate functions in the candidate annotation;
+numeric checks appear within the closed scanner. Whole-worker instruction reduction,
+not symbol disappearance by itself, is the observed improvement. Independent review
+verified the new six raw profiles, both predicates and the exact four-attribute delta,
+without reopening the closed source proofs.
+
+The final full run for `247ff99` completed separately in
+`target/review/convergence/closed-text-inline-final-qa-1.json`: 3,622 workspace tests
+passed with six existing skips, 190 doctests passed, 138 consumer tests passed with one
+existing skip, and both strict Clippy/format pairs passed. All 909 inputs remained
+unchanged across the seven serial gates. Independent final review verified all seven
+log hashes, ordered gate intervals, current/archive/source hashes and actual test totals.
+It linked the new full receipt directly to the same archived source; the older five-gate
+receipt in the symbol-build manifest retains its original affected-only scope.
+Ordinary debug0 builds have begun serially from the exact retained archives;
+no ordinary functional/timing campaign or candidate heap collection has run yet.
