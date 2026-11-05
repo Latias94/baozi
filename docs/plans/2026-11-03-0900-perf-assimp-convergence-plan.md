@@ -621,3 +621,24 @@ negative case only for a genuinely new boundary, not for incidental private layo
   staged/frozen inputs and the sole source2 alias delta without a mismatch. No new
   timing or memory result is attributed to this source. Fixed/dynamic backing,
   promotion, exact accounting, indexing and all original convergence gates remain open.
+- The [direct-state native/heap/placement checkpoint](../reviews/2026-11-05-direct-work-state-performance.md)
+  completes all four original GNU campaigns, each with fourteen cases, 110 lanes,
+  three warmups and twenty retained AB/BA pairs, without command failures.
+  Candidate N0/N1 each retain sixteen of twenty-eight pipelines above 3x Assimp;
+  all whole-child RSS ratios remain below 3x. C0/C1 overlap Windows build/test
+  tools in 142/256 and 94/282 sampled instants; candidate windows have no named
+  overlap. No clean source-change timing effect follows. Separate six-case
+  whole-worker Ir changes are -0.369% to +0.041%; eighteen fresh heap observations
+  retain identical Baozi allocation counts and rounded peaks. The Windows
+  sequence reaches its start limit before C0 and has no ordinary samples.
+  An unchanged-debug0-binary diagnostic then moves only executable placement
+  from `/mnt/f` v9fs to the Linux filesystem: three small Baozi pipeline medians
+  fall from 39–62 ms to 0.58–1.05 ms, with whole-worker median major faults
+  204–266 to zero; Assimp also improves. This is environmental evidence, not a
+  source optimization or acceptance substitute. Preserve all original samples
+  and load records. Prospectively qualify the full original Linux matrix with
+  both engines and corpus on the Linux filesystem before choosing a parser or
+  algorithm rewrite from these ordinary times. Refresh the lexical-root design
+  against current six-dimension/three-phase direct runtime; fixed/dynamic roots,
+  shared promotion, exact accounting, terminal facts, cleanup/indexing and every
+  original Windows/Linux release gate remain open.

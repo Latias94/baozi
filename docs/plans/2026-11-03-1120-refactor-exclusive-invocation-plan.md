@@ -249,3 +249,20 @@ proof, widen budgets, weaken mathematical results or move benchmark work outside
   without extending the invariant numeric lifetime. Implementation and caller migration are
   underway; existing state/control/failure checks remain. No performance keep follows from
   the design or its initial compiler checkpoint.
+- The current owner at `56eecd9` now directly owns numeric WorkState and removes
+  LocalWork, BoundWorkGroup and dynamic numeric borrow recovery after actual
+  caller/startup/publication migration. The current direct vocabulary is six
+  dimensions and three phases; refresh the older five-dimension sketch rather
+  than preserving its stale capacity. The
+  [native/heap/placement checkpoint](../reviews/2026-11-05-direct-work-state-performance.md)
+  shows small mixed Ir changes, unchanged heap counts/rounded peaks and no native
+  acceptance. Its complete original GNU matrix retains loaded controls and
+  unresolved endpoint/pipeline gaps. A separate exact-binary residency diagnostic
+  identifies material `/mnt/f` demand-paging cost; qualify the original full
+  Linux matrix with native filesystem placement before using those elapsed times
+  to prioritize another algorithm rewrite. The next coherent owner change remains
+  lexical fixed/dynamic roots through actual activation/attachment, one storage
+  arithmetic implementation, shell-before-state promotion, honest administrative
+  payload/capacity metrics, independent terminal facts and cleanup-before-finish;
+  indexed selection follows that seam. None of these remaining items is complete
+  merely because numeric RefCell and execution wrappers have been removed.

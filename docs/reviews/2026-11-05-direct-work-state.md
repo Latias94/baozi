@@ -137,5 +137,9 @@ The previous [instruction and heap checkpoint](2026-11-05-retained-owner-attribu
 does not measure this representation. Fixed/dynamic backing, shared promotion,
 exact administrative accounting and indexed selection remain under the
 [convergence plan](../plans/2026-11-03-0900-perf-assimp-convergence-plan.md).
-Current-source original Windows/Linux ordinary timing and whole-child memory
-qualification are still open; release remains HOLD.
+The subsequent [native/heap/placement checkpoint](2026-11-05-direct-work-state-performance.md)
+retains all four original Linux campaigns, their loaded controls and unchanged
+allocation observations. A separate identical-binary diagnostic identifies a
+large `/mnt/f` executable-placement effect; it does not replace the original
+matrix or establish convergence. Current-source Windows ordinary qualification,
+the next complete Linux-filesystem comparison and release acceptance remain open.
