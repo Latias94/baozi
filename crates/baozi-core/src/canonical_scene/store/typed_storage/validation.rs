@@ -128,6 +128,7 @@ impl NodeStorage {
 /// Only mutable traversal cursors; the semantic rows and payloads remain borrowed in place.
 #[derive(Default)]
 struct PoolCursors {
+    integer_attribute_scalar_count: u64,
     f32_values: usize,
     f64_values: usize,
     u32_values: usize,
@@ -309,19 +310,22 @@ impl GeometryStorage {
                 return Ok(false);
             }
         }
-        Ok([
-            pools.f32_values,
-            pools.f64_values,
-            pools.u32_values,
-            pools.i32_values,
-            pools.names,
-        ] == [
-            self.f32_values.len(),
-            self.f64_values.len(),
-            self.u32_values.len(),
-            self.i32_values.len(),
-            self.names.len(),
-        ])
+        Ok(
+            pools.integer_attribute_scalar_count == self.integer_attribute_scalar_count
+                && [
+                    pools.f32_values,
+                    pools.f64_values,
+                    pools.u32_values,
+                    pools.i32_values,
+                    pools.names,
+                ] == [
+                    self.f32_values.len(),
+                    self.f64_values.len(),
+                    self.u32_values.len(),
+                    self.i32_values.len(),
+                    self.names.len(),
+                ],
+        )
     }
 
     fn attribute_key<'a>(
@@ -375,7 +379,7 @@ impl GeometryStorage {
         }
         let lanes = usize::from(attribute.lanes);
         macro_rules! dense {
-            ($range:expr, $values:ident, $check:expr) => {{
+            ($range:expr, $values:ident $(, $check:path)?) => {{
                 let Some(dense_count) = (attribute.element_count as usize).checked_mul(lanes)
                 else {
                     return Ok(false);
@@ -383,13 +387,16 @@ impl GeometryStorage {
                 let Some(values) = consume_range($range, &self.$values, &mut pools.$values) else {
                     return Ok(false);
                 };
-                if values.len() != dense_count || !visit(values, control, $check)? {
+                if values.len() != dense_count {
                     return Ok(false);
                 }
+                $(if !visit(values, control, $check)? {
+                    return Ok(false);
+                })?
             }};
         }
         macro_rules! sparse {
-            ($indices:expr, $values:expr, $default:expr, $pool:ident, $check:expr) => {{
+            ($indices:expr, $values:expr, $default:expr, $pool:ident $(, $check:path)?) => {{
                 let Some(indices) =
                     consume_range($indices, &self.u32_values, &mut pools.u32_values)
                 else {
@@ -415,18 +422,19 @@ impl GeometryStorage {
                 };
                 if indices.len().checked_mul(lanes) != Some(values.len())
                     || default.len() != lanes
-                    || !visit(values, control, $check)?
-                    || !visit(default, control, $check)?
                 {
                     return Ok(false);
                 }
+                $(if !visit(values, control, $check)? || !visit(default, control, $check)? {
+                    return Ok(false);
+                })?
             }};
         }
         match attribute.payload {
             StoredAttributePayload::DenseF32(range) => dense!(range, f32_values, f32::is_finite),
             StoredAttributePayload::DenseF64(range) => dense!(range, f64_values, f64::is_finite),
-            StoredAttributePayload::DenseU32(range) => dense!(range, u32_values, |_| true),
-            StoredAttributePayload::DenseI32(range) => dense!(range, i32_values, |_| true),
+            StoredAttributePayload::DenseU32(range) => dense!(range, u32_values),
+            StoredAttributePayload::DenseI32(range) => dense!(range, i32_values),
             StoredAttributePayload::SparseF32 {
                 indices,
                 values,
@@ -441,13 +449,21 @@ impl GeometryStorage {
                 indices,
                 values,
                 default,
-            } => sparse!(indices, values, default, u32_values, |_| true),
+            } => sparse!(indices, values, default, u32_values),
             StoredAttributePayload::SparseI32 {
                 indices,
                 values,
                 default,
-            } => sparse!(indices, values, default, i32_values, |_| true),
+            } => sparse!(indices, values, default, i32_values),
         }
+        let Some(integer_count) = attribute
+            .payload
+            .integer_value_count()
+            .and_then(|count| pools.integer_attribute_scalar_count.checked_add(count))
+        else {
+            return Ok(false);
+        };
+        pools.integer_attribute_scalar_count = integer_count;
         Ok(true)
     }
 }

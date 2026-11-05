@@ -686,3 +686,16 @@ negative case only for a genuinely new boundary, not for incidental private layo
   Native performance is not yet qualified. Next remove integer attribute no-op
   inspection and correct all four retained-work formulas together, including
   selection output lengths; keep actual copy, sparse/topology/range/schema work.
+- The [integer-attribute validation cut](../reviews/2026-11-05-integer-attribute-validation.md)
+  removes semantic empty callbacks and retained always-true integer predicates.
+  One checked metadata quantity excludes integer values/defaults from all four
+  retained-work owners, without reducing stored data or actual copying. Selection
+  counts output payloads; conversion counts newly synthesized topology indices.
+  Independent source review, the final 697-test Core suite, and all seven fresh
+  integrated gates pass: 3,593 workspace tests, 188 doctests, 138 consumer tests,
+  both strict lints and both formats, with existing skips. All 908 recorded source
+  inputs remain stable. Ordinary measurement is pending. Follow-up Interface
+  research identifies repeated finite checks over initial immutable copies, but
+  requires a closed private construction invariant before deleting them. Preserve
+  output layout/reference validation and real numeric qualification of edited
+  values; do not add a general proof engine or a second ledger.

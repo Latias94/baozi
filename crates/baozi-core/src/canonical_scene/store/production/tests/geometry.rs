@@ -477,13 +477,14 @@ fn obj_corner_domains_preserve_shared_positions_without_tuple_vertex_expansion()
     assert_eq!(validated.attribute_count(), 4);
     assert_eq!(validated.f32_scalar_count(), 39);
     assert_eq!(validated.u32_scalar_count(), 8);
+    assert_eq!(validated.integer_attribute_scalar_count(), 2);
     assert_eq!(validated.payload_block_count(), 5);
     assert_eq!(
         validated.canonical_bytes(),
         expected_geometry_bytes([1, 1, 4, 1], [39, 0, 8, 0], 0)
     );
-    assert_eq!(validated.validation_work(), 73);
-    assert_eq!(control.work, 73);
+    assert_eq!(validated.validation_work(), 71);
+    assert_eq!(control.work, 71);
 
     let primitive = validated
         .primitive(0)
@@ -583,14 +584,15 @@ fn custom_dense_and_sparse_i32_attributes_preserve_signed_values_and_exact_accou
     assert_eq!(validated.f32_scalar_count(), 9);
     assert_eq!(validated.i32_scalar_count(), 5);
     assert_eq!(validated.u32_scalar_count(), 1);
+    assert_eq!(validated.integer_attribute_scalar_count(), 5);
     assert_eq!(validated.payload_block_count(), 6);
     assert_eq!(validated.semantic_cell_count(), 48);
     assert_eq!(
         validated.canonical_bytes(),
         expected_geometry_bytes([1, 1, 3, 0], [9, 0, 1, 5], 33)
     );
-    assert_eq!(validated.validation_work(), 69);
-    assert_eq!(control.work, 69);
+    assert_eq!(validated.validation_work(), 64);
+    assert_eq!(control.work, 64);
 
     let primitive = validated.primitive(0).expect("validated primitive");
     let dense = primitive.attribute(1).expect("dense I32 attribute");
@@ -613,6 +615,78 @@ fn custom_dense_and_sparse_i32_attributes_preserve_signed_values_and_exact_accou
     assert_eq!(sparse.explicit_element_count(), 1);
     assert_eq!(sparse.canonical_scalar_count(), 2);
     assert_eq!(sparse.payload_block_count(), 3);
+}
+
+#[test]
+fn sparse_integer_scalar_count_keeps_defaults_and_excludes_indices() {
+    let positions = [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+    let topology_indices = [0_u32, 1, 2];
+    let unsigned_default = [0_u32, u32::MAX];
+    let signed_indices = [1_u32];
+    let signed_values = [i32::MIN, i32::MAX];
+    let signed_default = [-1_i32, 0];
+    let attributes = [
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Position,
+            AttributeDomain::Vertex,
+            3,
+            &positions,
+            Presence::Absent,
+        ),
+        GeometryAttributeAuthoring::sparse_u32(
+            AttributeSemantic::Custom(CustomAttributeSemantic::new("ply:a").unwrap()),
+            AttributeDomain::Vertex,
+            2,
+            3,
+            &[],
+            &[],
+            &unsigned_default,
+        ),
+        GeometryAttributeAuthoring::sparse_i32(
+            AttributeSemantic::Custom(CustomAttributeSemantic::new("ply:b").unwrap()),
+            AttributeDomain::Vertex,
+            2,
+            3,
+            &signed_indices,
+            &signed_values,
+            &signed_default,
+        ),
+    ];
+    let primitives = [GeometryPrimitiveAuthoring::new(
+        GeometryTopologyAuthoring::TriangleList,
+        Presence::Present(&topology_indices),
+        crate::MaterialAssignment::Unspecified,
+        AuthoringRange::new(0, 3),
+    )];
+    let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
+    let mut control = TestControl::default();
+    let validated = validate_geometry_batch_with_control(
+        GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &[]),
+        0,
+        0,
+        SceneValidationLimits::default(),
+        &mut control,
+    )
+    .expect("default-only and explicit sparse integer attributes must retain all stored lanes");
+
+    assert_eq!(validated.integer_attribute_scalar_count(), 6);
+    assert_eq!(validated.f32_scalar_count(), 9);
+    assert_eq!(validated.u32_scalar_count(), 6);
+    assert_eq!(validated.i32_scalar_count(), 4);
+    assert_eq!(validated.semantic_cell_count(), 29);
+    assert_eq!(
+        validated.canonical_bytes(),
+        expected_geometry_bytes([1, 1, 3, 0], [9, 0, 6, 4], 10)
+    );
+    assert_eq!(validated.validation_work(), control.work);
+    let primitive = validated.primitive(0).expect("validated integer primitive");
+    let default_only = primitive.attribute(1).expect("default-only U32 attribute");
+    assert_eq!(default_only.element_count(), 3);
+    assert_eq!(default_only.explicit_element_count(), 0);
+    assert_eq!(default_only.canonical_scalar_count(), 2);
+    let sparse = primitive.attribute(2).expect("sparse I32 attribute");
+    assert_eq!(sparse.explicit_element_count(), 1);
+    assert_eq!(sparse.canonical_scalar_count(), 4);
 }
 
 #[test]
@@ -720,6 +794,7 @@ fn sparse_attribute_counts_indices_values_and_default_without_dense_expansion() 
 
     assert_eq!(validated.f32_scalar_count(), 12);
     assert_eq!(validated.u32_scalar_count(), 1);
+    assert_eq!(validated.integer_attribute_scalar_count(), 0);
     assert_eq!(validated.payload_block_count(), 4);
     assert_eq!(
         validated.canonical_bytes(),

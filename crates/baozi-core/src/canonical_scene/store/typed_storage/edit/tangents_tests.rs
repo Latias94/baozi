@@ -105,6 +105,7 @@ fn external_conventions(source: &mut GeometryStorage, basis: &str) -> StoredTang
 /// two UV domains. Replacing its external tangent must compact only that descriptor's names.
 fn geometry(tangent: bool) -> GeometryStorage {
     let mut source = GeometryStorage {
+        integer_attribute_scalar_count: 3,
         logical_meshes: Vec::new(),
         primitives: Vec::new(),
         attributes: Vec::new(),
@@ -550,6 +551,7 @@ fn sparse_f64_survives_tangent_addition_and_replacement_with_exact_work() {
             unreachable!();
         };
         source.i32_values.clear();
+        source.integer_attribute_scalar_count = 0;
         let dense_values = std::mem::take(&mut source.f64_values);
         source.attributes[source_row].lanes = 2;
         source.attributes[source_row].payload = StoredAttributePayload::SparseF64 {

@@ -48,6 +48,7 @@ fn values<T: Copy>(pool: &mut Vec<T>, values: &[T]) -> TableRange<T> {
 }
 fn empty() -> GeometryStorage {
     GeometryStorage {
+        integer_attribute_scalar_count: 0,
         logical_meshes: Vec::new(),
         primitives: Vec::new(),
         attributes: Vec::new(),
@@ -67,6 +68,7 @@ fn attribute(
     count: u32,
     payload: StoredAttributePayload,
 ) {
+    storage.integer_attribute_scalar_count += payload.integer_value_count().unwrap();
     storage.attributes.push(StoredAttribute {
         tangent_conventions: if semantic == StoredAttributeSemantic::Tangent {
             Some(crate::canonical_scene::store::typed_storage::StoredTangentConventions::UNKNOWN)
@@ -390,6 +392,68 @@ fn assert_valid(storage: &GeometryStorage) -> u64 {
         Ok(true)
     );
     control.completed
+}
+
+#[test]
+fn default_only_integer_attributes_keep_values_without_validation_padding() {
+    let mut source = empty();
+    let position = values(&mut source.f32_values, &[0.0; 9]);
+    attribute(
+        &mut source,
+        StoredAttributeSemantic::Position,
+        AttributeDomain::Vertex,
+        3,
+        3,
+        StoredAttributePayload::DenseF32(position),
+    );
+    let semantic =
+        StoredAttributeSemantic::Custom(TextRange(values(&mut source.names, b"test:default")));
+    let payload = StoredAttributePayload::SparseU32 {
+        indices: TableRange::new(0, 0),
+        values: TableRange::new(0, 0),
+        default: values(&mut source.u32_values, &[0, u32::MAX]),
+    };
+    attribute(
+        &mut source,
+        semantic,
+        AttributeDomain::Vertex,
+        2,
+        3,
+        payload,
+    );
+    finish_fixture(
+        &mut source,
+        TopologyKind::TriangleList,
+        [3, 3, 1],
+        None,
+        None,
+    );
+    assert_eq!(source.integer_attribute_scalar_count, 2);
+    assert_eq!(source.validation_work(), Some(16));
+    assert_eq!(assert_valid(&source), 16);
+
+    let plan =
+        GeometrySpacePlan::try_new(&source, winding_only(), &mut Control::default()).unwrap();
+    let mut build = Control::default();
+    let output = plan.materialize(&mut build).unwrap();
+    assert_eq!(build.completed, plan.work());
+    assert_eq!(output.integer_attribute_scalar_count, 2);
+    assert_eq!(output.attributes[1].element_count, 3);
+    let StoredAttributePayload::SparseU32 {
+        indices,
+        values,
+        default,
+    } = output.attributes[1].payload
+    else {
+        panic!("default-only integer attribute must remain sparse");
+    };
+    assert!(indices.get(&output.u32_values).unwrap().is_empty());
+    assert!(values.get(&output.u32_values).unwrap().is_empty());
+    assert_eq!(default.get(&output.u32_values), Some(&[0, u32::MAX][..]));
+    assert_eq!(output.u32_values.len(), 5);
+    assert_eq!(plan.validation_work(), 19);
+    assert_eq!(output.validation_work(), Some(19));
+    assert_eq!(assert_valid(&output), 19);
 }
 
 #[test]

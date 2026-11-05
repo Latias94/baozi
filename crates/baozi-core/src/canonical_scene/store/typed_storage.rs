@@ -238,6 +238,22 @@ pub(super) enum StoredAttributePayload {
     },
 }
 
+impl StoredAttributePayload {
+    fn integer_value_count(self) -> Option<u64> {
+        match self {
+            Self::DenseU32(values) => Some(values.len() as u64),
+            Self::DenseI32(values) => Some(values.len() as u64),
+            Self::SparseU32 {
+                values, default, ..
+            } => (values.len() as u64).checked_add(default.len() as u64),
+            Self::SparseI32 {
+                values, default, ..
+            } => (values.len() as u64).checked_add(default.len() as u64),
+            _ => Some(0),
+        }
+    }
+}
+
 /// Attribute-owned declarations; extension text lives in this geometry owner's names pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct StoredTangentConventions {
@@ -331,6 +347,8 @@ pub(super) struct StoredMeshInstance {
 
 /// One immutable geometry owner; every scalar lane remains contiguous and directly borrowable.
 pub(super) struct GeometryStorage {
+    // Retain this metadata fact so work queries never rescan attribute values or rows.
+    pub(super) integer_attribute_scalar_count: u64,
     pub(super) logical_meshes: Vec<StoredLogicalMesh>,
     pub(super) primitives: Vec<StoredPrimitive>,
     pub(super) attributes: Vec<StoredAttribute>,
@@ -357,5 +375,6 @@ impl GeometryStorage {
         ]
         .into_iter()
         .try_fold(0_u64, |sum, count| sum.checked_add(count as u64))
+        .and_then(|work| work.checked_sub(self.integer_attribute_scalar_count))
     }
 }

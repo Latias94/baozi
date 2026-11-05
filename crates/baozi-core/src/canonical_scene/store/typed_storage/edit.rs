@@ -246,6 +246,7 @@ mod tests {
         }
         f32_values.extend_from_slice(&[2.0, 0.0, 0.0, 3.0, 0.0, 0.0, 2.0, 1.0, 0.0]);
         GeometryStorage {
+            integer_attribute_scalar_count: 8,
             logical_meshes: vec![StoredLogicalMesh {
                 primitives: TableRange::new(0, 2),
                 name: Some(mesh_name),
@@ -378,7 +379,9 @@ mod tests {
             Ok(true)
         );
         assert_eq!(validation.completed, plan.validation_work());
-        assert_eq!(validation.completed, 106);
+        assert_eq!(validation.completed, 96);
+        assert_eq!(source.integer_attribute_scalar_count, 8);
+        assert_eq!(output.integer_attribute_scalar_count, 10);
         assert_eq!(output.primitives[0].topology, TopologyKind::TriangleList);
         assert_eq!(output.primitives[0].material, source.primitives[0].material);
         assert_eq!(output.primitives[0].vertex_count, 5);
@@ -499,6 +502,10 @@ mod tests {
             ),
         ] {
             let mut source = geometry();
+            source.integer_attribute_scalar_count -= source.attributes[row]
+                .payload
+                .integer_value_count()
+                .unwrap();
             let indices = match source.attributes[row].payload {
                 StoredAttributePayload::SparseI32 { indices, .. } => {
                     source.i32_values.clear();
@@ -673,6 +680,7 @@ mod tests {
             },
         });
         let source = GeometryStorage {
+            integer_attribute_scalar_count: 0,
             logical_meshes: vec![StoredLogicalMesh {
                 primitives: TableRange::new(0, 1),
                 name: None,

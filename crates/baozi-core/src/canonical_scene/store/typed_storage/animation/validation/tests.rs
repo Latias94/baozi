@@ -88,6 +88,7 @@ fn fixture() -> Fixture {
         names: Vec::new(),
     };
     let geometry = GeometryStorage {
+        integer_attribute_scalar_count: 0,
         logical_meshes: vec![
             StoredLogicalMesh {
                 primitives: TableRange::new(0, 0),

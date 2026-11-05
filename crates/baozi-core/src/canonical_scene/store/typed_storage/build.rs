@@ -268,7 +268,7 @@ pub(in crate::canonical_scene::store) struct GeometryStoragePlan {
     f64_values: CapacityPlan,
     u32_values: CapacityPlan,
     i32_values: CapacityPlan,
-    scalar_work: u64,
+    scalar_validation_work: u64,
 }
 
 impl GeometryStoragePlan {
@@ -327,11 +327,12 @@ impl GeometryStoragePlan {
             f64_values: capacity::<f64>(batch.f64_scalar_count())?,
             u32_values: capacity::<u32>(batch.u32_scalar_count())?,
             i32_values: capacity::<i32>(batch.i32_scalar_count())?,
-            scalar_work: batch
+            scalar_validation_work: batch
                 .f32_scalar_count()
                 .checked_add(batch.f64_scalar_count())
                 .and_then(|count| count.checked_add(batch.u32_scalar_count()))
                 .and_then(|count| count.checked_add(batch.i32_scalar_count()))
+                .and_then(|count| count.checked_sub(batch.integer_attribute_scalar_count()))
                 .ok_or(StorePlanError::SizeOverflow)?,
         };
         if plan.canonical_bytes()? != batch.canonical_bytes() {
@@ -366,7 +367,7 @@ impl GeometryStoragePlan {
             self.primitives,
             self.primitives,
         ])?;
-        rows.checked_add(self.scalar_work)
+        rows.checked_add(self.scalar_validation_work)
             .ok_or(StorePlanError::SizeOverflow)
     }
 
@@ -394,6 +395,7 @@ impl GeometryStoragePlan {
         mut unit: C,
     ) -> BuildResult<GeometryStorage, C::Error> {
         let mut storage = GeometryStorage {
+            integer_attribute_scalar_count: batch.integer_attribute_scalar_count(),
             logical_meshes: allocate(self.logical_meshes)?,
             primitives: allocate(self.primitives)?,
             attributes: allocate(self.attributes)?,

@@ -208,16 +208,9 @@ impl<'a> GeometrySpacePlan<'a> {
             .checked_add(payload_work)
             .and_then(|work| work.checked_add(source.names.len() as u64))
             .ok_or_else(plan_overflow)?;
-        let validation_work = row_work
-            .checked_add(
-                sum_counts([
-                    source.f32_values.len(),
-                    source.f64_values.len(),
-                    u32_count,
-                    source.i32_values.len(),
-                ])
-                .map_err(GeometrySpacePlanError::Plan)?,
-            )
+        let validation_work = source
+            .validation_work()
+            .and_then(|work| work.checked_add(extra_indices as u64))
             .ok_or_else(plan_overflow)?;
         Ok(Self {
             source,
@@ -250,6 +243,7 @@ impl<'a> GeometrySpacePlan<'a> {
     ) -> BuildResult<GeometryStorage, C::Error> {
         let c = self.capacities;
         let mut output = GeometryStorage {
+            integer_attribute_scalar_count: self.source.integer_attribute_scalar_count,
             logical_meshes: allocate(c[0])?,
             primitives: allocate(c[1])?,
             attributes: allocate(c[2])?,

@@ -41,6 +41,7 @@ pub(super) struct Writer<'a, C> {
     control: &'a mut C,
     pub(super) counts: [usize; 9],
     pub(super) work: u64,
+    pub(super) integer_attribute_scalar_count: u64,
     comparison: Option<ComparisonSpan>,
 }
 
@@ -51,6 +52,7 @@ impl<'a, C: TypedStorageBuildControl> Writer<'a, C> {
             control,
             counts: [0; 9],
             work: 0,
+            integer_attribute_scalar_count: 0,
             comparison: None,
         }
     }
@@ -219,7 +221,7 @@ emit!(
         && a.attributes == b.attributes
 );
 emit!(
-    attribute,
+    attribute_row,
     attributes,
     2,
     StoredAttribute,
@@ -246,6 +248,17 @@ emit!(u32, u32_values, 7, u32, |a, b| a == b);
 emit!(i32, i32_values, 8, i32, |a, b| a == b);
 
 impl<C: TypedStorageBuildControl> Writer<'_, C> {
+    pub(super) fn attribute(&mut self, value: StoredAttribute) -> EditResult<usize, C::Error> {
+        let integer_count = value
+            .payload
+            .integer_value_count()
+            .and_then(|count| self.integer_attribute_scalar_count.checked_add(count))
+            .ok_or_else(overflow)?;
+        let index = self.attribute_row(value)?;
+        self.integer_attribute_scalar_count = integer_count;
+        Ok(index)
+    }
+
     fn byte(&mut self, value: u8) -> EditResult<(), C::Error> {
         let index = self.counts[4];
         let comparison = self.comparison;

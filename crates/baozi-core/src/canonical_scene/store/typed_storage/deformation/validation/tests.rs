@@ -351,6 +351,7 @@ fn empty_storage() -> DeformationStorage {
 
 fn empty_geometry() -> GeometryStorage {
     GeometryStorage {
+        integer_attribute_scalar_count: 0,
         logical_meshes: Vec::new(),
         primitives: Vec::new(),
         attributes: Vec::new(),

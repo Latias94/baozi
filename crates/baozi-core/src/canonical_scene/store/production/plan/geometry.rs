@@ -456,6 +456,7 @@ struct GeometryValidationStorage<R> {
     f64_scalar_count: u64,
     u32_scalar_count: u64,
     i32_scalar_count: u64,
+    integer_attribute_scalar_count: u64,
     payload_block_count: u32,
     entity_count: u64,
     edge_count: u64,
@@ -528,6 +529,10 @@ impl<'input, R> ValidatedGeometryBatch<'input, R> {
 
     pub(in crate::canonical_scene::store) const fn i32_scalar_count(&self) -> u64 {
         self.compiled.i32_scalar_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn integer_attribute_scalar_count(&self) -> u64 {
+        self.compiled.integer_attribute_scalar_count
     }
 
     #[cfg(test)]
@@ -645,6 +650,10 @@ impl<R> fmt::Debug for ValidatedGeometryBatch<'_, R> {
             .field("f64_scalar_count", &self.compiled.f64_scalar_count)
             .field("u32_scalar_count", &self.compiled.u32_scalar_count)
             .field("i32_scalar_count", &self.compiled.i32_scalar_count)
+            .field(
+                "integer_attribute_scalar_count",
+                &self.compiled.integer_attribute_scalar_count,
+            )
             .field("payload_block_count", &self.compiled.payload_block_count)
             .field("entity_count", &self.compiled.entity_count)
             .field("edge_count", &self.compiled.edge_count)
@@ -694,6 +703,7 @@ struct GeometryValidationContext<'control, C: CanonicalAuthoringControl> {
     f64_scalars: u64,
     u32_scalars: u64,
     i32_scalars: u64,
+    integer_attribute_scalar_count: u64,
     payload_blocks: u32,
     canonical_bytes: u64,
     rows: [u64; 4],
@@ -715,6 +725,7 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
             f64_scalars: 0,
             u32_scalars: 0,
             i32_scalars: 0,
+            integer_attribute_scalar_count: 0,
             payload_blocks: 0,
             canonical_bytes: 0,
             rows: [0; 4],
@@ -888,6 +899,16 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
         self.i32_scalars = final_i32;
         self.payload_blocks = final_blocks;
         self.canonical_bytes = final_canonical_bytes;
+        Ok(())
+    }
+
+    fn add_integer_attribute_scalars(&mut self, count: u64) -> GeometryValidationResult<(), C> {
+        self.integer_attribute_scalar_count = self
+            .integer_attribute_scalar_count
+            .checked_add(count)
+            .ok_or(GeometryAuthoringSemanticError::AccountingOverflow {
+                dimension: "integer attribute scalar count",
+            })?;
         Ok(())
     }
 
@@ -1327,6 +1348,7 @@ where
         f64_scalar_count: context.f64_scalars,
         u32_scalar_count: context.u32_scalars,
         i32_scalar_count: context.i32_scalars,
+        integer_attribute_scalar_count: context.integer_attribute_scalar_count,
         payload_block_count: context.payload_blocks,
         entity_count,
         edge_count: context.edges,
@@ -1875,7 +1897,7 @@ where
             let canonical_scalar_count = usize_to_u64(values.len(), "u32 attribute scalars")?;
             let payload_block_count = block_for_len(values.len());
             context.add_payload(0, 0, canonical_scalar_count, 0, payload_block_count)?;
-            inspect_u32_values(values, context)?;
+            context.add_integer_attribute_scalars(canonical_scalar_count)?;
             Ok(ValidatedGeometryAttribute {
                 input_index: attribute_index,
                 #[cfg(test)]
@@ -1915,7 +1937,7 @@ where
             let canonical_scalar_count = usize_to_u64(values.len(), "i32 attribute scalars")?;
             let payload_block_count = block_for_len(values.len());
             context.add_payload(0, 0, 0, canonical_scalar_count, payload_block_count)?;
-            inspect_i32_values(values, context)?;
+            context.add_integer_attribute_scalars(canonical_scalar_count)?;
             Ok(ValidatedGeometryAttribute {
                 input_index: attribute_index,
                 #[cfg(test)]
@@ -2046,11 +2068,11 @@ impl GeometryScalar for u32 {
 
     fn inspect<C: CanonicalAuthoringControl>(
         _attribute_index: usize,
-        values: &[Self],
+        _values: &[Self],
         _scalar_offset: usize,
-        context: &mut GeometryValidationContext<'_, C>,
+        _context: &mut GeometryValidationContext<'_, C>,
     ) -> GeometryValidationResult<(), C> {
-        inspect_u32_values(values, context)
+        Ok(())
     }
 }
 
@@ -2059,11 +2081,11 @@ impl GeometryScalar for i32 {
 
     fn inspect<C: CanonicalAuthoringControl>(
         _attribute_index: usize,
-        values: &[Self],
+        _values: &[Self],
         _scalar_offset: usize,
-        context: &mut GeometryValidationContext<'_, C>,
+        _context: &mut GeometryValidationContext<'_, C>,
     ) -> GeometryValidationResult<(), C> {
-        inspect_i32_values(values, context)
+        Ok(())
     }
 }
 
@@ -2149,6 +2171,7 @@ where
                     dimension: "u32 scalar count",
                 })?;
             context.add_payload(0, 0, u32_scalars, 0, payload_block_count)?;
+            context.add_integer_attribute_scalars(canonical_scalar_count)?;
         }
         GeometryAttributeScalarKind::I32 => {
             context.add_payload(
@@ -2158,6 +2181,7 @@ where
                 canonical_scalar_count,
                 payload_block_count,
             )?;
+            context.add_integer_attribute_scalars(canonical_scalar_count)?;
         }
         GeometryAttributeScalarKind::F64 => {
             context.add_payload(
@@ -2638,32 +2662,6 @@ where
             }
             .into());
         }
-    }
-    Ok(())
-}
-
-fn inspect_u32_values<C>(
-    values: &[u32],
-    context: &mut GeometryValidationContext<'_, C>,
-) -> GeometryValidationResult<(), C>
-where
-    C: CanonicalAuthoringControl,
-{
-    for _ in values {
-        context.run_copy_unit(SceneValidationWork::PayloadCell, || ())?;
-    }
-    Ok(())
-}
-
-fn inspect_i32_values<C>(
-    values: &[i32],
-    context: &mut GeometryValidationContext<'_, C>,
-) -> GeometryValidationResult<(), C>
-where
-    C: CanonicalAuthoringControl,
-{
-    for _ in values {
-        context.run_copy_unit(SceneValidationWork::PayloadCell, || ())?;
     }
     Ok(())
 }

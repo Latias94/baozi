@@ -152,3 +152,8 @@ storage, selection output and space-conversion output each own a validation-work
 formula; all four must exclude the actual integer attribute values/defaults.
 Selection must use output data lengths, which may grow during triangulation.
 Preserve exact envelope finish rather than padding it with nonexistent work.
+
+The subsequent [integer-attribute cut](2026-11-05-integer-attribute-validation.md)
+implements that removal and records its source review and verification. It also
+investigates a private construction invariant for repeated floating finite checks;
+that follow-up is a design recommendation, not an implemented skip switch.

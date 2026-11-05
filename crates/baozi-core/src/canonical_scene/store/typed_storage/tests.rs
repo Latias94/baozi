@@ -35,6 +35,7 @@ impl TypedStorageBuildControl for &mut Control {
 
 fn geometry() -> GeometryStorage {
     GeometryStorage {
+        integer_attribute_scalar_count: 1,
         logical_meshes: vec![StoredLogicalMesh {
             primitives: TableRange::new(0, 1),
             name: None,
@@ -104,6 +105,7 @@ fn geometry() -> GeometryStorage {
 
 fn tangent_geometry() -> GeometryStorage {
     GeometryStorage {
+        integer_attribute_scalar_count: 0,
         logical_meshes: vec![StoredLogicalMesh {
             primitives: TableRange::new(0, 1),
             name: None,
@@ -164,6 +166,7 @@ fn tangent_geometry() -> GeometryStorage {
 
 fn f64_geometry() -> GeometryStorage {
     GeometryStorage {
+        integer_attribute_scalar_count: 0,
         logical_meshes: vec![StoredLogicalMesh {
             primitives: TableRange::new(0, 1),
             name: None,
@@ -419,7 +422,7 @@ fn validation_borrows_vertex_corner_face_sparse_and_f64_tables_without_allocatin
         assert_eq!(storage.validate(&mut control, [1, 1, 4, 1], 2, 0), Ok(true));
     });
     assert_eq!(allocations.count_total, 0);
-    assert_eq!(control.completed, 35);
+    assert_eq!(control.completed, 34);
     assert_eq!(storage.f32_values.as_ptr(), before);
     assert_eq!(storage.f64_values, [1.0e200, 2.0e200, 3.0e200]);
 }
@@ -427,7 +430,7 @@ fn validation_borrows_vertex_corner_face_sparse_and_f64_tables_without_allocatin
 #[test]
 fn every_geometry_validation_action_is_interruptible_before_its_effect() {
     let storage = geometry();
-    for completed in 0..35 {
+    for completed in 0..34 {
         let mut control = Control {
             completed: 0,
             reject_before: Some(completed),
@@ -461,7 +464,7 @@ fn typed_ranges_reject_foreign_domain_targets_and_uncovered_payloads() {
 
 #[test]
 fn typed_geometry_rejects_invalid_ranges_cardinality_schema_and_nonfinite_values() {
-    let corruptions: [fn(&mut GeometryStorage); 8] = [
+    let corruptions: [fn(&mut GeometryStorage); 10] = [
         |storage| storage.primitives[0].attributes = TableRange::new(usize::MAX, 2),
         |storage| storage.attributes[1].element_count = 2,
         |storage| storage.attributes[0].domain = AttributeDomain::Corner,
@@ -472,6 +475,8 @@ fn typed_geometry_rejects_invalid_ranges_cardinality_schema_and_nonfinite_values
         |storage| storage.f32_values[15] = f32::NAN,
         |storage| storage.u32_values[5] = 3,
         |storage| storage.names[7] = b'\n',
+        |storage| storage.integer_attribute_scalar_count = 0,
+        |storage| storage.integer_attribute_scalar_count = u64::MAX,
     ];
     for corrupt in corruptions {
         let mut storage = geometry();

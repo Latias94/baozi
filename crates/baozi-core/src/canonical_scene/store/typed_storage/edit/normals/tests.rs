@@ -75,6 +75,7 @@ fn attribute(
     payload: StoredAttributePayload,
 ) -> u32 {
     let index = storage.attributes.len() as u32;
+    storage.integer_attribute_scalar_count += payload.integer_value_count().unwrap();
     storage.attributes.push(StoredAttribute {
         tangent_conventions: if semantic == StoredAttributeSemantic::Tangent {
             Some(crate::canonical_scene::store::typed_storage::StoredTangentConventions::UNKNOWN)
@@ -94,6 +95,7 @@ fn attribute(
 /// and Tangent are sparse, so deletion must compact both their F32 and U32 scalar ranges.
 fn geometry(normal: bool, tangent: bool) -> GeometryStorage {
     let mut storage = GeometryStorage {
+        integer_attribute_scalar_count: 0,
         logical_meshes: Vec::new(),
         primitives: Vec::new(),
         attributes: Vec::new(),
@@ -897,6 +899,7 @@ fn sparse_f64_survives_normal_addition_and_replacement_with_exact_work() {
             unreachable!();
         };
         let removed = old_values.len() + old_default.len();
+        source.integer_attribute_scalar_count -= removed as u64;
         source.i32_values = source.i32_values[removed..].to_vec();
         for row in &mut source.attributes {
             if let StoredAttributePayload::DenseI32(range) = &mut row.payload {

@@ -108,6 +108,7 @@ pub(in crate::canonical_scene::store) struct GeometrySelectionPlan<'a> {
     capacities: [CapacityPlan; 9],
     work: u64,
     validation_work: u64,
+    integer_attribute_scalar_count: u64,
     changes_fields: bool,
 }
 
@@ -166,7 +167,7 @@ impl<'a> GeometrySelectionPlan<'a> {
                     .ok_or_else(overflow)?;
             }
         }
-        let (counts, work) = {
+        let (counts, work, integer_attribute_scalar_count) = {
             let mut writer = Writer::new(Mode::Count, control);
             reconstruct(
                 source,
@@ -174,7 +175,11 @@ impl<'a> GeometrySelectionPlan<'a> {
                 MappingPass::Planning(&mut *mappings),
                 &mut writer,
             )?;
-            (writer.counts, writer.work)
+            (
+                writer.counts,
+                writer.work,
+                writer.integer_attribute_scalar_count,
+            )
         };
         u32::try_from(counts[2]).map_err(|_| overflow())?;
         let mut changes_fields = false;
@@ -205,7 +210,9 @@ impl<'a> GeometrySelectionPlan<'a> {
         .into_iter()
         .try_fold(0_u64, |sum, n| {
             sum.checked_add(n as u64).ok_or_else(overflow)
-        })?;
+        })?
+        .checked_sub(integer_attribute_scalar_count)
+        .ok_or_else(overflow)?;
         Ok(Self {
             source,
             edits,
@@ -213,6 +220,7 @@ impl<'a> GeometrySelectionPlan<'a> {
             capacities,
             work,
             validation_work,
+            integer_attribute_scalar_count,
             changes_fields,
         })
     }
@@ -266,6 +274,7 @@ impl<'a> GeometrySelectionPlan<'a> {
     ) -> EditResult<GeometryStorage, C::Error> {
         let p = self.capacities;
         let mut output = GeometryStorage {
+            integer_attribute_scalar_count: self.integer_attribute_scalar_count,
             logical_meshes: allocate(p[0])?,
             primitives: allocate(p[1])?,
             attributes: allocate(p[2])?,
@@ -284,7 +293,10 @@ impl<'a> GeometrySelectionPlan<'a> {
                 MappingPass::Sealed(self.mappings),
                 &mut writer,
             )?;
-            if writer.counts != p.map(|p| p.desired_capacity()) || writer.work != self.work {
+            if writer.counts != p.map(|p| p.desired_capacity())
+                || writer.work != self.work
+                || writer.integer_attribute_scalar_count != self.integer_attribute_scalar_count
+            {
                 return Err(TypedStorageBuildError::Invariant);
             }
         }
