@@ -740,6 +740,21 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
         kind: SceneValidationWork,
         action: impl FnMut() -> R,
     ) -> GeometryValidationResult<R, C> {
+        self.run_controlled_unit(|control| control.run_unit(kind, action))
+    }
+
+    fn run_copy_unit<R: Copy>(
+        &mut self,
+        kind: SceneValidationWork,
+        action: impl Fn() -> R + Copy,
+    ) -> GeometryValidationResult<R, C> {
+        self.run_controlled_unit(|control| control.run_copy_unit(kind, action))
+    }
+
+    fn run_controlled_unit<R>(
+        &mut self,
+        action: impl FnOnce(&mut C) -> Result<R, C::Error>,
+    ) -> GeometryValidationResult<R, C> {
         let final_work =
             self.work
                 .checked_add(1)
@@ -752,10 +767,7 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
             self.limits.max_work(),
         )?;
 
-        let result = self
-            .control
-            .run_unit(kind, action)
-            .map_err(GeometryAuthoringFailure::Control)?;
+        let result = action(self.control).map_err(GeometryAuthoringFailure::Control)?;
         self.work = final_work;
         self.work_since_poll += 1;
         if self.work_since_poll == SCENE_VALIDATION_POLL_INTERVAL {
@@ -2573,20 +2585,20 @@ where
     C: CanonicalAuthoringControl,
 {
     for (relative_scalar, value) in values.iter().enumerate() {
-        context.run_unit(SceneValidationWork::PayloadCell, || {
-            if !value.is_finite() {
-                let scalar = scalar_offset.checked_add(relative_scalar).ok_or(
-                    GeometryAuthoringSemanticError::AccountingOverflow {
-                        dimension: "attribute scalar index",
-                    },
-                )?;
-                return Err(GeometryAuthoringSemanticError::NonFiniteAttributeValue {
-                    attribute: attribute_index,
-                    scalar,
-                });
+        let finite =
+            context.run_copy_unit(SceneValidationWork::PayloadCell, || value.is_finite())?;
+        if !finite {
+            let scalar = scalar_offset.checked_add(relative_scalar).ok_or(
+                GeometryAuthoringSemanticError::AccountingOverflow {
+                    dimension: "attribute scalar index",
+                },
+            )?;
+            return Err(GeometryAuthoringSemanticError::NonFiniteAttributeValue {
+                attribute: attribute_index,
+                scalar,
             }
-            Ok(())
-        })??;
+            .into());
+        }
     }
     Ok(())
 }
@@ -2612,21 +2624,20 @@ where
     C: CanonicalAuthoringControl,
 {
     for (relative_scalar, value) in values.iter().enumerate() {
-        context.run_unit(SceneValidationWork::PayloadCell, || {
-            if value.is_finite() {
-                Ok(())
-            } else {
-                let scalar = scalar_offset.checked_add(relative_scalar).ok_or(
-                    GeometryAuthoringSemanticError::AccountingOverflow {
-                        dimension: "attribute scalar index",
-                    },
-                )?;
-                Err(GeometryAuthoringSemanticError::NonFiniteAttributeValue {
-                    attribute: attribute_index,
-                    scalar,
-                })
+        let finite =
+            context.run_copy_unit(SceneValidationWork::PayloadCell, || value.is_finite())?;
+        if !finite {
+            let scalar = scalar_offset.checked_add(relative_scalar).ok_or(
+                GeometryAuthoringSemanticError::AccountingOverflow {
+                    dimension: "attribute scalar index",
+                },
+            )?;
+            return Err(GeometryAuthoringSemanticError::NonFiniteAttributeValue {
+                attribute: attribute_index,
+                scalar,
             }
-        })??;
+            .into());
+        }
     }
     Ok(())
 }
@@ -2639,7 +2650,7 @@ where
     C: CanonicalAuthoringControl,
 {
     for _ in values {
-        context.run_unit(SceneValidationWork::PayloadCell, || ())?;
+        context.run_copy_unit(SceneValidationWork::PayloadCell, || ())?;
     }
     Ok(())
 }
@@ -2652,7 +2663,7 @@ where
     C: CanonicalAuthoringControl,
 {
     for _ in values {
-        context.run_unit(SceneValidationWork::PayloadCell, || ())?;
+        context.run_copy_unit(SceneValidationWork::PayloadCell, || ())?;
     }
     Ok(())
 }

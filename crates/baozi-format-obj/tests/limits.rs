@@ -750,6 +750,45 @@ fn reused_mtl_scan_preserves_later_token_rejection_prefix_and_releases_storage()
 }
 
 #[test]
+fn shared_mtl_layouts_reject_later_token_bytes_before_numeric_interpretation() -> TestResult<()> {
+    let obj = b"mtllib first.mtl palette.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+    let first_mtl = b"newmtl blue\nKd 0 0 1\n";
+    let mtl = "newmtl red\n# \u{1f642}\n\u{2003}Kd nope 1234567890123 0\n";
+    let mut limits = ResourceLimits::default();
+    limits.max_token_bytes = 12;
+    let failure = expected_failure(import_assets_result(
+        "reused-mtl-bytes.obj",
+        [
+            ("reused-mtl-bytes.obj", obj.as_slice()),
+            ("first.mtl", first_mtl.as_slice()),
+            ("palette.mtl", mtl.as_bytes()),
+        ],
+        limits,
+        false,
+    )?);
+
+    assert_scope_limit(&failure, "token-bytes", 12);
+    // The second library's later record is fully scanned before its 13-byte token is rejected.
+    // The preceding invalid number must not emit a warning or skip this byte limit.
+    assert!(failure.diagnostics().is_empty());
+    for (dimension, attempted, consumed) in [
+        (ImportDimension::DecodeWork, 456, 443),
+        (ImportDimension::Tokens, 30, 29),
+        (ImportDimension::Records, 10, 10),
+        (ImportDimension::Vertices, 3, 3),
+        (ImportDimension::Faces, 1, 1),
+    ] {
+        let snapshot = failure.ledger().dimension(dimension).unwrap();
+        assert_eq!(snapshot.attempted(), attempted, "{dimension:?}");
+        assert_eq!(snapshot.consumed(), consumed, "{dimension:?}");
+    }
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    assert_eq!(failure.ledger().active_reservations(), 0);
+    assert_eq!(failure.ledger().committed_canonical_members(), 0);
+    Ok(())
+}
+
+#[test]
 fn repeated_texture_replacement_does_not_accumulate_live_reservations() -> TestResult<()> {
     const REPLACEMENTS: usize = 64;
     const MAP_LINE: &str = "map_Kd textures/diffuse.png\n";

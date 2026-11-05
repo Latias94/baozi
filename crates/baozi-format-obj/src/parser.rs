@@ -2,13 +2,28 @@ use crate::options::{ObjImportOptions, ObjTextDecodingMode};
 use crate::{ObjFailure, mesh_builder, mtl, obj};
 use baozi_import::{
     ConformedTextInput, DiagnosticCode, DiagnosticSource, ImportWorkClass, ParseChildren,
-    ParseContext, ParseFailure, ParseResult, ParseServices, TextConformanceViolation,
-    TextConformanceViolationKind, TextDecodingMode, TextInputLine, TextInputOptions,
-    TextInputRecoveryTracker,
+    ParseContext, ParseFailure, ParsePieceError, ParseResult, ParseServices, ParseWorkLayout,
+    TextConformanceViolation, TextConformanceViolationKind, TextDecodingMode, TextInputLine,
+    TextInputOptions, TextInputRecoveryTracker,
 };
 use std::ops::Range;
 
 pub(crate) const SCAN_CHUNK_BYTES: usize = 4 * 1024;
+
+// Bind once for the parser region; each physical scan and token still admits its own work.
+pub(crate) struct TokenWorkLayouts<'op> {
+    pub(crate) tokens: ParseWorkLayout<'op, 2>,
+    pub(crate) scan: ParseWorkLayout<'op, 1>,
+}
+
+impl<'op> TokenWorkLayouts<'op> {
+    pub(crate) fn bind(children: &mut ParseChildren<'_, 'op, '_>) -> ParseResult<Self> {
+        Ok(Self {
+            tokens: children.bind_group([ImportWorkClass::Tokens, ImportWorkClass::TokenBytes])?,
+            scan: children.bind_group([ImportWorkClass::DecodeWork])?,
+        })
+    }
+}
 
 // A document reuses these initialized buffers; scans read only the populated prefix.
 pub(crate) struct TokenScanScratch {
@@ -204,22 +219,22 @@ fn document_byte_failure(
 
 pub(crate) fn scan_token_ranges<'region, 'op, 'session>(
     exec: &mut ParseChildren<'region, 'op, 'session>,
+    scan_work: &ParseWorkLayout<'op, 1>,
     scratch: &mut TokenScanScratch,
     line: &str,
     resource: &'static str,
-    mut inspect: impl FnMut(&mut ParseServices<'_, 'op, 'session>, usize, char) -> ParseResult<()>,
+    mut inspect: impl FnMut(usize, char) -> Result<(), ParsePieceError<ObjFailure>>,
     mut visit: impl FnMut(&mut ParseChildren<'region, 'op, 'session>, usize, usize) -> ParseResult<()>,
 ) -> ParseResult<Option<usize>> {
     let mut token_start = None;
     let mut chunk_start = 0usize;
-    let scan_work = exec.bind_group([ImportWorkClass::DecodeWork])?;
 
     while chunk_start < line.len() {
         let chunk_end = str_chunk_end(line, chunk_start);
         let mut scanned_len = 0usize;
         let amount = usize_amount(&exec.services()?, chunk_end - chunk_start, resource)?;
         let errors = exec.error_view();
-        exec.child(&scan_work, [amount], |work| {
+        exec.child(scan_work, [amount], |work| {
             work.run([amount], || -> ParseResult<()> {
                 for (relative, character) in line[chunk_start..chunk_end].char_indices() {
                     let offset =
@@ -258,7 +273,12 @@ pub(crate) fn scan_token_ranges<'region, 'op, 'session>(
                 }
                 return Ok(Some(index));
             }
-            inspect(&mut exec.services()?, index, character)?;
+            if let Err(cause) = inspect(index, character) {
+                return Err(match cause {
+                    ParsePieceError::Parse(cause) => cause,
+                    ParsePieceError::Format(cause) => exec.services()?.format_failure(cause),
+                });
+            }
             if character.is_whitespace() {
                 if let Some(start) = token_start.take() {
                     visit(exec, start, index)?;

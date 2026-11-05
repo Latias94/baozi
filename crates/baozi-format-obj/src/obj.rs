@@ -114,6 +114,7 @@ pub(crate) fn parse<'region, 'op, 'session>(
     let mut scan_scratch = parser::TokenScanScratch::new();
 
     let record_work = children.bind_group([ImportWorkClass::Records])?;
+    let token_work = parser::TokenWorkLayouts::bind(children)?;
     for line in text.lines() {
         let line_number = u32::try_from(line.number()).map_err(|_| {
             children
@@ -123,7 +124,14 @@ pub(crate) fn parse<'region, 'op, 'session>(
         let line = children.child(&record_work, [1], |work| {
             work.run([1], || Ok::<_, ParseFailure>(line))
         })?;
-        parser.parse_line(children, &mut scan_scratch, recoveries, &line, line_number)?;
+        parser.parse_line(
+            children,
+            &token_work,
+            &mut scan_scratch,
+            recoveries,
+            &line,
+            line_number,
+        )?;
         #[cfg(test)]
         crate::control_tests::face_completed(parser.parsed.faces.len());
     }
@@ -159,13 +167,20 @@ impl<'op, 'session> ObjParser<'op, 'session> {
     fn parse_line(
         &mut self,
         children: &mut ParseChildren<'_, 'op, 'session>,
+        token_work: &parser::TokenWorkLayouts<'op>,
         scan_scratch: &mut parser::TokenScanScratch,
         recoveries: &mut TextInputRecoveryTracker<'_, 'session>,
         decoded_line: &TextInputLine<'_, '_>,
         line_number: u32,
     ) -> ParseResult<()> {
         let raw_line = decoded_line.text();
-        let tokens = tokenize(children, scan_scratch, decoded_line, line_number)?;
+        let tokens = tokenize(
+            children,
+            token_work,
+            scan_scratch,
+            decoded_line,
+            line_number,
+        )?;
         let token_values = tokens.values.as_slice();
         let allowed_value = token_values.first().and_then(|first| match first.text {
             "o" | "g" | "usemtl" | "mtllib" => trailing_token_range(token_values),
@@ -407,14 +422,14 @@ fn parse_smoothing_group(
     Ok(NonZeroU32::new(group).map_or(ObjSmoothing::Off, ObjSmoothing::Group))
 }
 
-fn tokenize<'session, 'line>(
-    children: &mut ParseChildren<'_, '_, 'session>,
+fn tokenize<'op, 'session, 'line>(
+    children: &mut ParseChildren<'_, 'op, 'session>,
+    token_work: &parser::TokenWorkLayouts<'op>,
     scan_scratch: &mut parser::TokenScanScratch,
     decoded_line: &'line TextInputLine<'_, '_>,
     line_number: u32,
 ) -> ParseResult<TokenBuffer<'session, 'line>> {
     let line = decoded_line.text();
-    let token_work = children.bind_group([ImportWorkClass::Tokens, ImportWorkClass::TokenBytes])?;
     let mut tokens = TokenBuffer {
         values: children
             .services()?
@@ -422,18 +437,20 @@ fn tokenize<'session, 'line>(
         comment_start: None,
     };
 
+    let errors = children.error_view();
     tokens.comment_start = parser::scan_token_ranges(
         children,
+        &token_work.scan,
         scan_scratch,
         line,
         "obj-token-scan-work",
-        |exec, index, character| {
+        |index, character| {
             if character == '\0' {
                 let column = index
                     .checked_add(1)
                     .and_then(|column| u32::try_from(column).ok())
-                    .ok_or_else(|| exec.resource_limit_exceeded("line-columns", u64::MAX))?;
-                return Err(exec.format_failure(ObjFailure::statement(
+                    .ok_or_else(|| errors.resource_limit_exceeded("line-columns", u64::MAX))?;
+                return Err(ParsePieceError::Format(ObjFailure::statement(
                     "token",
                     "contains-nul",
                     line_number,
@@ -443,7 +460,14 @@ fn tokenize<'session, 'line>(
             Ok(())
         },
         |exec, token_start, token_end| {
-            push_token(exec, &token_work, &mut tokens, line, token_start, token_end)
+            push_token(
+                exec,
+                &token_work.tokens,
+                &mut tokens,
+                line,
+                token_start,
+                token_end,
+            )
         },
     )?;
     Ok(tokens)

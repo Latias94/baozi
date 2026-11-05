@@ -350,3 +350,9 @@ paths in each production cutover, verify affected failure/cancellation/precision
 contracts, then measure the actual source change. Keep the original Windows and
 Linux 14-case/110-lane release gates. Neither the diagnostics, instruction shares,
 heap counts, nor an improved environmental measurement clear those gates.
+
+The subsequent [scalar/OBJ production cut](2026-11-05-semantic-copy-and-obj-lexical.md)
+implements the first bounded execution changes and records their source review
+and correctness qualification. Its tests are not a new performance comparison.
+It also identifies integer value inspections that perform no predicate at all;
+those loops and their planned work must be removed together in the next cut.

@@ -676,3 +676,13 @@ negative case only for a genuinely new boundary, not for incidental private layo
   Address repeated glTF normalization before a whole JSON parser replacement.
   Finite roots, terminal facts, unchanged selection, pool-transfer ownership and
   all original integrated correctness/Windows/Linux performance gates remain.
+- The [scalar/OBJ execution cut](../reviews/2026-11-05-semantic-copy-and-obj-lexical.md)
+  implements Copy-only semantic units over one real reusable frame and binds
+  OBJ/MTL lexical work once per invocation. Per-unit budgets, control frontiers,
+  completed prefixes and owned-callback cleanup remain; scalar inner catches
+  and successful per-character services acquisition are removed. Independent
+  source/test reviews and seven integrated gates pass, followed by a test-only
+  numeric-prefix regression update and focused/lint/format qualification.
+  Native performance is not yet qualified. Next remove integer attribute no-op
+  inspection and correct all four retained-work formulas together, including
+  selection output lengths; keep actual copy, sparse/topology/range/schema work.

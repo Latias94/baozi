@@ -1715,6 +1715,7 @@ where
 {
     context: StoreInvocation<'borrow, O, PP, U>,
     work_group: StoreInvocationLayout<'borrow, 1>,
+    copy_frame: Option<crate::ledger::WorkFrame<1>>,
     first_fault: &'borrow mut Option<ActivationFirstFault>,
     phase: StorePhaseKey,
     scratch_dimension: StoreDimensionKey,

@@ -649,7 +649,10 @@ fn semantic_counters(
 
 #[test]
 fn semantic_execution_polls_at_entry_256_actions_and_finish() {
-    for actions in [255_u64, 256, 257] {
+    for (copy, actions) in [false, true]
+        .into_iter()
+        .flat_map(|copy| [255_u64, 256, 257].map(|actions| (copy, actions)))
+    {
         let polls = Arc::new(AtomicUsize::new(0));
         let control = OperationControl::default().with_cancellation(Stop {
             cancelled: Arc::new(AtomicBool::new(false)),
@@ -677,7 +680,11 @@ fn semantic_execution_polls_at_entry_256_actions_and_finish() {
                             assert_eq!(polls.load(Ordering::Relaxed), before_entry + 1);
                             let baseline = semantic_counters(semantic, keys);
                             for completed in 1..=actions {
-                                semantic.run_unit(|| ()).unwrap();
+                                if copy {
+                                    semantic.run_copy_unit(|| ()).unwrap();
+                                } else {
+                                    semantic.run_unit(|| ()).unwrap();
+                                }
                                 assert_eq!(
                                     semantic_counters(semantic, keys),
                                     (baseline.0 + completed, baseline.1 + completed)
@@ -709,6 +716,191 @@ fn semantic_execution_polls_at_entry_256_actions_and_finish() {
 
 #[test]
 fn semantic_returned_error_completes_before_any_checkpoint() {
+    for copy in [false, true] {
+        let mut invocation_host = InvocationHost::new();
+        let mut retained_account = None;
+        let finish = invocation_host
+            .run_body(|parts, disposition| {
+                let CanonicalBodyParts {
+                    startup: invocation_root,
+                    output,
+                    activation,
+                    ..
+                } = parts;
+                let (operation, keys, account) =
+                    body_operation(invocation_root, 4096, 4096, OperationControl::default());
+                let outcome: SemanticOutcome<'_> = keys
+                    .body_session(operation)
+                    .plan_and_activate_scoped(output, activation, |mut planning| {
+                        let finished = planning.with_semantic_work(|semantic| {
+                            let baseline = semantic_counters(semantic, keys);
+                            assert_eq!(
+                                if copy {
+                                    semantic.run_copy_unit(|| Err::<(), _>("invalid domain value"))
+                                } else {
+                                    semantic.run_unit(|| Err::<(), _>("invalid domain value"))
+                                }
+                                .unwrap(),
+                                Err("invalid domain value")
+                            );
+                            assert_eq!(
+                                semantic_counters(semantic, keys),
+                                (baseline.0 + 1, baseline.1 + 1)
+                            );
+                            Err::<(), _>(())
+                        });
+                        assert!(matches!(
+                            finished,
+                            Err(CanonicalSemanticWorkError::Rejected(()))
+                        ));
+                        planning.reject((), 82)
+                    })
+                    .unwrap();
+                request_semantic_rejection(outcome, disposition);
+                retained_account = Some(account);
+            })
+            .unwrap();
+        release_semantic_rejection(finish.resume().outcome, retained_account.as_ref().unwrap());
+    }
+}
+
+#[test]
+fn semantic_consumed_limit_denies_the_callback_before_execution() {
+    for (copy, completed_prefix) in [(false, 0_u64), (true, 0), (true, 1)] {
+        let mut invocation_host = InvocationHost::new();
+        let mut retained_account = None;
+        let finish = invocation_host
+            .run_body(|parts, disposition| {
+                let CanonicalBodyParts {
+                    startup: invocation_root,
+                    output,
+                    activation,
+                    ..
+                } = parts;
+                let (operation, keys, account) =
+                    body_operation(invocation_root, 4096, 4096, OperationControl::default());
+                let executed = std::cell::Cell::new(false);
+                let outcome: SemanticOutcome<'_> = keys
+                    .body_session(operation)
+                    .plan_and_activate_scoped(output, activation, |mut planning| {
+                        let finished = planning.with_semantic_work(|semantic| {
+                            let baseline = semantic_counters(semantic, keys);
+                            semantic
+                                .context
+                                .tighten_dimension_policy(
+                                    keys.work,
+                                    DimensionPolicy::counter(
+                                        baseline.0 + 8,
+                                        baseline.1 + completed_prefix,
+                                        0,
+                                    ),
+                                )
+                                .unwrap();
+                            for _ in 0..completed_prefix {
+                                semantic.run_copy_unit(|| ()).unwrap();
+                            }
+                            let denial = if copy {
+                                semantic.run_copy_unit(|| executed.set(true))
+                            } else {
+                                semantic.run_unit(|| executed.set(true))
+                            };
+                            assert!(matches!(
+                                denial,
+                                Err(StoreRuntimeError::Ledger(LedgerCause::LimitExceeded {
+                                    class: crate::CounterClass::Consumed,
+                                    ..
+                                }))
+                            ));
+                            assert!(!executed.get());
+                            assert_eq!(
+                                semantic.context.work_counters(keys.work).unwrap(),
+                                (
+                                    baseline.0 + completed_prefix + 1,
+                                    baseline.1 + completed_prefix,
+                                    0
+                                )
+                            );
+                            Ok::<(), ()>(())
+                        });
+                        assert!(matches!(
+                            finished,
+                            Err(CanonicalSemanticWorkError::Runtime(
+                                StoreRuntimeError::Ledger(LedgerCause::LimitExceeded {
+                                    class: crate::CounterClass::Consumed,
+                                    ..
+                                })
+                            ))
+                        ));
+                        planning.reject((), 83)
+                    })
+                    .unwrap();
+                request_semantic_rejection(outcome, disposition);
+                retained_account = Some(account);
+            })
+            .unwrap();
+        release_semantic_rejection(finish.resume().outcome, retained_account.as_ref().unwrap());
+    }
+}
+
+#[test]
+fn semantic_copy_panic_preserves_the_numeric_prefix_and_denies_reuse() {
+    for completed_prefix in [0_u64, 1] {
+        let mut invocation_host = InvocationHost::new();
+        let body = invocation_host.run_body(|parts, _disposition| {
+            let CanonicalBodyParts {
+                startup: invocation_root,
+                output,
+                activation,
+                ..
+            } = parts;
+            let (operation, keys, account) =
+                body_operation(invocation_root, 4096, 4096, OperationControl::default());
+            let result: Result<SemanticOutcome<'_>, _> = keys
+                .body_session(operation)
+                .plan_and_activate_scoped(output, activation, |mut planning| {
+                    let finished = planning.with_semantic_work(|semantic| {
+                        let baseline = semantic_counters(semantic, keys);
+                        for _ in 0..completed_prefix {
+                            semantic.run_copy_unit(|| ()).unwrap();
+                        }
+                        let panicked = catch_unwind(AssertUnwindSafe(|| {
+                            let _ = semantic.run_copy_unit(|| -> () {
+                                panic!("Copy semantic leaf panic");
+                            });
+                        }));
+                        assert!(panicked.is_err());
+                        let expected = (
+                            baseline.0 + completed_prefix + 1,
+                            baseline.1 + completed_prefix,
+                            0,
+                        );
+                        assert_eq!(semantic.context.work_counters(keys.work).unwrap(), expected);
+                        let executed = std::cell::Cell::new(false);
+                        assert!(matches!(
+                            semantic.run_copy_unit(|| executed.set(true)),
+                            Err(StoreRuntimeError::ConstructionInvariantUnverified)
+                        ));
+                        assert!(!executed.get());
+                        assert_eq!(semantic.context.work_counters(keys.work).unwrap(), expected);
+                        Ok::<(), ()>(())
+                    });
+                    assert!(matches!(
+                        finished,
+                        Err(CanonicalSemanticWorkError::Runtime(
+                            StoreRuntimeError::ConstructionInvariantUnverified
+                        ))
+                    ));
+                    planning.reject((), 88)
+                });
+            assert!(result.is_err());
+            assert!(account.snapshot().poisoned());
+        });
+        assert!(body.is_err());
+    }
+}
+
+#[test]
+fn semantic_copy_units_can_cross_storage_and_owned_callback_boundaries() {
     let mut invocation_host = InvocationHost::new();
     let mut retained_account = None;
     let finish = invocation_host
@@ -726,77 +918,30 @@ fn semantic_returned_error_completes_before_any_checkpoint() {
                 .plan_and_activate_scoped(output, activation, |mut planning| {
                     let finished = planning.with_semantic_work(|semantic| {
                         let baseline = semantic_counters(semantic, keys);
-                        assert_eq!(
-                            semantic
-                                .run_unit(|| Err::<(), _>("invalid domain value"))
-                                .unwrap(),
-                            Err("invalid domain value")
-                        );
+                        assert_eq!(semantic.run_copy_unit(|| 7).unwrap(), 7);
+                        let mut scratch = semantic.reserve(8).unwrap();
+                        semantic.run_copy_unit(|| ()).unwrap();
+                        semantic.resize(&mut scratch, 4).unwrap();
+                        semantic.run_copy_unit(|| ()).unwrap();
+                        semantic.validate_live_owner(&scratch).unwrap();
+                        semantic.run_copy_unit(|| ()).unwrap();
+                        let owned = String::from("owned semantic capture");
+                        assert_eq!(semantic.run_unit(move || owned.len()).unwrap(), 22);
+                        assert!(!semantic.run_copy_unit(|| false).unwrap());
+                        semantic.poll_if_due().unwrap();
+                        semantic.context.check_work_quiescent().unwrap();
                         assert_eq!(
                             semantic_counters(semantic, keys),
-                            (baseline.0 + 1, baseline.1 + 1)
+                            (baseline.0 + 6, baseline.1 + 6)
                         );
+                        drop(scratch);
                         Err::<(), _>(())
                     });
                     assert!(matches!(
                         finished,
                         Err(CanonicalSemanticWorkError::Rejected(()))
                     ));
-                    planning.reject((), 82)
-                })
-                .unwrap();
-            request_semantic_rejection(outcome, disposition);
-            retained_account = Some(account);
-        })
-        .unwrap();
-    release_semantic_rejection(finish.resume().outcome, retained_account.as_ref().unwrap());
-}
-
-#[test]
-fn semantic_consumed_limit_denies_the_callback_before_execution() {
-    let mut invocation_host = InvocationHost::new();
-    let mut retained_account = None;
-    let finish = invocation_host
-        .run_body(|parts, disposition| {
-            let CanonicalBodyParts {
-                startup: invocation_root,
-                output,
-                activation,
-                ..
-            } = parts;
-            let (operation, keys, account) =
-                body_operation(invocation_root, 4096, 4096, OperationControl::default());
-            let executed = std::cell::Cell::new(false);
-            let outcome: SemanticOutcome<'_> = keys
-                .body_session(operation)
-                .plan_and_activate_scoped(output, activation, |mut planning| {
-                    let finished = planning.with_semantic_work(|semantic| {
-                        let baseline = semantic_counters(semantic, keys);
-                        semantic
-                            .context
-                            .tighten_dimension_policy(
-                                keys.work,
-                                DimensionPolicy::counter(baseline.0 + 8, baseline.1, 0),
-                            )
-                            .unwrap();
-                        assert!(matches!(
-                            semantic.run_unit(|| executed.set(true)),
-                            Err(StoreRuntimeError::Ledger(_))
-                        ));
-                        assert!(!executed.get());
-                        assert_eq!(
-                            semantic_counters(semantic, keys),
-                            (baseline.0 + 1, baseline.1)
-                        );
-                        Ok::<(), ()>(())
-                    });
-                    assert!(matches!(
-                        finished,
-                        Err(CanonicalSemanticWorkError::Runtime(
-                            StoreRuntimeError::Ledger(_)
-                        ))
-                    ));
-                    planning.reject((), 83)
+                    planning.reject((), 87)
                 })
                 .unwrap();
             request_semantic_rejection(outcome, disposition);
@@ -832,7 +977,7 @@ fn semantic_scratch_boundaries_poll_before_the_action_cadence_is_due() {
                     .plan_and_activate_scoped(output, activation, |mut planning| {
                         let finished = planning.with_semantic_work(|semantic| {
                             let mut scratch = semantic.reserve(4).unwrap();
-                            semantic.run_unit(|| ()).unwrap();
+                            semantic.run_copy_unit(|| ()).unwrap();
                             let before = scratch.raw.covered_bytes_for_test();
                             let physical_before = account.snapshot();
                             cancelled.store(true, Ordering::Relaxed);
@@ -1109,7 +1254,7 @@ fn semantic_callback_capture_cleanup_precedes_the_final_control_checkpoint() {
                     let finished = planning.with_semantic_work(move |semantic| {
                         let _capture = &capture;
                         let baseline = semantic_counters(semantic, keys);
-                        semantic.run_unit(|| ()).unwrap();
+                        semantic.run_copy_unit(|| ()).unwrap();
                         assert_eq!(
                             semantic_counters(semantic, keys),
                             (baseline.0 + 1, baseline.1 + 1)
@@ -1255,7 +1400,7 @@ fn semantic_callback_body_and_capture_panics_preserve_the_actual_completed_prefi
                         planning.with_semantic_work(move |semantic| {
                             let _capture = &capture;
                             baseline_ref.set(semantic_counters(semantic, keys));
-                            semantic.run_unit(|| ()).unwrap();
+                            semantic.run_copy_unit(|| ()).unwrap();
                             if panic_body {
                                 panic!("semantic pass body panic");
                             }
@@ -1565,7 +1710,7 @@ fn semantic_capture_drop_failure_disposes_returned_rejection_once() {
                     let finished = planning.with_semantic_work(move |semantic| {
                         let _capture = &capture;
                         baseline_ref.set(semantic_counters(semantic, keys));
-                        semantic.run_unit(|| ()).unwrap();
+                        semantic.run_copy_unit(|| ()).unwrap();
                         assert!(semantic.first_fault.is_none());
                         if prior_control {
                             cancelled_ref.store(true, Ordering::Relaxed);

@@ -293,3 +293,11 @@ proof, widen budgets, weaken mathematical results or move benchmark work outside
   Vecs alone cannot solve those repetitions. These coarse diagnostic fractions
   are not isolated protocol costs or savings. Root/backing, promotion, cleanup,
   final evidence and every existing performance/correctness gate remain open.
+- The [qualified scalar/OBJ source cut](../reviews/2026-11-05-semantic-copy-and-obj-lexical.md)
+  reuses a host-owned singleton frame for Copy semantic facts, closing it before
+  control/storage/owned-callback and outer-body destruction frontiers. It retires
+  the general scalar callback path and repeated OBJ lexical binding/services
+  path. Existing numeric kernels and general owned-result cleanup remain. Full
+  correctness/lint/format and bounded independent reviews pass; no performance
+  keep is claimed. Integer no-op scans and their exact work envelopes are the
+  next removal; root/backing, terminal facts and all release gates remain open.

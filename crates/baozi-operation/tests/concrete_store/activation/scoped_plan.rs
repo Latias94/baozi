@@ -3034,7 +3034,10 @@ fn forgetting_a_detached_reservation_cannot_publish_rejected() {
     assert_forgotten_reservation_is_contained(ForgottenReservationTerminal::Rejected);
 }
 
-fn scoped_semantic_case(execute_limit: u64, cancel_after: Option<u64>) -> (u64, u64, u64, bool) {
+fn scoped_semantic_case<const COPY: bool>(
+    execute_limit: u64,
+    cancel_after: Option<u64>,
+) -> (u64, u64, u64, bool) {
     let baseline = scoped_semantic_baseline();
     let factory = factory(1);
     let account = account(&factory);
@@ -3069,13 +3072,18 @@ fn scoped_semantic_case(execute_limit: u64, cancel_after: Option<u64>) -> (u64, 
                     .plan_and_activate_scoped(output_slot, activation_slots, |mut planning| {
                         let result = planning.with_semantic_work(|semantic| {
                             while executed.get() < execute_limit {
-                                let result = semantic.run_unit(|| {
+                                let action = || {
                                     let completed = executed.get() + 1;
                                     executed.set(completed);
                                     if cancel_after == Some(completed) {
                                         cancellation.cancel();
                                     }
-                                });
+                                };
+                                let result = if COPY {
+                                    semantic.run_copy_unit(action)
+                                } else {
+                                    semantic.run_unit(action)
+                                };
                                 if let Err(cause) = result {
                                     assert!(matches!(cause, StoreRuntimeError::Control(_)));
                                     interrupted.set(true);
@@ -3210,7 +3218,7 @@ fn scoped_semantic_baseline() -> (u64, u64) {
 
 #[test]
 fn rejected_semantic_body_preserves_the_exact_partial_prefix_without_contract_fault() {
-    assert_eq!(scoped_semantic_case(1, None), (1, 1, 1, false));
+    assert_eq!(scoped_semantic_case::<false>(1, None), (1, 1, 1, false));
 }
 
 #[test]
@@ -3240,48 +3248,56 @@ fn semantic_work_is_admitted_per_action_at_exact_one_short_and_zero_capacity() {
         ),
         (0, 0, 1, 0, StorePreparationFailureClass::Ledger),
     ] {
-        let factory = factory(1);
-        let account = account(&factory);
-        let mut invocation_host = TestInvocationHost::<_, (), _>::new();
-        let mut body_values = None;
-        let finish = invocation_host
-            .run_body(
-                |CanonicalBodyParts {
-                     startup: invocation_root,
-                     output: output_slot,
-                     activation: activation_slots,
-                     ..
-                 },
-                 disposition| {
-                    let (operation, keys) = operation_with_isolated_work_limit(
-                        invocation_root,
-                        &account,
-                        semantic_work_limit,
-                    );
-                    let TestScopedActivation {
-                        policy,
-                        failure,
-                        success: _,
-                    } = scoped_activation_shape_with_dimensions(
-                        keys,
-                        1,
-                        1,
-                        keys.other_dimension,
-                        keys.dimension,
-                        keys.dimension,
-                        keys.dimension,
-                    );
-                    let owner = operation
-                        .into_test_session_outcome_owner(policy, failure)
-                        .unwrap();
-                    let executed = Cell::new(0_u64);
-                    let admission_failed = Cell::new(false);
+        for copy in [false, true] {
+            let factory = factory(1);
+            let account = account(&factory);
+            let mut invocation_host = TestInvocationHost::<_, (), _>::new();
+            let mut body_values = None;
+            let finish = invocation_host
+                .run_body(
+                    |CanonicalBodyParts {
+                         startup: invocation_root,
+                         output: output_slot,
+                         activation: activation_slots,
+                         ..
+                     },
+                     disposition| {
+                        let (operation, keys) = operation_with_isolated_work_limit(
+                            invocation_root,
+                            &account,
+                            semantic_work_limit,
+                        );
+                        let TestScopedActivation {
+                            policy,
+                            failure,
+                            success: _,
+                        } = scoped_activation_shape_with_dimensions(
+                            keys,
+                            1,
+                            1,
+                            keys.other_dimension,
+                            keys.dimension,
+                            keys.dimension,
+                            keys.dimension,
+                        );
+                        let owner = operation
+                            .into_test_session_outcome_owner(policy, failure)
+                            .unwrap();
+                        let executed = Cell::new(0_u64);
+                        let admission_failed = Cell::new(false);
 
-                    let outcome: ScopedOutcome<'_, PreflightRejection> = owner
-                        .plan_and_activate_scoped(output_slot, activation_slots, |mut planning| {
-                            let result = planning.with_semantic_work(|semantic| {
+                        let outcome: ScopedOutcome<'_, PreflightRejection> = owner
+                            .plan_and_activate_scoped(
+                                output_slot,
+                                activation_slots,
+                                |mut planning| {
+                                    let result = planning.with_semantic_work(|semantic| {
                                 for _ in 0..REQUESTED_UNITS {
-                                    match semantic.run_unit(|| executed.set(executed.get() + 1)) {
+                                    match if copy {
+                                        semantic.run_copy_unit(|| executed.set(executed.get() + 1))
+                                    } else {
+                                        semantic.run_unit(|| executed.set(executed.get() + 1))
+                                    } {
                                         Ok(()) => {}
                                         Err(StoreRuntimeError::Ledger(_)) => {
                                             admission_failed.set(true);
@@ -3294,62 +3310,65 @@ fn semantic_work_is_admitted_per_action_at_exact_one_short_and_zero_capacity() {
                                 }
                                 Err::<(), PreflightRejection>(PreflightRejection::Unsupported)
                             });
-                            assert!(matches!(
-                                result,
-                                Err(CanonicalSemanticWorkError::Rejected(
-                                    PreflightRejection::Unsupported
-                                ))
-                            ));
-                            planning.reject(PreflightRejection::Unsupported, 56)
-                        })
-                        .unwrap();
+                                    assert!(matches!(
+                                        result,
+                                        Err(CanonicalSemanticWorkError::Rejected(
+                                            PreflightRejection::Unsupported
+                                        ))
+                                    ));
+                                    planning.reject(PreflightRejection::Unsupported, 56)
+                                },
+                            )
+                            .unwrap();
 
-                    assert_eq!(executed.get(), expected_executed);
-                    let never_activated = match outcome {
-                        CanonicalActivationOutcome::NeverActivated(state) => state,
-                        CanonicalActivationOutcome::Activated(_)
-                        | CanonicalActivationOutcome::Rejected(_) => {
-                            panic!("semantic work admission must remain pre-activation")
+                        assert_eq!(executed.get(), expected_executed);
+                        let never_activated = match outcome {
+                            CanonicalActivationOutcome::NeverActivated(state) => state,
+                            CanonicalActivationOutcome::Activated(_)
+                            | CanonicalActivationOutcome::Rejected(_) => {
+                                panic!("semantic work admission must remain pre-activation")
+                            }
+                        };
+                        if admission_failed.get() {
+                            assert!(matches!(
+                                never_activated.cause(),
+                                StoreNeverActivatedCause::Runtime(StoreRuntimeError::Ledger(_))
+                            ));
+                        } else {
+                            assert!(matches!(
+                                never_activated.cause(),
+                                StoreNeverActivatedCause::Requested(_)
+                            ));
                         }
-                    };
-                    if admission_failed.get() {
-                        assert!(matches!(
-                            never_activated.cause(),
-                            StoreNeverActivatedCause::Runtime(StoreRuntimeError::Ledger(_))
-                        ));
-                    } else {
-                        assert!(matches!(
-                            never_activated.cause(),
-                            StoreNeverActivatedCause::Requested(_)
-                        ));
-                    }
-                    body_values = Some(keys);
-                    never_activated.request_finish(disposition).unwrap();
-                },
-            )
-            .unwrap();
-        let keys = body_values.unwrap();
-        let CanonicalInvocationOutcome::NeverActivated(never_activated) = finish.resume().outcome
-        else {
-            panic!("semantic capacity rejection must resume as NeverActivated")
-        };
-        let (prepared, _) = never_activated
-            .prepare_minimal_fallback()
-            .unwrap()
-            .into_parts();
-        let published = prepared.handoff();
-        let semantic_work = published
-            .ledger_evidence
-            .dimension(keys.other_dimension)
-            .expect("the isolated semantic dimension remains queryable");
-        assert_eq!(semantic_work.attempted(), expected_attempted);
-        assert_eq!(semantic_work.consumed(), expected_consumed);
-        assert_eq!(
-            store_failure_cause(&published.ledger_evidence).class(),
-            expected_cause
-        );
-        drop(published);
-        assert!(!account.snapshot().poisoned());
+                        body_values = Some(keys);
+                        never_activated.request_finish(disposition).unwrap();
+                    },
+                )
+                .unwrap();
+            let keys = body_values.unwrap();
+            let CanonicalInvocationOutcome::NeverActivated(never_activated) =
+                finish.resume().outcome
+            else {
+                panic!("semantic capacity rejection must resume as NeverActivated")
+            };
+            let (prepared, _) = never_activated
+                .prepare_minimal_fallback()
+                .unwrap()
+                .into_parts();
+            let published = prepared.handoff();
+            let semantic_work = published
+                .ledger_evidence
+                .dimension(keys.other_dimension)
+                .expect("the isolated semantic dimension remains queryable");
+            assert_eq!(semantic_work.attempted(), expected_attempted);
+            assert_eq!(semantic_work.consumed(), expected_consumed);
+            assert_eq!(
+                store_failure_cause(&published.ledger_evidence).class(),
+                expected_cause
+            );
+            drop(published);
+            assert!(!account.snapshot().poisoned());
+        }
     }
 }
 
@@ -3442,7 +3461,10 @@ fn semantic_domain_rejection_consumes_the_returned_action_unit() {
 
 #[test]
 fn caught_semantic_action_panic_cannot_be_downgraded_to_requested() {
-    for completed_prefix in [0_u64, 1] {
+    for (copy, completed_prefix) in [false, true]
+        .into_iter()
+        .flat_map(|copy| [0_u64, 1].map(|prefix| (copy, prefix)))
+    {
         let factory = factory(1);
         let account = account(&factory);
         let mut invocation_host = TestInvocationHost::<_, (), _>::new();
@@ -3478,15 +3500,25 @@ fn caught_semantic_action_panic_cannot_be_downgraded_to_requested() {
                     .plan_and_activate_scoped(output_slot, activation_slots, |mut planning| {
                         let result = planning.with_semantic_work(|semantic| {
                             if completed_prefix == 1 {
-                                semantic
-                                    .run_unit(|| completed.set(completed.get() + 1))
-                                    .unwrap();
+                                if copy {
+                                    semantic
+                                        .run_copy_unit(|| completed.set(completed.get() + 1))
+                                        .unwrap();
+                                } else {
+                                    semantic
+                                        .run_unit(|| completed.set(completed.get() + 1))
+                                        .unwrap();
+                                }
                             }
                             let panicked =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    let _ = semantic.run_unit(|| -> () {
-                                        panic!("caught semantic action panic")
-                                    });
+                                    let action =
+                                        || -> () { panic!("caught semantic action panic") };
+                                    if copy {
+                                        let _ = semantic.run_copy_unit(action);
+                                    } else {
+                                        let _ = semantic.run_unit(action);
+                                    }
                                 }));
                             assert!(panicked.is_err());
                             Err::<(), PreflightRejection>(PreflightRejection::Unsupported)
@@ -3511,10 +3543,38 @@ fn caught_semantic_action_panic_cannot_be_downgraded_to_requested() {
 
 #[test]
 fn semantic_work_records_exact_255_256_and_cancelled_257_prefixes() {
-    assert_eq!(scoped_semantic_case(255, None), (255, 255, 255, false));
-    assert_eq!(scoped_semantic_case(256, None), (256, 256, 256, false));
-    assert_eq!(scoped_semantic_case(257, Some(256)), (256, 256, 256, true));
-    assert_eq!(scoped_semantic_case(257, Some(1)), (256, 256, 256, true));
+    assert_eq!(
+        scoped_semantic_case::<false>(255, None),
+        (255, 255, 255, false)
+    );
+    assert_eq!(
+        scoped_semantic_case::<false>(256, None),
+        (256, 256, 256, false)
+    );
+    assert_eq!(
+        scoped_semantic_case::<false>(257, Some(256)),
+        (256, 256, 256, true)
+    );
+    assert_eq!(
+        scoped_semantic_case::<false>(257, Some(1)),
+        (256, 256, 256, true)
+    );
+    assert_eq!(
+        scoped_semantic_case::<true>(255, None),
+        (255, 255, 255, false)
+    );
+    assert_eq!(
+        scoped_semantic_case::<true>(256, None),
+        (256, 256, 256, false)
+    );
+    assert_eq!(
+        scoped_semantic_case::<true>(257, Some(256)),
+        (256, 256, 256, true)
+    );
+    assert_eq!(
+        scoped_semantic_case::<true>(257, Some(1)),
+        (256, 256, 256, true)
+    );
 }
 
 #[test]

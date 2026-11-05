@@ -806,6 +806,7 @@ where
         let mut semantic = CanonicalSemanticWorkSession {
             context,
             work_group,
+            copy_frame: None,
             first_fault,
             phase,
             scratch_dimension,
@@ -825,6 +826,7 @@ where
         let result = match result {
             Ok(result) => result,
             Err(payload) => {
+                let _ = semantic.close_copy_units();
                 note_later_contract::<()>(
                     semantic.first_fault,
                     Err(StoreRuntimeError::ConstructionInvariantUnverified),
@@ -840,6 +842,7 @@ where
             }
         };
         // Captures are disposed before the final semantic checkpoint and completion issuance.
+        let _ = semantic.close_copy_units();
         if drop_optional_callback(body).is_err() {
             note_later_contract::<()>(
                 semantic.first_fault,
@@ -1785,6 +1788,22 @@ where
     }
 }
 
+struct SemanticCopyGuard<'a> {
+    first_fault: &'a mut Option<ActivationFirstFault>,
+    armed: bool,
+}
+
+impl Drop for SemanticCopyGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            note_later_contract::<()>(
+                self.first_fault,
+                Err(StoreRuntimeError::ConstructionInvariantUnverified),
+            );
+        }
+    }
+}
+
 impl<'borrow, 'scope, O, PP, U, L> CanonicalSemanticWorkSession<'borrow, 'scope, O, PP, U, L>
 where
     O: OperationOwner,
@@ -1801,6 +1820,7 @@ where
     }
 
     fn poll_now(&mut self) -> Result<(), StoreRuntimeError> {
+        self.close_copy_units()?;
         if let Some(cause) = preserved_fault(self.first_fault) {
             return Err(cause);
         }
@@ -1812,6 +1832,7 @@ where
 
     /// Polls when the invocation's bounded action checkpoint has been reached.
     pub fn poll_if_due(&mut self) -> Result<(), StoreRuntimeError> {
+        self.close_copy_units()?;
         if let Some(cause) = preserved_fault(self.first_fault) {
             return Err(cause);
         }
@@ -1909,11 +1930,62 @@ where
         Self::finish_action_callback(self.first_fault, action, Ok(result))
     }
 
+    /// Runs one scalar check without an owned callback or result destructor.
+    ///
+    /// Every call admits its real unit before execution and completes it only on normal return,
+    /// including a returned domain error. Consecutive checks reuse one zero-remaining frame;
+    /// storage, general callbacks, polls and finish close that frame before transferring control.
+    /// A caught panic still rejects the semantic pass and retains its exact completed prefix.
+    ///
+    /// Owned captures use [`Self::run_unit`] and its controlled disposal:
+    ///
+    /// ```compile_fail
+    /// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+    /// use baozi_operation::__retained_store_integration::activation::CanonicalSemanticWorkSession;
+    /// fn owned<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+    ///     semantic: &mut CanonicalSemanticWorkSession<'_, '_, O, P, U>,
+    /// ) {
+    ///     let value = String::from("owned capture");
+    ///     let _ = semantic.run_copy_unit(move || value.len());
+    /// }
+    /// ```
+    pub fn run_copy_unit<R: Copy>(
+        &mut self,
+        action: impl FnOnce() -> R + Copy,
+    ) -> Result<R, StoreRuntimeError> {
+        if let Some(cause) = preserved_fault(self.first_fault) {
+            return Err(cause);
+        }
+        let mut guard = SemanticCopyGuard {
+            first_fault: self.first_fault,
+            armed: true,
+        };
+        let result = self
+            .context
+            .run_copy_unit(self.work_group, &mut self.copy_frame, action);
+        guard.armed = false;
+        let result = preserve_first_fault(guard.first_fault, result);
+        if result.is_ok() {
+            self.completed_any = true;
+        }
+        result
+    }
+
+    fn close_copy_units(&mut self) -> Result<(), StoreRuntimeError> {
+        let result = preserve_first_fault(
+            self.first_fault,
+            self.context
+                .close_copy_units(self.work_group, &mut self.copy_frame),
+        );
+        preserved_fault(self.first_fault).map_or(result, Err)
+    }
+
     /// Reserves metered construction scratch in the policy-owned authoring role.
     pub fn reserve(
         &mut self,
         bytes: u64,
     ) -> Result<CanonicalReservation<'scope, O>, StoreRuntimeError> {
+        self.close_copy_units()?;
         if let Some(cause) = preserved_fault(self.first_fault) {
             return Err(cause);
         }
@@ -1996,6 +2068,7 @@ where
     U: ProgressUnit,
 {
     fn drop(&mut self) {
+        let _ = self.close_copy_units();
         if self.resolved {
             return;
         }

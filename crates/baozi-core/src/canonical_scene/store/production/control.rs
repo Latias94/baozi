@@ -31,6 +31,14 @@ pub(in crate::canonical_scene::store) trait CanonicalAuthoringControl {
         action: impl FnMut() -> R,
     ) -> Result<R, Self::Error>;
 
+    fn run_copy_unit<R: Copy>(
+        &mut self,
+        work: SceneValidationWork,
+        action: impl Fn() -> R + Copy,
+    ) -> Result<R, Self::Error> {
+        self.run_unit(work, action)
+    }
+
     fn reserve_scratch(&mut self, bytes: u64) -> Result<Self::Reservation, Self::Error>;
 
     fn validate_scratch(&mut self, reservation: &Self::Reservation) -> Result<(), Self::Error>;
@@ -98,6 +106,14 @@ where
         action: impl FnMut() -> R,
     ) -> Result<R, Self::Error> {
         self.session.run_unit(action)
+    }
+
+    fn run_copy_unit<R: Copy>(
+        &mut self,
+        _work: SceneValidationWork,
+        action: impl Fn() -> R + Copy,
+    ) -> Result<R, Self::Error> {
+        self.session.run_copy_unit(action)
     }
 
     fn reserve_scratch(&mut self, bytes: u64) -> Result<Self::Reservation, Self::Error> {

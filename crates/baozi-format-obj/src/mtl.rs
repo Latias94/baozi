@@ -295,6 +295,7 @@ pub(crate) fn load_libraries<'session>(
     };
     library.origins.try_reserve(exec, mtllibs.len())?;
     let origin_root = exec.root_origin();
+    let token_work = parser::TokenWorkLayouts::bind(&mut root.children()?)?;
     for mtllib in mtllibs {
         let outcome = root.dependency(&origin_root, &role, mtllib.as_str())?;
         match outcome.into_result() {
@@ -309,7 +310,15 @@ pub(crate) fn load_libraries<'session>(
                     "obj-mtl-text",
                     raw_limit,
                     |exec, text, recoveries| {
-                        parse_mtl(exec, &snapshot, text, recoveries, origin, &mut library)
+                        parse_mtl(
+                            exec,
+                            &token_work,
+                            &snapshot,
+                            text,
+                            recoveries,
+                            origin,
+                            &mut library,
+                        )
                     },
                 )?;
                 drop(snapshot);
@@ -351,8 +360,9 @@ impl<'session> MaterialLibrary<'session> {
     }
 }
 
-fn parse_mtl<'session>(
-    children: &mut ParseChildren<'_, '_, 'session>,
+fn parse_mtl<'op, 'session>(
+    children: &mut ParseChildren<'_, 'op, 'session>,
+    token_work: &parser::TokenWorkLayouts<'op>,
     snapshot: &DependencySnapshot<'_>,
     text: &ConformedTextInput<'_>,
     recoveries: &mut baozi_import::TextInputRecoveryTracker<'_, 'session>,
@@ -374,7 +384,7 @@ fn parse_mtl<'session>(
         let raw_line = children.child(&record_work, [1], |work| {
             work.run([1], || Ok::<_, ParseFailure>(decoded_line.text()))
         })?;
-        let tokens = tokenize_mtl(children, &mut scan_scratch, &decoded_line)?;
+        let tokens = tokenize_mtl(children, token_work, &mut scan_scratch, &decoded_line)?;
         let exec = &mut children.services()?;
         let keyword = tokens.first().map(|token| token.text);
         let allowed_value = match keyword {
@@ -659,13 +669,13 @@ impl<'line> std::ops::Deref for MtlTokenBuffer<'_, 'line> {
     }
 }
 
-fn tokenize_mtl<'session, 'line>(
-    children: &mut ParseChildren<'_, '_, 'session>,
+fn tokenize_mtl<'op, 'session, 'line>(
+    children: &mut ParseChildren<'_, 'op, 'session>,
+    token_work: &parser::TokenWorkLayouts<'op>,
     scan_scratch: &mut parser::TokenScanScratch,
     decoded_line: &'line TextInputLine<'_, '_>,
 ) -> ParseResult<MtlTokenBuffer<'session, 'line>> {
     let line = decoded_line.text();
-    let token_work = children.bind_group([ImportWorkClass::Tokens, ImportWorkClass::TokenBytes])?;
     let mut tokens = MtlTokenBuffer {
         values: children
             .services()?
@@ -674,17 +684,18 @@ fn tokenize_mtl<'session, 'line>(
     };
     tokens.comment_start = parser::scan_token_ranges(
         children,
+        &token_work.scan,
         scan_scratch,
         line,
         "obj-mtl-token-scan-work",
-        |_, _, _| Ok(()),
+        |_, _| Ok(()),
         |children, start, end| {
             let amounts = [
                 1,
                 usize_amount(&children.services()?, end - start, "obj-mtl-token-bytes")?,
             ];
             let errors = children.error_view();
-            children.child(&token_work, amounts, |work| {
+            children.child(&token_work.tokens, amounts, |work| {
                 work.run_returned_with_storage::<_, crate::ObjFailure>(|mut storage| {
                     let column = start
                         .checked_add(1)
