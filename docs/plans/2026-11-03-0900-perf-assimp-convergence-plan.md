@@ -720,3 +720,14 @@ negative case only for a genuinely new boundary, not for incidental private layo
   old-source C0, then stops before candidate N0 when external builds recur. Its
   386-second post-collector file copy motivates standard tar retention outside
   future worker clocks; every original task, timing boundary and load gate remains.
+- The [work-layout arity experiment](../reviews/2026-11-05-work-layout-arity.md)
+  is retired at `c497c90`, returning the runtime exactly to qualified e5 inputs.
+  All seven integrated gates and six instruction diagnostics pass, but four full
+  GNU ordinary campaigns show mixed endpoint results with unequal control load;
+  Windows candidate sampling cannot start. Preserve the millisecond repeated-OBJ
+  gains, microsecond extraction costs, every original lane, raw archives and all
+  failed attempts. This is a rejected performance keep, not a correctness failure
+  or isolated negative source effect. Standard post-collector tar retention cuts
+  artifact transfer to 1.08-1.60 seconds without moving benchmark clocks. Next
+  investigate repeated immutable-source text conformance at its actual owner,
+  retaining new output layout/recovery checks and precise resource/control bounds.
