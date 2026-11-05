@@ -572,3 +572,18 @@ negative case only for a genuinely new boundary, not for incidental private layo
   publication opening and both table creations form the next coherent owner cut;
   cold numeric users, fixed/dynamic backing, shared promotion, exact accounting,
   indexing and all full Windows/Linux/heap convergence gates remain open.
+- The cumulative [retained-owner attribution and heap checkpoint](../reviews/2026-11-05-retained-owner-attribution-and-memory.md)
+  measures immutable `05b7d9b` against `308e9ab`. Six GNU whole-worker profiles
+  reduce instructions by 0.45% to 7.14%; eighteen fresh heap observations retain
+  identical Baozi calls and rounded peaks in every selected case. These bounded
+  diagnostics show no heap benefit or native timing conclusion. The fixed Windows
+  C0/N0/N1/C1 sequence completes only C0 (110 lanes, no failures, 41 named-tool
+  overlap snapshots); N0 cannot start within its 180-second quiet-window limit.
+  The first unstarted C0 attempt and prospective reschedule remain recorded.
+  Candidate ordinary timing, whole-child memory, confirmation and full ordinary
+  Linux remain uncollected. Independent review reconciles GNU archives, profile
+  totals and all eighteen heap identities/logs without a numerical mismatch;
+  eleven historical Windows mixed-newline files retain only their earlier
+  reconciliation record rather than newly reproduced raw bytes. Continue the
+  real startup/publication/table owner cut before fixed/dynamic state and shared
+  promotion; preserve the incomplete performance gates and release HOLD.

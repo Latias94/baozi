@@ -630,3 +630,22 @@ storage; preserve pending consumption, gate precedence and physical release.
 Cold/shared numeric callers still prevent LocalWork retirement. Fixed/dynamic
 backing, shared promotion, exact accounting, indexing and full ordinary Windows/
 Linux/heap qualification remain open; this cut has no new performance acceptance.
+
+## Cumulative Measurement Checkpoint, 2026-11-05
+
+The [retained-owner measurement](../reviews/2026-11-05-retained-owner-attribution-and-memory.md)
+retains the complete `05b7d9b` worker and compares six whole-worker GNU instruction
+profiles against the previous `308e9ab` symbol worker. Counts fall 0.45% to 7.14%.
+Eighteen fresh heap observations show identical selected Baozi allocation calls
+and rounded peaks. Windows ordinary work remains incomplete: C0 finishes with
+41 external-tool overlap observations, then N0 reaches its fixed start limit;
+no candidate timing or whole-child memory contrast exists. Independent evidence
+review reconciles the GNU archives, profile totals and eighteen heap observations.
+Historical Windows config/documentation byte-reproduction limits and grid profiler
+warnings remain explicit. These are bounded attribution results, not release acceptance.
+
+The modest instruction reduction and unchanged heap support completing the
+startup/publication/table borrowed owner as a prerequisite to replacing the
+allocationful finite startup representation. Preserve all uncollected ordinary
+gates, current-policy projection, completed prefixes and physical ownership;
+LocalWork, fixed/dynamic backing, promotion, exact accounting and indexing remain.
