@@ -439,11 +439,11 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
-    fn prepare_body_deferral(&self) -> Option<Result<(), LedgerCause<D>>> {
+    fn prepare_body_deferral(&mut self) -> Option<Result<(), LedgerCause<D>>> {
         if !self.fields.has_deferred_storage() {
             return None;
         }
-        let operation = self.operation.as_ref()?;
+        let operation = self.operation.as_mut()?;
         let account = self.fields.account.as_ref()?;
         let baseline = operation.retained.baseline.first_account()?;
         if !account.is_same_account(baseline) {
@@ -465,7 +465,7 @@ where
         std::mem::forget(self);
     }
 
-    pub(crate) fn defer_until_body_cleanup(self) -> Result<(), Self> {
+    pub(crate) fn defer_until_body_cleanup(mut self) -> Result<(), Self> {
         if !matches!(self.prepare_body_deferral(), Some(Ok(()))) {
             return Err(self);
         }
@@ -865,7 +865,7 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
-    pub(crate) fn defer_until_body_cleanup(self) -> Result<(), Self> {
+    pub(crate) fn defer_until_body_cleanup(mut self) -> Result<(), Self> {
         if !matches!(self.assembly.prepare_body_deferral(), Some(Ok(()))) {
             return Err(self);
         }
@@ -4125,7 +4125,7 @@ where
         self.activation_containment_required
     }
 
-    pub(crate) fn defer_until_body_cleanup(self) -> Result<(), Self> {
+    pub(crate) fn defer_until_body_cleanup(mut self) -> Result<(), Self> {
         if !matches!(self.assembly.prepare_body_deferral(), Some(Ok(()))) {
             return Err(self);
         }

@@ -1,5 +1,26 @@
-//! Literal oracles for the actual kernel, exercised over fixed rows and the dynamic owner.
+//! Literal oracles for the actual kernel, direct state, and Ledger entry boundaries.
 use super::*;
+use crate::OperationOwner;
+use crate::ledger::{Ledger, LedgerLimits};
+
+struct Owner;
+
+impl OperationOwner for Owner {}
+
+fn ledger() -> Ledger<Owner, u8, u8> {
+    Ledger::try_new(
+        LedgerLimits::new(
+            0,
+            [
+                (1, DimensionPolicy::counter(8, 8, 8)),
+                (2, DimensionPolicy::counter(8, 8, 8)),
+            ],
+        )
+        .unwrap(),
+        &[1],
+    )
+    .unwrap()
+}
 
 fn row(dimension: u8, attempted: u64, consumed: u64) -> WorkEntry<u8> {
     WorkEntry {
@@ -35,6 +56,7 @@ fn counters(view: &WorkView<'_, u8>) -> [(u64, u64, u64); 2] {
 fn duplicate_internal_trace(view: &mut WorkView<'_, u8>) {
     let catalog = view.catalog;
     let layout = WorkLayout::bind(catalog, &[2, 1, 2], WorkGrant::Ordinary).unwrap();
+    layout.validate_active(view).unwrap();
     let mut producer = layout
         .admit_observed(view, [2, 1, 3], WorkLane::Producer)
         .unwrap();
@@ -45,6 +67,7 @@ fn duplicate_internal_trace(view: &mut WorkView<'_, u8>) {
     ));
     assert_eq!(counters(view), [(1, 1, 0), (5, 3, 2)]);
     let internal = WorkLayout::bind(catalog, &[2], WorkGrant::Ordinary).unwrap();
+    internal.validate_active(view).unwrap();
     let mut share = internal
         .admit_observed(view, [2], WorkLane::Internal)
         .unwrap();
@@ -62,7 +85,7 @@ fn duplicate_internal_trace(view: &mut WorkView<'_, u8>) {
 }
 
 #[test]
-fn fixed_and_dynamic_rows_run_the_same_literal_duplicate_internal_trace() {
+fn fixed_and_direct_state_rows_run_the_same_literal_duplicate_internal_trace() {
     let mut fixed = [row(1, 10, 10), row(2, 10, 10)];
     let mut fixed_header = header();
     duplicate_internal_trace(&mut WorkView {
@@ -70,8 +93,9 @@ fn fixed_and_dynamic_rows_run_the_same_literal_duplicate_internal_trace() {
         rows: &mut fixed,
         header: &mut fixed_header,
     });
-    let mut dynamic = LocalWork::new(vec![1, 2], vec![row(1, 10, 10), row(2, 10, 10)]);
-    let (_, mut view) = dynamic.exclusive().unwrap();
+    let catalog = vec![1, 2];
+    let mut state = WorkState::new(catalog.len(), vec![row(1, 10, 10), row(2, 10, 10)]);
+    let mut view = state.view(&catalog);
     duplicate_internal_trace(&mut view);
 }
 
@@ -156,11 +180,14 @@ fn completion_categories_keep_the_physical_prefix_and_resolve_only_the_suffix() 
 }
 
 #[test]
-fn zero_and_full_completion_still_own_a_frame_until_host_resolution() {
+fn zero_and_full_completion_still_own_a_frame_until_explicit_resolution() {
     for amount in [0, 1] {
-        let mut owner = LocalWork::new(vec![1], vec![row(1, 8, 8)]);
-        let (catalog, mut view) = owner.exclusive().unwrap();
-        let layout = WorkLayout::bind(catalog, &[1], WorkGrant::Ordinary).unwrap();
+        let catalog = vec![1];
+        let mut state = WorkState::new(catalog.len(), vec![row(1, 8, 8)]);
+        let layout = state
+            .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+            .unwrap();
+        let mut view = state.view(&catalog);
         let mut frame = layout
             .admit_observed(&mut view, [amount], WorkLane::Producer)
             .unwrap();
@@ -178,54 +205,47 @@ fn zero_and_full_completion_still_own_a_frame_until_host_resolution() {
 }
 
 #[test]
-fn exclusive_entry_does_not_recover_unresolved_frames_or_forgotten_guards() {
-    for amount in [0, 1] {
-        let mut owner = LocalWork::new(vec![1], vec![row(1, 8, 8)]);
+fn exclusive_entry_rejects_unresolved_zero_full_and_partial_frames() {
+    for (amount, completed) in [(0, 0), (3, 3), (3, 1)] {
+        let mut owner = ledger();
         {
-            let (catalog, mut view) = owner.exclusive().unwrap();
-            let layout = WorkLayout::bind(catalog, &[1], WorkGrant::Ordinary).unwrap();
+            let (mut work, _storage) = owner.exclusive().unwrap();
+            let layout = work.bind([1]).unwrap();
             let mut frame = layout
-                .admit_observed(&mut view, [amount], WorkLane::Producer)
+                .admit_observed(&mut work.work, [amount], WorkLane::Producer)
                 .unwrap();
             frame
-                .complete_batch_with_outcome(&layout, &mut view, [amount])
+                .complete_batch_with_outcome(&layout, &mut work.work, [completed])
                 .into_result()
                 .unwrap();
+            assert_eq!(frame.remaining, [amount - completed]);
             let _unresolved_frame = frame;
         }
+        assert_eq!(owner.work.header.open_envelopes, 1);
+        assert!(owner.work.header.producer_open);
+        assert_eq!(
+            owner.work.rows[0].state,
+            WorkDimensionState {
+                attempted: amount,
+                consumed: completed,
+                pending_consumed: amount - completed,
+            }
+        );
         assert!(matches!(
             owner.exclusive(),
             Err(LedgerCause::OutstandingLinearWorkPermits { count: 1 })
         ));
     }
-    for shared in [false, true] {
-        let mut owner = LocalWork::new(vec![1], vec![row(1, 8, 8)]);
-        if shared {
-            std::mem::forget(owner.borrow_state().unwrap());
-        } else {
-            std::mem::forget(owner.borrow_state_mut().unwrap());
-        }
-        assert!(matches!(
-            owner.exclusive(),
-            Err(LedgerCause::FinalSnapshotShapeMismatch)
-        ));
-        assert!(owner.borrow_fault.get());
-        assert!(owner.into_state().1.header.integrity_fault);
-    }
-    // Terminal composition also rejects a leaked shared Ref without relying on prior entry.
-    let owner = LocalWork::new(vec![1], vec![row(1, 8, 8)]);
-    std::mem::forget(owner.borrow_state().unwrap());
-    assert!(owner.into_state().1.header.integrity_fault);
 }
 
 #[test]
 fn internal_reborrow_preserves_its_enclosing_frame_and_external_quiescence_gate() {
-    let mut owner = LocalWork::new(vec![1], vec![row(1, 8, 8)]);
+    let mut owner = ledger();
     let (layout, mut enclosing) = {
-        let (catalog, mut view) = owner.exclusive().unwrap();
-        let layout = WorkLayout::bind(catalog, &[1], WorkGrant::Ordinary).unwrap();
+        let (mut work, _storage) = owner.exclusive().unwrap();
+        let layout = work.bind([1]).unwrap();
         let enclosing = layout
-            .admit_observed(&mut view, [3], WorkLane::Internal)
+            .admit_observed(&mut work.work, [3], WorkLane::Internal)
             .unwrap();
         (layout, enclosing)
     };
@@ -234,48 +254,32 @@ fn internal_reborrow_preserves_its_enclosing_frame_and_external_quiescence_gate(
         Err(LedgerCause::OutstandingLinearWorkPermits { count: 1 })
     ));
     {
-        let (_, mut view) = owner.reborrow().unwrap();
+        let (mut internal, _storage) = owner.split_internal();
+        let mut work = internal.reborrow().unwrap();
+        let view = &mut work.work;
         let mut share = layout
-            .admit_observed(&mut view, [2], WorkLane::Internal)
+            .admit_observed(view, [2], WorkLane::Internal)
             .unwrap();
         assert_eq!(view.header.open_envelopes, 2);
         assert!(matches!(
-            share.complete_batch_with_outcome(&layout, &mut view, [2]),
+            share.complete_batch_with_outcome(&layout, view, [2]),
             LinearWorkCompletion::Completed
         ));
-        share.resolve(&layout, &mut view, false).unwrap();
+        share.resolve(&layout, view, false).unwrap();
         assert_eq!(view.header.open_envelopes, 1);
         assert_eq!(view.rows[0].state.pending_consumed, 3);
         assert!(matches!(
-            enclosing.complete_batch_with_outcome(&layout, &mut view, [1]),
+            enclosing.complete_batch_with_outcome(&layout, view, [1]),
             LinearWorkCompletion::Completed
         ));
-        enclosing.resolve(&layout, &mut view, false).unwrap();
+        enclosing.resolve(&layout, view, false).unwrap();
     }
-    let (_, view) = owner.exclusive().unwrap();
-    let state = view.rows[0].state;
+    let (work, _storage) = owner.exclusive().unwrap();
+    let state = work.work.rows[0].state;
     assert_eq!(
         (state.attempted, state.consumed, state.pending_consumed),
         (5, 3, 0)
     );
-}
-
-#[test]
-fn internal_reborrow_never_recovers_forgotten_dynamic_guards() {
-    for shared in [false, true] {
-        let mut owner = LocalWork::new(vec![1], vec![row(1, 8, 8)]);
-        if shared {
-            std::mem::forget(owner.borrow_state().unwrap());
-        } else {
-            std::mem::forget(owner.borrow_state_mut().unwrap());
-        }
-        assert!(matches!(
-            owner.reborrow(),
-            Err(LedgerCause::FinalSnapshotShapeMismatch)
-        ));
-        assert!(owner.borrow_fault.get());
-        assert!(owner.into_state().1.header.integrity_fault);
-    }
 }
 
 // Equal ordering identities intentionally have different diagnostic labels. These are the R2
@@ -306,14 +310,15 @@ impl Ord for DiagnosticKey {
     }
 }
 
-fn diagnostic_work() -> LocalWork<DiagnosticKey> {
-    LocalWork::new(
-        [1, 37, 90]
-            .map(|id| DiagnosticKey {
-                id,
-                label: "registered",
-            })
-            .to_vec(),
+fn diagnostic_work() -> (Vec<DiagnosticKey>, WorkState<DiagnosticKey>) {
+    let catalog = [1, 37, 90]
+        .map(|id| DiagnosticKey {
+            id,
+            label: "registered",
+        })
+        .to_vec();
+    let state = WorkState::new(
+        catalog.len(),
         [1, 37, 90]
             .map(|id| WorkEntry {
                 dimension: DiagnosticKey {
@@ -328,20 +333,23 @@ fn diagnostic_work() -> LocalWork<DiagnosticKey> {
             })
             .into_iter()
             .collect(),
-    )
+    );
+    (catalog, state)
 }
 
 #[test]
 fn borrowed_layout_binding_and_revalidation_keep_the_r2_diagnostic_sources() {
-    let mut owner = diagnostic_work();
-    let (catalog, view) = owner.exclusive().unwrap();
+    let (catalog, mut state) = diagnostic_work();
     let layout = {
         let supplied = [DiagnosticKey {
             id: 90,
             label: "caller",
         }];
-        WorkLayout::bind(catalog, &supplied, WorkGrant::Ordinary).unwrap()
+        state
+            .bind_layout(&catalog, supplied, WorkGrant::Ordinary)
+            .unwrap()
     };
+    let view = state.view(&catalog);
     layout
         .validate_role_header(view.catalog, view.header)
         .unwrap();
@@ -351,7 +359,7 @@ fn borrowed_layout_binding_and_revalidation_keep_the_r2_diagnostic_sources() {
         label: "missing caller",
     }];
     let Err(LedgerCause::UnknownDimension { dimension }) =
-        WorkLayout::bind(catalog, &missing, WorkGrant::Ordinary)
+        WorkLayout::bind(&catalog, &missing, WorkGrant::Ordinary)
     else {
         panic!("expected the absent supplied key");
     };
@@ -385,8 +393,7 @@ fn borrowed_layout_binding_and_revalidation_keep_the_r2_diagnostic_sources() {
 
 #[test]
 fn borrowed_duplicate_layout_retains_the_physical_prefix_and_registered_error_key() {
-    let mut owner = diagnostic_work();
-    let (catalog, mut view) = owner.exclusive().unwrap();
+    let (catalog, mut state) = diagnostic_work();
     let caller = DiagnosticKey {
         id: 90,
         label: "caller",
@@ -395,7 +402,10 @@ fn borrowed_duplicate_layout_retains_the_physical_prefix_and_registered_error_ke
         id: 1,
         label: "first caller",
     };
-    let layout = WorkLayout::bind(catalog, &[caller, first, caller], WorkGrant::Ordinary).unwrap();
+    let layout = state
+        .bind_layout(&catalog, [caller, first, caller], WorkGrant::Ordinary)
+        .unwrap();
+    let mut view = state.view(&catalog);
     let mut frame = layout
         .admit_observed(&mut view, [2, 1, 3], WorkLane::Producer)
         .unwrap();
@@ -439,15 +449,17 @@ fn borrowed_duplicate_layout_retains_the_physical_prefix_and_registered_error_ke
 
 #[test]
 fn borrowed_parser_layout_keeps_only_the_verified_prefix_and_registered_error_key() {
-    let mut owner = diagnostic_work();
-    let (catalog, mut view) = owner.exclusive().unwrap();
+    let (catalog, mut state) = diagnostic_work();
     let layout = {
         let supplied = [DiagnosticKey {
             id: 90,
             label: "caller",
         }];
-        WorkLayout::bind(catalog, &supplied, WorkGrant::Ordinary).unwrap()
+        state
+            .bind_layout(&catalog, supplied, WorkGrant::Ordinary)
+            .unwrap()
     };
+    let mut view = state.view(&catalog);
     let mut frame = layout
         .begin_parser(&mut view, [2], [None], ParserChannel::Child)
         .unwrap();
@@ -478,13 +490,15 @@ fn borrowed_parser_layout_keeps_only_the_verified_prefix_and_registered_error_ke
 #[test]
 fn registered_diagnostic_error_outlives_the_borrowed_catalog_owner() {
     let failure = {
-        let mut owner = diagnostic_work();
-        let (_, mut view) = owner.exclusive().unwrap();
+        let (catalog, mut state) = diagnostic_work();
         let supplied = [DiagnosticKey {
             id: 90,
             label: "caller",
         }];
-        let layout = WorkLayout::bind(view.catalog, &supplied, WorkGrant::Ordinary).unwrap();
+        let layout = state
+            .bind_layout(&catalog, supplied, WorkGrant::Ordinary)
+            .unwrap();
+        let mut view = state.view(&catalog);
         let Err(cause) = layout.charge_attempted_in_order(&mut view, [9]) else {
             panic!("expected the representable denied attempt");
         };
@@ -516,10 +530,10 @@ fn internal_split_preserves_the_original_catalog_rows_and_deferred_faults() {
         WorkMode::Protected,
         WorkMode::Closed,
     ] {
-        let mut owner = LocalWork::new(vec![1, 2], vec![row(1, 8, 8), row(2, 8, 8)]);
-        let catalog = owner.catalog.as_ptr();
+        let mut owner = ledger();
+        let catalog = owner.work_catalog.as_ptr();
         let rows = {
-            let mut state = owner.borrow_state_mut().unwrap();
+            let state = &mut owner.work;
             state.header.mode = mode;
             state.header.open_envelopes = 1;
             state.header.integrity_fault = true;
@@ -530,18 +544,22 @@ fn internal_split_preserves_the_original_catalog_rows_and_deferred_faults() {
             };
             state.rows.as_ptr()
         };
-        let mut internal = owner.split_internal();
+        let (mut internal, _storage) = owner.split_internal();
         assert_eq!(internal.catalog.as_ptr(), catalog);
-        assert_eq!(internal.state.rows.as_ptr(), rows);
-        assert_eq!(internal.state.header.mode, mode);
-        assert_eq!(internal.state.header.open_envelopes, 1);
-        assert_eq!(internal.state.rows[0].state.attempted, 9);
-        assert_eq!(internal.state.rows[0].state.consumed, 4);
-        assert_eq!(internal.state.rows[0].state.pending_consumed, 3);
-        assert!(!internal.borrow_fault.get());
+        let state = internal.read_state();
+        assert_eq!(state.rows.as_ptr(), rows);
+        assert_eq!(state.header.mode, mode);
+        assert_eq!(state.header.open_envelopes, 1);
+        assert_eq!(state.rows[0].state.attempted, 9);
+        assert_eq!(state.rows[0].state.consumed, 4);
+        assert_eq!(state.rows[0].state.pending_consumed, 3);
         assert!(matches!(
             internal.bind_ordinary([9]),
             Err(LedgerCause::UnknownDimension { dimension: 9 })
+        ));
+        assert!(matches!(
+            internal.ensure_active(WorkGrant::Ordinary),
+            Err(LedgerCause::FinalSnapshotShapeMismatch)
         ));
         assert!(matches!(
             internal.reborrow(),
@@ -552,7 +570,7 @@ fn internal_split_preserves_the_original_catalog_rows_and_deferred_faults() {
 }
 
 #[test]
-fn internal_binding_matches_local_key_integrity_mode_and_role_precedence() {
+fn internal_binding_preserves_key_integrity_mode_and_role_precedence() {
     for mode in [
         WorkMode::Ordinary,
         WorkMode::OrdinarySealed,
@@ -562,16 +580,43 @@ fn internal_binding_matches_local_key_integrity_mode_and_role_precedence() {
         for integrity_fault in [false, true] {
             for grant in [WorkGrant::Ordinary, WorkGrant::Protected] {
                 for dimensions in [[1], [2], [9]] {
-                    let mut owner = LocalWork::new(vec![1, 2], vec![row(1, 8, 8), row(2, 8, 8)]);
-                    {
-                        let mut state = owner.borrow_state_mut().unwrap();
-                        state.header.mode = mode;
-                        state.header.protected_dimension = Some(1);
-                        state.header.integrity_fault = integrity_fault;
-                        state.rows[0].state.attempted = 9;
-                    }
-                    let expected = owner.bind(dimensions, grant).map(|_| ());
-                    let internal = owner.split_internal();
+                    let catalog = vec![1, 2];
+                    let mut state = WorkState::new(catalog.len(), vec![row(1, 8, 8), row(2, 8, 8)]);
+                    state.header.mode = mode;
+                    state.header.protected_dimension = Some(1);
+                    state.header.integrity_fault = integrity_fault;
+                    state.rows[0].state.attempted = 9;
+                    let expected = if dimensions == [9] {
+                        Err(LedgerCause::UnknownDimension { dimension: 9 })
+                    } else if integrity_fault {
+                        Err(LedgerCause::FinalSnapshotShapeMismatch)
+                    } else {
+                        match (mode, grant) {
+                            (WorkMode::Closed, _) => Err(LedgerCause::PublicationAlreadyCompleted),
+                            (WorkMode::OrdinarySealed, _)
+                            | (WorkMode::Protected, WorkGrant::Ordinary) => {
+                                Err(LedgerCause::PublicationAlreadyPending)
+                            }
+                            (WorkMode::Ordinary, WorkGrant::Protected) => {
+                                Err(LedgerCause::InactiveLinearWorkPermit)
+                            }
+                            (WorkMode::Ordinary, WorkGrant::Ordinary) if dimensions == [2] => {
+                                Err(LedgerCause::UnknownDimension { dimension: 2 })
+                            }
+                            (WorkMode::Protected, WorkGrant::Protected) if dimensions == [1] => {
+                                Err(LedgerCause::InactiveLinearWorkPermit)
+                            }
+                            _ => Ok(()),
+                        }
+                    };
+                    assert_eq!(
+                        state.bind_layout(&catalog, dimensions, grant).map(|_| ()),
+                        expected
+                    );
+                    let internal = InternalWork {
+                        catalog: &catalog,
+                        state: &mut state,
+                    };
                     let actual = match grant {
                         WorkGrant::Ordinary => internal.bind_ordinary(dimensions),
                         WorkGrant::Protected => internal.bind_protected(dimensions),
@@ -587,7 +632,6 @@ fn internal_binding_matches_local_key_integrity_mode_and_role_precedence() {
                     assert_eq!(internal.state.rows[0].state.attempted, 9);
                     assert_eq!(internal.state.rows[1].state, WorkDimensionState::default());
                     assert_eq!(internal.state.header.open_envelopes, 0);
-                    assert!(!internal.borrow_fault.get());
                 }
             }
         }
@@ -595,65 +639,13 @@ fn internal_binding_matches_local_key_integrity_mode_and_role_precedence() {
 }
 
 #[test]
-fn internal_split_preserves_forgotten_shared_and_mutable_borrow_precedence() {
-    for shared in [false, true] {
-        let mut owner = LocalWork::new(vec![1], vec![row(1, 8, 8)]);
-        if shared {
-            std::mem::forget(owner.borrow_state().unwrap());
-        } else {
-            std::mem::forget(owner.borrow_state_mut().unwrap());
-        }
-        {
-            let mut root = owner.split_internal();
-            let mut internal = root.loan();
-            assert!(!internal.borrow_fault.get());
-            assert!(matches!(
-                internal.bind_ordinary([9]),
-                Err(LedgerCause::UnknownDimension { dimension: 9 })
-            ));
-            assert!(matches!(
-                internal.bind_protected([9]),
-                Err(LedgerCause::UnknownDimension { dimension: 9 })
-            ));
-            assert!(!internal.borrow_fault.get());
-            if shared {
-                internal.bind_ordinary([1]).unwrap();
-                internal.bind_share([1]).unwrap();
-                assert!(matches!(
-                    internal.bind_protected([1]),
-                    Err(LedgerCause::InactiveLinearWorkPermit)
-                ));
-                assert!(!internal.borrow_fault.get());
-            } else {
-                assert!(matches!(
-                    internal.bind_share([9]),
-                    Err(LedgerCause::FinalSnapshotShapeMismatch)
-                ));
-                assert!(internal.borrow_fault.get());
-            }
-            assert!(matches!(
-                internal.reborrow(),
-                Err(LedgerCause::FinalSnapshotShapeMismatch)
-            ));
-            assert!(internal.borrow_fault.get());
-            assert!(matches!(
-                internal.bind_ordinary([1]),
-                Err(LedgerCause::FinalSnapshotShapeMismatch)
-            ));
-            assert_eq!(internal.state.rows[0].state, WorkDimensionState::default());
-        }
-        assert!(owner.into_state().1.header.integrity_fault);
-    }
-}
-
-#[test]
 fn internal_root_reborrows_active_internal_and_producer_frames_without_external_entry() {
     for lane in [WorkLane::Internal, WorkLane::Producer] {
-        let mut owner = LocalWork::new(vec![1, 2], vec![row(1, 8, 8), row(2, 8, 8)]);
+        let mut owner = ledger();
         let (layout, mut enclosing) = {
-            let (catalog, mut view) = owner.exclusive().unwrap();
-            let layout = WorkLayout::bind(catalog, &[1], WorkGrant::Ordinary).unwrap();
-            let frame = layout.admit_observed(&mut view, [3], lane).unwrap();
+            let (mut work, _storage) = owner.exclusive().unwrap();
+            let layout = work.bind([1]).unwrap();
+            let frame = layout.admit_observed(&mut work.work, [3], lane).unwrap();
             (layout, frame)
         };
         assert!(matches!(
@@ -661,7 +653,7 @@ fn internal_root_reborrows_active_internal_and_producer_frames_without_external_
             Err(LedgerCause::OutstandingLinearWorkPermits { count: 1 })
         ));
         {
-            let mut internal = owner.split_internal();
+            let (mut internal, _storage) = owner.split_internal();
             let share_layout = internal.bind_share([1]).unwrap();
             let mut loan = internal.loan();
             let mut work = loan.reborrow().unwrap();
@@ -686,20 +678,20 @@ fn internal_root_reborrows_active_internal_and_producer_frames_without_external_
             ));
             enclosing.resolve(&layout, &mut work.work, false).unwrap();
         }
-        let (_, view) = owner.exclusive().unwrap();
-        assert_eq!(counters(&view), [(5, 3, 0), (0, 0, 0)]);
+        let (work, _storage) = owner.exclusive().unwrap();
+        assert_eq!(counters(&work.work), [(5, 3, 0), (0, 0, 0)]);
     }
 }
 
 #[test]
 fn internal_root_reborrows_active_parser_channels_without_external_entry() {
     for channel in [ParserChannel::Parent, ParserChannel::Child] {
-        let mut owner = LocalWork::new(vec![1, 2], vec![row(1, 8, 8), row(2, 8, 8)]);
+        let mut owner = ledger();
         let (layout, mut parser) = {
-            let (catalog, mut view) = owner.exclusive().unwrap();
-            let layout = WorkLayout::bind(catalog, &[1], WorkGrant::Ordinary).unwrap();
+            let (mut work, _storage) = owner.exclusive().unwrap();
+            let layout = work.bind([1]).unwrap();
             let parser = layout
-                .begin_parser(&mut view, [2], [None], channel)
+                .begin_parser(&mut work.work, [2], [None], channel)
                 .unwrap();
             (layout, parser)
         };
@@ -708,7 +700,7 @@ fn internal_root_reborrows_active_parser_channels_without_external_entry() {
             Err(LedgerCause::OutstandingLinearWorkPermits { count: 1 })
         ));
         {
-            let mut internal = owner.split_internal();
+            let (mut internal, _storage) = owner.split_internal();
             let share_layout = internal.bind_share([1]).unwrap();
             let mut work = internal.reborrow().unwrap();
             let mut share = share_layout
@@ -722,92 +714,75 @@ fn internal_root_reborrows_active_parser_channels_without_external_entry() {
             parser.complete(&layout, &mut work.work, [1]).unwrap();
             parser.resolve(&mut work.work).unwrap();
         }
-        let (_, view) = owner.exclusive().unwrap();
-        assert_eq!(counters(&view), [(3, 2, 0), (0, 0, 0)]);
+        let (work, _storage) = owner.exclusive().unwrap();
+        assert_eq!(counters(&work.work), [(3, 2, 0), (0, 0, 0)]);
     }
 }
 
 #[test]
-fn internal_cleanup_releases_pending_suffix_after_header_or_borrow_faults() {
+fn internal_cleanup_releases_pending_suffix_after_a_header_integrity_fault() {
     for lane in [WorkLane::Internal, WorkLane::Producer, WorkLane::Protected] {
-        for borrow_fault in [false, true] {
-            let mut owner = LocalWork::new(vec![1, 2], vec![row(1, 8, 8), row(2, 8, 8)]);
-            let (layout, mut frame) = {
-                let (catalog, mut view) = owner.exclusive().unwrap();
-                let grant = if lane == WorkLane::Protected {
-                    view.header.mode = WorkMode::Protected;
-                    view.header.protected_dimension = Some(0);
-                    WorkGrant::Protected
-                } else {
-                    WorkGrant::Ordinary
-                };
-                let layout = WorkLayout::bind(catalog, &[1], grant).unwrap();
-                let mut frame = layout.admit_observed(&mut view, [3], lane).unwrap();
-                assert!(matches!(
-                    frame.complete_batch_with_outcome(&layout, &mut view, [1]),
-                    LinearWorkCompletion::Completed
-                ));
-                view.header.integrity_fault = !borrow_fault;
-                frame.faulted = true;
-                (layout, frame)
-            };
-            owner.borrow_fault.set(borrow_fault);
-            {
-                let mut internal = owner.split_internal();
-                assert!(matches!(
-                    internal.reborrow(),
-                    Err(LedgerCause::FinalSnapshotShapeMismatch)
-                ));
-                internal.loan().resolve(layout, &mut frame, false).unwrap();
-                assert!(!frame.active);
-                assert_eq!(internal.state.rows[0].state.attempted, 3);
-                assert_eq!(internal.state.rows[0].state.consumed, 1);
-                assert_eq!(internal.state.rows[0].state.pending_consumed, 0);
-                assert_eq!(internal.state.header.open_envelopes, 0);
-                assert!(!internal.state.header.producer_open);
-                assert!(!internal.state.header.protected_open);
-                assert_eq!(
-                    internal.resolve(layout, &mut frame, false),
-                    Err(LedgerCause::InactiveLinearWorkPermit)
-                );
-            }
-            let (_, state) = owner.into_state();
-            assert!(state.header.integrity_fault);
-            assert_eq!(state.rows[0].state.pending_consumed, 0);
-        }
-    }
-}
-
-#[test]
-fn internal_cleanup_never_recovers_forgotten_guards_or_invalid_row_shape() {
-    for shared in [false, true] {
-        let mut owner = LocalWork::new(vec![1], vec![row(1, 8, 8)]);
-        let (layout, mut frame) = {
-            let (catalog, mut view) = owner.exclusive().unwrap();
-            let layout = WorkLayout::bind(catalog, &[1], WorkGrant::Ordinary).unwrap();
-            let frame = layout
-                .admit_observed(&mut view, [2], WorkLane::Internal)
-                .unwrap();
-            (layout, frame)
-        };
-        if shared {
-            std::mem::forget(owner.borrow_state().unwrap());
+        let catalog = vec![1, 2];
+        let mut state = WorkState::new(catalog.len(), vec![row(1, 8, 8), row(2, 8, 8)]);
+        let grant = if lane == WorkLane::Protected {
+            state.header.mode = WorkMode::Protected;
+            state.header.protected_dimension = Some(0);
+            WorkGrant::Protected
         } else {
-            std::mem::forget(owner.borrow_state_mut().unwrap());
+            WorkGrant::Ordinary
+        };
+        let layout = state.bind_layout(&catalog, [1], grant).unwrap();
+        let mut frame = {
+            let mut view = state.view(&catalog);
+            let mut frame = layout.admit_observed(&mut view, [3], lane).unwrap();
+            assert!(matches!(
+                frame.complete_batch_with_outcome(&layout, &mut view, [1]),
+                LinearWorkCompletion::Completed
+            ));
+            view.header.integrity_fault = true;
+            frame
+        };
+        {
+            let mut internal = InternalWork {
+                catalog: &catalog,
+                state: &mut state,
+            };
+            assert!(matches!(
+                internal.reborrow(),
+                Err(LedgerCause::FinalSnapshotShapeMismatch)
+            ));
+            assert_eq!(internal.read_state().rows[0].state.pending_consumed, 2);
+            internal.loan().resolve(layout, &mut frame, false).unwrap();
+            assert!(!frame.active);
+            assert_eq!(internal.state.rows[0].state.attempted, 3);
+            assert_eq!(internal.state.rows[0].state.consumed, 1);
+            assert_eq!(internal.state.rows[0].state.pending_consumed, 0);
+            assert_eq!(internal.state.rows[1].state, WorkDimensionState::default());
+            assert_eq!(internal.state.header.open_envelopes, 0);
+            assert!(!internal.state.header.producer_open);
+            assert!(!internal.state.header.protected_open);
+            assert_eq!(
+                internal.resolve(layout, &mut frame, false),
+                Err(LedgerCause::InactiveLinearWorkPermit)
+            );
         }
-        let mut internal = owner.split_internal();
-        assert!(!internal.borrow_fault.get());
+        assert!(state.header.integrity_fault);
+        assert_eq!(state.rows[0].state.pending_consumed, 0);
         assert_eq!(
-            internal.loan().resolve(layout, &mut frame, false),
+            state.check_quiescent(catalog.len()),
             Err(LedgerCause::FinalSnapshotShapeMismatch)
         );
-        assert!(internal.borrow_fault.get());
-        assert!(frame.active);
-        assert_eq!(internal.state.rows[0].state.pending_consumed, 2);
     }
+}
 
-    let mut owner = LocalWork::new(vec![1], vec![row(1, 8, 8)]);
-    let mut internal = owner.split_internal();
+#[test]
+fn internal_cleanup_rejects_invalid_row_shape_without_indexing_missing_rows() {
+    let catalog = vec![1];
+    let mut state = WorkState::new(catalog.len(), vec![row(1, 8, 8)]);
+    let mut internal = InternalWork {
+        catalog: &catalog,
+        state: &mut state,
+    };
     let layout = internal.bind_ordinary([1]).unwrap();
     let mut frame = {
         let mut work = internal.reborrow().unwrap();
@@ -822,4 +797,8 @@ fn internal_cleanup_never_recovers_forgotten_guards_or_invalid_row_shape() {
     );
     assert!(!frame.active);
     assert!(internal.state.header.integrity_fault);
+    assert_eq!(
+        internal.state.check_integrity(catalog.len()),
+        Err(LedgerCause::FinalSnapshotShapeMismatch)
+    );
 }

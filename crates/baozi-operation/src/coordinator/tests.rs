@@ -63,11 +63,13 @@ fn final_gate_remains_sealed_for_protected_recovery_and_internal_share_nesting()
     )
     .expect("complete phase catalog");
     coordinator
-        .ledger
+        .retained_ledger_mut()
         .configure_protected_work(Dimension::Protected)
         .expect("protected role is configured before sealing");
     assert_eq!(
-        coordinator.ledger.charge_attempted(Dimension::Protected, 0),
+        coordinator
+            .retained_ledger_mut()
+            .charge_attempted(Dimension::Protected, 0),
         Err(LedgerCause::UnknownDimension {
             dimension: Dimension::Protected
         })
@@ -85,16 +87,18 @@ fn final_gate_remains_sealed_for_protected_recovery_and_internal_share_nesting()
         Some((1, Some(1)))
     );
     assert_eq!(
-        coordinator.ledger.charge_attempted(Dimension::Ordinary, 1),
+        coordinator
+            .retained_ledger_mut()
+            .charge_attempted(Dimension::Ordinary, 1),
         Err(LedgerCause::PublicationAlreadyPending)
     );
     coordinator
-        .ledger
+        .retained_ledger_mut()
         .activate_protected_work(Dimension::Protected)
         .expect("a later generation rejection can still activate its finite grant");
 
     let (producer_layout, mut producer) = {
-        let (mut internal, _) = coordinator.ledger.split_internal();
+        let (mut internal, _) = coordinator.retained_ledger_mut().split_internal();
         let layout = internal.bind_protected([Dimension::Protected]).unwrap();
         let producer = layout
             .admit_observed(
@@ -107,14 +111,14 @@ fn final_gate_remains_sealed_for_protected_recovery_and_internal_share_nesting()
     };
     assert!(matches!(
         coordinator
-            .ledger
+            .retained_ledger_mut()
             .split_internal()
             .0
             .bind_share([Dimension::Ordinary]),
         Err(LedgerCause::InactiveLinearWorkPermit)
     ));
     let (share_layout, mut share) = {
-        let (mut internal, _) = coordinator.ledger.split_internal();
+        let (mut internal, _) = coordinator.retained_ledger_mut().split_internal();
         let layout = internal
             .bind_share([Dimension::Protected, Dimension::Protected])
             .unwrap();
@@ -128,7 +132,7 @@ fn final_gate_remains_sealed_for_protected_recovery_and_internal_share_nesting()
         (layout, share)
     };
     {
-        let (mut internal, _) = coordinator.ledger.split_internal();
+        let (mut internal, _) = coordinator.retained_ledger_mut().split_internal();
         producer
             .complete_batch_with_outcome(
                 &producer_layout,
@@ -167,29 +171,29 @@ fn final_gate_remains_sealed_for_protected_recovery_and_internal_share_nesting()
             .expect("remaining physical producer prefix");
     }
     assert_eq!(
-        coordinator.ledger.close_work(),
+        coordinator.retained_ledger_mut().close_work(),
         Err(LedgerCause::OutstandingLinearWorkPermits { count: 1 })
     );
     assert_eq!(producer.remaining, [0]);
     coordinator
-        .ledger
+        .retained_ledger_mut()
         .split_internal()
         .0
         .resolve(producer_layout, &mut producer, false)
         .expect("a completed producer must still explicitly finish");
     coordinator
-        .ledger
+        .retained_ledger_mut()
         .close_work()
         .expect("all protected ownership is resolved");
     assert_eq!(
         coordinator
-            .ledger
+            .retained_ledger_mut()
             .activate_protected_work(Dimension::Protected),
         Err(LedgerCause::InactiveLinearWorkPermit)
     );
     assert!(matches!(
         coordinator
-            .ledger
+            .retained_ledger_mut()
             .split_internal()
             .0
             .bind_share([Dimension::Protected]),

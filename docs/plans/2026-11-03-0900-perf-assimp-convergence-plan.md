@@ -604,3 +604,20 @@ negative case only for a genuinely new boundary, not for incidental private layo
   RefCell, LocalWork and cold BoundWorkGroup together with shared-write API
   migration, retaining the storage Arc identity and existing kernel. Fixed/dynamic
   backing, shared promotion, exact accounting, indexing and full convergence stay open.
+- The [direct numeric WorkState implementation](../reviews/2026-11-05-direct-work-state.md)
+  stores the original catalog/rows directly in Ledger and deletes LocalWork,
+  BoundWorkGroup, numeric RefCell availability probes and recovery. Cold writes,
+  policy/mode changes, control checkpoints and deferral sealing use mutable loans;
+  range/evidence/snapshot readers and storage release keep shared access. Account
+  preflight still covers failure-work transfer; startup defers work errors after
+  live checks and snapshot allocates before checking work. Actual frame ownership,
+  dirty terminal evidence and original storage Arc identity remain. Independent
+  design and final production/test source reviews find no blocking issue. Workspace
+  production/all-target compilation passes without warnings. QA1 retains its
+  test-fixture type-complexity Clippy failure; source2 names that same tuple and
+  passes all seven fresh serial gates: 3,588 workspace tests, 187 doctests,
+  138 consumer tests, both strict lints and both formats, with existing skips.
+  Independent final evidence review reconciles all seven original logs/commands,
+  staged/frozen inputs and the sole source2 alias delta without a mismatch. No new
+  timing or memory result is attributed to this source. Fixed/dynamic backing,
+  promotion, exact accounting, indexing and all original convergence gates remain open.

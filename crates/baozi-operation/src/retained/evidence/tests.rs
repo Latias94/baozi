@@ -56,7 +56,7 @@ impl TerminalEvidenceKeySeal for ShapeKey {}
 impl TerminalEvidenceKey for ShapeKey {}
 
 fn terminal_snapshot() -> LedgerSnapshot<TestPhase, TestDimension> {
-    let ledger = Ledger::<EvidenceOwner, TestPhase, TestDimension>::try_new(
+    let mut ledger = Ledger::<EvidenceOwner, TestPhase, TestDimension>::try_new(
         test_limits(),
         &[TestPhase::Read, TestPhase::Decode],
     )
@@ -424,7 +424,7 @@ fn nonterminal_phase_dimension_and_global_states_reject_before_any_cell_write() 
     drop(phase_live);
     drop(phase_ledger);
 
-    let pending_ledger = test_ledger();
+    let mut pending_ledger = test_ledger();
     let mut empty_batch = PublicationReservationBatch::try_new(Vec::new(), None)
         .expect("an empty covered batch is valid");
     let pending = pending_ledger

@@ -743,6 +743,10 @@ where
         &self.ledger
     }
 
+    pub(crate) fn retained_ledger_mut(&mut self) -> &mut Ledger<O, LP, D> {
+        &mut self.ledger
+    }
+
     #[allow(
         clippy::type_complexity,
         reason = "the tuple exposes the concrete disjoint ledger and progress borrows"
@@ -766,7 +770,7 @@ where
 
     pub(crate) fn split_poll_checkpoint_and_retained_ledger(
         &mut self,
-    ) -> (OperationPollCheckpoint<'_, PP, U>, &Ledger<O, LP, D>) {
+    ) -> (OperationPollCheckpoint<'_, PP, U>, &mut Ledger<O, LP, D>) {
         let Self {
             control,
             ledger,

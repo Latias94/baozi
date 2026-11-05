@@ -677,3 +677,26 @@ The checkpoint split and account preflight loan must migrate with those APIs.
 Real frame ownership and failure prefixes survive; dynamic-guard-only faults
 disappear with the obsolete representation. Fixed/dynamic backing and all remaining
 promotion/accounting/indexing and ordinary convergence gates remain required.
+
+## Direct Numeric WorkState, 2026-11-05
+
+The [direct-state cut](../reviews/2026-11-05-direct-work-state.md) replaces the
+remaining numeric interior mutability with Ledger-owned catalog/WorkState and
+ordinary mutable loans. LocalWork, BoundWorkGroup and numeric RefCell fault
+recovery are removed with their remaining cold writers. Coordinator checkpoints,
+producer writes, protected policy/modes and all deferral sealing migrate together.
+Snapshots/range projection remain shared; escaping storage retains its original
+Arc identity. The account preflight guard still spans failure-policy transfer,
+and actual frame cleanup preserves pending prefixes after a header fault.
+
+Independent design and final production/test source reviews find no blocking issue.
+Production workspace and all-target compilation pass without warnings. Frozen
+source2 passes the complete serial gates: 3,588 workspace tests, 187 doctests,
+138 consumer tests, both strict lints and both formats, with existing skips.
+QA1's test-only type-complexity failure remains recorded; source2 names its
+unchanged fixture tuple. Final evidence review reconciles original command/log
+identities, frozen/staged inputs and that exact alias delta; no performance or
+release acceptance is claimed. Retired dynamic
+guard-only tests are documented separately from retained frame/shape/cleanup
+contracts. Fixed/dynamic backing, shared promotion, exact accounting, indexing
+and the original Windows/Linux timing/memory/heap qualification remain open.

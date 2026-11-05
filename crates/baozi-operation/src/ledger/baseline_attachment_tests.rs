@@ -76,7 +76,7 @@ fn baseline(
 
 #[test]
 fn attachment_preserves_live_scratch_and_preexisting_work_but_strict_binding_rejects_residue() {
-    let ledger = ledger();
+    let mut ledger = ledger();
     ledger.charge_attempted(Dimension::Work, 4).unwrap();
     ledger.charge_consumed(Dimension::Work, 2).unwrap();
     let scratch = ledger
@@ -128,7 +128,7 @@ fn attachment_preserves_pending_linear_work_until_explicit_resolution() {
     assert_eq!(ledger.try_snapshot().unwrap(), before);
     assert_eq!(linear.remaining, [3]);
     {
-        let work = ledger.work.borrow_state().unwrap();
+        let work = &ledger.work;
         assert_eq!(work.rows[1].state.pending_consumed, 3);
         assert_eq!(work.header.open_envelopes, 1);
         assert!(!work.header.parser_parent_open);
@@ -190,7 +190,7 @@ fn attachment_preserves_forgotten_kernel_channels_and_pending_internal_work() {
 
     assert_eq!(ledger.try_snapshot().unwrap(), before);
     {
-        let work = ledger.work.borrow_state().unwrap();
+        let work = &ledger.work;
         assert_eq!(work.rows[1].state.pending_consumed, 3);
         assert_eq!(work.header.open_envelopes, 1);
         assert!(work.header.parser_parent_open);
@@ -254,7 +254,7 @@ fn attachment_rechecks_current_limits_for_canonical_and_aggregated_evidence_comm
         (CounterClass::Committed, 4, 64, 5, 4),
         (CounterClass::PublishedOutcomeEvidence, 64, 6, 7, 6),
     ] {
-        let ledger = ledger();
+        let mut ledger = ledger();
         let mut baseline = baseline(&ledger);
         ledger.try_attach_fallback_baseline(&mut baseline).unwrap();
         ledger
@@ -356,7 +356,7 @@ fn attachment_rejects_out_of_bounds_commitment_positions_without_consuming_the_b
 
 #[test]
 fn attachment_requires_open_publication_while_strict_binding_accepts_closed_work() {
-    let ledger = ledger();
+    let mut ledger = ledger();
     let mut baseline = baseline(&ledger);
     ledger.seal_ordinary_work().unwrap();
     let before = ledger.try_snapshot().unwrap();
@@ -377,7 +377,7 @@ fn attachment_requires_open_publication_while_strict_binding_accepts_closed_work
 
 #[test]
 fn protected_work_preflight_is_read_only_and_configuration_remains_single_use() {
-    let ledger = ledger();
+    let mut ledger = ledger();
     ledger.charge_attempted(Dimension::Work, 4).unwrap();
     ledger.charge_consumed(Dimension::Work, 2).unwrap();
     let before = ledger.try_snapshot().unwrap();
@@ -390,25 +390,9 @@ fn protected_work_preflight_is_read_only_and_configuration_remains_single_use() 
         .unwrap();
 
     assert_eq!(ledger.try_snapshot().unwrap(), before);
-    assert_eq!(
-        ledger
-            .work
-            .borrow_state()
-            .unwrap()
-            .header
-            .protected_dimension,
-        None
-    );
+    assert_eq!(ledger.work.header.protected_dimension, None);
     ledger.configure_protected_work(Dimension::Failure).unwrap();
-    assert_eq!(
-        ledger
-            .work
-            .borrow_state()
-            .unwrap()
-            .header
-            .protected_dimension,
-        Some(2)
-    );
+    assert_eq!(ledger.work.header.protected_dimension, Some(2));
     assert_eq!(
         ledger.preflight_configure_protected_work(Dimension::Failure),
         Err(LedgerCause::InactiveLinearWorkPermit)
@@ -424,20 +408,12 @@ fn protected_work_preflight_is_read_only_and_configuration_remains_single_use() 
         })
     );
     assert_eq!(ledger.try_snapshot().unwrap(), before);
-    assert_eq!(
-        ledger
-            .work
-            .borrow_state()
-            .unwrap()
-            .header
-            .protected_dimension,
-        Some(2)
-    );
+    assert_eq!(ledger.work.header.protected_dimension, Some(2));
 }
 
 #[test]
 fn protected_work_preflight_and_configuration_reject_sealed_and_closed_modes() {
-    let ledger = ledger();
+    let mut ledger = ledger();
     ledger.seal_ordinary_work().unwrap();
     for _ in 0..2 {
         assert_eq!(
@@ -448,28 +424,23 @@ fn protected_work_preflight_and_configuration_reject_sealed_and_closed_modes() {
             ledger.configure_protected_work(Dimension::Failure),
             Err(LedgerCause::InactiveLinearWorkPermit)
         );
-        assert_eq!(
-            ledger
-                .work
-                .borrow_state()
-                .unwrap()
-                .header
-                .protected_dimension,
-            None
-        );
+        assert_eq!(ledger.work.header.protected_dimension, None);
         ledger.close_work().unwrap();
     }
 }
 
 fn assert_dormant_failure_pool(ledger: &Ledger<Owner, Phase, Dimension>) {
-    let work = ledger.work.borrow_state().unwrap();
+    let work = &ledger.work;
     assert_eq!(work.header.mode, WorkMode::Ordinary);
     assert_eq!(work.header.protected_dimension, Some(2));
     assert_eq!(work.header.open_envelopes, 0);
     assert!(!work.header.protected_open);
-    drop(work);
     assert!(matches!(
-        ledger.bind_work([Dimension::Failure]),
+        work.bind_layout(
+            &ledger.work_catalog,
+            [Dimension::Failure],
+            WorkGrant::Ordinary,
+        ),
         Err(LedgerCause::UnknownDimension {
             dimension: Dimension::Failure
         })
@@ -478,7 +449,7 @@ fn assert_dormant_failure_pool(ledger: &Ledger<Owner, Phase, Dimension>) {
 
 #[test]
 fn dormant_attachment_capacity_is_exact_and_uses_the_current_tightened_policy() {
-    let ledger = ledger();
+    let mut ledger = ledger();
     ledger.configure_protected_work(Dimension::Failure).unwrap();
     let charges = [(Dimension::Failure, 1), (Dimension::Failure, 1)];
     let repetitions = NonZeroU64::new(4).unwrap();
@@ -508,7 +479,7 @@ fn dormant_attachment_capacity_is_exact_and_uses_the_current_tightened_policy() 
 
 #[test]
 fn dormant_attachment_overflow_rejects_without_granting_or_charging_failure_work() {
-    let ledger = ledger();
+    let mut ledger = ledger();
     ledger.configure_protected_work(Dimension::Failure).unwrap();
     let before = ledger.try_snapshot().unwrap();
     assert!(matches!(

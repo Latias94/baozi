@@ -234,7 +234,7 @@ where
         if self
             .common
             .coordinator
-            .retained_ledger()
+            .retained_ledger_mut()
             .seal_ordinary_work()
             .is_err()
         {
@@ -390,7 +390,7 @@ where
         }
         if common
             .coordinator
-            .retained_ledger()
+            .retained_ledger_mut()
             .seal_ordinary_work()
             .is_err()
         {
@@ -664,7 +664,7 @@ where
         );
         if common
             .coordinator
-            .retained_ledger()
+            .retained_ledger_mut()
             .seal_ordinary_work()
             .is_err()
         {
@@ -1166,7 +1166,7 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
-    pub(super) fn prepare_body_deferral(&self) -> Option<Result<(), LedgerCause<D>>> {
+    pub(super) fn prepare_body_deferral(&mut self) -> Option<Result<(), LedgerCause<D>>> {
         if self.retained.deferred_stage.is_some()
             || !self.retained.has_deferred_storage()
             || self.retained.failure_work_permit_outstanding
@@ -1174,11 +1174,16 @@ where
         {
             return None;
         }
-        let common = self.common.common.as_ref()?;
-        Some(common.coordinator.retained_ledger().seal_ordinary_work())
+        let common = self.common.common.as_mut()?;
+        Some(
+            common
+                .coordinator
+                .retained_ledger_mut()
+                .seal_ordinary_work(),
+        )
     }
 
-    pub(crate) fn defer_until_body_cleanup(self) -> Result<(), Self> {
+    pub(crate) fn defer_until_body_cleanup(mut self) -> Result<(), Self> {
         if !self.assembly.as_ref().is_some_and(|slot| slot.is_none())
             || !matches!(self.prepare_body_deferral(), Some(Ok(())))
         {
@@ -1237,7 +1242,7 @@ where
         if self
             .common
             .coordinator
-            .retained_ledger()
+            .retained_ledger_mut()
             .seal_ordinary_work()
             .is_err()
         {
@@ -1351,7 +1356,7 @@ where
     D: Copy + Ord + fmt::Debug,
 {
     poll: OperationPollCheckpoint<'a, PP, U>,
-    ledger: &'a crate::ledger::Ledger<O, P, D>,
+    ledger: &'a mut crate::ledger::Ledger<O, P, D>,
     failure_terminal_work_dimension: Option<D>,
     sticky_terminal_cause: &'a Cell<Option<PreparationFailureCode>>,
 }
@@ -1454,7 +1459,7 @@ where
         self.ensure_direct_accounting_available()?;
         let result = self
             .coordinator
-            .retained_ledger()
+            .retained_ledger_mut()
             .charge_producer_attempted(dimension, amount, self.failure_terminal_work_dimension);
         if result.is_err() {
             self.record_ledger_failure();
@@ -1472,7 +1477,7 @@ where
             .map_err(RetainedProducerWorkStartError::Ledger)?;
         let result = self
             .coordinator
-            .retained_ledger()
+            .retained_ledger_mut()
             .charge_consumed(dimension, amount);
         if result.is_err() {
             self.record_ledger_failure();
@@ -1491,7 +1496,7 @@ where
         }
         let result = self
             .coordinator
-            .retained_ledger()
+            .retained_ledger_mut()
             .charge_observed_batch(charges);
         if result.is_err() {
             self.record_ledger_failure();
@@ -1506,7 +1511,7 @@ where
         self.ensure_direct_accounting_available()?;
         let result = self
             .coordinator
-            .retained_ledger()
+            .retained_ledger_mut()
             .charge_producer_consumed_batch(charges, self.failure_terminal_work_dimension);
         if result.is_err() {
             self.record_ledger_failure();
@@ -1996,7 +2001,7 @@ where
         });
         let common = root
             .common
-            .as_ref()
+            .as_mut()
             .expect("binding installs its actual common");
         if !super::terminal_evidence_catalog_is_qualified(
             common.coordinator.retained_ledger(),
@@ -2009,7 +2014,7 @@ where
         if let Some((failure_plan, _)) = failure_terminal_work {
             common
                 .coordinator
-                .retained_ledger()
+                .retained_ledger_mut()
                 .configure_protected_work(failure_plan.dimension())
                 .map_err(|cause| {
                     RetainedOperationStartError::Writer(RetainedWriterError::Ledger(cause))
@@ -2343,7 +2348,7 @@ where
     ) -> Result<Option<RetainedHandleSharePlan<D>>, LedgerCause<D>> {
         self.common
             .coordinator
-            .retained_ledger()
+            .retained_ledger_mut()
             .seal_ordinary_work()?;
         let Some(capability) = self.retained.failure_terminal_work.as_ref() else {
             return Ok(None);
@@ -2351,7 +2356,7 @@ where
         let dimension = capability.handle_share_work.charges()[0].0;
         self.common
             .coordinator
-            .retained_ledger()
+            .retained_ledger_mut()
             .activate_protected_work(dimension)?;
         Ok(self
             .retained
@@ -2412,39 +2417,58 @@ where
         validation_work_limit: u64,
     ) -> Result<(), RetainedWriterError<D>> {
         let result = (|| {
-            let preflight = self
+            let Self {
+                retained, common, ..
+            } = self;
+            let preflight = retained
+                .baseline
                 .account()
                 .try_begin_account_preflight()
                 .map_err(RetainedWriterError::AccountPoisoned)?;
-            let capability = self
-                .retained
+            let capability = retained
                 .failure_terminal_work
                 .as_ref()
                 .filter(|capability| !capability.validation_work_qualified)
                 .ok_or(RetainedWriterError::InvalidPublicationPlan)?;
-            if self.has_outstanding_work_permit() || self.sticky_terminal_cause().is_some() {
+            if retained.failure_work_permit_outstanding
+                || retained.ordinary_work_permit_outstanding
+                || common
+                    .coordinator
+                    .retained_ledger()
+                    .check_work_quiescent()
+                    .is_err()
+                || common.sticky_terminal_cause.get().is_some()
+            {
                 return Err(RetainedWriterError::InvalidPublicationPlan);
             }
-            if !self.contains_dimension(ordinary_dimension) {
+            if retained.failure_terminal_work_dimension == Some(ordinary_dimension)
+                || !common
+                    .coordinator
+                    .retained_ledger()
+                    .contains_dimension(ordinary_dimension)
+            {
                 return Err(RetainedWriterError::Ledger(LedgerCause::UnknownDimension {
                     dimension: ordinary_dimension,
                 }));
             }
-            let max_evidence_members = max_evidence_members.max(capability.max_evidence_members);
-            let validation_work_limit = validation_work_limit.max(capability.validation_work_limit);
             let terminal_dimension = capability.handle_share_work.charges()[0].0;
+            let original_max_evidence_members = capability.max_evidence_members;
+            let construction_work_limit = capability.construction_work_limit;
+            let original_validation_work_limit = capability.validation_work_limit;
+            let max_evidence_members = max_evidence_members.max(original_max_evidence_members);
+            let validation_work_limit = validation_work_limit.max(original_validation_work_limit);
             let original = RetainedFailureTerminalWorkPlan::with_evidence_work(
                 terminal_dimension,
-                capability.max_evidence_members,
-                capability.construction_work_limit,
-                capability.validation_work_limit,
+                original_max_evidence_members,
+                construction_work_limit,
+                original_validation_work_limit,
             )
             .requirement()
             .map_err(|()| RetainedWriterError::InvalidPublicationPlan)?;
             let qualified = RetainedFailureTerminalWorkPlan::with_evidence_work(
                 terminal_dimension,
                 max_evidence_members,
-                capability.construction_work_limit,
+                construction_work_limit,
                 validation_work_limit,
             )
             .requirement()
@@ -2453,9 +2477,9 @@ where
                 .observed_work_limit()
                 .checked_sub(original.observed_work_limit())
                 .ok_or(RetainedWriterError::InvalidPublicationPlan)?;
-            self.common
+            common
                 .coordinator
-                .retained_ledger()
+                .retained_ledger_mut()
                 .transfer_failure_terminal_work(
                     ordinary_dimension,
                     terminal_dimension,
@@ -2463,8 +2487,7 @@ where
                 )
                 .map_err(RetainedWriterError::Ledger)?;
             drop(preflight);
-            let capability = self
-                .retained
+            let capability = retained
                 .failure_terminal_work
                 .as_mut()
                 .expect("qualification retains the dormant failure capability");

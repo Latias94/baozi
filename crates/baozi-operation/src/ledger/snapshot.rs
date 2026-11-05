@@ -1,4 +1,4 @@
-use super::work::{LocalWork, WorkState};
+use super::work::WorkState;
 use super::{
     AttributionReservationBatch, CanonicalOutput, DimensionState, LedgerCause, LedgerEvidenceError,
     LedgerEvidencePurpose, LedgerState, OutcomeEvidenceDestination, PhaseState, capacity_bytes,
@@ -335,7 +335,8 @@ fn allocate_snapshot_vec<T>(
 
 pub(super) fn try_snapshot<P, D>(
     storage: &Arc<Mutex<LedgerState<P, D>>>,
-    work: &LocalWork<D>,
+    catalog: &[D],
+    work: &WorkState<D>,
 ) -> Result<LedgerSnapshot<P, D>, LedgerEvidenceError>
 where
     P: Copy + Ord,
@@ -345,11 +346,8 @@ where
     assembly.allocate(dimension_plan, phase_plan)?;
 
     // Sample work only after allocation, then hold the sole joint observation interval.
-    work.validate_integrity()
-        .map_err(|_| LedgerEvidenceError::WorkStateUnavailable)?;
-    let work = work
-        .borrow_state()
-        .map_err(|_| LedgerEvidenceError::WorkStateUnavailable)?;
+    work.check_integrity(catalog.len())
+        .map_err(|_| LedgerEvidenceError::SnapshotShapeMismatch)?;
     let mut state = lock(storage);
     if !phase_catalog_positions_are_valid(&state) {
         return Err(LedgerEvidenceError::PhaseCatalogShapeMismatch);
@@ -386,7 +384,6 @@ where
         peak_evidence_bytes: state.peak_evidence_bytes,
     };
     drop(state);
-    drop(work);
     Ok(snapshot)
 }
 

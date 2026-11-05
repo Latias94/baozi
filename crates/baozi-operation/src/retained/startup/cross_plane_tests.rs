@@ -244,7 +244,7 @@ fn initialized_ledger_preflight_rejects_before_graph_shares_or_account_admission
     let factory = factory();
     let account = account(&factory, 5, 2);
     let (limits, parts) = ledger_request(2, 3);
-    let ledger = Ledger::<Owner, Phase, Dimension>::try_new(limits, &[Phase::Build])
+    let mut ledger = Ledger::<Owner, Phase, Dimension>::try_new(limits, &[Phase::Build])
         .unwrap_or_else(|error| panic!("existing ledger: {error}"));
     ledger
         .charge_attempted(Dimension::Records, u64::MAX)

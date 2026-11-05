@@ -272,11 +272,11 @@ fn completed_same_row_share_reduces_connected_builder_consumed_headroom() {
     assert!(consumed_limit <= attempted_limit);
     assembly
         .operation
-        .as_ref()
+        .as_mut()
         .unwrap()
         .common
         .coordinator
-        .retained_ledger()
+        .retained_ledger_mut()
         .tighten_dimension_policy(
             TestDimension::Bytes,
             DimensionPolicy::reservable_bytes(attempted_limit, consumed_limit, u64::MAX, u64::MAX)

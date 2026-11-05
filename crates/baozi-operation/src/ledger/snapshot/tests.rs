@@ -8,7 +8,9 @@ use super::*;
 
 const FROZEN_EVIDENCE: u64 = 4096;
 
-fn fixture<K: Copy>(key: K) -> (Arc<Mutex<LedgerState<K, K>>>, LocalWork<K>) {
+type SnapshotFixture<K> = (Arc<Mutex<LedgerState<K, K>>>, Vec<K>, WorkState<K>);
+
+fn fixture<K: Copy>(key: K) -> SnapshotFixture<K> {
     let storage = Arc::new(Mutex::new(LedgerState {
         dimensions: vec![DimensionEntry {
             dimension: key,
@@ -46,8 +48,9 @@ fn fixture<K: Copy>(key: K) -> (Arc<Mutex<LedgerState<K, K>>>, LocalWork<K>) {
         publication: PublicationState::Open,
         last_completed_phase: None,
     }));
-    let work = LocalWork::new(
-        vec![key],
+    let catalog = vec![key];
+    let work = WorkState::new(
+        catalog.len(),
         vec![WorkEntry {
             dimension: key,
             policy: WorkPolicy {
@@ -61,7 +64,7 @@ fn fixture<K: Copy>(key: K) -> (Arc<Mutex<LedgerState<K, K>>>, LocalWork<K>) {
             },
         }],
     );
-    (storage, work)
+    (storage, catalog, work)
 }
 
 #[derive(Clone, Copy)]
@@ -89,13 +92,10 @@ impl Ord for NoComparison {
 
 #[test]
 fn interim_joins_active_work_without_key_comparison_or_debug_bounds() {
-    let (storage, work) = fixture(NoComparison);
-    {
-        let mut state = work.state.borrow_mut();
-        state.header.open_envelopes = 1;
-        state.header.producer_open = true;
-    }
-    let snapshot = try_snapshot(&storage, &work).expect("active work remains observable");
+    let (storage, catalog, mut work) = fixture(NoComparison);
+    work.header.open_envelopes = 1;
+    work.header.producer_open = true;
+    let snapshot = try_snapshot(&storage, &catalog, &work).expect("active work remains observable");
     let dimension = snapshot.dimensions[0].1;
     assert_eq!(dimension.attempted(), 11);
     assert_eq!(dimension.consumed(), 5);
@@ -105,12 +105,15 @@ fn interim_joins_active_work_without_key_comparison_or_debug_bounds() {
     assert_eq!(snapshot.current_evidence_bytes(), FROZEN_EVIDENCE);
     assert!(snapshot.peak_evidence_bytes() > FROZEN_EVIDENCE);
     assert_eq!(lock(&storage).current_evidence_bytes, FROZEN_EVIDENCE);
+    assert_eq!(work.rows[0].state.pending_consumed, 3);
+    assert_eq!(work.header.open_envelopes, 1);
+    assert!(work.header.producer_open);
 }
 
 #[test]
 fn allocation_failure_releases_only_owned_admission_after_intervening_changes() {
     let _guard = test_evidence_allocation_guard();
-    let (storage, _work) = fixture(0_u8);
+    let (storage, _catalog, _work) = fixture(0_u8);
     let (mut assembly, dimension_plan, phase_plan) =
         SnapshotEvidenceAssembly::new(&storage).expect("snapshot admission");
     allocate_snapshot_vec(&mut assembly.dimensions, dimension_plan)
@@ -137,36 +140,54 @@ fn allocation_failure_releases_only_owned_admission_after_intervening_changes() 
 }
 
 #[test]
-fn over_envelope_failure_and_borrow_fault_release_snapshot_backing() {
+fn over_envelope_failure_releases_snapshot_backing() {
     let _guard = test_evidence_allocation_guard();
-    let (storage, work) = fixture(0_u8);
+    let (storage, catalog, work) = fixture(0_u8);
     test_fail_next_evidence_over_envelope();
     assert!(matches!(
-        try_snapshot(&storage, &work),
+        try_snapshot(&storage, &catalog, &work),
         Err(LedgerEvidenceError::Capacity {
             purpose: LedgerEvidencePurpose::Snapshot,
             cause: CapacityPlanError::CapacityEnvelopeViolated { .. },
         })
     ));
     assert_eq!(lock(&storage).current_evidence_bytes, FROZEN_EVIDENCE);
+}
 
-    let active_borrow = work.state.borrow_mut();
-    assert!(matches!(
-        try_snapshot(&storage, &work),
-        Err(LedgerEvidenceError::WorkStateUnavailable)
-    ));
-    drop(active_borrow);
-    assert!(matches!(
-        try_snapshot(&storage, &work),
-        Err(LedgerEvidenceError::WorkStateUnavailable)
-    ));
-    assert_eq!(lock(&storage).current_evidence_bytes, FROZEN_EVIDENCE);
+#[test]
+fn allocation_failure_precedes_work_fault_and_both_release_admission() {
+    let _guard = test_evidence_allocation_guard();
+    for shape_fault in [false, true] {
+        let (storage, mut catalog, mut work) = fixture(0_u8);
+        if shape_fault {
+            catalog.clear();
+        } else {
+            work.header.integrity_fault = true;
+        }
+        test_fail_next_evidence_allocation();
+        assert!(matches!(
+            try_snapshot(&storage, &catalog, &work),
+            Err(LedgerEvidenceError::AllocationFailed {
+                purpose: LedgerEvidencePurpose::Snapshot,
+                ..
+            })
+        ));
+        assert_eq!(lock(&storage).current_evidence_bytes, FROZEN_EVIDENCE);
+        assert!(matches!(
+            try_snapshot(&storage, &catalog, &work),
+            Err(LedgerEvidenceError::SnapshotShapeMismatch)
+        ));
+        let state = lock(&storage);
+        assert_eq!(state.current_evidence_bytes, FROZEN_EVIDENCE);
+        assert!(state.peak_evidence_bytes > FROZEN_EVIDENCE);
+        assert_eq!(state.current_live_bytes, 7);
+        assert_eq!(state.active_reservations, 1);
+    }
 }
 
 #[test]
 fn terminal_checks_reject_pending_and_completed_unfinished_channels() {
-    let (storage, work) = fixture(0_u8);
-    let mut work = work.state.borrow_mut();
+    let (storage, _catalog, mut work) = fixture(0_u8);
     let mut state = lock(&storage);
     assert!(!typed_terminal_snapshot_positions_are_valid(&state, &work));
     work.rows[0].state.pending_consumed = 0;
@@ -180,7 +201,6 @@ fn terminal_checks_reject_pending_and_completed_unfinished_channels() {
     assert!(typed_terminal_snapshot_positions_are_valid(&state, &work));
     let snapshot = take_typed_final_snapshot(&mut state, &work, None);
     drop(state);
-    drop(work);
     assert_eq!(snapshot.dimensions[0].1.consumed(), 5);
     assert_eq!(snapshot.current_evidence_bytes(), 0);
     assert_eq!(snapshot.peak_evidence_bytes(), FROZEN_EVIDENCE);

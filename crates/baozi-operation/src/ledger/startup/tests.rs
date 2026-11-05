@@ -338,7 +338,7 @@ fn preflight_startup(
         )
     };
     let work_before = {
-        let state = ledger.work.borrow_state().expect("current work state");
+        let state = &ledger.work;
         state
             .rows
             .iter()
@@ -376,7 +376,7 @@ fn preflight_startup(
         );
     }
     {
-        let state = ledger.work.borrow_state().expect("unchanged work state");
+        let state = &ledger.work;
         assert_eq!(
             state
                 .rows
@@ -492,7 +492,7 @@ fn startup_preflight_preserves_the_exact_typed_envelope() {
     assert_eq!(parts.commitments[0].amount(), 4);
     assert_eq!(parts.commitments[1].dimension(), Dimension::Records);
     assert_eq!(parts.commitments[1].amount(), 6);
-    assert_eq!(ledger.work.catalogue().len(), 2);
+    assert_eq!(ledger.work_catalog.len(), 2);
 }
 
 #[test]
@@ -756,7 +756,7 @@ fn startup_preflight_includes_existing_live_and_observed_work() {
         (total_live + 10, u64::MAX, false),
         (u64::MAX, total_live + 10, false),
     ] {
-        let ledger = frozen_graph_ledger(graph_limits(
+        let mut ledger = frozen_graph_ledger(graph_limits(
             operation_limit,
             dimension_limit,
             u64::MAX,
@@ -874,7 +874,7 @@ fn startup_graph_projection_preserves_pending_work_and_current_share_policy() {
         .try_bind_startup_attribution_graph(parts)
         .expect("startup graph permits an existing internal frame");
     {
-        let state = ledger.work.borrow_state().expect("current work state");
+        let state = &ledger.work;
         let records = state
             .rows
             .iter()
@@ -935,7 +935,7 @@ fn startup_graph_projection_preserves_pending_work_and_current_share_policy() {
 #[test]
 fn startup_preflight_includes_current_outcome_evidence_and_policy() {
     let (limits, parts, _) = default_graph_request();
-    let ledger = frozen_graph_ledger(limits);
+    let mut ledger = frozen_graph_ledger(limits);
     {
         let mut state = lock(&ledger.state);
         let records = state
@@ -1144,27 +1144,55 @@ fn startup_preflight_checks_current_publication_before_deferred_bindings() {
 }
 
 #[test]
-fn startup_graph_preserves_forgotten_guard_error_precedence() {
+fn startup_graph_defers_work_faults_until_after_storage_and_live_checks() {
     use super::super::PublicationState;
 
-    for shared in [false, true] {
-        for publication in [PublicationState::Open, PublicationState::Pending] {
+    for shape_fault in [false, true] {
+        for (publication, phase, limited_live) in [
+            (PublicationState::Pending, Phase::Unknown, false),
+            (PublicationState::Open, Phase::Unknown, false),
+            (PublicationState::Open, Phase::Build, true),
+            (PublicationState::Open, Phase::Build, false),
+        ] {
             test_reset_startup_graph_probes(None);
-            let (limits, mut parts, _) = default_graph_request();
-            let mut ledger = frozen_graph_ledger(limits);
-            parts.batches.canonical_assembly.phase = Phase::Unknown;
+            let (_, mut parts, covers) = default_graph_request();
+            let total_live = covers
+                .into_iter()
+                .try_fold(8_u64, u64::checked_add)
+                .expect("startup graph live bytes");
+            let live_limit = if limited_live {
+                total_live - 1
+            } else {
+                u64::MAX
+            };
+            let mut ledger = frozen_graph_ledger(graph_limits(
+                u64::MAX,
+                live_limit,
+                u64::MAX,
+                u64::MAX,
+                u64::MAX,
+            ));
+            parts.batches.canonical_assembly.phase = phase;
+            parts.commitments[0] = OutputCommitment::new(Dimension::Unknown, 4);
             lock(&ledger.state).publication = publication;
-            if shared {
-                mem::forget(ledger.work.borrow_state().expect("shared work guard"));
+            if shape_fault {
+                ledger.work.rows.pop().expect("work row for shape fault");
             } else {
-                mem::forget(ledger.work.borrow_state_mut().expect("mutable work guard"));
+                ledger.work.header.integrity_fault = true;
             }
-            let cause = if !shared {
-                LedgerCause::FinalSnapshotShapeMismatch
-            } else if publication == PublicationState::Pending {
+            let cause = if publication == PublicationState::Pending {
                 LedgerCause::PublicationAlreadyPending
-            } else {
+            } else if phase == Phase::Unknown {
                 LedgerCause::UnknownPhase
+            } else if limited_live {
+                LedgerCause::LimitExceeded {
+                    class: CounterClass::Live,
+                    dimension: Dimension::Bytes,
+                    value: total_live,
+                    limit: live_limit,
+                }
+            } else {
+                LedgerCause::FinalSnapshotShapeMismatch
             };
             assert!(matches!(
                 ledger.preflight_startup_attribution_graph(&parts),
@@ -1188,35 +1216,6 @@ fn startup_graph_preserves_forgotten_guard_error_precedence() {
             assert_eq!(state.active_reservations, 0);
         }
     }
-}
-
-#[test]
-fn startup_graph_read_only_projection_does_not_recover_a_forgotten_shared_guard() {
-    test_reset_startup_graph_probes(None);
-    let (limits, parts, _) = default_graph_request();
-    let mut ledger = frozen_graph_ledger(limits);
-    mem::forget(ledger.work.borrow_state().expect("shared work guard"));
-    assert_eq!(preflight_startup(&ledger, &parts), Ok(()));
-    let graph = ledger
-        .try_bind_startup_attribution_graph(parts)
-        .expect("read-only projection preserves shared-guard precedence");
-    assert_eq!(ledger.test_probe().active_reservations(), 6);
-    {
-        let (mut work, _storage) = ledger.split_internal();
-        assert!(matches!(
-            work.reborrow(),
-            Err(LedgerCause::FinalSnapshotShapeMismatch)
-        ));
-    }
-    drop(graph);
-    let work = ledger.work.borrow_state().expect("work remains observable");
-    assert!(work.rows.iter().all(|row| row.state.attempted == 0
-        && row.state.consumed == 0
-        && row.state.pending_consumed == 0));
-    assert_eq!(work.header.open_envelopes, 0);
-    let state = lock(&ledger.state);
-    assert_eq!(state.current_live_bytes, 0);
-    assert_eq!(state.active_reservations, 0);
 }
 
 #[test]

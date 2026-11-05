@@ -1210,7 +1210,7 @@ fn startup_qualified_failure_terminal_work_survives_exhausted_ordinary_work() {
         1,
     ));
     let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
-    let operation = RetainedOperation::try_start(
+    let mut operation = RetainedOperation::try_start(
         &mut invocation_root,
         OperationControl::default(),
         limits,
@@ -1224,7 +1224,7 @@ fn startup_qualified_failure_terminal_work_survives_exhausted_ordinary_work() {
         operation
             .common
             .coordinator
-            .retained_ledger()
+            .retained_ledger_mut()
             .charge_observed_batch(&[(TestDimension::Bytes, 1)])
             .is_err(),
         "ordinary work must retain its non-refundable failing attempt"

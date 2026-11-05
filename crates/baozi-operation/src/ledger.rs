@@ -18,10 +18,10 @@ mod startup;
 mod work;
 
 pub(crate) use work::{
-    BoundWorkGroup, InternalWork, ParserChannel, ParserFrame, ParserWorkError, WorkFrame, WorkLane,
-    WorkLayout, WorkView,
+    InternalWork, ParserChannel, ParserFrame, ParserWorkError, WorkFrame, WorkLane, WorkLayout,
+    WorkView,
 };
-use work::{LocalWork, WorkDimensionState, WorkEntry, WorkGrant, WorkMode, WorkPolicy, WorkState};
+use work::{WorkDimensionState, WorkEntry, WorkGrant, WorkMode, WorkPolicy, WorkState};
 
 use commitment::{
     AggregateCommitmentError, AggregatedCommitment, aggregate_commitments,
@@ -181,8 +181,6 @@ pub enum LedgerEvidencePurpose {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LedgerEvidenceError {
-    /// Invocation-local work state could not be borrowed or failed its integrity checks.
-    WorkStateUnavailable,
     /// Frozen work and storage rows no longer match their preadmitted snapshot buffers.
     SnapshotShapeMismatch,
     /// The phase catalog no longer maps its append-only state positions exactly once.
@@ -214,9 +212,6 @@ pub enum LedgerEvidenceError {
 impl fmt::Display for LedgerEvidenceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::WorkStateUnavailable => {
-                formatter.write_str("ledger local work state is unavailable")
-            }
             Self::SnapshotShapeMismatch => {
                 formatter.write_str("ledger snapshot shape is inconsistent")
             }
@@ -260,8 +255,7 @@ impl std::error::Error for LedgerEvidenceError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Capacity { cause, .. } => Some(cause),
-            Self::WorkStateUnavailable
-            | Self::SnapshotShapeMismatch
+            Self::SnapshotShapeMismatch
             | Self::PhaseCatalogShapeMismatch
             | Self::TrackedStorageCoverageMismatch { .. }
             | Self::LimitExceeded { .. }
@@ -1127,7 +1121,8 @@ impl FallbackBaselineQualification {
 
 /// Shared accounting state branded by one operation domain.
 pub(crate) struct Ledger<O, P, D> {
-    work: LocalWork<D>,
+    work_catalog: Vec<D>,
+    work: WorkState<D>,
     phase_catalogue: Vec<PhaseEntry<P>>,
     state: Arc<Mutex<LedgerState<P, D>>>,
     operation_live_byte_limit: u64,
@@ -1298,7 +1293,8 @@ where
         .map_err(|cause| LedgerCause::Evidence { cause })?;
         phase_catalogue.extend_from_slice(&state.phases);
         Ok(Self {
-            work: LocalWork::new(work_catalog, work_dimensions),
+            work: WorkState::new(work_catalog.len(), work_dimensions),
+            work_catalog,
             phase_catalogue,
             state: Arc::new(Mutex::new(state)),
             operation_live_byte_limit,
@@ -1314,24 +1310,24 @@ where
     }
 
     pub(crate) fn ensure_work_open(&self) -> Result<(), LedgerCause<D>> {
-        self.work.validate_integrity()?;
-        match self.work.borrow_state()?.header.mode {
+        self.work.check_integrity(self.work_catalog.len())?;
+        match self.work.header.mode {
             WorkMode::Ordinary => Ok(()),
             WorkMode::OrdinarySealed => Err(LedgerCause::PublicationAlreadyPending),
             WorkMode::Protected | WorkMode::Closed => Err(LedgerCause::PublicationAlreadyCompleted),
         }
     }
 
-    pub(crate) fn bind_work<const N: usize>(
+    fn bind_work_layout<const N: usize>(
         &self,
         dimensions: [D; N],
-    ) -> Result<BoundWorkGroup<'_, D, N>, LedgerCause<D>> {
-        self.work.bind(dimensions, WorkGrant::Ordinary)
+    ) -> Result<WorkLayout<N>, LedgerCause<D>> {
+        self.work
+            .bind_layout(&self.work_catalog, dimensions, WorkGrant::Ordinary)
     }
 
     fn bound_dimension_position(&self, dimension: D) -> Result<usize, LedgerCause<D>> {
-        self.work
-            .catalogue()
+        self.work_catalog
             .binary_search(&dimension)
             .map_err(|_| LedgerCause::UnknownDimension { dimension })
     }
@@ -1345,19 +1341,17 @@ where
     }
 
     pub(crate) fn ordinary_work_is_sealed(&self) -> bool {
-        self.work
-            .borrow_state()
-            .map_or(true, |work| work.header.mode != WorkMode::Ordinary)
+        self.work.header.mode != WorkMode::Ordinary
     }
 
     pub(crate) fn check_work_quiescent(&self) -> Result<(), LedgerCause<D>> {
-        self.work.check_quiescent()
+        self.work.check_quiescent(self.work_catalog.len())
     }
 
     /// Irreversibly revokes ordinary work before any terminal callback is delivered.
-    pub(crate) fn seal_ordinary_work(&self) -> Result<(), LedgerCause<D>> {
-        self.work.check_quiescent()?;
-        let mut work = self.work.borrow_state_mut()?;
+    pub(crate) fn seal_ordinary_work(&mut self) -> Result<(), LedgerCause<D>> {
+        self.work.check_quiescent(self.work_catalog.len())?;
+        let work = &mut self.work;
         let mut storage = lock(&self.state);
         match work.header.mode {
             WorkMode::Ordinary => {
@@ -1374,7 +1368,7 @@ where
 
     fn protected_work_dimension_position(&self, dimension: D) -> Result<usize, LedgerCause<D>> {
         let position = self.bound_dimension_position(dimension)?;
-        self.work.check_quiescent()?;
+        self.work.check_quiescent(self.work_catalog.len())?;
         Ok(position)
     }
 
@@ -1392,14 +1386,14 @@ where
         dimension: D,
     ) -> Result<(), LedgerCause<D>> {
         self.protected_work_dimension_position(dimension)?;
-        let work = self.work.borrow_state()?;
-        Self::validate_protected_work_configuration(&work)
+        let work = &self.work;
+        Self::validate_protected_work_configuration(work)
     }
 
-    pub(crate) fn configure_protected_work(&self, dimension: D) -> Result<(), LedgerCause<D>> {
+    pub(crate) fn configure_protected_work(&mut self, dimension: D) -> Result<(), LedgerCause<D>> {
         let position = self.protected_work_dimension_position(dimension)?;
-        let mut work = self.work.borrow_state_mut()?;
-        Self::validate_protected_work_configuration(&work)?;
+        let work = &mut self.work;
+        Self::validate_protected_work_configuration(work)?;
         work.header.protected_dimension = Some(position);
         Ok(())
     }
@@ -1412,19 +1406,19 @@ where
         repetitions: NonZeroU64,
     ) -> Result<(), LedgerCause<D>> {
         let position = self.protected_work_dimension_position(dimension)?;
-        let work = self.work.borrow_state()?;
+        let work = &self.work;
         if work.header.mode != WorkMode::Ordinary
             || work.header.protected_dimension != Some(position)
         {
             return Err(LedgerCause::InactiveLinearWorkPermit);
         }
         let layout = work::WorkLayout::bind(
-            self.work.catalogue(),
+            &self.work_catalog,
             &charges.map(|(dimension, _)| dimension),
             WorkGrant::Protected,
         )?;
         layout.preflight_repeated_observed(
-            self.work.catalogue(),
+            &self.work_catalog,
             &work.rows,
             &work.header,
             charges.map(|(_, amount)| amount),
@@ -1433,14 +1427,13 @@ where
     }
 
     /// Activates the one prequalified private failure dimension after ordinary sealing.
-    pub(crate) fn activate_protected_work(&self, dimension: D) -> Result<(), LedgerCause<D>> {
+    pub(crate) fn activate_protected_work(&mut self, dimension: D) -> Result<(), LedgerCause<D>> {
         let position = self
-            .work
-            .catalogue()
+            .work_catalog
             .binary_search(&dimension)
             .map_err(|_| LedgerCause::UnknownDimension { dimension })?;
         self.seal_ordinary_work()?;
-        let mut work = self.work.borrow_state_mut()?;
+        let work = &mut self.work;
         if work.header.mode != WorkMode::OrdinarySealed
             || work.header.protected_dimension != Some(position)
         {
@@ -1451,9 +1444,9 @@ where
     }
 
     /// Closes the invocation only after all ordinary and protected owners explicitly resolve.
-    pub(crate) fn close_work(&self) -> Result<(), LedgerCause<D>> {
-        self.work.check_quiescent()?;
-        let mut work = self.work.borrow_state_mut()?;
+    pub(crate) fn close_work(&mut self) -> Result<(), LedgerCause<D>> {
+        self.work.check_quiescent(self.work_catalog.len())?;
+        let work = &mut self.work;
         match work.header.mode {
             WorkMode::Ordinary => return Err(LedgerCause::InactiveLinearWorkPermit),
             WorkMode::OrdinarySealed | WorkMode::Protected | WorkMode::Closed => {
@@ -1464,14 +1457,14 @@ where
     }
 
     /// Charges non-refundable attempted work before an action.
-    pub fn charge_attempted(&self, dimension: D, amount: u64) -> Result<(), LedgerCause<D>> {
+    pub fn charge_attempted(&mut self, dimension: D, amount: u64) -> Result<(), LedgerCause<D>> {
         self.ensure_work_open()?;
-        self.bind_work([dimension])?
-            .charge_attempted_in_order([amount])
+        let layout = self.bind_work_layout([dimension])?;
+        layout.charge_attempted_in_order(&mut self.work.view(&self.work_catalog), [amount])
     }
 
     pub(crate) fn charge_producer_attempted(
-        &self,
+        &mut self,
         dimension: D,
         amount: u64,
         excluded_dimension: Option<D>,
@@ -1479,25 +1472,24 @@ where
         if excluded_dimension == Some(dimension) {
             return Err(LedgerCause::UnknownDimension { dimension });
         }
-        self.bind_work([dimension])?
-            .charge_attempted_in_order([amount])
+        let layout = self.bind_work_layout([dimension])?;
+        layout.charge_attempted_in_order(&mut self.work.view(&self.work_catalog), [amount])
     }
 
     /// Installs both halves of a tighter mixed policy at one coherent observation point.
     pub fn tighten_dimension_policy(
-        &self,
+        &mut self,
         dimension: D,
         upper_bound: DimensionPolicy,
     ) -> Result<(), LedgerCause<D>> {
         let position = self
-            .work
-            .catalogue()
+            .work_catalog
             .binary_search(&dimension)
             .map_err(|_| LedgerCause::UnknownDimension { dimension })?;
-        let mut work = self.work.borrow_state_mut()?;
+        let work = &mut self.work;
         let mut storage = lock(&self.state);
         Self::tighten_policy_in(
-            &mut work.view(self.work.catalogue()),
+            &mut work.view(&self.work_catalog),
             &mut storage,
             position,
             dimension,
@@ -1537,14 +1529,13 @@ where
 
     /// Transfers unused ordinary counter policy into the private terminal counter atomically.
     pub(crate) fn transfer_failure_terminal_work(
-        &self,
+        &mut self,
         ordinary_dimension: D,
         terminal_dimension: D,
         additional_work: u64,
     ) -> Result<(), LedgerCause<D>> {
         let position = |dimension| {
-            self.work
-                .catalogue()
+            self.work_catalog
                 .binary_search(&dimension)
                 .map_err(|_| LedgerCause::UnknownDimension { dimension })
         };
@@ -1555,8 +1546,8 @@ where
                 dimension: ordinary_dimension,
             });
         }
-        self.work.check_quiescent()?;
-        let mut work = self.work.borrow_state_mut()?;
+        self.work.check_quiescent(self.work_catalog.len())?;
+        let work = &mut self.work;
         let storage = lock(&self.state);
         Self::ensure_open(&storage)?;
         if work.header.mode != WorkMode::Ordinary {
@@ -1617,17 +1608,17 @@ where
     }
 
     /// Records a non-refundable physically completed scalar prefix.
-    pub fn charge_consumed(&self, dimension: D, amount: u64) -> Result<(), LedgerCause<D>> {
+    pub fn charge_consumed(&mut self, dimension: D, amount: u64) -> Result<(), LedgerCause<D>> {
         self.ensure_work_open()?;
-        self.bind_work([dimension])?
-            .consume_observed_in_order([amount])
+        let layout = self.bind_work_layout([dimension])?;
+        layout.consume_observed_in_order(&mut self.work.view(&self.work_catalog), [amount])
     }
 
-    pub fn charge_observed_batch(&self, charges: &[(D, u64)]) -> Result<(), LedgerCause<D>> {
+    pub fn charge_observed_batch(&mut self, charges: &[(D, u64)]) -> Result<(), LedgerCause<D>> {
         self.ensure_work_open()?;
         for &(dimension, amount) in charges {
-            self.bind_work([dimension])?
-                .charge_observed_ordered([amount])?;
+            let layout = self.bind_work_layout([dimension])?;
+            layout.charge_observed_ordered(&mut self.work.view(&self.work_catalog), [amount])?;
         }
         Ok(())
     }
@@ -1638,20 +1629,25 @@ where
         repetitions: NonZeroU64,
     ) -> Result<(), LedgerCause<D>> {
         self.ensure_work_open()?;
-        self.bind_work(charges.map(|(dimension, _)| dimension))?
-            .preflight_repeated_observed(charges.map(|(_, amount)| amount), repetitions)
+        self.bind_work_layout(charges.map(|(dimension, _)| dimension))?
+            .preflight_repeated_observed(
+                &self.work_catalog,
+                &self.work.rows,
+                &self.work.header,
+                charges.map(|(_, amount)| amount),
+                repetitions,
+            )
     }
 
     pub fn charge_consumed_batch<const N: usize>(
-        &self,
+        &mut self,
         charges: &[(D, u64); N],
     ) -> Result<(), LedgerCause<D>> {
         self.ensure_work_open()?;
         let mut previous = None;
         for &(dimension, _) in charges {
             let position = self
-                .work
-                .catalogue()
+                .work_catalog
                 .binary_search(&dimension)
                 .map_err(|_| LedgerCause::UnknownDimension { dimension })?;
             if let Some((previous_position, previous_dimension)) = previous
@@ -1664,23 +1660,26 @@ where
             }
             previous = Some((position, dimension));
         }
-        self.bind_work(charges.map(|(dimension, _)| dimension))?
-            .consume_direct_atomic(charges.map(|(_, amount)| amount))
+        let layout = self.bind_work_layout(charges.map(|(dimension, _)| dimension))?;
+        layout.consume_direct_atomic(
+            &mut self.work.view(&self.work_catalog),
+            charges.map(|(_, amount)| amount),
+        )
     }
 
     pub(crate) fn charge_producer_consumed_batch<const N: usize>(
-        &self,
+        &mut self,
         charges: &[(D, u64); N],
         excluded_dimension: Option<D>,
     ) -> Result<(), LedgerCause<D>> {
         for &(dimension, _) in charges {
             if excluded_dimension == Some(dimension)
-                || self.work.catalogue().binary_search(&dimension).is_err()
+                || self.work_catalog.binary_search(&dimension).is_err()
             {
                 return Err(LedgerCause::UnknownDimension { dimension });
             }
         }
-        let bound = self.bind_work(charges.map(|(dimension, _)| dimension))?;
+        let bound = self.bind_work_layout(charges.map(|(dimension, _)| dimension))?;
         self.ensure_work_open()?;
         for pair in charges.windows(2) {
             if pair[1].0 < pair[0].0 {
@@ -1690,14 +1689,17 @@ where
                 });
             }
         }
-        bound.consume_direct_atomic(charges.map(|(_, amount)| amount))
+        bound.consume_direct_atomic(
+            &mut self.work.view(&self.work_catalog),
+            charges.map(|(_, amount)| amount),
+        )
     }
 
     fn storage_admission<Destination: PublicationDestination>(
         &self,
     ) -> Result<StorageAdmission, LedgerCause<D>> {
-        self.work.validate_integrity()?;
-        Self::storage_admission_for_mode::<Destination>(self.work.borrow_state()?.header.mode)
+        self.work.check_integrity(self.work_catalog.len())?;
+        Self::storage_admission_for_mode::<Destination>(self.work.header.mode)
     }
 
     fn storage_admission_for_mode<Destination: PublicationDestination>(
@@ -2105,12 +2107,9 @@ where
         let canonical_position = self.bound_dimension_position(canonical.dimension);
         let evidence_position = self.bound_dimension_position(evidence.dimension);
         self.work
-            .validate_integrity()
+            .check_integrity(self.work_catalog.len())
             .map_err(CommitmentPairPushError::Ledger)?;
-        let work = self
-            .work
-            .borrow_state()
-            .map_err(CommitmentPairPushError::Ledger)?;
+        let work = &self.work;
         let state = lock(&self.state);
         if !canonical_batch.validate_owner(&self.state)
             || !evidence_batch.validate_owner(&self.state)
@@ -2129,7 +2128,7 @@ where
         evidence.dimension_position = evidence_position.map_err(CommitmentPairPushError::Ledger)?;
         self.preflight_primary_publication_locked(
             &state,
-            &work,
+            work,
             baseline,
             Some(canonical_batch),
             Some(evidence_batch),
@@ -2513,7 +2512,7 @@ where
     /// storage before releasing the reservations. The batch must own every current live byte; once
     /// admitted, no accounting mutation can race the final control boundary.
     pub fn prepare_publication(
-        &self,
+        &mut self,
         reservations: &mut PublicationReservationBatch<O, P, D>,
         commitments: &[Commitment<D>],
     ) -> Result<PendingPublication<O, P, D>, LedgerCause<D>> {
@@ -2521,22 +2520,22 @@ where
             self.check_reservation(reservation)?;
         }
         let transaction_live_bytes = Self::reservation_bytes(reservations)?;
-        self.work.validate_integrity()?;
+        self.work.check_integrity(self.work_catalog.len())?;
         {
-            let work = self.work.borrow_state()?;
+            let work = &self.work;
             let storage = lock(&self.state);
-            Self::preflight_publication(&storage, &work, transaction_live_bytes)?;
+            Self::preflight_publication(&storage, work, transaction_live_bytes)?;
         }
         // Allocation and key binding occur before either guard. This owner remains armed
         // until every current-state check succeeds and the pending transaction takes it.
-        let aggregate = aggregate_commitments(&self.state, self.work.catalogue(), commitments)
+        let aggregate = aggregate_commitments(&self.state, &self.work_catalog, commitments)
             .map_err(|cause| match cause {
                 AggregateCommitmentError::Ledger(cause) => cause,
                 AggregateCommitmentError::Evidence(cause) => LedgerCause::Evidence { cause },
             })?;
-        let mut work = self.work.borrow_state_mut()?;
+        let work = &mut self.work;
         let mut storage = lock(&self.state);
-        Self::preflight_publication(&storage, &work, transaction_live_bytes)?;
+        Self::preflight_publication(&storage, work, transaction_live_bytes)?;
         validate_commitments(&storage.dimensions, aggregate.entries())?;
         for commitment in aggregate.entries() {
             storage.dimensions[commitment.dimension_position]
@@ -2546,7 +2545,6 @@ where
         storage.publication = PublicationState::Pending;
         work.header.mode = WorkMode::OrdinarySealed;
         drop(storage);
-        drop(work);
         let (commitments, evidence_bytes) = aggregate.into_parts();
         Ok(PendingPublication {
             owner: Arc::clone(&self.state),
@@ -2579,7 +2577,7 @@ where
 
     /// Captures immutable owner-neutral evidence without finalizing the ledger.
     pub fn try_snapshot(&self) -> Result<LedgerSnapshot<P, D>, LedgerEvidenceError> {
-        try_snapshot(&self.state, &self.work)
+        try_snapshot(&self.state, &self.work_catalog, &self.work)
     }
 
     /// Observes only the transaction-temporary live state under one ledger lock.
@@ -2596,12 +2594,11 @@ where
     /// Copies one dimension's scalar evidence without allocating a full snapshot.
     pub fn dimension_evidence(&self, dimension: D) -> Result<DimensionSnapshot, LedgerCause<D>> {
         let position = self
-            .work
-            .catalogue()
+            .work_catalog
             .binary_search(&dimension)
             .map_err(|_| LedgerCause::UnknownDimension { dimension })?;
-        self.work.validate_integrity()?;
-        let work = self.work.borrow_state()?;
+        self.work.check_integrity(self.work_catalog.len())?;
+        let work = &self.work;
         let storage = lock(&self.state);
         Ok(dimension_snapshot(DimensionState::join(
             work.rows[position].state,
@@ -2614,7 +2611,7 @@ where
         reason = "crate-private until the U4 canonical consumers switch atomically"
     )]
     pub(crate) fn dimension_count(&self) -> usize {
-        self.work.catalogue().len()
+        self.work_catalog.len()
     }
 
     #[allow(
@@ -2622,7 +2619,7 @@ where
         reason = "crate-private until the U4 canonical consumers switch atomically"
     )]
     pub(crate) fn dimension_at(&self, index: usize) -> Option<D> {
-        self.work.catalogue().get(index).copied()
+        self.work_catalog.get(index).copied()
     }
 
     pub(crate) fn phase_at(&self, index: usize) -> Option<P> {
@@ -2634,13 +2631,9 @@ where
         expected_dimensions: usize,
         expected_phases: usize,
     ) -> bool {
-        self.work.catalogue().len() == expected_dimensions
+        self.work_catalog.len() == expected_dimensions
             && self.phase_catalogue.len() == expected_phases
-            && self
-                .work
-                .catalogue()
-                .windows(2)
-                .all(|pair| pair[0] < pair[1])
+            && self.work_catalog.windows(2).all(|pair| pair[0] < pair[1])
             && self
                 .phase_catalogue
                 .windows(2)
@@ -2648,7 +2641,7 @@ where
     }
 
     pub(crate) fn contains_dimension(&self, dimension: D) -> bool {
-        self.work.catalogue().binary_search(&dimension).is_ok()
+        self.work_catalog.binary_search(&dimension).is_ok()
     }
 
     pub(crate) fn contains_phase(&self, phase: P) -> bool {
@@ -2766,11 +2759,13 @@ where
     ) -> Result<(), LedgerCause<D>> {
         match qualification {
             FallbackBaselineQualification::Attachment => self.ensure_work_open()?,
-            FallbackBaselineQualification::Terminal => self.work.validate_integrity()?,
+            FallbackBaselineQualification::Terminal => {
+                self.work.check_integrity(self.work_catalog.len())?
+            }
         }
-        let work = self.work.borrow_state()?;
+        let work = &self.work;
         let state = lock(&self.state);
-        self.validate_fallback_baseline_locked(&state, &work, baseline, qualification)?;
+        self.validate_fallback_baseline_locked(&state, work, baseline, qualification)?;
         preflight_typed_publication_batch(&state, &baseline.canonical_assembly)?;
         preflight_typed_publication_batch(&state, &baseline.evidence_assembly)?;
         preflight_typed_publication_batch(&state, &baseline.fallback)?;
@@ -2887,12 +2882,12 @@ where
         >,
         publish_canonical: bool,
     ) -> Result<(), LedgerCause<D>> {
-        self.work.validate_integrity()?;
-        let work = self.work.borrow_state()?;
+        self.work.check_integrity(self.work_catalog.len())?;
+        let work = &self.work;
         let state = lock(&self.state);
         self.preflight_primary_publication_locked(
             &state,
-            &work,
+            work,
             baseline,
             canonical_source.as_deref(),
             evidence_source.as_deref(),
@@ -2989,11 +2984,11 @@ where
             return Err(LedgerCause::ActiveReservationsRemain { count: u64::MAX });
         }
 
-        self.work.validate_integrity()?;
-        let work = self.work.borrow_state()?;
+        self.work.check_integrity(self.work_catalog.len())?;
+        let work = &self.work;
         let state = lock(&self.state);
-        Self::ensure_terminal_preflight(&state, &work)?;
-        validate_final_snapshot_shape(&state, &work)?;
+        Self::ensure_terminal_preflight(&state, work)?;
+        validate_final_snapshot_shape(&state, work)?;
         if let Some(batch) = canonical_discard.as_deref() {
             preflight_typed_discard_batch(&state, batch)?;
         }
@@ -3243,12 +3238,13 @@ where
     )]
     pub fn finish(self) -> Result<LedgerSnapshot<P, D>, LedgerFinishError<P, D>> {
         let Self {
-            work,
+            mut work,
+            work_catalog,
             phase_catalogue: _phase_catalogue,
             state,
             ..
         } = self;
-        let (_work_catalogue, work) = work.into_state();
+        work.header.integrity_fault |= work.rows.len() != work_catalog.len();
         let mut state = lock(&state);
         let shape_cause = validate_final_snapshot_shape(&state, &work).err();
         let live_cause =
@@ -3341,7 +3337,7 @@ where
     }
 
     pub(crate) fn publish(
-        &self,
+        &mut self,
         publication: &mut PendingPublication<O, P, D>,
     ) -> Result<(), LedgerCause<D>> {
         self.check_publication(publication)?;
@@ -4243,15 +4239,11 @@ where
         let qualification = (|| {
             self.ledger
                 .work
-                .validate_integrity()
+                .check_integrity(self.ledger.work_catalog.len())
                 .map_err(|_| TypedFreezeQualificationError::SnapshotShape)?;
-            let work = self
-                .ledger
-                .work
-                .borrow_state()
-                .map_err(|_| TypedFreezeQualificationError::SnapshotShape)?;
+            let work = &self.ledger.work;
             let mut state = lock(&self.ledger.state);
-            self.validate_terminal(&state, &work).inspect(|_| {
+            self.validate_terminal(&state, work).inspect(|_| {
                 state.publication = PublicationState::TerminalQualified;
             })
         })();
@@ -4472,12 +4464,13 @@ where
         } = proof;
         let unexpected_discard = discard_canonical.is_some() || discard_evidence.is_some();
         let Ledger {
-            work,
+            mut work,
+            work_catalog,
             phase_catalogue: _phase_catalogue,
             state,
             ..
         } = ledger;
-        let (_work_catalogue, work) = work.into_state();
+        work.header.integrity_fault |= work.rows.len() != work_catalog.len();
         let projection = {
             let mut storage = lock(&state);
             take_typed_terminal_projection(

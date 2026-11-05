@@ -1,7 +1,7 @@
 use super::{
     AttributionBatchCreateError, AttributionBatchPlan, AttributionReservationBatch,
-    CanonicalOutput, CounterClass, FallbackBatchBaseline, Ledger, LedgerCause, LedgerState,
-    OperationAttributionReservation, OutcomeEvidenceDestination, OutputCommitment,
+    CanonicalOutput, CounterClass, FallbackBatchBaseline, InternalWork, Ledger, LedgerCause,
+    LedgerState, OperationAttributionReservation, OutcomeEvidenceDestination, OutputCommitment,
     PublicationDestination, ReservationCore, StorageCoveringReservation, WorkGrant, WorkLayout,
     lock,
 };
@@ -587,10 +587,7 @@ where
             &parts.account_shares,
             parts.commitments,
         );
-        let work_state = self
-            .work
-            .borrow_state()
-            .map_err(AttributionBatchCreateError::Ledger)?;
+        let work_state = &self.work;
         let state = lock(&self.state);
         Self::ensure_open(&state).map_err(AttributionBatchCreateError::Ledger)?;
         Self::preflight_startup_ledger(
@@ -598,9 +595,9 @@ where
             self.operation_live_byte_limit,
             bindings,
             |layout, amounts| {
-                self.work.ensure_active(&work_state, WorkGrant::Ordinary)?;
+                work_state.ensure_active(self.work_catalog.len(), WorkGrant::Ordinary)?;
                 layout.preflight_repeated_observed(
-                    self.work.catalogue(),
+                    &self.work_catalog,
                     &work_state.rows,
                     &work_state.header,
                     amounts,
@@ -704,8 +701,11 @@ where
         commitments: [OutputCommitment<D, OutcomeEvidenceDestination>; 2],
     ) -> Result<StartupLedgerCommit<O, P, D>, LedgerCause<D>> {
         let bindings = self.bind_startup_ledger(reservation_specs, account_shares, commitments);
-        let work = self.work.split_internal();
-        let work_state = work.read_state()?;
+        let work = InternalWork {
+            catalog: &self.work_catalog,
+            state: &mut self.work,
+        };
+        let work_state = work.read_state();
         let mut state = lock(&self.state);
         Self::ensure_open(&state)?;
         let admission = Self::preflight_startup_ledger(
@@ -713,7 +713,7 @@ where
             self.operation_live_byte_limit,
             bindings,
             |layout, amounts| {
-                work.ensure_active(work_state, WorkGrant::Ordinary)?;
+                work.ensure_active(WorkGrant::Ordinary)?;
                 layout.preflight_repeated_observed(
                     work.catalog,
                     &work_state.rows,
@@ -755,8 +755,7 @@ where
             spec,
             phase_position: self.bound_phase_position(spec.phase),
             dimension_position: self
-                .work
-                .catalogue()
+                .work_catalog
                 .binary_search(&spec.dimension)
                 .map_err(|_| LedgerCause::UnknownDimension {
                     dimension: spec.dimension,
@@ -774,6 +773,7 @@ where
             steps[3].charges[1],
         ];
         let work = self.work.bind_layout(
+            &self.work_catalog,
             work_specs.map(|(dimension, _)| dimension),
             WorkGrant::Ordinary,
         );
@@ -781,8 +781,7 @@ where
             let commitment = &mut commitments[index];
             commitment.dimension_position = usize::MAX;
             let position = self
-                .work
-                .catalogue()
+                .work_catalog
                 .binary_search(&commitment.dimension)
                 .map_err(|_| LedgerCause::UnknownDimension {
                     dimension: commitment.dimension,

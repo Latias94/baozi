@@ -44,7 +44,10 @@ impl<O: OperationOwner, P: Copy + Ord, D: Copy + Ord + fmt::Debug> Ledger<O, P, 
     pub(crate) fn split_internal(
         &mut self,
     ) -> (InternalWork<'_, D>, ExclusiveStorage<'_, O, P, D>) {
-        let work = self.work.split_internal();
+        let work = InternalWork {
+            catalog: &self.work_catalog,
+            state: &mut self.work,
+        };
         let storage = ExclusiveStorage {
             state: &self.state,
             phases: &self.phase_catalogue,
@@ -55,19 +58,22 @@ impl<O: OperationOwner, P: Copy + Ord, D: Copy + Ord + fmt::Debug> Ledger<O, P, 
         (work, storage)
     }
 
-    /// Transitional storage-only adapter: numeric work is never borrowed by this view.
     pub(crate) fn storage_view(&self) -> ExclusiveStorage<'_, O, P, D> {
         ExclusiveStorage {
             state: &self.state,
             phases: &self.phase_catalogue,
-            catalog: self.work.catalogue(),
+            catalog: &self.work_catalog,
             operation_live_byte_limit: self.operation_live_byte_limit,
             owner: PhantomData,
         }
     }
 
     pub(crate) fn exclusive(&mut self) -> Result<WorkAndStorage<'_, O, P, D>, LedgerCause<D>> {
-        let (catalog, work) = self.work.exclusive()?;
+        self.work.check_quiescent(self.work_catalog.len())?;
+        self.work
+            .ensure_active(self.work_catalog.len(), WorkGrant::Ordinary)?;
+        let catalog = &self.work_catalog;
+        let work = self.work.view(catalog);
         Ok((
             ExclusiveWork { catalog, work },
             ExclusiveStorage {
@@ -86,12 +92,13 @@ impl<O: OperationOwner, P: Copy + Ord, D: Copy + Ord + fmt::Debug> Ledger<O, P, 
         &mut self,
         dimensions: [D; N],
     ) -> Result<(ExclusiveWork<'_, D>, WorkLayout<N>), LedgerCause<D>> {
-        let grant = match self.work.borrow_state()?.header.mode {
+        let grant = match self.work.header.mode {
             WorkMode::Protected => WorkGrant::Protected,
             _ => WorkGrant::Ordinary,
         };
-        let layout = self.work.bind_layout(dimensions, grant)?;
-        let (catalog, work) = self.work.reborrow()?;
+        let catalog = &self.work_catalog;
+        let layout = self.work.bind_layout(catalog, dimensions, grant)?;
+        let work = self.work.view(catalog);
         layout.validate_active(&work)?;
         Ok((ExclusiveWork { catalog, work }, layout))
     }
