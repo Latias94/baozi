@@ -340,12 +340,14 @@ pub(crate) struct ParseReadRow<'borrow, 'read, 'session> {
 }
 
 impl ParseReadRow<'_, '_, '_> {
+    #[inline]
     pub(crate) fn ready_for_read(&mut self) -> ParseResult<bool> {
         self.numeric
             .ready_for_read()
             .map_err(|cause| self.views.runtime(self.vocabulary, cause))
     }
 
+    #[inline]
     pub(crate) fn complete_read(&mut self, amount: u64) -> ParseResult<()> {
         self.numeric
             .complete_read(amount)

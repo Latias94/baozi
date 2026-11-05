@@ -227,5 +227,60 @@ Six fresh control profiles completed in
 | OBJ grid 128 | 2,685,124,942 |
 
 These are new fixed-main instruction observations, not native timings or an improvement
-claim. Candidate build/comparison and independent evidence review remain due. Raw stdout,
-stderr, Callgrind profiles and inclusive/self annotations are retained.
+claim. The first candidate comparison is recorded below. Raw stdout, stderr, Callgrind
+profiles and inclusive/self annotations are retained.
+
+## First diagnostic and four-hint follow-up
+
+Source `2aff613` passed the complete qualification above and built with the same GNU
+compiler/profile/allocator as control `3cd9997`. Its first comparison launcher failed
+before any worker because obsolete baseline-schema code remained in the adapted script.
+That script, empty output directory and the separate startup-failure receipt are retained.
+Launcher 2 completed six actual candidate profiles in
+`target/review/convergence/closed-text-candidate-attribution-2/report.json`:
+
+| Case | Control Ir | Candidate Ir | Change |
+| --- | ---: | ---: | ---: |
+| glTF shared 1 | 5,947,738 | 5,947,464 | -0.005% |
+| glTF shared 32 | 29,540,514 | 29,539,770 | -0.003% |
+| F64 PLY neighbors | 2,510,384 | 2,506,967 | -0.136% |
+| STL repeated 1024 | 14,070,989 | 14,060,529 | -0.074% |
+| OBJ repeated 16384 | 796,422,241 | 790,921,776 | -0.691% |
+| OBJ grid 128 | 2,685,124,942 | 2,621,576,376 | -2.367% |
+
+All observations and reported work match after excluding `stage_ns`. The prospective
+diagnostic stop is false. Independent raw-evidence review verified all twelve profiles,
+archive/binary/QA bindings, complete observation/work equality and this predicate. Both
+grid Valgrind brk warnings and the candidate's 158,880-byte symbol-bearing binary growth
+are retained. These are not native elapsed-time, RSS, heap or release acceptance.
+
+The candidate annotations show four separately outlined readiness/completion functions:
+the private Import adapters and the non-generic Operation methods. Their source/self
+partitions include result handling as well as required numeric work. This locates a
+remaining call/optimization seam; it does not make all their instructions removable.
+
+Before spending on ordinary campaigns, compare one isolated follow-up: add ordinary
+`#[inline]` hints to those four methods, changing no function body, counter, checkpoint,
+interface or benchmark flag. Retain `2aff613` and its raw observations as the immediate
+control. Alternatives are to flatten the Import adapter into the scanner (more source
+coupling) or retain the current code if hints do not help. Changing global LTO/target
+flags is a different experiment and is not selected here.
+
+Run existing Operation row tests, Import tests, affected doctests, strict affected lint
+and formatting for the four-line source delta before building its exact committed
+archive. The earlier full run remains reference evidence, not a new full qualification
+of the hint variant. If that variant wins, final integrated workspace/consumer gates
+still precede any measured keep/main merge. Add no tests that mirror compiler hints.
+
+Keep hints only if at least one OBJ improves a further 1% versus `2aff613` and none of
+the six cases regresses more than 1%, with identical non-clock observations/work. Also
+retain the unchanged original-main diagnostic predicate. Any later ordinary/heap and
+release decisions keep their existing protocol and targets.
+
+The four-hint source delta is exactly four added attributes in two files. Scoped receipt
+`target/review/convergence/closed-text-inline-qa-1.json` passed eight actual-row tests
+(1,080 other Operation tests filtered), 484 Import tests, 179 affected doctests, strict
+affected Clippy and workspace formatting, with all 909 before/after inputs stable.
+It used one build/test thread and set `RUST_TEST_THREADS=1` for doctests. No function
+body or test was added or removed. This permits its locating build; it is not the final
+full workspace/consumer qualification of the hint variant.

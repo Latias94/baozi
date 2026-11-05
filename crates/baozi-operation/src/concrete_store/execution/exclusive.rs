@@ -1186,6 +1186,7 @@ pub struct StoreParserReadRow<'read> {
 impl StoreParserReadRow<'_> {
     /// Returns false before a direct-mode checkpoint is due. End this loan and checkpoint
     /// through the parser host before reading another unit; loan entry never resets debt.
+    #[inline]
     pub fn ready_for_read(&mut self) -> Result<bool, StoreInvocationError> {
         if self.stopped {
             return Err(StoreRuntimeError::FallbackOnly.into());
@@ -1199,6 +1200,7 @@ impl StoreParserReadRow<'_> {
 
     /// Commits one literal returned read before any later policy, write or control action.
     /// Numeric failure leaves row/remainder unchanged and stops every later call in this loan.
+    #[inline]
     pub fn complete_read(&mut self, amount: u64) -> Result<(), StoreInvocationError> {
         if self.stopped {
             return Err(StoreRuntimeError::FallbackOnly.into());
