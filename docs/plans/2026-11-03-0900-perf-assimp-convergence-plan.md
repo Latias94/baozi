@@ -762,3 +762,17 @@ negative case only for a genuinely new boundary, not for incidental private layo
   source/simplicity/test-delta review. Original failed verification stays retained.
   Native instruction, unchanged 110-lane timing/memory and separate heap observations
   remain pending before measured keep and local-main integration. Release HOLD remains.
+- That finite-owner candidate's original ordinary and diagnostic evidence is now collected:
+  four Windows and three GNU 110-lane campaigns, twelve instruction profiles and eighteen
+  separate heap observations, each independently reviewed. GNU C1 never starts within its
+  original 180-second joint load gate. STL shows repeated Windows improvement and lower
+  GNU/Ir work, while all preparation/extraction increases, load overlaps and remaining
+  threshold failures stay visible in the [full receipt](../reviews/2026-11-06-finite-geometry-payload.md)
+  and [all lanes](../reviews/2026-11-06-finite-geometry-payload-lanes.md). The final independent
+  integration review accepts the closed source invariant as an intermediate development
+  change and permits a local main fast-forward with all unresolved native costs retained.
+  It checks the unchanged 909-input QA association and the four-document evidence freeze;
+  the measured runtime remains `b3a748c` within candidate `a1064ff`. This disposition grants
+  neither release nor general performance acceptance. Existing parser admission/completion
+  remains the next primary owner investigation. Release HOLD and all original convergence
+  targets remain active.

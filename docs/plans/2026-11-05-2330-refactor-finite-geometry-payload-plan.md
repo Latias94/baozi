@@ -1,6 +1,6 @@
 # Finite Geometry Payload Construction
 
-Status: steps 1-3 source-qualified under the active [Assimp convergence plan](2026-11-03-0900-perf-assimp-convergence-plan.md). Step 1 is merged into local main at `19c0a42`. Closed pools, all three writers, duplicate-scan deletion and work/contract changes are qualified at `b3a748c` on `refactor/finite-geometry-writes`: 3,609 workspace tests, 188 doctests, 138 consumer tests and strict lint/format gates pass, with existing skips. Independent source/simplicity and final test-delta reviews close without P1/P2. Native diagnostics, time/memory qualification and measured disposition remain open; this is not release approval. The prior text cleanup retains its documented mixed native results.
+Status: source-qualified under the active [Assimp convergence plan](2026-11-03-0900-perf-assimp-convergence-plan.md). Step 1 is merged into local main at `19c0a42`. Closed pools, all three writers, duplicate-scan deletion and work/contract changes are qualified at `b3a748c` on `refactor/finite-geometry-writes`: 3,609 workspace tests, 188 doctests, 138 consumer tests and strict lint/format gates pass, with existing skips. Independent source/simplicity and final test-delta reviews close without P1/P2. Ordinary Windows C0/N0/N1/C1 and GNU C0/N0/N1, twelve instruction profiles and eighteen separate heap observations are collected and independently reviewed; GNU C1 never starts within its original gate. Final integration review accepts an intermediate source keep and local development-main fast-forward with the native regressions and incomplete GNU confirmation retained. General measured-performance acceptance and every original release convergence target remain open.
 
 ## Problem and decision
 
@@ -109,7 +109,32 @@ source-coordinate rejection and the updated row/index work convention. The final
 stable run passes 3,609 workspace tests, 188 doctests and 138 consumer tests, both
 strict all-target/all-feature lints and both formats. The initial failed run and
 two test-only corrections are retained with independent bounded review. All five
-user notes remain unchanged. The candidate is committed on its isolated branch;
-main merge waits for the original native time/memory comparison and disposition.
-Step 4's diagnostics/ordinary measurements and step 5 remain open. No new native
+user notes remain unchanged. At that source-only checkpoint the candidate is committed
+on its isolated branch; main merge waits for native comparison and disposition.
+Step 4's diagnostics/ordinary measurements and step 5 are then open. No new native
 performance, heap, convergence or release result is inferred from source tests.
+
+The measured candidate is `a1064ff`, containing runtime `b3a748c`; direct-parent control
+is `19c0a42`. All completed original 110-lane campaigns retain three warmup and twenty
+AB/BA pairs. Windows completes four campaigns, GNU three; GNU C1's 91 blocked observations
+and original 180-second expiration remain explicit. Independent raw reviews reconstruct
+35,420 worker stdout objects and all 770 campaign rows, with every measured increase and
+all unavailable confirmation cells retained. Twelve exact-source Callgrind profiles and
+eighteen separate heap observations also pass bounded independent evidence review.
+STL memory pipeline changes are -16.00%/-16.25% in Windows and -25.31% in GNU N0/C0;
+its work reduction is exactly 36,864 actions and whole-worker Ir falls 40.48968%.
+Other native results remain mixed, including preparation/extraction increases. Candidate
+whole-child working-set/RSS pair medians reach about 1.804/2.081; diagnostic heap calls
+and rounded peaks match between sources in all six tasks. None of these observations
+clears the outstanding timing targets or supplies GNU's missing reverse control.
+
+The [full receipt and every lane](../reviews/2026-11-06-finite-geometry-payload.md) retain
+the construction invariant as an intermediate source improvement with unresolved native
+costs. The final independent integration review accepts a local development-main
+fast-forward of the qualified source, with those costs and the original control retained.
+The bounded source disposition is complete. GNU's missing C1 and general native acceptance
+remain explicitly incomplete, and every original release-convergence obligation continues
+in the parent plan. The next primary investigation
+is the existing parser admission/completion owner, with unchanged-prepare producer ownership
+as a smaller secondary hypothesis. Do not add a new generic proof/execution framework to
+explain these costs or rewrite format algorithms before locating the actual remaining work.
