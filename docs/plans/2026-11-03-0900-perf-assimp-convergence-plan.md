@@ -825,3 +825,15 @@ negative case only for a genuinely new boundary, not for incidental private layo
   candidate acceptance. A first-clear timer correction is independently reviewed for
   future attempts only. The glTF owner-run source remains a separately qualified next
   implementation; no main runtime merge or release gate is cleared.
+- The [glTF owner-run checkpoint](../reviews/2026-11-06-gltf-owner-source-runs.md)
+  source-qualifies `6e7c1c0`: local completed runs and validated inventory ordinals
+  replace full-row global relation ordering and later identity searches. All seven
+  final gates pass with 972 stable inputs, independently reviewed. Original compiler,
+  fixture-lifecycle and test-lint failures remain. Six instruction tasks retain
+  shared-32 -11.590%, shared-1 +0.676%, all other signs and physical work changes.
+  Eighteen separate heap tasks retain five/ten more glTF allocations and lower rounded
+  displayed peaks, with 477,080 additional diagnostic binary bytes. Independent
+  instruction and heap reviews close with every adverse sign, summary discrepancy
+  and calibration limit retained. New ordinary candidate workers match final QA;
+  Windows collection starts with the corrected first-clear guard. Ordinary acceptance,
+  runtime main integration and release remain open.

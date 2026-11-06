@@ -220,6 +220,21 @@ The full workspace run includes the sparse identity, partial reservation, fresh
 terminal-error, and public Skin-order/source-provenance oracles. The existing passing
 postprocess unwind test retains intentional panic stderr. This is Windows-host source
 qualification, not every feature combination, skipped manual fixture or wasm/new-host
-execution. Independent final receipt/source-association review remains separate.
+execution. Independent final receipt/source-association review verifies every gate,
+hash and named test closure with no actionable finding. It reuses the source1
+production proof and bounds all later changes to formatting or reviewed tests.
 No performance, main integration or release approval follows from these passes.
 The original convergence goal remains active and release HOLD.
+
+The [separate diagnostic checkpoint](../reviews/2026-11-06-gltf-owner-source-runs.md)
+records source `6e7c1c0`: shared-32 whole-worker Ir falls 11.589768%, shared-1 rises
+0.675913%, and the other four original cases are flat/lower. Physical import work
+changes from 12,195/84,932 to 11,911/70,332 only for glTF. Complete remaining nonclock
+output agrees. The prospective diagnostic predicate and independent instruction
+audit pass. Eighteen independently audited separate heap observations retain glTF allocation-call
+increases of five/ten and lower displayed rounded peaks; all four other tasks are
+unchanged. Temporary-count disagreements, exit-live labels, unfavorable Assimp heap
+ratios and reused-sanity provenance limits remain explicit. The diagnostic binary grows
+477,080 bytes. Both new ordinary candidate workers are built and bound to final QA;
+the Windows sampling envelope has started with the corrected first-clear guard.
+Native time/process memory, ordinary acceptance and local-main disposition remain open.
