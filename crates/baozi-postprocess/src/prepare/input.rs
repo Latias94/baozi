@@ -26,6 +26,11 @@ pub(super) struct PreparedPrimitive {
     pub uv_domain: AttributeDomain,
 }
 
+pub(super) enum PreparedSelection {
+    Unchanged,
+    Prepared(ScratchVec<PreparedPrimitive>),
+}
+
 impl PreparedPrimitive {
     fn unchanged(target: PrimitiveId) -> Self {
         Self {
@@ -40,13 +45,6 @@ impl PreparedPrimitive {
             uv_domain: AttributeDomain::Vertex,
         }
     }
-
-    pub(super) fn changed(&self) -> bool {
-        self.origins.is_some()
-            || self.normals.is_some()
-            || self.tangents.is_some()
-            || self.remove_tangents
-    }
 }
 
 pub(super) fn prepare(
@@ -55,9 +53,9 @@ pub(super) fn prepare(
     options: TrianglePreparationOptions,
     operation: &mut ActiveRuntime<'_>,
     keys: RuntimeKeys,
-) -> Result<ScratchVec<PreparedPrimitive>, PreparationCause> {
+) -> Result<PreparedSelection, PreparationCause> {
     if targets.is_empty() {
-        return ScratchVec::new(operation, keys, 0).map_err(PreparationCause::from);
+        return Ok(PreparedSelection::Unchanged);
     }
     let mut sorted = ScratchVec::new(operation, keys, targets.len())?;
     for &target in targets {
@@ -100,13 +98,13 @@ pub(super) fn prepare(
             }
         }
     }
-    let mut output = ScratchVec::new(operation, keys, targets.len())?;
     for pair in sorted.values().windows(2) {
         if run_unit(operation, || pair[0] == pair[1])? {
             return Err(PreparationCause::DuplicateTarget);
         }
     }
-    for &primitive in selected.values() {
+    let mut output: Option<ScratchVec<PreparedPrimitive>> = None;
+    for (index, &primitive) in selected.values().iter().enumerate() {
         let target = run_unit(operation, || primitive.id())?;
         let (topology, corners, faces, indices, sizes, mut attributes) =
             run_unit(operation, || {
@@ -131,11 +129,13 @@ pub(super) fn prepare(
             return Err(PreparationCause::UnsupportedTopology(topology));
         }
         if faces == 0 {
-            run_unit(operation, || {
-                output
-                    .values_mut()
-                    .push(PreparedPrimitive::unchanged(target))
-            })?;
+            if let Some(output) = &mut output {
+                run_unit(operation, || {
+                    output
+                        .values_mut()
+                        .push(PreparedPrimitive::unchanged(target))
+                })?;
+            }
             continue;
         }
         let (mut positions, mut selected_normal, mut selected_uv, mut smoothing) =
@@ -238,11 +238,13 @@ pub(super) fn prepare(
             })
         };
         if origins.is_none() && !generate_normal && !generate_tangent && !remove_tangents {
-            run_unit(operation, || {
-                output
-                    .values_mut()
-                    .push(PreparedPrimitive::unchanged(target))
-            })?;
+            if let Some(output) = &mut output {
+                run_unit(operation, || {
+                    output
+                        .values_mut()
+                        .push(PreparedPrimitive::unchanged(target))
+                })?;
+            }
             continue;
         }
         let count = origins
@@ -397,9 +399,39 @@ pub(super) fn prepare(
             uv_set: tangent_options.map_or(0, |t| t.uv_set),
             uv_domain: tangent_options.map_or(AttributeDomain::Vertex, |t| t.uv_domain),
         };
+        let output = match &mut output {
+            Some(output) => output,
+            empty => {
+                #[cfg(test)]
+                super::cleanup_tests::before_prepared_output(
+                    operation,
+                    keys,
+                    &prepared,
+                    sorted.values(),
+                    selected.values(),
+                )?;
+                let mut output = ScratchVec::new(operation, keys, targets.len())?;
+                for previous in &selected.values()[..index] {
+                    let target = run_unit(operation, || previous.id())?;
+                    run_unit(operation, || {
+                        output
+                            .values_mut()
+                            .push(PreparedPrimitive::unchanged(target))
+                    })?;
+                    #[cfg(test)]
+                    super::cleanup_tests::prepared_prefix_ready(
+                        operation, keys, &prepared, &output,
+                    )?;
+                }
+                empty.insert(output)
+            }
+        };
         run_unit(operation, || output.values_mut().push(prepared))?;
     }
-    Ok(output)
+    Ok(match output {
+        Some(output) => PreparedSelection::Prepared(output),
+        None => PreparedSelection::Unchanged,
+    })
 }
 
 fn floating(a: AttributeRef<'_>) -> bool {

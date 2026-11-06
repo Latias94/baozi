@@ -234,7 +234,10 @@ pub(crate) fn run(
         move |parts, disposition| {
             let mut startup = parts.startup;
             let prepared = match startup.with_action_execution(keys.work, |runtime| {
-                input::prepare(source, targets, options, runtime, keys)
+                let prepared = input::prepare(source, targets, options, runtime, keys)?;
+                #[cfg(test)]
+                cleanup_tests::preparation_returned(&prepared);
+                Ok::<_, PreparationCause>(prepared)
             }) {
                 Ok(prepared) => prepared,
                 Err(cause) => {
@@ -245,31 +248,15 @@ pub(crate) fn run(
                     return;
                 }
             };
-            let any_changed = match startup.with_action_execution(keys.work, |runtime| {
-                for primitive in prepared.values() {
-                    if crate::operation::runtime::run_unit(runtime, || primitive.changed())? {
-                        return Ok::<_, baozi_operation::StoreRuntimeError>(true);
-                    }
-                }
-                Ok(false)
-            }) {
-                Ok(changed) => changed,
-                Err(cause) => {
-                    drop(prepared);
-                    *local_cause = Some(cause.into());
-                    if let Err(cause) = startup.request_failure(disposition, REJECTION_CODE) {
+            let prepared = match prepared {
+                input::PreparedSelection::Unchanged => {
+                    if let Err(cause) = startup.request_unchanged(disposition) {
                         *local_cause = Some(cause.into());
                     }
                     return;
                 }
+                input::PreparedSelection::Prepared(prepared) => prepared,
             };
-            if !any_changed {
-                drop(prepared);
-                if let Err(cause) = startup.request_unchanged(disposition) {
-                    *local_cause = Some(cause.into());
-                }
-                return;
-            }
             let mut operation = match startup.attach() {
                 Ok(operation) => operation,
                 Err(cause) => {

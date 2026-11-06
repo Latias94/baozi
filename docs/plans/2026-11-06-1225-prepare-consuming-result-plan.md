@@ -155,3 +155,23 @@ The original Windows/GNU 14-case/110-lane protocol, three warmup/twenty retained
 pairs, all failures/load/missing campaigns and memory boundaries remain unchanged.
 Source/diagnostic success does not authorize a native performance keep, local-main
 runtime merge or release. The parent goal remains active and release HOLD.
+
+## Source and correctness checkpoint
+
+The four-file source 1 implements the selected two production-owner changes plus
+oracles in the existing public selection and private cleanup tests. Independent
+production and source-oracle reviews close with no required correction. The original
+region-exit/final-control boundaries, mixed prefix/suffix, actual storage denial,
+partial backfill denial and original whole-Scene ownership are checked without a new
+operation API. The facade does not expose frozen terminal class/code or failure-time
+pending; no test claim extends to those unavailable observations.
+
+The first focused attempt passes 303 tests, strict Clippy and fmt. All seven fresh
+integrated gates pass: 3,643 workspace tests, 190 doctests, 138 consumer tests, both
+strict lint gates and both formatting gates, with 972 stable inputs. Existing skipped
+manual cases and passing unwind panic stderr remain. Final receipt association is
+under independent review; instruction/native/heap qualification remains open in the
+[checkpoint](../reviews/2026-11-06-preparation-producer-result.md). No main runtime
+merge or release acceptance follows. The separately reviewed
+[owned finite invocation plan](2026-11-06-1240-owned-finite-invocation-plan.md) covers
+the larger fixed startup/terminal owner; its implementation is not part of this slice.
