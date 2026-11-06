@@ -814,3 +814,14 @@ negative case only for a genuinely new boundary, not for incidental private layo
   replaces global full-row relation ordering and repeated authoring identity searches;
   its isolated source work grants no performance acceptance. All builds use the
   current repository target; release HOLD and original convergence gates remain.
+- That cumulative token candidate's first new ordinary attempt completes all four
+  110-lane functional preflights but no candidate ordinary sampling. Windows C0/N0/N1/C1
+  and GNU C0/N0/N1 reach their prospective startup limits. GNU C1 alone records the
+  old capacity control; independent review finds its required 20-second quiet guard
+  unqualified because the timer starts at the last busy sample. All C1 descriptive
+  statistics, adverse load and original missing cells remain in the [checkpoint](../reviews/2026-11-06-obj-document-token-scratch.md)
+  and [tables](../reviews/2026-11-06-obj-document-token-scratch-lanes.md). Its 14/28
+  pipelines above 3x and 28 endpoints at least 10x are old-control observations, not
+  candidate acceptance. A first-clear timer correction is independently reviewed for
+  future attempts only. The glTF owner-run source remains a separately qualified next
+  implementation; no main runtime merge or release gate is cleared.

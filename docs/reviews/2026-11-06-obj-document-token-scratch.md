@@ -174,8 +174,46 @@ Windows C0/N0/N1/C1 all remain **not started**: none obtains the required 20-sec
 named-tool quiet interval within its prospective 180-second deadline. Actual recorded
 waits are 181.016/181.112/181.048/181.149 seconds, preserving polling overrun and every
 sampled Cargo/nextest/rustc/link observation. There are no Windows ordinary samples
-for this attempt. GNU ordinary startup/collection is still active at this checkpoint;
-its completed functional preflights are not promoted to campaign results.
+for this attempt. GNU C0/N0/N1 likewise do not start within 180 seconds, with actual
+waits of 180.493/180.505/180.620 seconds. GNU C1 completes 110 lanes and 5,060
+successful comparison children, plus its two context commands, with the original
+three warmup and twenty retained pairs. Both campaign envelopes remain partial.
+
+There is no ordinary candidate sample on either platform. GNU C1 is old capacity
+control `3cd9997` only. It cannot establish candidate convergence, a source gain or
+control drift across the missing bracket. Every original lane and missing campaign
+is retained in the [complete availability/ratio tables](2026-11-06-obj-document-token-scratch-lanes.md).
+
+Independent ordinary review identifies a start-qualification defect: the launcher's
+quiet duration starts at the last busy snapshot, crediting the next sampling interval.
+C1 reports 20.135 seconds quiet, but the first all-clear joint snapshot to release is
+only 18.114 seconds. Its required 20-second observed start window is therefore
+unqualified. Preserve the complete C1 as a **descriptive old-control recording**;
+do not repair, replace or relabel it. All 46 C1 load snapshots subsequently contain
+Windows Cargo, with 43 also containing rustc. Empty Linux tool lists and low Linux
+load averages do not establish host isolation.
+
+For future attempts only, version 2 of the launcher starts at the first fresh all-clear
+snapshot with zero quiet time, resets on busy/stale evidence, and checks the original
+180-second deadline before acceptance. Independent bounded source review accepts
+that correction; it is prepared but not executed. The original launcher, decisions,
+C1 and every wait/load record remain unchanged. The 20-second criterion and original
+task/sampling protocol are not relaxed.
+
+The descriptive GNU C1 paired medians leave 70/110 worker endpoints above 3x Assimp,
+28 at least 10x, and 14/28 complete pipelines above 3x. Examples include repeated OBJ
+memory pipeline 4.931860x, grid OBJ 6.624102x and shared-32 glTF 12.009943x; their
+parent elapsed ratios are separate 3.680762x/4.956565x/1.901210x. Whole-child RSS
+has a maximum lane median ratio of 2.057177 and maximum individual pair ratio 2.141463.
+These are old-control observations under recorded load and the unqualified start
+guard, not successful candidate thresholds or new release evidence.
+
+The independent audit reads 5,940 complete worker JSON objects, all named command
+stdout/stderr, 5,500 GNU RSS records, 661 wait records, build associations and every
+table cell. Pair inversion precedes median/IQR calculation; failures and unavailable
+metrics remain explicit. The audit accepts functionality, descriptive statistics
+and retained availability, with the quiet-guard correction above. It grants no
+runtime keep, main integration or release acceptance.
 
 Local association and receipts are
 `obj-token-scratch-ordinary-build-association-1.json`,
@@ -186,3 +224,12 @@ GNU workers/corpus are copied to its native filesystem outside worker clocks; no
 build takes place there. The unchanged protocol remains 14 cases/110 lanes, three
 warmup and twenty retained AB/BA pairs, 60-second child timeout, and the original
 release targets. No startup limit is widened and no unavailable sample is imputed.
+
+The ordinary summary SHA-256 is
+`e1dd6a75b1518d886cbee8845af760ec88904c2ee2898a0545e4a6aaac72cf7b`;
+the descriptive C1 report is
+`2e43c9c909cc8ea33f6045a9786f4b14c7d3cfb16562dff054fdff32a5e18c16`.
+Independent audit is `obj-token-scratch-ordinary-review-1.md` in the same evidence
+directory; future-guard preparation/review are `quiet-window-first-clear-fix-1.json`
+and `quiet-window-first-clear-fix-review-1.md`. Source development proceeds separately
+through the reviewed glTF owner-run candidate; the release goal remains active.

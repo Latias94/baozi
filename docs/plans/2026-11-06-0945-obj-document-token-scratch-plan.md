@@ -155,3 +155,13 @@ heap workers report 16,388/66,052 fewer OBJ allocation calls and unchanged round
 displayed peaks. Independent heap audit verifies all 80 task/sanity artifacts and
 retains recorder/analysis temporary-count discrepancies, exit-live labels and missing
 historical calibration source/build evidence. Native qualification remains open.
+
+The first cumulative ordinary attempt is terminal and incomplete. All four original
+110-lane functional preflights pass their comparison tasks. Windows has no ordinary
+samples; GNU C0/N0/N1 cannot start and only old-capacity-control C1 completes. Its
+start guard credits one sample interval before the first all-clear observation, so
+the required 20 observed quiet seconds are unqualified. All recorded host activity,
+descriptive old-control results, context Git-status failures and unavailable campaigns
+remain in the checkpoint and all-lane tables. No ordinary candidate gain or threshold
+assessment is possible. The independently reviewed correction is prepared for future
+attempts only; it neither replaces nor qualifies the ended recording. Release HOLD.
