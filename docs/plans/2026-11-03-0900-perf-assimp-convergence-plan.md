@@ -834,6 +834,19 @@ negative case only for a genuinely new boundary, not for incidental private layo
   Eighteen separate heap tasks retain five/ten more glTF allocations and lower rounded
   displayed peaks, with 477,080 additional diagnostic binary bytes. Independent
   instruction and heap reviews close with every adverse sign, summary discrepancy
-  and calibration limit retained. New ordinary candidate workers match final QA;
-  Windows collection starts with the corrected first-clear guard. Ordinary acceptance,
-  runtime main integration and release remain open.
+  and calibration limit retained. New ordinary candidate workers match final QA.
+  The corrected first-clear guard qualifies Windows N0 and GNU N1; both complete
+  all 110 original lanes with three warmups/twenty retained pairs and no comparison
+  failures. Six other campaigns cannot start within their prospective load gates.
+  All missing cells and measured signs remain in the checkpoint and full tables:
+  Windows 56/110 endpoints and 9/28 pipelines exceed 3x; GNU 69/110 and 14/28.
+  Endpoint medians at least 10x number 31/29 respectively, descriptively without
+  same-platform repeat confirmation. Both completed candidates have no whole-child
+  memory median above 3x. Independent Windows and GNU/raw-export reviews close with
+  60/106 N0 and 47/51 N1 load samples busy, all raw observations/statistics and all
+  3,080 export cells verified. No ordinary source-change keep, runtime main
+  integration or release follows. Current preparation attribution motivates the
+  [producer-result plan](2026-11-06-1225-prepare-consuming-result-plan.md) as a first
+  bounded deletion while the larger finite invocation/backing/terminal interface
+  receives concrete design review. No numeric algorithm or benchmark boundary is
+  changed, and every original convergence target remains active.

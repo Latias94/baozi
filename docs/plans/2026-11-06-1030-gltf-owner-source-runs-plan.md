@@ -235,6 +235,16 @@ audit pass. Eighteen independently audited separate heap observations retain glT
 increases of five/ten and lower displayed rounded peaks; all four other tasks are
 unchanged. Temporary-count disagreements, exit-live labels, unfavorable Assimp heap
 ratios and reused-sanity provenance limits remain explicit. The diagnostic binary grows
-477,080 bytes. Both new ordinary candidate workers are built and bound to final QA;
-the Windows sampling envelope has started with the corrected first-clear guard.
-Native time/process memory, ordinary acceptance and local-main disposition remain open.
+477,080 bytes. Both new ordinary candidate workers are built and bound to final QA.
+The corrected first-clear guard qualifies Windows N0 and GNU N1; each completes the
+original 110 lanes, three warmup/twenty retained pairs and zero comparison failures.
+The other six campaigns cannot start within their prospective gates. All missing
+cells, wait overruns, load and unfavorable observations remain in the
+[checkpoint](../reviews/2026-11-06-gltf-owner-source-runs.md) and
+[complete tables](../reviews/2026-11-06-gltf-owner-source-runs-lanes.md).
+Independent Windows and GNU/combined-export reviews are closed. They verify every
+raw observation/statistic, GNU RSS text records and all 3,080 exported cells, preserving
+60/106 and 47/51 loaded candidate snapshots respectively. Neither platform has a
+second candidate or control bracket.
+No source-change gain, ordinary acceptance or local-main runtime merge follows.
+Every original convergence target and release HOLD remain active.

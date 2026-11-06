@@ -3,8 +3,10 @@
 Status: source `6e7c1c0` is qualified on `optimize/gltf-owner-source-runs`. Independent
 final QA/source association is closed. Six instruction tasks pass their prospective
 predicate and independent audit; eighteen separate heap workers and their independent
-audit complete. Ordinary candidate time and whole-child memory qualification remain
-open. No runtime main integration or release acceptance follows. Release remains HOLD.
+audit complete. Both new ordinary attempts are terminal but incomplete: Windows N0
+and GNU N1 each complete all 110 lanes; the other six campaigns cannot start. Ordinary
+qualification remains open. No runtime main integration or release acceptance follows.
+Release remains HOLD.
 
 ## Actual replacement
 
@@ -149,7 +151,7 @@ neither confirmed application leaks nor leak freedom. Shared-32's candidate/Assi
 displayed-peak ratio remains an unfavorable approximate 2.236235 despite the improvement
 against Baozi control. No diagnostic `stage_ns` or profiler RSS is ordinary evidence.
 
-## Evidence and next measurement
+## Evidence and ordinary attempt
 
 Local evidence under `.git/baozi-review/performance-convergence/` includes source5,
 the independent production/test/final-QA reviews, `gltf-owner-source-runs-probe-1`,
@@ -166,8 +168,8 @@ New ordinary candidate builds use this exact source, debug0 and the current repo
 target, serially. The capacity control and pinned Assimp ordinary workers are reused
 by exact identity, with new samples required. Both platforms retain fourteen cases,
 110 lanes, three warmup and twenty retained AB/BA pairs and the original release
-targets. A future quiet guard begins at the first fresh all-clear observation, with
-no credit from a preceding busy sample; its 20-second requirement and 180-second
+targets. The corrected quiet guard begins at the first fresh all-clear observation,
+with no credit from a preceding busy sample; its 20-second requirement and 180-second
 deadline remain. The earlier descriptive old-control C1 is not repaired or replaced.
 No favorable diagnostic subset grants runtime main integration or release acceptance.
 
@@ -177,10 +179,126 @@ GNU is `b8ffff508835119315b8fd63160802a9a531d254e276110c6436f4cb024dc335`.
 Each candidate's 972-input map equals final QA; each platform's recorded compiler,
 arguments and overrides agree with its retained capacity control. The association is
 `gltf-owner-source-runs-ordinary-build-association-1.json` in the local evidence tree.
-The new Windows functional/ordinary envelope has started; no outcome is inferred here.
+Both platform envelopes are now terminal with partial status. The wrapper's GNU exit
+code 2 records missing ordinary campaigns; its executed children have no comparison
+failures. No missing ordinary result is filled from functional preflight or history.
 
 The byte-identical collector now executes from the real coordinator checkout, so its
 Git probes can describe that checkout instead of failing inside a frozen `.git`
 archive. Its context HEAD/status still do not establish worker source identity:
 immutable archives, source maps, build manifests and executable hashes do. The ended
 attempt's Git-status failures and all its other evidence remain unchanged.
+
+## Every original ordinary lane
+
+The [complete lane tables](2026-11-06-gltf-owner-source-runs-lanes.md) retain all 110
+lanes, both platforms and all four campaign columns. The local
+`gltf-owner-source-runs-ordinary-summary-1.json` retains the engine medians, inclusive
+IQRs, extrema and every positive paired ratio. Each reported Baozi/Assimp statistic
+inverts each retained Assimp/Baozi pair before summarizing; it is not an inverse of
+the saved median or a ratio of engine medians.
+
+| Platform | C0 | N0 | N1 | C1 |
+| --- | --- | --- | --- | --- |
+| Windows | Not started | Completed 110 lanes | Not started | Not started |
+| GNU native filesystem | Not started | Not started | Completed 110 lanes | Not started |
+
+Every completed ordinary collection uses three warmup and twenty retained AB/BA
+pairs per lane: 5,060 comparison children plus two successful Git-context commands.
+Both control/candidate functional preflights also complete all 110 lanes on both
+platforms, with zero comparison failures. Functional runs use zero warmups and one
+pair and do not supply ordinary confirmation. Every child retains its 60-second
+timeout and original successful task, precision and normal policy.
+
+Each missing campaign reaches its prospective 180-second startup limit. Its sampled
+duration, overrun, named-tool records and reason remain in the immutable command/wait
+receipts. A corrected sampled start does not imply continued quiet or machine
+isolation. Independent Windows review verifies 20.120297 seconds from the first clear
+snapshot for N0; subsequent build contention appears in 60/106 collection-load
+snapshots. GNU N1 records 20.056623 seconds from its first qualifying fresh clear
+snapshot. Independent GNU review verifies the archive bindings, fresh Windows monitor
+records and all raw observations; 47/51 N1 load samples subsequently contain Windows
+build tools. No machine-isolation claim follows. Three successful GNU Git-status
+commands retain the untracked-cache warning; comparison stderr is empty.
+
+| Observed candidate campaign | Endpoint medians >3x / 110 | Endpoint medians >=10x / 110 | Pipeline medians >3x / 28 |
+| --- | ---: | ---: | ---: |
+| Windows N0 | 56 | 31 | 9 |
+| GNU N1 | 69 | 29 | 14 |
+
+These are descriptive threshold observations. The missing second candidate campaign
+on each platform prevents repeat confirmation. Missing C0/C1 prevents a cumulative
+candidate/control source-gain or control-relative regression decision. Cross-platform
+observations do not supply a same-platform bracket.
+
+All original memory-IO pipeline ratios remain visible below, including favorable
+small inputs and adverse large/model inputs. Every numeric cell summarizes twenty
+retained paired worker endpoint times; process memory is a different metric.
+
+| Case | Windows N0 Baozi/Assimp | GNU N1 Baozi/Assimp |
+| --- | ---: | ---: |
+| Repeated OBJ 1 | 0.438751 | 0.181553 |
+| Repeated OBJ 1024 | 0.994452 | 0.706544 |
+| Repeated OBJ 16384 | 4.336148 | 4.558394 |
+| Grid OBJ 2 | 0.354669 | 0.144850 |
+| Grid OBJ 32 | 1.464612 | 1.296340 |
+| Grid OBJ 128 | 4.251478 | 5.330971 |
+| Shared glTF 1 | 8.034490 | 7.776057 |
+| Shared glTF 8 | 9.006843 | 8.897078 |
+| Shared glTF 32 | 9.778565 | 12.226871 |
+| Binary STL 1 | 10.771137 | 9.460190 |
+| Binary STL 1024 | 7.556089 | 6.473811 |
+| PLY triangle | 2.254557 | 0.788734 |
+| F64 PLY neighbors | 2.317221 | 0.781864 |
+| PLY points 1024 | 2.133066 | 0.925463 |
+
+Preparation remains a separate short endpoint. The Windows worst paired median is
+shared-32 glTF/memory at 61.586842, IQR 8.027083; separate engine medians are
+118.800 us (Baozi, IQR 10.075 us) and 2.000 us (Assimp, IQR 0.275 us).
+GNU's worst is F64 PLY/file at 88.893894, IQR 36.467582; its separate engine medians
+are 36.453 us (Baozi, IQR 6.6575 us) and 0.437 us (Assimp, IQR 0.1385 us). These large
+ratios, short comparator intervals and dispersion are retained, not exempted or
+attributed to one constructor from elapsed times. Parent whole-child elapsed time
+stays separate in the full tables.
+
+GNU's largest individual parent-time ratio is 27.220476 on points-only PLY's memory
+pipeline: the retained pair records 93.814145/3.446455 ms parent elapsed but
+0.752926/0.745448 ms worker time. The lane's parent median ratio is 1.007220.
+This adverse tail remains without assigning its cause from incomplete telemetry or
+turning it into a worker-stage slowdown claim.
+
+Ordinary process-memory paired medians do not exceed 3x in either completed candidate
+collection. Windows peak working-set and peak-commit maxima across lane medians are
+1.894755 and 1.384460; GNU peak-RSS maximum is 2.130416. These are lifetime child
+metrics including setup, observation and teardown, not stage peaks, tracked heap or
+a demonstrated candidate/control memory regression pass. Unfavorable values and
+all individual tails remain in the full summary. The separate GNU and Windows
+bounded audits are now closed. The GNU audit
+reconstructs every RSS text value, every paired statistic, and all 3,080 exported
+campaign cells: 770 numeric and 2,310 explicitly not started. Its report is
+`gltf-owner-source-runs-linux-ordinary-review-1.md`; the Windows authority is
+`gltf-owner-source-runs-windows-ordinary-review-1.md`, both in the local evidence tree.
+
+## Next owner and architectural limit
+
+The completed attempt leaves the original convergence targets unmet. The measured
+source remains an investigative intermediate on its isolated development branch;
+diagnostic improvement alone grants no runtime main integration or release.
+
+New read-only attribution locates fixed preparation plan/binding at approximately
+42% of preparation Ir in the existing glTF-1 and STL-1024 instruction profiles.
+They preserve existing triangles/fields and enter no numerical normal/tangent
+kernel. Source inspection of the fixed comparators confirms Assimp enters its
+normal postprocess only when requested normals are missing, while Baozi starts a
+fresh source-bound operation and returns owned terminal evidence even when no edit
+is needed. This locates an ownership/startup question; it does not turn instruction
+shares into native CPU percentages or excuse removing required semantic checks.
+
+The [producer-result plan](../plans/2026-11-06-1225-prepare-consuming-result-plan.md)
+proposes the first bounded deletion: return authoritative unchanged/prepared output,
+materialize descriptors only on a real effect, and remove consumer rediscovery.
+It preserves mixed selections and the same consuming terminal. Concrete finite
+invocation/backing/promotion/terminal design remains the larger follow-on, including
+an explicit check that the old external-loan design is simpler than an owned backing
+at the actual host seam. Neither proposal changes the comparison helper, numerical
+algorithm, original measurement boundary or release targets.
