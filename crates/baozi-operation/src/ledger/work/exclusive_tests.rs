@@ -53,6 +53,107 @@ fn counters(view: &WorkView<'_, u8>) -> [(u64, u64, u64); 2] {
     })
 }
 
+#[test]
+fn reserved_producer_row_transfers_the_actual_prefix_and_resolves_only_its_suffix() {
+    for completed in 0..=3 {
+        let mut rows = [row(1, 8, 8), row(2, 8, 8)];
+        let mut header = header();
+        let mut view = WorkView {
+            catalog: &[1, 2],
+            rows: &mut rows,
+            header: &mut header,
+        };
+        let layout = WorkLayout::bind(view.catalog, &[1], WorkGrant::Ordinary).unwrap();
+        let mut internal = layout
+            .admit_observed(&mut view, [2], WorkLane::Internal)
+            .unwrap();
+        let mut producer = layout
+            .admit_observed(&mut view, [3], WorkLane::Producer)
+            .unwrap();
+        {
+            let mut reserved = producer
+                .borrow_reserved_producer_row(&layout, &mut view)
+                .unwrap();
+            for prefix in 0..completed {
+                assert_eq!(reserved.remaining(), 3 - prefix);
+                reserved.complete_unit();
+            }
+            assert_eq!(reserved.remaining(), 3 - completed);
+        }
+        assert_eq!(counters(&view), [(5, completed, 5 - completed), (0, 0, 0)]);
+        assert_eq!(producer.remaining, [3 - completed]);
+        assert!(producer.active);
+        assert_eq!(view.header.open_envelopes, 2);
+        producer.resolve(&layout, &mut view, false).unwrap();
+        assert_eq!(counters(&view), [(5, completed, 2), (0, 0, 0)]);
+        assert!(!view.header.producer_open);
+        internal.resolve(&layout, &mut view, false).unwrap();
+        assert_eq!(counters(&view), [(5, completed, 0), (0, 0, 0)]);
+        kernel::check_quiescent(view.rows, view.header).unwrap();
+    }
+}
+
+#[test]
+fn reserved_producer_row_keeps_admitted_headroom_at_the_counter_boundary() {
+    let mut rows = [row(1, u64::MAX, u64::MAX), row(2, 8, 8)];
+    rows[0].state = WorkDimensionState {
+        attempted: u64::MAX - 3,
+        consumed: u64::MAX - 3,
+        pending_consumed: 0,
+    };
+    let mut header = header();
+    let mut view = WorkView {
+        catalog: &[1, 2],
+        rows: &mut rows,
+        header: &mut header,
+    };
+    let layout = WorkLayout::bind(view.catalog, &[1], WorkGrant::Ordinary).unwrap();
+    let mut producer = layout
+        .admit_observed(&mut view, [3], WorkLane::Producer)
+        .unwrap();
+    {
+        let mut reserved = producer
+            .borrow_reserved_producer_row(&layout, &mut view)
+            .unwrap();
+        for _ in 0..3 {
+            reserved.complete_unit();
+        }
+        assert_eq!(reserved.remaining(), 0);
+    }
+    assert_eq!(counters(&view), [(u64::MAX, u64::MAX, 0), (0, 0, 0)]);
+    producer.resolve(&layout, &mut view, false).unwrap();
+    kernel::check_quiescent(view.rows, view.header).unwrap();
+}
+
+#[test]
+fn reserved_producer_row_rejects_a_tightened_existing_frame_without_completing_it() {
+    let mut rows = [row(1, 8, 8), row(2, 8, 8)];
+    let mut header = header();
+    let mut view = WorkView {
+        catalog: &[1, 2],
+        rows: &mut rows,
+        header: &mut header,
+    };
+    let layout = WorkLayout::bind(view.catalog, &[1], WorkGrant::Ordinary).unwrap();
+    let mut producer = layout
+        .admit_observed(&mut view, [3], WorkLane::Producer)
+        .unwrap();
+    view.rows[0].policy.consumed_limit = 2;
+    assert!(matches!(
+        producer.borrow_reserved_producer_row(&layout, &mut view),
+        Err(LedgerCause::LimitExceeded {
+            class: CounterClass::Consumed,
+            dimension: 1,
+            value: 3,
+            limit: 2,
+        })
+    ));
+    assert_eq!(counters(&view), [(3, 0, 3), (0, 0, 0)]);
+    assert_eq!(producer.remaining, [3]);
+    producer.resolve(&layout, &mut view, false).unwrap();
+    assert_eq!(counters(&view), [(3, 0, 0), (0, 0, 0)]);
+}
+
 fn duplicate_internal_trace(view: &mut WorkView<'_, u8>) {
     let catalog = view.catalog;
     let layout = WorkLayout::bind(catalog, &[2, 1, 2], WorkGrant::Ordinary).unwrap();

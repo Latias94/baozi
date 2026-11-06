@@ -18,8 +18,8 @@ mod startup;
 mod work;
 
 pub(crate) use work::{
-    InternalWork, ParserChannel, ParserFrame, ParserReadRow, ParserWorkError, WorkFrame, WorkLane,
-    WorkLayout, WorkView,
+    InternalWork, ParserChannel, ParserFrame, ParserReadRow, ParserWorkError, ReservedProducerRow,
+    WorkFrame, WorkLane, WorkLayout, WorkView,
 };
 use work::{WorkDimensionState, WorkEntry, WorkGrant, WorkMode, WorkPolicy, WorkState};
 

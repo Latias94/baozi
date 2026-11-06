@@ -390,6 +390,37 @@ pub(crate) struct WorkFrame<const N: usize> {
     pub(crate) faulted: bool,
 }
 
+/// A singleton Producer row whose complete admitted envelope is held by an exclusive loan.
+///
+/// The constructor checks the reserved-state invariant once. While this row exists, the
+/// exclusive borrow prevents policy, lane, reservation, and resolution changes, so each unit
+/// only transfers the already reserved counters and remainder.
+pub(crate) struct ReservedProducerRow<'loan, D> {
+    row: &'loan mut WorkEntry<D>,
+    remaining: &'loan mut u64,
+}
+
+impl<D> ReservedProducerRow<'_, D> {
+    pub(crate) fn remaining(&self) -> u64 {
+        *self.remaining
+    }
+
+    /// Completes one normally returned action after the caller checked actual remaining work.
+    pub(crate) fn complete_unit(&mut self) {
+        debug_assert!(*self.remaining > 0);
+        // At entry C + P is representable and within attempted/limit, and P >= R. Each
+        // transfer preserves C + P and P - R; R > 0 therefore makes all three updates valid.
+        self.row.state.consumed += 1;
+        self.row.state.pending_consumed -= 1;
+        *self.remaining -= 1;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_remaining_mut(&mut self) -> &mut u64 {
+        self.remaining
+    }
+}
+
 impl<const N: usize> WorkFrame<N> {
     pub(crate) fn complete_batch_with_outcome<D: Copy>(
         &mut self,
@@ -519,6 +550,55 @@ impl<const N: usize> WorkFrame<N> {
 }
 
 impl WorkFrame<1> {
+    /// Lends the actual singleton Producer row after checking its reserved envelope once.
+    ///
+    /// The caller must hold this loan through every unit completion. Its lifetime prevents any
+    /// other work or policy operation from changing the row until the loan is dropped.
+    pub(crate) fn borrow_reserved_producer_row<'loan, D: Copy>(
+        &'loan mut self,
+        group: &WorkLayout<1>,
+        state: &'loan mut WorkView<'_, D>,
+    ) -> Result<ReservedProducerRow<'loan, D>, LedgerCause<D>> {
+        if !self.active
+            || self.faulted
+            || self.lane != WorkLane::Producer
+            || group.grant != WorkGrant::Ordinary
+        {
+            return Err(LedgerCause::InactiveLinearWorkPermit);
+        }
+        if group.positions[0] >= state.catalog.len() {
+            return Err(LedgerCause::FinalSnapshotShapeMismatch);
+        }
+        group.validate_active(state)?;
+        if !lane_is_open(state, self.lane) {
+            state.header.integrity_fault = true;
+            self.faulted = true;
+            return Err(LedgerCause::InactiveLinearWorkPermit);
+        }
+
+        let position = group.positions[0];
+        let dimension = state.catalog[position];
+        let row = &state.rows[position];
+        let counters = row.state;
+        check_effective(
+            || dimension,
+            counters.consumed,
+            counters.pending_consumed,
+            counters.attempted,
+            row.policy.consumed_limit,
+        )?;
+        if counters.pending_consumed < self.remaining[0] {
+            state.header.integrity_fault = true;
+            self.faulted = true;
+            return Err(LedgerCause::FinalSnapshotShapeMismatch);
+        }
+
+        Ok(ReservedProducerRow {
+            row: &mut state.rows[position],
+            remaining: &mut self.remaining[0],
+        })
+    }
+
     /// Admits only the next real leaf, retaining the same explicitly owned envelope.
     pub(crate) fn replenish_one<D: Copy>(
         &mut self,

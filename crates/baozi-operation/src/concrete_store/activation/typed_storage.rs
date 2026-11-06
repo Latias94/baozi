@@ -5,10 +5,10 @@ use std::convert::Infallible;
 use super::*;
 use crate::CapacityPlan;
 use crate::concrete_store::execution::map_execution_error;
-use crate::ledger::{WorkFrame, WorkLane, WorkLayout};
+use crate::ledger::{ReservedProducerRow, WorkFrame, WorkLane, WorkLayout};
 use crate::retained::{
-    ExclusiveOperationParts, ORDINARY_WORK_PERMIT_ABANDONED_CODE, RetainedWriterError,
-    SharedRetainedStorage, record_terminal_cause_with_precedence,
+    ExclusiveOperationParts, ExecutionOrdinaryStorage, ORDINARY_WORK_PERMIT_ABANDONED_CODE,
+    RetainedWriterError, SharedRetainedStorage, record_terminal_cause_with_precedence,
 };
 
 const STORAGE_BUILD_POLL_INTERVAL: usize = 256;
@@ -90,27 +90,27 @@ where
         })
     }
 
-    fn poll(&mut self) -> Result<(), StoreRuntimeError> {
-        self.parts.ordinary.poll.poll().map_err(|cause| {
-            record_terminal_cause_with_precedence(
-                self.parts.ordinary.failure,
-                PreparationFailureCode::from_control(&cause),
-            );
-            StoreRuntimeError::Control(cause)
-        })
-    }
-
-    fn complete_unit(&mut self) -> Result<(), StoreRuntimeError> {
-        self.frame
-            .complete_batch_with_outcome(&self.layout, &mut self.parts.work.work, [1])
-            .into_result()
+    fn borrow_work(&mut self) -> Result<RetainedStorageWorkLoan<'_, O, PP, U>, StoreRuntimeError> {
+        let row = self
+            .frame
+            .borrow_reserved_producer_row(&self.layout, &mut self.parts.work.work)
             .map_err(|cause| {
                 record_terminal_cause_with_precedence(
                     self.parts.ordinary.failure,
                     PreparationFailureCode::ledger(),
                 );
                 StoreRuntimeError::Ledger(cause)
-            })
+            })?;
+        Ok(RetainedStorageWorkLoan {
+            row,
+            ordinary: ExecutionOrdinaryStorage {
+                storage: self.parts.ordinary.storage.reborrow(),
+                poll: self.parts.ordinary.poll.reborrow(),
+                failure: self.parts.ordinary.failure,
+                debt: self.parts.ordinary.debt,
+                execution_state: self.parts.ordinary.execution_state,
+            },
+        })
     }
 
     fn resolve(&mut self) -> Result<(), StoreRuntimeError> {
@@ -139,6 +139,23 @@ where
     }
 }
 
+struct RetainedStorageWorkLoan<'loan, O, PP, U> {
+    row: ReservedProducerRow<'loan, StoreDimensionKey>,
+    ordinary: ExecutionOrdinaryStorage<'loan, O, StorePhaseKey, PP, U, StoreDimensionKey>,
+}
+
+impl<O, PP, U> RetainedStorageWorkLoan<'_, O, PP, U> {
+    fn poll(&mut self) -> Result<(), StoreRuntimeError> {
+        self.ordinary.poll.poll().map_err(|cause| {
+            record_terminal_cause_with_precedence(
+                self.ordinary.failure,
+                PreparationFailureCode::from_control(&cause),
+            );
+            StoreRuntimeError::Control(cause)
+        })
+    }
+}
+
 /// One admitted typed-table copy. Each normally returned action completes one work unit.
 pub struct CanonicalRetainedStorageBuildControl<'a, O, PP, U>
 where
@@ -146,7 +163,7 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    work: Option<RetainedStorageWorkHost<'a, O, PP, U>>,
+    work: Option<RetainedStorageWorkLoan<'a, O, PP, U>>,
     strings_remaining: u64,
     sticky: Option<StoreRuntimeError>,
     since_poll: usize,
@@ -167,7 +184,7 @@ where
             self.sticky = Some(cause.clone());
             return Err(cause);
         };
-        if work.frame.remaining[0] == 0 {
+        if work.row.remaining() == 0 {
             let cause = StoreRuntimeError::ObservedWorkExceedsAdmitted;
             self.sticky = Some(cause.clone());
             return Err(cause);
@@ -179,11 +196,7 @@ where
             return Err(cause);
         }
         let value = action();
-        if let Err(cause) = work.complete_unit() {
-            self.sticky = Some(cause.clone());
-            drop(value);
-            return Err(cause);
-        }
+        work.row.complete_unit();
         self.since_poll = (self.since_poll + 1) % STORAGE_BUILD_POLL_INTERVAL;
         Ok(value)
     }
@@ -205,37 +218,23 @@ where
         Ok(result)
     }
 
-    fn finish(
-        &mut self,
-        complete: bool,
-        first_fault: &mut Option<ActivationFirstFault>,
-    ) -> Result<(), StoreRuntimeError> {
+    fn finish(self, complete: bool, first_fault: &mut Option<ActivationFirstFault>) {
         if complete
             && first_fault.is_none()
             && (self.strings_remaining != 0
                 || self
                     .work
                     .as_ref()
-                    .is_some_and(|work| work.frame.remaining != [0]))
+                    .is_some_and(|work| work.row.remaining() != 0))
         {
             if let Some(work) = &self.work {
                 record_terminal_cause_with_precedence(
-                    work.parts.ordinary.failure,
+                    work.ordinary.failure,
                     PreparationFailureCode::product_graph(ORDINARY_WORK_PERMIT_ABANDONED_CODE),
                 );
             }
             note_later_contract::<()>(first_fault, Err(StoreRuntimeError::ObservedWorkIncomplete));
         }
-        if let Some(mut work) = self.work.take() {
-            if let Some(code) = first_fault
-                .as_ref()
-                .and_then(ActivationFirstFault::recoverable_code)
-            {
-                record_terminal_cause_with_precedence(work.parts.ordinary.failure, code);
-            }
-            note_later_contract(first_fault, work.resolve());
-        }
-        preserved_fault(first_fault).map_or(Ok(()), Err)
     }
 }
 
@@ -406,7 +405,7 @@ where
                 return Err(cause.into());
             }
         };
-        let observed = match if work == 0 {
+        let mut observed = match if work == 0 {
             Ok(None)
         } else {
             operation
@@ -434,8 +433,30 @@ where
                 return Err(cause.into());
             }
         };
+        let work = match observed
+            .as_mut()
+            .map(RetainedStorageWorkHost::borrow_work)
+            .transpose()
+        {
+            Ok(work) => work,
+            Err(cause) => {
+                note_later_contract::<()>(self.first_fault, Err(cause.clone()));
+                if let Some(mut host) = observed.take() {
+                    note_later_contract(self.first_fault, host.resolve());
+                }
+                drop(observed);
+                if !crate::retained::release_owned_storage(physical, prepared) {
+                    attribution.retain_fail_closed_in_place();
+                    note_later_contract::<()>(
+                        self.first_fault,
+                        Err(StoreRuntimeError::ConstructionInvariantUnverified),
+                    );
+                }
+                return Err(preserved_fault(self.first_fault).unwrap_or(cause).into());
+            }
+        };
         let mut control = CanonicalRetainedStorageBuildControl {
-            work: observed,
+            work,
             strings_remaining: semantic_bytes,
             sticky: None,
             since_poll: 0,
@@ -453,9 +474,19 @@ where
                 Err(StoreRuntimeError::ConstructionInvariantUnverified),
             );
         }
-        let completion = control.finish(matches!(&built, Ok(Ok(_))), self.first_fault);
-        drop(control);
-        if completion.is_ok() {
+        control.finish(matches!(&built, Ok(Ok(_))), self.first_fault);
+        if let Some(mut host) = observed.take() {
+            if let Some(code) = self
+                .first_fault
+                .as_ref()
+                .and_then(ActivationFirstFault::recoverable_code)
+            {
+                record_terminal_cause_with_precedence(host.parts.ordinary.failure, code);
+            }
+            note_later_contract(self.first_fault, host.resolve());
+        }
+        drop(observed);
+        if preserved_fault(self.first_fault).is_none() {
             let observed = self
                 .control_checkpoint()
                 .and_then(|mut checkpoint| checkpoint.poll());
@@ -653,9 +684,9 @@ mod tests {
                                             completed.set(completed.get() + 1);
                                         })?;
                                         let work = control.work.as_mut().unwrap();
-                                        assert_eq!(work.frame.remaining, [1]);
+                                        assert_eq!(work.row.remaining(), 1);
                                         // The real ledger has one pending unit; resolving two must fail.
-                                        work.frame.remaining[0] += 1;
+                                        *work.row.test_remaining_mut() += 1;
                                         frozen_polls.set(polls.load(Ordering::SeqCst));
                                         frozen_observations
                                             .set(observations.load(Ordering::SeqCst));
@@ -881,7 +912,7 @@ mod tests {
                         let cause = lane
                             .try_retain_storage::<DropProbe, Infallible, 0>([], 1, 0, |control| {
                                 control.run_unit(|| completed.set(completed.get() + 1))?;
-                                assert_eq!(control.work.as_ref().unwrap().frame.remaining, [0]);
+                                assert_eq!(control.work.as_ref().unwrap().row.remaining(), 0);
                                 cancelled.store(true, Ordering::SeqCst);
                                 frozen_polls.set(polls.load(Ordering::SeqCst));
                                 frozen_observations.set(observations.load(Ordering::SeqCst));
@@ -994,7 +1025,7 @@ mod tests {
                                         values.push(7);
                                         completed.set(completed.get() + 1);
                                     })?;
-                                    assert_eq!(control.work.as_ref().unwrap().frame.remaining, [1]);
+                                    assert_eq!(control.work.as_ref().unwrap().row.remaining(), 1);
                                     frozen_polls.set(polls.load(Ordering::SeqCst));
                                     frozen_observations.set(observations.load(Ordering::SeqCst));
                                     panic!(
