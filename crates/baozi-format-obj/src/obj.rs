@@ -111,7 +111,11 @@ pub(crate) fn parse<'region, 'op, 'session>(
         material: None,
         smoothing: ObjSmoothing::Unspecified,
     };
-    let mut scan_scratch = parser::TokenScanScratch::new();
+    let mut tokens = TokenBuffer {
+        values: exec.metered_vec(ImportStorageClass::FormatNormalization, "obj-tokens"),
+        comment_start: None,
+        scan_scratch: parser::TokenScanScratch::new(),
+    };
 
     let record_work = children.bind_group([ImportWorkClass::Records])?;
     let token_work = parser::TokenWorkLayouts::bind(children)?;
@@ -127,10 +131,10 @@ pub(crate) fn parse<'region, 'op, 'session>(
         parser.parse_line(
             children,
             &token_work,
-            &mut scan_scratch,
             recoveries,
             &line,
             line_number,
+            &mut tokens,
         )?;
         #[cfg(test)]
         crate::control_tests::face_completed(parser.parsed.faces.len());
@@ -151,36 +155,31 @@ struct ObjParser<'op, 'session> {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Token<'line> {
-    text: &'line str,
+struct Token<'input> {
+    text: &'input str,
     column: u32,
     start: usize,
     end: usize,
 }
 
-struct TokenBuffer<'session, 'line> {
-    values: MeteredVec<'session, Token<'line>>,
+struct TokenBuffer<'session, 'input> {
+    values: MeteredVec<'session, Token<'input>>,
     comment_start: Option<usize>,
+    scan_scratch: parser::TokenScanScratch,
 }
 
 impl<'op, 'session> ObjParser<'op, 'session> {
-    fn parse_line(
+    fn parse_line<'input>(
         &mut self,
         children: &mut ParseChildren<'_, 'op, 'session>,
         token_work: &parser::TokenWorkLayouts<'op>,
-        scan_scratch: &mut parser::TokenScanScratch,
         recoveries: &mut TextInputRecoveryTracker<'_, 'session>,
-        decoded_line: &TextInputLine<'_, '_>,
+        decoded_line: &TextInputLine<'input, '_>,
         line_number: u32,
+        tokens: &mut TokenBuffer<'session, 'input>,
     ) -> ParseResult<()> {
         let raw_line = decoded_line.text();
-        let tokens = tokenize(
-            children,
-            token_work,
-            scan_scratch,
-            decoded_line,
-            line_number,
-        )?;
+        tokenize(children, token_work, decoded_line, line_number, tokens)?;
         let token_values = tokens.values.as_slice();
         let allowed_value = token_values.first().and_then(|first| match first.text {
             "o" | "g" | "usemtl" | "mtllib" => trailing_token_range(token_values),
@@ -422,23 +421,24 @@ fn parse_smoothing_group(
     Ok(NonZeroU32::new(group).map_or(ObjSmoothing::Off, ObjSmoothing::Group))
 }
 
-fn tokenize<'op, 'session, 'line>(
+fn tokenize<'op, 'session, 'input>(
     children: &mut ParseChildren<'_, 'op, 'session>,
     token_work: &parser::TokenWorkLayouts<'op>,
-    scan_scratch: &mut parser::TokenScanScratch,
-    decoded_line: &'line TextInputLine<'_, '_>,
+    decoded_line: &TextInputLine<'input, '_>,
     line_number: u32,
-) -> ParseResult<TokenBuffer<'session, 'line>> {
+    tokens: &mut TokenBuffer<'session, 'input>,
+) -> ParseResult<()> {
+    let TokenBuffer {
+        values,
+        comment_start,
+        scan_scratch,
+    } = tokens;
+    values.truncate(0);
+    *comment_start = None;
     let line = decoded_line.text();
-    let mut tokens = TokenBuffer {
-        values: children
-            .services()?
-            .metered_vec(ImportStorageClass::FormatNormalization, "obj-tokens"),
-        comment_start: None,
-    };
 
     let errors = children.error_view();
-    tokens.comment_start = parser::scan_token_ranges(
+    *comment_start = parser::scan_token_ranges(
         children,
         &token_work.scan,
         scan_scratch,
@@ -463,21 +463,21 @@ fn tokenize<'op, 'session, 'line>(
             push_token(
                 exec,
                 &token_work.tokens,
-                &mut tokens,
+                values,
                 line,
                 token_start,
                 token_end,
             )
         },
     )?;
-    Ok(tokens)
+    Ok(())
 }
 
-fn push_token<'op, 'session, 'line>(
+fn push_token<'op, 'session, 'input>(
     children: &mut ParseChildren<'_, 'op, 'session>,
     token_work: &ParseWorkLayout<'op, 2>,
-    tokens: &mut TokenBuffer<'session, 'line>,
-    line: &'line str,
+    tokens: &mut MeteredVec<'session, Token<'input>>,
+    line: &'input str,
     start: usize,
     end: usize,
 ) -> ParseResult<()> {
@@ -494,7 +494,7 @@ fn push_token<'op, 'session, 'line>(
                 .and_then(|column| u32::try_from(column).ok())
                 .ok_or_else(|| errors.resource_limit_exceeded("line-columns", u64::MAX))?;
             storage.push_vec(
-                &mut tokens.values,
+                tokens,
                 Token {
                     text,
                     column,

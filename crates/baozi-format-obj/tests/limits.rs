@@ -789,6 +789,169 @@ fn shared_mtl_layouts_reject_later_token_bytes_before_numeric_interpretation() -
 }
 
 #[test]
+fn document_token_scratch_preserves_later_recovery_and_exact_live_limits() -> TestResult<()> {
+    let material_obj = "mtllib palette.mtl\nusemtl recovered\u{fffd}\n\
+v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+    for material_document in [false, true] {
+        let mut document = format!("unknown {}# ignored ", "x ".repeat(256)).into_bytes();
+        document.extend_from_slice(b"\x80\n\n# ignored \x80\n");
+        document.extend_from_slice(if material_document {
+            b"newmtl recovered"
+        } else {
+            b"o recovered"
+        });
+        let semantic_offset = u64::try_from(document.len())?;
+        document.push(0xff);
+        document.extend_from_slice(if material_document {
+            b"\nKd 0.25 0.5 1\n"
+        } else {
+            b"\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"
+        });
+        let (obj, mtl, recovery_source) = if material_document {
+            (material_obj.as_bytes(), document.as_slice(), "palette.mtl")
+        } else {
+            (document.as_slice(), &[][..], "token-scratch.obj")
+        };
+        let run = |limits| {
+            import_assets_result_with_text_policy_and_control(
+                "token-scratch.obj",
+                [("token-scratch.obj", obj), ("palette.mtl", mtl)],
+                limits,
+                false,
+                Some(
+                    ObjImportOptions::default()
+                        .with_text_decoding_mode(ObjTextDecodingMode::ReplaceInvalidUtf8),
+                ),
+                ConformancePolicy::AllowDeclaredRecovery,
+                true,
+                ImportOperationControl::default(),
+            )
+        };
+        let baseline = expected_success(run(ResourceLimits::default())?);
+        let exact_peak = baseline.ledger().peak_live_bytes();
+        assert!(exact_peak > 0);
+        let mut exact = ResourceLimits::default();
+        exact.max_live_bytes = exact_peak;
+        let exact_report = expected_success(run(exact)?);
+        assert_eq!(exact_report.ledger().peak_live_bytes(), exact_peak);
+        let expected_codes = [
+            if material_document {
+                "obj.mtl_unknown_statement"
+            } else {
+                "obj.unknown_statement"
+            },
+            "obj.invalid_utf8_replaced",
+        ];
+
+        for report in [&baseline, &exact_report] {
+            assert_eq!(report.loss_evidence().len(), 1);
+            let range = report.loss_evidence()[0].raw_range().unwrap();
+            assert_eq!(
+                (range.start(), range.end()),
+                (semantic_offset, semantic_offset + 1)
+            );
+            assert_eq!(report.diagnostics().len(), 2);
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .map(|diagnostic| diagnostic.code().as_str())
+                    .eq(expected_codes)
+            );
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .all(|diagnostic| diagnostic.source().as_str() == recovery_source)
+            );
+            let diagnostic = &report.diagnostics()[1];
+            assert_eq!(diagnostic.byte_range(), Some(range));
+            let scene = report.scene();
+            assert_eq!(scene.mesh_count(), 1);
+            let mesh = scene.meshes().next().unwrap();
+            if material_document {
+                let material = mesh
+                    .primitives()
+                    .next()
+                    .unwrap()
+                    .authored_material()
+                    .unwrap();
+                assert_eq!(material.name(), Some("recovered\u{fffd}"));
+            } else {
+                assert_eq!(mesh.name(), Some("recovered\u{fffd}"));
+            }
+            assert_eq!(report.ledger().current_live_bytes(), 0);
+            assert_eq!(report.ledger().active_reservations(), 0);
+        }
+
+        let mut excess = ResourceLimits::default();
+        excess.max_live_bytes = exact_peak - 1;
+        let failure = expected_failure(run(excess)?);
+        assert_live_limit(&failure, exact_peak - 1);
+        assert_eq!(failure.ledger().active_reservations(), 0);
+        assert_eq!(failure.ledger().committed_canonical_members(), 0);
+
+        let token_count = baseline
+            .ledger()
+            .dimension(ImportDimension::Tokens)
+            .unwrap()
+            .consumed();
+        let expected_tokens = if material_document { 283 } else { 275 };
+        assert_eq!(token_count, expected_tokens);
+        let mut token_limit = ResourceLimits::default();
+        token_limit.max_tokens = token_count - 1;
+        let failure = expected_failure(run(token_limit)?);
+        assert_ledger_limit(&failure, ImportDimension::Tokens);
+        for (dimension, attempted, consumed) in [
+            (
+                ImportDimension::Tokens,
+                expected_tokens,
+                expected_tokens - 1,
+            ),
+            (
+                ImportDimension::Records,
+                if material_document { 11 } else { 8 },
+                if material_document { 11 } else { 8 },
+            ),
+            (ImportDimension::Vertices, 3, 3),
+            (
+                ImportDimension::Faces,
+                u64::from(material_document),
+                u64::from(material_document),
+            ),
+        ] {
+            let snapshot = failure.ledger().dimension(dimension).unwrap();
+            assert_eq!(snapshot.attempted(), attempted, "{dimension:?}");
+            assert_eq!(snapshot.consumed(), consumed, "{dimension:?}");
+        }
+        assert_eq!(failure.loss_evidence().len(), 1);
+        let range = failure.loss_evidence()[0].raw_range().unwrap();
+        assert_eq!(
+            (range.start(), range.end()),
+            (semantic_offset, semantic_offset + 1)
+        );
+        assert!(
+            failure
+                .diagnostics()
+                .iter()
+                .map(|diagnostic| diagnostic.code().as_str())
+                .eq(expected_codes)
+        );
+        assert!(
+            failure
+                .diagnostics()
+                .iter()
+                .all(|diagnostic| diagnostic.source().as_str() == recovery_source)
+        );
+        assert_eq!(failure.diagnostics()[1].byte_range(), Some(range));
+        assert_eq!(failure.ledger().current_live_bytes(), 0);
+        assert_eq!(failure.ledger().active_reservations(), 0);
+        assert_eq!(failure.ledger().committed_canonical_members(), 0);
+    }
+    Ok(())
+}
+
+#[test]
 fn repeated_texture_replacement_does_not_accumulate_live_reservations() -> TestResult<()> {
     const REPLACEMENTS: usize = 64;
     const MAP_LINE: &str = "map_Kd textures/diffuse.png\n";

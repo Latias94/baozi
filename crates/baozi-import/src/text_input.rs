@@ -574,12 +574,16 @@ pub struct TextInputLine<'input, 'scope> {
     scope: PhantomData<&'scope ()>,
 }
 
-impl<'scope> TextInputLine<'_, 'scope> {
+impl<'input, 'scope> TextInputLine<'input, 'scope> {
     pub const fn number(&self) -> u64 {
         self.number
     }
 
-    pub const fn text(&self) -> &str {
+    /// Returns the decoded line text borrowed from the conformed input.
+    ///
+    /// The slice remains valid for the input borrow `'input`, even after this line view is
+    /// dropped. It cannot outlive the conformed input.
+    pub const fn text(&self) -> &'input str {
         self.text
     }
 
