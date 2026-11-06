@@ -23,8 +23,8 @@ const COMPARISONS_BETWEEN_POLLS: u64 = 64;
 #[cfg(test)]
 mod tests;
 
-// Each original composite comparison remains one WorkUnit. Production callers compare only
-// fixed owner/source ordinals and validated NamespacedName keys of at most 64 ASCII bytes.
+// Each comparison is one WorkUnit. Production callers compare fixed owner/entry ordinals
+// and validated NamespacedName keys of at most 64 ASCII bytes.
 struct ProfileComparisonWork<'meter, 'borrow, 'frame, 'ctx, 'op, 'session> {
     work: &'meter mut ParseParser<'borrow, 'frame, 'ctx, 'op, 'session, 1, true>,
     comparisons_until_poll: u64,
@@ -68,17 +68,69 @@ pub(super) struct SelectedSource<'scope> {
     _storage: MeteredOpaqueAllowance<'scope>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct OwnerSourceLink {
-    pub(super) owner: ProfileOwner,
-    pub(super) source: SourceEntityId,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct SelectedEntryOrdinal(usize);
+
+#[derive(Clone, Copy)]
+struct OwnerSourceRange {
+    owner: ProfileOwner,
+    start: usize,
+    length: usize,
+}
+
+pub(super) struct OwnerSourceRun<'scope> {
+    owner: Option<ProfileOwner>,
+    ordinals: MeteredVec<'scope, SelectedEntryOrdinal>,
+}
+
+impl<'scope> OwnerSourceRun<'scope> {
+    pub(super) fn new(ctx: &mut ParseRoot<'_, '_, 'scope>) -> Result<Self> {
+        Ok(Self {
+            owner: None,
+            ordinals: ctx.services()?.metered_vec(
+                ImportStorageClass::FormatNormalization,
+                "gltf-selected-source-owner-scratch",
+            ),
+        })
+    }
+
+    fn order(&mut self, ctx: &mut ParseRoot<'_, '_, '_>) -> Result<()> {
+        ctx.poll()?;
+        let group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+        if self.ordinals.len() > 1 {
+            ctx.child(&group, [0], |ledger_work| {
+                let mut work = ProfileComparisonWork::new(ledger_work);
+                #[cfg(test)]
+                tests::comparison_scope(tests::ComparisonSite::RunSort);
+                self.ordinals
+                    .try_sort_unstable_by(|left, right| work.run(|| left.cmp(right)))
+            })?;
+        }
+        ctx.poll()?;
+        let retained = if self.ordinals.len() > 1 {
+            ctx.child(&group, [0], |ledger_work| {
+                let mut work = ProfileComparisonWork::new(ledger_work);
+                #[cfg(test)]
+                tests::comparison_scope(tests::ComparisonSite::RunDedup);
+                self.ordinals
+                    .try_partition_dedup_by(|left, right| work.run(|| left == right))
+            })?
+        } else {
+            self.ordinals.len()
+        };
+        ctx.poll()?;
+        self.ordinals.truncate(retained);
+        Ok(())
+    }
 }
 
 /// Only selected declarations survive normalization. The session owns the primary snapshot;
 /// this inventory owns the locators and their admitted allocations until authoring completes.
 pub(super) struct SelectedSourceProfile<'scope> {
     entries: MeteredVec<'scope, SelectedSource<'scope>>,
-    links: MeteredVec<'scope, OwnerSourceLink>,
+    ordinals: MeteredVec<'scope, SelectedEntryOrdinal>,
+    owners: MeteredVec<'scope, OwnerSourceRange>,
+    finished: bool,
     extras: MeteredVec<'scope, SourceExtras>,
 }
 
@@ -157,10 +209,15 @@ impl<'scope> SelectedSourceProfile<'scope> {
         ctx.poll()?;
         let profile = Self {
             entries,
-            links: ctx.services()?.metered_vec(
+            ordinals: ctx.services()?.metered_vec(
                 ImportStorageClass::FormatNormalization,
-                "gltf-selected-source-owner-links",
+                "gltf-selected-source-owner-ordinals",
             ),
+            owners: ctx.services()?.metered_vec(
+                ImportStorageClass::FormatNormalization,
+                "gltf-selected-source-owner-ranges",
+            ),
+            finished: false,
             extras,
         };
         profile.required(ctx, DOCUMENT)?;
@@ -172,7 +229,7 @@ impl<'scope> SelectedSourceProfile<'scope> {
     }
 
     pub(super) fn link_count(&self) -> usize {
-        self.links.len()
+        self.ordinals.len()
     }
 
     pub(super) fn extras(&self) -> &[SourceExtras] {
@@ -184,14 +241,30 @@ impl<'scope> SelectedSourceProfile<'scope> {
         ctx: &mut ParseRoot<'_, '_, '_>,
         id: SourceEntityId,
     ) -> Result<&SelectedSource<'scope>> {
+        let ordinal = self.required_ordinal(ctx, id)?;
+        self.source(ctx, ordinal)
+    }
+
+    fn find_ordinal(
+        &self,
+        ctx: &mut ParseRoot<'_, '_, '_>,
+        id: SourceEntityId,
+    ) -> Result<Option<SelectedEntryOrdinal>> {
         lookup(ctx, self.entries.len(), 1, || {
             self.entries
                 .as_slice()
                 .binary_search_by_key(&id, |source| source.entity.id)
                 .ok()
-                .and_then(|index| self.entries.as_slice().get(index))
-        })?
-        .ok_or_else(|| {
+                .map(SelectedEntryOrdinal)
+        })
+    }
+
+    fn required_ordinal(
+        &self,
+        ctx: &mut ParseRoot<'_, '_, '_>,
+        id: SourceEntityId,
+    ) -> Result<SelectedEntryOrdinal> {
+        self.find_ordinal(ctx, id)?.ok_or_else(|| {
             ContentError::from(GltfFailure::internal(
                 "selected glTF owner has no admitted source identity",
             ))
@@ -199,43 +272,181 @@ impl<'scope> SelectedSourceProfile<'scope> {
     }
 
     pub(super) fn link(
-        &mut self,
+        &self,
         ctx: &mut ParseRoot<'_, '_, 'scope>,
+        run: &mut OwnerSourceRun<'scope>,
         owner: ProfileOwner,
         source: SourceEntityId,
     ) -> Result<()> {
+        let ordinal = self.required_ordinal(ctx, source)?;
+        run.ordinals.try_reserve(&mut ctx.services()?, 1)?;
         let layout = ctx.bind_group([ImportWorkClass::WorkUnits])?;
-        let link = ctx.child(&layout, [1], |child| {
+        ctx.child(&layout, [1], |child| {
             child.run([1], || {
-                Ok::<_, baozi_import::ParseFailure>(OwnerSourceLink { owner, source })
+                if self.finished || run.owner.is_some_and(|active| active != owner) {
+                    return Err(GltfFailure::internal("glTF source owner run is not open").into());
+                }
+                run.ordinals.try_push_reserved(ordinal)?;
+                run.owner = Some(owner);
+                Ok::<_, ContentError>(())
+            })
+        })
+    }
+
+    pub(super) fn complete_owner(
+        &mut self,
+        ctx: &mut ParseRoot<'_, '_, 'scope>,
+        run: &mut OwnerSourceRun<'scope>,
+        owner: ProfileOwner,
+    ) -> Result<()> {
+        ctx.poll()?;
+        let group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+        ctx.child(&group, [1], |child| {
+            child.run([1], || {
+                if self.finished || run.owner != Some(owner) || run.ordinals.is_empty() {
+                    return Err(GltfFailure::internal("glTF source owner run is incomplete").into());
+                }
+                Ok::<_, ContentError>(())
             })
         })?;
-        self.required(ctx, source)?;
-        self.links.try_push(&mut ctx.services()?, link)?;
+        run.order(ctx)?;
+        let range = ctx.child(&group, [1], |child| {
+            child.run([1], || {
+                let range = OwnerSourceRange {
+                    owner,
+                    start: self.ordinals.len(),
+                    length: run.ordinals.len(),
+                };
+                range.start.checked_add(range.length).ok_or_else(|| {
+                    GltfFailure::internal("glTF source owner range exceeds usize")
+                })?;
+                Ok::<_, ContentError>(range)
+            })
+        })?;
+        self.ordinals
+            .try_reserve(&mut ctx.services()?, range.length)?;
+        self.owners.try_reserve(&mut ctx.services()?, 1)?;
+        ctx.child(&group, [0], |work| {
+            work.poll()?;
+            for (index, &ordinal) in run.ordinals.as_slice().iter().enumerate() {
+                work.replenish(1)?;
+                work.run([1], || {
+                    if self.entries.as_slice().get(ordinal.0).is_none() {
+                        return Err(
+                            GltfFailure::internal("glTF source entry ordinal is invalid").into(),
+                        );
+                    }
+                    self.ordinals.try_push_reserved(ordinal)?;
+                    Ok::<_, ContentError>(())
+                })?;
+                #[cfg(test)]
+                tests::ordinal_transferred();
+                if (index + 1) % COMPARISONS_BETWEEN_POLLS as usize == 0 {
+                    work.poll()?;
+                }
+            }
+            work.poll()?;
+            Ok::<_, ContentError>(())
+        })?;
+        ctx.child(&group, [1], |child| {
+            child.run([1], || {
+                self.owners.try_push_reserved(range)?;
+                run.ordinals.truncate(0);
+                run.owner = None;
+                Ok::<_, ContentError>(())
+            })
+        })?;
+        ctx.poll()?;
         Ok(())
     }
 
-    pub(super) fn finish(&mut self, ctx: &mut ParseRoot<'_, '_, '_>) -> Result<()> {
+    pub(super) fn finish(
+        &mut self,
+        ctx: &mut ParseRoot<'_, '_, '_>,
+        ordinary: &OwnerSourceRun<'_>,
+        suspended: &OwnerSourceRun<'_>,
+    ) -> Result<()> {
         ctx.poll()?;
-        if self.links.len() > 1 {
-            let group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+        let group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+        ctx.child(&group, [1], |child| {
+            child.run([1], || {
+                if self.finished
+                    || ordinary.owner.is_some()
+                    || suspended.owner.is_some()
+                    || !ordinary.ordinals.is_empty()
+                    || !suspended.ordinals.is_empty()
+                {
+                    return Err(
+                        GltfFailure::internal("glTF source owner runs are incomplete").into(),
+                    );
+                }
+                Ok::<_, ContentError>(())
+            })
+        })?;
+        let covered = ctx.child(&group, [0], |work| {
+            work.poll()?;
+            let mut covered = 0;
+            for (index, range) in self.owners.as_slice().iter().enumerate() {
+                work.replenish(1)?;
+                covered = work.run([1], || -> Result<_> {
+                    range
+                        .start
+                        .checked_add(range.length)
+                        .filter(|&end| {
+                            range.start == covered
+                                && range.length != 0
+                                && end <= self.ordinals.len()
+                        })
+                        .ok_or_else(|| {
+                            GltfFailure::internal("glTF source owner range is invalid").into()
+                        })
+                })?;
+                if (index + 1) % COMPARISONS_BETWEEN_POLLS as usize == 0 {
+                    work.poll()?;
+                }
+            }
+            work.poll()?;
+            Ok::<_, ContentError>(covered)
+        })?;
+        ctx.child(&group, [1], |child| {
+            child.run([1], || {
+                if covered != self.ordinals.len() {
+                    return Err(
+                        GltfFailure::internal("glTF source owner ranges are incomplete").into(),
+                    );
+                }
+                Ok::<_, ContentError>(())
+            })
+        })?;
+        if self.owners.len() > 1 {
             ctx.child(&group, [0], |ledger_work| {
                 let mut work = ProfileComparisonWork::new(ledger_work);
                 #[cfg(test)]
-                tests::comparison_scope(tests::ComparisonSite::LinkSort);
-                self.links
-                    .try_sort_unstable_by(|left, right| work.run(|| left.cmp(right)))
+                tests::comparison_scope(tests::ComparisonSite::DirectorySort);
+                self.owners
+                    .try_sort_unstable_by(|left, right| work.run(|| left.owner.cmp(&right.owner)))
             })?;
-            let retained = ctx.child(&group, [0], |ledger_work| {
-                let mut work = ProfileComparisonWork::new(ledger_work);
-                #[cfg(test)]
-                tests::comparison_scope(tests::ComparisonSite::LinkDedup);
-                self.links
-                    .try_partition_dedup_by(|left, right| work.run(|| left == right))
-            })?;
-            self.links.truncate(retained);
         }
         ctx.poll()?;
+        ctx.child(&group, [0], |ledger_work| {
+            ledger_work.poll()?;
+            {
+                let mut work = ProfileComparisonWork::new(ledger_work);
+                #[cfg(test)]
+                tests::comparison_scope(tests::ComparisonSite::OwnerUnique);
+                for pair in self.owners.as_slice().windows(2) {
+                    if work.run(|| pair[0].owner == pair[1].owner)? {
+                        return Err(
+                            GltfFailure::internal("glTF source owner was completed twice").into(),
+                        );
+                    }
+                }
+            }
+            ledger_work.poll()?;
+            Ok::<_, ContentError>(())
+        })?;
+        ctx.poll()?;
+        self.finished = true;
         Ok(())
     }
 
@@ -243,18 +454,47 @@ impl<'scope> SelectedSourceProfile<'scope> {
         &self,
         ctx: &mut ParseRoot<'_, '_, '_>,
         owner: ProfileOwner,
-    ) -> Result<&[OwnerSourceLink]> {
-        let links = self.links.as_slice();
-        let (start, end) = lookup(ctx, links.len(), 2, || {
-            (
-                links.partition_point(|link| link.owner < owner),
-                links.partition_point(|link| link.owner <= owner),
-            )
-        })?;
-        if start == end {
-            return Err(GltfFailure::internal("glTF canonical owner has no source mapping").into());
-        }
-        Ok(&links[start..end])
+    ) -> Result<&[SelectedEntryOrdinal]> {
+        let range = lookup(ctx, self.owners.len(), 1, || {
+            self.owners
+                .as_slice()
+                .binary_search_by_key(&owner, |range| range.owner)
+                .ok()
+                .and_then(|index| self.owners.as_slice().get(index))
+        })?
+        .ok_or_else(|| GltfFailure::internal("glTF canonical owner has no source mapping"))?;
+        let group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+        ctx.child(&group, [1], |child| {
+            child.run([1], || {
+                if !self.finished || range.length == 0 {
+                    return Err(
+                        GltfFailure::internal("glTF source owner directory is incomplete").into(),
+                    );
+                }
+                range
+                    .start
+                    .checked_add(range.length)
+                    .and_then(|end| self.ordinals.as_slice().get(range.start..end))
+                    .ok_or_else(|| {
+                        GltfFailure::internal("glTF source owner range is invalid").into()
+                    })
+            })
+        })
+    }
+
+    pub(super) fn source(
+        &self,
+        ctx: &mut ParseRoot<'_, '_, '_>,
+        ordinal: SelectedEntryOrdinal,
+    ) -> Result<&SelectedSource<'scope>> {
+        let group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+        ctx.child(&group, [1], |child| {
+            child.run([1], || {
+                self.entries.as_slice().get(ordinal.0).ok_or_else(|| {
+                    GltfFailure::internal("glTF source entry ordinal is invalid").into()
+                })
+            })
+        })
     }
 
     /// Resource sources retain their existing indices. The document reuses source zero; other
@@ -266,20 +506,38 @@ impl<'scope> SelectedSourceProfile<'scope> {
         resource_count: usize,
         id: SourceEntityId,
     ) -> Result<u32> {
-        let index = lookup(ctx, self.entries.len(), 1, || {
-            self.entries
-                .as_slice()
-                .binary_search_by_key(&id, |source| source.entity.id)
-        })?
-        .map_err(|_| GltfFailure::internal("glTF source mapping references a missing identity"))?;
-        if id == DOCUMENT {
-            return Ok(0);
-        }
-        resource_count
-            .checked_add(index)
-            .and_then(|index| index.checked_sub(1))
-            .and_then(|index| u32::try_from(index).ok())
-            .ok_or_else(|| GltfFailure::internal("glTF source identity count exceeds u32").into())
+        let ordinal = self.find_ordinal(ctx, id)?.ok_or_else(|| {
+            GltfFailure::internal("glTF source mapping references a missing identity")
+        })?;
+        self.ordinal_source_index(ctx, resource_count, ordinal)
+    }
+
+    pub(super) fn ordinal_source_index(
+        &self,
+        ctx: &mut ParseRoot<'_, '_, '_>,
+        resource_count: usize,
+        ordinal: SelectedEntryOrdinal,
+    ) -> Result<u32> {
+        let group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+        ctx.child(&group, [1], |child| {
+            child.run([1], || {
+                if ordinal.0 >= self.entries.len() {
+                    return Err(
+                        GltfFailure::internal("glTF source entry ordinal is invalid").into(),
+                    );
+                }
+                if ordinal.0 == 0 {
+                    return Ok(0);
+                }
+                resource_count
+                    .checked_add(ordinal.0)
+                    .and_then(|index| index.checked_sub(1))
+                    .and_then(|index| u32::try_from(index).ok())
+                    .ok_or_else(|| {
+                        GltfFailure::internal("glTF source identity count exceeds u32").into()
+                    })
+            })
+        })
     }
 }
 
@@ -383,6 +641,8 @@ pub(super) fn associate<'session>(
     model: &mut NormalizedGltf<'session>,
 ) -> Result<()> {
     let profile = &mut model.sources;
+    let mut ordinary = OwnerSourceRun::new(ctx)?;
+    let mut suspended = OwnerSourceRun::new(ctx)?;
     let root = document.tables();
     let scene_source = prepared
         .node_graph
@@ -391,8 +651,15 @@ pub(super) fn associate<'session>(
         .map_or(DOCUMENT, |index| {
             entity(SourceEntityKind::Scene, None, index)
         });
-    profile.link(ctx, ProfileOwner::Scene, scene_source)?;
-    profile.link(ctx, ProfileOwner::SyntheticRoot, scene_source)?;
+    profile.link(ctx, &mut ordinary, ProfileOwner::Scene, scene_source)?;
+    profile.complete_owner(ctx, &mut ordinary, ProfileOwner::Scene)?;
+    profile.link(
+        ctx,
+        &mut ordinary,
+        ProfileOwner::SyntheticRoot,
+        scene_source,
+    )?;
+    profile.complete_owner(ctx, &mut ordinary, ProfileOwner::SyntheticRoot)?;
 
     let work_group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
     for (index, id) in model.nodes.node_ids.as_slice().iter().enumerate() {
@@ -402,9 +669,11 @@ pub(super) fn associate<'session>(
         if let Some(id) = id {
             profile.link(
                 ctx,
+                &mut ordinary,
                 ProfileOwner::Node(*id),
                 entity(SourceEntityKind::Node, None, index),
             )?;
+            profile.complete_owner(ctx, &mut ordinary, ProfileOwner::Node(*id))?;
         }
     }
     for (index, id) in model.cameras.camera_ids.as_slice().iter().enumerate() {
@@ -414,9 +683,11 @@ pub(super) fn associate<'session>(
         if let Some(id) = id {
             profile.link(
                 ctx,
+                &mut ordinary,
                 ProfileOwner::Camera(id.index()),
                 entity(SourceEntityKind::Camera, None, index),
             )?;
+            profile.complete_owner(ctx, &mut ordinary, ProfileOwner::Camera(id.index()))?;
         }
     }
     for (index, id) in model.lights.light_ids.as_slice().iter().enumerate() {
@@ -426,9 +697,11 @@ pub(super) fn associate<'session>(
         if let Some(id) = id {
             profile.link(
                 ctx,
+                &mut ordinary,
                 ProfileOwner::Light(id.index()),
                 entity(SourceEntityKind::Light, None, index),
             )?;
+            profile.complete_owner(ctx, &mut ordinary, ProfileOwner::Light(id.index()))?;
         }
     }
     for (index, instance) in model.nodes.mesh_instances.as_slice().iter().enumerate() {
@@ -439,6 +712,7 @@ pub(super) fn associate<'session>(
         )?);
         profile.link(
             ctx,
+            &mut ordinary,
             owner,
             entity(SourceEntityKind::Node, None, instance.source_node_index),
         )?;
@@ -449,9 +723,11 @@ pub(super) fn associate<'session>(
             .ok_or_else(|| gltf_parse_error("glTF instance source mesh is missing"))?;
         profile.link(
             ctx,
+            &mut ordinary,
             owner,
             entity(SourceEntityKind::Mesh, None, mesh.value()),
         )?;
+        profile.complete_owner(ctx, &mut ordinary, owner)?;
     }
 
     for (index, id) in model.appearance.image_ids.as_slice().iter().enumerate() {
@@ -460,10 +736,16 @@ pub(super) fn associate<'session>(
         })?;
         let Some(id) = id else { continue };
         let owner = ProfileOwner::Image(id.index());
-        profile.link(ctx, owner, entity(SourceEntityKind::Image, None, index))?;
+        profile.link(
+            ctx,
+            &mut ordinary,
+            owner,
+            entity(SourceEntityKind::Image, None, index),
+        )?;
         if let Some(view) = root.images.get(index).and_then(|image| image.buffer_view) {
-            link_view(ctx, profile, root, owner, view.value())?;
+            link_view(ctx, profile, &mut ordinary, root, owner, view.value())?;
         }
+        profile.complete_owner(ctx, &mut ordinary, owner)?;
     }
     for (index, id) in model.appearance.sampler_ids.as_slice().iter().enumerate() {
         let id = ctx.child(&work_group, [1], |child| {
@@ -472,9 +754,11 @@ pub(super) fn associate<'session>(
         if let Some(id) = id {
             profile.link(
                 ctx,
+                &mut ordinary,
                 ProfileOwner::Sampler(id.index()),
                 entity(SourceEntityKind::Sampler, None, index),
             )?;
+            profile.complete_owner(ctx, &mut ordinary, ProfileOwner::Sampler(id.index()))?;
         }
     }
     for (index, id) in model.appearance.texture_ids.as_slice().iter().enumerate() {
@@ -483,7 +767,8 @@ pub(super) fn associate<'session>(
         })?;
         let Some(id) = id else { continue };
         let source = entity(SourceEntityKind::Texture, None, index);
-        profile.link(ctx, ProfileOwner::Texture(id.index()), source)?;
+        let owner = ProfileOwner::Texture(id.index());
+        profile.link(ctx, &mut ordinary, owner, source)?;
         if root
             .textures
             .get(index)
@@ -493,11 +778,22 @@ pub(super) fn associate<'session>(
                 .appearance
                 .default_sampler
                 .ok_or_else(|| gltf_parse_error("glTF implicit sampler source is missing"))?;
-            profile.link(ctx, ProfileOwner::Sampler(sampler.index()), source)?;
+            profile.link(
+                ctx,
+                &mut suspended,
+                ProfileOwner::Sampler(sampler.index()),
+                source,
+            )?;
         }
+        profile.complete_owner(ctx, &mut ordinary, owner)?;
+    }
+    if let Some(sampler) = model.appearance.default_sampler {
+        profile.complete_owner(ctx, &mut suspended, ProfileOwner::Sampler(sampler.index()))?;
     }
     if let Some(material) = model.appearance.default_material {
-        profile.link(ctx, ProfileOwner::Material(material.index()), DOCUMENT)?;
+        let owner = ProfileOwner::Material(material.index());
+        profile.link(ctx, &mut ordinary, owner, DOCUMENT)?;
+        profile.complete_owner(ctx, &mut ordinary, owner)?;
     }
     let mut binding_index = 0;
     for (index, id) in model.appearance.material_ids.as_slice().iter().enumerate() {
@@ -506,7 +802,9 @@ pub(super) fn associate<'session>(
         })?;
         let Some(id) = id else { continue };
         let source = entity(SourceEntityKind::Material, None, index);
-        profile.link(ctx, ProfileOwner::Material(id.index()), source)?;
+        let owner = ProfileOwner::Material(id.index());
+        profile.link(ctx, &mut ordinary, owner, source)?;
+        profile.complete_owner(ctx, &mut ordinary, owner)?;
         for binding in prepared
             .material_contracts
             .bindings(&mut ctx.services()?, index)?
@@ -521,8 +819,14 @@ pub(super) fn associate<'session>(
                 binding_index,
                 "gltf-source-binding",
             )?);
-            profile.link(ctx, owner, source)?;
-            profile.link(ctx, owner, entity(SourceEntityKind::Texture, None, texture))?;
+            profile.link(ctx, &mut ordinary, owner, source)?;
+            profile.link(
+                ctx,
+                &mut ordinary,
+                owner,
+                entity(SourceEntityKind::Texture, None, texture),
+            )?;
+            profile.complete_owner(ctx, &mut ordinary, owner)?;
             binding_index += 1;
         }
     }
@@ -567,7 +871,8 @@ pub(super) fn associate<'session>(
                 mesh_index,
                 "gltf-source-mesh",
             )?);
-            profile.link(ctx, argument_0, source)
+            profile.link(ctx, &mut ordinary, argument_0, source)?;
+            profile.complete_owner(ctx, &mut ordinary, argument_0)
         }?;
         mesh_index += 1;
         let mut width = 0;
@@ -588,7 +893,8 @@ pub(super) fn associate<'session>(
                 definition_index,
                 "gltf-source-morph-definition",
             )?);
-            profile.link(ctx, owner, source)?;
+            profile.link(ctx, &mut ordinary, owner, source)?;
+            profile.complete_owner(ctx, &mut ordinary, owner)?;
             definition_index += 1;
         }
         if mesh.primitives.len() != normalized.primitives.len() {
@@ -606,7 +912,7 @@ pub(super) fn associate<'session>(
                 primitive_index,
                 "gltf-source-primitive",
             )?);
-            profile.link(ctx, owner, source)?;
+            profile.link(ctx, &mut ordinary, owner, source)?;
             primitive_index += 1;
             // Includes the JOINTS/WEIGHTS inputs retained as influences rather than attributes.
             for accessor in primitive
@@ -615,8 +921,9 @@ pub(super) fn associate<'session>(
                 .copied()
                 .chain(primitive.indices)
             {
-                link_accessor(ctx, profile, root, owner, accessor.value())?;
+                link_accessor(ctx, profile, &mut ordinary, root, owner, accessor.value())?;
             }
+            profile.complete_owner(ctx, &mut ordinary, owner)?;
             for attribute in normalized.attributes.as_slice() {
                 let semantic = match &attribute.semantic {
                     AttributeSemantic::Position => json::mesh::Semantic::Positions,
@@ -639,8 +946,9 @@ pub(super) fn associate<'session>(
                     attribute_index,
                     "gltf-source-attribute",
                 )?);
-                profile.link(ctx, owner, source)?;
-                link_accessor(ctx, profile, root, owner, accessor.value())?;
+                profile.link(ctx, &mut ordinary, owner, source)?;
+                link_accessor(ctx, profile, &mut ordinary, root, owner, accessor.value())?;
+                profile.complete_owner(ctx, &mut ordinary, owner)?;
                 attribute_index += 1;
             }
             for target in primitive.targets.iter().flatten() {
@@ -659,8 +967,9 @@ pub(super) fn associate<'session>(
                         delta_index,
                         "gltf-source-morph-delta",
                     )?);
-                    profile.link(ctx, owner, source)?;
-                    link_accessor(ctx, profile, root, owner, accessor.value())?;
+                    profile.link(ctx, &mut ordinary, owner, source)?;
+                    link_accessor(ctx, profile, &mut ordinary, root, owner, accessor.value())?;
+                    profile.complete_owner(ctx, &mut ordinary, owner)?;
                     delta_index += 1;
                 }
             }
@@ -689,21 +998,28 @@ pub(super) fn associate<'session>(
             "gltf-source-skin",
         )?);
         skin_index += 1;
-        profile.link(ctx, owner, entity(SourceEntityKind::Skin, None, index))?;
+        profile.link(
+            ctx,
+            &mut ordinary,
+            owner,
+            entity(SourceEntityKind::Skin, None, index),
+        )?;
         let skin = root
             .skins
             .get(index)
             .ok_or_else(|| gltf_parse_error("glTF skin source is missing"))?;
         if let Some(accessor) = skin.inverse_bind_matrices {
-            link_accessor(ctx, profile, root, owner, accessor.value())?;
+            link_accessor(ctx, profile, &mut ordinary, root, owner, accessor.value())?;
         }
         for node in skin.joints.iter().copied().chain(skin.skeleton) {
             profile.link(
                 ctx,
+                &mut ordinary,
                 owner,
                 entity(SourceEntityKind::Node, None, node.value()),
             )?;
         }
+        profile.complete_owner(ctx, &mut ordinary, owner)?;
     }
 
     let mut clip_index = 0;
@@ -730,7 +1046,12 @@ pub(super) fn associate<'session>(
             "gltf-source-animation",
         )?);
         if selected {
-            profile.link(ctx, owner, entity(SourceEntityKind::Animation, None, index))?;
+            profile.link(
+                ctx,
+                &mut suspended,
+                owner,
+                entity(SourceEntityKind::Animation, None, index),
+            )?;
             clip_index += 1;
         }
         for (local_channel, channel) in animation.channels.iter().enumerate() {
@@ -759,8 +1080,15 @@ pub(super) fn associate<'session>(
                 .get(channel.sampler.value())
                 .ok_or_else(|| gltf_parse_error("glTF animation source sampler is missing"))?;
             // Omitted targets may contribute duration, but never receive a canonical channel owner.
-            profile.link(ctx, owner, sampler_id)?;
-            link_accessor(ctx, profile, root, owner, sampler.input.value())?;
+            profile.link(ctx, &mut suspended, owner, sampler_id)?;
+            link_accessor(
+                ctx,
+                profile,
+                &mut suspended,
+                root,
+                owner,
+                sampler.input.value(),
+            )?;
             if retained {
                 let owner = ProfileOwner::AnimationChannel(authoring_u32(
                     &mut ctx.services()?,
@@ -770,6 +1098,7 @@ pub(super) fn associate<'session>(
                 channel_index += 1;
                 profile.link(
                     ctx,
+                    &mut ordinary,
                     owner,
                     entity(
                         SourceEntityKind::AnimationChannel,
@@ -777,10 +1106,28 @@ pub(super) fn associate<'session>(
                         local_channel,
                     ),
                 )?;
-                profile.link(ctx, owner, sampler_id)?;
-                link_accessor(ctx, profile, root, owner, sampler.input.value())?;
-                link_accessor(ctx, profile, root, owner, sampler.output.value())?;
+                profile.link(ctx, &mut ordinary, owner, sampler_id)?;
+                link_accessor(
+                    ctx,
+                    profile,
+                    &mut ordinary,
+                    root,
+                    owner,
+                    sampler.input.value(),
+                )?;
+                link_accessor(
+                    ctx,
+                    profile,
+                    &mut ordinary,
+                    root,
+                    owner,
+                    sampler.output.value(),
+                )?;
+                profile.complete_owner(ctx, &mut ordinary, owner)?;
             }
+        }
+        if selected {
+            profile.complete_owner(ctx, &mut suspended, owner)?;
         }
     }
     if clip_index != model.animations.clip_count()
@@ -789,46 +1136,62 @@ pub(super) fn associate<'session>(
     {
         return Err(gltf_parse_error("glTF animation source map is incomplete"));
     }
-    profile.finish(ctx)
+    profile.finish(ctx, &ordinary, &suspended)
 }
 
 fn link_accessor<'session>(
     ctx: &mut ParseRoot<'_, '_, 'session>,
-    profile: &mut SelectedSourceProfile<'session>,
-    root: &json::Tables<'_>,
-    owner: ProfileOwner,
-    index: usize,
-) -> Result<()> {
-    profile.link(ctx, owner, entity(SourceEntityKind::Accessor, None, index))?;
-    let accessor = root
-        .accessors
-        .get(index)
-        .ok_or_else(|| gltf_parse_error("glTF source accessor is missing"))?;
-    if let Some(view) = accessor.buffer_view {
-        link_view(ctx, profile, root, owner, view.value())?;
-    }
-    if let Some(sparse) = &accessor.sparse {
-        link_view(
-            ctx,
-            profile,
-            root,
-            owner,
-            sparse.indices.buffer_view.value(),
-        )?;
-        link_view(ctx, profile, root, owner, sparse.values.buffer_view.value())?;
-    }
-    Ok(())
-}
-
-fn link_view<'session>(
-    ctx: &mut ParseRoot<'_, '_, 'session>,
-    profile: &mut SelectedSourceProfile<'session>,
+    profile: &SelectedSourceProfile<'session>,
+    run: &mut OwnerSourceRun<'session>,
     root: &json::Tables<'_>,
     owner: ProfileOwner,
     index: usize,
 ) -> Result<()> {
     profile.link(
         ctx,
+        run,
+        owner,
+        entity(SourceEntityKind::Accessor, None, index),
+    )?;
+    let accessor = root
+        .accessors
+        .get(index)
+        .ok_or_else(|| gltf_parse_error("glTF source accessor is missing"))?;
+    if let Some(view) = accessor.buffer_view {
+        link_view(ctx, profile, run, root, owner, view.value())?;
+    }
+    if let Some(sparse) = &accessor.sparse {
+        link_view(
+            ctx,
+            profile,
+            run,
+            root,
+            owner,
+            sparse.indices.buffer_view.value(),
+        )?;
+        link_view(
+            ctx,
+            profile,
+            run,
+            root,
+            owner,
+            sparse.values.buffer_view.value(),
+        )?;
+    }
+    Ok(())
+}
+
+fn link_view<'session>(
+    ctx: &mut ParseRoot<'_, '_, 'session>,
+    profile: &SelectedSourceProfile<'session>,
+    run: &mut OwnerSourceRun<'session>,
+    root: &json::Tables<'_>,
+    owner: ProfileOwner,
+    index: usize,
+) -> Result<()> {
+    profile.link(
+        ctx,
+        run,
         owner,
         entity(SourceEntityKind::BufferView, None, index),
     )?;
@@ -838,6 +1201,7 @@ fn link_view<'session>(
         .ok_or_else(|| gltf_parse_error("glTF source buffer view is missing"))?;
     profile.link(
         ctx,
+        run,
         owner,
         entity(SourceEntityKind::Buffer, None, view.buffer.value()),
     )

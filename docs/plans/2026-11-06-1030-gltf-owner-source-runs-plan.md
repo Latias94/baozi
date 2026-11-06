@@ -169,9 +169,57 @@ failure-prefix oracles, and identifies two bounded gaps: sparse Buffer declarati
 identity and rejection between ordinal/output and directory reservations. A test-only
 follow-up adds source assertions for both cases using existing probes, including the
 actual published sparse-source translation and a real charged-capacity calibration
-for directory denial. Its independent oracle review is pending. A Skin relation case
-still needs qualification through the existing integration fixture; its helper is not
-wired into the private unit module. Production source remains frozen during this
-follow-up. These are uncompiled sources and source-review conclusions, not executed test or
-performance results. Main retains the fixed ordinary workers until both platform
-measurement attempts are terminal; all subsequent builds use its existing F: target.
+for directory denial. Independent oracle review closes both at the source level.
+One test in the existing public Skin integration file then checks the complete ordered
+source/resource sequence for joints `[1, 3]` and `[3, 1]`, with skeleton 1 also a joint.
+It reuses the fixture directly; no helper module wiring or new framework is added.
+The selected source cut consequently includes that fifth test file. Independent Skin
+review confirms the literal expected relation but finds one stable-compilation defect:
+the public locator value is already `&str` and must use `starts_with` directly.
+
+Both fixed ordinary platform attempts end before integration into the current F:
+checkout on `optimize/gltf-owner-source-runs`. Formatting changes only the five selected
+files; all 967 other recorded Rust/Cargo inputs remain unchanged. Subsequent source
+freezes retain the exact corrections and every original failure:
+
+| Attempt | Actual result and correction |
+| --- | --- |
+| Focused 1, selected source 2 | Test compilation fails on Skin's unstable `str::as_str`; zero tests run. Correct the assertion to `value.starts_with(identity)`. |
+| Focused 2, selected source 3 | 536 tests run: 533 pass, three test-lifecycle failures. Negative fixtures catch a terminal child error and wrongly resume ordinary work in the same invocation. |
+| Targeted failed cases, selected source 4 | All three pass after giving each terminal rejection a fresh import and returning the original error. Overflow rejection moves out of the successful inventory/publication fixture into independent negative cases. |
+| Focused 3, selected source 4 | All 536 affected runtime tests pass (two slow, zero skips); strict Clippy then rejects three test-only `.err().expect()` expressions. |
+| Selected source 5 | Replace those three expressions with `expect_err`; all seven final gates pass. Production source is unchanged by every runtime/lint correction. |
+
+The independent lifecycle-test review verifies that every original invalid range,
+unfinished/duplicate owner, ordinal and index-overflow obligation is preserved by a
+real first-error witness. Each corrected failure returns its original content error
+after pure state assertions, without reopening a stopped parser. The existing runner
+checks zero live bytes/reservations and no publication. The shared successful inventory
+fixture now completes publication rather than continuing after deliberate rejection.
+This review is bounded to source 3-to-4 tests, not a new production or performance audit.
+
+Current source authority is
+`.git/baozi-review/performance-convergence/gltf-owner-source-runs-source-5.json`;
+final qualification is `gltf-owner-source-runs-final-qa-1/report.json` in the same
+directory. Earlier compile, runtime and lint receipts remain. All builds use the
+existing `F:/SourceCodes/Rust/baozi/target`, Rust 1.95.0, jobs1 and nextest threads1.
+The final receipt binds 972 stable before/after/current Rust/Cargo inputs, including
+the same five frozen source hashes. Its SHA-256 is
+`2ba3c6e4c6252fa3531283c4d571643350b1533953c72ec8e3d960d4c0e53589`.
+
+| Final selected-source serial gate | Actual result |
+| --- | --- |
+| Workspace nextest, all features | 3,637 passed (two slow); six existing manual skips |
+| Workspace doctests | 190 passed |
+| Workspace Clippy, all targets/features, `-D warnings` | Passed |
+| Asset-consumer nextest | 138 passed; one existing manual scale skip |
+| Asset-consumer strict Clippy | Passed |
+| Workspace and consumer formatting | Both passed |
+
+The full workspace run includes the sparse identity, partial reservation, fresh
+terminal-error, and public Skin-order/source-provenance oracles. The existing passing
+postprocess unwind test retains intentional panic stderr. This is Windows-host source
+qualification, not every feature combination, skipped manual fixture or wasm/new-host
+execution. Independent final receipt/source-association review remains separate.
+No performance, main integration or release approval follows from these passes.
+The original convergence goal remains active and release HOLD.

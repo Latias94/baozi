@@ -1,8 +1,10 @@
 mod common;
 
+use baozi_core::ProvenanceKindRef;
 use baozi_format_gltf::GltfFailureCode;
 use baozi_import::{
     ImportDimension, ImportTerminalCause, ImportTerminalFailureClass, SceneValidationError,
+    SourceObjectLocatorRef,
 };
 use common::{
     TestResult, assert_gltf_failure, expected_error, import_assets, import_assets_result,
@@ -37,6 +39,71 @@ fn imports_skinned_triangle_with_node_level_binding() -> TestResult<()> {
 
     assert!(diagnostics.is_empty());
     assert!(report.scene().canonical_block_count() > 0);
+    Ok(())
+}
+
+#[test]
+fn skin_source_relations_order_joint_identities_and_deduplicate_the_skeleton() -> TestResult<()> {
+    for joint_order in ["[1, 3]", "[3, 1]"] {
+        let gltf = replace_fixture_fragment(
+            String::from_utf8(skinned_triangle_gltf())?,
+            r#""joints": [1, 3]"#,
+            &format!(r#""joints": {joint_order}"#),
+        );
+        let (report, diagnostics) = import_assets(
+            "models/skin.gltf",
+            [
+                ("models/skin.gltf", gltf.into_bytes()),
+                ("models/skin.bin", skinned_triangle_bin()),
+            ],
+            sidecar_options(),
+        )?;
+        assert!(diagnostics.is_empty());
+        let scene = report.scene();
+        let skin = scene.skins().next().expect("selected skin");
+        assert_eq!(skin.joint_count(), 2);
+        let sources = scene
+            .owner_provenance(skin.metadata_owner())?
+            .map(|node| {
+                let ProvenanceKindRef::Source(source) = node.kind() else {
+                    panic!("authored skin retains direct source leaves");
+                };
+                source
+            })
+            .collect::<Vec<_>>();
+        // Primary and external resource sources precede ordered declaration sources.
+        // Node 1 is both a joint and the skeleton, and must appear only once.
+        assert_eq!(
+            sources
+                .iter()
+                .map(|source| source.index())
+                .collect::<Vec<_>>(),
+            [0, 1, 4, 6, 9, 10, 15, 20],
+        );
+        assert_eq!(
+            sources
+                .iter()
+                .map(|source| source.resource().index())
+                .collect::<Vec<_>>(),
+            [0, 1, 0, 0, 0, 0, 0, 0],
+        );
+        assert_eq!(sources[0].resource().identity(), "models/skin.gltf");
+        assert_eq!(sources[1].resource().identity(), "models/skin.bin");
+        for (source, identity) in sources[2..].iter().zip([
+            "kind=node;parent=-;index=1;",
+            "kind=node;parent=-;index=3;",
+            "kind=skin;parent=-;index=0;",
+            "kind=buffer;parent=-;index=0;",
+            "kind=buffer-view;parent=-;index=4;",
+            "kind=accessor;parent=-;index=4;",
+        ]) {
+            assert_eq!(source.resource().identity(), "models/skin.gltf");
+            let SourceObjectLocatorRef::Namespaced { value, .. } = source.locator() else {
+                panic!("declaration source retains its original glTF identity");
+            };
+            assert!(value.starts_with(identity));
+        }
+    }
     Ok(())
 }
 
