@@ -857,9 +857,11 @@ negative case only for a genuinely new boundary, not for incidental private layo
   disjoint-loan P2 at the plan-contract level. The dynamic-first cut includes all
   three whole-Ledger transfers, the sibling pre-freeze classifier and real fail-closed
   state retention; the finite cut includes every Start/Body error carrier and actual
-  Core/postprocess ownership. Neither cut is implemented or compiler-qualified.
-  The current producer-result slice remains separate; no finite allocation, layout,
-  performance, main integration or release claim follows from design GO.
+  Core/postprocess ownership. The first dynamic cut is now source-only work in the
+  current checkout, uncompiled and independently unreviewed; no finite caller exists.
+  The current producer-result slice and its immutable workers remain separate; no
+  finite allocation, layout, performance, main integration or release claim follows
+  from design GO or in-progress source.
 - The [preparation producer result](../reviews/2026-11-06-preparation-producer-result.md)
   qualifies `e8c4802`: only real effects materialize output, unchanged prefixes/suffixes
   retain complete ordered evidence, and caller rediscovery is removed. Independent
@@ -875,5 +877,16 @@ negative case only for a genuinely new boundary, not for incidental private layo
   five one-call reductions, unchanged repeated OBJ and all rounded peak displays,
   temporary-count/exit-live facts and the existing sanity provenance limit. Both new
   ordinary debug0 candidates are built and bound to QA against exact retained `6e7c1c0`
-  controls. Fixed startup and nonempty selection scratch remain. Native qualification
-  is open; no finite-root implementation, main runtime merge or release follows.
+  controls. Both new ordinary attempts terminate partial: N1 alone completes every
+  original lane on each host; all six C0/N0/C1 opportunities remain not started.
+  The [complete tables](../reviews/2026-11-06-preparation-producer-result-lanes.md)
+  retain Windows 56/110 endpoints and 9/28 pipelines above 3x, GNU 69/110 and 14/28,
+  and 35/29 endpoint medians at least 10x, descriptively without same-platform repeat
+  or control bracket. All ordinary memory medians stay below 3x; source-relative
+  memory acceptance remains open. Independent Windows and GNU/combined reviews close
+  with every raw observation, GNU RSS text, 9,570 statistics per platform and all
+  3,080 export cells verified. N1 load remains 80/107 busy on Windows and 2/52 on GNU,
+  with 313/379 busy enclosing Windows monitor samples. The local Windows versus
+  joint GNU quiet-start scopes stay distinct. Fixed startup and
+  nonempty selection scratch remain. Native qualification is incomplete; no finite-root
+  implementation, main runtime merge or release follows.

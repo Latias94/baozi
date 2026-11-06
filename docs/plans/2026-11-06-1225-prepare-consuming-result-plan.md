@@ -179,7 +179,15 @@ increases, identical full nonclock output including work, and actual glTF-1/STL-
 preparation-entry Ir decreases of 12.241491%/12.188790%. All eighteen separately audited
 heap workers retain five one-call reductions, unchanged repeated OBJ, unchanged rounded
 peaks, temporary-count/exit-live limitations and reused-sanity provenance gaps. Both
-ordinary debug0 candidates are built and source-associated; original native qualification
-remains open. No main runtime merge or release acceptance follows. The separately reviewed
+ordinary debug0 candidates are built and source-associated. Each platform completes
+N1's original 110 lanes, three warmup/twenty retained pairs and zero comparison failures;
+six other campaigns cannot start. All signs/load/missing cells remain in the checkpoint
+and full tables. Independent Windows and GNU/combined export audits are closed,
+verifying all raw observations, RSS text records, 9,570 statistics per platform and
+all 3,080 exported cells. Loaded N1 snapshots remain 80/107 on Windows and 2/52 on GNU;
+the enclosing Windows monitor remains 313/379 busy. Each gate retains its actual
+local versus joint monitoring scope.
+There is no same-platform repeat or control bracket, so original native qualification
+remains incomplete. No main runtime merge or release acceptance follows. The separately reviewed
 [owned finite invocation plan](2026-11-06-1240-owned-finite-invocation-plan.md) covers
 the larger fixed startup/terminal owner; its implementation is not part of this slice.

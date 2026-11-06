@@ -6,8 +6,10 @@ Independent production and oracle reviews accept the exact formatted source. Aff
 and all seven integrated gates pass; independent final receipt/source association is
 closed. The GNU diagnostic worker is built from the current repository and target;
 six-task instruction and eighteen-worker heap diagnostics are independently reviewed.
-Ordinary time/process-memory qualification remains open. No native performance keep,
-runtime main integration or release acceptance follows.
+Both ordinary attempts are terminal but partial: each platform completes N1 while
+C0/N0/C1 cannot start. Independent Windows and GNU/combined export reviews are closed.
+Ordinary qualification remains incomplete. No native performance keep, runtime main
+integration or release acceptance follows.
 
 ## Actual deletion
 
@@ -221,3 +223,96 @@ protocol, three warmup/twenty retained AB/BA pairs, memory boundaries and missin
 records remain required. No earlier candidate-only result supplies this source's
 native acceptance. All build output stays in the current repository target; release
 HOLD and every original convergence target remain active.
+
+## Terminal ordinary attempt: every original lane retained
+
+Both platforms complete control and candidate functional preflights, all 110 lanes
+with zero comparison failures. Each platform's N1 completes the original three
+warmup/twenty retained AB/BA pairs per lane: 5,060 comparison children and two successful
+Git-context commands. C0, N0 and C1 cannot start within their prospective gates on
+either platform. Both terminal envelopes report partial/exit 2; neither has a failed
+comparison child. Their wait durations, overruns and load remain in the raw receipts.
+
+| Platform | C0 wait / disposition | N0 wait / disposition | N1 | C1 wait / disposition |
+| --- | --- | --- | --- | --- |
+| Windows | 181.100705 s / not started | 181.582327 s / not started | Completed 110 | 181.123670 s / not started |
+| GNU native filesystem | 180.812423 s / not started | 180.586587 s / not started | Completed 110 | 180.510378 s / not started |
+
+The [complete lane tables](2026-11-06-preparation-producer-result-lanes.md) retain every
+original lane in all eight campaign slots. Worker time, parent elapsed time and
+platform-specific whole-child memory stay separate. The local
+`prepare-consuming-result-ordinary-summary-1.json` retains all engine distributions,
+paired ratios and explicit missing metrics. Each Baozi/Assimp ratio is inverted per
+positive retained pair before summarizing, not calculated from engine medians or by
+inverting a saved median. Functional observations do not fill missing ordinary cells.
+
+| Candidate N1 observation | Endpoint medians >3x / 110 | Endpoint medians >=10x / 110 | Pipeline medians >3x / 28 |
+| --- | ---: | ---: | ---: |
+| Windows | 56 | 35 | 9 |
+| GNU | 69 | 29 | 14 |
+
+These are descriptive observations with no same-platform candidate repeat or control
+bracket. Neither the earlier `6e7c1c0` candidate recording nor another platform supplies
+those missing controls. No native source gain, source-relative regression decision or
+confirmed threshold acceptance follows. The independent Windows audit accepts its
+5,500 raw comparison objects and 9,570 reproduced summary statistics. Independent GNU
+review additionally verifies 5,500 raw JSON objects, 5,500 RSS text records, 9,570
+statistics and all 3,080 combined export cells: 770 numeric and 2,310 explicitly not
+started. Its authority is `prepare-consuming-result-linux-ordinary-review-1.md` in
+the local evidence tree; the separate Windows authority is
+`prepare-consuming-result-windows-ordinary-review-1.md`.
+
+All fourteen memory-IO pipeline paired medians remain visible below, including favorable
+small inputs and adverse large/model inputs. Every cell contains twenty retained pairs.
+
+| Original case | Windows N1 Baozi/Assimp | GNU N1 Baozi/Assimp |
+| --- | ---: | ---: |
+| Repeated OBJ 1 | 0.441907 | 0.158989 |
+| Repeated OBJ 1024 | 0.696071 | 0.730665 |
+| Repeated OBJ 16384 | 3.484544 | 4.555841 |
+| Grid OBJ 2 | 0.230253 | 0.136254 |
+| Grid OBJ 32 | 1.467914 | 1.300887 |
+| Grid OBJ 128 | 4.209223 | 5.526384 |
+| Shared glTF 1 | 8.240325 | 7.543679 |
+| Shared glTF 8 | 8.719629 | 8.564831 |
+| Shared glTF 32 | 10.213498 | 12.814267 |
+| Binary STL 1 | 11.142564 | 9.591975 |
+| Binary STL 1024 | 7.645505 | 6.362799 |
+| PLY triangle | 2.204479 | 0.775537 |
+| F64 PLY neighbors | 2.354563 | 0.810656 |
+| PLY points 1024 | 1.984923 | 0.957154 |
+
+Short preparation endpoints remain separate failing observations. The Windows worst
+paired median is STL-1/memory at 52.535714, IQR 11.506583, with separate Baozi/Assimp
+engine medians 73.800/1.450 us and IQRs 9.825/0.125 us. GNU's worst is F64 PLY/memory
+at 75.948767, IQR 18.823346, with engine medians 37.509/0.476 us and IQRs
+4.10675/0.08025 us. These short comparator intervals and dispersion stay visible;
+instruction improvements are not substituted for their native outcomes.
+
+Neither Windows working-set/commit nor GNU RSS paired lane medians exceed 3x in the
+completed N1 observations. Maximum medians are 1.879287/1.380332 for the two Windows
+metrics and 2.127617 for GNU RSS. These are whole-child lifetime observations, not
+stage peaks, tracked heap or source-relative memory nonregression. Windows review also
+finds no individual retained memory pair above 3x; GNU review establishes the same
+absence for every retained RSS pair. Every unfavorable value and parent-time tail
+remains in the full summary. GNU's largest parent median is grid-128/prepare/file at
+5.156768, with engine medians 164.330571/31.863031 ms; this includes prior import and
+child setup/teardown and is not the independently timed prepare endpoint.
+
+Both N1 starts satisfy the corrected first-fresh 20-second gate before the 180-second
+deadline. Windows records 20.1213865 seconds of clear Windows named-process samples;
+GNU records 20.074989791 seconds of jointly clear GNU and fresh Windows samples.
+Subsequent contention remains explicit: Windows has tools in 80/107 N1 load snapshots;
+GNU's N1 collection has Windows tools in 2/52 samples, with 313/379 busy samples in
+the enclosing Windows monitor. All local GNU named-tool lists are empty and no
+embedded Windows sample is stale; these facts do not establish machine isolation or
+correct clocks for unobserved load. All started campaigns keep every sample; none is
+cleaned up by removing slow pairs or replacing a missing campaign.
+
+The current checkout can contain later source-only dynamic-owner work while these
+measurements run. Coordinator Git context records that checkout; executed worker
+identity remains the immutable `6e7c1c0`/`e8c4802` archives, build maps and binary hashes.
+Later uncompiled code never becomes this candidate's source or a new QA pass. The
+original release gates remain unmet; continue the separately reviewed owned invocation
+cut and its real compiler/source/measurement qualification rather than claiming this
+bounded producer deletion completed convergence.
