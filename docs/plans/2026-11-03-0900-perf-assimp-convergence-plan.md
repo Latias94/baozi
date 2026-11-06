@@ -776,3 +776,17 @@ negative case only for a genuinely new boundary, not for incidental private layo
   neither release nor general performance acceptance. Existing parser admission/completion
   remains the next primary owner investigation. Release HOLD and all original convergence
   targets remain active.
+- The [closed-text row checkpoint](../reviews/2026-11-06-closed-text-planning.md)
+  qualifies actual row borrowing and four ordinary inline hints at runtime `247ff99`.
+  Historical integrated checks pass, and whole-worker grid/repeated OBJ instructions
+  decrease by 7.943%/2.016%. Both platforms complete original C0/N0/N1 campaigns;
+  both C1s cannot start within their prospective load gates. All candidate complete
+  pipelines above 3x (Windows 9/28, GNU 14/28), repeated >=10x endpoints, adverse
+  preparation/PLY observations, load overlap and equal separate heap totals remain
+  visible in the receipt and all-lane tables. No measured keep/main merge or release
+  acceptance follows. User disk cleanup later removes local raw trees; surviving GNU
+  originals are recovered only against recorded hashes, and absent Windows/diagnostic
+  raw evidence is explicitly unavailable. Next implement the independently reviewed
+  [reserved typed-storage row](2026-11-06-0800-typed-storage-reserved-row-plan.md), then
+  separately qualify document-local OBJ/MTL token reuse. All builds remain in the
+  current repository target; all original convergence targets remain active.

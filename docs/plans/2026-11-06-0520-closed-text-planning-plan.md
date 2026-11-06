@@ -315,5 +315,10 @@ unchanged across the seven serial gates. Independent final review verified all s
 log hashes, ordered gate intervals, current/archive/source hashes and actual test totals.
 It linked the new full receipt directly to the same archived source; the older five-gate
 receipt in the symbol-build manifest retains its original affected-only scope.
-Ordinary debug0 builds have begun serially from the exact retained archives;
-no ordinary functional/timing campaign or candidate heap collection has run yet.
+The subsequent [ordinary and heap checkpoint](../reviews/2026-11-06-closed-text-planning.md)
+records all terminal attempts: original Windows/GNU C0/N0/N1 complete, both C1s cannot
+start within their prospective load gates, and eighteen separate heap observations
+complete. Threshold failures, mixed endpoint observations, load overlap and equal
+allocation totals do not establish a measured keep/main merge. The linked receipt
+also records later user disk cleanup, surviving GNU-original recovery against hashes,
+and unavailable Windows/diagnostic raw files. All release targets remain open.
